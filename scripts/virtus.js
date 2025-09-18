@@ -1,0 +1,1143 @@
+// scripts/virtus.js
+/**
+Runner do Virtus: Mantém uma aba do Messenger aberta/ativa/logada e atende automaticamente os chats Marketplace.
+Arquitetura:
+- 1 instância de Virtus por perfil (navegador), totalmente independente.
+- Polling de novos chats a cada 30s por perfil.
+- Atendimento contínuo 1–2 min por chat, por perfil, sem depender do tick de 30s.
+- Persistência segura do histórico no Windows (write tmp -> unlink final -> rename/copy) + cache em memória 24h.
+- Snapshot:
+  - Se NÃO existir chats_respondidos.json: cria arquivo e marca TODOS <24h atuais como respondidos (não cria backlog antigo).
+  - Se JÁ existir: retoma e enfileira somente <24h ainda não respondidos, sem marcar nada nesse momento.
+- Anti-duplicação por ID com TTL de 24h (não usa DOM para decidir).
+*/
+
+const fs = require('fs/promises');
+const fsRaw = require('fs'); // Necessário para uso síncrono dentro de getPerfilManifest
+const path = require('path');
+const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
+const utils = require('./utils.js');
+
+// ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
+function getPerfilManifest(nome) {
+  const perfisArr = require('../dados/perfis.json');
+  const perfil = perfisArr.find(p => p && p.nome === nome);
+  if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
+  const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
+  if (!fsRaw.existsSync(manifestPath)) throw new Error('Manifest não existe: ' + manifestPath);
+  return { manifest: require(manifestPath), perfil };
+}
+// ========== FIM HELPER ==========
+
+// Log de issues (robusto; falha silenciosa se o módulo não existir)
+let issues = null;
+try { issues = require('./issues.js'); } catch { issues = null; }
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function randomBetween(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Adicionado helper local para registrar issues
+async function logIssue(nome, type, message) {
+  try {
+    if (issues && typeof issues.append === 'function') {
+      await issues.append(nome, type, message);
+    }
+  } catch {
+    // silencioso
+  }
+}
+
+// Carrega JSON de atendimento.json (array de respostas randomizáveis)
+let mensagensAtendimento = [];
+(async () => {
+  try {
+    const file = await fs.readFile(path.join(__dirname, '../dados/atendimento.json'), 'utf8');
+    const data = JSON.parse(file);
+    if (Array.isArray(data)) {
+      mensagensAtendimento = data;
+    } else if (Array.isArray(data.messages)) {
+      mensagensAtendimento = data.messages;
+    } else {
+      mensagensAtendimento = [];
+    }
+  } catch (e) {
+    console.error('[VIRTUS] ERRO ao carregar atendimento.json:', e);
+    mensagensAtendimento = [];
+  }
+})();
+
+function agoraEpoch() {
+  return Math.floor(Date.now() / 1000);
+}
+
+const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_respondidos.json');
+
+// Classificadores de tempo
+function isVelho24h(tempoLabel) {
+  if (!tempoLabel) return false;
+  const t = tempoLabel.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  if (/\b\d+\sd\b/.test(t)) return true;
+  if (/\b\d+\sdias?\b/.test(t)) return true;
+  if (/\b\d+\ssem\b/.test(t)) return true;
+  if (/\b\d+\sseman/.test(t)) return true;
+  if (/\b\d+\s*w\b/.test(t)) return true;
+  if (/week/.test(t)) return true;
+  return false;
+}
+
+function isChatRecente(tempoLabel) {
+  if (!tempoLabel) return false;
+  const t = tempoLabel.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  if (isVelho24h(t)) return false;
+  if (/\bagora\b/.test(t)) return true;
+  if (/\b\d+\s*(s|seg)\b/.test(t)) return true;
+  if (/\b\d+\s*(min|minute|minuto)\b/.test(t)) return true;
+  if (/\b\d+\s*(h|hora|hour)\b/.test(t)) return true;
+  return false;
+}
+
+// Extratores e coleta
+function extraiIdDoHref(href) {
+  try {
+    const s = String(href || '');
+    const pos = s.indexOf('/marketplace/t/');
+    if (pos < 0) return null;
+    const rest = s.slice(pos + '/marketplace/t/'.length);
+    const id = rest.split(/[/?#]/)[0];
+    return id && /^\d+$/.test(id) ? id : null;
+  } catch { return null; }
+}
+
+async function coletaChatsMarketplaceTodos(page) {
+  try {
+    const items = await page.$$eval('a[href^="/marketplace/t/"]', els => {
+      function _extraiId(href) {
+        try {
+          const s = String(href || '');
+          const pos = s.indexOf('/marketplace/t/');
+          if (pos < 0) return null;
+          const rest = s.slice(pos + '/marketplace/t/'.length);
+          const id = rest.split(/[/?#]/)[0];
+          return id && /^\d+$/.test(id) ? id : null;
+        } catch { return null; }
+      }
+      function _extraiTempo(row) {
+        if (!row) return '';
+        try {
+          const abbr = row.querySelector('abbr[aria-label]');
+          if (abbr) {
+            const t1 = (abbr.innerText || '').trim();
+            if (t1) return t1;
+            const t2 = (abbr.getAttribute('aria-label') || '').trim();
+            if (t2) return t2;
+          }
+          const spans = Array.from(row.querySelectorAll('span'));
+          for (const s of spans) {
+            const txt = (s.innerText || s.textContent || '').trim();
+            if (!txt) continue;
+            if (/agora/i.test(txt)) return txt;
+            if (/\d+\s*(s|min|m|seg|h|hora|hour|minute|minuto|dia|dias|d|sem|seman|week|w)/i.test(txt)) return txt;
+          }
+        } catch {}
+        return '';
+      }
+      const arr = els.map(el => {
+        const href = el.getAttribute('href') || el.href || '';
+        const id = _extraiId(href);
+        const row = el.closest('div[role="row"]') || el.parentElement;
+        const tempo = _extraiTempo(row);
+        return { id, tempo, href };
+      }).filter(o => o.id);
+      const map = new Map();
+      for (const it of arr) if (!map.has(it.id)) map.set(it.id, it);
+      return Array.from(map.values());
+    });
+    return items;
+  } catch (err) {
+    console.log('[VIRTUS] Erro em coletaChatsMarketplaceTodos:', err + '');
+    return [];
+  }
+}
+
+// Messenger helpers
+async function garantirMarketplace(page) {
+  if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
+
+  let url = '';
+  try { url = page.url() || ''; } catch {}
+
+  if (url === 'about:blank' || !url.includes('/marketplace')) {
+    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded' });
+    url = page.url();
+  }
+  await page.waitForSelector('header span, header h1', { timeout: 15000 });
+  const header = await page.$eval('header span, header h1', el => el.textContent || "");
+  if (!header.toLowerCase().includes('marketplace')) throw new Error('Não está no Marketplace!');
+}
+
+// ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
+
+/**
+ * GUARD: manter top chats always visible to avoid drifting out of viewport.
+ * Função utilitária para scrollar a lista de chats para o topo.
+ * Executa direto via page.evaluate no Messenger.
+ */
+async function scrollChatsToTop(page) {
+  if (!page) return false;
+  try {
+    const res = await page.evaluate(() => {
+      // GUARD: manter top chats always visible to avoid drifting out of viewport
+      const grid = document.querySelector('div[role="grid"], div[role="rowgroup"]');
+      if (grid) {
+        grid.scrollTop = 0;
+        return true;
+      }
+      return false;
+    });
+    return !!res;
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Periodic Prune do browser/pages da Messenger (RAM/robustez).
+ * Executado a cada intervalo para manter apenas a page principal.
+ */
+async function periodicPruneMessengerPages(browser, mainPage, nome, robeMeta) {
+  if (!browser) return;
+  try {
+    const pages = await browser.pages();
+    let numPages = pages.length;
+
+    if (robeMeta && robeMeta[nome]?.emExecucao) {
+      // Militar: skipping prune during Robe
+      return;
+    }
+
+    for (const p of pages) {
+      if (p === mainPage) continue;
+      try {
+        const url = p.url ? await p.url() : '';
+        // Fechar apenas popups Messenger
+        if (!url.includes('messenger.com')) {
+          // Militar: closing non-messenger page (popup)
+          try {
+            await p.close({ runBeforeUnload: false });
+          } catch (err) { /* Militar: ignored error during popup close */ }
+        } else if (!url.includes('/marketplace')) {
+          // Militar: closing Messenger popup page
+          try {
+            await p.close({ runBeforeUnload: false });
+          } catch (err) { /* Militar: ignored error during popup close */ }
+        }
+        // Não fecha "marketplace/create" ou páginas do Robe em execução
+      } catch (err) {
+        // Militar: safe ignore during prune
+      }
+    }
+
+    // Militar: numPages para status
+    if (robeMeta && typeof nome !== "undefined") {
+      if (!robeMeta[nome]) robeMeta[nome] = {};
+      robeMeta[nome].numPages = numPages;
+    }
+  } catch (err) {
+    // Militar: ignore error during prunePages
+  }
+}
+
+// RAM/Scroll debug métricas
+const virtusStatus = {};
+function updateVirtusStatus(nome, data) {
+  virtusStatus[nome] = { ...(virtusStatus[nome] || {}), ...data };
+}
+function getVirtusStatus(nome) {
+  return virtusStatus[nome] || {};
+}
+// ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
+
+function startVirtus(browser, nome, robeMeta = {}) {
+  const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
+
+  let running = true;
+  let page = null;
+  let fila = [];
+  let historico = {};
+  let chatAtivo = null;
+
+  const HIST_FILE = HIST_JSON_NAME(nome);
+  const NO_REPEAT_WINDOW_SEC = 24 * 3600;
+  const POLL_INTERVAL_MS = 30_000; // polling de novos chats
+  const MIN_REPLY_DELAY_MS = 60_000;
+  const MAX_REPLY_DELAY_MS = 120_000;
+
+  // cache em memória e timers
+  const respondedCache = new Map();
+
+  // MILITAR: Timers unificados
+  let filaInterval = null;
+  let filaChatTimer = null;
+  // Militar: cleaning interval to prevent interval leak
+  let pruneInterval = null; // Militar: cleaning interval to prevent interval leak
+  let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
+  let ramDebugInterval = null; // Militar: cleaning interval to prevent interval leak
+
+  let lastScrollToTop = 0;
+  let lastRamCheck = 0;
+
+  // trackers
+  let ultimoAtendimento = agoraEpoch();
+  let saveChain = Promise.resolve();
+  let filaLoopBusy = false;
+  let recoverBackoffMs = 0;
+  const failCounts = new Map();
+
+  // Persistência segura no Windows
+  async function salvaHistorico() {
+    saveChain = saveChain.then(async () => {
+      try {
+        await fs.mkdir(path.dirname(HIST_FILE), { recursive: true });
+        const tmp = HIST_FILE + '.tmp';
+        await fs.writeFile(tmp, JSON.stringify(historico, null, 2));
+        try { await fs.unlink(HIST_FILE); } catch {}
+        try {
+          await fs.rename(tmp, HIST_FILE);
+        } catch {
+          await fs.copyFile(tmp, HIST_FILE);
+          try { await fs.unlink(tmp); } catch {}
+        }
+      } catch (e) {
+        log('Erro ao salvar histórico:', e + '');
+      }
+    }).catch(err => log('Erro em cadeia de salvamento:', err + ''));
+    return saveChain;
+  }
+
+  async function carregaHistorico() {
+    try {
+      const txt = await fs.readFile(HIST_FILE, 'utf-8');
+      historico = JSON.parse(txt);
+    } catch {
+      historico = {};
+    }
+    respondedCache.clear();
+    const agora = agoraEpoch();
+    for (const id of Object.keys(historico)) {
+      const ts = Number(historico[id]) || 0;
+      if (ts && (agora - ts) < NO_REPEAT_WINDOW_SEC) {
+        respondedCache.set(id, ts);
+      }
+    }
+  }
+
+  function limpaHistoricoVelho() {
+    let mudanca = false;
+    const agora = agoraEpoch();
+    Object.keys(historico).forEach(id => {
+      const ts = Number(historico[id]) || 0;
+      if (!ts || (agora - ts) >= NO_REPEAT_WINDOW_SEC) {
+        delete historico[id];
+        respondedCache.delete(id);
+        mudanca = true;
+        log(`Histórico limpo: ${id} removido (>24h)`);
+      }
+    });
+    return mudanca;
+  }
+
+  async function ensurePage() {
+    try {
+      let pages = await browser.pages();
+      if (!pages || !pages[0]) {
+        // Cria nova aba e aplica patchPage nela (ambiente idêntico às outras)
+        const newP = await browser.newPage();
+        try {
+          // === ALTERADO CONFORME INSTRUÇÕES ===
+
+          // --- INÍCIO Interceptação de assets pesados no Messenger ---
+          // Importante: interceptamos SOMENTE páginas messenger.com (NÃO na config/marketplace)
+          if (newP.url && typeof newP.url === 'function' && /messenger\.com/.test(await newP.url())) {
+            try {
+              await newP.setRequestInterception(true);
+              newP.on('request', req => {
+                const resource = req.resourceType();
+                if (
+                  resource === 'image' ||
+                  resource === 'media' ||
+                  resource === 'video' ||
+                  resource === 'font' ||
+                  resource === 'stylesheet'
+                ) {
+                  // Bloqueie assets pesados (pode adicionar "whitelist" aqui se necessário)
+                  return req.abort();
+                }
+                req.continue();
+              });
+            } catch (e) {
+              log('[VIRTUS] Erro ao aplicar interception:', e + '');
+            }
+          }
+          // --- FIM Interceptação de assets pesados no Messenger ---
+
+          try {
+            const { manifest } = getPerfilManifest(nome);
+            const coords = utils.getCoords(manifest.cidade || '');
+            await patchPage(nome, newP, coords);
+            await ensureMinimizedWindowForPage(newP);
+          } catch (e) {
+            log('ensurePage: falha ao obter manifest ou patchPage:', e + '');
+          }
+          // === FIM DA ALTERAÇÃO ===
+        } catch (e) {
+          log('ensurePage: falha ao aplicar patchPage/minimize na nova aba:', e + '');
+        }
+        page = newP;
+        return page;
+      }
+      page = pages[0];
+
+      // --- INÍCIO Interceptação de assets pesados no Messenger (garantir para pages já abertas) ---
+      if (page.url && typeof page.url === 'function' && /messenger\.com/.test(await page.url())) {
+        try {
+          await page.setRequestInterception(true);
+          if (!page._virtusIntercepted) {
+            page.on('request', req => {
+              const resource = req.resourceType();
+              if (
+                resource === 'image' ||
+                resource === 'media' ||
+                resource === 'video' ||
+                resource === 'font' ||
+                resource === 'stylesheet'
+              ) {
+                return req.abort();
+              }
+              req.continue();
+            });
+            page._virtusIntercepted = true;
+          }
+        } catch (e) {
+          log('[VIRTUS] Erro ao aplicar interception:', e + '');
+        }
+      }
+      // --- FIM Interceptação ---
+
+      // NÃO forçar viewport aqui; a janela já está maximizada (defaultViewport:null no launch)
+      return page;
+    } catch (e) {
+      log('ensurePage falhou:', e + '');
+      return null;
+    }
+  }
+
+  function bumpRecoverBackoff() {
+    recoverBackoffMs = Math.min(32000, (recoverBackoffMs || 1000) * 2); // Backoff exponencial até 32s
+  }
+  function resetRecoverBackoff() {
+    recoverBackoffMs = 0;
+  }
+
+  const COMPOSER_SELECTORS = [
+    'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"][aria-label]',
+    'div[contenteditable="true"]',
+    'div[role="combobox"][contenteditable="true"]',
+    'div[aria-label="Mensagem"]',
+    'div[aria-label*="mensagem"]'
+  ];
+
+  const CHAT_BLOCKED_PATTERNS = [
+    /vo[cç]e\s+n[aã]o\s+pode\s+enviar\s+mensagens/i,
+    /mensagem\s+indispon[íi]vel/i,
+    /vo[cç]e\s+n[aã]o\s+est[aá]\s+mais\s+neste\s+grupo/i,
+    /vo[cç]e\s+saiu\s+do\s+grupo/i,
+    /you\s+can[’']?t\s+send\s+messages/i,
+    /message\s+unavailable/i
+  ];
+  const CHAT_BLOCKED_ALERT_SELECTOR = 'div[role="alert"]';
+
+  async function isChatBlocked(p) {
+    try {
+      const alertExists = await p.$(CHAT_BLOCKED_ALERT_SELECTOR);
+      if (alertExists) {
+        const txt = await p.evaluate(el => (el.innerText || el.textContent || '').trim(), alertExists);
+        if (txt && CHAT_BLOCKED_PATTERNS.some(rx => rx.test(txt))) return true;
+      }
+      const txts = await p.$$eval('div, span, h1, h2', els =>
+        els.slice(0, 200).map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)
+      );
+      for (const t of txts) {
+        if (CHAT_BLOCKED_PATTERNS.some(rx => rx.test(t))) return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  async function waitForComposer(p, timeoutMs = 10000) {
+    const start = Date.now();
+    while ((Date.now() - start) < timeoutMs) {
+      for (const sel of COMPOSER_SELECTORS) {
+        try {
+          const h = await p.$(sel);
+          if (h) {
+            const ok = await p.evaluate(el => {
+              const st = window.getComputedStyle(el);
+              const vis = st && st.visibility !== 'hidden' && st.display !== 'none' && el.offsetParent !== null;
+              const disabled = el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true';
+              return vis && !disabled;
+            }, h);
+            if (ok) return h;
+          }
+        } catch {}
+      }
+      await sleep(250);
+    }
+    return null;
+  }
+
+  async function ensureChatAnchorInList(p, chatId, budgetMs = 8000) {
+    const start = Date.now();
+    let lastCount = -1;
+    const sel = `a[href^="/marketplace/t/${chatId}"]`;
+    while ((Date.now() - start) < budgetMs) {
+      const handle = await p.$(sel);
+      if (handle) return handle;
+      try {
+        const contSel = await p.evaluate(() => {
+          const cands = ['div[role="grid"]','div[role="rowgroup"]','div.x78zum5.xdt5ytf'];
+          for (const cs of cands) {
+            const el = document.querySelector(cs);
+            if (el && el.scrollHeight > el.clientHeight) return cs;
+          }
+          return 'body';
+        });
+        const count = await p.$$eval('a[href^="/marketplace/t/"]', els => els.length);
+        if (count !== lastCount) {
+          lastCount = count;
+        } else {
+          await p.evaluate(selector => {
+            const el = document.querySelector(selector) || document.scrollingElement || document.body;
+            el.scrollTop = el.scrollTop + Math.max(300, window.innerHeight * 0.5);
+          }, contSel);
+        }
+      } catch {}
+      await sleep(250);
+    }
+    return null;
+  }
+
+  function incFail(chatId) {
+    const n = (failCounts.get(chatId) || 0) + 1;
+    failCounts.set(chatId, n);
+    return n;
+  }
+  function resetFail(chatId) {
+    failCounts.delete(chatId);
+  }
+
+  async function coletaChatsMarketplaceRecentes() {
+    try {
+      const p = await ensurePage();
+      if (!p) return [];
+      try {
+        await garantirMarketplace(p);
+      } catch (err) {
+        log('Não está no Marketplace ou erro ao garantir Marketplace:', err + '');
+        await sleep(5000);
+        return [];
+      }
+      try {
+        await Promise.race([
+          p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 4000 }),
+          p.waitForSelector('div[role="row"] span', { timeout: 4000 }),
+        ]);
+      } catch {}
+      const todos = await coletaChatsMarketplaceTodos(p);
+      const filtrados = todos.filter(c => c.id && isChatRecente(c.tempo));
+      return filtrados;
+    } catch (err) {
+      log('Erro ao coletar chats:', err + '');
+      return [];
+    }
+  }
+
+  async function reloadUltraRobusto() {
+    try {
+      log('Reload ultra robusto (2h sem responder).');
+      const p = await ensurePage();
+      if (!p) { bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); return; }
+      const client = await p.target().createCDPSession();
+      try { await client.send('Network.clearBrowserCache'); } catch {}
+      try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
+      await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      /* Minimização suave pontual após navegação forte (opcional) */
+      try { await ensureMinimizedWindowForPage(p); } catch {}
+      await Promise.race([
+        p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 15000 }),
+        p.waitForSelector('div[role="row"] span', { timeout: 15000 })
+      ]).catch(()=>{});
+      resetRecoverBackoff();
+      log('Reload ultra robusto concluído.');
+
+      // Após reload ultra robusto, garantir scrollToTop
+      await scrollChatsToTop(p);
+      lastScrollToTop = Date.now();
+      updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
+    } catch (e) {
+      log('Erro no reload ultra robusto:', e + '');
+      bumpRecoverBackoff();
+      if (recoverBackoffMs) await sleep(recoverBackoffMs);
+    }
+  }
+
+  async function initHistoricoSePreciso() {
+    // Se JÁ existir arquivo, apenas carregar e seguir
+    try {
+      await fs.access(HIST_FILE);
+      await carregaHistorico();
+      log('Histórico existente carregado. Retomando pendentes <24h.');
+      return;
+    } catch {}
+
+    // Se NÃO existir, criar e marcar TODO <24h atual como respondido (sem backlog antigo)
+    log('[SNAPSHOT] Primeiro boot sem histórico. Marcando <24h atuais como respondidos.');
+    const p = await ensurePage();
+    if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
+    await garantirMarketplace(p);
+    try {
+      await Promise.race([
+        p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }),
+        p.waitForSelector('div[role="row"] span', { timeout: 8000 })
+      ]);
+    } catch {}
+    try { await scrollListaAte24h(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
+    const todos = await coletaChatsMarketplaceTodos(p);
+    const recentes = todos.filter(c => isChatRecente(c.tempo));
+    const agora = agoraEpoch();
+    historico = {};
+    for (const chat of recentes) historico[chat.id] = agora;
+    await salvaHistorico();
+    await carregaHistorico();
+    log(`[SNAPSHOT] Concluído. ${recentes.length} chats <24h marcados como respondidos no primeiro boot.`);
+  }
+
+  async function scrollListaAte24h(page, { maxMs = 90000, quietLoops = 3 } = {}) {
+    const t0 = Date.now();
+    let semNovos = 0;
+    let vistos = new Set();
+
+    while ((Date.now() - t0) < maxMs) {
+      const todos = await coletaChatsMarketplaceTodos(page);
+      let houveNovo = false, viuAntigo = false;
+      for (const c of todos) {
+        if (!vistos.has(c.id)) { vistos.add(c.id); houveNovo = true; }
+        if (isVelho24h(c.tempo)) viuAntigo = true;
+      }
+      if (viuAntigo) break;
+      if (!houveNovo) {
+        semNovos += 1;
+        if (semNovos >= quietLoops) break;
+      } else {
+        semNovos = 0;
+      }
+      try {
+        const contSel = await page.evaluate(() => {
+          const cands = ['div[role="grid"]','div[role="rowgroup"]','div.x78zum5.xdt5ytf'];
+          for (const sel of cands) {
+            const el = document.querySelector(sel);
+            if (el && el.scrollHeight > el.clientHeight) return sel;
+          }
+          return 'body';
+        });
+        await page.evaluate((selector) => {
+          const el = document.querySelector(selector) || document.scrollingElement || document.body;
+          el.scrollTop = el.scrollHeight;
+        }, contSel);
+      } catch {
+        try { await page.evaluate(() => window.scrollBy(0, Math.max(400, window.innerHeight * 0.8))); } catch {}
+      }
+      await sleep(800 + Math.floor(Math.random() * 500));
+    }
+    return Array.from(vistos);
+  }
+
+  async function atualizaFila() {
+    let mudancaFila = false;
+    const chatsNovos = await coletaChatsMarketplaceRecentes();
+    let novosAti = 0;
+    const agora = agoraEpoch();
+
+    chatsNovos.forEach(c => {
+      const ts = respondedCache.get(c.id);
+      const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
+      if (!jaRespondido && !fila.includes(c.id)) {
+        fila.push(c.id);
+        novosAti++;
+        log(`NOVO chat em Fila: ${c.id} (${c.tempo})`);
+      }
+    });
+
+    // Remove da fila ids já respondidos
+    const filaAnt = fila.slice(0);
+    fila = fila.filter(id => {
+      const ts = respondedCache.get(id);
+      return !(ts && (agora - ts) < NO_REPEAT_WINDOW_SEC);
+    });
+    filaAnt.forEach(id => {
+      const ts = respondedCache.get(id);
+      if (ts && (agora - ts) < NO_REPEAT_WINDOW_SEC) {
+        log(`[FILA] Chat ${id} removido da fila (já respondido <24h)`);
+        mudancaFila = true;
+      }
+    });
+
+    if (novosAti > 0) {
+      log(`[FILA] Atualizada: ${fila.length} chats pendentes para resposta.`);
+      mudancaFila = true;
+    }
+    return mudancaFila;
+  }
+
+  function scheduleNextIfIdle() {
+    if (!running) return;
+    if (chatAtivo) return;
+    if (filaChatTimer) return;
+    if (!fila.length) return;
+
+    const next = fila[0];
+    const delay = randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
+    log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
+    filaChatTimer = setTimeout(async () => {
+      filaChatTimer = null;
+      await responderChat(next);
+      scheduleNextIfIdle();
+    }, delay);
+  }
+
+  async function responderChat(chatId) {
+    log(`[DETAILED] Início responderChat: ${chatId}`);
+    if (!chatId) return;
+    chatAtivo = chatId;
+
+    try {
+      const p = await ensurePage();
+      if (!p) {
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+      await garantirMarketplace(p);
+
+      // Se já respondido <24h (checagem final por ID), não responde
+      const tsPrev = respondedCache.get(chatId);
+      if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
+        log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+
+      // --- INÍCIO BLOCO ULTRA ROBUSTO DE TROCA DE CHAT ---
+
+      // Seleciona o anchor usando o seletor diretamente
+      let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+      let found = await p.$(anchorSel);
+
+      if (!found) {
+        log(`[WARN] Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`);
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+
+      // Simula scroll e click via JS DOM real
+      await p.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        if (el) {
+          el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+          el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        }
+      }, anchorSel);
+
+      // [ULTRA ROBUSTO] Aguarda a transição do chat na UI (espera até 2s para url mudar corretamente)
+      let attempts = 0;
+      let achou = false;
+      let urlAtual = '';
+      while (attempts < 8) {
+        urlAtual = await p.evaluate(() => location.pathname);
+        if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
+          achou = true;
+          break;
+        }
+        await sleep(250);
+        attempts++;
+      }
+      if (!achou) {
+        log(`[ERRO] Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`);
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+      // --- FIM BLOCO ULTRA ROBUSTO DE TROCA DE CHAT ---
+
+      if (await isChatBlocked(p)) {
+        log(`[WARN] Chat ${chatId} bloqueado/indisponível. Marcando como respondido para evitar looping.`);
+        // try { await p.screenshot({ path: `screenshot_bloqueado_${chatId}.png` }); } catch {}
+        const tsNow = agoraEpoch();
+        historico[chatId] = tsNow;
+        respondedCache.set(chatId, tsNow);
+        ultimoAtendimento = tsNow;
+        await salvaHistorico();
+
+        // INSERIR A LINHA ABAIXO (log de issue)
+        try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
+
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        resetFail(chatId);
+        return;
+      }
+
+      let campo = await waitForComposer(p, 10000);
+      if (!campo) {
+        log(`[WARN] Composer não encontrado. Fallback: goto direto e revalidar.`);
+        try {
+          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await sleep(800);
+        } catch {}
+        if (await isChatBlocked(p)) {
+          log(`[WARN] Chat ${chatId} bloqueado no fallback. Marcando como respondido para evitar looping.`);
+          // try { await p.screenshot({ path: `screenshot_bloqueado_${chatId}.png` }); } catch {}
+          const tsNow = agoraEpoch();
+          historico[chatId] = tsNow;
+          respondedCache.set(chatId, tsNow);
+          ultimoAtendimento = tsNow;
+          await salvaHistorico();
+
+          // INSERIR A LINHA ABAIXO (log de issue)
+          try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
+
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          resetFail(chatId);
+          return;
+        }
+        campo = await waitForComposer(p, 8000);
+      }
+
+      if (!campo) {
+        const fails = incFail(chatId);
+        log(`[ERRO] Composer indisponível para chat ${chatId}. Tentativas: ${fails}`);
+        // try { await p.screenshot({ path: `screenshot_sem_composer_${chatId}.png` }); } catch {}
+        if (fails >= 2) {
+          log(`[WARN] ${chatId} falhou 2x. Marcando como respondido para não travar fila.`);
+          const tsNow = agoraEpoch();
+          historico[chatId] = tsNow;
+          respondedCache.set(chatId, tsNow);
+          ultimoAtendimento = tsNow;
+          await salvaHistorico();
+
+          // INSERIR A LINHA ABAIXO (log de issue)
+          try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
+        }
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+
+      resetFail(chatId);
+
+      if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
+        log('[ERRO] atendimento.json vazio. Não será enviada resposta!');
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+
+      let msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
+      if (Array.isArray(msg)) msg = msg.join('\n');
+      if (typeof msg !== 'string') msg = String(msg);
+
+      await campo.type(msg, { delay: randomBetween(10,45) });
+      await campo.press('Enter');
+      // try { await p.screenshot({ path: `screenshot_envio_${chatId}.png` }); } catch {}
+
+      log(`Mensagem enviada para chat ${chatId}`);
+      const tsNow = agoraEpoch();
+      historico[chatId] = tsNow;
+      respondedCache.set(chatId, tsNow);
+      ultimoAtendimento = tsNow;
+      await salvaHistorico();
+
+    } catch (err) {
+      log(`[ERRO] Erro ao responder chat ${chatId}:`, err && err.stack ? err.stack : err + '');
+
+      // INSERIR A LINHA ABAIXO (log de issue)
+      const msg = (err && err.message) ? err.message : String(err);
+      try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msg}`); } catch {}
+    }
+
+    fila = fila.filter(id => id !== chatId);
+    chatAtivo = null;
+    log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`);
+  }
+
+  // ========================
+  // === BLOCO MODIFICADO ===
+  // ========================
+  async function filaManagerLoop() {
+    if (!running) return;
+    if (filaLoopBusy) return;
+    filaLoopBusy = true;
+    try {
+      const p = await ensurePage();
+      if (!p) {
+        bumpRecoverBackoff();
+        if (recoverBackoffMs) await sleep(recoverBackoffMs);
+        return;
+      }
+
+      // === RAM — monitoramento e shutdown individual por perfil ===
+      // Se status.json informar RAM > 700MB (input externo), stopVirtus e reinicialize apenas a conta.
+      // (simulado via getVirtusStatus()["ramMB"] -- na real, deveria ser lido status.json por externo)
+      // Exemplo de uso externo: updateVirtusStatus(nome, { ramMB: valor });
+      let ramMB = 0;
+      try { ramMB = (getVirtusStatus(nome) || {}).ramMB || 0; } catch {}
+      lastRamCheck = Date.now();
+      if (ramMB > 700) {
+        await logIssue(nome, "chrome_memory_spike", `RAM acima de 700MB (${ramMB} MB). shutdown temporário`);
+        log(`[GUARD][RAM] RAM acima de 700MB (${ramMB} MB), shutdown/restart`);
+        running = false;
+        // Militar: cleaning interval to prevent interval leak
+        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+        // Militar: cleaning interval to prevent interval leak
+        if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+        if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+        updateVirtusStatus(nome, {ramMB, lastKill: Date.now()});
+        // RETURN; (deixa ser reinicializado pelo controlador)
+        return;
+      }
+      updateVirtusStatus(nome, {ramMB});
+
+      // --- INÍCIO DETECTOR/REVIVE ---
+      // Tentativa de diagnóstico rápido/JS: revive caso page travada
+      try {
+        const reviveTimeoutMs = 1000;
+        const jsTest = await Promise.race([
+          p.evaluate(() => 1+41),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), reviveTimeoutMs))
+        ]);
+      } catch (e) {
+        try {
+          log('[VIRTUS][REVIVE] Navegador detectado travado/sem resposta — abrindo aba fantasma para tentar reviver.');
+          const tmp = await browser.newPage();
+          setTimeout(() => { try { tmp.close(); } catch {} }, 1000);
+        } catch (e2) {
+        }
+      }
+      // --- FIM DETECTOR/REVIVE ---
+
+      // --- BLOCO KEEPALIVE: JS para acordar navegador/Messenger (anti-freeze/anti-throttle) ---
+      try {
+        await p.evaluate(() => {
+          // Apenas estimula o JS engine — NÃO chama bringToFront, focus, maximize, moveWindow ou qualquer ação que puxe foco!
+          window.dispatchEvent(new Event('focus'));
+          document.dispatchEvent(new MouseEvent('mousemove', {bubbles:true}));
+          document.dispatchEvent(new Event('visibilitychange'));
+          if (window && document && document.body) {
+            const evt = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Control', code: 'ControlLeft' });
+            document.body.dispatchEvent(evt);
+          }
+          setTimeout(()=>{}, 1);
+        });
+      } catch (err) {
+        try { console.log('[KEEPALIVE][EXCEPTION]', err && err.message); } catch{}
+      }
+      // --- FIM BLOCO KEEPALIVE ---
+
+      if (limpaHistoricoVelho()) await salvaHistorico();
+
+      if ((agoraEpoch() - ultimoAtendimento) > 7200) {
+        await reloadUltraRobusto();
+        try { await garantirMarketplace(p); } catch {}
+      }
+
+      await atualizaFila();
+      scheduleNextIfIdle();
+      resetRecoverBackoff();
+
+      // ===== Scroll Top Chats GUARD: Manter sempre topo visível =====
+      // Essa função Garante que a interface Messenger NUNCA desça o scroll por conta própria,
+      // evitando que os chats do topo "sumam" e o loop falhe por não enxergar o topo.
+
+      if (scrollInterval == null) {
+        // Militar: cleaning interval to prevent interval leak
+        scrollInterval = setInterval(async () => {
+          if (!running) return;
+          try {
+            const ok = await scrollChatsToTop(p);
+            if (ok) {
+              lastScrollToTop = Date.now();
+              updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
+            }
+          } catch {}
+        }, 60000);
+      }
+      // Executa também logo após landing/garantir marketplace/ensurePage
+      try {
+        const scrolled = await scrollChatsToTop(p);
+        if (scrolled) {
+          lastScrollToTop = Date.now();
+          updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
+        }
+      } catch {}
+      // ========== FIM SCROLL GUARD ==========
+    } finally {
+      filaLoopBusy = false;
+    }
+  }
+  // ==== FIM BLOCO MODIFICADO ====
+
+  async function runner() {
+    await sleep(2000);
+    let ready = false;
+    while (!ready) {
+      try {
+        const p = await ensurePage();
+        if (!p) { await sleep(2500); continue; }
+        if (p.url() === 'about:blank' || !p.url().includes('/marketplace')) {
+          try {
+            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded' });
+          } catch { bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue; }
+        }
+        await garantirMarketplace(p);
+
+        // ---- Scroll to Top na tela logo após garantir marketplace
+        try {
+          const ok = await scrollChatsToTop(p);
+          if (ok) {
+            lastScrollToTop = Date.now();
+            updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
+          }
+        } catch {}
+        // ----
+
+        ready = true;
+        log('Aba zero da Virtus iniciada e garantida: Marketplace pronta.');
+      } catch (err) {
+        log('Falha ao garantir aba zero no startup Virtus:', err + '');
+        await sleep(2500);
+      }
+    }
+
+    await initHistoricoSePreciso();
+
+    // Polling fixo de 30s por perfil
+    // Militar: cleaning interval to prevent interval leak
+    filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
+    filaManagerLoop();
+
+    // === Pruning periódico a cada 120s: fecha popups/páginas "não-principais"
+    pruneInterval = setInterval(async () => {
+      try {
+        const mainPage = await ensurePage();
+        // Militar: robusto pruning com check de Robe
+        await periodicPruneMessengerPages(browser, mainPage, nome, robeMeta);
+        log(`[DEBUG] Prune event executado`);
+        updateVirtusStatus(nome, {lastPrune: Date.now()});
+        // Militar: expose numPages
+        let pages = [];
+        try { pages = await browser.pages(); } catch {}
+        if (robeMeta && typeof nome !== "undefined") {
+          if (!robeMeta[nome]) robeMeta[nome] = {};
+          robeMeta[nome].numPages = pages.length;
+        }
+      } catch (err) {}
+    }, 120000);
+    // ===
+
+    // === Logging RAM/CPU debug por perfil (Somente se habilitado em config/env)
+    if (process.env.RAM_CPU_DEBUG === '1' || process.env.NODE_ENV === 'qa' || process.env.NODE_ENV === 'development') {
+      // Militar: RAM/CPU debug ativado apenas em QA/dev/env CONTROLADO
+      ramDebugInterval = setInterval(() => {
+        try {
+          browser.process().then(proc => {
+            if (proc && proc.pid) {
+              // Exemplo: updateVirtusStatus(nome, {ramMB: valor});
+              // Placeholder: NÃO coleta RAM/CPU individual em Virtus.js de verdade!
+            }
+          }).catch(()=>{});
+        } catch {}
+      }, 30000);
+    }
+    // ===
+
+    // === Backoff Exponencial por Falha no startup/garantia da página/Marketplace
+    // (JÁ implementado na ensurePage/bumpRecoverBackoff do runner)
+
+    // --- Mantém enquanto rodando ---
+    while (running) {
+      try {
+        const p = await ensurePage();
+        if (!p) { bumpRecoverBackoff(); await sleep(recoverBackoffMs || 1000); continue; }
+        try {
+          if (p.url() === 'about:blank' || !p.url().includes('/marketplace')) {
+            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded' });
+          }
+          resetRecoverBackoff();
+        } catch (e) {
+          log('Erro garantindo marketplace no loop principal:', e + '');
+          bumpRecoverBackoff();
+          await sleep(recoverBackoffMs || 1000);
+          updateVirtusStatus(nome, {lastVirtusStartFail: Date.now()});
+          await logIssue(nome, "virtus_start_fail", `Erro ao garantir marketplace: ${(e && e.message) || e}`);
+          continue;
+        }
+        await sleep(45000);
+      } catch (e) {
+        log('Erro no loop principal:', e + '');
+        await sleep(5000);
+      }
+    }
+  }
+
+  // START
+  runner();
+
+  return {
+    stop: async () => {
+      running = false;
+      // Militar: cleaning interval to prevent interval leak
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      // Militar: cleaning interval to prevent interval leak
+      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+      // Atualizar o numPages até o próximo ciclo do prune
+      let pages = [];
+      try { pages = await browser.pages(); } catch {}
+      if (robeMeta && typeof nome !== "undefined") {
+        if (!robeMeta[nome]) robeMeta[nome] = {};
+        robeMeta[nome].numPages = pages.length;
+      }
+      updateVirtusStatus(nome, {stoppedAt: Date.now()});
+      // ========== Limpeza para evitar leaks ==========
+    }
+  };
+}
+
+module.exports = {
+  startVirtus
+};

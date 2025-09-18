@@ -1,0 +1,1212 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <title>Gerenciador de Contas — Conveniente Tecnologia</title>
+  <style>
+    :root{ --bg:#0e1420; --card:#111826; --card2:#0f1723; --border:#1f2a3a; --text:#e8eef8; --muted:#9fb2cf; --brand:#3c82f6; --brand2:#1f6be1; --good:#17b67c; --warn:#f0b429; --bad:#e35a5a; --pill:#1a2232; --pill-border:#2a3954; --btn:#1a2334; --btn-border:#2a3954; --btn-hover:#21304a; --stroke:#162033; }
+    *{box-sizing:border-box} html,body{height:100%}
+    body{
+      margin:0;
+      background:linear-gradient(180deg,#0b1120 0%, #0d1527 100%);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      color:var(--text);
+    }
+    header{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:18px 22px;
+      border-bottom:1px solid var(--stroke);
+      background:rgba(3,8,20,.65);
+      backdrop-filter: blur(6px);
+      position:sticky; top:0; z-index:5;
+    }
+    .brand{
+      display:flex; align-items:center; gap:12px; font-weight:800; letter-spacing:.2px; font-size:18px;
+    }
+    .brand .logo{
+      width:26px; height:26px; border-radius:6px;
+      background:linear-gradient(135deg,#3c82f6,#1f6be1);
+      display:inline-block;
+      box-shadow:0 0 0 2px rgba(60,130,246,.25);
+    }
+    .metrics{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .metric{
+      display:flex; align-items:center; gap:8px;
+      padding:6px 10px; border:1px solid var(--pill-border);
+      border-radius:8px; background:var(--pill); font-size:12px; color:var(--muted)
+    }
+    .metric b{color:var(--text); font-size:13px}
+    .wrap{ max-width:1100px; margin:22px auto; padding:0 16px; }
+    /* Toolbar refinada: ações à direita, quebra suave */
+    .toolbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px }
+    .toolbar .actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-left:auto }
+    /* Ponto de notificação no botão "Arquivo" quando existir issues */
+    .notif-dot{
+      display:inline-block; width:8px; height:8px; border-radius:50%;
+      background: var(--bad);
+      margin-left:6px;
+      box-shadow: 0 0 0 2px var(--btn); /* borda para destacar no botão */
+    }
+
+    .add-btn{
+      background:linear-gradient(135deg, var(--brand), var(--brand2));
+      color:#fff; border:none; border-radius:8px; padding:10px 14px;
+      font-weight:700; cursor:pointer; box-shadow:0 6px 18px rgba(31,107,225,.25);
+      transition:.15s;
+    }
+    .add-btn:hover{
+      transform: translateY(-1px);
+      box-shadow:0 8px 22px rgba(31,107,225,.35);
+    }
+    .list{display:flex; flex-direction:column; gap:12px}
+
+    .perfil{
+      border:1px solid var(--border); background:linear-gradient(180deg, var(--card), var(--card2));
+      border-radius:12px; padding:12px; display:grid; grid-template-columns: 220px 1fr 340px; gap:12px;
+      box-shadow:0 1px 0 0 rgba(255,255,255,.03) inset;
+      transition: background 0.2s, border 0.2s, opacity 0.15s;
+    }
+    .perfil.frozen {
+      opacity: 0.66;
+      filter: grayscale(0.35);
+      pointer-events: none;
+      background:linear-gradient(180deg, #19202c 60%, var(--card2));
+      border-color: #434d5b;
+    }
+    .leftCol{
+      display:flex; align-items:center; gap:10px;
+      padding-right:10px; border-right:1px dashed var(--stroke);
+    }
+    .toggle{
+      border:1px solid var(--btn-border); background:var(--btn); color:var(--text);
+      border-radius:9px; padding:8px 12px; font-weight:700; cursor:pointer; transition:.12s;
+    }
+    .toggle.open{ border-color:#24562b; background:rgba(23,182,124,.12); color:#c6f3e3; }
+    .toggle.close{ border-color:#4b2a2a; background:rgba(227,90,90,.12); color:#ffdede; }
+    .toggle:hover{ filter:brightness(1.06) }
+
+    .centerCol{ display:flex; flex-direction:column; gap:6px; }
+    .titleRow{ display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+    .accName{ font-weight:800; letter-spacing:.2px }
+    .pill{
+      border:1px solid var(--pill-border); background:var(--pill); color:var(--muted);
+      font-size:11px; padding:3px 8px; border-radius:999px; display:inline-flex; gap:6px; align-items:center;
+    }
+    .pill .dot{ width:8px; height:8px; border-radius:999px; background:#888 }
+    .pill.good .dot{ background:var(--good) }
+    .pill.warn .dot{ background:var(--warn) }
+    .pill.bad  .dot{ background:var(--bad)  }
+    .pill.info .dot{ background:var(--brand) }
+    .pill.ramWarn   { border-color: #cf8a2e; background: #31210e; color: #f6cc87; }
+    .pill.ramBad    { border-color: #e35a5a; background: #360f0f; color: #f1b3b3; font-weight:700; }
+    .pill.frozen    { border-color:#BBB; background:#272f3c; color:#fff; font-weight:700;}
+    .pill.cooldown  { border-color: #dba125; background: #2d230a; color: #f2d289;}
+    .pill.abas      { border-color: #b28ef1; background: #1c183a; color: #cbbaff;}
+    .subRow{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; color:var(--muted); font-size:12px }
+
+    .rightCol{ display:flex; align-items:center; gap:8px; justify-content:flex-end; flex-wrap:wrap }
+    .btn{
+      border:1px solid var(--btn-border); background:var(--btn); color:var(--text);
+      border-radius:9px; padding:8px 10px; font-size:12px; cursor:pointer; transition:.12s; font-weight:700;
+    }
+    .btn:hover{ background:var(--btn-hover) }
+    .btn.primary{ background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff }
+    .btn.danger { border-color:#5c2b2b; background:rgba(227,90,90,.12); color:#ffdede }
+    .btn.reset-memmil {
+      border-color: #cf8a2e;
+      background: linear-gradient(90deg, #fbcb6c 0%, #d49a34 100%);
+      color:#442d09;
+      font-weight: 800;
+      box-shadow:0 1px 7px #a4791e12;
+      letter-spacing:0.1px;
+    }
+    .btn.reset-memmil:disabled { opacity:.55; filter: saturate(0.7); cursor:not-allowed;}
+    .icon-btn{
+      border:1px solid var(--btn-border); background:var(--btn); color:#cfe1ff;
+      border-radius:9px; padding:7px 9px; cursor:pointer; display:inline-flex; align-items:center; gap:6px;
+    }
+    .icon-btn:hover{ background:var(--btn-hover) }
+    .icon{ width:15px; height:15px; display:inline-block }
+
+    /* Spinner para botões em estado de carregamento */
+    .spinner{
+      width:14px; height:14px;
+      border:2px solid rgba(255,255,255,.25);
+      border-top-color:#fff;
+      border-radius:50%;
+      display:inline-block;
+      animation:spin .8s linear infinite;
+    }
+    @keyframes spin{ to { transform: rotate(360deg); } }
+    .loading{ opacity:.85; pointer-events:none }
+
+    /* Botão pequenino para caber ao lado das pills */
+    .icon-btn.mini{
+      padding:4px 6px; font-size:11px;
+    }
+    .icon-btn.mini .icon{ width:12px; height:12px }
+
+    /* Modal base */
+    .modal-ov{ position: fixed; inset:0; background: rgba(0,0,0,.46); display:flex; align-items:center; justify-content:center; z-index:9999; }
+    .modal-box{ background:#0f1625; color:var(--text); border:1px solid var(--border); border-radius:12px; max-width:560px; width:92%; padding:18px 18px 16px; box-shadow:0 16px 50px rgba(0,0,0,.45); }
+    .modal-box h2{ margin:6px 0 14px; font-size:18px }
+    .form-row{ margin-bottom:12px }
+    label{ display:block; margin-bottom:6px; color:#cdd9f0; font-weight:600; font-size:13px }
+    input[type="text"], textarea, select{
+      width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:#0a1322; color:var(--text);
+    }
+    .modal-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:14px }
+    .danger-zone{
+      margin-top:14px; padding:10px; border:1px solid #432; background:rgba(227,90,90,.08); border-radius:8px;
+    }
+    .filters{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px }
+    .filters .btn.active{ background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo"></span>
+      <div>Gerenciador de Contas — Conveniente Tecnologia</div>
+    </div>
+    <div class="metrics"> 
+      <div class="metric"><span>Total</span><b id="mTotal">0</b></div>
+      <div class="metric"><span>Ativos</span><b id="mAtivos">0</b></div>
+      <div class="metric"><span>Trabalhando</span><b id="mTrabalhando">0</b></div>
+      <div class="metric"><span>Fila Robe</span><b id="mFila">0</b></div>
+      <div class="metric"><span>RAM livre</span><b id="mRam">--</b></div>
+      <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
+      <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
+      <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
+      <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
+    </div>
+  </header>
+  <div class="wrap">
+    <div class="toolbar"> 
+      <button class="add-btn" id="addPerfilBtn">+ Nova Conta</button>
+      <div class="actions"> 
+        <button class="btn" id="citiesCountBtn">Cidades (Contagem)</button>
+        <button class="btn" id="startAllBtn">Abrir Todos e Iniciar 24h</button>
+        <button class="btn danger" id="stopAllBtn">Fechar todos</button>
+        <button class="btn" id="robe24AllBtn">Robe 24h (todos)</button>
+        <button class="btn" id="robeReleaseAllBtn">Liberar Robe (todos)</button>
+        <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
+          <button class="btn" id="filterAll">Todas</button>
+          <button class="btn" id="filterActive">Ativas</button>
+          <button class="btn" id="filterInactive">Inativas</button>
+          <button class="btn" id="filterIssues">Com problema</button>
+        </div>
+      </div> 
+    </div>
+    <div id="listaPerfis" class="list"></div>
+  </div>
+  <script src="app.js"></script>
+  <script>
+    // Util: tempo restante
+    function tempoRestante(seg) {
+      if (seg <= 0) return 'Pronto!';
+      const h = Math.floor(seg/3600), m = Math.floor((seg%3600)/60), s = seg % 60;
+      if (h) return `${h}h ${m}m ${s}s`;
+      if (m) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+
+    // Tipos de ERRO considerados no log (Virtus/Robe)
+    const ERROR_TYPES = new Set(['robe_error','robe_no_photo','virtus_blocked','virtus_no_composer','virtus_send_failed']);
+    function isErrorIssue(it) {
+      try { return ERROR_TYPES.has(String(it && it.type || '')); } catch { return false; }
+    }
+
+    // MODAL: criar conta (com loading + mensagens no próprio modal)
+    function showCriarContaModal({ cidades }) {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-ov';
+      const box = document.createElement('div');
+      box.className = 'modal-box';
+      box.innerHTML = `
+        <h2>Nova Conta</h2>
+        <div class="form-row">
+          <label>Cidade</label>
+          <select id="cidadeSel"></select>
+        </div>
+        <div class="form-row">
+          <label>Cookies Originais</label>
+          <textarea id="cookiesCampo" placeholder="Cole aqui os cookies exportados da conta"></textarea>
+        </div>
+        <div id="criarContaMsg" style="display:none" class="pill"></div>
+        <div class="modal-actions">
+          <button class="btn" id="cancelarBtn" type="button">Cancelar</button>
+          <button class="btn primary" id="confirmarBtn" type="button">Criar Conta</button>
+        </div>
+      `;
+      overlay.append(box);
+      document.body.append(overlay);
+
+      const sel = box.querySelector('#cidadeSel');
+      sel.innerHTML = `<option value="">Selecione uma cidade</option>`;
+      (cidades||[]).forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = typeof c === 'string' ? c : (c.nome || c.label || c.id || '');
+        opt.textContent = typeof c === 'string' ? c : (c.nome || c.label || c.id || '');
+        sel.append(opt);
+      });
+
+      const msgEl = box.querySelector('#criarContaMsg');
+      const cancelarBtn = box.querySelector('#cancelarBtn');
+      const confirmarBtn = box.querySelector('#confirmarBtn');
+      const cookiesEl = box.querySelector('#cookiesCampo');
+
+      function setDisabled(dis) {
+        cancelarBtn.disabled = dis;
+        sel.disabled = dis;
+        cookiesEl.disabled = dis;
+      }
+
+      cancelarBtn.onclick = () => overlay.remove();
+
+      confirmarBtn.onclick = async () => {
+        const cidade = sel.value;
+        const cookies = cookiesEl.value.trim();
+        if (!cidade) { alert('Selecione uma cidade.'); return; }
+        if (!cookies) { alert('Cole os cookies originais.'); return; }
+
+        setBtnLoading(confirmarBtn, true, 'Criando...');
+        setDisabled(true);
+        msgEl.style.display = 'none';
+
+        try {
+          const res = await window.electronAPI.criarPerfil({ cidade, cookies });
+          if (!res || !res.ok) {
+            msgEl.className = 'pill bad';
+            msgEl.textContent = 'Falha ao criar: ' + ((res && res.error) || 'erro desconhecido');
+            msgEl.style.display = 'inline-flex';
+            setBtnLoading(confirmarBtn, false);
+            setDisabled(false);
+            return;
+          }
+          msgEl.className = 'pill good';
+          msgEl.textContent = 'Conta criada com sucesso.';
+          msgEl.style.display = 'inline-flex';
+          setTimeout(() => {
+            overlay.remove();
+            try { reloadPerfis(); } catch {}
+          }, 600);
+        } catch (e) {
+          msgEl.className = 'pill bad';
+          msgEl.textContent = 'Erro: ' + (e && e.message || e);
+          msgEl.style.display = 'inline-flex';
+          setBtnLoading(confirmarBtn, false);
+          setDisabled(false);
+        }
+      };
+    }
+
+    // MODAL: configurações de conta (renomear/excluir)
+    function showConfigPerfilModal({ perfil, onClose }) {
+      const overlay = document.createElement('div'); overlay.className = 'modal-ov';
+      const box = document.createElement('div'); box.className = 'modal-box';
+      const ativo = !!perfil.active;
+      const nomeAtual = perfil.nome;
+      const labelAtual = perfil.label || '';
+
+      box.innerHTML = `
+        <h2>Configurações — ${nomeAtual}</h2>
+        <div class="form-row">
+          <label>Nome exibido (label)</label>
+          <input type="text" id="labelInput" placeholder="Ex.: Nome do Facebook" value="${labelAtual.replace(/"/g,'&quot;')}"/>
+          <div style="font-size:12px;color:#9fb2cf;margin-top:6px">O nome exibido aparece apenas no gerenciador, não altera o identificador do perfil.</div>
+        </div>
+        <div class="form-row">
+          <label><input type="checkbox" id="renameSlugCk" ${ativo ? 'disabled' : ''}/> Renomear identificador/diretório (somente com navegador fechado)</label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="fecharCfg">Fechar</button>
+          <button class="btn primary" id="salvarCfg">Salvar</button>
+        </div>
+        <div class="danger-zone">
+          <div style="margin-bottom:8px; font-weight:700; color:#ffcbcb">Zona de Perigo</div>
+          <button class="btn danger" id="excluirBtn" ${ativo ? 'disabled' : ''}>Excluir Conta (somente inativa)</button>
+        </div>
+      `;
+      overlay.append(box);
+      document.body.append(overlay);
+
+      box.querySelector('#fecharCfg').onclick = () => { overlay.remove(); onClose && onClose(); };
+      box.querySelector('#salvarCfg').onclick = async () => {
+        const novoLabel = box.querySelector('#labelInput').value.trim();
+        const renameSlug = box.querySelector('#renameSlugCk').checked && !ativo;
+        if (!novoLabel) { alert('Informe um nome exibido.'); return; }
+        try {
+          await window.electronAPI.renamePerfil({ nome: nomeAtual, novoLabel, renameSlug });
+          alert('Configurações salvas.');
+          overlay.remove();
+          onClose && onClose();
+        } catch (e) {
+          alert('Falha ao salvar: ' + (e && e.message || e));
+        }
+      };
+      box.querySelector('#excluirBtn').onclick = async (ev) => {
+        if (ativo) return alert('Feche o navegador desta conta antes de excluir.');
+        if (!confirm(`Tem certeza que deseja excluir a conta "${nomeAtual}"? Esta ação é irreversível.`)) return;
+        const btn = ev.currentTarget;
+        // loading até concluir (sem alert final)
+        if (!btn.dataset.idleHtml) btn.dataset.idleHtml = btn.innerHTML;
+        btn.disabled = true; btn.classList.add('loading');
+        btn.innerHTML = `<span class="spinner"></span> <span>Excluindo...</span>`;
+        try {
+          await window.electronAPI.deletePerfil(nomeAtual);
+          overlay.remove();
+          onClose && onClose();
+        } catch (e) {
+          alert('Falha ao excluir: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.classList.remove('loading');
+          btn.innerHTML = btn.dataset.idleHtml;
+        }
+      };
+    }
+
+    function buildPill(text, cls='info'){ const span=document.createElement('span'); span.className='pill '+cls; span.innerHTML=`<span class="dot"></span>${text}`; return span; }
+
+    // ============================= INÍCIO ALTERAÇÕES PEDIDAS =============================
+    // Militar: null-aware, badge neutra se RAM/CPU desconhecida
+    // Helper pill RAM
+    function buildRamPill(ramMB) {
+      // Militar: null-aware RAM/CPU badge. Nunca badge "0" se null
+      if (ramMB === null || ramMB === undefined) { // Null ou undefined: badge neutra
+        return buildPill('RAM: —', 'info');
+      }
+      // até <500: normal, entre 500-700: warn (amarelo), >700MB: alerta vermelho pill
+      let cls = '';
+      let label = `RAM: ${ramMB} MB`;
+      if (ramMB >= 700) cls = 'ramBad';
+      else if (ramMB >= 500) cls = 'ramWarn';
+      return buildPill(label, cls || 'info');
+    }
+
+    // Militar: null-aware, badge neutra se RAM/CPU desconhecida
+    // Helper pill CPU (instrução adicionada)
+    function buildCpuPill(cpuPercent) {
+      // Militar: null-aware RAM/CPU badge. Nunca badge "0" se null
+      if (cpuPercent === null || cpuPercent === undefined) {
+        return buildPill('CPU: —', 'info');
+      }
+      let cls = '';
+      let label = `CPU: ${cpuPercent}%`;
+      if (cpuPercent >= 150) cls = 'ramBad';
+      else if (cpuPercent >= 80) cls = 'ramWarn';
+      return buildPill(label, cls || 'info');
+    }
+
+    // Helper badge Frozen/skip/antiflood (roboFrozenUntil > Date.now())
+    // Militar: frozenUntil/COOLDOWN badge lógica
+    function buildFrozenPill(p) {
+      if (!p || !p.robeFrozenUntil) return null;
+      try {
+        const ts = Number(p.robeFrozenUntil);
+        if (!ts || ts < Date.now()) return null;
+        const agora = Date.now();
+        const restante = Math.max(0, Math.floor((ts-agora)/1000));
+        return buildPill(`ROBE Congelado (${tempoRestante(restante)})`, 'frozen');
+      } catch { return null; }
+    }
+
+    // Helper cooldown pill
+    function buildCooldownPill(sec) {
+      if (!sec || sec <= 0) return null;
+      return buildPill(`Cooldown: ${tempoRestante(sec)}`, 'cooldown');
+    }
+
+    // Helper estado do robe
+    function buildRobeEstadoPill(robeEstado) {
+      robeEstado = (robeEstado||'').toLowerCase();
+      // Highligh: erro/anormal/backoff = vermelho, skip/pausa=amarelo, ok/em fila/normal = verde/info
+      let cls='info';
+      let txt = robeEstado.replace(/^./, c=>c.toUpperCase());
+      if (/erro|grave|fail|backoff/.test(robeEstado)) cls='bad';
+      else if (/skip|congel|frozen|pausa|warn/.test(robeEstado)) cls='warn';
+      else if (/ok|normal|pronto/.test(robeEstado)) cls='good';
+      else if (/fila/.test(robeEstado)) cls='info';
+      return buildPill(`Robe: ${txt}`, cls);
+    }
+
+    // Helper Abas/pages por navegador
+    function buildAbasPill(numPages) {
+      if (numPages === null || numPages === undefined) return null;
+      if (numPages > 1) {
+        // alerta roxo caso >1 aba (possível bug)
+        return buildPill(`Abas: ${numPages}`, 'abas');
+      }
+      return null;
+    }
+    // ============================= FIM ALTERAÇÕES PEDIDAS – RESTO SÓ CHAMADA NOS LUGARES =============================
+
+    // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
+    async function reloadPerfis() {
+      const st = await window.electronAPI.getStatus();
+      const perfis = st?.perfis || [];
+      const robes  = st?.robes  || {};
+      const robeQueue = st?.robeQueue || [];
+
+      // ----- ALTERAÇÃO: GLOBAL HEALTH PANEL ------
+      // Militar: somar apenas perfis com RAM !== null
+      let ramTotal = 0, ramMilit = 0, ramMax = 0, pCooldown = 0, pFrozen = 0;
+      for (const p of perfis) {
+        if (typeof p.ramMB === 'number') {
+          ramTotal += p.ramMB;
+          if (p.ramMB >= 700) ramMilit++;
+          if (p.ramMB > ramMax) ramMax = p.ramMB;
+        }
+        if (p.robeFrozenUntil && p.robeFrozenUntil > Date.now()) pFrozen++;
+        const robeStatus = robes[p.nome] || {};
+        if (robeStatus.cooldownSec > 0) pCooldown++;
+      }
+      // RAM painels
+      if (perfis.length) {
+        document.getElementById('mRamPanel').style.display = 'flex';
+        document.getElementById('mRamTotal').textContent = (ramTotal ? `${ramTotal} MB` : '--');
+        document.getElementById('mRamMax').textContent = (ramMax ? `${ramMax} MB` : '--');
+        document.getElementById('mRamMilit').textContent = ramMilit;
+        document.getElementById('mPCooldown').textContent = pCooldown;
+        document.getElementById('mPFrozen').textContent = pFrozen;
+      } else {
+        document.getElementById('mRamPanel').style.display = 'none';
+      }
+
+      // Militar: badge de modo full/leve, tooltip detalhado do autoMode/state
+      const auto = st && st.autoMode || null;
+      const modoEl = document.getElementById('mModo');
+      if (modoEl) {
+        if (auto && auto.mode === 'light') {
+          modoEl.textContent = 'Leve';
+          modoEl.style.color = '#f6cc87';
+          modoEl.parentElement.title = `Leve: ${auto.reason || ''} | desde: ${auto.since ? new Date(auto.since).toLocaleTimeString() : ''} | CPU EMA: ${Math.round((auto.cpuEma||0))}% | RAM EMA: ${Math.round((auto.freeEmaMB||0))} MB`;
+        } else if (auto && auto.mode === 'full') {
+          modoEl.textContent = 'Full';
+          modoEl.style.color = '#c6f3e3';
+          modoEl.parentElement.title = `Full | CPU EMA: ${Math.round((auto.cpuEma||0))}% | RAM EMA: ${Math.round((auto.freeEmaMB||0))} MB`;
+        } else {
+          modoEl.textContent = '--';
+          modoEl.style.color = '';
+          modoEl.parentElement.title = '';
+        }
+      }
+
+      // Metrics
+      document.getElementById('mTotal').textContent = String(perfis.length);
+      document.getElementById('mAtivos').textContent = String(perfis.filter(p => p.active).length);
+      document.getElementById('mTrabalhando').textContent = String(perfis.filter(p => p.trabalhando).length);
+      document.getElementById('mFila').textContent = String(robeQueue.length);
+
+      const lista = document.getElementById('listaPerfis');
+      lista.innerHTML = '';
+      if (!perfis.length) {
+        const empty = document.createElement('div');
+        empty.className='pill'; empty.textContent='Nenhuma conta cadastrada.';
+        lista.appendChild(empty);
+        return;
+      }
+
+      perfis.filter(passFilter).forEach((p, idx) => {
+        const robeStatus = robes[p.nome] || {};
+        const robeCooldownSec = robeStatus.cooldownSec || 0;
+        const fila = robeQueue || [];
+        const inQueue = fila.includes(p.nome);
+        const isNext = (fila[0] === p.nome);
+        const display = p.label || p.nome;
+        const idxStr = String(idx + 1).padStart(3, '0'); // 001, 002, ...
+
+        const card = document.createElement('div');
+        card.className='perfil';
+
+        // ----- BLOQUEIO/CONGELAMENTO: antiflood skip/frozen ----
+        const isFrozen = (p.robeFrozenUntil && p.robeFrozenUntil > Date.now());
+        if (isFrozen) card.classList.add('frozen');
+
+        // LEFT: toggle
+        const left = document.createElement('div'); left.className='leftCol';
+        const toggle = document.createElement('button');
+        toggle.className = 'toggle ' + (p.active ? 'close':'open');
+        toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
+        toggle.onclick = () => toggleBrowserUI(p, toggle);
+        if (isFrozen) toggle.disabled = true;
+        left.append(toggle);
+
+        // NOVO: start 24h logo abaixo do toggle (com loading)
+        const btnStartLeft = document.createElement('button');
+        btnStartLeft.className = 'btn';
+        btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
+        btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
+        if (isFrozen) btnStartLeft.disabled = true;
+        left.append(btnStartLeft);
+
+        // ------------------- RAM VISUAL (ADICIONADO) -------------------
+        // Militar: null-aware, badge neutra se RAM/CPU desconhecida
+        // RAM por conta (campo .ramMB): mostra RAM: NNN MB, warn (>700MB pill vermelho), warn amarelo >500MB, badge neutra se null
+        const ramPill = buildRamPill(p.ramMB); // RAM por conta
+
+        // Exibir CPU percent (com null-aware)
+        const cpuPill = buildCpuPill(p.cpuPercent);
+
+        // ------------------- FROZEN/CONGELADO (ADICIONADO) -------------------
+        // Militar: frozenUntil/COOLDOWN badge lógica
+        const frozenPill = buildFrozenPill(p);
+
+        // -----------------------------------------------------
+
+        // CENTER: info
+        const center = document.createElement('div'); center.className='centerCol';
+        const titleRow = document.createElement('div'); titleRow.className='titleRow';
+        const nameEl = document.createElement('div'); nameEl.className='accName';
+        nameEl.textContent = `[${idxStr}] ${display}`; // <- enumerado
+        titleRow.append(nameEl);
+
+        // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
+        titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
+        titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
+
+        // -------- RAM e CPU pill explícito ---------
+        if (ramPill) titleRow.append(ramPill); // RAM por conta
+        if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
+
+        // -------- FROZEN pill explícito (primeiro) ---------
+        if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
+
+        // ------- COOLDOWN (ADICIONAL) -------
+        if (robeCooldownSec > 0) {
+          titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil
+        } else {
+          if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
+          else if (inQueue) titleRow.append(buildPill('Robe: Aguardando fila', 'info'));
+          else titleRow.append(buildPill('Robe: Pronto', 'good'));
+        }
+
+        // ------- Estado do robe ------
+        if (robeStatus && robeStatus.estado) {
+          titleRow.append(buildRobeEstadoPill(robeStatus.estado));
+        }
+
+        // Opcional: Adicione pill/status visual "Modo Humano"
+        if (p.humanControl) {
+          titleRow.append(buildPill('Modo Humano', 'warn'));
+        }
+
+        // ------------- ABAS/NUMPAGES PILL -------------
+        // Militar: Se campo não for null, badge “Abas: N” para contas com N > 1 (alerta, cor de warning). Se null/undefined, simplesmente não exibir.
+        const abasPill = buildAbasPill(p.numPages);
+        if (abasPill) titleRow.append(abasPill);
+
+        // Após montar as pills do Robe…
+        const btnPlay = document.createElement('button');
+        btnPlay.className='icon-btn mini';
+        btnPlay.title='Forçar postagem agora (Robe Play)';
+        btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
+        btnPlay.onclick = () => robePlayUI(p, btnPlay);
+        if (isFrozen) btnPlay.disabled = true;
+        titleRow.append(btnPlay);
+
+        // Novo botão: Robe 24h (por conta)
+        const btnRobe24 = document.createElement('button');
+        btnRobe24.className = 'icon-btn mini';
+        btnRobe24.title='Pausar Robe por 24h';
+        btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
+        btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
+        if (isFrozen) btnRobe24.disabled = true;
+        titleRow.append(btnRobe24);
+
+        const subRow = document.createElement('div'); subRow.className='subRow';
+        subRow.textContent = p.cidade ? ('Cidade: ' + p.cidade) : '';
+        center.append(titleRow, subRow);
+
+        // RIGHT: actions (ajustado conforme instruções)
+        const right = document.createElement('div'); right.className='rightCol';
+
+        const btnCookies = document.createElement('button');
+        btnCookies.className='btn';
+        btnCookies.textContent='Injetar Cookies';
+        btnCookies.title='Injetar cookies salvos neste perfil';
+        btnCookies.onclick = () => window.electronAPI.configure(p.nome).then(reloadPerfis);
+        if (isFrozen) btnCookies.disabled = true;
+
+        const btnCfg = document.createElement('button');
+        btnCfg.className='icon-btn';
+        btnCfg.title='Configurações da Conta';
+        btnCfg.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm0-6 2.2 1.6 2.6-.6 1.1 2.5 2.6.6-.2 2.7 2 1.8-2 1.8.2 2.7-2.6.6-1.1 2.5-2.6-.6L12 22l-2.2-1.6-2.6.6-1.1-2.5-2.6-.6.2-2.7-2-1.8 2-1.8-.2-2.7 2.6-.6 1.1-2.5 2.6.6L12 2.5Z"/></svg><span>Configurar</span>`;
+        btnCfg.onclick = () => showConfigPerfilModal({ perfil: p, onClose: reloadPerfis });
+        if (isFrozen) btnCfg.disabled = true;
+
+        // Botão Arquivo/Log por conta - alterado para ponto se issuesCount > 0
+        const btnLog = document.createElement('button');
+        btnLog.className='icon-btn';
+        btnLog.title='Ver Log da Conta';
+        btnLog.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm9 0v5h5"/></svg><span>Arquivo</span>${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
+        btnLog.onclick = () => showIssuesModal(p.nome);
+        if (isFrozen) btnLog.disabled = true;
+
+        // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
+        if (p.humanControl) {
+          // Botão “Retomar Trabalho”
+          const btnResume = document.createElement('button');
+          btnResume.className='icon-btn';
+          btnResume.title='Retomar atendimento e automação';
+          btnResume.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`;
+          btnResume.onclick = async () => {
+            btnResume.disabled = true;
+            btnResume.innerText = 'Resumindo...';
+            try {
+              await window.electronAPI.resumeHuman(p.nome);
+              await new Promise(r=>setTimeout(r,800));
+              reloadPerfis();
+            } catch(e){ alert('Falha ao retomar trabalho: '+(e&&e.message||e)); }
+            finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
+          };
+          if (isFrozen) btnResume.disabled = true;
+          right.append(btnCookies, btnResume, btnCfg, btnLog);
+        } else {
+          // Botão “Invocar Humano” padrão
+          const btnHuman = document.createElement('button');
+          btnHuman.className='icon-btn';
+          btnHuman.title='Invocar Humano';
+          btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
+          btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
+          if (isFrozen) btnHuman.disabled = true;
+          right.append(btnCookies, btnHuman, btnCfg, btnLog);
+        }
+        // ===========================================================
+
+        // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
+        // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
+        let estadoCritico = false;
+        let podeResetar = false;
+        let robeEstadoVal = (robeStatus && typeof robeStatus.estado === 'string' ? robeStatus.estado : '');
+        let ramMBval = (typeof p.ramMB === "number") ? p.ramMB : null;
+        if (ramMBval !== null && ramMBval >= 700) estadoCritico = true;
+        if (/erro|grave|backoff|fail/i.test(robeEstadoVal)) estadoCritico = true;
+        if (estadoCritico && !isFrozen && !p.resetando && !p.resetEmCurso && !p.humanControl && !p.trabalhando) {
+          // Somente se navegador não está ativo ou perfil não está resetando/congelado
+          podeResetar = !p.active;
+        }
+        if (estadoCritico && podeResetar) {
+          const btnResetMil = document.createElement('button');
+          btnResetMil.className = 'btn reset-memmil';
+          btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
+          btnResetMil.onclick = async () => {
+            btnResetMil.disabled = true; btnResetMil.innerHTML = `<span class="spinner"></span> Resetando...`;
+            try {
+              await window.electronAPI.deactivate(p.nome);
+              await new Promise(r=>setTimeout(r,1100));
+              await window.electronAPI.activate(p.nome);
+              alert('Perfil resetado.');
+              reloadPerfis();
+            } catch(e) {
+              alert('Falha ao resetar perfil: '+(e&&e.message||e));
+            } finally {
+              btnResetMil.disabled = false; btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
+            }
+          };
+          right.append(btnResetMil);
+        }
+        // ----------------------------------------------------------------------------------
+
+        card.append(left, center, right);
+        lista.appendChild(card);
+
+      });
+    }
+
+    // Nova Conta (chama o modal; o modal faz a criação com loading)
+    document.getElementById('addPerfilBtn').onclick = async () => {
+      let cidades = [];
+      try { cidades = await window.electronAPI.listarCidades(); } catch { cidades = ['São Paulo','Rio de Janeiro']; }
+      showCriarContaModal({ cidades });
+    };
+
+    // ============================== FUNÇÕES DE MÉTRICAS E BOTÕES NOVOS ===============================
+    // 4.1 Helpers base (sleep/wait, formatadores):
+    function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+    async function waitUntil(fnCond, { timeoutMs = 20000, intervalMs = 300 } = {}) {
+      const t0 = Date.now();
+      while ((Date.now() - t0) < timeoutMs) {
+        try { if (await fnCond()) return true; } catch {}
+        await sleep(intervalMs);
+      }
+      return false;
+    }
+
+    function formatGB(gb) {
+      if (gb == null) return '--';
+      return `${Number(gb).toFixed(2)} GB`;
+    }
+    function formatCPU(cpu) {
+      if (cpu == null) return '--';
+      return `${Math.round(cpu)}%`;
+    }
+
+    // Helper: liga/desliga loading num botão preservando o HTML original
+    function setBtnLoading(btn, loading, labelWhileLoading='Aguarde...') {
+      if (!btn) return;
+      if (!btn.dataset.idleHtml) btn.dataset.idleHtml = btn.innerHTML;
+      if (loading) {
+        btn.disabled = true;
+        btn.classList.add('loading');
+        btn.innerHTML = `<span class="spinner"></span> <span>${labelWhileLoading}</span>`;
+      } else {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+        btn.innerHTML = btn.dataset.idleHtml;
+      }
+    }
+
+    // Filtros
+    let currentFilter = 'all';
+    function setFilter(f) {
+      currentFilter = f;
+      // destacar botão ativo
+      const ids = ['filterAll','filterActive','filterInactive','filterIssues'];
+      ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('active',
+          (id==='filterAll'     && f==='all') ||
+          (id==='filterActive'  && f==='active') ||
+          (id==='filterInactive'&& f==='inactive') ||
+          (id==='filterIssues'  && f==='issues'));
+      });
+      reloadPerfis();
+    }
+    function passFilter(p) {
+      const issuesCount = Number(p.issuesCount || 0);
+      if (currentFilter === 'active')   return !!p.active;
+      if (currentFilter === 'inactive') return !p.active;
+      if (currentFilter === 'issues')   return issuesCount > 0;
+      return true; // 'all'
+    }
+
+    // Robe: UI helpers
+    async function robePlayUI(p, btn){
+      try {
+        setBtnLoading(btn, true, 'Liberando...');
+        await window.electronAPI.robePlay(p.nome);
+        await new Promise(r=>setTimeout(r,400));
+        reloadPerfis();
+      } catch(e){ alert('Falha no Robe Play: '+(e&&e.message||e)); }
+      finally{ setBtnLoading(btn, false); }
+    }
+    async function robePause24hUI(p, btn){
+      try {
+        setBtnLoading(btn, true, 'Pausando 24h...');
+        await window.electronAPI.robePause24h(p.nome);
+        await new Promise(r=>setTimeout(r,400));
+        reloadPerfis();
+      } catch(e){ alert('Falha ao pausar Robe 24h: '+(e&&e.message||e)); }
+      finally{ setBtnLoading(btn, false); }
+    }
+
+    // Toggle abrir/fechar com loading
+    async function toggleBrowserUI(p, btn){
+      try {
+        const wantOpen = !p.active;
+        setBtnLoading(btn, true, wantOpen ? 'Abrindo...' : 'Fechando...');
+        const fn = wantOpen ? window.electronAPI.activate : window.electronAPI.deactivate;
+        await fn(p.nome);
+        // Espera refletir
+        await waitUntil(async () => {
+          const st = await window.electronAPI.getStatus();
+          const cur = (st.perfis||[]).find(x => x.nome === p.nome);
+          return !!cur && (!!cur.active === wantOpen);
+        }, { timeoutMs: 60000, intervalMs: 400 });
+        reloadPerfis();
+      } catch (e) {
+        alert('Falha no toggle do navegador: ' + (e && e.message || e));
+      } finally {
+        setBtnLoading(btn, false);
+      }
+    }
+
+    // Logs por conta (arquivo)
+    function showIssuesModal(nome){
+      const overlay = document.createElement('div'); overlay.className='modal-ov';
+      const box = document.createElement('div'); box.className='modal-box'; box.style.maxWidth='720px';
+      box.innerHTML =      `<h2>Logs — ${nome}</h2>      <div id="issuesBody" style="max-height:420px; overflow:auto; border:1px solid #1f2a3a; border-radius:8px; padding:8px; background:#0b1322;">        <div class="pill">Carregando...</div>      </div>      <div class="modal-actions">        <button class="btn" id="closeIssues">Fechar</button>        <button class="btn danger" id="clearIssues">Limpar logs</button>      </div>   `;
+      overlay.append(box);
+      document.body.append(overlay);
+
+      const load = async () => {
+        try {
+          const res = await window.electronAPI.getIssues(nome);
+          const body = box.querySelector('#issuesBody');
+          if (!res || !res.ok) {
+            body.innerHTML = '<div class="pill bad">Falha ao carregar logs.</div>';
+            return;
+          }
+
+          // Filtra SOMENTE erros
+          const all = Array.isArray(res.issues) ? res.issues : [];
+          const errs = all.filter(isErrorIssue);
+
+          if (!errs.length) {
+            body.innerHTML = '<div class="pill">Sem registros de erros.</div>';
+            return;
+          }
+
+          const rows = errs.map(it => {
+            const d = new Date(it.ts || Date.now());
+            const hh = d.toLocaleString();
+            const type = (it.type || '').toString();
+            const msg  = (it.message || '').toString();
+            return `<div style="border-bottom:1px dashed #223; padding:6px 0">
+                      <div style="font-size:12px;color:#9fb2cf">${hh} — <b>${type}</b></div>
+                      <div style="font-size:13px">${msg}</div>
+                    </div>`;
+          }).join('');
+          body.innerHTML = rows;
+        } catch {
+          const body = box.querySelector('#issuesBody');
+          body.innerHTML = '<div class="pill bad">Erro ao carregar logs.</div>';
+        }
+      };
+
+      box.querySelector('#closeIssues').onclick = () => overlay.remove();
+      box.querySelector('#clearIssues').onclick = async (ev) => {
+        const btn = ev.currentTarget;
+        if (!btn.dataset.idleHtml) btn.dataset.idleHtml = btn.innerHTML;
+        btn.disabled = true; btn.classList.add('loading');
+        btn.innerHTML = `<span class="spinner"></span> <span>Limpando...</span>`;
+        try {
+          await window.electronAPI.clearIssues(nome);
+          await load();
+        } catch (e) {
+          alert('Falha ao limpar: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.classList.remove('loading');
+          btn.innerHTML = btn.dataset.idleHtml;
+        }
+      };
+
+      load();
+    }
+
+    // Binds filtros
+    (function bindFilters(){
+      const map = [
+        ['filterAll','all'],
+        ['filterActive','active'],
+        ['filterInactive','inactive'],
+        ['filterIssues','issues']
+      ];
+      map.forEach(([id, f]) => {
+        const el = document.getElementById(id);
+        if (el) el.onclick = () => setFilter(f);
+      });
+      // default
+      setFilter('all');
+    })();
+
+    // 4.2 Atualização das métricas (RAM/CPU/Fotos) — sem bloquear "+ Nova Conta" em RAM baixa
+    async function updateSysMetrics() {
+      try {
+        // RAM/CPU
+        const m = await window.electronAPI.getSysMetrics().catch(()=>null);
+        if (m && m.mem) {
+          const r = document.getElementById('mRam');
+          if (r) r.textContent = formatGB(m.mem.freeGB);
+          const c = document.getElementById('mCpu');
+          if (c) c.textContent = formatCPU(m.cpu && m.cpu.percent);
+
+          // Apenas aviso visual; NUNCA desabilitar o botão
+          try {
+            const addBtn = document.getElementById('addPerfilBtn');
+            if (addBtn && m.mem && typeof m.mem.freeMB === 'number') {
+              const minMB = m.mem.minFreeRequiredMB || 1536;
+              const low = m.mem.freeMB < minMB;
+              addBtn.disabled = false; // nunca desabilita
+              addBtn.title = low ? `Pouca memória livre (${m.mem.freeMB} MB). Sugestão: feche apps para melhorar desempenho.` : '';
+              addBtn.style.opacity = low ? '0.9' : '';
+              addBtn.style.cursor  = '';
+            }
+          } catch {}
+        }
+
+        // Fotos (contagem)
+        const f = await window.electronAPI.getFotosCount().catch(()=>null);
+        if (f && f.ok) {
+          const el = document.getElementById('mFotos');
+          if (el) el.textContent = String(f.count || 0);
+        }
+      } catch (e) {
+        // silencioso
+      }
+    }
+
+    // Intervalo periódico de métricas (3s)
+    setInterval(updateSysMetrics, 3000);
+
+    // 4.3 Modal: Cidades com contagem de contas
+    function showCidadesContagemModal({ contagens, totalPerfis }) {
+      const overlay = document.createElement('div'); overlay.className = 'modal-ov';
+      const box = document.createElement('div'); box.className = 'modal-box';
+      box.style.maxWidth = '620px';
+
+      let rows = '';
+      (contagens || []).forEach(ent => {
+        const c = ent.cidade || '—';
+        const n = ent.count || 0;
+        rows += `<div style="display:flex;justify-content:space-between;border-bottom:1px dashed #223;padding:6px 0">
+          <div>${c}</div><div><b>${n}</b></div>
+        </div>`;
+      });
+
+      box.innerHTML = `
+        <h2>Cidades — Contagem de Contas</h2>
+        <div style="max-height:420px; overflow:auto; border:1px solid #1f2a3a; border-radius:8px; padding:8px; background:#0b1322;">
+          ${rows || '<div class="pill">Nenhuma cidade encontrada.</div>'}
+        </div>
+        <div class="subRow" style="margin-top:10px">
+          <span>Total de contas: <b>${totalPerfis || 0}</b></span>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="fecharCid">Fechar</button>
+        </div>
+      `;
+      overlay.append(box);
+      document.body.append(overlay);
+      box.querySelector('#fecharCid').onclick = () => overlay.remove();
+    }
+
+    // Bind do botão "Cidades (Contagem)"
+    (function bindCidadesContagemBtn(){
+      const btn = document.getElementById('citiesCountBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        try {
+          const resp = await window.electronAPI.listarCidadesPerfisCount();
+          if (resp && resp.ok) {
+            showCidadesContagemModal({ contagens: resp.contagens, totalPerfis: resp.totalPerfis });
+          } else {
+            alert('Falha ao carregar contagem de cidades.');
+          }
+        } catch (e) {
+          alert('Falha ao carregar contagem de cidades: ' + (e && e.message || e));
+        }
+      };
+    })();
+
+    // 4.4 Abertura sequencial “Abrir Todos e Iniciar 24h” com calma, respeitando CPU/RAM
+    async function ensureResourcesOk() {
+      // Espera até CPU <= 90% e RAM livre >= minFreeMB (do main)
+      const ok = await waitUntil(async () => {
+        const m = await window.electronAPI.getSysMetrics().catch(()=>null);
+        if (!m || !m.mem) return false;
+        const freeMB = m.mem.freeMB || 0;
+        const minMB  = m.mem.minFreeRequiredMB || 1536;
+        const cpu    = (m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0; // primeira chamada pode ser null
+        const cpuOk  = (cpu === 0) ? true : (cpu <= 90); // tolera primeira leitura 0/null
+        const memOk  = freeMB >= minMB;
+        return cpuOk && memOk;
+      }, { timeoutMs: 0x7fffffff, intervalMs: 1200 }); // espera indefinidamente até ok
+      return ok;
+    }
+
+    async function startAllSequential() {
+      const startBtn = document.getElementById('startAllBtn');
+      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
+      try {
+        const st = await window.electronAPI.getStatus();
+        const perfis = st?.perfis || [];
+        // Ordem: como exibido
+        for (let i = 0; i < perfis.length; i++) {
+          const p = perfis[i];
+          // Re-checa status a cada iteração (robusto)
+          try {
+            await ensureResourcesOk(); // aguarda CPU/RAM ok antes de abrir o próximo
+
+            // Ativar navegador se necessário
+            if (!p.active) {
+              await window.electronAPI.activate(p.nome);
+              // Espera ficar ativo
+              await waitUntil(async () => {
+                const st2 = await window.electronAPI.getStatus();
+                const cur = (st2.perfis || []).find(x => x.nome === p.nome);
+                return cur && cur.active;
+              }, { timeoutMs: 60000, intervalMs: 400 });
+              // Pausa pequena entre aberturas
+              await sleep(1500);
+            }
+
+            // Start work (Virtus/24h)
+            await window.electronAPI.startWork(p.nome);
+            // Aguarda “trabalhando” refletir (tolerante)
+            await waitUntil(async () => {
+              const st3 = await window.electronAPI.getStatus();
+              const cur = (st3.perfis || []).find(x => x.nome === p.nome);
+              return cur && cur.trabalhando;
+            }, { timeoutMs: 30000, intervalMs: 400 });
+
+            // Resgata status atualizado para próximo ciclo
+            const stNext = await window.electronAPI.getStatus();
+            perfis.splice(0, perfis.length, ...(stNext.perfis || []));
+          } catch (e) {
+            console.warn('[StartAll] Falha em', p && p.nome, e && e.message || e);
+          }
+        }
+      } catch (e) {
+        alert('Falha na sequência: ' + (e && e.message || e));
+      } finally {
+        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir Todos e Iniciar 24h'; }
+        reloadPerfis();
+      }
+    }
+
+    // ====== Funções e binds NOVAS para loading, Fechar Todos, Invocar Humano, Start 24h ======
+
+    // 4.1) Esperar Robe terminar (para Invocar Humano)
+    async function waitRobeFinish(nome, { timeoutMs = 30601000 } = {}) {
+      return await waitUntil(async () => {
+        const st = await window.electronAPI.getStatus();
+        const emExec = !!(st && st.robes && st.robes[nome] && st.robes[nome].emExecucao);
+        return !emExec;
+      }, { timeoutMs, intervalMs: 1000 });
+    }
+
+    // 4.2) Invocar Humano robusto com loading e espera do Robe
+    async function invocarHumanoUI(p, btn) {
+      try {
+        setBtnLoading(btn, true, 'Verificando...');
+        // Garante navegador ativo (com confirmação)
+        let st = await window.electronAPI.getStatus();
+        let cur = (st.perfis || []).find(x => x.nome === p.nome);
+        if (!cur || !cur.active) {
+          const ok = confirm(`O navegador da conta "${p.label || p.nome}" está fechado. Abrir e invocar humano agora?`);
+          if (!ok) { setBtnLoading(btn, false); return; }
+          await window.electronAPI.activate(p.nome);
+          await waitUntil(async () => {
+            const s2 = await window.electronAPI.getStatus();
+            const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
+            return c2 && c2.active;
+          }, { timeoutMs: 60000, intervalMs: 400 });
+        }
+        // Se Robe estiver executando para esta conta, aguarda finalizar
+        st = await window.electronAPI.getStatus();
+        const emExec = !!(st && st.robes && st.robes[p.nome] && st.robes[p.nome].emExecucao);
+        if (emExec) {
+          setBtnLoading(btn, true, 'Aguardando Robe concluir...');
+          await waitRobeFinish(p.nome);
+        }
+
+        setBtnLoading(btn, true, 'Invocando Humano...');
+        await window.electronAPI.invokeHuman(p.nome);
+        await new Promise(r=>setTimeout(r,800));
+        reloadPerfis();
+      } catch (e) {
+        alert('Falha ao invocar humano: ' + (e && e.message || e));
+      } finally {
+        setBtnLoading(btn, false);
+      }
+    }
+
+    // 4.3) Start Work robusto com loading (move para a coluna ESQUERDA)
+    async function startWorkUI(p, btn) {
+      try {
+        setBtnLoading(btn, true, 'Iniciando...');
+        // Garante navegador ativo
+        let st = await window.electronAPI.getStatus();
+        let cur = (st.perfis || []).find(x => x.nome === p.nome);
+        if (!cur || !cur.active) {
+          await window.electronAPI.activate(p.nome);
+          await waitUntil(async () => {
+            const s2 = await window.electronAPI.getStatus();
+            const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
+            return c2 && c2.active;
+          }, { timeoutMs: 60000, intervalMs: 400 });
+          await new Promise(r=>setTimeout(r,1000));
+        }
+        // Inicia Virtus/24h
+        await window.electronAPI.startWork(p.nome);
+        await waitUntil(async () => {
+          const s3 = await window.electronAPI.getStatus();
+          const c3 = (s3.perfis || []).find(x => x.nome === p.nome);
+          return c3 && c3.trabalhando;
+        }, { timeoutMs: 30000, intervalMs: 400 });
+        reloadPerfis();
+      } catch (e) {
+        alert('Falha ao iniciar 24h: ' + (e && e.message || e));
+      } finally {
+        setBtnLoading(btn, false);
+      }
+    }
+
+    // 4.4) Fechar todos sequencialmente com feedback
+    async function stopAllSequential() {
+      const stopBtn = document.getElementById('stopAllBtn');
+      if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
+      try {
+        const st = await window.electronAPI.getStatus();
+        const ativos = (st.perfis || []).filter(x => x.active);
+        for (const p of ativos) {
+          try {
+            await window.electronAPI.deactivate(p.nome);
+            await waitUntil(async () => {
+              const s2 = await window.electronAPI.getStatus();
+              const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
+              return !c2 || !c2.active;
+            }, { timeoutMs: 60000, intervalMs: 400 });
+            await new Promise(r=>setTimeout(r,600));
+          } catch (e) {
+            console.warn('[Fechar todos] falha fechando', p && p.nome, e && e.message || e);
+          }
+        }
+      } catch (e) {
+        alert('Falha ao fechar todos: ' + (e && e.message || e));
+      } finally {
+        if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar todos'; }
+        reloadPerfis();
+      }
+    }
+
+    // Bind do botão “Fechar todos”
+    (function bindStopAllBtn(){
+      const btn = document.getElementById('stopAllBtn');
+      if (!btn) return;
+      btn.onclick = stopAllSequential;
+    })();
+
+    // Bind do botão “Abrir Todos e Iniciar 24h”
+    (function bindStartAllBtn(){
+      const btn = document.getElementById('startAllBtn');
+      if (!btn) return;
+      btn.onclick = startAllSequential;
+    })();
+
+    // Robe 24h (todos)
+    (function bindRobeAll(){
+      const btn24 = document.getElementById('robe24AllBtn');
+      if (btn24) {
+        btn24.onclick = async () => {
+          if (!btn24.dataset.idleTxt) btn24.dataset.idleTxt = btn24.textContent;
+          btn24.disabled = true; btn24.style.opacity='0.7'; btn24.textContent='Pausando 24h...';
+          try { await window.electronAPI.robesPause24hAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
+          catch(e){ alert('Falha ao pausar 24h todos: ' + (e&&e.message||e)); }
+          finally { btn24.disabled=false; btn24.style.opacity=''; btn24.textContent=btn24.dataset.idleTxt; }
+        };
+      }
+      const btnRel = document.getElementById('robeReleaseAllBtn');
+      if (btnRel) {
+        btnRel.onclick = async () => {
+          if (!btnRel.dataset.idleTxt) btnRel.dataset.idleTxt = btnRel.textContent;
+          btnRel.disabled = true; btnRel.style.opacity='0.7'; btnRel.textContent='Liberando...';
+          try { await window.electronAPI.robesReleaseAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
+          catch(e){ alert('Falha ao liberar Robe: ' + (e&&e.message||e)); }
+          finally { btnRel.disabled=false; btnRel.style.opacity=''; btnRel.textContent=btnRel.dataset.idleTxt; }
+        };
+      }
+    })();
+
+    reloadPerfis();
+    setInterval(reloadPerfis, 3000);
+
+    // Chamada inicial das métricas:
+    updateSysMetrics();
+
+  </script>
+</body>
+</html>

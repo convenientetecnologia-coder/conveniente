@@ -1,0 +1,25 @@
+npm install puppeteer-extra puppeteer-extra-plugin-stealth puppeteer
+
+npm install fs-extra path
+
+npm install express cors
+
+npm install body-parser
+
+npm install open
+
+npm install open@8.4.2
+
+npm install pidusage ps-list
+
+
+
+
+
+
+
+
+
+
+
+

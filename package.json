@@ -1,0 +1,23 @@
+{
+  "name": "conveniente",
+  "version": "1.0.0",
+  "description": "Gerenciador de Perfis Facebook - Node.js + Chrome/Chromium",
+  "author": "",
+  "license": "MIT",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "open": "^8.4.2",
+    "os-utils": "^0.0.14",
+    "pidusage": "^4.0.1",
+    "ps-list": "^8.1.1",
+    "puppeteer": "^24.22.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
