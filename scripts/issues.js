@@ -8,7 +8,17 @@ const PERFIS_DIR = path.join(DADOS_DIR, 'perfis');
 const MAX_ISSUES = parseInt(process.env.ISSUES_MAX || '200', 10);
 
 // Somente os tipos abaixo são considerados ERROS de operação (Virtus/Robe)
-const ERROR_TYPES = new Set(['robe_error', 'robe_no_photo', 'virtus_blocked', 'virtus_no_composer', 'virtus_send_failed']);
+const ERROR_TYPES = new Set([
+  'browser_disconnected',
+  'robe_error',
+  'robe_no_photo',
+  'virtus_blocked',
+  'virtus_no_composer',
+  'virtus_send_failed',
+  'virtus_page_dead',
+  'chrome_memory_spike',
+  'cpu_memory_spike'
+]);
 
 function isErrorType(t) {
   try { return ERROR_TYPES.has(String(t || '')); } catch { return false; }
@@ -62,12 +72,36 @@ function _serialize(nome, fn) {
   return next;
 }
 
+// Tipos padronizados de issues
+const ISSUE_TYPES_SET = new Set([
+  'browser_disconnected',
+  'robe_error',
+  'robe_no_photo',
+  'virtus_blocked',
+  'virtus_no_composer',
+  'virtus_send_failed',
+  'virtus_page_dead',
+  'chrome_memory_spike',
+  'cpu_memory_spike'
+]);
+
+function padronizaType(type) {
+  try {
+    const t = String(type || '').trim();
+    if (ISSUE_TYPES_SET.has(t)) return t;
+    // fallback padrão se tipo não padronizado
+    return 'misc';
+  } catch {
+    return 'misc';
+  }
+}
+
 // API
 function append(nome, type, message) {
   const file = getFilePath(nome);
   const entry = {
     ts: Date.now(),
-    type: String(type || 'misc'),
+    type: padronizaType(type),
     message: sanitizeMessage(message)
   };
   return _serialize(nome, () => {
@@ -92,7 +126,9 @@ function list(nome) {
   try {
     const file = getFilePath(nome);
     const arr = readJsonSafe(file, []);
-    return { ok: true, issues: Array.isArray(arr) ? arr : [], file };
+    // Ordena pelo timestamp decrescente (mais novo no topo)
+    const issuesArr = Array.isArray(arr) ? arr.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)) : [];
+    return { ok: true, issues: issuesArr, file };
   } catch (e) {
     return { ok: false, issues: [], error: e && e.message || String(e) };
   }

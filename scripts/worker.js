@@ -745,6 +745,17 @@ async function robeTickGlobal() {
       const ctrl = controllers.get(nome);
       const workingNow = getWorkingProfileNames();
 
+      // GUARD: browser precisa estar vivo
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        robeUpdateMeta(nome, { estado: 'erro' });
+        try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (guard)'); } catch {}
+        return;
+      }
+
+      // Log de início do Robe
+      try { console.log(`[WORKER][robeTickGlobal] Robe start: ${nome}`); } catch {}
+      try { await reportAction(nome, 'robe_start', 'Iniciando Robe via fila global'); } catch {}
+
       let mainPage = null;
       try {
         if (ctrl && ctrl.browser && !ctrl.mainPage) {
@@ -755,15 +766,16 @@ async function robeTickGlobal() {
         }
         mainPage = ctrl.mainPage;
 
-        // PRUNE DE ABAS: sempre antes/antes de começar
-        try { await closeExtraPages(ctrl.browser, mainPage); } catch {}
-
+        // Sempre parar Virtus ANTES de prune
         if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
           virtusWasRunning = true;
           try { await ctrl.virtus.stop(); } catch {}
           ctrl.virtus = null; // ficará pausado durante o Robe
           // Mantemos ctrl.trabalhando = true para a semântica de "conta trabalhando"
         }
+
+        // PRUNE DE ABAS: sempre antes de começar (Virtus já parado)
+        try { await closeExtraPages(ctrl.browser, mainPage); } catch {}
 
         // Pause curto pós-postagem
         const robePauseMs = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
@@ -784,6 +796,7 @@ async function robeTickGlobal() {
           robeMeta[nome].cooldownSec = penalSec;
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: penalSec });
+          try { console.warn('[WORKER][robeTickGlobal] Robe error:', e && e.message || e); } catch {}
           return; // não crasha fila global
         }
         // ==== EOF COOL/PRUNED ERRORS ====
@@ -803,6 +816,8 @@ async function robeTickGlobal() {
             proximaPostagem: robeLastPosted(nome) + robePauseMs,
             ultimaPostagem: Date.now()
           });
+          try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso'); } catch {}
+          try { console.log(`[WORKER][robeTickGlobal] Robe success: ${nome}`); } catch {}
         } else {
           robeUpdateMeta(nome, {
             estado: 'idle',
@@ -812,6 +827,9 @@ async function robeTickGlobal() {
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
       } finally {
+        // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
+        try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
+
         // Religa o Virtus se estava rodando antes
         if (virtusWasRunning) {
           try {
@@ -828,8 +846,9 @@ async function robeTickGlobal() {
           await snapshotStatusAndWrite();
         }
 
-        // PRUNE DE ABAS após ciclo de configure/post
-        try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
+        // Log de término do Robe
+        try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado'); } catch {}
+        try { console.log(`[WORKER][robeTickGlobal] Robe end: ${nome}`); } catch {}
       }
     });
 
@@ -901,22 +920,14 @@ try { freezeCooldownIfNotWorking(nome); } catch {}
 // Remove do mapa de controladores
 controllers.delete(nome);
 
+// Log de morte/desconexão imediatamente após remover do controllers
+try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
+
 // LIMPA PRUNER DE ABAS
 stopPruneLoop(nome);
 
-// Persiste desired.active=false e virtus='off' (não reabrir no boot)
-try {
-  const d = readJsonFile(desiredPath, { perfis: {} });
-  d.perfis = d.perfis || {};
-  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-  writeJsonAtomic(desiredPath, d);
-} catch {}
-
 // Atualiza status.json imediato
 try { await snapshotStatusAndWrite(); } catch {}
-
-// ===== NOVO: Registrar browser_disconnected =====
-// try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
 } catch (e) {
   try { console.warn('[WORKER][BROWSER] disconnect handler err:', e && e.message || e); } catch {}
 }
@@ -1047,7 +1058,7 @@ const handlers = {
 
   async configure({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser) return { ok: false, error: 'Navegador não está aberto para esta conta!' };
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     const perfisArr = loadPerfisJson();
     const perfil = perfisArr.find(p => p && p.nome === nome);
     if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
@@ -1075,7 +1086,7 @@ const handlers = {
   async start_work({ nome }) {
     // ALTERAÇÃO 1: mantenha/simplifique, nunca chamado via workerClient, só via desired.json + reconciliador.
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser) return { ok: false, error: 'Navegador não está aberto para esta conta!' };
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     if (ctrl.trabalhando) return { ok: true }; // já trabalhando
 
     try {
@@ -1100,7 +1111,7 @@ const handlers = {
 
   async invoke_human({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser) return { ok: false, error: 'Navegador não está aberto para esta conta!' };
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     // 1. Esperar Robe terminar (se estiver em execução para esta conta)
     const robes = robeMeta[nome] || {};
@@ -1137,7 +1148,7 @@ const handlers = {
 
   async ['human-resume']({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser) return { ok: false, error: 'Navegador não está aberto para esta conta!' };
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
 
@@ -1164,7 +1175,7 @@ const handlers = {
   // == ALTERAÇÃO 3: Handler robe-play substituído ==
   async ['robe-play']({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser) return { ok: false, error: 'Navegador não está aberto para esta conta!' };
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     // Zera cooldown no manifest
     try {
@@ -1194,6 +1205,17 @@ const handlers = {
         const ctrl = controllers.get(nome);
         const workingNow = getWorkingProfileNames();
 
+        // GUARD: browser precisa estar vivo
+        if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+          robeUpdateMeta(nome, { estado: 'erro' });
+          try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (robe-play guard)'); } catch {}
+          return;
+        }
+
+        // Log de início do Robe (robe-play)
+        try { console.log(`[WORKER][robe-play] Robe start: ${nome}`); } catch {}
+        try { await reportAction(nome, 'robe_start', 'Iniciando Robe via robe-play'); } catch {}
+
         let mainPage = null;
         try {
           if (ctrl && ctrl.browser && !ctrl.mainPage) {
@@ -1204,7 +1226,14 @@ const handlers = {
           }
           mainPage = ctrl.mainPage;
 
-          // PRUNE ANTI-ABAS
+          // Sempre parar Virtus ANTES de prune
+          if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+            virtusWasRunning = true;
+            try { await ctrl.virtus.stop(); } catch {}
+            ctrl.virtus = null;
+          }
+
+          // PRUNE ANTI-ABAS (Virtus parado)
           try { await closeExtraPages(ctrl.browser, mainPage); } catch {}
 
           // ==== ALTERAÇÃO HOTFIX: ANTIMANIFEST-FLOOD, COOL/PRUNED ERRORS ====
@@ -1223,6 +1252,7 @@ const handlers = {
             robeMeta[nome].cooldownSec = penalSec;
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
             robeUpdateMeta(nome, { estado: 'erro', cooldownSec: penalSec });
+            try { console.warn('[WORKER][robe-play] Robe error:', e && e.message || e); } catch {}
             return; // não crasha fila global
           }
           // ==== EOF COOL/PRUNED ERRORS ====
@@ -1242,6 +1272,8 @@ const handlers = {
               proximaPostagem: robeLastPosted(nome) + ((15+Math.floor(Math.random()*16))*60*1000),
               ultimaPostagem: Date.now()
             });
+            try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso (robe-play)'); } catch {}
+            try { console.log(`[WORKER][robe-play] Robe success: ${nome}`); } catch {}
           } else {
             robeUpdateMeta(nome, {
               estado: 'idle',
@@ -1251,6 +1283,9 @@ const handlers = {
         } catch (e) {
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
         } finally {
+          // PRUNE DE ABAS antes de religar Virtus
+          try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
+
           if (virtusWasRunning) {
             try {
               ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
@@ -1260,8 +1295,9 @@ const handlers = {
           robeUpdateMeta(nome, { emExecucao: false });
           await snapshotStatusAndWrite();
 
-          // PRUNE DE ABAS após ciclo
-          try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
+          // Log de término do Robe (robe-play)
+          try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
+          try { console.log(`[WORKER][robe-play] Robe end: ${nome}`); } catch {}
         }
       });
       await snapshotStatusAndWrite();

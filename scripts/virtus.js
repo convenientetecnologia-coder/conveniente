@@ -195,13 +195,44 @@ async function scrollChatsToTop(page) {
   if (!page) return false;
   try {
     const res = await page.evaluate(() => {
-      // GUARD: manter top chats always visible to avoid drifting out of viewport
-      const grid = document.querySelector('div[role="grid"], div[role="rowgroup"]');
-      if (grid) {
-        grid.scrollTop = 0;
-        return true;
+      // Procure vários elementos "scrolláveis"
+      // 1. grid por role
+      let grid = document.querySelector('div[role="grid"]');
+      // 2. por data-virtualized e classes do FB
+      if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf[data-virtualized="false"]');
+      // 3. rowgroup
+      if (!grid) grid = document.querySelector('div[role="rowgroup"]');
+      // 4. fallback classe base
+      if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf');
+      // 5. heurística de altura
+      if (!grid) grid = Array.from(document.querySelectorAll('div'))
+        .find(d => d.scrollHeight > 400 && d.scrollHeight > d.clientHeight + 30);
+      // 6. fallback body
+      if (!grid) grid = document.body;
+      if (!grid) return false;
+
+      // Forçar scrollTop em grid e ancestrais
+      grid.scrollTop = 0;
+      let node = grid.parentElement;
+      for (let i = 0; i < 4 && node; i++) {
+        if (node.scrollHeight > node.clientHeight + 30) node.scrollTop = 0;
+        node = node.parentElement;
       }
-      return false;
+
+      // Tentativa extra: clicar em cima no topo para garantir foco no chat mais recente
+      try {
+        let firstA = grid.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
+        if (firstA) {
+          firstA.focus && firstA.focus();
+          // Eventual scrollIntoView + toTop
+          firstA.scrollIntoView({block: "start", behavior: "smooth"});
+        }
+      } catch {}
+
+      // Se scroll ainda não foi suficiente (scrollTop > 0 depois do set), repete
+      setTimeout(() => { if (grid.scrollTop > 0) grid.scrollTop = 0; }, 250);
+
+      return grid.scrollTop === 0;
     });
     return !!res;
   } catch (err) {
@@ -209,70 +240,9 @@ async function scrollChatsToTop(page) {
   }
 }
 
-/**
- * Periodic Prune do browser/pages da Messenger (RAM/robustez).
- * Executado a cada intervalo para manter apenas a page principal.
- */
-async function periodicPruneMessengerPages(browser, mainPage, nome, robeMeta) {
-  if (!browser) return;
-  try {
-    const pages = await browser.pages();
-    let numPages = pages.length;
-
-    // PATCH MILITAR: se robeQueue.isActive(nome), aborta prune!
-    if (robeQueue && robeQueue.isActive && robeQueue.isActive(nome)) {
-      if (process.env.DEBUG) console.log(`[VIRTUS][PRUNE][SKIP] robe ativo para ${nome}`);
-      return;
-    }
-    // === FIM PATCH ===
-
-    // Remover if antigo de robeMeta (controle agora unificado)
-    // if (robeMeta && robeMeta[nome]?.emExecucao) {
-    //   // Militar: skipping prune during Robe
-    //   return;
-    // }
-
-    for (const p of pages) {
-      if (p === mainPage) continue;
-      try {
-        const url = p.url ? await p.url() : '';
-        // Fechar apenas popups Messenger
-        if (!url.includes('messenger.com')) {
-          // Militar: closing non-messenger page (popup)
-          try {
-            await p.close({ runBeforeUnload: false });
-          } catch (err) { /* Militar: ignored error during popup close */ }
-        } else if (!url.includes('/marketplace')) {
-          // Militar: closing Messenger popup page
-          try {
-            await p.close({ runBeforeUnload: false });
-          } catch (err) { /* Militar: ignored error during popup close */ }
-        }
-        // Não fecha "marketplace/create" ou páginas do Robe em execução
-      } catch (err) {
-        // Militar: safe ignore during prune
-      }
-    }
-
-    // Militar: numPages para status
-    if (robeMeta && typeof nome !== "undefined") {
-      if (!robeMeta[nome]) robeMeta[nome] = {};
-      robeMeta[nome].numPages = numPages;
-    }
-  } catch (err) {
-    // Militar: ignore error during prunePages
-  }
-}
-
-// RAM/Scroll debug métricas
-const virtusStatus = {};
-function updateVirtusStatus(nome, data) {
-  virtusStatus[nome] = { ...(virtusStatus[nome] || {}), ...data };
-}
-function getVirtusStatus(nome) {
-  return virtusStatus[nome] || {};
-}
 // ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
+
+// ... o resto do código permanece inalterado abaixo ...
 
 function startVirtus(browser, nome, robeMeta = {}) {
   const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
@@ -364,41 +334,41 @@ function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function ensurePage() {
+    // === INÍCIO GUARD DE VIDA NO ENSUREPAGE ===
+    if (!browser || (browser.isConnected && browser.isConnected() === false)) {
+      log(`[VIRTUS][${nome}] Browser morto, não é possível garantir page.`);
+      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
+      return null;
+    }
+    // ...seguir rotina normal...
+    // === FIM GUARD DE VIDA NO ENSUREPAGE ===
     try {
       let pages = await browser.pages();
       if (!pages || !pages[0]) {
         // Cria nova aba e aplica patchPage nela (ambiente idêntico às outras)
         const newP = await browser.newPage();
         try {
-          // === ALTERADO CONFORME INSTRUÇÕES ===
-
-          // --- INÍCIO Interceptação de assets pesados no Messenger ---
-          // Importante: interceptamos SOMENTE páginas messenger.com (NÃO na config/marketplace)
+          // --- Interceptação de assets pesados no Messenger ---
           if (newP.url && typeof newP.url === 'function' && /messenger\.com/.test(await newP.url())) {
             try {
-              // ===== BEGIN REQUISITOS DE ALTERAÇÃO =====
               await newP.setRequestInterception(true);
               newP.on('request', req => {
                 const resource = req.resourceType();
                 const u = req.url();
-                // Liberação handshake/login/nonce/checkpoint Messenger e Facebook
                 if (/(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u)) {
                   return req.continue();
                 }
-                // Só bloqueia assets pesados DEPOIS do login — stylesheet nunca!
                 if (resource === 'image' || resource === 'media' || resource === 'video' || resource === 'font') {
                   if (/favicon\.ico$/i.test(u) && resource === 'image') return req.continue();
                   return req.abort();
                 }
-                // stylesheet nunca é bloqueado!
                 return req.continue();
               });
-              // ===== END REQUISITOS DE ALTERAÇÃO =====
             } catch (e) {
               log('[VIRTUS] Erro ao aplicar interception:', e + '');
             }
           }
-          // --- FIM Interceptação de assets pesados no Messenger ---
+          // --- FIM Interceptação ---
 
           try {
             const { manifest } = getPerfilManifest(nome);
@@ -408,46 +378,53 @@ function startVirtus(browser, nome, robeMeta = {}) {
           } catch (e) {
             log('ensurePage: falha ao obter manifest ou patchPage:', e + '');
           }
-          // === FIM DA ALTERAÇÃO ===
         } catch (e) {
           log('ensurePage: falha ao aplicar patchPage/minimize na nova aba:', e + '');
         }
         page = newP;
+        // GUARD extra para page morta após newPage
+        if (!browser || (browser.isConnected && browser.isConnected() === false)) {
+          log(`[VIRTUS][${nome}] Browser morto após newPage.`);
+          if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected após newPage'); } catch {}
+          return null;
+        }
+        if (page && page.isClosed && page.isClosed()) {
+          log(`[VIRTUS][${nome}] Page principal fechada.`);
+          if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
+          return null;
+        }
         return page;
       }
       page = pages[0];
-
-      // --- INÍCIO Interceptação de assets pesados no Messenger (garantir para pages já abertas) ---
+      // --- Interceptação de assets pesados no Messenger (garantir para pages já abertas) ---
       if (page.url && typeof page.url === 'function' && /messenger\.com/.test(await page.url())) {
         try {
           await page.setRequestInterception(true);
           if (!page._virtusIntercepted) {
-            // ===== BEGIN REQUISITOS DE ALTERAÇÃO =====
             page.on('request', req => {
               const resource = req.resourceType();
               const u = req.url();
-              // Liberação handshake/login/nonce/checkpoint Messenger e Facebook
               if (/(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u)) {
                 return req.continue();
               }
-              // Só bloqueia assets pesados DEPOIS do login — stylesheet nunca!
               if (resource === 'image' || resource === 'media' || resource === 'video' || resource === 'font') {
                 if (/favicon\.ico$/i.test(u) && resource === 'image') return req.continue();
                 return req.abort();
               }
-              // stylesheet nunca é bloqueado!
               return req.continue();
             });
-            // ===== END REQUISITOS DE ALTERAÇÃO =====
             page._virtusIntercepted = true;
           }
         } catch (e) {
           log('[VIRTUS] Erro ao aplicar interception:', e + '');
         }
       }
-      // --- FIM Interceptação ---
-
-      // NÃO forçar viewport aqui; a janela já está maximizada (defaultViewport:null no launch)
+      // GUARD para page fechada
+      if (page && page.isClosed && page.isClosed()) {
+        log(`[VIRTUS][${nome}] Page principal fechada.`);
+        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
+        return null;
+      }
       return page;
     } catch (e) {
       log('ensurePage falhou:', e + '');
@@ -587,15 +564,42 @@ function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function reloadUltraRobusto() {
+    // === INÍCIO GUARD DE VIDA ===
+    if (!browser || browser.isConnected?.() === false) {
+      log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
+      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
+      return;
+    }
+    // Fim guard de vida browser
+    let p = await ensurePage();
+    if (!p || (p.isClosed && p.isClosed())) {
+      log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
+      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
+      return;
+    }
+    // === FIM GUARD DE VIDA ===
     try {
       log('Reload ultra robusto (2h sem responder).');
-      const p = await ensurePage();
+      p = await ensurePage();
       if (!p) { bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); return; }
       const client = await p.target().createCDPSession();
       try { await client.send('Network.clearBrowserCache'); } catch {}
       try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
       await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-      /* Minimização suave pontual após navegação forte (opcional) */
       try { await ensureMinimizedWindowForPage(p); } catch {}
       await Promise.race([
         p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 15000 }),
@@ -603,9 +607,13 @@ function startVirtus(browser, nome, robeMeta = {}) {
       ]).catch(()=>{});
       resetRecoverBackoff();
       log('Reload ultra robusto concluído.');
-
-      // Após reload ultra robusto, garantir scrollToTop
-      await scrollChatsToTop(p);
+      // Chama scrollChatsToTop após reload ultra robusto
+      try {
+        const ok = await scrollChatsToTop(p);
+        log('[SCROLL TOP]', ok ? 'Scroll OK' : 'Scroll DEU RUIM');
+      } catch {}
+      // Reforce após 800ms
+      setTimeout(() => { scrollChatsToTop(p); }, 800);
       lastScrollToTop = Date.now();
       updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
     } catch (e) {
@@ -616,7 +624,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function initHistoricoSePreciso() {
-    // Se JÁ existir arquivo, apenas carregar e seguir
     try {
       await fs.access(HIST_FILE);
       await carregaHistorico();
@@ -624,7 +631,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       return;
     } catch {}
 
-    // Se NÃO existir, criar e marcar TODO <24h atual como respondido (sem backlog antigo)
     log('[SNAPSHOT] Primeiro boot sem histórico. Marcando <24h atuais como respondidos.');
     const p = await ensurePage();
     if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
@@ -702,7 +708,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       }
     });
 
-    // Remove da fila ids já respondidos
     const filaAnt = fila.slice(0);
     fila = fila.filter(id => {
       const ts = respondedCache.get(id);
@@ -741,11 +746,38 @@ function startVirtus(browser, nome, robeMeta = {}) {
 
   async function responderChat(chatId) {
     log(`[DETAILED] Início responderChat: ${chatId}`);
+    // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
+    if (!browser || browser.isConnected?.() === false) {
+      log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
+      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
+      return;
+    }
+    let p = await ensurePage();
+    if (!p || (p.isClosed && p.isClosed())) {
+      log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
+      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
+      return;
+    }
+    // === FIM GUARD DE VIDA ===
     if (!chatId) return;
     chatAtivo = chatId;
 
     try {
-      const p = await ensurePage();
+      p = await ensurePage();
       if (!p) {
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
@@ -753,7 +785,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       }
       await garantirMarketplace(p);
 
-      // Se já respondido <24h (checagem final por ID), não responde
       const tsPrev = respondedCache.get(chatId);
       if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
         log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
@@ -762,9 +793,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-      // --- INÍCIO BLOCO ULTRA ROBUSTO DE TROCA DE CHAT ---
-
-      // Seleciona o anchor usando o seletor diretamente
       let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
       let found = await p.$(anchorSel);
 
@@ -775,7 +803,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-      // Simula scroll e click via JS DOM real
       await p.evaluate((sel) => {
         const el = document.querySelector(sel);
         if (el) {
@@ -787,7 +814,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
         }
       }, anchorSel);
 
-      // [ULTRA ROBUSTO] Aguarda a transição do chat na UI (espera até 2s para url mudar corretamente)
       let attempts = 0;
       let achou = false;
       let urlAtual = '';
@@ -806,20 +832,15 @@ function startVirtus(browser, nome, robeMeta = {}) {
         chatAtivo = null;
         return;
       }
-      // --- FIM BLOCO ULTRA ROBUSTO DE TROCA DE CHAT ---
 
       if (await isChatBlocked(p)) {
         log(`[WARN] Chat ${chatId} bloqueado/indisponível. Marcando como respondido para evitar looping.`);
-        // try { await p.screenshot({ path: `screenshot_bloqueado_${chatId}.png` }); } catch {}
         const tsNow = agoraEpoch();
         historico[chatId] = tsNow;
         respondedCache.set(chatId, tsNow);
         ultimoAtendimento = tsNow;
         await salvaHistorico();
-
-        // INSERIR A LINHA ABAIXO (log de issue)
         try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
-
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
         resetFail(chatId);
@@ -835,16 +856,12 @@ function startVirtus(browser, nome, robeMeta = {}) {
         } catch {}
         if (await isChatBlocked(p)) {
           log(`[WARN] Chat ${chatId} bloqueado no fallback. Marcando como respondido para evitar looping.`);
-          // try { await p.screenshot({ path: `screenshot_bloqueado_${chatId}.png` }); } catch {}
           const tsNow = agoraEpoch();
           historico[chatId] = tsNow;
           respondedCache.set(chatId, tsNow);
           ultimoAtendimento = tsNow;
           await salvaHistorico();
-
-          // INSERIR A LINHA ABAIXO (log de issue)
           try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
-
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           resetFail(chatId);
@@ -856,7 +873,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (!campo) {
         const fails = incFail(chatId);
         log(`[ERRO] Composer indisponível para chat ${chatId}. Tentativas: ${fails}`);
-        // try { await p.screenshot({ path: `screenshot_sem_composer_${chatId}.png` }); } catch {}
         if (fails >= 2) {
           log(`[WARN] ${chatId} falhou 2x. Marcando como respondido para não travar fila.`);
           const tsNow = agoraEpoch();
@@ -864,8 +880,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
           respondedCache.set(chatId, tsNow);
           ultimoAtendimento = tsNow;
           await salvaHistorico();
-
-          // INSERIR A LINHA ABAIXO (log de issue)
           try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
         }
         fila = fila.filter(id => id !== chatId);
@@ -888,7 +902,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
 
       await campo.type(msg, { delay: randomBetween(10,45) });
       await campo.press('Enter');
-      // try { await p.screenshot({ path: `screenshot_envio_${chatId}.png` }); } catch {}
 
       log(`Mensagem enviada para chat ${chatId}`);
       const tsNow = agoraEpoch();
@@ -899,8 +912,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
 
     } catch (err) {
       log(`[ERRO] Erro ao responder chat ${chatId}:`, err && err.stack ? err.stack : err + '');
-
-      // INSERIR A LINHA ABAIXO (log de issue)
       const msg = (err && err.message) ? err.message : String(err);
       try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msg}`); } catch {}
     }
@@ -914,21 +925,39 @@ function startVirtus(browser, nome, robeMeta = {}) {
   // === BLOCO MODIFICADO ===
   // ========================
   async function filaManagerLoop() {
-    if (!running) return;
+    // === INÍCIO GUARD DE VIDA NO FILAMANAGERLOOP ===
+    if (!browser || browser.isConnected?.() === false) {
+      log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
+      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
+      return;
+    }
+    // Fim guard de vida browser
+
     if (filaLoopBusy) return;
     filaLoopBusy = true;
     try {
       const p = await ensurePage();
-      if (!p) {
-        bumpRecoverBackoff();
-        if (recoverBackoffMs) await sleep(recoverBackoffMs);
+      if (!p || (p.isClosed && p.isClosed())) {
+        log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
+        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
+        running = false;
+        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+        if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
+        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+        if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
+        updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
         return;
       }
 
       // === RAM — monitoramento e shutdown individual por perfil ===
-      // Se status.json informar RAM > 700MB (input externo), stopVirtus e reinicialize apenas a conta.
-      // (simulado via getVirtusStatus()["ramMB"] -- na real, deveria ser lido status.json por externo)
-      // Exemplo de uso externo: updateVirtusStatus(nome, { ramMB: valor });
       let ramMB = 0;
       try { ramMB = (getVirtusStatus(nome) || {}).ramMB || 0; } catch {}
       lastRamCheck = Date.now();
@@ -936,21 +965,19 @@ function startVirtus(browser, nome, robeMeta = {}) {
         await logIssue(nome, "chrome_memory_spike", `RAM acima de 700MB (${ramMB} MB). shutdown temporário`);
         log(`[GUARD][RAM] RAM acima de 700MB (${ramMB} MB), shutdown/restart`);
         running = false;
-        // Militar: cleaning interval to prevent interval leak
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
         if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        // Militar: cleaning interval to prevent interval leak
         if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
         if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
         if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
         updateVirtusStatus(nome, {ramMB, lastKill: Date.now()});
-        // RETURN; (deixa ser reinicializado pelo controlador)
         return;
       }
       updateVirtusStatus(nome, {ramMB});
 
+      // ======= INSTRUÇÃO: REMOVER BLOCO REVIVE AQUI =======
+      /*
       // --- INÍCIO DETECTOR/REVIVE ---
-      // Tentativa de diagnóstico rápido/JS: revive caso page travada
       try {
         const reviveTimeoutMs = 1000;
         const jsTest = await Promise.race([
@@ -966,11 +993,12 @@ function startVirtus(browser, nome, robeMeta = {}) {
         }
       }
       // --- FIM DETECTOR/REVIVE ---
+      */
+      // === BLOCO REMOVIDO CONFORME INSTRUÇÃO ===
 
       // --- BLOCO KEEPALIVE: JS para acordar navegador/Messenger (anti-freeze/anti-throttle) ---
       try {
         await p.evaluate(() => {
-          // Apenas estimula o JS engine — NÃO chama bringToFront, focus, maximize, moveWindow ou qualquer ação que puxe foco!
           window.dispatchEvent(new Event('focus'));
           document.dispatchEvent(new MouseEvent('mousemove', {bubbles:true}));
           document.dispatchEvent(new Event('visibilitychange'));
@@ -996,32 +1024,31 @@ function startVirtus(browser, nome, robeMeta = {}) {
       scheduleNextIfIdle();
       resetRecoverBackoff();
 
-      // ===== Scroll Top Chats GUARD: Manter sempre topo visível =====
-      // Essa função Garante que a interface Messenger NUNCA desça o scroll por conta própria,
-      // evitando que os chats do topo "sumam" e o loop falhe por não enxergar o topo.
-
       if (scrollInterval == null) {
-        // Militar: cleaning interval to prevent interval leak
         scrollInterval = setInterval(async () => {
           if (!running) return;
           try {
             const ok = await scrollChatsToTop(p);
+            log('[SCROLL TOP]', ok ? 'OK' : 'FAIL');
             if (ok) {
               lastScrollToTop = Date.now();
               updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
             }
           } catch {}
-        }, 60000);
+          // Reforço após 800ms para garantir Messenger reativo
+          setTimeout(() => { scrollChatsToTop(p); }, 800);
+        }, 30000);
       }
-      // Executa também logo após landing/garantir marketplace/ensurePage
       try {
         const scrolled = await scrollChatsToTop(p);
+        log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL');
         if (scrolled) {
           lastScrollToTop = Date.now();
           updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
         }
+        // Reforço após 800ms para garantir Messenger reativo
+        setTimeout(() => { scrollChatsToTop(p); }, 800);
       } catch {}
-      // ========== FIM SCROLL GUARD ==========
     } finally {
       filaLoopBusy = false;
     }
@@ -1042,15 +1069,16 @@ function startVirtus(browser, nome, robeMeta = {}) {
         }
         await garantirMarketplace(p);
 
-        // ---- Scroll to Top na tela logo após garantir marketplace
         try {
           const ok = await scrollChatsToTop(p);
+          log('[SCROLL TOP]', ok ? 'OK' : 'FAIL');
           if (ok) {
             lastScrollToTop = Date.now();
             updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
           }
+          // Reforço após 800ms
+          setTimeout(() => { scrollChatsToTop(p); }, 800);
         } catch {}
-        // ----
 
         ready = true;
         log('Aba zero da Virtus iniciada e garantida: Marketplace pronta.');
@@ -1062,20 +1090,15 @@ function startVirtus(browser, nome, robeMeta = {}) {
 
     await initHistoricoSePreciso();
 
-    // Polling fixo de 30s por perfil
-    // Militar: cleaning interval to prevent interval leak
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
 
-    // === Pruning periódico a cada 120s: fecha popups/páginas "não-principais"
     pruneInterval = setInterval(async () => {
       try {
         const mainPage = await ensurePage();
-        // Militar: robusto pruning com check de Robe
         await periodicPruneMessengerPages(browser, mainPage, nome, robeMeta);
         log(`[DEBUG] Prune event executado`);
         updateVirtusStatus(nome, {lastPrune: Date.now()});
-        // Militar: expose numPages
         let pages = [];
         try { pages = await browser.pages(); } catch {}
         if (robeMeta && typeof nome !== "undefined") {
@@ -1084,28 +1107,19 @@ function startVirtus(browser, nome, robeMeta = {}) {
         }
       } catch (err) {}
     }, 120000);
-    // ===
 
-    // === Logging RAM/CPU debug por perfil (Somente se habilitado em config/env)
     if (process.env.RAM_CPU_DEBUG === '1' || process.env.NODE_ENV === 'qa' || process.env.NODE_ENV === 'development') {
-      // Militar: RAM/CPU debug ativado apenas em QA/dev/env CONTROLADO
       ramDebugInterval = setInterval(() => {
         try {
           browser.process().then(proc => {
             if (proc && proc.pid) {
               // Exemplo: updateVirtusStatus(nome, {ramMB: valor});
-              // Placeholder: NÃO coleta RAM/CPU individual em Virtus.js de verdade!
             }
           }).catch(()=>{});
         } catch {}
       }, 30000);
     }
-    // ===
 
-    // === Backoff Exponencial por Falha no startup/garantia da página/Marketplace
-    // (JÁ implementado na ensurePage/bumpRecoverBackoff do runner)
-
-    // --- Mantém enquanto rodando ---
     while (running) {
       try {
         const p = await ensurePage();
@@ -1131,27 +1145,23 @@ function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  // START
   runner();
 
   return {
     stop: async () => {
       running = false;
-      // Militar: cleaning interval to prevent interval leak
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      // Militar: cleaning interval to prevent interval leak
       if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-      // Atualizar o numPages até o próximo ciclo do prune
       let pages = [];
       try { pages = await browser.pages(); } catch {}
       if (robeMeta && typeof nome !== "undefined") {
         if (!robeMeta[nome]) robeMeta[nome] = {};
         robeMeta[nome].numPages = pages.length;
       }
-      updateVirtusStatus(nome, {stoppedAt: Date.now()});
+      updateVirtusStatus(nome, {stoppedAt: Date.now(), virtusDead: true});
       // ========== Limpeza para evitar leaks ==========
     }
   };

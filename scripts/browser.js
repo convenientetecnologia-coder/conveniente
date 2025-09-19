@@ -164,47 +164,37 @@ async function patchPage(nome, page, coords) {
   // ==== PATCH APLICADO CONFORME INSTRUÇÃO (PATCH MILITAR) ====
   if (enableVirtusMessengerBlock) {
     try {
-      await page.setRequestInterception(true);
+      // EVITAR MÚLTIPLOS setRequestInterception/listeners:
+      if (!page._virtusIntercepted) {
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+          // ... (seu código do intercept aqui) ...
+          const u = req.url();
+          const type = req.resourceType();
+          const allowLoginFlow = (url) => /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(url);
+          const isLoggedArea = () => {
+            try { return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(page.url() || ''); }
+            catch { return false; }
+          };
 
-      const allowLoginFlow = (u) => {
-        // Permite tudo nas telas de login/nonce/checkpoint/oauth do FB/Messenger
-        return /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u);
-      };
-
-      const isLoggedArea = () => {
-        try {
-          const u = page.url() || '';
-          // Considere “logado” apenas nas áreas produtivas
-          return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(u);
-        } catch { return false; }
-      };
-
-      page.on('request', (req) => {
-        const u = req.url();
-        const type = req.resourceType();
-
-        // SEMPRE liberar tudo durante login/nonce/checkpoint
-        if (allowLoginFlow(u)) return req.continue();
-
-        // Durante o login (antes de logar), não bloqueie imagens handshake do Facebook/Messenger
-        if (!isLoggedArea()) {
-          if (type === 'image' && /facebook\.com/i.test(u)) return req.continue();
-          if (/favicon\.ico$/i.test(u) && type === 'image') return req.continue();
+          if (allowLoginFlow(u)) return req.continue();
+          if (!isLoggedArea()) {
+            if (type === 'image' && /facebook\.com/i.test(u)) return req.continue();
+            if (/favicon\.ico$/i.test(u) && type === 'image') return req.continue();
+            return req.continue();
+          }
+          if (type === 'image') {
+            if (/favicon\.ico$/i.test(u)) return req.continue();
+            return req.abort();
+          }
+          if (type === 'media' || type === 'font') {
+            return req.abort();
+          }
           return req.continue();
-        }
-
-        // Já logado: agora pode bloquear certos assets
-        if (type === 'image') {
-          if (/favicon\.ico$/i.test(u)) return req.continue();
-          return req.abort();
-        }
-        if (type === 'media' || type === 'font') {
-          return req.abort();
-        }
-        return req.continue();
-      });
-
-      interceptionConfigured = true;
+        });
+        page._virtusIntercepted = true;
+        interceptionConfigured = true;
+      }
     } catch (err) {
       // log silencioso
     }
