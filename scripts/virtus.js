@@ -574,7 +574,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
       return;
     }
     // Fim guard de vida browser
@@ -588,7 +587,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
       return;
     }
     // === FIM GUARD DE VIDA ===
@@ -615,7 +613,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       // Reforce após 800ms
       setTimeout(() => { scrollChatsToTop(p); }, 800);
       lastScrollToTop = Date.now();
-      updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
     } catch (e) {
       log('Erro no reload ultra robusto:', e + '');
       bumpRecoverBackoff();
@@ -756,7 +753,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
       return;
     }
     let p = await ensurePage();
@@ -769,7 +765,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
       return;
     }
     // === FIM GUARD DE VIDA ===
@@ -935,7 +930,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-      updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
       return;
     }
     // Fim guard de vida browser
@@ -953,13 +947,12 @@ function startVirtus(browser, nome, robeMeta = {}) {
         if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
         if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
         if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-        updateVirtusStatus(nome, { stoppedAt: Date.now(), virtusDead: true });
         return;
       }
 
       // === RAM — monitoramento e shutdown individual por perfil ===
       let ramMB = 0;
-      try { ramMB = (getVirtusStatus(nome) || {}).ramMB || 0; } catch {}
+      try { ramMB = 0; } catch {}
       lastRamCheck = Date.now();
       if (ramMB > 700) {
         await logIssue(nome, "chrome_memory_spike", `RAM acima de 700MB (${ramMB} MB). shutdown temporário`);
@@ -970,10 +963,8 @@ function startVirtus(browser, nome, robeMeta = {}) {
         if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
         if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
         if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
-        updateVirtusStatus(nome, {ramMB, lastKill: Date.now()});
         return;
       }
-      updateVirtusStatus(nome, {ramMB});
 
       // ======= INSTRUÇÃO: REMOVER BLOCO REVIVE AQUI =======
       /*
@@ -1032,7 +1023,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
             log('[SCROLL TOP]', ok ? 'OK' : 'FAIL');
             if (ok) {
               lastScrollToTop = Date.now();
-              updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
             }
           } catch {}
           // Reforço após 800ms para garantir Messenger reativo
@@ -1044,7 +1034,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
         log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL');
         if (scrolled) {
           lastScrollToTop = Date.now();
-          updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
         }
         // Reforço após 800ms para garantir Messenger reativo
         setTimeout(() => { scrollChatsToTop(p); }, 800);
@@ -1074,7 +1063,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
           log('[SCROLL TOP]', ok ? 'OK' : 'FAIL');
           if (ok) {
             lastScrollToTop = Date.now();
-            updateVirtusStatus(nome, { lastScrollToTop: lastScrollToTop });
           }
           // Reforço após 800ms
           setTimeout(() => { scrollChatsToTop(p); }, 800);
@@ -1092,57 +1080,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
 
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
-
-    pruneInterval = setInterval(async () => {
-      try {
-        const mainPage = await ensurePage();
-        await periodicPruneMessengerPages(browser, mainPage, nome, robeMeta);
-        log(`[DEBUG] Prune event executado`);
-        updateVirtusStatus(nome, {lastPrune: Date.now()});
-        let pages = [];
-        try { pages = await browser.pages(); } catch {}
-        if (robeMeta && typeof nome !== "undefined") {
-          if (!robeMeta[nome]) robeMeta[nome] = {};
-          robeMeta[nome].numPages = pages.length;
-        }
-      } catch (err) {}
-    }, 120000);
-
-    if (process.env.RAM_CPU_DEBUG === '1' || process.env.NODE_ENV === 'qa' || process.env.NODE_ENV === 'development') {
-      ramDebugInterval = setInterval(() => {
-        try {
-          browser.process().then(proc => {
-            if (proc && proc.pid) {
-              // Exemplo: updateVirtusStatus(nome, {ramMB: valor});
-            }
-          }).catch(()=>{});
-        } catch {}
-      }, 30000);
-    }
-
-    while (running) {
-      try {
-        const p = await ensurePage();
-        if (!p) { bumpRecoverBackoff(); await sleep(recoverBackoffMs || 1000); continue; }
-        try {
-          if (p.url() === 'about:blank' || !p.url().includes('/marketplace')) {
-            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded' });
-          }
-          resetRecoverBackoff();
-        } catch (e) {
-          log('Erro garantindo marketplace no loop principal:', e + '');
-          bumpRecoverBackoff();
-          await sleep(recoverBackoffMs || 1000);
-          updateVirtusStatus(nome, {lastVirtusStartFail: Date.now()});
-          await logIssue(nome, "virtus_start_fail", `Erro ao garantir marketplace: ${(e && e.message) || e}`);
-          continue;
-        }
-        await sleep(45000);
-      } catch (e) {
-        log('Erro no loop principal:', e + '');
-        await sleep(5000);
-      }
-    }
   }
 
   runner();
@@ -1161,7 +1098,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
         if (!robeMeta[nome]) robeMeta[nome] = {};
         robeMeta[nome].numPages = pages.length;
       }
-      updateVirtusStatus(nome, {stoppedAt: Date.now(), virtusDead: true});
       // ========== Limpeza para evitar leaks ==========
     }
   };
