@@ -197,6 +197,7 @@ await issues.append(nome, type, msg);
 }
 // ===================================================================
 
+//
 // Storage de perfis ativos
 const controllers = new Map(); // nome => { browser, virtus, robe, status, configurando, trabalhando }
 
@@ -553,6 +554,10 @@ async function ramCpuMonitorTick() {
           const last5 = hist.slice(-5);
           const allHigh = last5.every(h => h.p >= 150);
           if (allHigh) {
+            // GUARD: Nunca realizar kill durante configuração — ctrl.configurando
+            const ctrl = controllers.get(nome);
+            if (ctrl && ctrl.configurando) return;
+
             handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'})
               .then(() => reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas)`))
               .catch(()=>{});
@@ -603,6 +608,10 @@ async function ramCpuMonitorTick() {
       }
       // Só kill se comprovado leak real!
       if (allHigh || slopeOK) {
+        // GUARD: Nunca realizar kill durante configuração — ctrl.configurando
+        const ctrl = controllers.get(nome);
+        if (ctrl && ctrl.configurando) return;
+
         handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' })
         .then(() => reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK})`))
         .catch(()=>{});
@@ -880,6 +889,7 @@ try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 
 // Para Virtus (se houver referência)
 const ctrl = controllers.get(nome);
+if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
 try {
   if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
     await ctrl.virtus.stop().catch(()=>{});
@@ -910,9 +920,9 @@ try { await snapshotStatusAndWrite(); } catch {}
 } catch (e) {
   try { console.warn('[WORKER][BROWSER] disconnect handler err:', e && e.message || e); } catch {}
 }
+});  // <-- Fecha o browser.once('disconnected', async () => { ... })
+}     // <-- Fecha a função attachBrowserLifecycle(nome, browser)
 
-});
-}
 // == FIM função ciclo de vida browser ==
 
 // ========== HANDLERS ==========
@@ -1044,11 +1054,22 @@ const handlers = {
     const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
     if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    if (!manifest.cookies || !Array.isArray(manifest.cookies)) return { ok: false, error: 'Cookies não encontrados no manifest!' };
-    await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
-    // PRUNE APÓS CICLO DE CONFIGURE
-    try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
-    return { ok: true };
+    if (!Array.isArray(manifest.cookies) || !manifest.cookies.length) {
+      try { await issues.append(nome, 'cookie_inject_failed', 'Cookies não encontrados no manifest!'); } catch {}
+      return { ok: false, error: 'Cookies não encontrados no manifest!' };
+    }
+    ctrl.configurando = true;
+    try {
+      await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
+      // NÃO execute closeExtraPages/prune aqui!
+      return { ok: true };
+    } catch (e) {
+      try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
+      return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
+    } finally {
+      ctrl.configurando = false;
+      await snapshotStatusAndWrite();
+    }
   },
 
   async start_work({ nome }) {
@@ -1060,6 +1081,16 @@ const handlers = {
     try {
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
       ctrl.trabalhando = true;
+
+      // === GARANTE PRUNE SÓ NESTE MOMENTO (PRODUÇÃO!) ===
+      try {
+        if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
+          await browserHelper.forceCloseExtras(ctrl.browser);
+        }
+      } catch (e) {
+        try { console.warn('[WORKER][start_work] prune/forceCloseExtras fail:', e && e.message || e); } catch {}
+      }
+
       await snapshotStatusAndWrite();
       return { ok: true };
     } catch (e) {
@@ -1414,6 +1445,9 @@ for (const nome of nomes) {
 
   // Liga/desliga browser
   if (want.active === true && !ctrl) {
+    // Guard-rail frozen: se estiver congelado, pula
+    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) continue;
+
     // === PATCH autoMode Light: gate para ativação no reconcileOnce ===
     const now = Date.now();
     if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > now) continue;
@@ -1649,6 +1683,21 @@ if (!utils.slugify) {
     return String(s).toLowerCase().replace(/[^\w\d\-]+/g,'_').replace(/_+/g,'_').replace(/(^_|_$)/g,'');
   };
 }
+
+// ===== Watchdog de stuck/frozen =====
+setInterval(() => {
+  const now = Date.now();
+  for (const nome of Object.keys(robeMeta)) {
+    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now && (robeMeta[nome].frozenUntil - now > 6 * 3600 * 1000)) {
+      issues.append(nome, 'frozen_watchdog', 'Perfil congelado > 6h');
+    }
+    const desired = readJsonFile(desiredPath, { perfis: {} });
+    if (desired.perfis?.[nome]?.active === true && !controllers.has(nome)) {
+      // desired ativo mas não há browser controlando — stuck
+      issues.append(nome, 'stuck_activation', 'Desired ativo sem browser por >10min');
+    }
+  }
+}, 10 * 60 * 1000);
 
 // ====== GRACEFUL SHUTDOWN ======
 let _shuttingDown = false;

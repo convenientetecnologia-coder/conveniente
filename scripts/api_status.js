@@ -171,11 +171,11 @@ module.exports = (app, workerClient, fileStore) => {
       if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
         let workerStatus;
         try {
-          workerStatus = await workerClient.sendWorkerCommand('get-status', workerId).catch(() => null);
+          workerStatus = await workerClient.sendWorkerCommand('get-status', workerId, { timeoutMs: 5000 }).catch(() => null);
           if (!workerStatus || !workerStatus.perfis) {
             // Se worker respondeu mas vazio, aguarde 200ms e tente de novo (janela atômica de swap de status.json)
             await new Promise(r => setTimeout(r, 200));
-            workerStatus = await workerClient.sendWorkerCommand('get-status', workerId).catch(() => null);
+            workerStatus = await workerClient.sendWorkerCommand('get-status', workerId, { timeoutMs: 5000 }).catch(() => null);
           }
         } catch (err) {
           erroMsg = String((err && err.message) || err);

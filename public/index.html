@@ -621,12 +621,29 @@
         // RIGHT: actions (ajustado conforme instruções)
         const right = document.createElement('div'); right.className='rightCol';
 
+        // ===================== ALTERAÇÃO SOLICITADA — INÍCIO ======================
         const btnCookies = document.createElement('button');
         btnCookies.className='btn';
         btnCookies.textContent='Injetar Cookies';
         btnCookies.title='Injetar cookies salvos neste perfil';
-        btnCookies.onclick = () => window.electronAPI.configure(p.nome).then(reloadPerfis);
+        btnCookies.onclick = async (ev) => {
+          setBtnLoading(btnCookies, true, 'Injetando...');
+          try {
+            const res = await window.electronAPI.configure(p.nome);
+            if (!res || !res.ok) {
+              alert('Falha ao injetar cookies: ' + (res && res.error ? res.error : 'erro desconhecido'));
+            } else {
+              alert('Cookies injetados com sucesso.');
+            }
+          } catch (e) {
+            alert('Falha ao injetar cookies: ' + (e && e.message || e));
+          } finally {
+            setBtnLoading(btnCookies, false);
+            reloadPerfis();
+          }
+        };
         if (isFrozen) btnCookies.disabled = true;
+        // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
 
         const btnCfg = document.createElement('button');
         btnCfg.className='icon-btn';

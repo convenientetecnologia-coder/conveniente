@@ -125,9 +125,17 @@ function normalizeCookies(cookiesInput) {
     // Normalização ultra-robusta de campos e valores, converte .expires/.expirationDate para segundos unix
     arr = arr.map(cleanObj).map(c => {
       const cookie = {};
-      // Tratamento, normalização e mapeamento do nome/valor
+      // PATCH MILITAR: NUNCA value vazio/nulo/indefinido
       cookie.name = cleanAscii(c.name);
-      cookie.value = cleanAscii(c.value);
+      let v = cleanAscii(c.value);
+      if (v === undefined || v === null || v === '' || v.length === 0) {
+        // Ajuste o valor padrão conforme sua política:
+        // Para c_user/xs/fr/sb/datr, escolha um valor seguro, nunca vazio (ex: "default" ou "0")
+        if (c.name === 'c_user' || c.name === 'xs' || c.name === 'fr') v = 'default'; // ou 'cookie'
+        else if (c.name === 'sb' || c.name === 'datr') v = '0';
+        else v = 'default';
+      }
+      cookie.value = v;
 
       // Apenas prepara expiracao (em segundos unix)
       let expiresRaw = c.expires || c.expirationDate;
@@ -180,7 +188,15 @@ function normalizeCookies(cookiesInput) {
       cookie.sameSite = 'None';
       // Sanitize value de novo no pós-final (robustez extra)
       cookie.name = cleanAscii(cookie.name);
-      cookie.value = cleanAscii(cookie.value);
+
+      // PATCH MILITAR: value nunca vazio, nunca nulo, nunca undefined
+      if (cookie.value === undefined || cookie.value === null || cookie.value === '' || cookie.value.length === 0) {
+        if (cookie.name === 'c_user' || cookie.name === 'xs' || cookie.name === 'fr') cookie.value = 'default';
+        else if (cookie.name === 'sb' || cookie.name === 'datr') cookie.value = '0';
+        else cookie.value = 'default';
+        console.warn(`[normalizeCookies][PATCH] cookie "${cookie.name}" sem value, ajustado para "${cookie.value}"`);
+      }
+
       // expires: se não existir ou estiver no passado, seta para 180 dias à frente (em segundos)
       if (
         typeof cookie.expires !== 'number'
@@ -194,6 +210,9 @@ function normalizeCookies(cookiesInput) {
       else cookie.httpOnly = true;
     });
 
+    // Elimine completamente qualquer cookie cujo name esteja vazio ou ausente:
+    arr = arr.filter(c => ESSENCIAIS.includes(c.name) && c.name && c.value);
+
     // (Opcional) LOGA WARNING se faltar algum essencial
     const foundEssenciais = new Set(arr.map(c => c.name));
     for (const nomeEss of ESSENCIAIS) {
@@ -201,6 +220,9 @@ function normalizeCookies(cookiesInput) {
         console.warn(`[normalizeCookies][WARNING] Cookie essencial ausente ou estranho: ${nomeEss}`);
       }
     }
+
+    // DICA/robustez: log final do array retornado
+    console.log('[normalizeCookies][FINAL]', arr);
 
     // Final: retorna array ultra-limpo dos ESSENCIAIS normalizados
     return arr;

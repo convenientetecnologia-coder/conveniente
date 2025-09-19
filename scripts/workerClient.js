@@ -30,56 +30,57 @@ function forkWorker() {
 }
 
 // ---- Comunica com o worker via msgId e reply ----
-function sendWorkerCommand(type, payload = {}) {
+function sendWorkerCommand(type, payload = {}, opts = {}) {
+  const timeoutMs = Number((opts && opts.timeoutMs) || 15000);
+
   return new Promise((resolve) => {
     if (!workerChild) {
-      // Garantia extra: tenta startar o worker on demand
       forkWorker();
       setTimeout(() => resolve({ ok: false, error: 'worker off (tente de novo em 2s)' }), 500);
       return;
     }
-    const msgId = Math.random().toString(36).slice(2);
-    const childAtSend = workerChild; // Captura referência local do worker no momento do envio
 
-    // Handler da resposta do worker
+    const msgId = Math.random().toString(36).slice(2);
+    const childAtSend = workerChild;
+    let done = false;
+
     const handler = (msg) => {
       try {
-        if (msg && msg.replyTo && msg.replyTo === msgId) {
-          // GUARD: protege admin de crashar por worker morto
-          // Remover listener apenas do objeto child capturado, não do global
+        if (done) return;
+        if (msg && msg.replyTo === msgId) {
+          done = true;
           try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
+          clearTimeout(timerId);
           resolve(msg.data);
         }
       } catch (err) {
-        // Nunca crashar admin/master por erro de worker morto
-        console.error('[WORKER][SEND][handler] erro ao processar resposta:', err);
+        if (done) return;
+        done = true;
         try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
+        clearTimeout(timerId);
         resolve({ ok: false, error: 'Erro ao processar resposta do worker.' });
       }
     };
 
-    // Sempre validar o objeto antes de usar .on, .send, etc.
     try { childAtSend && childAtSend.on && childAtSend.on('message', handler); } catch {}
 
     try {
       childAtSend && childAtSend.send && childAtSend.send({ type, payload, msgId });
     } catch (err) {
-      // Nunca crashar admin/master por worker morto/desconectado
-      console.error('[WORKER][SEND] erro ao enviar msg para o worker:', err);
+      if (done) return;
+      done = true;
       try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
       resolve({ ok: false, error: 'worker morreu ou está indisponível ao enviar a mensagem.' });
       return;
     }
 
-    // Guard timeout contra leak de listeners + "off em null"
-    setTimeout(() => {
-      // GUARD: protege admin de crashar por worker morto
-      // Remover listener apenas do objeto child capturado, não do global
+    const timerId = setTimeout(() => {
+      if (done) return;
+      done = true;
       try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
-      // Logging especial
       console.warn(`[WORKER][TIMEOUT] Timeout aguardando resposta do worker para msgId=${msgId} (PID=${childAtSend && childAtSend.pid})`);
       resolve({ ok: false, error: 'Timeout aguardando resposta do worker.' });
-    }, 15000);
+    }, timeoutMs);
   });
 }
 

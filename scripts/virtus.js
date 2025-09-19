@@ -18,6 +18,10 @@ const path = require('path');
 const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
 
+// ========== PATCH MILITAR: Import robeQueue ==========
+const robeQueue = require('./robeQueue.js');
+// ========== FIM PATCH ==========
+
 // ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
 function getPerfilManifest(nome) {
   const perfisArr = require('../dados/perfis.json');
@@ -215,10 +219,18 @@ async function periodicPruneMessengerPages(browser, mainPage, nome, robeMeta) {
     const pages = await browser.pages();
     let numPages = pages.length;
 
-    if (robeMeta && robeMeta[nome]?.emExecucao) {
-      // Militar: skipping prune during Robe
+    // PATCH MILITAR: se robeQueue.isActive(nome), aborta prune!
+    if (robeQueue && robeQueue.isActive && robeQueue.isActive(nome)) {
+      if (process.env.DEBUG) console.log(`[VIRTUS][PRUNE][SKIP] robe ativo para ${nome}`);
       return;
     }
+    // === FIM PATCH ===
+
+    // Remover if antigo de robeMeta (controle agora unificado)
+    // if (robeMeta && robeMeta[nome]?.emExecucao) {
+    //   // Militar: skipping prune during Robe
+    //   return;
+    // }
 
     for (const p of pages) {
       if (p === mainPage) continue;
@@ -364,21 +376,24 @@ function startVirtus(browser, nome, robeMeta = {}) {
           // Importante: interceptamos SOMENTE páginas messenger.com (NÃO na config/marketplace)
           if (newP.url && typeof newP.url === 'function' && /messenger\.com/.test(await newP.url())) {
             try {
+              // ===== BEGIN REQUISITOS DE ALTERAÇÃO =====
               await newP.setRequestInterception(true);
               newP.on('request', req => {
                 const resource = req.resourceType();
-                if (
-                  resource === 'image' ||
-                  resource === 'media' ||
-                  resource === 'video' ||
-                  resource === 'font' ||
-                  resource === 'stylesheet'
-                ) {
-                  // Bloqueie assets pesados (pode adicionar "whitelist" aqui se necessário)
+                const u = req.url();
+                // Liberação handshake/login/nonce/checkpoint Messenger e Facebook
+                if (/(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u)) {
+                  return req.continue();
+                }
+                // Só bloqueia assets pesados DEPOIS do login — stylesheet nunca!
+                if (resource === 'image' || resource === 'media' || resource === 'video' || resource === 'font') {
+                  if (/favicon\.ico$/i.test(u) && resource === 'image') return req.continue();
                   return req.abort();
                 }
-                req.continue();
+                // stylesheet nunca é bloqueado!
+                return req.continue();
               });
+              // ===== END REQUISITOS DE ALTERAÇÃO =====
             } catch (e) {
               log('[VIRTUS] Erro ao aplicar interception:', e + '');
             }
@@ -407,19 +422,23 @@ function startVirtus(browser, nome, robeMeta = {}) {
         try {
           await page.setRequestInterception(true);
           if (!page._virtusIntercepted) {
+            // ===== BEGIN REQUISITOS DE ALTERAÇÃO =====
             page.on('request', req => {
               const resource = req.resourceType();
-              if (
-                resource === 'image' ||
-                resource === 'media' ||
-                resource === 'video' ||
-                resource === 'font' ||
-                resource === 'stylesheet'
-              ) {
+              const u = req.url();
+              // Liberação handshake/login/nonce/checkpoint Messenger e Facebook
+              if (/(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u)) {
+                return req.continue();
+              }
+              // Só bloqueia assets pesados DEPOIS do login — stylesheet nunca!
+              if (resource === 'image' || resource === 'media' || resource === 'video' || resource === 'font') {
+                if (/favicon\.ico$/i.test(u) && resource === 'image') return req.continue();
                 return req.abort();
               }
-              req.continue();
+              // stylesheet nunca é bloqueado!
+              return req.continue();
             });
+            // ===== END REQUISITOS DE ALTERAÇÃO =====
             page._virtusIntercepted = true;
           }
         } catch (e) {

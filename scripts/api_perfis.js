@@ -133,7 +133,8 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/configure', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-    const resp = await workerClient.sendWorkerCommand('configure', { nome });
+    // Timeout aumentado para 180000ms (3min) para comando configure
+    const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
     return res.json(resp);
   });
 

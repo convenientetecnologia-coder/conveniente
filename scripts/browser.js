@@ -161,30 +161,55 @@ async function patchPage(nome, page, coords) {
       )
     );
 
+  // ==== PATCH APLICADO CONFORME INSTRUÇÃO (PATCH MILITAR) ====
   if (enableVirtusMessengerBlock) {
     try {
       await page.setRequestInterception(true);
-      page.on('request', req => {
-        const reqUrl = req.url();
-        // Não bloquear no Marketplace Create! (whitelist para create no marketplace)
-        if (/facebook\.com\/marketplace\/create/.test(reqUrl)) return req.continue();
+
+      const allowLoginFlow = (u) => {
+        // Permite tudo nas telas de login/nonce/checkpoint/oauth do FB/Messenger
+        return /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u);
+      };
+
+      const isLoggedArea = () => {
+        try {
+          const u = page.url() || '';
+          // Considere “logado” apenas nas áreas produtivas
+          return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(u);
+        } catch { return false; }
+      };
+
+      page.on('request', (req) => {
+        const u = req.url();
         const type = req.resourceType();
-        // Block image, media, font, stylesheet exceto whitelist mínimos
-        // Whitelist for Messenger:
-        // Apenas permite arquivos JS/scripts, XHR, doc, fetch, ws, navigation; bloqueia o RESTANTE no Messenger
-        if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
-          // Whitelist mínima para Messenger — Aqui pode-se ajustar um mínimo para, ex, https://www.messenger.com/favicon.ico
-          if (/favicon\.ico$/.test(reqUrl) && type === 'image') return req.continue();
+
+        // SEMPRE liberar tudo durante login/nonce/checkpoint
+        if (allowLoginFlow(u)) return req.continue();
+
+        // Durante o login (antes de logar), não bloqueie imagens handshake do Facebook/Messenger
+        if (!isLoggedArea()) {
+          if (type === 'image' && /facebook\.com/i.test(u)) return req.continue();
+          if (/favicon\.ico$/i.test(u) && type === 'image') return req.continue();
+          return req.continue();
+        }
+
+        // Já logado: agora pode bloquear certos assets
+        if (type === 'image') {
+          if (/favicon\.ico$/i.test(u)) return req.continue();
+          return req.abort();
+        }
+        if (type === 'media' || type === 'font') {
           return req.abort();
         }
         return req.continue();
       });
+
       interceptionConfigured = true;
-      //console.log('Virtus Messenger asset interception ativado para resourceType image/media/font/stylesheet');
     } catch (err) {
-      //console.log('[Virtus] Messenger: interception failed: ', err && err.message || err);
+      // log silencioso
     }
   }
+  // ==== FIM DO PATCH ====
 }
 
 // Minimização suave
@@ -647,27 +672,9 @@ async function openBrowser(manifest, { robeMeta=robeMetaGlobal, nome=manifest.no
       throw e;
     }
 
-    // 1.1) Janela única — fecha extras, se surgirem
-    try {
-      const mainPage = pages && pages[0];
-      await pruneExtraWindows(browser, mainPage, { timeoutMs: 5000, intervalMs: 250, robeMeta, nome, ctrl });
-      // GUARDA: RAM pruning ultra-militar - pruning periódico (2min)
-      try {
-        pruneTimer = setInterval(async () => {
-          try {
-            // Proteção: skip pruning se ativo
-            await pruneExtraWindows(browser, (await browser.pages())[0], { timeoutMs: 5000, intervalMs: 250, robeMeta, nome, ctrl });
-          } catch (_) {}
-        }, 120 * 1000); // 120s
-        globalPruneIntervalByBrowser.set(browser, pruneTimer);
-        browser.once('disconnected', () => {
-          if (pruneTimer) clearInterval(pruneTimer);
-          globalPruneIntervalByBrowser.delete(browser);
-        });
-      } catch (_) {}
-    } catch (e) {
-      console.warn('[BROWSER][PRUNE] falha ao garantir janela única:', e && e.message || e);
-    }
+    // 1.1) Inicialmente NÃO execute prune nem arme timer de prune durante abertura/configuração.
+    // Só rode pruning/timer após entrar realmente em modo de produção (Virtus ON/start_work).
+    // Permaneça inativo aqui.
 
     // 2) Maximizar janela (se falhar, segue)
     try {
@@ -757,9 +764,136 @@ async function openBrowser(manifest, { robeMeta=robeMetaGlobal, nome=manifest.no
 }
 
 // ===============
+//
+// ==========|||||| HELPERS ROBUSTOS MESSENGER LOGIN ||||||==========
+
+async function waitAny(page, selectors, { timeout = 15000, visible = true } = {}) {
+  const start = Date.now();
+  while ((Date.now() - start) < timeout) {
+    for (const sel of selectors) {
+      try {
+        const h = await page.$(sel);
+        if (h) {
+          if (!visible) return h;
+          const ok = await page.evaluate(el => {
+            const st = window.getComputedStyle(el);
+            return st && st.visibility !== 'hidden' && st.display !== 'none' && el.offsetParent !== null;
+          }, h).catch(()=>false);
+          if (ok) return h;
+        }
+      } catch {}
+    }
+    await sleep(200);
+  }
+  return null;
+}
+
+async function clickByXPath(page, xps, { waitNav = true, timeoutNav = 15000, logPrefix = '[messenger]' } = {}) {
+  for (const xp of xps) {
+    try {
+      const els = await page.$x(xp);
+      if (els && els[0]) {
+        await page.evaluate(el => {
+          el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+        }, els[0]);
+        if (waitNav) {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: timeoutNav }).catch(()=>{}),
+            els[0].click({ delay: 80 })
+          ]);
+        } else {
+          await els[0].click({ delay: 80 });
+        }
+        return true;
+      }
+    } catch (e) {
+      try { console.log(`${logPrefix} clickByXPath err:`, e && e.message || e); } catch {}
+    }
+  }
+  return false;
+}
+
+async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', maxCycles = 3 } = {}) {
+  for (let i = 0; i < maxCycles; i++) {
+    const url = page.url() || '';
+    if (!/messenger.com\/login\/nonce/i.test(url)) return true;
+
+    try { console.log(`${logPrefix} detectado em ${url}`); } catch {}
+
+    // Botão “Recarregar página”
+    const recarregar = await waitAny(page, [
+      'button[type="submit"]',
+      'button[aria-label*="Recarregar"]'
+    ], { timeout: 3000, visible: true });
+    if (recarregar) {
+      try {
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
+          recarregar.click({ delay: 60 })
+        ]);
+        await sleep(800);
+        continue;
+      } catch {}
+    }
+
+    // Tenta “Return to messenger”
+    const ok = await clickByXPath(page, [
+      '//a[contains(.,"Return to messenger")]',
+      '//a[contains(.,"Return") and contains(.,"messenger")]',
+      '//a[contains(.,"Voltar") and contains(.,"Messenger")]'
+    ], { waitNav: true, timeoutNav: 15000, logPrefix });
+
+    if (ok) {
+      await sleep(800);
+      continue;
+    }
+
+    // Sem botão na UI: recarrega e volta manualmente para a home do messenger
+    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
+    await sleep(800);
+    try { await page.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
+    await sleep(800);
+  }
+  return !/messenger.com\/login\/nonce/i.test(page.url() || '');
+}
+
+async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', timeout = 15000 } = {}) {
+  // Seletor CSS universal para “Continuar como ...”
+  const btn = await waitAny(page, [
+    'button[type="submit"]',
+    'button[aria-label*="Continuar"]',
+    'div[role="button"][aria-label*="Continuar"]',
+    'button[aria-label*="Continue"]',
+    'div[role="button"][aria-label*="Continue"]'
+  ], { timeout, visible: true });
+
+  if (btn) {
+    try {
+      await page.evaluate(el => el.scrollIntoView({ behavior: 'instant', block: 'center' }), btn);
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
+        btn.click({ delay: 80 })
+      ]);
+      return true;
+    } catch (e) {
+      try { console.log(`${logPrefix} click via CSS falhou:`, e && e.message || e); } catch {}
+    }
+  }
+
+  // Fallback por XPath
+  const ok = await clickByXPath(page, [
+    '//button[contains(.,"Continuar") or .//span[contains(.,"Continuar")]]',
+    '//div[@role="button"][.//span[contains(.,"Continuar")]]',
+    '//button[contains(.,"Continue") or .//span[contains(.,"Continue")]]'
+  ], { waitNav: true, timeoutNav: 15000, logPrefix });
+
+  return ok;
+}
+
+// ===============
 // configureProfile USA A LEITURA correta do manifest
 // ===============
-async function configureProfile(browser, nome) {
+async function configureProfile(browser, nome, cookiesOverride = null) {
   console.log('[CONFIG] Iniciando configureProfile para', nome);
 
   let pages;
@@ -793,97 +927,20 @@ async function configureProfile(browser, nome) {
     throw e;
   }
 
-  if (cookiesSeed) {
-    try {
-      console.log('=== CHECKPOINT 3A: Antes de preparar cookiesSeed ===');
-      const utilsLocal = require('./utils.js');
-      let cookiesArr = utilsLocal.normalizeCookies(cookiesSeed);
-      console.log('[COOKIES][FINAL][PARA INJETAR]:', cookiesArr);
-
-      const CRITICOS = ['c_user', 'xs', 'fr', 'sb', 'datr'];
-      const now = Math.floor(Date.now() / 1000);
-      const VENC = now + 180 * 24 * 60 * 60;
-
-      cookiesArr = cookiesArr.map(c => {
-        let ck = { ...c };
-        if (CRITICOS.includes(ck.name)) {
-          if (!ck.expirationDate || typeof ck.expirationDate !== 'number' || ck.expirationDate < now) ck.expirationDate = VENC;
-          if (ck.expirationDate > 9999999999) ck.expirationDate = Math.floor(ck.expirationDate / 1000);
-          ck.sameSite = 'None';
-          ck.secure = true;
-        }
-        if (ck.name === 'c_user') ck.httpOnly = false;
-        if (ck.name === 'xs') ck.httpOnly = true;
-        if (!ck.domain) ck.domain = '.facebook.com';
-        if (!ck.path) ck.path = '/';
-        if (typeof ck.value === 'string') ck.value = ck.value.trim();
-        if (typeof ck.name === 'string') ck.name = ck.name.trim();
-        return ck;
-      });
-
-      if (cookiesArr.find(c => c.name === 'c_user') && cookiesArr.find(c => c.name === 'xs')) {
-        try {
-          console.log('=== CHECKPOINT 4A: Antes de limpeza de cookies via CDP');
-          const client = await page.target().createCDPSession();
-          await client.send('Network.clearBrowserCookies');
-          console.log('=== CHECKPOINT 4B: Depois de limpeza de cookies via CDP');
-        } catch(e) {
-          console.warn('[CONFIG][ERRO][CHECKPOINT 4][Não conseguiu limpar cookies via CDP]:', e && e.stack ? e.stack : e);
-        }
-
-        for (const cookie of cookiesArr) {
-          try {
-            if (typeof cookie.expirationDate === "number") {
-              cookie.expires = cookie.expirationDate;
-              delete cookie.expirationDate;
-            }
-            if (cookie.name === 'c_user' && typeof cookie.value === 'string') {
-              cookie.value = cookie.value.replace(/\s+/g,'');
-            }
-            if (CRITICOS.includes(cookie.name)) {
-              const hostOnly1 = { ...cookie, url: 'https://facebook.com' }; delete hostOnly1.domain;
-              const hostOnly2 = { ...cookie, url: 'https://www.facebook.com' }; delete hostOnly2.domain;
-              const domainC = { ...cookie, domain: '.facebook.com' }; delete domainC.url;
-              try { await page.setCookie(hostOnly1); } catch(e) { console.warn(`[CONFIG] setCookie hostOnly1 ${cookie.name}`, e && e.message); }
-              try { await page.setCookie(hostOnly2); } catch(e) { console.warn(`[CONFIG] setCookie hostOnly2 ${cookie.name}`, e && e.message); }
-              try { await page.setCookie(domainC); } catch(e) { console.warn(`[CONFIG] setCookie domainC ${cookie.name}`, e && e.message); }
-            } else {
-              try { await page.setCookie(cookie); } catch(e) { console.warn(`[CONFIG] setCookie other ${cookie.name}`, e && e.message); }
-            }
-          } catch(e) {
-            console.warn(`[CONFIG] Loop setCookie ${cookie.name}`, e && e.message);
-          }
-        }
-
-        try {
-          const ckFb = await page.cookies('https://facebook.com');
-          const ckWwwFb = await page.cookies('https://www.facebook.com');
-          const ckMsg = await page.cookies('https://messenger.com');
-          console.log('[COOKIES][DEPOIS DA INJEÇÃO][facebook.com]', ckFb);
-          console.log('[COOKIES][DEPOIS DA INJEÇÃO][www.facebook.com]', ckWwwFb);
-          console.log('[COOKIES][DEPOIS DA INJEÇÃO][messenger.com]', ckMsg);
-        } catch(e){
-          console.warn('[CONFIG][ERRO][CHECKPOINT 6][Log Final dos cookies]', e && e.stack ? e.stack : e);
-        }
-      } else {
-        console.warn('[CONFIG] Cookies lidos não possuem c_user ou xs!');
-      }
-      console.log('=== CHECKPOINT 7: Fim de processamento cookiesSeed');
-    } catch(e) {
-      console.error('[CONFIG][ERRO][CHECKPOINT 3][Preparando/transformando cookiesSeed]:', e && e.stack ? e.stack : e);
-      throw e;
-    }
-  }
+  // ==================== PATCH INJEÇÃO UNIVERSAL ====================
+  // Injete TODOS os cookies (normalizados) direto na Facebook antes de navegar:
+  await injectCookies(pages[0], manifest.cookies);
+  // ================================================================
 
   try {
     console.log('=== CHECKPOINT 8A: Antes de page.goto("https://facebook.com/")');
-    await page.goto('https://facebook.com/', { waitUntil: 'domcontentloaded' }).catch((e) => {
+    await pages[0].goto('https://facebook.com/', { waitUntil: 'domcontentloaded' }).catch((e) => {
       console.warn('[CONFIG][ERRO][CHECKPOINT 8][goto facebook.com.catch]:', e && e.stack ? e.stack : e);
     });
 
     try {
-      const title = await page.title();
-      const url = page.url();
+      const title = await pages[0].title();
+      const url = pages[0].url();
       console.log(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
     } catch(logerr) {
       console.log('[STATE] Erro ao obter título/URL após goto facebook.com:', logerr && logerr.stack ? logerr.stack : logerr);
@@ -907,7 +964,7 @@ async function configureProfile(browser, nome) {
   const openedPages = [];
   try {
     console.log('=== CHECKPOINT 10A: Antes de abrir abas auxiliares ===');
-    openedPages[0] = page;
+    openedPages[0] = pages[0];
 
     // Aba 1 — criar item
     try {
@@ -956,50 +1013,54 @@ async function configureProfile(browser, nome) {
       console.error('[CONFIG][ERRO][CHECKPOINT 10.2][Aba Idioma]:', e && e.stack ? e.stack : e);
     }
 
-    // Aba 3 — messenger
+    // Aba 3 — MESSENGER: PATCH UNIVERSAL COOKIES
     try {
       await new Promise(r => setTimeout(r, 1000));
       console.log('=== CHECKPOINT 10.3A: Antes de newPage (messenger)');
       openedPages[3] = await browser.newPage();
       await patchPage(nome, openedPages[3], coords);
       await new Promise(r => setTimeout(r, 1000));
-      await openedPages[3].goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded' }).catch((e) => {
-        console.warn('[CONFIG][ERRO][CHECKPOINT 10.3][goto messenger.catch]:', e && e.stack ? e.stack : e);
-      });
 
-      try {
-        await openedPages[3].reload({ waitUntil: 'domcontentloaded' });
-        await new Promise(r => setTimeout(r, 600));
-      } catch(e) {
-        console.log('[CONFIG][CHECKPOINT Messenger]: Erro no reload, segue...');
-      }
+      // 1. Injete cookies (normalizados) ANTES de navegar:
+      await injectCookies(openedPages[3], manifest.cookies);
 
-      const SEL = 'button[type="submit"], button[aria-label*="Continuar"]';
+      // 2. Vai para Messenger e FAZ RELOAD (comportamento do legado!):
+      await openedPages[3].goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      await sleep(800);
       try {
-        await openedPages[3].waitForSelector(SEL, { timeout: 12000, visible: true });
-        await new Promise(r => setTimeout(r, 800));
-        await Promise.all([
-            openedPages[3].waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 }),
-            openedPages[3].click(SEL)
-        ]);
-        console.log('[CONFIG][CHECKPOINT Messenger]: Cliquei no botão "Continuar como..." e aguardei navegação.');
+        await openedPages[3].reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+        await sleep(800);
       } catch {
-        console.log('[CONFIG][CHECKPOINT Messenger]: Botão não apareceu ou navegação falhou, segue normal.');
+        console.log('[CONFIG][Messenger] reload inicial falhou, seguindo...');
       }
 
+      // 3. Resolve nonce se aparecer:
+      await resolveNonceIfPresent(openedPages[3], { logPrefix: '[CONFIG][Messenger][nonce]' });
+
+      // 4. TENTA CLIQUE CONTINUAR COMO... (super robusto!)
+      const clicked = await clickContinuarComo(openedPages[3], { logPrefix: '[CONFIG][Messenger][continuar]' });
+
+      if (!clicked) {
+        // 5. Tente resolver nonce e clique de novo
+        await resolveNonceIfPresent(openedPages[3], { logPrefix: '[CONFIG][Messenger][nonce-2]' });
+        await clickContinuarComo(openedPages[3], { logPrefix: '[CONFIG][Messenger][continuar-2]' });
+      }
+
+      // 6. Loga título/URL final
       try {
         const title = await openedPages[3].title();
         const url = await openedPages[3].url();
-        console.log(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
+        console.log(`[STATE] Messenger Após fluxo: "${title}" | URL: ${url}`);
       } catch(logerr) {
-        console.log('[STATE] Erro ao obter título/URL após goto messenger:', logerr && logerr.stack ? logerr.stack : logerr);
+        console.log('[STATE] Erro ao obter título/URL após fluxo messenger:', logerr && logerr.stack ? logerr.stack : logerr);
       }
-      console.log('=== CHECKPOINT 10.3D: goto messenger OK');
-      await new Promise(r => setTimeout(r, 6000));
-      console.log('=== CHECKPOINT 10.3E: Delay após messenger OK');
+      console.log('=== CHECKPOINT 10.3Z: Fluxo Messenger finalizado (robusto)');
+
+      await new Promise(r => setTimeout(r, 4000)); // settle curto
     } catch(e) {
-      console.error('[CONFIG][ERRO][CHECKPOINT 10.3][Aba Messenger]:', e && e.stack ? e.stack : e);
+      console.error('[CONFIG][ERRO][CHECKPOINT 10.3][Aba Messenger robusta]:', e && e.stack ? e.stack : e);
     }
+    // FIM ABA MESSENGER PATCH UNIVERSAL COOKIES
 
     console.log('=== CHECKPOINT 10B: Depois de abrir abas auxiliares ===');
   } catch(e) {
@@ -1007,21 +1068,7 @@ async function configureProfile(browser, nome) {
     throw e;
   }
 
-  // GUARDA: PRUNING pós-configureProfile (fechar extras, manter só main)
-  try {
-    if (browser && typeof browser.pages === 'function') {
-      const allPages = await browser.pages();
-      if (allPages.length > 1) {
-        const mainPage = allPages[0];
-        for (const p of allPages.slice(1)) {
-          if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
-        }
-        await pruneExtraWindows(browser, mainPage, { timeoutMs: 5000, intervalMs: 250 });
-      }
-    }
-  } catch (e) {
-    console.warn('[CONFIG] pruning extra windows pós-chamada configureProfile:', e && e.message);
-  }
+  // (REMOVIDO BLOCO DE PRUNING APÓS CONFIGURATION CONFORME INSTRUÇÃO)
 
   console.log('=== CHECKPOINT 14: Todas abas abertas/logadas, firmadas e curadas. Configuração concluída!');
   console.log('[CONFIG] configureProfile FINALIZADO em', nome);
