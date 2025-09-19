@@ -242,7 +242,91 @@ async function scrollChatsToTop(page) {
 
 // ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
 
-// ... o resto do código permanece inalterado abaixo ...
+// ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
+async function sendMessageSafe(p, campo, msg) {
+  // 1) Garantir foco e limpar o composer
+  try { await campo.focus(); } catch {}
+  try {
+    await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
+    await p.keyboard.press('A');
+    await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
+    await p.keyboard.press('Backspace');
+  } catch {}
+
+  // 2) Tentativa: colar via clipboard (inserção “atômica”)
+  let pasted = false;
+  try {
+    const ok = await p.evaluate(async (txt) => {
+      try { await navigator.clipboard.writeText(txt); return true; }
+      catch { return false; }
+    }, msg);
+    if (ok) {
+      await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
+      await p.keyboard.press('V');
+      await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
+      pasted = true;
+    }
+  } catch {}
+
+  // 3) Fallback: digitação
+  if (!pasted) {
+    await campo.type(msg, { delay: randomBetween(6,14) });
+  }
+
+  // 4) Verificação do composer: precisa constar exatamente o texto
+  const match = await p.evaluate((el) => {
+    const getText = (n) => (n.innerText || n.textContent || '').replace(/\r/g,'');
+    const text = getText(el).replace(/\u00a0/g,' ').trim();
+    return text;
+  }, campo).catch(() => '');
+
+  // 5) Se não bate (corte/preview interferiu), limpa e re-insere uma única vez com execCommand
+  if (match !== msg.trim()) {
+    try {
+      await campo.focus();
+      await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
+      await p.keyboard.press('A');
+      await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
+      await p.keyboard.press('Backspace');
+    } catch {}
+    await p.evaluate((el, txt) => {
+      el.focus();
+      try { document.execCommand('insertText', false, txt); } catch {
+        const e = new InputEvent('beforeinput', { inputType: 'insertText', data: txt, bubbles: true, cancelable: true });
+        el.dispatchEvent(e);
+        el.textContent = txt;
+      }
+    }, campo, msg);
+    // revalida
+    const m2 = await p.evaluate((el) => (el.innerText || el.textContent || '').replace(/\u00a0/g,' ').trim(), campo).catch(()=>'');
+
+    if (m2 !== msg.trim()) {
+      try { await logIssue(nome, 'virtus_send_failed', `composer mismatch [expect=${msg.length}, got=${m2.length}]`); } catch {}
+      throw new Error('composer_text_mismatch');
+    }
+  }
+
+  // 6) Envia
+  await campo.press('Enter');
+
+  // 7) Aguarda composer esvaziar (sinal básico de envio) – 7s
+  await p.waitForFunction((el) => {
+    const txt = (el.innerText || el.textContent || '').trim();
+    return txt.length === 0;
+  }, { timeout: 7000 }, campo).catch(()=>{});
+
+  // 8) Pós-verificação: se imagem placeholder quebrada ficou no composer
+  try {
+    const broken = await p.evaluate(() => {
+      const imgs = Array.from(document.querySelectorAll('div[role="textbox"] img'));
+      return imgs.some(img => img.naturalWidth === 0 || img.naturalHeight === 0);
+    });
+    if (broken) {
+      await logIssue(nome, 'virtus_send_failed', 'composer contains broken image placeholder post-send');
+    }
+  } catch {}
+}
+// ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
 function startVirtus(browser, nome, robeMeta = {}) {
   const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
@@ -354,13 +438,12 @@ function startVirtus(browser, nome, robeMeta = {}) {
               await newP.setRequestInterception(true);
               newP.on('request', req => {
                 const resource = req.resourceType();
-                const u = req.url();
-                if (/(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u)) {
-                  return req.continue();
-                }
-                if (resource === 'image' || resource === 'media' || resource === 'video' || resource === 'font') {
-                  if (/favicon\.ico$/i.test(u) && resource === 'image') return req.continue();
+                // PATCH: liberar "image" no intercept
+                if (resource === 'media' || resource === 'video' || resource === 'font') {
                   return req.abort();
+                }
+                if (resource === 'image') {
+                  return req.continue();
                 }
                 return req.continue();
               });
@@ -403,13 +486,12 @@ function startVirtus(browser, nome, robeMeta = {}) {
           if (!page._virtusIntercepted) {
             page.on('request', req => {
               const resource = req.resourceType();
-              const u = req.url();
-              if (/(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(u)) {
-                return req.continue();
-              }
-              if (resource === 'image' || resource === 'media' || resource === 'video' || resource === 'font') {
-                if (/favicon\.ico$/i.test(u) && resource === 'image') return req.continue();
+              // PATCH: liberar "image" no intercept
+              if (resource === 'media' || resource === 'video' || resource === 'font') {
                 return req.abort();
+              }
+              if (resource === 'image') {
+                return req.continue();
               }
               return req.continue();
             });
@@ -895,8 +977,9 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (Array.isArray(msg)) msg = msg.join('\n');
       if (typeof msg !== 'string') msg = String(msg);
 
-      await campo.type(msg, { delay: randomBetween(10,45) });
-      await campo.press('Enter');
+      // -------- SUBSTITUIR PELO USO sendMessageSafe --------
+      await sendMessageSafe(p, campo, msg);
+      // -----------------------------------------------------
 
       log(`Mensagem enviada para chat ${chatId}`);
       const tsNow = agoraEpoch();

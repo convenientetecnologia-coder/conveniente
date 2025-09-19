@@ -168,7 +168,6 @@ async function patchPage(nome, page, coords) {
       if (!page._virtusIntercepted) {
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-          // ... (seu código do intercept aqui) ...
           const u = req.url();
           const type = req.resourceType();
           const allowLoginFlow = (url) => /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(url);
@@ -183,12 +182,11 @@ async function patchPage(nome, page, coords) {
             if (/favicon\.ico$/i.test(u) && type === 'image') return req.continue();
             return req.continue();
           }
-          if (type === 'image') {
-            if (/favicon\.ico$/i.test(u)) return req.continue();
-            return req.abort();
-          }
           if (type === 'media' || type === 'font') {
             return req.abort();
+          }
+          if (type === 'image') {
+            return req.continue();
           }
           return req.continue();
         });

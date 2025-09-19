@@ -462,42 +462,7 @@ async function safeClosePage(page) {
 }
 
 // —————— NOVO: Rotina publicação e fechamento 5s como solicitado ——————
-/*
-// Nova rotina: clica em "Publicar" e/ou "Avançar" quantas vezes aparecerem (curto),
-// aguarda 5s e fecha a aba. Retorna true se clicou em pelo menos um botão.
-*/
-async function publicarEFechar5s(page) {
-  let performed = false;
-  const MAX_PASSOS = 8; // limite defensivo
-  for (let i = 0; i < MAX_PASSOS; i++) {
-    // Tenta "Publicar"
-    const btnPub = await findEnabledButton(page, 'Publicar', 600);
-    if (btnPub) {
-      try { await btnPub.click(); } catch {}
-      performed = true;
-      await sleep(400);
-      continue;
-    }
-    // Tenta "Avançar"
-    const btnAv = await findEnabledButton(page, 'Avançar', 600);
-    if (btnAv) {
-      try { await btnAv.click(); } catch {}
-      performed = true;
-      await sleep(400);
-      continue;
-    }
-    // Nenhum botão habilitado encontrado nesta iteração: encerra loop
-    break;
-  }
-
-  if (performed) {
-    // Espera FIXO de 5 segundos e fecha a aba
-    await sleep(5000);
-    try { await safeClosePage(page); } catch {}
-    return true;
-  }
-  return false;
-}
+// *** SUBSTITUÍDA PELO NOVO FLUXO ABAIXO ***
 
 // ——— NOVO: Pós-publicação ultra-rápido com detecção de “painel/listagem” ———
 async function isSellerListOrDashboard(page) {
@@ -531,6 +496,59 @@ async function waitAndCloseAfterPublishSmart(page, { hardMaxMs = 3000, popupExtr
     await sleep(100);
   }
   await safeClosePage(page);
+}
+
+// --------- SUBSTITUÍDA PELO NOVO FLUXO SINGLE SUBMIT BOOT MILITAR ---------
+async function publicarEFechar5s(page) {
+  let submitted = false;
+  let steps = 0;
+
+  // 1) Avança etapas até aparecer “Publicar”
+  for (let i = 0; i < 12; i++) {
+    steps++;
+    const btnPub = await findEnabledButton(page, 'Publicar', 500);
+    if (btnPub) {
+      try {
+        await btnPub.click();
+        submitted = true;
+      } catch {}
+      break; // NUNCA clica "Publicar" mais de uma vez
+    }
+    const btnAv = await findEnabledButton(page, 'Avançar', 500);
+    if (btnAv) {
+      try { await btnAv.click(); } catch {}
+      await sleep(400);
+      continue;
+    }
+    // Nem Avançar nem Publicar => pequena espera e revalida mais uma vez
+    await sleep(250);
+  }
+
+  if (!submitted) return false;
+
+  // 2) Espera o “sumiço”/desabilitação de "Publicar" (até 15s)
+  const hidden = await page.waitForFunction(() => {
+    const spans = Array.from(document.querySelectorAll('span'));
+    const btnSpan = spans.find(s => (s.innerText || '').trim() === 'Publicar');
+    if (!btnSpan) return true;
+    const host = btnSpan.closest('div[role="button"],button');
+    if (!host) return true;
+    const disabled = host.getAttribute('aria-disabled') === 'true' || host.getAttribute('tabindex') === '-1';
+    const style = window.getComputedStyle(host);
+    const visible = style && style.visibility !== 'hidden' && style.display !== 'none';
+    return (!visible) || disabled;
+  }, { timeout: 15000 }).catch(() => false);
+
+  // 3) Espera heurística de conclusão (dashboard/lista) e fecha
+  // Se dashboard detectado, fecha em seguida; se não, aguarda até 3s e fecha.
+  try {
+    const sawPopupRef = { value: false };
+    await waitAndCloseAfterPublishSmart(page, { hardMaxMs: 3000, popupExtraMs: 2500, sawPopupRef });
+  } catch {
+    try { await safeClosePage(page); } catch {}
+  }
+
+  return true;
 }
 
 // --------------------------------------------------
@@ -733,11 +751,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // —————— ALTERAÇÃO APLICADA: Rotina publicarEFechar5s no lugar do pós-publicação anterior ——————
 
-    // PUBLICAR e FECHAR (fixo 5s)
+    // PUBLICAR e FECHAR (novo fluxo militar)
     const okPub = await publicarEFechar5s(page);
     if (!okPub) throw new Error('Falha ao publicar (nenhum clique efetivo em Publicar/Avançar).');
     published = true;
-    stepLog.push(`[${nome}] Publicação concluída; aguardado 5s e aba fechada.`);
+    stepLog.push(`[${nome}] Publicação concluída; aguardado rotina militar e aba fechada.`);
 
     // Confirmar localização usada (após publicar — mantém)
     try { await locais.confirmUsed(cidadePerfil, localUsada); } catch {}
@@ -858,6 +876,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     } catch (err) {
       stepLog.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
     }
+
+    // OPCIONAL RECOMENDADO: logging do beforeunload dialog
+    try { 
+      if (sawBeforeUnloadDialog) 
+        await logIssue(nome, 'robe_error', 'beforeunload dialog detectado; fechamento forçado'); 
+    } catch {}
 
     if (page) {
       try { await safeClosePage(page); console.log(`[ROBE] ${nome}: aba fechada no finally`); } catch {}
