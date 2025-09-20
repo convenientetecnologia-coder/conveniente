@@ -45,7 +45,7 @@ const autoMode = {
 
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
 function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
-// ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
+— ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
 
 // HOOKS de Modo LEVE/FULL (próximo aos patches militares - AUTO_CFG)
 async function onEnterLightMode() {
@@ -1174,6 +1174,16 @@ try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado
 // LIMPA PRUNER DE ABAS
 stopPruneLoop(nome);
 
+// Registrar falha e agendar reabertura curta
+try { registerFailure(nome, 'disconnected'); } catch {}
+try {
+  robeMeta[nome] = robeMeta[nome] || {};
+  if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
+    robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+    issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+  }
+} catch {}
+
 // Atualiza status.json imediato
 try { await snapshotStatusAndWrite(); } catch {}
 } catch (e) {
@@ -1247,62 +1257,58 @@ const handlers = {
   },
 
   async deactivate({ nome, reason, policy }) {
-    // POLÍTICA preserveDesired para RAM/CPU breaker!
-    // Se ramKill/cpuKill e policy preserveDesired, marca reopenAt/robeFrozenUntil, NÃO zera desired, nem desired.active.
-    // Limite militar: max 3x em 10min, senão frozen por 1h.
-    let killSource = (reason === 'ramKill' || reason === 'cpuKill') && policy === 'preserveDesired';
-    if (killSource) {
-      const MAX_ATTEMPTS = 3, WINDOW_MS = 10*60*1000, FROZEN_MS = 60*60*1000;
+  const preserve = (policy === 'preserveDesired');
+  let reopenDelayMs = 0;
+  if (preserve) {
+    try { registerFailure(nome, reason || 'deactivate_preserve'); } catch {}
+    if (reason === 'ramKill' || reason === 'cpuKill') {
+      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random()*120000);
+    } else {
+      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+    }
+  }
+  const ctrl = controllers.get(nome);
+  if (!ctrl) {
+    if (preserve) {
       robeMeta[nome] = robeMeta[nome] || {};
-      if (!robeMeta[nome].killHistory) robeMeta[nome].killHistory = [];
-      let arr = robeMeta[nome].killHistory = robeMeta[nome].killHistory.filter(t => t > Date.now() - WINDOW_MS);
-      arr.push(Date.now());
-      if (arr.length > MAX_ATTEMPTS) {
-        // congelar 1h
-        robeMeta[nome].frozenUntil = Date.now() + FROZEN_MS;
-        robeMeta[nome].killHistory = [];
-      } else {
-        robeMeta[nome].reopenAt = Date.now() + 4*60*1000 + Math.floor(Math.random()*120000);
+      if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
+        robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
+        issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
       }
-    }
-    // Prossiga desativação normal, exceto: preserve desired.active/virtus!
-    const ctrl = controllers.get(nome);
-    if (!ctrl) {
-      await snapshotStatusAndWrite();
-      return { ok: true };
-    }
-    try {
-      if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-        await ctrl.virtus.stop();
-      }
-    } catch (e) {
-      console.warn('[WORKER][deactivate] erro ao parar Virtus:', e && e.message || e);
-    }
-    try {
-      if (ctrl.browser && ctrl.browser.close) {
-        await ctrl.browser.close();
-      }
-    } catch (e) {
-      console.warn('[WORKER][deactivate] erro ao fechar browser:', e && e.message || e);
-    }
-    try { freezeCooldownIfNotWorking(nome); } catch {}
-    controllers.delete(nome);
-
-    // LIMPAR PRUNER ao desativar
-    stopPruneLoop(nome);
-
-    // desired NÃO é mexido se preserveDesired, só marca reopenAt e snapshot
-    if (!killSource) {
-      try {
-        const d = readJsonFile(desiredPath, { perfis: {} });
-        d.perfis = d.perfis || {};
-        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-        writeJsonAtomic(desiredPath, d);
-      } catch {}
     }
     await snapshotStatusAndWrite();
     return { ok: true };
-  },
+  }
+  try {
+    if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+      await ctrl.virtus.stop();
+    }
+  } catch {}
+  try {
+    if (ctrl.browser && ctrl.browser.close) {
+      await ctrl.browser.close();
+    }
+  } catch {}
+  try { freezeCooldownIfNotWorking(nome); } catch {}
+  controllers.delete(nome);
+  stopPruneLoop(nome);
+  if (!preserve) {
+    try {
+      const d = readJsonFile(desiredPath, { perfis: {} });
+      d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+      writeJsonAtomic(desiredPath, d);
+    } catch {}
+  } else {
+    robeMeta[nome] = robeMeta[nome] || {};
+    if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
+      robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
+      issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
+    }
+  }
+  await snapshotStatusAndWrite();
+  return { ok: true };
+},
 
   async configure({ nome }) {
     const ctrl = controllers.get(nome);
@@ -1880,61 +1886,93 @@ const NURSE_CFG = {
 };
 const nurseState = new Map(); // nome => { strikes: number, lastOk: ts }
 
+// === ULTRA RECOVERY (militar) ===
+const ULTRA_RECOVERY = {
+  MAX_RELOADS: 2,                   // no máximo 2 reloads curtos por página zumbi
+  RELOAD_TIMEOUT_MS: 4500,          // timeout curto para reload
+  RELOAD_POST_WAIT_MS: 250,         // pequena espera pós-reload
+  REOPEN_DELAY_SHORT_MS: 4000,      // reabrir "já já" (nurse_kill, no_pages)
+  REOPEN_DELAY_RAMCPU_MS: 4*60*1000, // reabrir após 4–6min em RAM/CPU kill (usaremos também jitter)
+  FAIL_WINDOW_MS: 3*60*60*1000,     // 3h janela
+  FAIL_FREEZE_AFTER: 5,             // >5 falhas em 3h => congela
+  FAIL_FREEZE_MS: 2*60*60*1000      // congela por 2h
+};
+
+const profileFailures = new Map(); // nome => [ts, ts, ...]
+function registerFailure(nome, reason) {
+  const now = Date.now();
+  const arr = profileFailures.get(nome) || [];
+  const filtered = arr.filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  filtered.push(now);
+  profileFailures.set(nome, filtered);
+  if (filtered.length > ULTRA_RECOVERY.FAIL_FREEZE_AFTER) {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].frozenUntil = now + ULTRA_RECOVERY.FAIL_FREEZE_MS;
+    issues.append(nome, 'mil_action', `frozen_2h: >${ULTRA_RECOVERY.FAIL_FREEZE_AFTER} falhas em 3h (${filtered.length})`).catch(()=>{});
+  }
+}
+
+async function pageReadyBasic(p0) {
+  try {
+    const res = await Promise.race([
+      (async () => (await p0.evaluate(() => document.readyState)) || 'unknown')(),
+      new Promise(res => setTimeout(() => res('timeout'), NURSE_CFG.PAGE_EVAL_TIMEOUT_MS))
+    ]);
+    return (res === 'interactive' || res === 'complete');
+  } catch { return false; }
+}
+
+async function tryReloadShort(p0, nome, attempt) {
+  try { await reportAction(nome, 'mil_action', `nurse_reload_try #${attempt}`); } catch {}
+  try {
+    await p0.reload({ waitUntil: 'domcontentloaded', timeout: ULTRA_RECOVERY.RELOAD_TIMEOUT_MS }).catch(()=>{});
+    await new Promise(r=>setTimeout(r, ULTRA_RECOVERY.RELOAD_POST_WAIT_MS));
+  } catch {}
+  return await pageReadyBasic(p0);
+}
+
 async function nurseTick() {
   const now = Date.now();
   const desired = readJsonFile(desiredPath, { perfis: {} });
   for (const nome of Object.keys(desired.perfis || {})) {
     const want = desired.perfis[nome] || {};
     const ctrl = controllers.get(nome);
-
-    // Se desired.active e não há controller: tenta ativar (respeita GATE nos próprios activateOnce)
     if (want.active === true && !ctrl) {
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
       try { await activateOnce(nome, 'nurse_auto'); } catch {}
       continue;
     }
-
     if (!ctrl || !ctrl.browser) continue;
-
-    // Healthcheck de page básica
-    let healthy = false;
-    try {
-      const pages = await ctrl.browser.pages().catch(()=>[]);
-      if (!pages || !pages[0]) {
-        await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
-        await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+    let pages = [];
+    try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
+    if (!pages || !pages[0]) {
+      await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
+      try { registerFailure(nome, 'no_pages'); } catch {}
+      await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+      continue;
+    }
+    const p0 = pages[0];
+    let healthy = await pageReadyBasic(p0);
+    if (!healthy) {
+      healthy = await tryReloadShort(p0, nome, 1);
+      if (!healthy) {
+        healthy = await tryReloadShort(p0, nome, 2);
+      }
+      if (healthy) {
+        await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
+      } else {
+        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
+        try { registerFailure(nome, 'zombie'); } catch {}
+        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
       }
-      const p0 = pages[0];
-      const res = await Promise.race([
-        (async () => (await p0.evaluate(() => document.readyState)) || 'unknown')(),
-        new Promise(res => setTimeout(() => res('timeout'), NURSE_CFG.PAGE_EVAL_TIMEOUT_MS))
-      ]);
-      healthy = (res === 'interactive' || res === 'complete');
-      // Poda de abas excessivas quando não estiver em execução de Robe
-      if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
-        try { await closeExtraPages(ctrl.browser, pages[0]).catch(()=>{}); } catch {}
-      }
-      // Se conta deveria estar trabalhando e Virtus == null no modo FULL: religar
-      if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
-        try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
-      }
-    } catch {
-      healthy = false;
     }
-
-    const st = nurseState.get(nome) || { strikes: 0, lastOk: 0 };
-    if (healthy) {
-      st.strikes = 0; st.lastOk = now;
-    } else {
-      st.strikes = (st.strikes || 0) + 1;
-      if (st.strikes >= NURSE_CFG.ZOMBIE_STRIKES) {
-        await reportAction(nome, 'nurse_kill', `page zombie/stuck (strikes=${st.strikes}) — rollback preserveDesired`);
-        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
-        st.strikes = 0; // reseta após rollback
-      }
+    if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+      try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
     }
-    nurseState.set(nome, st);
+    if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
+      try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
+    }
   }
 }
 
