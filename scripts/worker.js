@@ -45,7 +45,7 @@ const autoMode = {
 
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
 function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
-— ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
+//— ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
 
 // HOOKS de Modo LEVE/FULL (próximo aos patches militares - AUTO_CFG)
 async function onEnterLightMode() {
