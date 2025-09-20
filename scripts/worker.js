@@ -36,7 +36,6 @@ const AUTO_CFG = {
 // APÓS o bloco do AUTO_CFG, adicione:
 const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '2048', 10); // mínimo RAM que deve sobrar pós-abertura
-const FB_TEMPBLOCK_FREEZE_MINUTES = parseInt(process.env.FB_TEMPBLOCK_FREEZE_MINUTES || '120', 10); // Default: 2 horas
 
 const autoMode = {
   mode: 'full', since: Date.now(), reason: '',
@@ -1944,19 +1943,6 @@ async function ensureFrozenShutdown(nome, origin = 'frozen') {
 }
 // ===== FIM DO MÉTODO ULTRA CIRÚRGICO =====
 
-// 3. Freezer militar específico para FB temp block
-async function freezeForTempBlock(nome, detailMsg = '') {
-  const until = Date.now() + (FB_TEMPBLOCK_FREEZE_MINUTES * 60 * 1000);
-  robeMeta[nome] = robeMeta[nome] || {};
-  robeMeta[nome].frozenUntil = until;
-  robeMeta[nome].activationHeldUntil = until;
-  try { await issues.append(nome, 'mil_action', 'fb_temp_block'); } catch {}
-  try { await issues.append(nome, 'mil_action', `fb_temp_block_frozen_2h until ${new Date(until).toISOString()}${detailMsg ? ' ('+detailMsg+')':''}`); } catch {}
-  try { await reportAction(nome, 'mil_action', 'fb_temp_block'); } catch {}
-  try { await ensureFrozenShutdown(nome, 'fb_temp_block'); } catch {}
-  try { await snapshotStatusAndWrite(); } catch {}
-}
-
 const profileFailures = new Map(); // nome => [ts, ts, ...]
 async function registerFailure(nome, reason) {
   const now = Date.now();
@@ -1991,40 +1977,6 @@ async function tryReloadShort(p0, nome, attempt) {
   return await pageReadyBasic(p0);
 }
 
-// 2. Helper para detectar “temporarily blocked” via DOM
-async function detectFbTempBlock(page) {
-  try {
-    const url = typeof page.url === 'function' ? (page.url() || '') : '';
-    if (!/facebook.com|messenger.com/i.test(url)) return { blocked: false, reason: '' };
-    const info = await page.evaluate(() => {
-      function getTxt(el) { try { return (el && (el.innerText || el.textContent) || '').trim(); } catch { return ''; } }
-      const bodyTxt = getTxt(document.body).toLowerCase();
-      const find = (s) => bodyTxt.includes(s);
-      const modals = Array.from(document.querySelectorAll('div[role="dialog"],div[aria-modal="true"],div[role="alert"]'))
-        .map(getTxt).join(' ').toLowerCase();
-      const hasBlocked =
-        find('temporariamente bloqueado') ||
-        find('você está temporariamente bloqueado') ||
-        find('você foi temporariamente bloqueado') ||
-        find('you’re temporarily blocked') ||
-        find("you're temporarily blocked") ||
-        find('you are temporarily blocked') ||
-        find('temporarily blocked');
-      const hasReload =
-        find('recarregar página') ||
-        modals.includes('recarregar página') ||
-        bodyTxt.includes('reload page');
-      const blocked = !!hasBlocked;
-      let reason = '';
-      if (blocked) { reason = 'fb_temp_block_detected' + (hasReload ? '_with_reload' : ''); }
-      return { blocked, reason };
-    }).catch(() => ({ blocked: false, reason: '' }));
-    return info;
-  } catch {
-    return { blocked: false, reason: '' };
-  }
-}
-
 async function nurseTick() {
   const now = Date.now();
   const desired = readJsonFile(desiredPath, { perfis: {} });
@@ -2056,16 +2008,6 @@ async function nurseTick() {
       continue;
     }
     const p0 = pages[0];
-
-    // 4. Em nurseTick, ANTES DE QUALQUER reload ou pageReadyBasic, adicione:
-    try {
-      const check = await detectFbTempBlock(p0);
-      if (check && check.blocked) {
-        await freezeForTempBlock(nome, check.reason || '');
-        continue;
-      }
-    } catch {}
-
     let healthy = await pageReadyBasic(p0);
     if (!healthy) {
       healthy = await tryReloadShort(p0, nome, 1);
@@ -2250,7 +2192,7 @@ process.on('message', async (msg) => {
   if (!msg || !msg.type || !msg.msgId) return;
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
-    sendReply(msgId, { ok: false, error: 'Comando desconhecido' });
+    sendReply(msg.msgId, { ok: false, error: 'Comando desconhecido' });
     return;
   }
   try {
