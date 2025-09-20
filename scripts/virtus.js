@@ -33,6 +33,130 @@ function getPerfilManifest(nome) {
 }
 // ========== FIM HELPER ==========
 
+// ========== NOVOS HELPERS Ultra Blindagem (INÍCIO) ==========
+function normTxt(s) {
+  return String(s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function getComposerHandle(p) {
+  const sels = [
+    'div[contenteditable="true"][role="textbox"]',
+    'div[role="combobox"][contenteditable="true"]',
+    'div[contenteditable="true"][aria-label]',
+    'div[contenteditable="true"]'
+  ];
+  for (const sel of sels) {
+    try { const h = await p.$(sel); if (h) return h; } catch {}
+  }
+  return null;
+}
+
+async function getComposerTextCurrent(p) {
+  try {
+    return await p.evaluate(() => {
+      const sels = [
+        'div[contenteditable="true"][role="textbox"]',
+        'div[role="combobox"][contenteditable="true"]',
+        'div[contenteditable="true"][aria-label]',
+        'div[contenteditable="true"]'
+      ];
+      let el = null;
+      for (const s of sels) {
+        const h = document.querySelector(s);
+        if (h) { el = h; break; }
+      }
+      if (!el) return '';
+      return (el.innerText || el.textContent || '').replace(/\u00a0/g,' ').trim();
+    });
+  } catch { return ''; }
+}
+
+async function countMsgOccurrencesInThread(p, msg, limit = 30) {
+  const expected = normTxt(msg);
+  try {
+    return await p.evaluate((exp, lim) => {
+      const getTxt = el => (el.innerText || el.textContent || '').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
+      const nodes = Array.from(document.querySelectorAll(
+        'div[role="row"] [data-testid="mwthreadpane-message"], div[role="row"] div[dir], div[role="row"] span'
+      )).filter(el => (el.innerText || el.textContent || '').trim()).slice(-Math.max(10, lim));
+      const texts = nodes.map(getTxt);
+      return texts.filter(t => t === exp).length;
+    }, expected, limit);
+  } catch { return 0; }
+}
+
+async function hasDuplicateBubbleRecent(p, msg, checkDepth = 20) {
+  const occurs = await countMsgOccurrencesInThread(p, msg, checkDepth);
+  return occurs > 0;
+}
+
+async function findSendButton(p) {
+  const sels = [
+    'div[aria-label*="Enviar"]',
+    'div[aria-label*="send"]',
+    'button[aria-label*="Enviar"]',
+    'button[aria-label*="send"]',
+    'div[role="button"][aria-label*="Enviar"]',
+    'div[role="button"][aria-label*="send"]'
+  ];
+  for (const sel of sels) {
+    try { const h = await p.$(sel); if (h) return h; } catch {}
+  }
+  return null;
+}
+
+async function synthEnterOn(elHandle) {
+  try {
+    await elHandle.press('Enter');
+    return true;
+  } catch { return false; }
+}
+
+async function synthEnterEvents(p, elHandle) {
+  try {
+    await p.evaluate(el => {
+      el.focus();
+      const kd = new KeyboardEvent('keydown', { key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true });
+      const ku = new KeyboardEvent('keyup',   { key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true });
+      el.dispatchEvent(kd); el.dispatchEvent(ku);
+    }, elHandle);
+    return true;
+  } catch { return false; }
+}
+
+async function waitSentOrBubble(p, msg, baselineCount, { timeoutMs = 8000, intervalMs = 250 } = {}) {
+  const expected = normTxt(msg);
+  const t0 = Date.now();
+  while ((Date.now() - t0) < timeoutMs) {
+    // 1) Composer vazio?
+    try {
+      const empty = await p.evaluate(() => {
+        const sels = [
+          'div[contenteditable="true"][role="textbox"]',
+          'div[role="combobox"][contenteditable="true"]',
+          'div[contenteditable="true"][aria-label]',
+          'div[contenteditable="true"]'
+        ];
+        let el = null;
+        for (const s of sels) {
+          const h = document.querySelector(s);
+          if (h) { el = h; break; }
+        }
+        if (!el) return false;
+        const txt = (el.innerText || el.textContent || '').replace(/\u00a0/g,' ').trim();
+        return txt.length === 0;
+      });
+      if (empty) return true;
+    } catch {}
+    // 2) Nova bubble com mesmo texto?
+    const occ = await countMsgOccurrencesInThread(p, expected, 30).catch(() => null);
+    if (typeof occ === 'number' && occ > baselineCount) return true;
+    await sleep(intervalMs);
+  }
+  return false;
+}
+// ========== FIM NOVOS HELPERS Ultra Blindagem ==========
+
 // Log de issues (robusto; falha silenciosa se o módulo não existir)
 let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
@@ -242,46 +366,24 @@ async function scrollChatsToTop(page) {
 
 // ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
 
-// ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
-async function sendMessageSafe(p, campo, msg) {
-  // 1) Garantir foco e limpar o composer
-  try { await campo.focus(); } catch {}
-  try {
-    await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
-    await p.keyboard.press('A');
-    await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
-    await p.keyboard.press('Backspace');
-  } catch {}
+// ========== INÍCIO DA FUNÇÃO sendMessageSafe (patch ultra robusto) ==========
+async function sendMessageSafe(p, campo, msg, { nome, chatId, maxAttempts = 3, verifyTimeoutMs = 8000 } = {}) {
+  const texto = normTxt(msg);
+  const beforeOcc = await countMsgOccurrencesInThread(p, texto, 30);
 
-  // 2) Tentativa: colar via clipboard (inserção “atômica”)
-  let pasted = false;
+  // DUPLICATA? Se já existe bubble idêntica recente, pula envio
   try {
-    const ok = await p.evaluate(async (txt) => {
-      try { await navigator.clipboard.writeText(txt); return true; }
-      catch { return false; }
-    }, msg);
-    if (ok) {
-      await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
-      await p.keyboard.press('V');
-      await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
-      pasted = true;
+    const dup = await hasDuplicateBubbleRecent(p, texto, 20);
+    if (dup) {
+      try { await logIssue(nome, 'mil_action', `virtus_skip_duplicate chat=${chatId}`); } catch {}
+      return { ok: true, skippedDuplicate: true };
     }
   } catch {}
 
-  // 3) Fallback: digitação
-  if (!pasted) {
-    await campo.type(msg, { delay: randomBetween(6,14) });
-  }
-
-  // 4) Verificação do composer: precisa constar exatamente o texto
-  const match = await p.evaluate((el) => {
-    const getText = (n) => (n.innerText || n.textContent || '').replace(/\r/g,'');
-    const text = getText(el).replace(/\u00a0/g,' ').trim();
-    return text;
-  }, campo).catch(() => '');
-
-  // 5) Se não bate (corte/preview interferiu), limpa e re-insere uma única vez com execCommand
-  if (match !== msg.trim()) {
+  // Se já está no composer, só tenta enviar
+  let composerText = await getComposerTextCurrent(p).catch(()=> '');
+  if (normTxt(composerText) !== texto) {
+    // Limpa e insere
     try {
       await campo.focus();
       await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
@@ -289,44 +391,81 @@ async function sendMessageSafe(p, campo, msg) {
       await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
       await p.keyboard.press('Backspace');
     } catch {}
-    await p.evaluate((el, txt) => {
-      el.focus();
-      try { document.execCommand('insertText', false, txt); } catch {
-        const e = new InputEvent('beforeinput', { inputType: 'insertText', data: txt, bubbles: true, cancelable: true });
-        el.dispatchEvent(e);
-        el.textContent = txt;
-      }
-    }, campo, msg);
-    // revalida
-    const m2 = await p.evaluate((el) => (el.innerText || el.textContent || '').replace(/\u00a0/g,' ').trim(), campo).catch(()=>'');
 
-    if (m2 !== msg.trim()) {
-      try { await logIssue(nome, 'virtus_send_failed', `composer mismatch [expect=${msg.length}, got=${m2.length}]`); } catch {}
-      throw new Error('composer_text_mismatch');
+    // Tenta colar (clipboard); fallback para type
+    let pasted = false;
+    try {
+      const ok = await p.evaluate(async (txt) => {
+        try { await navigator.clipboard.writeText(txt); return true; } catch { return false; }
+      }, texto);
+      if (ok) {
+        await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
+        await p.keyboard.press('V');
+        await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
+        pasted = true;
+      }
+    } catch {}
+    if (!pasted) {
+      await campo.type(texto, { delay: randomBetween(6,14) });
+    }
+
+    // Valida match no composer (1 correção com execCommand)
+    let matchNow = normTxt(await getComposerTextCurrent(p));
+    if (matchNow !== texto) {
+      await p.evaluate((el, txt) => {
+        el.focus();
+        try { document.execCommand('insertText', false, txt); } catch {
+          const e = new InputEvent('beforeinput', { inputType: 'insertText', data: txt, bubbles: true, cancelable: true });
+          el.dispatchEvent(e);
+          el.textContent = txt;
+        }
+      }, campo, texto);
+      matchNow = normTxt(await getComposerTextCurrent(p));
+      if (matchNow !== texto) {
+        try { await logIssue(nome, 'virtus_send_failed', `composer_text_mismatch chat=${chatId} expect=${texto.length} got=${matchNow.length}`); } catch {}
+        return { ok: false, error: 'composer_text_mismatch' };
+      }
     }
   }
 
-  // 6) Envia
-  await campo.press('Enter');
+  // Tenta enviar até 3x: Enter -> Enter synthetic -> botão Enviar/Enter novamente
+  let sent = false;
+  for (let tent = 1; tent <= maxAttempts; tent++) {
+    try { await logIssue(nome, 'mil_action', `virtus_try_send chat=${chatId} attempt=${tent}`); } catch {}
+    if (tent === 1) {
+      await synthEnterOn(campo);
+    } else if (tent === 2) {
+      await synthEnterEvents(p, campo);
+    } else {
+      const btn = await findSendButton(p);
+      if (btn) { try { await btn.click({ delay: 40 }); } catch {} }
+      else { await synthEnterOn(campo); }
+    }
+    const ok = await waitSentOrBubble(p, texto, beforeOcc, { timeoutMs: verifyTimeoutMs, intervalMs: 250 });
+    if (ok) { sent = true; break; }
+    await sleep(350);
+  }
+  if (!sent) {
+    try { await logIssue(nome, 'virtus_send_failed', `not_sent_after_type chat=${chatId}`); } catch {}
+    return { ok: false, error: 'not_sent_after_type' };
+  }
 
-  // 7) Aguarda composer esvaziar (sinal básico de envio) – 7s
-  await p.waitForFunction((el) => {
-    const txt = (el.innerText || el.textContent || '').trim();
-    return txt.length === 0;
-  }, { timeout: 7000 }, campo).catch(()=>{});
-
-  // 8) Pós-verificação: se imagem placeholder quebrada ficou no composer
   try {
-    const broken = await p.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('div[role="textbox"] img'));
-      return imgs.some(img => img.naturalWidth === 0 || img.naturalHeight === 0);
+    const empty = await p.evaluate(() => {
+      const el = document.querySelector('div[contenteditable="true"][role="textbox"],div[role="combobox"][contenteditable="true"],div[contenteditable="true"][aria-label],div[contenteditable="true"]');
+      if (!el) return true;
+      const txt = (el.innerText || el.textContent || '').replace(/\u00a0/g,' ').trim();
+      return txt.length === 0;
     });
-    if (broken) {
-      await logIssue(nome, 'virtus_send_failed', 'composer contains broken image placeholder post-send');
+    if (!empty) {
+      try { await logIssue(nome, 'mil_action', `composer_not_empty_postsend chat=${chatId}`); } catch {}
     }
   } catch {}
+
+  try { await logIssue(nome, 'mil_action', `virtus_send_ok chat=${chatId}`); } catch {}
+  return { ok: true };
 }
-// ========== FIM DA FUNÇÃO sendMessageSafe ==========
+// ========== FIM DA FUNÇÃO sendMessageSafe (patch ultra robusto) ==========
 
 function startVirtus(browser, nome, robeMeta = {}) {
   const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
@@ -363,6 +502,10 @@ function startVirtus(browser, nome, robeMeta = {}) {
   let filaLoopBusy = false;
   let recoverBackoffMs = 0;
   const failCounts = new Map();
+
+  // ========== INÍCIO DA INSTRUÇÃO (3): Single-flight lock por chatId ==========
+  const sendingLocks = new Set(); // single-flight por chatId
+  // ========== FIM INSTRUÇÃO single-flight ==========
 
   // Persistência segura no Windows
   async function salvaHistorico() {
@@ -977,11 +1120,50 @@ function startVirtus(browser, nome, robeMeta = {}) {
       if (Array.isArray(msg)) msg = msg.join('\n');
       if (typeof msg !== 'string') msg = String(msg);
 
-      // -------- SUBSTITUIR PELO USO sendMessageSafe --------
-      await sendMessageSafe(p, campo, msg);
-      // -----------------------------------------------------
+      // --------- PATCH: DOM duplicate guard antes de envio ---------
+      try {
+        const dup = await hasDuplicateBubbleRecent(p, msg, 20);
+        if (dup) {
+          const tsNow = agoraEpoch();
+          historico[chatId] = tsNow;
+          respondedCache.set(chatId, tsNow);
+          ultimoAtendimento = tsNow;
+          await salvaHistorico();
+          try { await logIssue(nome, 'mil_action', `virtus_skip_duplicate_dom chat=${chatId}`); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+      } catch {}
 
-      log(`Mensagem enviada para chat ${chatId}`);
+      // PATCH: single-flight
+      if (sendingLocks.has(chatId)) {
+        log(`[GUARD] chat ${chatId} já em envio (lock).`);
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+      sendingLocks.add(chatId);
+
+      let sendRes = null;
+      try {
+        sendRes = await sendMessageSafe(p, campo, msg, { nome, chatId, maxAttempts: 3, verifyTimeoutMs: 9000 });
+      } finally {
+        sendingLocks.delete(chatId);
+      }
+
+      if (!sendRes || !sendRes.ok) {
+        // Não marcar como respondido (não houve confirmação real)
+        log(`[ERRO] Envio falhou chat ${chatId}: ${(sendRes && sendRes.error) || 'unknown'}`);
+        const fails = incFail(chatId);
+        if (fails >= 2) { try { await logIssue(nome, 'virtus_send_failed', `giveup_after_failures chat=${chatId} fails=${fails}`); } catch {} }
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+
+      // Sucesso real confirmado
+      log(`Mensagem enviada (confirmada) para chat ${chatId}`);
       const tsNow = agoraEpoch();
       historico[chatId] = tsNow;
       respondedCache.set(chatId, tsNow);
