@@ -418,6 +418,15 @@ if (!nome) return { ok: false, error: 'Nome ausente' };
 // Já está ativo?
 if (controllers.has(nome)) return { ok: true, already: true };
 
+// BLOQUEIO: não ativa se estiver congelado
+{
+  const now = Date.now();
+  if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now) {
+    await reportAction(nome, 'mil_action', 'block_activate_frozen');
+    return { ok: false, error: 'account_is_frozen' };
+  }
+}
+
 // Se já existe uma ativação em curso para este nome, aguarde finalização
 const inflight = activationLocks.get(nome);
 if (inflight) {
@@ -1701,6 +1710,18 @@ const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
 const perfisDesired = (desired && desired.perfis && typeof desired.perfis === 'object') ? desired.perfis : {};
 const nomes = Object.keys(perfisDesired);
 
+// Varre controllers e fecha se congelado, antes de ativações
+{
+const now = Date.now();
+controllers.forEach((ctrl, nome) => {
+  try {
+    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now) {
+      ensureFrozenShutdown(nome, 'reconcile_guard').catch(()=>{});
+    }
+  } catch {}
+});
+}
+
 // AUDITORIA GLOBAL DE COOLDOWN: congela/descongela por perfil conforme estado real
 try {
 const perfisArrAudit = loadPerfisJson();
@@ -1726,6 +1747,10 @@ for (const nome of nomes) {
 
   // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
   if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
+    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
+      // não reabre durante congelamento
+      continue;
+    }
     // Auto-reabrir (militar)
     robeMeta[nome].reopenAt = null;
     robeMeta[nome].killHistory = [];
@@ -1898,8 +1923,28 @@ const ULTRA_RECOVERY = {
   FAIL_FREEZE_MS: 2*60*60*1000      // congela por 2h
 };
 
+// ===== INÍCIO DO MÉTODO ULTRA CIRÚRGICO: ensureFrozenShutdown =====
+async function ensureFrozenShutdown(nome, origin = 'frozen') {
+  const ctrl = controllers.get(nome);
+  if (!ctrl) return;
+  try { robeQueue.skip && robeQueue.skip(nome); } catch {}
+  try { await reportAction(nome, 'mil_action', 'frozen_kill'); } catch {}
+  try {
+    // Fecha “preservando desired”, mas sem reabrir durante o frozen
+    await handlers.deactivate({ nome, reason: 'frozen', policy: 'preserveDesired' });
+  } catch {}
+  try { stopPruneLoop(nome); } catch {}
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].reopenAt = null; // impede tentativa de reabrir antes do fim do frozen
+    robeMeta[nome].activationHeldUntil = robeMeta[nome].frozenUntil || (Date.now() + 3600_000);
+  } catch {}
+  try { await snapshotStatusAndWrite(); } catch {}
+}
+// ===== FIM DO MÉTODO ULTRA CIRÚRGICO =====
+
 const profileFailures = new Map(); // nome => [ts, ts, ...]
-function registerFailure(nome, reason) {
+async function registerFailure(nome, reason) {
   const now = Date.now();
   const arr = profileFailures.get(nome) || [];
   const filtered = arr.filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
@@ -1909,6 +1954,7 @@ function registerFailure(nome, reason) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = now + ULTRA_RECOVERY.FAIL_FREEZE_MS;
     issues.append(nome, 'mil_action', `frozen_2h: >${ULTRA_RECOVERY.FAIL_FREEZE_AFTER} falhas em 3h (${filtered.length})`).catch(()=>{});
+    await ensureFrozenShutdown(nome, 'fail_freeze');
   }
 }
 
@@ -1937,6 +1983,16 @@ async function nurseTick() {
   for (const nome of Object.keys(desired.perfis || {})) {
     const want = desired.perfis[nome] || {};
     const ctrl = controllers.get(nome);
+
+    // GUARD: nunca manter ativo durante frozen
+    {
+      const now = Date.now();
+      if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now) {
+        if (ctrl) { await ensureFrozenShutdown(nome, 'nurse_guard'); }
+        continue;
+      }
+    }
+
     if (want.active === true && !ctrl) {
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
       try { await activateOnce(nome, 'nurse_auto'); } catch {}
@@ -1993,6 +2049,7 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = frozenUntil;
     await reportAction(nome, 'robe_error', 'manifest ausente; congelado por 12h');
+    await ensureFrozenShutdown(nome, 'manifest_missing'); // para manifest ausente
     return { ok: false, error: 'no_manifest' };
   }
 
@@ -2001,6 +2058,7 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = Date.now() + 12*60*60*1000;
     await reportAction(nome, 'robe_error', 'manifest incompleto (cookies/fp); congelado por 12h');
+    await ensureFrozenShutdown(nome, 'manifest_incomplete'); // para manifest incompleto
     return { ok: false, error: 'incomplete_manifest' };
   }
 
