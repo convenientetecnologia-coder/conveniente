@@ -82,7 +82,16 @@ const ISSUE_TYPES_SET = new Set([
   'virtus_send_failed',
   'virtus_page_dead',
   'chrome_memory_spike',
-  'cpu_memory_spike'
+  'cpu_memory_spike',
+  // Logs militares (ação/saúde de sistema - não contam como "erro" no painel principal)
+  'mil_action',
+  'mem_block_signup',
+  'mem_block_activate',
+  'open_rollback_memory',
+  'light_enter',
+  'light_exit',
+  'nurse_kill',
+  'nurse_restart'
 ]);
 
 function padronizaType(type) {

@@ -274,6 +274,20 @@
         setDisabled(true);
         msgEl.style.display = 'none';
 
+        // ========================== INÍCIO ALTERAÇÃO RAM MILITAR ==========================
+        // Preflight: RAM > 3GB
+        try {
+          const m = await window.electronAPI.getSysMetrics();
+          const freeMB = (m && m.mem && m.mem.freeMB) || 0;
+          if (freeMB <= 3072) {
+            alert(`Impossível abrir nova conta por falta de RAM.\nLivre: ${freeMB} MB (mínimo: 3072 MB)`);
+            setBtnLoading(confirmarBtn, false);
+            setDisabled(false);
+            return;
+          }
+        } catch {}
+        // ========================== FIM ALTERAÇÃO RAM MILITAR ==========================
+
         try {
           const res = await window.electronAPI.criarPerfil({ cidade, cookies });
           if (!res || !res.ok) {
@@ -1009,18 +1023,18 @@
     })();
 
     // 4.4 Abertura sequencial “Abrir Todos e Iniciar 24h” com calma, respeitando CPU/RAM
-    async function ensureResourcesOk() {
-      // Espera até CPU <= 90% e RAM livre >= minFreeMB (do main)
+    // ======================= INÍCIO ALTERAÇÃO BLOQUEIO RAM "ABRIR TODOS" ========================
+    // NOVO ensureResourcesOk({ minFreeMB }) militar
+    async function ensureResourcesOk({ minFreeMB = 3072 } = {}) {
       const ok = await waitUntil(async () => {
         const m = await window.electronAPI.getSysMetrics().catch(()=>null);
         if (!m || !m.mem) return false;
         const freeMB = m.mem.freeMB || 0;
-        const minMB  = m.mem.minFreeRequiredMB || 1536;
-        const cpu    = (m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0; // primeira chamada pode ser null
-        const cpuOk  = (cpu === 0) ? true : (cpu <= 90); // tolera primeira leitura 0/null
-        const memOk  = freeMB >= minMB;
+        const cpu    = (m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0;
+        const cpuOk  = (cpu === 0) ? true : (cpu <= 90);
+        const memOk  = freeMB >= minFreeMB;
         return cpuOk && memOk;
-      }, { timeoutMs: 0x7fffffff, intervalMs: 1200 }); // espera indefinidamente até ok
+      }, { timeoutMs: 0x7fffffff, intervalMs: 1200 });
       return ok;
     }
 
@@ -1035,7 +1049,7 @@
           const p = perfis[i];
           // Re-checa status a cada iteração (robusto)
           try {
-            await ensureResourcesOk(); // aguarda CPU/RAM ok antes de abrir o próximo
+            await ensureResourcesOk({ minFreeMB: 3072 }); // ALTERAÇÃO: SEMPRE usa 3GB militar
 
             // Ativar navegador se necessário
             if (!p.active) {
@@ -1073,6 +1087,7 @@
         reloadPerfis();
       }
     }
+    // ======================= FIM ALTERAÇÃO BLOQUEIO RAM "ABRIR TODOS" ========================
 
     // ====== Funções e binds NOVAS para loading, Fechar Todos, Invocar Humano, Start 24h ======
 

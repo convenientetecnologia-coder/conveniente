@@ -33,6 +33,10 @@ const AUTO_CFG = {
   RAM_WARN_MB: 700
 };
 
+// APÓS o bloco do AUTO_CFG, adicione:
+const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
+const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '2048', 10); // mínimo RAM que deve sobrar pós-abertura
+
 const autoMode = {
   mode: 'full', since: Date.now(), reason: '',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
@@ -42,6 +46,204 @@ const autoMode = {
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
 function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
 // ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
+
+// HOOKS de Modo LEVE/FULL (próximo aos patches militares - AUTO_CFG)
+async function onEnterLightMode() {
+  try { await reportAction('system', 'light_enter', 'enter_light_mode'); } catch {}
+  try { robeQueue.clear(); } catch {}
+  for (const [nome, ctrl] of controllers) {
+    try {
+      if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+        await ctrl.virtus.stop().catch(()=>{});
+      }
+      if (ctrl) { ctrl.virtus = null; ctrl.trabalhando = false; }
+      // Derruba pesados/zumbis (RAM >= 900MB) imediatamente
+      const ramMB = (robeMeta[nome] && typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
+      if (ramMB != null && ramMB >= AUTO_CFG.RAM_KILL_MB) {
+        await reportAction(nome, 'nurse_kill', `LEVE: kill pesado/zumbi (RAM=${ramMB}MB) preserveDesired`);
+        await handlers.deactivate({ nome, reason: 'light_ram_shed', policy: 'preserveDesired' });
+      }
+    } catch {}
+  }
+}
+
+async function onExitLightMode() {
+  try { await reportAction('system', 'light_exit', 'exit_light_mode'); } catch {}
+  // Reconciliador retomará Virtus/ativação por desired; não força nada aqui.
+}
+
+// ======= AUTOFIX/HEAL CONFIG =======
+const SELF_HEAL_CFG = {
+  SURVIVAL_MIN_ACTIVE: parseInt(process.env.SURVIVAL_MIN_ACTIVE || '2', 10),
+  LIGHT_ESCALATE_STEP: parseInt(process.env.LIGHT_ESCALATE_STEP || '3', 10),
+  LIGHT_ESCALATE_INTERVAL_MS: parseInt(process.env.LIGHT_ESCALATE_INTERVAL_MS || '180000', 10), // 3min
+  FULL_ASSERT_INTERVAL_MS: parseInt(process.env.FULL_ASSERT_INTERVAL_MS || '120000', 10), // 2min
+  PANIC_LIGHT_MAX_MS: parseInt(process.env.PANIC_LIGHT_MAX_MS || '15601000', 10), // 15min
+  PANIC_NO_PROGRESS_MS: parseInt(process.env.PANIC_NO_PROGRESS_MS || '8601000', 10), // 8min
+  MAX_LIGHT_CYCLES_WITHOUT_PROGRESS: parseInt(process.env.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS || '2', 10)
+};
+
+const healer = {
+  lastProgressAt: Date.now(),
+  lastFullAssertAt: 0,
+  lightEnterAt: 0,
+  lightCycles: 0,
+  lightAttempts: 0,
+  noProgressCycles: 0,
+  escalateTimer: null,
+  assertTimer: null,
+  lastLightCause: ''
+};
+
+async function milLog(type, msg) {
+  try { await reportAction('system', type || 'mil_action', String(msg || '')); } catch {}
+}
+
+function countActive() {
+  let n = 0;
+  controllers.forEach((ctrl) => { if (ctrl && ctrl.browser) n++; });
+  return n;
+}
+
+function countWorking() {
+  let n = 0;
+  controllers.forEach((ctrl) => { if (ctrl && ctrl.browser && ctrl.trabalhando) n++; });
+  return n;
+}
+
+function desiredActiveNames() {
+  const d = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+  return Object.entries(d.perfis || {}).filter(([_, ent]) => ent && ent.active === true).map(([nome]) => nome);
+}
+
+function chooseCandidatesToOpen(maxN = 2) {
+  const now = Date.now();
+  const desired = new Set(desiredActiveNames());
+  const allPerfis = loadPerfisJson();
+  const candidates = allPerfis
+    .map(p => p.nome)
+    .filter(nome => desired.has(nome) && !controllers.has(nome))
+    .filter(nome => !(robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now))
+    .slice(0);
+  candidates.sort((a,b) => {
+    const ra = typeof robeMeta[a]?.ramMB === 'number' ? robeMeta[a].ramMB : 999999;
+    const rb = typeof robeMeta[b]?.ramMB === 'number' ? robeMeta[b].ramMB : 999999;
+    return ra - rb;
+  });
+  return candidates.slice(0, Math.max(1, maxN));
+}
+
+async function escalateTowardsFull() {
+  if (autoMode.mode !== 'light') return;
+  if (countActive() === 0) {
+    const need = Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 1);
+    const cand = chooseCandidatesToOpen(need);
+    if (cand.length) {
+      await milLog('mil_action', `assert_min_active: abrindo ${cand.length} para não ficar em zero`);
+      for (const nome of cand) { try { await activateOnce(nome, 'heal_min_active'); healer.lastProgressAt = Date.now(); } catch {} }
+    }
+    return;
+  }
+  const cand = chooseCandidatesToOpen(SELF_HEAL_CFG.LIGHT_ESCALATE_STEP);
+  if (cand.length) {
+    await milLog('mil_action', `light_escalate: tentando abrir ${cand.length} perfis`);
+    for (const nome of cand) {
+      try { await activateOnce(nome, 'heal_escalate'); healer.lastProgressAt = Date.now(); } catch {}
+    }
+    healer.lightAttempts++;
+  }
+}
+
+function scheduleLightEscalator() {
+  if (healer.escalateTimer) return;
+  healer.escalateTimer = setInterval(async () => {
+    if (autoMode.mode === 'light') {
+      const since = healer.lightEnterAt || autoMode.since || Date.now();
+      const elapsed = Date.now() - since;
+      const noProgElapsed = Date.now() - healer.lastProgressAt;
+      if (elapsed > SELF_HEAL_CFG.PANIC_LIGHT_MAX_MS || noProgElapsed > SELF_HEAL_CFG.PANIC_NO_PROGRESS_MS) {
+        healer.noProgressCycles++;
+        if (healer.noProgressCycles >= SELF_HEAL_CFG.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS) {
+          panicMode();
+          healer.noProgressCycles = 0;
+        }
+      }
+      await escalateTowardsFull();
+    }
+  }, SELF_HEAL_CFG.LIGHT_ESCALATE_INTERVAL_MS);
+}
+
+function clearLightEscalator() {
+  if (healer.escalateTimer) { clearInterval(healer.escalateTimer); healer.escalateTimer = null; }
+  healer.lightAttempts = 0;
+  healer.noProgressCycles = 0;
+}
+
+async function assertFullActivity() {
+  const now = Date.now();
+  if ((now - healer.lastFullAssertAt) < SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS) return;
+  healer.lastFullAssertAt = now;
+  try { await killStrayChromes(); } catch {}
+  
+  if (countActive() === 0) {
+    const need = Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 1);
+    const cand = chooseCandidatesToOpen(need);
+    if (cand.length) {
+      await milLog('mil_action', `assert_full_activity: subir ${cand.length} para não ficar em zero`);
+      for (const nome of cand) { try { await activateOnce(nome, 'assert_full_activity'); healer.lastProgressAt = Date.now(); } catch {} }
+    }
+  }
+}
+
+// PANIC MODE: drop parcial + bootstrap mínimo e agressivo
+async function panicMode() {
+  await milLog('mil_action', `panic_mode_start: light since=${(Date.now()-(healer.lightEnterAt||autoMode.since||Date.now()))}ms cause=${healer.lastLightCause}`);
+  try { robeQueue.clear(); } catch {}
+  const nomesAtivos = Array.from(controllers.keys());
+  for (const nome of nomesAtivos) {
+    try { await handlers.deactivate({ nome, reason: 'panic', policy: 'preserveDesired' }); } catch {}
+  }
+  try { await killStrayChromes(); } catch {}
+  const cand = chooseCandidatesToOpen(Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 2));
+  await milLog('mil_action', `panic_min_bootstrap: abrindo ${cand.length}`);
+  for (const nome of cand) { try { await activateOnce(nome, 'panic_bootstrap'); healer.lastProgressAt = Date.now(); } catch {} }
+  await milLog('mil_action', `panic_mode_end`);
+}
+
+// === Stray kill helpers ===
+async function killPids(pids = []) {
+  for (const pid of (pids || [])) {
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }
+}
+
+async function killStrayChromes() {
+  try {
+    const perfisArr = loadPerfisJson();
+    const nomeByDir = {};
+    for (const p of perfisArr) {
+      if (p && p.userDataDir) nomeByDir[normalizePath(p.userDataDir)] = p.nome;
+    }
+    const procs = await psList().catch(()=>[]);
+    const group = {};
+    for (const proc of procs) {
+      const cmd = proc.cmd || proc.command || '';
+      if (!/chrome|chromium/i.test(cmd)) continue;
+      const userDir = extractUserDataDir(cmd);
+      if (!userDir) continue;
+      const nome = nomeByDir[normalizePath(userDir)];
+      if (!nome) continue;
+      if (controllers.has(nome)) continue; // não é stray
+      group[nome] = group[nome] || [];
+      group[nome].push(Number(proc.pid));
+    }
+    for (const [nome, pidList] of Object.entries(group)) {
+      if (!pidList || !pidList.length) continue;
+      await milLog('mil_action', `stray_kill: ${nome} pids=${pidList.join(',')}`);
+      await killPids(pidList);
+    }
+  } catch {}
+}
 
 // ====== BOOT ENV LOG ======
 try {
@@ -230,11 +432,31 @@ try {
 console.log('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
 const manifest = resolveManifest(nome);
 if (!manifest) throw new Error('Perfil não encontrado');
+
+// GATE DE RAM antes de abrir (livre > 3GB)
+{
+  const freeMB = Math.round(os.freemem() / (1024*1024));
+  if (freeMB <= OPEN_MIN_FREE_MB) {
+    await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
+    throw new Error('ram_insuficiente_para_ativar');
+  }
+}
+
 const browser = await browserHelper.openBrowser(manifest);
 if (!browser || typeof browser.newPage !== 'function') {
 throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
 }
 controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+
+// HEADROOM pós-abrir (rollback se < 2GB)
+{
+  const freeAfter = Math.round(os.freemem() / (1024*1024));
+  if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
+    await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
+    try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
+    return { ok: false, error: 'headroom_below_min_after_open' };
+  }
+}
 
 // PATCH MILITAR: marcar ativação e limpar históricos/avisos
 robeMeta[nome] = robeMeta[nome] || {};
@@ -242,6 +464,8 @@ robeMeta[nome].activatedAt = Date.now();
 robeMeta[nome].ramHist = [];
 robeMeta[nome].cpuHistory = [];
 robeMeta[nome].lastWarn = null;
+
+try { healer.lastProgressAt = Date.now(); } catch {}
 
 try { attachBrowserLifecycle(nome, browser); } catch {}
 try { await snapshotStatusAndWrite(); } catch {}
@@ -488,6 +712,16 @@ async function ramCpuMonitorTick() {
       }
     }
 
+    // === STRAY CHROME KILL (perfil sem controller) ===
+    try {
+      for (const [nome, pids] of Object.entries(pidsByNome)) {
+        if (!controllers.has(nome) && Array.isArray(pids) && pids.length) {
+          await milLog('mil_action', `stray_detected: ${nome} pids=${pids.join(',')} — killing`);
+          await killPids(pids);
+        }
+      }
+    } catch {}
+
     // Exemplo de debug: flag por env p/ troubleshooting de problemas de monitoramento
     if (process.env.METRICS_DEBUG === '1') {
       console.log('[METRICS] pidsByNome:', Object.keys(pidsByNome), 'Example command:', Object.values(pidsMeta)[0]?.cmd || '');
@@ -654,18 +888,32 @@ async function ramCpuMonitorTick() {
   else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
   else { autoMode.hot = 0; autoMode.cool = 0; }
 
+  // ENTER light
   if (autoMode.mode === 'full' && autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
     autoMode.mode = 'light';
     autoMode.since = Date.now();
     autoMode.reason = `CPU≈${cpuApprox}% (EMA≈${Math.round(autoMode.cpuEma||0)}%), freeMB=${freeMB} (EMA≈${Math.round(autoMode.freeEmaMB||0)})`;
     autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
-    try { await reportAction('system', 'auto_mode', 'enter_light: ' + autoMode.reason); } catch {}
+    healer.lightEnterAt = autoMode.since;
+    healer.lightCycles++;
+    healer.lastLightCause = autoMode.reason;
+    await reportAction('system', 'auto_mode', 'enter_light: ' + autoMode.reason);
+    // HOOK: entrar no Modo Leve — pausa Virtus, limpa fila, derruba pesados/zumbis
+    await onEnterLightMode();
+    scheduleLightEscalator(); // NOVO
   }
+
+  // EXIT light
   if (autoMode.mode === 'light' && autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
     autoMode.mode = 'full';
     autoMode.since = Date.now();
     autoMode.reason = '';
-    try { await reportAction('system', 'auto_mode', 'exit_light'); } catch {}
+    healer.noProgressCycles = 0;
+    healer.lightAttempts = 0;
+    await reportAction('system', 'auto_mode', 'exit_light');
+    // HOOK: sair do Modo Leve
+    await onExitLightMode();
+    clearLightEscalator(); // NOVO
   }
   // ===== FIM PATCH MILITAR: Avaliação/autoMode global =====
 
@@ -1619,7 +1867,79 @@ _reconciling = false;
 // Agendadores do reconciliador
 setInterval(() => { reconcileOnce().catch(()=>{}); }, RECONCILE_INTERVAL_MS);
 setTimeout(() => { reconcileOnce().catch(()=>{}); }, 300);
-// == FIM: reconciliador declarativo ==
+ // == FIM: reconciliador declarativo ==
+
+// === ASSERT FULL-ACTIVITY TIMER ===
+setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.floor(SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS/2)));
+
+// ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
+const NURSE_CFG = {
+  INTERVAL_MS: 5000,
+  PAGE_EVAL_TIMEOUT_MS: 1500,
+  ZOMBIE_STRIKES: 3
+};
+const nurseState = new Map(); // nome => { strikes: number, lastOk: ts }
+
+async function nurseTick() {
+  const now = Date.now();
+  const desired = readJsonFile(desiredPath, { perfis: {} });
+  for (const nome of Object.keys(desired.perfis || {})) {
+    const want = desired.perfis[nome] || {};
+    const ctrl = controllers.get(nome);
+
+    // Se desired.active e não há controller: tenta ativar (respeita GATE nos próprios activateOnce)
+    if (want.active === true && !ctrl) {
+      await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
+      try { await activateOnce(nome, 'nurse_auto'); } catch {}
+      continue;
+    }
+
+    if (!ctrl || !ctrl.browser) continue;
+
+    // Healthcheck de page básica
+    let healthy = false;
+    try {
+      const pages = await ctrl.browser.pages().catch(()=>[]);
+      if (!pages || !pages[0]) {
+        await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
+        await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+        continue;
+      }
+      const p0 = pages[0];
+      const res = await Promise.race([
+        (async () => (await p0.evaluate(() => document.readyState)) || 'unknown')(),
+        new Promise(res => setTimeout(() => res('timeout'), NURSE_CFG.PAGE_EVAL_TIMEOUT_MS))
+      ]);
+      healthy = (res === 'interactive' || res === 'complete');
+      // Poda de abas excessivas quando não estiver em execução de Robe
+      if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+        try { await closeExtraPages(ctrl.browser, pages[0]).catch(()=>{}); } catch {}
+      }
+      // Se conta deveria estar trabalhando e Virtus == null no modo FULL: religar
+      if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
+        try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
+      }
+    } catch {
+      healthy = false;
+    }
+
+    const st = nurseState.get(nome) || { strikes: 0, lastOk: 0 };
+    if (healthy) {
+      st.strikes = 0; st.lastOk = now;
+    } else {
+      st.strikes = (st.strikes || 0) + 1;
+      if (st.strikes >= NURSE_CFG.ZOMBIE_STRIKES) {
+        await reportAction(nome, 'nurse_kill', `page zombie/stuck (strikes=${st.strikes}) — rollback preserveDesired`);
+        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+        st.strikes = 0; // reseta após rollback
+      }
+    }
+    nurseState.set(nome, st);
+  }
+}
+
+setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
+setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 
 // ============ INÍCIO: PATCH/MODO FROZEN SE MANIFEST AUSENTE ==============
 

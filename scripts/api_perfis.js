@@ -31,7 +31,22 @@ module.exports = (app, workerClient, fileStore) => {
       const { cidade, cookies } = req.body || {};
       if (!cidade || !cookies) return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
 
+      // BLOQUEIO DE CADASTRO (militar): bloqueia cadastro se RAM <= 3GB
+      {
+        const osmod = require('os');
+        const freeMB = Math.floor(osmod.freemem() / (1024*1024));
+        const MIN_CREATE_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
+        if (freeMB <= MIN_CREATE_MB) {
+          try { require('./issues.js').append('system', 'mem_block_signup', `Cadastro bloqueado: RAM livre=${freeMB}MB <= ${MIN_CREATE_MB}MB`); } catch {}
+          return res.json({
+            ok: false,
+            error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_CREATE_MB} MB)`
+          });
+        }
+      }
+
       // Memória livre (warning only)
+      /*
       try {
         const osmod = require('os');
         const freeMB = Math.floor(osmod.freemem() / (1024*1024));
@@ -40,6 +55,7 @@ module.exports = (app, workerClient, fileStore) => {
           console.warn(`[CRIAR-PERFIL] AVISO: Memória livre ${freeMB} MB abaixo de ${minMB} MB. A criação seguirá mesmo assim.`);
         }
       } catch {}
+      */
 
       if (!fileStore.existsDir(fileStore.perfisDir)) fs.mkdirSync(fileStore.perfisDir, { recursive: true });
 
@@ -112,6 +128,16 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
 
+    // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
+    {
+      const freeMB = Math.floor(require('os').freemem() / (1024*1024));
+      const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
+      if (freeMB <= MIN_OPEN_MB) {
+        try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
+        return res.json({ ok: false, error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_OPEN_MB} MB)` });
+      }
+    }
+
     try { fileStore.patchDesired(nome, { active: true }); } catch {}
 
     // Não chama o worker diretamente para evitar corrida com o reconciliador
@@ -142,6 +168,17 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/start-work', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+
+    // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
+    {
+      const freeMB = Math.floor(require('os').freemem() / (1024*1024));
+      const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
+      if (freeMB <= MIN_OPEN_MB) {
+        try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
+        return res.json({ ok: false, error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_OPEN_MB} MB)` });
+      }
+    }
+
     try {
       fileStore.patchDesired(nome, { virtus: 'on', active: true, robePause24h: true });
     } catch (e) {}
