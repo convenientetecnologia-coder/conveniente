@@ -1440,6 +1440,9 @@ const handlers = {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
+    // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
+    if (ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
+
     // Zera cooldown no manifest
     try {
       const manifestPath = manifestPathOf(nome);
@@ -2022,6 +2025,13 @@ async function nurseTick() {
         await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
       }
+    }
+    // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
+    if (ctrl && ctrl.configurando) {
+      // Durante configuração (injeção de cookies): NUNCA prune. Mantém abas auxiliares abertas.
+      // Militar, rastreável, seguro.
+      console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
+      continue;
     }
     if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
       try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
