@@ -217,8 +217,15 @@ async function killPids(pids = []) {
   }
 }
 
+let _lastKillStrayRunAt = 0;
 async function killStrayChromes() {
   try {
+    if (inflightLaunches > 0) {
+      const now = Date.now();
+      if ((now - _lastKillStrayRunAt) < 30000) return; // throttle 30s durante inflight
+    }
+    _lastKillStrayRunAt = Date.now();
+
     const perfisArr = loadPerfisJson();
     const nomeByDir = {};
     for (const p of perfisArr) {
@@ -239,6 +246,20 @@ async function killStrayChromes() {
     }
     for (const [nome, pidList] of Object.entries(group)) {
       if (!pidList || !pidList.length) continue;
+      // PATCH: NUNCA matar se está activationLocks em progresso OU launch recente (<5min)
+      if (activationLocks.has(nome)) {
+        await milLog('mil_action', `stray_kill_skip_activation_in_progress: ${nome} pids=${pidList.join(',')}`);
+        continue;
+      }
+      const recentlyActivated = robeMeta[nome]?.activatedAt && (Date.now() - robeMeta[nome].activatedAt < 5 * 60 * 1000);
+      if (recentlyActivated) {
+        await milLog('mil_action', `stray_kill_skip_recently_activated: ${nome} pids=${pidList.join(',')}`);
+        continue;
+      }
+      if (inflightLaunches > 0) {
+        await milLog('mil_action', `stray_kill_skip_inflight_global: ${nome} pids=${pidList.join(',')}`);
+        continue;
+      }
       await milLog('mil_action', `stray_kill: ${nome} pids=${pidList.join(',')}`);
       await killPids(pidList);
     }
@@ -413,6 +434,32 @@ const activating = new Set();
 // ======= INÍCIO: LOCK GLOBAL DE ATIVAÇÃO (ULTRA ROBUSTO) =======
 const activationLocks = new Map(); // nome => Promise em andamento
 
+// PASSO 1.1: Semáforo/global pool de launch (MAX_CONCURRENT_LAUNCHES)
+const MAX_CONCURRENT_LAUNCHES = 2; // ajuste conforme seu hardware/teste real!
+let inflightLaunches = 0;
+const launchQueue = [];
+function withLaunchSlot(fn) {
+  return new Promise((resolve, reject) => {
+    function tryLaunch() {
+      if (inflightLaunches < MAX_CONCURRENT_LAUNCHES) {
+        inflightLaunches++;
+        Promise.resolve().then(() => fn())
+          .then((result) => { inflightLaunches--; resolve(result); nextLaunch(); })
+          .catch((e) => { inflightLaunches--; reject(e); nextLaunch(); });
+      } else {
+        launchQueue.push(tryLaunch);
+      }
+    }
+    function nextLaunch() {
+      if (launchQueue.length > 0 && inflightLaunches < MAX_CONCURRENT_LAUNCHES) {
+        const next = launchQueue.shift();
+        next && next();
+      }
+    }
+    tryLaunch();
+  });
+}
+
 async function activateOnce(nome, source = '') {
 if (!nome) return { ok: false, error: 'Nome ausente' };
 // Já está ativo?
@@ -451,7 +498,7 @@ if (!manifest) throw new Error('Perfil não encontrado');
   }
 }
 
-const browser = await browserHelper.openBrowser(manifest);
+const browser = await withLaunchSlot(() => browserHelper.openBrowser(manifest));
 if (!browser || typeof browser.newPage !== 'function') {
 throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
 }
@@ -473,6 +520,8 @@ robeMeta[nome].activatedAt = Date.now();
 robeMeta[nome].ramHist = [];
 robeMeta[nome].cpuHistory = [];
 robeMeta[nome].lastWarn = null;
+// RESET BACKOFF on success open (preemptive)
+try { robeMeta[nome].retryBackoffMs = 30000; } catch {}
 
 try { healer.lastProgressAt = Date.now(); } catch {}
 
@@ -1100,6 +1149,7 @@ async function robeTickGlobal() {
         // INÍCIO ALTERAÇÃO 1: snapshotStatusAndWrite após religar Virtus
         if (virtusWasRunning) {
           ctrl.trabalhando = true;
+          try { robeMeta[nome].retryBackoffMs = 30000; } catch {}
           await snapshotStatusAndWrite();
         }
 
@@ -1191,8 +1241,12 @@ try {
   robeMeta[nome] = robeMeta[nome] || {};
   if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
     if (isDesiredActive) {
-      robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
-      issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+      const baseBackoff = 30000, maxBackoff = 240000;
+      robeMeta[nome].retryBackoffMs = robeMeta[nome].retryBackoffMs || baseBackoff;
+      const delay = robeMeta[nome].retryBackoffMs;
+      robeMeta[nome].reopenAt = Date.now() + delay;
+      robeMeta[nome].retryBackoffMs = Math.min(robeMeta[nome].retryBackoffMs * 2, maxBackoff);
+      issues.append(nome, 'mil_action', `nurse_reopen_scheduled(disconnected)`).catch(()=>{});
     } else {
       robeMeta[nome].reopenAt = null; // NÃO agenda se desired.off!
       issues.append(nome, 'mil_action', 'reopen_suppressed_desired_off').catch(()=>{});
@@ -1277,10 +1331,14 @@ const handlers = {
   let reopenDelayMs = 0;
   if (preserve) {
     try { registerFailure(nome, reason || 'deactivate_preserve'); } catch {}
+    // BACKOFF PROGRESSIVO
+    const baseBackoff = 30000, maxBackoff = 240000;
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].retryBackoffMs = robeMeta[nome].retryBackoffMs || baseBackoff;
+    reopenDelayMs = robeMeta[nome].retryBackoffMs;
     if (reason === 'ramKill' || reason === 'cpuKill') {
-      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random()*120000);
-    } else {
-      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+      // para RAM/CPU, garante pelo menos 4min
+      reopenDelayMs = Math.max(reopenDelayMs, ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS);
     }
   }
   const ctrl = controllers.get(nome);
@@ -1289,6 +1347,9 @@ const handlers = {
       robeMeta[nome] = robeMeta[nome] || {};
       if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
         robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
+        // Dobra para próxima tentativa
+        const baseBackoff = 30000, maxBackoff = 240000;
+        robeMeta[nome].retryBackoffMs = Math.min((robeMeta[nome].retryBackoffMs || baseBackoff) * 2, maxBackoff);
         issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
       }
     }
@@ -1319,6 +1380,9 @@ const handlers = {
     robeMeta[nome] = robeMeta[nome] || {};
     if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
       robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
+      // Dobra para próxima tentativa
+      const baseBackoff = 30000, maxBackoff = 240000;
+      robeMeta[nome].retryBackoffMs = Math.min((robeMeta[nome].retryBackoffMs || baseBackoff) * 2, maxBackoff);
       issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
     }
   }
@@ -1362,6 +1426,7 @@ const handlers = {
     try {
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
       ctrl.trabalhando = true;
+      try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
 
       // === GARANTE PRUNE SÓ NESTE MOMENTO (PRODUÇÃO!) ===
       try {
@@ -1435,6 +1500,7 @@ const handlers = {
     // Religando Virtus APÓS a minimização/navegação
     ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
     ctrl.trabalhando = true;
+    try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
 
     try { unfreezeCooldownIfWorking(nome); } catch {}
 
@@ -1563,6 +1629,7 @@ const handlers = {
             try {
               ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
               ctrl.trabalhando = true;
+              try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
             } catch (e) {}
           }
           robeUpdateMeta(nome, { emExecucao: false });
@@ -1643,67 +1710,83 @@ const handlers = {
 };
 
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
+let _debounceStatusWrite = null;
 async function snapshotStatusAndWrite() {
-try {
-const perfisArr = loadPerfisJson();
-const perfis = perfisArr.map(p => {
-const nome = p.nome;
-let issuesCount = 0;
-try {
-  if (issues && typeof issues.countErrors === 'function') {
-    const res = issues.countErrors(nome);
-    issuesCount = Number(res && res.count) || 0;
-  } else {
-    issuesCount = countErrorsLocal(nome); // fallback local
-  }
-} catch {}
-return {
-  nome,
-  label: p.label || null,
-  cidade: p.cidade,
-  uaPresetId: p.uaPresetId,
-  active: controllers.has(nome),
-  trabalhando: !!(controllers.get(nome)?.trabalhando),
-  configurando: !!(controllers.get(nome)?.configurando),
-  humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
-  issuesCount,
-  ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
-  cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-  numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
-  robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
-};
-});
-const robes = {};
-perfisArr.forEach(p => {
-const nome = p.nome;
-robes[nome] = {
-  cooldownSec: robeCooldownLeft(nome),
-  estado: robeMeta[nome]?.estado || '',
-  proximaPostagem: robeMeta[nome]?.proximaPostagem || null,
-  ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
-  emFila: !!robeMeta[nome]?.emFila,
-  emExecucao: !!robeMeta[nome]?.emExecucao,
-  ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
-  cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-  numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
-  robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
-};
-});
-const robeQueueList = robeQueue.queueList();
-// PATCH autoMode/sys: incluir no statusObj
-const sys = {
-  freeMB: Math.round(os.freemem()/(1024*1024)),
-  totalMB: Math.round(os.totalmem()/(1024*1024)),
-  cores: (os.cpus()||[]).length,
-  cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
-};
-const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
-// Não inclui mais robeRam obsoleto, pois RAM por perfil já está em perfis/robes.
-// Unificado cross-platform.
-writeJsonAtomic(statusPath, statusObj);
-} catch (e) {
-try { console.warn('[WORKER][statusWrite] erro:', e && e.message || e); } catch {}
-}
+  if (_debounceStatusWrite) clearTimeout(_debounceStatusWrite);
+  _debounceStatusWrite = setTimeout(async () => {
+    try {
+      const perfisArr = loadPerfisJson();
+      const perfis = perfisArr.map(p => {
+        const nome = p.nome;
+        let issuesCount = 0;
+        try {
+          if (issues && typeof issues.countErrors === 'function') {
+            const res = issues.countErrors(nome);
+            issuesCount = Number(res && res.count) || 0;
+          } else {
+            issuesCount = countErrorsLocal(nome); // fallback local
+          }
+        } catch {}
+        return {
+          nome,
+          label: p.label || null,
+          cidade: p.cidade,
+          uaPresetId: p.uaPresetId,
+          active: controllers.has(nome),
+          trabalhando: !!(controllers.get(nome)?.trabalhando),
+          configurando: !!(controllers.get(nome)?.configurando),
+          humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
+          issuesCount,
+          ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
+          cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
+          numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
+          robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+        };
+      });
+      const robes = {};
+      perfisArr.forEach(p => {
+        const nome = p.nome;
+        robes[nome] = {
+          cooldownSec: robeCooldownLeft(nome),
+          estado: robeMeta[nome]?.estado || '',
+          proximaPostagem: robeMeta[nome]?.proximaPostagem || null,
+          ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
+          emFila: !!robeMeta[nome]?.emFila,
+          emExecucao: !!robeMeta[nome]?.emExecucao,
+          ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
+          cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
+          numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
+          robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+        };
+      });
+      const robeQueueList = robeQueue.queueList();
+      // PATCH autoMode/sys: incluir no statusObj
+      const sys = {
+        freeMB: Math.round(os.freemem()/(1024*1024)),
+        totalMB: Math.round(os.totalmem()/(1024*1024)),
+        cores: (os.cpus()||[]).length,
+        cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
+      };
+      const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
+      // Async atomic-ish write
+      const dir = path.dirname(statusPath);
+      try { await fs.promises.mkdir(dir, { recursive: true }); } catch {}
+      const tmp = statusPath + '.tmp';
+      await fs.promises.writeFile(tmp, JSON.stringify(statusObj, null, 2), 'utf8');
+      try { await fs.promises.unlink(statusPath); } catch {}
+      try {
+        await fs.promises.rename(tmp, statusPath);
+      } catch {
+        try {
+          await fs.promises.copyFile(tmp, statusPath);
+          try { await fs.promises.unlink(tmp); } catch {}
+        } catch {}
+      }
+    } catch (e) {
+      try { console.warn('[WORKER][statusWrite] erro:', e && e.message || e); } catch {}
+    }
+    _debounceStatusWrite = null;
+  }, 300);
 }
 // == FIM: snapshotStatusAndWrite ==
 
@@ -1793,7 +1876,14 @@ for (const nome of nomes) {
     }
     // === FIM PATCH autoMode Light ===
 
+    // PASSO 5: headroom e apenas um launch por vez no reconciliador
+    if (inflightLaunches >= 1) break;
+    const freeMB = Math.round(os.freemem() / (1024 * 1024));
+    if (freeMB <= OPEN_MIN_FREE_MB) break;
+
     try { await activateOnce(nome, 'reconcile'); } catch {}
+    // Aguarde próximo ciclo para outro launch
+    break;
   } else if (want.active === false && ctrl) {
     try { await handlers.deactivate({ nome }); } catch {}
     continue;
@@ -2051,7 +2141,7 @@ async function nurseTick() {
       try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
     }
     if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
-      try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
+      try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
     }
   }
 }

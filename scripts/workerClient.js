@@ -2,6 +2,9 @@
 const { fork } = require('child_process');
 const path = require('path');
 
+// === WORKER WATCHDOG TIMEOUT CONSTANT ===
+const WORKER_WATCHDOG_TIMEOUT_MS = 8000;
+
 // === MILITARY WATCHDOG (restart worker if nonresponsive) ===
 let _wd = { timer: null, failCount: 0 };
 function startWatchdog() {
@@ -9,7 +12,7 @@ function startWatchdog() {
   _wd.timer = setInterval(async () => {
     try {
       if (!workerChild) return; // sem child no momento (respawn já cuida)
-      const r = await sendWorkerCommand('get-status', {}, { timeoutMs: 2000 }).catch(() => null);
+      const r = await sendWorkerCommand('get-status', {}, { timeoutMs: WORKER_WATCHDOG_TIMEOUT_MS }).catch(() => null);
       if (r && r.perfis) {
         _wd.failCount = 0;
         return;
