@@ -420,7 +420,7 @@
         const ts = Number(p.robeFrozenUntil);
         if (!ts || ts < Date.now()) return null;
         const agora = Date.now();
-        const restante = Math.max(0, Math.floor((ts-agora)/1000));
+               const restante = Math.max(0, Math.floor((ts-agora)/1000));
         return buildPill(`ROBE Congelado (${tempoRestante(restante)})`, 'frozen');
       } catch { return null; }
     }
@@ -1275,20 +1275,26 @@
       if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
       try {
         const st = await window.electronAPI.getStatus();
-        const ativos = (st.perfis || []).filter(x => x.active);
-        for (const p of ativos) {
+        const perfis = st.perfis || [];
+        // NOVO: Fechar todos (todos mesmo!) — garante desired.off universal e anti-caroço
+        for (const p of perfis) {
           try {
+            // Garante /deactivate em todos, ativos OU inativos, para desired.off global
             await window.electronAPI.deactivate(p.nome);
-            await waitUntil(async () => {
-              const s2 = await window.electronAPI.getStatus();
-              const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
-              return !c2 || !c2.active;
-            }, { timeoutMs: 60000, intervalMs: 400 });
-            await new Promise(r=>setTimeout(r,600));
+            // Não precisa aguardar individualmente (mas pode, se desejar bloqueio máximo)
           } catch (e) {
-            console.warn('[Fechar todos] falha fechando', p && p.nome, e && e.message || e);
+            console.warn('[Fechar todos] falha chamando /deactivate', p && p.nome, e && e.message || e);
           }
         }
+        // NOVO: Espera real de fechamento absoluto e fila zerada (estado militar)
+        await waitUntil(async () => {
+          const st2 = await window.electronAPI.getStatus();
+          const inativos = (st2.perfis || []).every(x => !x.active);
+          const semFila = (st2.robeQueue || []).length === 0;
+          return inativos && semFila;
+        }, { timeoutMs: 120_000, intervalMs: 700 });
+        // Espera militar: sentinela de 5–6s após todos off
+        await new Promise(r => setTimeout(r, 6000));
       } catch (e) {
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {

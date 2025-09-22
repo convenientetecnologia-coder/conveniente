@@ -446,7 +446,7 @@ if (!manifest) throw new Error('Perfil não encontrado');
 {
   const freeMB = Math.round(os.freemem() / (1024*1024));
   if (freeMB <= OPEN_MIN_FREE_MB) {
-    await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
+    await reportAction(nome, 'mem_block_activate', `RAM libre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
     throw new Error('ram_insuficiente_para_ativar');
   }
 }
@@ -1186,10 +1186,17 @@ stopPruneLoop(nome);
 // Registrar falha e agendar reabertura curta
 try { registerFailure(nome, 'disconnected'); } catch {}
 try {
+  const d = readJsonFile(desiredPath, { perfis: {} });
+  const isDesiredActive = d.perfis?.[nome]?.active === true;
   robeMeta[nome] = robeMeta[nome] || {};
   if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
-    robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
-    issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+    if (isDesiredActive) {
+      robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+      issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+    } else {
+      robeMeta[nome].reopenAt = null; // NÃO agenda se desired.off!
+      issues.append(nome, 'mil_action', 'reopen_suppressed_desired_off').catch(()=>{});
+    }
   }
 } catch {}
 
@@ -1754,11 +1761,18 @@ for (const nome of nomes) {
       // não reabre durante congelamento
       continue;
     }
-    // Auto-reabrir (militar)
-    robeMeta[nome].reopenAt = null;
-    robeMeta[nome].killHistory = [];
-    try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
-    continue;
+    // PATCH: só reabre se desired ativo!
+    if (want.active === true) {
+      robeMeta[nome].reopenAt = null;
+      robeMeta[nome].killHistory = [];
+      try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
+      continue;
+    } else {
+      // NÃO reabrir se desired.off!
+      robeMeta[nome].reopenAt = null;
+      issues.append(nome, 'mil_action', 'reopen_at_ignored_desired_off').catch(()=>{});
+      continue;
+    }
   }
 
   // Liga/desliga browser
