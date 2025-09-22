@@ -1038,6 +1038,108 @@
       return ok;
     }
 
+    // NOVO MÉTODO ULTRA MILITAR: startAllIntelligent
+    async function startAllIntelligent() {
+      const startBtn = document.getElementById('startAllBtn');
+      if (startBtn) { 
+        startBtn.disabled = true; 
+        startBtn.style.opacity = '0.7';
+        startBtn.style.cursor = 'not-allowed';
+        startBtn.textContent = 'Iniciando...';
+      }
+
+      try {
+        // Passo 1: Coletar/ordenar perfis e limpar progresso
+        let st = await window.electronAPI.getStatus();
+        let perfis = st?.perfis || [];
+        let closedIdle = 0;
+
+        for (let i = 0; i < perfis.length; i++) {
+          let p = perfis[i];
+
+          // 1.a Garante recursos ANTES de tentar abrir
+          await ensureResourcesOk({ minFreeMB: 3072 });
+
+          // 1.b Fecha navegadores idle/about:blank (p.active==true && !p.trabalhando)
+          // (tornar a fila prioritariamente working!; logger para tracking)
+          if (p.active && !p.trabalhando) {
+            // Só vale fechar se não for working
+            await window.electronAPI.deactivate(p.nome);
+            closedIdle++;
+            // Aguardar deactivation real
+            await waitUntil(async () => {
+              const stCur = await window.electronAPI.getStatus();
+              const cur = (stCur.perfis || []).find(x => x.nome === p.nome);
+              return !cur || !cur.active;
+            }, { timeoutMs: 35000, intervalMs: 450 });
+            continue; // Após fechar, tente na próxima iteração
+          }
+
+          // 1.c Se já está working, segue; senão, tenta abrir e working.
+          if (!p.active) {
+            // Ativar navegador (espera real, tracking/log)
+            await window.electronAPI.activate(p.nome);
+            await waitUntil(async () => {
+              const st2 = await window.electronAPI.getStatus();
+              const cur2 = (st2.perfis||[]).find(x => x.nome === p.nome);
+              return !!cur2 && cur2.active;
+            }, { timeoutMs: 60000, intervalMs: 400 });
+            await sleep(1000);
+          }
+
+          // -- Garante recursos DEPOIS de abrir (sentinela headroom)
+          await ensureResourcesOk({ minFreeMB: 2048 });
+
+          // 1.d Start work/MODO ATENDIMENTO, só agora
+          let worked = false;
+          if (!p.trabalhando) {
+            await window.electronAPI.startWork(p.nome);
+            worked = await waitUntil(async () => {
+              const st3 = await window.electronAPI.getStatus();
+              const cur3 = (st3.perfis||[]).find(x => x.nome === p.nome);
+              return cur3 && cur3.trabalhando;
+            }, { timeoutMs: 40000, intervalMs: 400 });
+          } else {
+            worked = true;
+          }
+
+          // Se conseguiu working, prossegue. Se não, fecha o browser para liberar slot!
+          if (!worked) {
+            await window.electronAPI.deactivate(p.nome);
+            closedIdle++;
+            await waitUntil(async () => {
+              const stCur = await window.electronAPI.getStatus();
+              const cur = (stCur.perfis || []).find(x => x.nome === p.nome);
+              return !cur || !cur.active;
+            }, { timeoutMs: 35000, intervalMs: 450 });
+            continue;
+          }
+
+          // 1.e Atualiza progress na UI (opcional)
+          if (startBtn) startBtn.textContent = `Iniciando... (${i+1}/${perfis.length})`;
+          // RESINCRONIZA perfis para garantir view sempre up to date
+          st = await window.electronAPI.getStatus();
+          perfis = st?.perfis || [];
+        }
+
+        // Passo FINAL: mensagem de progresso
+        if (closedIdle > 0) {
+          alert(`Abertura inteligente: ${closedIdle} navegadores idle foram fechados para dar prioridade aos perfis working. Só contas working permanecem abertas.`);
+        }
+
+      } catch (e) {
+        alert('Falha na abertura inteligente: ' + (e && e.message || e));
+      } finally {
+        if (startBtn) { 
+          startBtn.disabled = false; 
+          startBtn.style.opacity = ''; 
+          startBtn.style.cursor = ''; 
+          startBtn.textContent = 'Abrir Todos e Iniciar 24h'; 
+        }
+        reloadPerfis();
+      }
+    }
+
     async function startAllSequential() {
       const startBtn = document.getElementById('startAllBtn');
       if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
@@ -1206,7 +1308,7 @@
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
       if (!btn) return;
-      btn.onclick = startAllSequential;
+      btn.onclick = startAllIntelligent;
     })();
 
     // Robe 24h (todos)
