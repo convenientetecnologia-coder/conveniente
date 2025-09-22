@@ -217,6 +217,57 @@
       try { return ERROR_TYPES.has(String(it && it.type || '')); } catch { return false; }
     }
 
+    // ===================== INÍCIO: BOOT STATE GLOBAL + POLLING =====================
+    window.isBootingGlobal = false;
+
+    async function pollBootState() {
+      try {
+        const r = await fetch('/api/boot/state').then(r=>r.json());
+        const bootActive = r && r.active === true;
+        window.isBootingGlobal = bootActive;
+        const modoEl = document.getElementById('mModo');
+        if (modoEl) {
+          if (bootActive) {
+            modoEl.textContent = 'BOOT';
+            modoEl.style.color = '#ffcbcb';
+            if (modoEl.parentElement) modoEl.parentElement.title = 'Modo: BOOT — init sequencial ultra militar.';
+          }
+        }
+        // Durante BOOT, bloqueie todos botões destrutivos
+        [
+          'startAllBtn',    // Abrir Todos e Iniciar 24h
+          'stopAllBtn',     // Fechar Todos
+          'robe24AllBtn',   // Robe 24h (todos)
+          'robeReleaseAllBtn', // Liberar Robe (todos)
+        ].forEach(id => {
+          const btn = document.getElementById(id);
+          if (btn) {
+            if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
+            btn.disabled = bootActive;
+            btn.style.opacity = bootActive ? '0.5' : '';
+            btn.textContent = (id === 'startAllBtn' && bootActive) ? 'BOOT em Progresso...' : btn.dataset.idleTxt || btn.textContent;
+          }
+        });
+        // Opcional: também bloquear "+ Nova Conta" e "Cidades" durante BOOT
+        ['addPerfilBtn','citiesCountBtn'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) {
+            el.disabled = bootActive;
+            el.style.opacity = bootActive ? '0.5' : '';
+          }
+        });
+        // Durante boot, bloqueie todos botões de ação individual (invocar humano, play robe etc.)
+        document.querySelectorAll('.perfil .btn, .perfil .icon-btn').forEach(b => {
+          b.disabled = bootActive || b.disabled; // mantém se já era disabled
+          if (bootActive) b.style.opacity = '0.5';
+          else if (!b.disabled) b.style.opacity = '';
+        });
+      } catch {}
+    }
+    setInterval(pollBootState, 2000);
+    pollBootState();
+    // ===================== FIM: BOOT STATE GLOBAL + POLLING =====================
+
     // MODAL: criar conta (com loading + mensagens no próprio modal)
     function showCriarContaModal({ cidades }) {
       const overlay = document.createElement('div');
@@ -544,6 +595,7 @@
         toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
         toggle.onclick = () => toggleBrowserUI(p, toggle);
         if (isFrozen) toggle.disabled = true;
+        if (window.isBootingGlobal) toggle.disabled = true;
         left.append(toggle);
 
         // NOVO: start 24h logo abaixo do toggle (com loading)
@@ -552,6 +604,7 @@
         btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
         btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
         if (isFrozen) btnStartLeft.disabled = true;
+        if (window.isBootingGlobal) btnStartLeft.disabled = true;
         left.append(btnStartLeft);
 
         // ------------------- RAM VISUAL (ADICIONADO) -------------------
@@ -617,6 +670,7 @@
         btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
         btnPlay.onclick = () => robePlayUI(p, btnPlay);
         if (isFrozen) btnPlay.disabled = true;
+        if (window.isBootingGlobal) btnPlay.disabled = true;
         titleRow.append(btnPlay);
 
         // Novo botão: Robe 24h (por conta)
@@ -626,6 +680,7 @@
         btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
         btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
         if (isFrozen) btnRobe24.disabled = true;
+        if (window.isBootingGlobal) btnRobe24.disabled = true;
         titleRow.append(btnRobe24);
 
         const subRow = document.createElement('div'); subRow.className='subRow';
@@ -657,6 +712,7 @@
           }
         };
         if (isFrozen) btnCookies.disabled = true;
+        if (window.isBootingGlobal) btnCookies.disabled = true;
         // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
 
         const btnCfg = document.createElement('button');
@@ -665,6 +721,7 @@
         btnCfg.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm0-6 2.2 1.6 2.6-.6 1.1 2.5 2.6.6-.2 2.7 2 1.8-2 1.8.2 2.7-2.6.6-1.1 2.5-2.6-.6L12 22l-2.2-1.6-2.6.6-1.1-2.5-2.6-.6.2-2.7-2-1.8 2-1.8-.2-2.7 2.6-.6 1.1-2.5 2.6.6L12 2.5Z"/></svg><span>Configurar</span>`;
         btnCfg.onclick = () => showConfigPerfilModal({ perfil: p, onClose: reloadPerfis });
         if (isFrozen) btnCfg.disabled = true;
+        if (window.isBootingGlobal) btnCfg.disabled = true;
 
         // Botão Arquivo/Log por conta - alterado para ponto se issuesCount > 0
         const btnLog = document.createElement('button');
@@ -673,6 +730,7 @@
         btnLog.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm9 0v5h5"/></svg><span>Arquivo</span>${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
         btnLog.onclick = () => showIssuesModal(p.nome);
         if (isFrozen) btnLog.disabled = true;
+        if (window.isBootingGlobal) btnLog.disabled = true;
 
         // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
         if (p.humanControl) {
@@ -692,6 +750,7 @@
             finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
           };
           if (isFrozen) btnResume.disabled = true;
+          if (window.isBootingGlobal) btnResume.disabled = true;
           right.append(btnCookies, btnResume, btnCfg, btnLog);
         } else {
           // Botão “Invocar Humano” padrão
@@ -701,6 +760,7 @@
           btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
           btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
           if (isFrozen) btnHuman.disabled = true;
+          if (window.isBootingGlobal) btnHuman.disabled = true;
           right.append(btnCookies, btnHuman, btnCfg, btnLog);
         }
         // ===========================================================
@@ -735,6 +795,7 @@
               btnResetMil.disabled = false; btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
             }
           };
+          if (window.isBootingGlobal) btnResetMil.disabled = true;
           right.append(btnResetMil);
         }
         // ----------------------------------------------------------------------------------
@@ -1314,7 +1375,19 @@
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
       if (!btn) return;
-      btn.onclick = startAllIntelligent;
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.style.opacity = '0.7';
+        btn.textContent = 'Iniciando BOOT...';
+        try {
+          const res = await fetch('/api/boot/start', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode: 'open_and_start' }) }).then(r=>r.json());
+          if (!res || !res.ok) alert('Falha ao iniciar BOOT: ' + (res && res.error || 'erro desconhecido'));
+          // O polling do estado de boot cuida do resto
+        } catch (e) {
+          alert('Falha ao iniciar BOOT: ' + (e && e.message || e));
+        }
+        // Botão só reabilitado após fim no polling
+      };
     })();
 
     // Robe 24h (todos)

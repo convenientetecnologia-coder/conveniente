@@ -7,9 +7,21 @@ const WORKER_WATCHDOG_TIMEOUT_MS = 8000;
 
 // === MILITARY WATCHDOG (restart worker if nonresponsive) ===
 let _wd = { timer: null, failCount: 0 };
+
+// === WATCHDOG SUSPENSION STATE ===
+let watchdogSuspendedUntil = 0;
+
+function isWatchdogSuspended() {
+  return Date.now() < watchdogSuspendedUntil;
+}
+
 function startWatchdog() {
   if (_wd.timer) return;
   _wd.timer = setInterval(async () => {
+    if (isWatchdogSuspended()) {
+      try { console.warn('[WATCHDOG] suspended by BOOT (não atua neste ciclo)'); } catch{}
+      return;
+    }
     try {
       if (!workerChild) return; // sem child no momento (respawn já cuida)
       const r = await sendWorkerCommand('get-status', {}, { timeoutMs: WORKER_WATCHDOG_TIMEOUT_MS }).catch(() => null);
@@ -27,6 +39,17 @@ function startWatchdog() {
   }, 5000);
 }
 // === END WATCHDOG ===
+
+// === WATCHDOG SUSPEND/RESUME HELPERS ===
+function suspendWatchdogFor(ms) {
+  watchdogSuspendedUntil = Date.now() + ms;
+}
+function clearWatchdogSuspension() {
+  watchdogSuspendedUntil = 0;
+}
+function isWatchdogCurrentlySuspended() {
+  return isWatchdogSuspended();
+}
 
 let workerChild = null;
 let isQuitting = false;
@@ -122,5 +145,8 @@ function killWorker() {
 module.exports = {
   fork: forkWorker,
   sendWorkerCommand,
-  kill: killWorker
+  kill: killWorker,
+  suspendWatchdogFor,
+  clearWatchdogSuspension,
+  isWatchdogCurrentlySuspended
 };
