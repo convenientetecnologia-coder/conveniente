@@ -1512,6 +1512,8 @@ const handlers = {
   async ['robe-play']({ nome }) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) 
+      return { ok: false, error: 'account_is_frozen' };
 
     // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
     if (ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
@@ -2099,6 +2101,25 @@ async function nurseTick() {
         continue;
       }
     }
+    // ===== PATCH ULTRA MILITAR: DETECTA FB/MESSENGER TEMP BLOCK E CONGELA 2H =====
+    try {
+      // Caminho: dados/perfis/NOME/issues.json
+      const issuesPath = path.join(perfisDir, nome, 'issues.json');
+      const arr = readJsonFile(issuesPath, []);
+      const now15min = Date.now() - 15 * 60 * 1000;
+      const recentes = arr.filter(it => it.ts > now15min);
+      const nBlocked = recentes.filter(it => it.type === 'virtus_blocked').length;
+      const nNoComposer = recentes.filter(it => it.type === 'virtus_no_composer').length;
+      if (nBlocked >= 3 || nNoComposer >= 2) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        const frozenTime = 2 * 60 * 60 * 1000; // 2h
+        robeMeta[nome].frozenUntil = Date.now() + frozenTime;
+        issues.append(nome, 'mil_action', 'frozen_2h: messenger_temp_block').catch(()=>{});
+        await ensureFrozenShutdown(nome, 'fb_temp_block');
+        continue;
+      }
+    } catch {}
+    // ===========================================================================
 
     if (want.active === true && !ctrl) {
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
@@ -2154,6 +2175,12 @@ setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // PATCH: intercepta robeHelper.startRobe para bloquear e congelar militarmente se manifest ausente
 const _startRobeOrig = robeHelper.startRobe;
 robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
+  // Guard: impedir início do Robe em perfis congelados
+  if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
+    await reportAction(nome, 'robe_error', 'block robe start: frozen');
+    return { ok: false, error: 'frozen' };
+  }
+
   // GUARD: antifila infinito, antiflood militar se manifest ausente
   let manifest;
   try { manifest = readManifest(nome); } catch(e){}
