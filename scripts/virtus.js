@@ -184,7 +184,55 @@ async function garantirMarketplace(page) {
   if (!header.toLowerCase().includes('marketplace')) throw new Error('Não está no Marketplace!');
 }
 
-// ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
+// === DETECÇÃO DOM: bloqueio global do Messenger (home/qualquer view) ===
+async function detectGlobalTempBlock(page) {
+  try {
+    return await page.evaluate(() => {
+      const takeText = (el) => (el && (el.innerText || el.textContent || '') || '').trim();
+      const haystack = [];
+
+      // Varre alguns nós com texto relevantes
+      const nodes = Array.from(document.querySelectorAll('h1, h2, span, div[role="alert"], [aria-label]')).slice(0, 300);
+      for (const el of nodes) {
+        const t = takeText(el);
+        if (t) haystack.push(t);
+        const al = el.getAttribute && el.getAttribute('aria-label');
+        if (al) haystack.push(al.trim());
+      }
+      const all = haystack.join('\n').toLowerCase();
+
+      // Regra PT-BR/EN
+      const br1 = /voc[eê]\s+est[aá]\s+bloquead[ao]\s+temporariament[eo]/i;
+      const br2 = /bloqueamos\s+temporariamente\s+sua\s+capacidade\s+de\s+usar\s+o\s+recurso/i;
+      const brRec = /recarregar p[aá]gina/i;
+      const en1 = /you['’]re\s+temporarily\s+blocked/i;
+      const en2 = /we['’]ve\s+temporarily\s+restricted|we\s+temporarily\s+restricted/i;
+      const en3 = /\btemporarily\s+blocked\b/i;
+
+      if (br1.test(all) || br2.test(all) || en1.test(all) || en2.test(all) || en3.test(all)) return true;
+      // BTN extra
+      const reloadBtn = document.querySelector('[aria-label*="Recarregar"]');
+      if (reloadBtn && brRec.test(all)) return true;
+
+      return false;
+    });
+  } catch { return false; }
+}
+
+// Guard+log (com throttling) — evita flood issues virtus_global_blocked
+let _lastGlobalBlockAt = 0;
+async function checkAndLogGlobalBlock(page, nome) {
+  try {
+    const blocked = await detectGlobalTempBlock(page);
+    if (!blocked) return false;
+    const now = Date.now();
+    if ((now - _lastGlobalBlockAt) > 10 * 60 * 1000) { // 1 log por 10min
+      await logIssue(nome, 'virtus_global_blocked', 'Global temp block detectado (home/DOM).');
+      _lastGlobalBlockAt = now;
+    }
+    return true;
+  } catch { return false; }
+}
 
 /**
  * GUARD: manter top chats always visible to avoid drifting out of viewport.
@@ -1033,6 +1081,15 @@ function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
+      // Checagem DOM recorrente durante operação (sem navegar à home – só verifica DOM já carregado)
+      try {
+        const gblocked = await checkAndLogGlobalBlock(p, nome);
+        if (gblocked) {
+          log('Bloqueio global (DOM) detectado em operação. Pausando Virtus, Nurse irá congelar.');
+          return; // Nurse cuida do ciclo militar
+        }
+      } catch {}
+
       // === RAM — monitoramento e shutdown individual por perfil ===
       let ramMB = 0;
       try { ramMB = 0; } catch {}
@@ -1134,6 +1191,17 @@ function startVirtus(browser, nome, robeMeta = {}) {
       try {
         const p = await ensurePage();
         if (!p) { await sleep(2500); continue; }
+        // 1) Checa bloqueio DOM ANTES de ir para o Marketplace!
+        try {
+          await p.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          await sleep(800);
+          const gblocked = await checkAndLogGlobalBlock(p, nome);
+          if (gblocked) {
+            log('Bloqueio global (DOM) detectado. Pausando Virtus e aguardando NURSE congelar a conta.');
+            return; // runner não arma timers; nurseTick cuidará do congelamento
+          }
+        } catch {}
+
         if (p.url() === 'about:blank' || !p.url().includes('/marketplace')) {
           try {
             await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded' });
