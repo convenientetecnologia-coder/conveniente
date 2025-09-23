@@ -16,6 +16,9 @@ const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const pidusage = require('pidusage');
 const psList = require('ps-list');
 
+// Worker start timestamp (grace windows)
+const WORKER_START_AT = Date.now();
+
 // ===== PATCH MILITAR: BLOCO AUTO-ADAPTATIVO autoMode/sys/global =====
 const os = require('os');
 const AUTO_CFG = {
@@ -130,7 +133,7 @@ async function stabilizeProfileAtomically(nome, opts = {}) {
     const page = pages && pages[0] ? pages[0] : null;
     if (!page) throw new Error('no_page');
     const rdy = await require('./browser.js').ensureMessengerMarketplaceReady(ctrl.browser, nome, {
-      gotoTimeoutMs: 30000, readyTimeoutMs: 40000, reloadTimeoutMs: 15000, allowReloadOnce: true
+      gotoTimeoutMs: 45000, readyTimeoutMs: 45000, reloadTimeoutMs: 15000, allowReloadOnce: true
     });
 
     if (!rdy || !rdy.ok) {
@@ -144,9 +147,7 @@ async function stabilizeProfileAtomically(nome, opts = {}) {
         return { ok: false, code: 'frozen' };
       }
       if (rdy && (rdy.code === 'fatal' || rdy.code === 'exception')) {
-        await reportAction(nome, 'nurse_kill', `boot_atomic_fatal: ${(rdy.err||rdy.code)}`);
-        await handlers.deactivate({ nome, reason: 'boot_atomic_fatal', policy: 'preserveDesired' });
-        setBootState(nome, { stage: 'fatal_kill', state: 'retry_later', lastError: rdy.err||rdy.code });
+        setBootState(nome, { stage: 'fatal_kill', state: 'retry_later', lastError: rdy.err || rdy.code });
         return { ok: false, code: 'retry_later' };
       }
       // erro intermediário: loga e segue
@@ -156,8 +157,6 @@ async function stabilizeProfileAtomically(nome, opts = {}) {
     }
   } catch (e) {
     const msg = (e && e.message) || String(e);
-    await reportAction(nome, 'nurse_kill', `boot_atomic_exception: ${msg}`);
-    await handlers.deactivate({ nome, reason: 'boot_atomic_exception', policy: 'preserveDesired' });
     setBootState(nome, { stage: 'fatal_kill', state: 'retry_later', lastError: msg });
     return { ok: false, code: 'retry_later' };
   }
@@ -327,7 +326,12 @@ async function assertFullActivity() {
   const now = Date.now();
   if ((now - healer.lastFullAssertAt) < SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS) return;
   healer.lastFullAssertAt = now;
-  try { await killStrayChromes(); } catch {}
+  // Grace window pós-boot atômico: não chamar killStrayChromes nos primeiros ~2 ciclos (~3min)
+  if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 180000) {
+    try { await reportAction('system', 'mil_action', 'block_kill_circuit_during_grace_window'); } catch {}
+  } else {
+    try { await killStrayChromes(); } catch {}
+  }
   
   if (countActive() === 0) {
     const need = Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 1);
@@ -342,6 +346,10 @@ async function assertFullActivity() {
 // PANIC MODE: drop parcial + bootstrap mínimo e agressivo
 async function panicMode() {
   if (isBootingAtomic()) { bootLog('BLOCKED panicMode'); return; }
+  if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 60*60*1000) {
+    try { await milLog('mil_action', 'panic_skip_post_boot'); } catch {}
+    return;
+  }
   await milLog('mil_action', `panic_mode_start: light since=${(Date.now()-(healer.lightEnterAt||autoMode.since||Date.now()))}ms cause=${healer.lastLightCause}`);
   try { robeQueue.clear(); } catch {}
   const nomesAtivos = Array.from(controllers.keys());
@@ -364,7 +372,7 @@ async function killPids(pids = []) {
 
 let _lastKillStrayRunAt = 0;
 async function killStrayChromes() {
-  if (isBootingAtomic()) { bootLog('BLOCKED killStrayChromes'); return; }
+  if (isBootingAtomic() || ((Date.now() - WORKER_START_AT) < 180000)) { bootLog('BLOCKED killStrayChromes by BOOT or startup grace'); try { await issues.append('system', 'mil_action', 'block_kill_circuit_during_grace_window'); } catch {} return; }
   try {
     if (inflightLaunches > 0) {
       const now = Date.now();
@@ -978,6 +986,12 @@ async function ramCpuMonitorTick() {
 
         if (IN_GUARD) return;
 
+        // Grace window: não avaliar breakers nos 10min pós-boot atômico ou 5min pós-ativação
+        if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 10*60*1000 || (Date.now() - (robeMeta[nome]?.activatedAt||0)) < 5*60*1000) {
+          try { await reportAction(nome, 'mil_action', 'block_ram_cpu_breaker_grace_window'); } catch {}
+          return; // skip breaker
+        }
+
         // Atualiza histórico CPU breaker persistente
         if (typeof robeMeta[nome].cpuPercent === "number") {
           // PATCH MILITAR: histórico persistente por perfil para CPU
@@ -1022,6 +1036,20 @@ async function ramCpuMonitorTick() {
       const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
       if (ramMB == null) continue;
 
+      // Warn apenas se RAM muito alta, sem kill
+      if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < AUTO_CFG.RAM_KILL_MB) {
+        if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
+          try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
+          robeMeta[nome].lastWarn = Date.now();
+        }
+      }
+
+      // Grace window: não avaliar killers nos 10min pós-boot atômico ou 5min pós-ativação
+      if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 10*60*1000 || (Date.now() - (robeMeta[nome]?.activatedAt||0)) < 5*60*1000) {
+        try { await reportAction(nome, 'mil_action', 'block_ram_cpu_breaker_grace_window'); } catch {}
+        continue; // skip breaker (mantém só warns acima)
+      }
+
       // PATCH MILITAR: nunca suicidar navegador por pico de boot/start/post,
       // só mata leak persistente e nunca perfil único.
       const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
@@ -1032,14 +1060,6 @@ async function ramCpuMonitorTick() {
       const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
       hist.push({ t: Date.now(), mb: ramMB });
       while (hist.length > 6) hist.shift();
-
-      // Warn apenas se RAM muito alta, sem kill
-      if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < AUTO_CFG.RAM_KILL_MB) {
-        if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
-          try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
-          robeMeta[nome].lastWarn = Date.now();
-        }
-      }
 
       // **Agora só KILL se leak comprovado**
       if (hist.length >= 5) {
@@ -1435,7 +1455,7 @@ function resolveChromeUserDataRoot() {
     const la = process.env.LOCALAPPDATA;
     if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
     const os = require('os');
-    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+    return path.join(os.homedir(), 'AppData', Local, 'Google', 'Chrome', 'User Data');
   }
   const os = require('os');
   return path.join(os.homedir(), '.config', 'google-chrome');
@@ -1919,8 +1939,10 @@ const handlers = {
       for (const nome of BOOT_ATOMIC.reopenQueue) {
          setBootState(nome, { stage: 'reopen_try', state: 'retrying' });
          const res = await stabilizeProfileAtomically(nome);
-         if (!res.ok) setBootState(nome, { stage: 'reopen_fail', state: 'fail', lastError: res.code });
-         else setBootState(nome, { stage: 'ok', state: 'ok' });
+         if (!res.ok) {
+           setBootState(nome, { stage: 'reopen_fail', state: 'fail', lastError: res.code });
+           try { await handlers.deactivate({ nome, reason: 'boot_atomic_final_fail', policy: 'forceDuringBoot' }); } catch {}
+         } else setBootState(nome, { stage: 'ok', state: 'ok' });
          await snapshotStatusAndWrite();
       }
       BOOT_ATOMIC.reopenDone = true;
@@ -2269,7 +2291,7 @@ setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.
 // ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
   INTERVAL_MS: 5000,
-  PAGE_EVAL_TIMEOUT_MS: 1500,
+  PAGE_EVAL_TIMEOUT_MS: 3000,
   ZOMBIE_STRIKES: 3
 };
 const nurseState = new Map(); // nome => { strikes: number, lastOk: ts }
@@ -2277,7 +2299,7 @@ const nurseState = new Map(); // nome => { strikes: number, lastOk: ts }
 // === ULTRA RECOVERY (militar) ===
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,                   // no máximo 2 reloads curtos por página zumbi
-  RELOAD_TIMEOUT_MS: 4500,          // timeout curto para reload
+  RELOAD_TIMEOUT_MS: 8000,          // timeout curto para reload
   RELOAD_POST_WAIT_MS: 250,         // pequena espera pós-reload
   REOPEN_DELAY_SHORT_MS: 4000,      // reabrir "já já" (nurse_kill, no_pages)
   REOPEN_DELAY_RAMCPU_MS: 4*60*1000, // reabrir após 4–6min em RAM/CPU kill (usaremos também jitter)
@@ -2356,25 +2378,6 @@ async function nurseTick() {
         continue;
       }
     }
-    // ===== PATCH ULTRA MILITAR: DETECTA FB/MESSENGER TEMP BLOCK E CONGELA 2H =====
-    try {
-      // Caminho: dados/perfis/NOME/issues.json
-      const issuesPath = path.join(perfisDir, nome, 'issues.json');
-      const arr = readJsonFile(issuesPath, []);
-      const now15min = Date.now() - 15 * 60 * 1000;
-      const recentes = arr.filter(it => it.ts > now15min);
-      const nBlocked = recentes.filter(it => it.type === 'virtus_blocked').length;
-      const nNoComposer = recentes.filter(it => it.type === 'virtus_no_composer').length;
-      if (nBlocked >= 3 || nNoComposer >= 2) {
-        robeMeta[nome] = robeMeta[nome] || {};
-        const frozenTime = 2 * 60 * 60 * 1000; // 2h
-        robeMeta[nome].frozenUntil = Date.now() + frozenTime;
-        issues.append(nome, 'mil_action', 'frozen_2h: messenger_temp_block').catch(()=>{});
-        await ensureFrozenShutdown(nome, 'fb_temp_block');
-        continue;
-      }
-    } catch {}
-    // ===========================================================================
 
     if (want.active === true && !ctrl) {
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
@@ -2391,16 +2394,56 @@ async function nurseTick() {
       continue;
     }
     const p0 = pages[0];
+
+    // DETECÇÃO DE BLOQUEIO TEMPORÁRIO (virtus_blocked/no_composer) COM CRITÉRIO E REVALIDAÇÃO
+    try {
+      const issuesPath = path.join(perfisDir, nome, 'issues.json');
+      const arr = readJsonFile(issuesPath, []);
+      const now15min = Date.now() - 15 * 60 * 1000;
+      const recentes = arr.filter(it => it.ts > now15min);
+      const nBlocked = recentes.filter(it => it.type === 'virtus_blocked').length;
+      const nNoComposer = recentes.filter(it => it.type === 'virtus_no_composer').length;
+
+      const now90min = Date.now() - (90 * 60 * 1000);
+      if ((robeMeta[nome]?.activatedAt || 0) < now90min && nBlocked >= 5 && nNoComposer >= 4) {
+        // Antes de congelar, revalida
+        let shouldFreeze = true;
+        try {
+          const okDom = await pageReadyBasic(p0);
+          if (okDom) {
+            const waitForComposerFn = require('./browser.js').waitForComposer;
+            if (typeof waitForComposerFn === 'function') {
+              const hasComposer = await waitForComposerFn(p0, 3500);
+              shouldFreeze = !hasComposer;
+            }
+          }
+        } catch {}
+        if (shouldFreeze) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].frozenUntil = Date.now() + 2*60*60*1000;
+          issues.append(nome, 'mil_action', 'frozen_2h: messenger_temp_block').catch(()=>{});
+          await ensureFrozenShutdown(nome, 'fb_temp_block');
+          continue;
+        } else {
+          issues.append(nome, 'mil_action', 'skip_freeze_revalidated_ok').catch(()=>{});
+        }
+      }
+    } catch {}
+
     let healthy = await pageReadyBasic(p0);
     if (!healthy) {
       healthy = await tryReloadShort(p0, nome, 1);
       if (!healthy) {
         healthy = await tryReloadShort(p0, nome, 2);
+        // Se ativado há menos de 10min, tente um 3º reload
+        if (!healthy && robeMeta[nome]?.activatedAt && (Date.now() - robeMeta[nome].activatedAt) < 600000) {
+          healthy = await tryReloadShort(p0, nome, 3);
+        }
       }
       if (healthy) {
         await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
       } else {
-        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
+        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após reloads — rollback preserveDesired');
         try { registerFailure(nome, 'zombie'); } catch {}
         await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
