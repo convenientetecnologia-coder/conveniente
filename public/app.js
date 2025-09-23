@@ -25,9 +25,6 @@ const api = {
   robesPause24hAll:    ()      => fetch('/api/robes/pause-24h-all',{method:'POST'}).then(r=>r.json()),
   robesReleaseAll:     ()      => fetch('/api/robes/release-all',{method:'POST'}).then(r=>r.json()),
   resumeHuman:         (nome)  => fetch(`/api/perfis/${encodeURIComponent(nome)}/human-resume`, { method: 'POST' }).then(r=>r.json()),
-  bootStart:           (payload) => fetch('/api/boot/start', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(payload || {}) }).then(r=>r.json()),
-  bootState:           ()        => fetch('/api/boot/state').then(r=>r.json()),
-  bootCancel:          ()        => fetch('/api/boot/cancel', { method: 'POST' }).then(r=>r.json()),
 };
 
 // Expor como window.electronAPI para compatibilidade com o index.html atual

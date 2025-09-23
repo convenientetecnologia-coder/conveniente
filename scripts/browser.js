@@ -1086,99 +1086,6 @@ async function invocarHumano(browser, nome) {
   }
 }
 
-// ====== Estabilização ultra robusta do Messenger/Marketplace para boot atômico ======
-
-async function waitMessengerDomReady(page, { timeout = 35000 } = {}) {
-  const start = Date.now();
-  while ((Date.now() - start) < timeout) {
-    try {
-      const headerOk = await page.$('header span, header h1');
-      const gridOk = await page.$('div[role="grid"], div[role="rowgroup"]');
-      const anchorOk = await page.$('a[href^="/marketplace/t/"]');
-      if (headerOk && (gridOk || anchorOk)) return true;
-    } catch {}
-    await sleep(250);
-  }
-  return false;
-}
-
-async function scrollChatsToTopLite(page) {
-  try {
-    await page.evaluate(() => {
-      // Força scrollTop sequencial em grids virtuais
-      let grid = document.querySelector('div[role="grid"]') ||
-                 document.querySelector('div[role="rowgroup"]') ||
-                 document.querySelector('div.x78zum5.xdt5ytf');
-      if (!grid) grid = document.body;
-      grid.scrollTop = 0;
-      for (let i = 0, node = grid; i < 4 && node; i++, node = node.parentElement)
-        if (node.scrollHeight > node.clientHeight + 30) node.scrollTop = 0;
-    });
-    await sleep(200);
-  } catch {}
-}
-
-async function detectGlobalTempBlock(page) {
-  try {
-    return await page.evaluate(() => {
-      const text = (node) => (node && (node.innerText || node.textContent || '') || '').trim().toLowerCase();
-      const nodes = Array.from(document.querySelectorAll('h1, h2, span, div[role="alert"], [aria-label]')).slice(0, 300);
-      const haystack = nodes.map(text).join('\n');
-      if (
-        haystack.includes('você está temporariamente bloqueado') ||
-        haystack.includes('bloqueamos temporariamente sua capacidade') ||
-        haystack.includes('temporarily blocked') ||
-        haystack.includes('temporarily restricted')
-      ) return true;
-      return false;
-    });
-  } catch { return false; }
-}
-
-async function ensureMessengerMarketplaceReady(browserOrPage, nome, {
-  gotoTimeoutMs = 30000,
-  readyTimeoutMs = 35000,
-  reloadTimeoutMs = 15000,
-  allowReloadOnce = true
-} = {}) {
-  const page = (browserOrPage.newPage ? (await browserOrPage.pages())[0] : browserOrPage);
-
-  if (!page) return { ok: false, code: 'no_page' };
-
-  try {
-    // Messenger home + resolve nonce/continuar
-    await page.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: gotoTimeoutMs }).catch(()=>{});
-    await sleep(600);
-    await resolveNonceIfPresent(page, { logPrefix: `[BOOT][${nome}][nonce]` });
-    await clickContinuarComo(page, { logPrefix: `[BOOT][${nome}][continuar]` });
-
-    // Messenger Marketplace
-    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: gotoTimeoutMs }).catch(()=>{});
-    let ready = await waitMessengerDomReady(page, { timeout: readyTimeoutMs });
-    if (!ready && allowReloadOnce) {
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: reloadTimeoutMs }).catch(()=>{});
-      await sleep(600);
-      ready = await waitMessengerDomReady(page, { timeout: readyTimeoutMs });
-    }
-    if (!ready) {
-      const blocked = await detectGlobalTempBlock(page);
-      if (blocked) return { ok: false, code: 'fb_temp_block' };
-      return { ok: false, code: 'no_dom' };
-    }
-
-    await scrollChatsToTopLite(page);
-
-    return { ok: true, code: 'ok' };
-  } catch(e) {
-    const msg = (e && e.message) || String(e);
-    if (/Protocol error|Target closed|disconnected/i.test(msg)) {
-      return { ok: false, code: 'fatal', err: msg };
-    }
-    return { ok: false, code: 'exception', err: msg };
-  }
-}
-
-// ====== EXPORTAÇÃO ===================================================
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1194,7 +1101,5 @@ module.exports = {
   forceCloseExtras: async function (browser) {
     if (!browser) return;
     try { await browser.forceCloseExtras(); } catch {}
-  },
-  // === ADICIONAR helper atômico:
-  ensureMessengerMarketplaceReady
+  }
 };

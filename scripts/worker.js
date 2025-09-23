@@ -16,9 +16,6 @@ const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const pidusage = require('pidusage');
 const psList = require('ps-list');
 
-// Worker start timestamp (grace windows)
-const WORKER_START_AT = Date.now();
-
 // ===== PATCH MILITAR: BLOCO AUTO-ADAPTATIVO autoMode/sys/global =====
 const os = require('os');
 const AUTO_CFG = {
@@ -35,145 +32,6 @@ const AUTO_CFG = {
   RAM_KILL_MB: 900,
   RAM_WARN_MB: 700
 };
-
-// BOOT SANCTUARY
-const BOOT = {
-  active: false,
-  startedAt: 0,
-  plan: [],
-  processList: [],
-  current: null,
-  opened: new Set(),
-  startedVirtus: new Set(),
-  guardUntil: 0,
-  suppressRobe: true,
-  suppressPruner: true
-};
-function beginBoot(lista) {
-  BOOT.active = true;
-  BOOT.startedAt = Date.now();
-  BOOT.plan = lista.slice();
-  BOOT.processList = lista.slice();
-  BOOT.opened.clear();
-  BOOT.startedVirtus.clear();
-  BOOT.guardUntil = 0;
-  BOOT.suppressRobe = true;
-  BOOT.suppressPruner = true;
-  bootLog('BOOT STARTED: perfis=' + BOOT.plan.join(','));
-}
-function endBoot(success) {
-  BOOT.active = false;
-  BOOT.guardUntil = 0;
-  BOOT.suppressRobe = false;
-  BOOT.suppressPruner = false;
-  bootLog('BOOT FINISHED: success=' + success + ', opened=' + Array.from(BOOT.opened).join(','));
-}
-function isBooting() { return BOOT.active === true; }
-function bootLog(msg) {
-  try { require('./issues.js').append('system', 'mil_action', '[BOOT] ' + msg); } catch {}
-}
-// Helper para checar recursos mínimos durante BOOT
-async function ensureResourcesOk({ minFreeMB }) {
-  const min = Number(minFreeMB || 0);
-  const timeoutMs = 10 * 60 * 1000; // 10min limite
-  const start = Date.now();
-  while (true) {
-    const freeMB = Math.round(os.freemem() / (1024 * 1024));
-    if (freeMB >= min) return true;
-    if (!isBooting()) return false;
-    if ((Date.now() - start) > timeoutMs) return false;
-    await new Promise(r => setTimeout(r, 1000));
-  }
-}
-
-// ==== BOOT ATOMIC ====
-const BOOT_ATOMIC = {
-  active: false,
-  startedAt: 0,
-  list: [],
-  idx: -1,
-  perProfile: new Map(), // nome => {state, attempts, lastError, stage, ts}
-  reopenQueue: [],
-  reopenDone: false
-};
-
-function setBootState(nome, patch) {
-  const cur = BOOT_ATOMIC.perProfile.get(nome) || { state: 'pending', attempts: 0, lastError: '', stage: 'idle', ts: Date.now() };
-  Object.assign(cur, patch || {}, { ts: Date.now() });
-  BOOT_ATOMIC.perProfile.set(nome, cur);
-}
-
-async function stabilizeProfileAtomically(nome, opts = {}) {
-  const ATTEMPTS = 1; // só um ciclo principal, reload dentro do helper
-  setBootState(nome, { stage: 'resources', state: 'pending' });
-  await ensureResourcesOk({ minFreeMB: OPEN_MIN_FREE_MB });
-  let ctrl = controllers.get(nome);
-
-  if (!ctrl) {
-    setBootState(nome, { stage: 'activating' });
-    const r = await activateOnce(nome, 'boot_atomic');
-    if (!r || !r.ok) {
-      setBootState(nome, { stage: 'activate_fail', state: 'fail', lastError: (r && r.error) || 'activate_failed' });
-      return { ok: false, code: 'activate_failed' };
-    }
-    const freeAfter = Math.round(require('os').freemem() / (1024*1024));
-    if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
-      await reportAction(nome, 'open_rollback_memory', `headroom=${freeAfter}MB`);
-      await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' });
-      setBootState(nome, { stage: 'rollback_headroom', state: 'fail', lastError: 'headroom_low' });
-      return { ok: false, code: 'headroom_low' };
-    }
-    ctrl = controllers.get(nome);
-  }
-
-  // Estabilização Messenger/Marketplace
-  try {
-    setBootState(nome, { stage: 'messenger_ready' });
-    const pages = await ctrl.browser.pages().catch(()=>[]);
-    const page = pages && pages[0] ? pages[0] : null;
-    if (!page) throw new Error('no_page');
-    const rdy = await require('./browser.js').ensureMessengerMarketplaceReady(ctrl.browser, nome, {
-      gotoTimeoutMs: 45000, readyTimeoutMs: 45000, reloadTimeoutMs: 15000, allowReloadOnce: true
-    });
-
-    if (!rdy || !rdy.ok) {
-      if (rdy && rdy.code === 'fb_temp_block') {
-        // congelar 2h
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].frozenUntil = Date.now() + 2*60*60*1000; // 2h
-        await reportAction(nome, 'mil_action', 'frozen_2h: fb_temp_block');
-        await ensureFrozenShutdown(nome, 'fb_temp_block');
-        setBootState(nome, { stage: 'frozen', state: 'frozen', lastError: 'fb_temp_block' });
-        return { ok: false, code: 'frozen' };
-      }
-      if (rdy && (rdy.code === 'fatal' || rdy.code === 'exception')) {
-        setBootState(nome, { stage: 'fatal_kill', state: 'retry_later', lastError: rdy.err || rdy.code });
-        return { ok: false, code: 'retry_later' };
-      }
-      // erro intermediário: loga e segue
-      await reportAction(nome, 'mil_action', `boot_atomic_intermediate_fail: ${(rdy && rdy.code) || 'no_dom'}`);
-      setBootState(nome, { stage: 'intermediate', state: 'fail', lastError: (rdy && rdy.code)||'no_dom' });
-      return { ok: false, code: 'intermediate' };
-    }
-  } catch (e) {
-    const msg = (e && e.message) || String(e);
-    setBootState(nome, { stage: 'fatal_kill', state: 'retry_later', lastError: msg });
-    return { ok: false, code: 'retry_later' };
-  }
-
-  // Ligar Virtus
-  setBootState(nome, { stage: 'virtus_start' });
-  const sw = await handlers.start_work({ nome });
-  if (!sw || !sw.ok) {
-    setBootState(nome, { stage: 'virtus_fail', state: 'fail', lastError: (sw && sw.error)||'virtus_start_failed' });
-    return { ok: false, code: 'virtus_start_failed' };
-  }
-
-  setBootState(nome, { stage: 'ok', state: 'ok' });
-  return { ok: true, code: 'ok' };
-}
-
-// FIM: entidades helpers BOOT_ATOMIC
 
 // APÓS o bloco do AUTO_CFG, adicione:
 const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
@@ -322,16 +180,10 @@ function clearLightEscalator() {
 }
 
 async function assertFullActivity() {
-  if (isBootingAtomic()) { bootLog('BLOCKED assertFullActivity'); return; }
   const now = Date.now();
   if ((now - healer.lastFullAssertAt) < SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS) return;
   healer.lastFullAssertAt = now;
-  // Grace window pós-boot atômico: não chamar killStrayChromes nos primeiros ~2 ciclos (~3min)
-  if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 180000) {
-    try { await reportAction('system', 'mil_action', 'block_kill_circuit_during_grace_window'); } catch {}
-  } else {
-    try { await killStrayChromes(); } catch {}
-  }
+  try { await killStrayChromes(); } catch {}
   
   if (countActive() === 0) {
     const need = Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 1);
@@ -345,11 +197,6 @@ async function assertFullActivity() {
 
 // PANIC MODE: drop parcial + bootstrap mínimo e agressivo
 async function panicMode() {
-  if (isBootingAtomic()) { bootLog('BLOCKED panicMode'); return; }
-  if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 60*60*1000) {
-    try { await milLog('mil_action', 'panic_skip_post_boot'); } catch {}
-    return;
-  }
   await milLog('mil_action', `panic_mode_start: light since=${(Date.now()-(healer.lightEnterAt||autoMode.since||Date.now()))}ms cause=${healer.lastLightCause}`);
   try { robeQueue.clear(); } catch {}
   const nomesAtivos = Array.from(controllers.keys());
@@ -370,16 +217,8 @@ async function killPids(pids = []) {
   }
 }
 
-let _lastKillStrayRunAt = 0;
 async function killStrayChromes() {
-  if (isBootingAtomic() || ((Date.now() - WORKER_START_AT) < 180000)) { bootLog('BLOCKED killStrayChromes by BOOT or startup grace'); try { await issues.append('system', 'mil_action', 'block_kill_circuit_during_grace_window'); } catch {} return; }
   try {
-    if (inflightLaunches > 0) {
-      const now = Date.now();
-      if ((now - _lastKillStrayRunAt) < 30000) return; // throttle 30s durante inflight
-    }
-    _lastKillStrayRunAt = Date.now();
-
     const perfisArr = loadPerfisJson();
     const nomeByDir = {};
     for (const p of perfisArr) {
@@ -400,20 +239,6 @@ async function killStrayChromes() {
     }
     for (const [nome, pidList] of Object.entries(group)) {
       if (!pidList || !pidList.length) continue;
-      // PATCH: NUNCA matar se está activationLocks em progresso OU launch recente (<5min)
-      if (activationLocks.has(nome)) {
-        await milLog('mil_action', `stray_kill_skip_activation_in_progress: ${nome} pids=${pidList.join(',')}`);
-        continue;
-      }
-      const recentlyActivated = robeMeta[nome]?.activatedAt && (Date.now() - robeMeta[nome].activatedAt < 5 * 60 * 1000);
-      if (recentlyActivated) {
-        await milLog('mil_action', `stray_kill_skip_recently_activated: ${nome} pids=${pidList.join(',')}`);
-        continue;
-      }
-      if (inflightLaunches > 0) {
-        await milLog('mil_action', `stray_kill_skip_inflight_global: ${nome} pids=${pidList.join(',')}`);
-        continue;
-      }
       await milLog('mil_action', `stray_kill: ${nome} pids=${pidList.join(',')}`);
       await killPids(pidList);
     }
@@ -588,32 +413,6 @@ const activating = new Set();
 // ======= INÍCIO: LOCK GLOBAL DE ATIVAÇÃO (ULTRA ROBUSTO) =======
 const activationLocks = new Map(); // nome => Promise em andamento
 
-// PASSO 1.1: Semáforo/global pool de launch (MAX_CONCURRENT_LAUNCHES)
-function getMaxConcurrentLaunches() { return isBooting() ? 1 : 2; }
-let inflightLaunches = 0;
-const launchQueue = [];
-function withLaunchSlot(fn) {
-  return new Promise((resolve, reject) => {
-    function tryLaunch() {
-      if (inflightLaunches < getMaxConcurrentLaunches()) {
-        inflightLaunches++;
-        Promise.resolve().then(() => fn())
-          .then((result) => { inflightLaunches--; resolve(result); nextLaunch(); })
-          .catch((e) => { inflightLaunches--; reject(e); nextLaunch(); });
-      } else {
-        launchQueue.push(tryLaunch);
-      }
-    }
-    function nextLaunch() {
-      if (launchQueue.length > 0 && inflightLaunches < getMaxConcurrentLaunches()) {
-        const next = launchQueue.shift();
-        next && next();
-      }
-    }
-    tryLaunch();
-  });
-}
-
 async function activateOnce(nome, source = '') {
 if (!nome) return { ok: false, error: 'Nome ausente' };
 // Já está ativo?
@@ -647,12 +446,12 @@ if (!manifest) throw new Error('Perfil não encontrado');
 {
   const freeMB = Math.round(os.freemem() / (1024*1024));
   if (freeMB <= OPEN_MIN_FREE_MB) {
-    await reportAction(nome, 'mem_block_activate', `RAM libre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
+    await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
     throw new Error('ram_insuficiente_para_ativar');
   }
 }
 
-const browser = await withLaunchSlot(() => browserHelper.openBrowser(manifest));
+const browser = await browserHelper.openBrowser(manifest);
 if (!browser || typeof browser.newPage !== 'function') {
 throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
 }
@@ -663,7 +462,7 @@ controllers.set(nome, { browser, virtus: null, robe: null, status: { active: tru
   const freeAfter = Math.round(os.freemem() / (1024*1024));
   if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
     await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
-    try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'forceDuringBoot' }); } catch {}
+    try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
     return { ok: false, error: 'headroom_below_min_after_open' };
   }
 }
@@ -674,8 +473,6 @@ robeMeta[nome].activatedAt = Date.now();
 robeMeta[nome].ramHist = [];
 robeMeta[nome].cpuHistory = [];
 robeMeta[nome].lastWarn = null;
-// RESET BACKOFF on success open (preemptive)
-try { robeMeta[nome].retryBackoffMs = 30000; } catch {}
 
 try { healer.lastProgressAt = Date.now(); } catch {}
 
@@ -816,7 +613,6 @@ async function closeExtraPages(browser, mainPage) {
 const _pruners = new Map(); // nome => pruneInterval
 
 function maybeStartPruneLoop(nome, browser, mainPage) {
-  if (isBootingAtomic()) { bootLog('BLOCKED maybeStartPruneLoop'); return; }
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
     try {
@@ -843,8 +639,6 @@ let ramMonitorInterval = null;
 // Monitora RAM/CPU globalmente a cada N segundos, cross-platform
 async function ramCpuMonitorTick() {
   const perfisArr = loadPerfisJson();
-  const IN_GUARD = isBootingAtomic();
-  if (IN_GUARD) { bootLog('BLOCKED ramCpuMonitorTick/all discipline'); }
   // Build lookup userDataDir -> nome
   const nomeByUserDir = {};
   for (const p of perfisArr) {
@@ -928,16 +722,14 @@ async function ramCpuMonitorTick() {
     }
 
     // === STRAY CHROME KILL (perfil sem controller) ===
-    if (!IN_GUARD) {
-      try {
-        for (const [nome, pids] of Object.entries(pidsByNome)) {
-          if (!controllers.has(nome) && Array.isArray(pids) && pids.length) {
-            await milLog('mil_action', `stray_detected: ${nome} pids=${pids.join(',')} — killing`);
-            await killPids(pids);
-          }
+    try {
+      for (const [nome, pids] of Object.entries(pidsByNome)) {
+        if (!controllers.has(nome) && Array.isArray(pids) && pids.length) {
+          await milLog('mil_action', `stray_detected: ${nome} pids=${pids.join(',')} — killing`);
+          await killPids(pids);
         }
-      } catch {}
-    }
+      }
+    } catch {}
 
     // Exemplo de debug: flag por env p/ troubleshooting de problemas de monitoramento
     if (process.env.METRICS_DEBUG === '1') {
@@ -984,14 +776,6 @@ async function ramCpuMonitorTick() {
           robeMeta[nome].cpuPercent = typeof somaCpu === "number" ? Math.round(somaCpu) : null;
         }
 
-        if (IN_GUARD) return;
-
-        // Grace window: não avaliar breakers nos 10min pós-boot atômico ou 5min pós-ativação
-        if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 10*60*1000 || (Date.now() - (robeMeta[nome]?.activatedAt||0)) < 5*60*1000) {
-          try { await reportAction(nome, 'mil_action', 'block_ram_cpu_breaker_grace_window'); } catch {}
-          return; // skip breaker
-        }
-
         // Atualiza histórico CPU breaker persistente
         if (typeof robeMeta[nome].cpuPercent === "number") {
           // PATCH MILITAR: histórico persistente por perfil para CPU
@@ -1031,58 +815,50 @@ async function ramCpuMonitorTick() {
   }
 
   // ===== PATCH MILITAR: RAM breaker inteligente por perfil =====
-  if (!IN_GUARD) {
-    for (const nome of Object.keys(robeMeta)) {
-      const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
-      if (ramMB == null) continue;
+  for (const nome of Object.keys(robeMeta)) {
+    const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
+    if (ramMB == null) continue;
 
-      // Warn apenas se RAM muito alta, sem kill
-      if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < AUTO_CFG.RAM_KILL_MB) {
-        if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
-          try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
-          robeMeta[nome].lastWarn = Date.now();
-        }
+    // PATCH MILITAR: nunca suicidar navegador por pico de boot/start/post,
+    // só mata leak persistente e nunca perfil único.
+    const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
+    if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue; // ignora <3min
+    if (vivos <= 1) continue; // nunca processa breaker se só 1 perfil trabalhando
+
+    // Histórico curto
+    const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
+    hist.push({ t: Date.now(), mb: ramMB });
+    while (hist.length > 6) hist.shift();
+
+    // Warn apenas se RAM muito alta, sem kill
+    if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < AUTO_CFG.RAM_KILL_MB) {
+      if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
+        try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
+        robeMeta[nome].lastWarn = Date.now();
       }
+    }
 
-      // Grace window: não avaliar killers nos 10min pós-boot atômico ou 5min pós-ativação
-      if ((Date.now() - (BOOT_ATOMIC.startedAt || 0)) < 10*60*1000 || (Date.now() - (robeMeta[nome]?.activatedAt||0)) < 5*60*1000) {
-        try { await reportAction(nome, 'mil_action', 'block_ram_cpu_breaker_grace_window'); } catch {}
-        continue; // skip breaker (mantém só warns acima)
+    // **Agora só KILL se leak comprovado**
+    if (hist.length >= 5) {
+      const allHigh = hist.slice(-5).every(h => h.mb >= AUTO_CFG.RAM_KILL_MB);
+      let slopeOK = false;
+      if (!allHigh) {
+        const A = hist[0], B = hist[hist.length-1];
+        const dMin = Math.max(0.5, (B.t - A.t)/60000);
+        const slope = (B.mb - A.mb) / dMin;
+        const avg = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
+        slopeOK = (slope > 50) && (avg > 800);
       }
+      // Só kill se comprovado leak real!
+      if (allHigh || slopeOK) {
+        // GUARD: Nunca realizar kill durante configuração — ctrl.configurando
+        const ctrl = controllers.get(nome);
+        if (ctrl && ctrl.configurando) return;
 
-      // PATCH MILITAR: nunca suicidar navegador por pico de boot/start/post,
-      // só mata leak persistente e nunca perfil único.
-      const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
-      if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue; // ignora <3min
-      if (vivos <= 1) continue; // nunca processa breaker se só 1 perfil trabalhando
-
-      // Histórico curto
-      const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
-      hist.push({ t: Date.now(), mb: ramMB });
-      while (hist.length > 6) hist.shift();
-
-      // **Agora só KILL se leak comprovado**
-      if (hist.length >= 5) {
-        const allHigh = hist.slice(-5).every(h => h.mb >= AUTO_CFG.RAM_KILL_MB);
-        let slopeOK = false;
-        if (!allHigh) {
-          const A = hist[0], B = hist[hist.length-1];
-          const dMin = Math.max(0.5, (B.t - A.t)/60000);
-          const slope = (B.mb - A.mb) / dMin;
-          const avg = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
-          slopeOK = (slope > 50) && (avg > 800);
-        }
-        // Só kill se comprovado leak real!
-        if (allHigh || slopeOK) {
-          // GUARD: Nunca realizar kill durante configuração — ctrl.configurando
-          const ctrl = controllers.get(nome);
-          if (ctrl && ctrl.configurando) return;
-
-          handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' })
-          .then(() => reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK})`))
-          .catch(()=>{});
-          // Não limpar hist; preserveDesired reabrirá mais tarde
-        }
+        handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' })
+        .then(() => reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK})`))
+        .catch(()=>{});
+        // Não limpar hist; preserveDesired reabrirá mais tarde
       }
     }
   }
@@ -1108,47 +884,45 @@ async function ramCpuMonitorTick() {
   autoMode.cpuEma = _ema(autoMode.cpuEma, cpuApprox, AUTO_CFG.EMA_ALPHA_CPU);
   autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
 
-  if (!IN_GUARD) {
-    const enterPressure = (freeMB < AUTO_CFG.MEM_ENTER_MB) ||
-      (autoMode.freeEmaMB != null && autoMode.freeEmaMB < AUTO_CFG.MEM_ENTER_MB) ||
-      (cpuApprox > AUTO_CFG.CPU_ENTER) ||
-      (autoMode.cpuEma != null && autoMode.cpuEma > (AUTO_CFG.CPU_ENTER - 3));
-    const exitPressure = (freeMB >= AUTO_CFG.MEM_EXIT_MB) &&
-      (autoMode.freeEmaMB != null && autoMode.freeEmaMB >= AUTO_CFG.MEM_EXIT_MB) &&
-      (cpuApprox <= AUTO_CFG.CPU_EXIT) &&
-      (autoMode.cpuEma != null && autoMode.cpuEma <= AUTO_CFG.CPU_EXIT);
+  const enterPressure = (freeMB < AUTO_CFG.MEM_ENTER_MB) ||
+    (autoMode.freeEmaMB != null && autoMode.freeEmaMB < AUTO_CFG.MEM_ENTER_MB) ||
+    (cpuApprox > AUTO_CFG.CPU_ENTER) ||
+    (autoMode.cpuEma != null && autoMode.cpuEma > (AUTO_CFG.CPU_ENTER - 3));
+  const exitPressure = (freeMB >= AUTO_CFG.MEM_EXIT_MB) &&
+    (autoMode.freeEmaMB != null && autoMode.freeEmaMB >= AUTO_CFG.MEM_EXIT_MB) &&
+    (cpuApprox <= AUTO_CFG.CPU_EXIT) &&
+    (autoMode.cpuEma != null && autoMode.cpuEma <= AUTO_CFG.CPU_EXIT);
 
-    if (enterPressure) { autoMode.hot++; autoMode.cool = 0; }
-    else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
-    else { autoMode.hot = 0; autoMode.cool = 0; }
+  if (enterPressure) { autoMode.hot++; autoMode.cool = 0; }
+  else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
+  else { autoMode.hot = 0; autoMode.cool = 0; }
 
-    // ENTER light
-    if (autoMode.mode === 'full' && autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
-      autoMode.mode = 'light';
-      autoMode.since = Date.now();
-      autoMode.reason = `CPU≈${cpuApprox}% (EMA≈${Math.round(autoMode.cpuEma||0)}%), freeMB=${freeMB} (EMA≈${Math.round(autoMode.freeEmaMB||0)})`;
-      autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
-      healer.lightEnterAt = autoMode.since;
-      healer.lightCycles++;
-      healer.lastLightCause = autoMode.reason;
-      await reportAction('system', 'auto_mode', 'enter_light: ' + autoMode.reason);
-      // HOOK: entrar no Modo Leve — pausa Virtus, limpa fila, derruba pesados/zumbis
-      await onEnterLightMode();
-      scheduleLightEscalator(); // NOVO
-    }
+  // ENTER light
+  if (autoMode.mode === 'full' && autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
+    autoMode.mode = 'light';
+    autoMode.since = Date.now();
+    autoMode.reason = `CPU≈${cpuApprox}% (EMA≈${Math.round(autoMode.cpuEma||0)}%), freeMB=${freeMB} (EMA≈${Math.round(autoMode.freeEmaMB||0)})`;
+    autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
+    healer.lightEnterAt = autoMode.since;
+    healer.lightCycles++;
+    healer.lastLightCause = autoMode.reason;
+    await reportAction('system', 'auto_mode', 'enter_light: ' + autoMode.reason);
+    // HOOK: entrar no Modo Leve — pausa Virtus, limpa fila, derruba pesados/zumbis
+    await onEnterLightMode();
+    scheduleLightEscalator(); // NOVO
+  }
 
-    // EXIT light
-    if (autoMode.mode === 'light' && autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
-      autoMode.mode = 'full';
-      autoMode.since = Date.now();
-      autoMode.reason = '';
-      healer.noProgressCycles = 0;
-      healer.lightAttempts = 0;
-      await reportAction('system', 'auto_mode', 'exit_light');
-      // HOOK: sair do Modo Leve
-      await onExitLightMode();
-      clearLightEscalator(); // NOVO
-    }
+  // EXIT light
+  if (autoMode.mode === 'light' && autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
+    autoMode.mode = 'full';
+    autoMode.since = Date.now();
+    autoMode.reason = '';
+    healer.noProgressCycles = 0;
+    healer.lightAttempts = 0;
+    await reportAction('system', 'auto_mode', 'exit_light');
+    // HOOK: sair do Modo Leve
+    await onExitLightMode();
+    clearLightEscalator(); // NOVO
   }
   // ===== FIM PATCH MILITAR: Avaliação/autoMode global =====
 
@@ -1177,7 +951,6 @@ setTimeout(ramCpuMonitorTick, 5000);
 
 // --------------- ROBE/TICK
 async function robeTickGlobal() {
-  if (isBootingAtomic()) { bootLog('BLOCKED robeTickGlobal'); return; }
   console.log('[WORKER][robeTickGlobal] Tick fila global, hora:', new Date().toLocaleString());
 
   // === PATCH autoMode Light: gate para robeTickGlobal ===
@@ -1327,7 +1100,6 @@ async function robeTickGlobal() {
         // INÍCIO ALTERAÇÃO 1: snapshotStatusAndWrite após religar Virtus
         if (virtusWasRunning) {
           ctrl.trabalhando = true;
-          try { robeMeta[nome].retryBackoffMs = 30000; } catch {}
           await snapshotStatusAndWrite();
         }
 
@@ -1414,28 +1186,10 @@ stopPruneLoop(nome);
 // Registrar falha e agendar reabertura curta
 try { registerFailure(nome, 'disconnected'); } catch {}
 try {
-  if (isBootingAtomic()) {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].reopenAt = null;
-    issues.append(nome, 'mil_action', 'reopen_suppressed_boot').catch(()=>{});
-    bootLog('BLOCKED browser_disconnected reopenAt');
-    return;
-  }
-  const d = readJsonFile(desiredPath, { perfis: {} });
-  const isDesiredActive = d.perfis?.[nome]?.active === true;
   robeMeta[nome] = robeMeta[nome] || {};
   if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
-    if (isDesiredActive) {
-      const baseBackoff = 30000, maxBackoff = 240000;
-      robeMeta[nome].retryBackoffMs = robeMeta[nome].retryBackoffMs || baseBackoff;
-      const delay = robeMeta[nome].retryBackoffMs;
-      robeMeta[nome].reopenAt = Date.now() + delay;
-      robeMeta[nome].retryBackoffMs = Math.min(robeMeta[nome].retryBackoffMs * 2, maxBackoff);
-      issues.append(nome, 'mil_action', `nurse_reopen_scheduled(disconnected)`).catch(()=>{});
-    } else {
-      robeMeta[nome].reopenAt = null; // NÃO agenda se desired.off!
-      issues.append(nome, 'mil_action', 'reopen_suppressed_desired_off').catch(()=>{});
-    }
+    robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+    issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
   }
 } catch {}
 
@@ -1455,14 +1209,10 @@ function resolveChromeUserDataRoot() {
     const la = process.env.LOCALAPPDATA;
     if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
     const os = require('os');
-    return path.join(os.homedir(), 'AppData', Local, 'Google', 'Chrome', 'User Data');
+    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
   }
   const os = require('os');
   return path.join(os.homedir(), '.config', 'google-chrome');
-}
-
-function isBootingAtomic() {
-  return BOOT_ATOMIC.active || BOOT.active;
 }
 
 const handlers = {
@@ -1516,22 +1266,14 @@ const handlers = {
   },
 
   async deactivate({ nome, reason, policy }) {
-  if (isBootingAtomic() && !(policy === 'preserveDesired' || policy === 'forceDuringBoot')) {
-    bootLog('BLOCKED deactivate (reason=' + (reason || '') + ')');
-    return { ok: true, skipped: true };
-  }
   const preserve = (policy === 'preserveDesired');
   let reopenDelayMs = 0;
   if (preserve) {
     try { registerFailure(nome, reason || 'deactivate_preserve'); } catch {}
-    // BACKOFF PROGRESSIVO
-    const baseBackoff = 30000, maxBackoff = 240000;
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].retryBackoffMs = robeMeta[nome].retryBackoffMs || baseBackoff;
-    reopenDelayMs = robeMeta[nome].retryBackoffMs;
     if (reason === 'ramKill' || reason === 'cpuKill') {
-      // para RAM/CPU, garante pelo menos 4min
-      reopenDelayMs = Math.max(reopenDelayMs, ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS);
+      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random()*120000);
+    } else {
+      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
     }
   }
   const ctrl = controllers.get(nome);
@@ -1540,9 +1282,6 @@ const handlers = {
       robeMeta[nome] = robeMeta[nome] || {};
       if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
         robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
-        // Dobra para próxima tentativa
-        const baseBackoff = 30000, maxBackoff = 240000;
-        robeMeta[nome].retryBackoffMs = Math.min((robeMeta[nome].retryBackoffMs || baseBackoff) * 2, maxBackoff);
         issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
       }
     }
@@ -1573,9 +1312,6 @@ const handlers = {
     robeMeta[nome] = robeMeta[nome] || {};
     if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
       robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
-      // Dobra para próxima tentativa
-      const baseBackoff = 30000, maxBackoff = 240000;
-      robeMeta[nome].retryBackoffMs = Math.min((robeMeta[nome].retryBackoffMs || baseBackoff) * 2, maxBackoff);
       issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
     }
   }
@@ -1619,7 +1355,6 @@ const handlers = {
     try {
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
       ctrl.trabalhando = true;
-      try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
 
       // === GARANTE PRUNE SÓ NESTE MOMENTO (PRODUÇÃO!) ===
       try {
@@ -1693,7 +1428,6 @@ const handlers = {
     // Religando Virtus APÓS a minimização/navegação
     ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
     ctrl.trabalhando = true;
-    try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
 
     try { unfreezeCooldownIfWorking(nome); } catch {}
 
@@ -1705,11 +1439,6 @@ const handlers = {
   async ['robe-play']({ nome }) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) 
-      return { ok: false, error: 'account_is_frozen' };
-
-    // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
-    if (ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
 
     // Zera cooldown no manifest
     try {
@@ -1824,7 +1553,6 @@ const handlers = {
             try {
               ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
               ctrl.trabalhando = true;
-              try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
             } catch (e) {}
           }
           robeUpdateMeta(nome, { emExecucao: false });
@@ -1899,171 +1627,73 @@ const handlers = {
       robes,
       robeQueue: robeQueueList,
       autoMode,
-      sys,
-      boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) },
-      bootAtomic: {
-        active: !!(BOOT_ATOMIC.active || BOOT.active),
-        startedAt: BOOT_ATOMIC.startedAt || BOOT.startedAt,
-        current: (BOOT_ATOMIC.idx >= 0 ? BOOT_ATOMIC.idx : null),
-        total: (BOOT_ATOMIC.list && BOOT_ATOMIC.list.length) || (loadPerfisJson().length),
-        perProfile: Array.from(BOOT_ATOMIC.perProfile.entries()).map(([nome, st]) => ({ nome, ...st })),
-        reopenQueue: Array.from(BOOT_ATOMIC.reopenQueue || []),
-        reopenDone: !!BOOT_ATOMIC.reopenDone
-      }
+      sys
     };
-  },
-
-  async ['boot-start'](payload) {
-  if (BOOT_ATOMIC.active || BOOT.active) return { ok: false, error: 'boot_already_active' };
-  // Set guards e state machine
-  BOOT_ATOMIC.active = true; BOOT.active = true;
-  BOOT_ATOMIC.startedAt = Date.now();
-  BOOT_ATOMIC.perProfile.clear();
-  BOOT_ATOMIC.reopenQueue = [];
-  BOOT_ATOMIC.reopenDone = false;
-  BOOT.suppressRobe = true;
-  BOOT.suppressPruner = true;
-  const perfisArr = loadPerfisJson();
-  const nomes = perfisArr.map(p => p.nome);
-  BOOT_ATOMIC.list = nomes;
-  for (let i=0;i<nomes.length;i++) {
-      BOOT_ATOMIC.idx = i;
-      const nome = nomes[i];
-      setBootState(nome, { state:'pending', stage:'opening' });
-      const res = await stabilizeProfileAtomically(nome);
-      if (!res.ok && (res.code === 'retry_later')) BOOT_ATOMIC.reopenQueue.push(nome);
-      await snapshotStatusAndWrite();
-  }
-  // tentativas de reopen no final
-  if (!BOOT_ATOMIC.reopenDone && BOOT_ATOMIC.reopenQueue.length) {
-      for (const nome of BOOT_ATOMIC.reopenQueue) {
-         setBootState(nome, { stage: 'reopen_try', state: 'retrying' });
-         const res = await stabilizeProfileAtomically(nome);
-         if (!res.ok) {
-           setBootState(nome, { stage: 'reopen_fail', state: 'fail', lastError: res.code });
-           try { await handlers.deactivate({ nome, reason: 'boot_atomic_final_fail', policy: 'forceDuringBoot' }); } catch {}
-         } else setBootState(nome, { stage: 'ok', state: 'ok' });
-         await snapshotStatusAndWrite();
-      }
-      BOOT_ATOMIC.reopenDone = true;
-  }
-  // libera discipline
-  BOOT.active = false; BOOT.suppressRobe = false; BOOT.suppressPruner = false; BOOT_ATOMIC.active = false;
-  await reportAction('system', 'mil_action', 'boot_atomic_finished');
-  await snapshotStatusAndWrite();
-  return { ok: true };
-},
-  async ['boot-state']() {
-    return {
-      active: !!(BOOT_ATOMIC.active || BOOT.active),
-      startedAt: BOOT_ATOMIC.startedAt || BOOT.startedAt,
-      current: (BOOT_ATOMIC.idx >= 0 ? BOOT_ATOMIC.idx : null),
-      total: (BOOT_ATOMIC.list && BOOT_ATOMIC.list.length) || (loadPerfisJson().length),
-      perProfile: Array.from(BOOT_ATOMIC.perProfile.entries()).map(([nome, st]) => ({ nome, ...st })),
-      // Manter campos antigos se necessário para retrocompatibilidade UI:
-      boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }
-    };
-  },
-  async ['boot-cancel']() {
-    endBoot(false); return { ok: true };
   }
 };
 
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
-let _debounceStatusWrite = null;
 async function snapshotStatusAndWrite() {
-  if (_debounceStatusWrite) clearTimeout(_debounceStatusWrite);
-  _debounceStatusWrite = setTimeout(async () => {
-    try {
-      const perfisArr = loadPerfisJson();
-      const perfis = perfisArr.map(p => {
-        const nome = p.nome;
-        let issuesCount = 0;
-        try {
-          if (issues && typeof issues.countErrors === 'function') {
-            const res = issues.countErrors(nome);
-            issuesCount = Number(res && res.count) || 0;
-          } else {
-            issuesCount = countErrorsLocal(nome); // fallback local
-          }
-        } catch {}
-        return {
-          nome,
-          label: p.label || null,
-          cidade: p.cidade,
-          uaPresetId: p.uaPresetId,
-          active: controllers.has(nome),
-          trabalhando: !!(controllers.get(nome)?.trabalhando),
-          configurando: !!(controllers.get(nome)?.configurando),
-          humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
-          issuesCount,
-          ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
-          cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-          numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
-          robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
-        };
-      });
-      const robes = {};
-      perfisArr.forEach(p => {
-        const nome = p.nome;
-        robes[nome] = {
-          cooldownSec: robeCooldownLeft(nome),
-          estado: robeMeta[nome]?.estado || '',
-          proximaPostagem: robeMeta[nome]?.proximaPostagem || null,
-          ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
-          emFila: !!robeMeta[nome]?.emFila,
-          emExecucao: !!robeMeta[nome]?.emExecucao,
-          ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
-          cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
-          numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
-          robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
-        };
-      });
-      const robeQueueList = robeQueue.queueList();
-      // PATCH autoMode/sys: incluir no statusObj
-      const sys = {
-        freeMB: Math.round(os.freemem()/(1024*1024)),
-        totalMB: Math.round(os.totalmem()/(1024*1024)),
-        cores: (os.cpus()||[]).length,
-        cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
-      };
-      const statusObj = { 
-        perfis, 
-        robes, 
-        robeQueue: robeQueueList, 
-        autoMode, 
-        sys, 
-        boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }, 
-        bootAtomic: {
-          active: !!(BOOT_ATOMIC.active || BOOT.active),
-          startedAt: BOOT_ATOMIC.startedAt || BOOT.startedAt,
-          current: (BOOT_ATOMIC.idx >= 0 ? BOOT_ATOMIC.idx : null),
-          total: (BOOT_ATOMIC.list && BOOT_ATOMIC.list.length) || (loadPerfisJson().length),
-          perProfile: Array.from(BOOT_ATOMIC.perProfile.entries()).map(([nome, st]) => ({ nome, ...st })),
-          reopenQueue: Array.from(BOOT_ATOMIC.reopenQueue || []),
-          reopenDone: !!BOOT_ATOMIC.reopenDone
-        }, 
-        ts: Date.now() 
-      };
-      // Async atomic-ish write
-      const dir = path.dirname(statusPath);
-      try { await fs.promises.mkdir(dir, { recursive: true }); } catch {}
-      const tmp = statusPath + '.tmp';
-      await fs.promises.writeFile(tmp, JSON.stringify(statusObj, null, 2), 'utf8');
-      try { await fs.promises.unlink(statusPath); } catch {}
-      try {
-        await fs.promises.rename(tmp, statusPath);
-      } catch {
-        try {
-          await fs.promises.copyFile(tmp, statusPath);
-          try { await fs.promises.unlink(tmp); } catch {}
-        } catch {}
-      }
-    } catch (e) {
-      try { console.warn('[WORKER][statusWrite] erro:', e && e.message || e); } catch {}
-    }
-    _debounceStatusWrite = null;
-  }, 300);
+try {
+const perfisArr = loadPerfisJson();
+const perfis = perfisArr.map(p => {
+const nome = p.nome;
+let issuesCount = 0;
+try {
+  if (issues && typeof issues.countErrors === 'function') {
+    const res = issues.countErrors(nome);
+    issuesCount = Number(res && res.count) || 0;
+  } else {
+    issuesCount = countErrorsLocal(nome); // fallback local
+  }
+} catch {}
+return {
+  nome,
+  label: p.label || null,
+  cidade: p.cidade,
+  uaPresetId: p.uaPresetId,
+  active: controllers.has(nome),
+  trabalhando: !!(controllers.get(nome)?.trabalhando),
+  configurando: !!(controllers.get(nome)?.configurando),
+  humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
+  issuesCount,
+  ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
+  cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
+  numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
+  robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+};
+});
+const robes = {};
+perfisArr.forEach(p => {
+const nome = p.nome;
+robes[nome] = {
+  cooldownSec: robeCooldownLeft(nome),
+  estado: robeMeta[nome]?.estado || '',
+  proximaPostagem: robeMeta[nome]?.proximaPostagem || null,
+  ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
+  emFila: !!robeMeta[nome]?.emFila,
+  emExecucao: !!robeMeta[nome]?.emExecucao,
+  ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
+  cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
+  numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
+  robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+};
+});
+const robeQueueList = robeQueue.queueList();
+// PATCH autoMode/sys: incluir no statusObj
+const sys = {
+  freeMB: Math.round(os.freemem()/(1024*1024)),
+  totalMB: Math.round(os.totalmem()/(1024*1024)),
+  cores: (os.cpus()||[]).length,
+  cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
+};
+const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
+// Não inclui mais robeRam obsoleto, pois RAM por perfil já está em perfis/robes.
+// Unificado cross-platform.
+writeJsonAtomic(statusPath, statusObj);
+} catch (e) {
+try { console.warn('[WORKER][statusWrite] erro:', e && e.message || e); } catch {}
+}
 }
 // == FIM: snapshotStatusAndWrite ==
 
@@ -2072,7 +1702,6 @@ const RECONCILE_INTERVAL_MS = 1500;
 let _reconciling = false;
 
 async function reconcileOnce() {
-if (isBootingAtomic()) { bootLog('BLOCKED reconcile_skip_activation'); return; }
 if (_reconciling) return;
 _reconciling = true;
 try {
@@ -2122,18 +1751,11 @@ for (const nome of nomes) {
       // não reabre durante congelamento
       continue;
     }
-    // PATCH: só reabre se desired ativo!
-    if (want.active === true) {
-      robeMeta[nome].reopenAt = null;
-      robeMeta[nome].killHistory = [];
-      try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
-      continue;
-    } else {
-      // NÃO reabrir se desired.off!
-      robeMeta[nome].reopenAt = null;
-      issues.append(nome, 'mil_action', 'reopen_at_ignored_desired_off').catch(()=>{});
-      continue;
-    }
+    // Auto-reabrir (militar)
+    robeMeta[nome].reopenAt = null;
+    robeMeta[nome].killHistory = [];
+    try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
+    continue;
   }
 
   // Liga/desliga browser
@@ -2154,14 +1776,7 @@ for (const nome of nomes) {
     }
     // === FIM PATCH autoMode Light ===
 
-    // PASSO 5: headroom e apenas um launch por vez no reconciliador
-    if (inflightLaunches >= 1) break;
-    const freeMB = Math.round(os.freemem() / (1024 * 1024));
-    if (freeMB <= OPEN_MIN_FREE_MB) break;
-
     try { await activateOnce(nome, 'reconcile'); } catch {}
-    // Aguarde próximo ciclo para outro launch
-    break;
   } else if (want.active === false && ctrl) {
     try { await handlers.deactivate({ nome }); } catch {}
     continue;
@@ -2291,7 +1906,7 @@ setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.
 // ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
   INTERVAL_MS: 5000,
-  PAGE_EVAL_TIMEOUT_MS: 3000,
+  PAGE_EVAL_TIMEOUT_MS: 1500,
   ZOMBIE_STRIKES: 3
 };
 const nurseState = new Map(); // nome => { strikes: number, lastOk: ts }
@@ -2299,7 +1914,7 @@ const nurseState = new Map(); // nome => { strikes: number, lastOk: ts }
 // === ULTRA RECOVERY (militar) ===
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,                   // no máximo 2 reloads curtos por página zumbi
-  RELOAD_TIMEOUT_MS: 8000,          // timeout curto para reload
+  RELOAD_TIMEOUT_MS: 4500,          // timeout curto para reload
   RELOAD_POST_WAIT_MS: 250,         // pequena espera pós-reload
   REOPEN_DELAY_SHORT_MS: 4000,      // reabrir "já já" (nurse_kill, no_pages)
   REOPEN_DELAY_RAMCPU_MS: 4*60*1000, // reabrir após 4–6min em RAM/CPU kill (usaremos também jitter)
@@ -2363,7 +1978,6 @@ async function tryReloadShort(p0, nome, attempt) {
 }
 
 async function nurseTick() {
-  if (isBootingAtomic()) { bootLog('BLOCKED nurse_tick_skip'); return; }
   const now = Date.now();
   const desired = readJsonFile(desiredPath, { perfis: {} });
   for (const nome of Object.keys(desired.perfis || {})) {
@@ -2394,73 +2008,26 @@ async function nurseTick() {
       continue;
     }
     const p0 = pages[0];
-
-    // DETECÇÃO DE BLOQUEIO TEMPORÁRIO (virtus_blocked/no_composer) COM CRITÉRIO E REVALIDAÇÃO
-    try {
-      const issuesPath = path.join(perfisDir, nome, 'issues.json');
-      const arr = readJsonFile(issuesPath, []);
-      const now15min = Date.now() - 15 * 60 * 1000;
-      const recentes = arr.filter(it => it.ts > now15min);
-      const nBlocked = recentes.filter(it => it.type === 'virtus_blocked').length;
-      const nNoComposer = recentes.filter(it => it.type === 'virtus_no_composer').length;
-
-      const now90min = Date.now() - (90 * 60 * 1000);
-      if ((robeMeta[nome]?.activatedAt || 0) < now90min && nBlocked >= 5 && nNoComposer >= 4) {
-        // Antes de congelar, revalida
-        let shouldFreeze = true;
-        try {
-          const okDom = await pageReadyBasic(p0);
-          if (okDom) {
-            const waitForComposerFn = require('./browser.js').waitForComposer;
-            if (typeof waitForComposerFn === 'function') {
-              const hasComposer = await waitForComposerFn(p0, 3500);
-              shouldFreeze = !hasComposer;
-            }
-          }
-        } catch {}
-        if (shouldFreeze) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].frozenUntil = Date.now() + 2*60*60*1000;
-          issues.append(nome, 'mil_action', 'frozen_2h: messenger_temp_block').catch(()=>{});
-          await ensureFrozenShutdown(nome, 'fb_temp_block');
-          continue;
-        } else {
-          issues.append(nome, 'mil_action', 'skip_freeze_revalidated_ok').catch(()=>{});
-        }
-      }
-    } catch {}
-
     let healthy = await pageReadyBasic(p0);
     if (!healthy) {
       healthy = await tryReloadShort(p0, nome, 1);
       if (!healthy) {
         healthy = await tryReloadShort(p0, nome, 2);
-        // Se ativado há menos de 10min, tente um 3º reload
-        if (!healthy && robeMeta[nome]?.activatedAt && (Date.now() - robeMeta[nome].activatedAt) < 600000) {
-          healthy = await tryReloadShort(p0, nome, 3);
-        }
       }
       if (healthy) {
         await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
       } else {
-        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após reloads — rollback preserveDesired');
+        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
         try { registerFailure(nome, 'zombie'); } catch {}
         await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
       }
     }
-    // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
-    if (ctrl && ctrl.configurando) {
-      // Durante configuração (injeção de cookies): NUNCA prune. Mantém abas auxiliares abertas.
-      // Militar, rastreável, seguro.
-      console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
-      continue;
-    }
     if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
       try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
     }
     if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
-      try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
+      try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
     }
   }
 }
@@ -2473,12 +2040,6 @@ setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // PATCH: intercepta robeHelper.startRobe para bloquear e congelar militarmente se manifest ausente
 const _startRobeOrig = robeHelper.startRobe;
 robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
-  // Guard: impedir início do Robe em perfis congelados
-  if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
-    await reportAction(nome, 'robe_error', 'block robe start: frozen');
-    return { ok: false, error: 'frozen' };
-  }
-
   // GUARD: antifila infinito, antiflood militar se manifest ausente
   let manifest;
   try { manifest = readManifest(nome); } catch(e){}

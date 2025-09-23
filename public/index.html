@@ -181,10 +181,6 @@
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
     </div>
   </header>
-  <div id="graceProgress" style="width:100%;height:8px;background:#1f2a3a;margin-top:-2px;display:none;position:relative;">
-    <div id="graceBar" style="height:100%;background:#f6cc87;width:0%;transition:width 0.5s;"></div>
-    <div id="gracePct" style="position:absolute;right:8px;top:-3px;font-size:11px;color:#fff;"></div>
-  </div>
   <div class="wrap">
     <div class="toolbar"> 
       <button class="add-btn" id="addPerfilBtn">+ Nova Conta</button>
@@ -220,65 +216,6 @@
     function isErrorIssue(it) {
       try { return ERROR_TYPES.has(String(it && it.type || '')); } catch { return false; }
     }
-
-    // ===================== INÍCIO: BOOT STATE GLOBAL + POLLING =====================
-    window.isBootingGlobal = false;
-    let bootPerProfile = [];
-    let bootCurrent = null;
-    let bootTotal = null;
-
-    async function pollBootState() {
-      try {
-        const r = await fetch('/api/boot/state').then(r=>r.json());
-        const bootActive = r && r.active === true;
-        bootPerProfile = Array.isArray(r && r.perProfile) ? r.perProfile : [];
-        bootCurrent = typeof r.current === "number" ? r.current : null;
-        bootTotal = typeof r.total === "number" ? r.total : null;
-        window.isBootingGlobal = bootActive;
-
-        const modoEl = document.getElementById('mModo');
-        if (modoEl) {
-          if (bootActive) {
-            modoEl.textContent = 'BOOT';
-            modoEl.style.color = '#ffcbcb';
-            if (modoEl.parentElement) modoEl.parentElement.title = 'Boot atômico 1×1 (nível humano, ultra robusto).';
-          } else {
-            modoEl.textContent = 'Full';
-            modoEl.style.color = '#c6f3e3';
-            if (modoEl.parentElement) modoEl.parentElement.title = 'Operação normal.';
-          }
-        }
-        // Barra de progresso de boot atômico
-        const graceProgress = document.getElementById('graceProgress');
-        const graceBar = document.getElementById('graceBar');
-        const gracePct = document.getElementById('gracePct');
-        if (bootActive && bootTotal && bootCurrent !== null && graceProgress && graceBar && gracePct) {
-          graceProgress.style.display = 'block';
-          const pct = Math.round(Math.min(100, 100 * ((bootCurrent + 1) / bootTotal)));
-          graceBar.style.width = pct + '%';
-          gracePct.textContent = `${bootCurrent+1}/${bootTotal}`;
-        } else if (graceProgress) {
-          graceProgress.style.display = 'none';
-        }
-        // Bloqueie todos os botões de ação durante o boot
-        [
-          'startAllBtn','stopAllBtn','robe24AllBtn','robeReleaseAllBtn','addPerfilBtn','citiesCountBtn'
-        ].forEach(id => {
-          const btn = document.getElementById(id);
-          if (btn) {
-            if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
-            btn.disabled = bootActive;
-            btn.style.opacity = bootActive ? '0.5' : '';
-            if (id === 'startAllBtn' && bootActive) btn.textContent = 'BOOT em Progresso...';
-            else btn.textContent = btn.dataset.idleTxt || btn.textContent;
-          }
-        });
-        // Cards serão atualizados em reloadPerfis para mostrar status por perfil.
-      } catch {}
-    }
-    setInterval(pollBootState, 2000);
-    pollBootState();
-    // ===================== FIM: BOOT STATE GLOBAL + POLLING =====================
 
     // MODAL: criar conta (com loading + mensagens no próprio modal)
     function showCriarContaModal({ cidades }) {
@@ -483,7 +420,7 @@
         const ts = Number(p.robeFrozenUntil);
         if (!ts || ts < Date.now()) return null;
         const agora = Date.now();
-               const restante = Math.max(0, Math.floor((ts-agora)/1000));
+        const restante = Math.max(0, Math.floor((ts-agora)/1000));
         return buildPill(`ROBE Congelado (${tempoRestante(restante)})`, 'frozen');
       } catch { return null; }
     }
@@ -550,22 +487,10 @@
         document.getElementById('mRamPanel').style.display = 'none';
       }
 
-      // Durante BOOT/GRACE, mantém o modo controlado pelo polling
-      try {
-        ['addPerfilBtn','citiesCountBtn'].forEach(id => {
-          const el = document.getElementById(id);
-          if (el) {
-            el.disabled = window.isBootingGlobal || el.disabled;
-            if (window.isBootingGlobal) el.style.opacity = '0.5';
-            else if (!el.disabled) el.style.opacity = '';
-          }
-        });
-      } catch {}
-
       // Militar: badge de modo full/leve, tooltip detalhado do autoMode/state
       const auto = st && st.autoMode || null;
       const modoEl = document.getElementById('mModo');
-      if (modoEl && !window.isBootingGlobal) {
+      if (modoEl) {
         if (auto && auto.mode === 'light') {
           modoEl.textContent = 'Leve';
           modoEl.style.color = '#f6cc87';
@@ -619,7 +544,6 @@
         toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
         toggle.onclick = () => toggleBrowserUI(p, toggle);
         if (isFrozen) toggle.disabled = true;
-        if (window.isBootingGlobal) toggle.disabled = true;
         left.append(toggle);
 
         // NOVO: start 24h logo abaixo do toggle (com loading)
@@ -628,7 +552,6 @@
         btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
         btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
         if (isFrozen) btnStartLeft.disabled = true;
-        if (window.isBootingGlobal) btnStartLeft.disabled = true;
         left.append(btnStartLeft);
 
         // ------------------- RAM VISUAL (ADICIONADO) -------------------
@@ -694,7 +617,6 @@
         btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
         btnPlay.onclick = () => robePlayUI(p, btnPlay);
         if (isFrozen) btnPlay.disabled = true;
-        if (window.isBootingGlobal) btnPlay.disabled = true;
         titleRow.append(btnPlay);
 
         // Novo botão: Robe 24h (por conta)
@@ -704,35 +626,7 @@
         btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
         btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
         if (isFrozen) btnRobe24.disabled = true;
-        if (window.isBootingGlobal) btnRobe24.disabled = true;
         titleRow.append(btnRobe24);
-
-        // === NOVO!!! INJETAR STATUS DO BOOT POR PERFIL ===
-        if (window.isBootingGlobal && Array.isArray(bootPerProfile)) {
-          const ent = bootPerProfile.find(x => x.nome === p.nome);
-          if (ent) {
-            const bootPill = buildPill(
-              'Boot: ' +
-              (ent.state === 'ok' ? 'OK' :
-              ent.state === 'pending' ? 'Aguardando' :
-              ent.state === 'retrying' ? 'Reabrindo' :
-              ent.state === 'fail' ? 'Erro' :
-              ent.state === 'frozen' ? 'Congelado' :
-              ent.state === 'retry_later' ? 'Erro, retry' :
-              ent.state || '—'
-              ),
-              ent.state === 'ok' ? 'good' :
-              ent.state === 'frozen' ? 'warn' :
-              ent.state === 'fail' || ent.state === 'retry_later' ? 'bad' :
-              'info'
-            );
-            titleRow.append(bootPill);
-            // Optionally put details in title:
-            card.title = (ent.stage ? `Boot: ${ent.stage}` : '') +
-              (ent.lastError ? ` (${ent.lastError})` : '');
-          }
-        }
-        // ===============
 
         const subRow = document.createElement('div'); subRow.className='subRow';
         subRow.textContent = p.cidade ? ('Cidade: ' + p.cidade) : '';
@@ -763,7 +657,6 @@
           }
         };
         if (isFrozen) btnCookies.disabled = true;
-        if (window.isBootingGlobal) btnCookies.disabled = true;
         // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
 
         const btnCfg = document.createElement('button');
@@ -772,7 +665,6 @@
         btnCfg.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm0-6 2.2 1.6 2.6-.6 1.1 2.5 2.6.6-.2 2.7 2 1.8-2 1.8.2 2.7-2.6.6-1.1 2.5-2.6-.6L12 22l-2.2-1.6-2.6.6-1.1-2.5-2.6-.6.2-2.7-2-1.8 2-1.8-.2-2.7 2.6-.6 1.1-2.5 2.6.6L12 2.5Z"/></svg><span>Configurar</span>`;
         btnCfg.onclick = () => showConfigPerfilModal({ perfil: p, onClose: reloadPerfis });
         if (isFrozen) btnCfg.disabled = true;
-        if (window.isBootingGlobal) btnCfg.disabled = true;
 
         // Botão Arquivo/Log por conta - alterado para ponto se issuesCount > 0
         const btnLog = document.createElement('button');
@@ -781,7 +673,6 @@
         btnLog.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm9 0v5h5"/></svg><span>Arquivo</span>${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
         btnLog.onclick = () => showIssuesModal(p.nome);
         if (isFrozen) btnLog.disabled = true;
-        if (window.isBootingGlobal) btnLog.disabled = true;
 
         // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
         if (p.humanControl) {
@@ -801,7 +692,6 @@
             finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
           };
           if (isFrozen) btnResume.disabled = true;
-          if (window.isBootingGlobal) btnResume.disabled = true;
           right.append(btnCookies, btnResume, btnCfg, btnLog);
         } else {
           // Botão “Invocar Humano” padrão
@@ -811,7 +701,6 @@
           btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
           btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
           if (isFrozen) btnHuman.disabled = true;
-          if (window.isBootingGlobal) btnHuman.disabled = true;
           right.append(btnCookies, btnHuman, btnCfg, btnLog);
         }
         // ===========================================================
@@ -846,7 +735,6 @@
               btnResetMil.disabled = false; btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
             }
           };
-          if (window.isBootingGlobal) btnResetMil.disabled = true;
           right.append(btnResetMil);
         }
         // ----------------------------------------------------------------------------------
@@ -911,7 +799,6 @@
         const el = document.getElementById(id);
         if (el) el.classList.toggle('active',
           (id==='filterAll'     && f==='all') ||
-          (id==='filterAll'     && f===undefined) ||
           (id==='filterActive'  && f==='active') ||
           (id==='filterInactive'&& f==='inactive') ||
           (id==='filterIssues'  && f==='issues'));
@@ -970,7 +857,7 @@
     // Logs por conta (arquivo)
     function showIssuesModal(nome){
       const overlay = document.createElement('div'); overlay.className='modal-ov';
-      const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth='720px';
+      const box = document.createElement('div'); box.className='modal-box'; box.style.maxWidth='720px';
       box.innerHTML =      `<h2>Logs — ${nome}</h2>      <div id="issuesBody" style="max-height:420px; overflow:auto; border:1px solid #1f2a3a; border-radius:8px; padding:8px; background:#0b1322;">        <div class="pill">Carregando...</div>      </div>      <div class="modal-actions">        <button class="btn" id="closeIssues">Fechar</button>        <button class="btn danger" id="clearIssues">Limpar logs</button>      </div>   `;
       overlay.append(box);
       document.body.append(overlay);
@@ -1151,108 +1038,6 @@
       return ok;
     }
 
-    // NOVO MÉTODO ULTRA MILITAR: startAllIntelligent
-    async function startAllIntelligent() {
-      const startBtn = document.getElementById('startAllBtn');
-      if (startBtn) { 
-        startBtn.disabled = true; 
-        startBtn.style.opacity = '0.7';
-        startBtn.style.cursor = 'not-allowed';
-        startBtn.textContent = 'Iniciando...';
-      }
-
-      try {
-        // Passo 1: Coletar/ordenar perfis e limpar progresso
-        let st = await window.electronAPI.getStatus();
-        let perfis = st?.perfis || [];
-        let closedIdle = 0;
-
-        for (let i = 0; i < perfis.length; i++) {
-          let p = perfis[i];
-
-          // 1.a Garante recursos ANTES de tentar abrir
-          await ensureResourcesOk({ minFreeMB: 3072 });
-
-          // 1.b Fecha navegadores idle/about:blank (p.active==true && !p.trabalhando)
-          // (tornar a fila prioritariamente working!; logger para tracking)
-          if (p.active && !p.trabalhando) {
-            // Só vale fechar se não for working
-            await window.electronAPI.deactivate(p.nome);
-            closedIdle++;
-            // Aguardar deactivation real
-            await waitUntil(async () => {
-              const stCur = await window.electronAPI.getStatus();
-              const cur = (stCur.perfis || []).find(x => x.nome === p.nome);
-              return !cur || !cur.active;
-            }, { timeoutMs: 35000, intervalMs: 450 });
-            continue; // Após fechar, tente na próxima iteração
-          }
-
-          // 1.c Se já está working, segue; senão, tenta abrir e working.
-          if (!p.active) {
-            // Ativar navegador (espera real, tracking/log)
-            await window.electronAPI.activate(p.nome);
-            await waitUntil(async () => {
-              const st2 = await window.electronAPI.getStatus();
-              const cur2 = (st2.perfis||[]).find(x => x.nome === p.nome);
-              return !!cur2 && cur2.active;
-            }, { timeoutMs: 60000, intervalMs: 400 });
-            await sleep(1000);
-          }
-
-          // -- Garante recursos DEPOIS de abrir (sentinela headroom)
-          await ensureResourcesOk({ minFreeMB: 2048 });
-
-          // 1.d Start work/MODO ATENDIMENTO, só agora
-          let worked = false;
-          if (!p.trabalhando) {
-            await window.electronAPI.startWork(p.nome);
-            worked = await waitUntil(async () => {
-              const st3 = await window.electronAPI.getStatus();
-              const cur3 = (st3.perfis||[]).find(x => x.nome === p.nome);
-              return cur3 && cur3.trabalhando;
-            }, { timeoutMs: 40000, intervalMs: 400 });
-          } else {
-            worked = true;
-          }
-
-          // Se conseguiu working, prossegue. Se não, fecha o browser para liberar slot!
-          if (!worked) {
-            await window.electronAPI.deactivate(p.nome);
-            closedIdle++;
-            await waitUntil(async () => {
-              const stCur = await window.electronAPI.getStatus();
-              const cur = (stCur.perfis || []).find(x => x.nome === p.nome);
-              return !cur || !cur.active;
-            }, { timeoutMs: 35000, intervalMs: 450 });
-            continue;
-          }
-
-          // 1.e Atualiza progress na UI (opcional)
-          if (startBtn) startBtn.textContent = `Iniciando... (${i+1}/${perfis.length})`;
-          // RESINCRONIZA perfis para garantir view sempre up to date
-          st = await window.electronAPI.getStatus();
-          perfis = st?.perfis || [];
-        }
-
-        // Passo FINAL: mensagem de progresso
-        if (closedIdle > 0) {
-          alert(`Abertura inteligente: ${closedIdle} navegadores idle foram fechados para dar prioridade aos perfis working. Só contas working permanecem abertas.`);
-        }
-
-      } catch (e) {
-        alert('Falha na abertura inteligente: ' + (e && e.message || e));
-      } finally {
-        if (startBtn) { 
-          startBtn.disabled = false; 
-          startBtn.style.opacity = ''; 
-          startBtn.style.cursor = ''; 
-          startBtn.textContent = 'Abrir Todos e Iniciar 24h'; 
-        }
-        reloadPerfis();
-      }
-    }
-
     async function startAllSequential() {
       const startBtn = document.getElementById('startAllBtn');
       if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
@@ -1388,26 +1173,20 @@
       if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
       try {
         const st = await window.electronAPI.getStatus();
-        const perfis = st.perfis || [];
-        // NOVO: Fechar todos (todos mesmo!) — garante desired.off universal e anti-caroço
-        for (const p of perfis) {
+        const ativos = (st.perfis || []).filter(x => x.active);
+        for (const p of ativos) {
           try {
-            // Garante /deactivate em todos, ativos OU inativos, para desired.off global
             await window.electronAPI.deactivate(p.nome);
-            // Não precisa aguardar individualmente (mas pode, se desejar bloqueio máximo)
+            await waitUntil(async () => {
+              const s2 = await window.electronAPI.getStatus();
+              const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
+              return !c2 || !c2.active;
+            }, { timeoutMs: 60000, intervalMs: 400 });
+            await new Promise(r=>setTimeout(r,600));
           } catch (e) {
-            console.warn('[Fechar todos] falha chamando /deactivate', p && p.nome, e && e.message || e);
+            console.warn('[Fechar todos] falha fechando', p && p.nome, e && e.message || e);
           }
         }
-        // NOVO: Espera real de fechamento absoluto e fila zerada (estado militar)
-        await waitUntil(async () => {
-          const st2 = await window.electronAPI.getStatus();
-          const inativos = (st2.perfis || []).every(x => !x.active);
-          const semFila = (st2.robeQueue || []).length === 0;
-          return inativos && semFila;
-        }, { timeoutMs: 120_000, intervalMs: 700 });
-        // Espera militar: sentinela de 5–6s após todos off
-        await new Promise(r => setTimeout(r, 6000));
       } catch (e) {
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {
@@ -1427,19 +1206,7 @@
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
       if (!btn) return;
-      btn.onclick = async () => {
-        btn.disabled = true;
-        btn.style.opacity = '0.7';
-        btn.textContent = 'Iniciando BOOT...';
-        try {
-          const res = await fetch('/api/boot/start', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode: 'open_and_start' }) }).then(r=>r.json());
-          if (!res || !res.ok) alert('Falha ao iniciar BOOT: ' + (res && res.error || 'erro desconhecido'));
-          // O polling do estado de boot cuida do resto
-        } catch (e) {
-          alert('Falha ao iniciar BOOT: ' + (e && e.message || e));
-        }
-        // Botão só reabilitado após fim no polling
-      };
+      btn.onclick = startAllSequential;
     })();
 
     // Robe 24h (todos)

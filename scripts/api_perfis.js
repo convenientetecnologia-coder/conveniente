@@ -14,18 +14,6 @@ function resolveChromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
-// ===================== HELPER ISBOOTACTIVE ==========================
-async function isBootActive(workerClient) {
-  try {
-    const resp = await workerClient.sendWorkerCommand('boot-state', {}, { timeoutMs: 3000 });
-    return resp && resp.active === true;
-  } catch {
-    // Se falhou consulta, seja conservador: NÃO bloqueia, permite comandos.
-    return false;
-  }
-}
-// ====================================================================
-
 module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
@@ -140,11 +128,6 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
 
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
-
     // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
     {
       const freeMB = Math.floor(require('os').freemem() / (1024*1024));
@@ -166,11 +149,6 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
 
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
-
     try { fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch {}
 
     // Não chama o worker diretamente para evitar corrida com o reconciliador
@@ -181,12 +159,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/configure', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
-
     // Timeout aumentado para 180000ms (3min) para comando configure
     const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
     return res.json(resp);
@@ -196,11 +168,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/start-work', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
 
     // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
     {
@@ -223,12 +190,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/invoke-human', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
-
     const resp = await workerClient.sendWorkerCommand('invoke_human', { nome });
     return res.json(resp);
   });
@@ -237,12 +198,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/robe-play', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
-
     const resp = await workerClient.sendWorkerCommand('robe-play', { nome });
     return res.json(resp);
   });
@@ -251,12 +206,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/robe-24h', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
-
     fileStore.patchDesired(nome, { robePause24h: true });
     return res.json({ ok: true });
   });
@@ -266,12 +215,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/human-resume', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-
-    // BOOT BLOCK GUARD (ABSOLUTO)
-    if (await isBootActive(workerClient)) {
-      return res.status(409).json({ ok: false, error: 'boot_in_progress' });
-    }
-
     // Marca o "fine" do modo humano e ativa virtus novamente
     try {
       fileStore.patchDesired(nome, { humanResume: true });
