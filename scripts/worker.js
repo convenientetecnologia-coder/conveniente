@@ -1842,7 +1842,7 @@ for (const nome of nomes) {
   if (want.invokeHuman === true) {
     try {
       const r = await handlers.invoke_human({ nome });
-      if (r e && r.ok) {
+      if (r && r.ok) {
         try {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
