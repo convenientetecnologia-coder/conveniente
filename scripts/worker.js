@@ -64,6 +64,8 @@ function endBoot(success) {
   BOOT.suppressRobe = false;
   BOOT.suppressPruner = false;
   bootLog('BOOT FINISHED: success=' + success + ', opened=' + Array.from(BOOT.opened).join(','));
+  // INÍCIO GRACE
+  beginGrace(process.env.POST_BOOT_GRACE_MS); // 120s padrão (ajuste por env se desejar)
 }
 function isBooting() { return BOOT.active === true; }
 function bootLog(msg) {
@@ -81,6 +83,97 @@ async function ensureResourcesOk({ minFreeMB }) {
     if ((Date.now() - start) > timeoutMs) return false;
     await new Promise(r => setTimeout(r, 1000));
   }
+}
+
+// ===== POST-BOOT GRACE (Fase de Estabilização) =====
+const GRACE = {
+  active: false,
+  startedAt: 0,
+  durationMs: parseInt(process.env.POST_BOOT_GRACE_MS || '120000', 10), // 120s padrão
+  endsAt: 0,
+  planned: { kill: new Map(), reopen: new Set() }, // nome => reason | set de reaberturas
+  checks: new Map(), // nome => { alive, pagesOk, messengerOk, virtusOk, lastError, ts }
+};
+
+function isGraceActive() {
+  return GRACE.active && Date.now() < GRACE.endsAt;
+}
+function graceRemainingMs() {
+  return GRACE.active ? Math.max(0, GRACE.endsAt - Date.now()) : 0;
+}
+function planGraceKill(nome, reason) {
+  if (!isGraceActive()) return false;
+  GRACE.planned.kill.set(String(nome), String(reason || 'unknown'));
+  return true;
+}
+function planGraceReopen(nome) {
+  if (!isGraceActive()) return false;
+  GRACE.planned.reopen.add(String(nome));
+  return true;
+}
+function recordGraceCheck(nome, status) {
+  if (!isGraceActive()) return;
+  GRACE.checks.set(String(nome), { ...(status||{}), ts: Date.now() });
+}
+// Pequeno resumo de "OK" durante grace (navegador vivo + trabalhando)
+function graceOkCount() {
+  let ok = 0;
+  controllers.forEach((ctrl) => { if (ctrl && ctrl.browser && ctrl.trabalhando) ok++; });
+  return ok;
+}
+
+async function beginGrace(ms) {
+  GRACE.active = true;
+  GRACE.startedAt = Date.now();
+  GRACE.durationMs = parseInt(ms || GRACE.durationMs, 10);
+  GRACE.endsAt = GRACE.startedAt + GRACE.durationMs;
+  GRACE.planned.kill.clear();
+  GRACE.planned.reopen.clear();
+  GRACE.checks.clear();
+  try { await reportAction('system', 'mil_action', `grace_enter(${GRACE.durationMs}ms)`); } catch {}
+  setTimeout(() => { finalizeGrace().catch(()=>{}); }, GRACE.durationMs + 50);
+}
+
+async function finalizeGrace() {
+  if (!GRACE.active) return;
+  const now = Date.now();
+  GRACE.active = false;
+
+  // Commit das ações planejadas (com disciplina ativa)
+  const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+
+  // 1) Reopen planejados (para quem morreu durante a graça)
+  for (const nome of Array.from(GRACE.planned.reopen)) {
+    const want = desired.perfis?.[nome];
+    if (!want || want.active !== true) continue; // não reabrir se desired.off
+    if (controllers.has(nome)) continue; // já está ativo novamente
+    try {
+      await activateOnce(nome, 'grace_reopen');
+      await reportAction(nome, 'mil_action', 'grace_reopen_done');
+    } catch (e) {
+      try { await reportAction(nome, 'mil_action', 'grace_reopen_fail ' + (e && e.message || e)); } catch {}
+    }
+  }
+
+  // 2) Kills planejados (casos irrecuperáveis)
+  for (const [nome, reason] of Array.from(GRACE.planned.kill.entries())) {
+    // Se já fechou durante a graça, nada a fazer
+    if (!controllers.has(nome)) continue;
+    try {
+      await handlers.deactivate({ nome, reason: `grace_planned_${reason}`, policy: 'preserveDesired' });
+      await reportAction(nome, 'mil_action', `grace_kill_done(${reason})`);
+    } catch (e) {
+      try { await reportAction(nome, 'mil_action', `grace_kill_fail(${reason}) ${e && e.message || e}`); } catch {}
+    }
+  }
+
+  try { await reportAction('system', 'mil_action', `grace_exit(reopen=${GRACE.planned.reopen.size}, kill=${GRACE.planned.kill.size})`); } catch {}
+  GRACE.planned.kill.clear();
+  GRACE.planned.reopen.clear();
+  GRACE.checks.clear();
+
+  // Snapshot após commit
+  try { await snapshotStatusAndWrite(); } catch {}
 }
 
 // APÓS o bloco do AUTO_CFG, adicione:
@@ -231,6 +324,7 @@ function clearLightEscalator() {
 
 async function assertFullActivity() {
   if (isBooting()) { bootLog('BLOCKED assertFullActivity'); return; }
+  if (isGraceActive()) { bootLog('BLOCKED assertFullActivity during GRACE'); return; }
   const now = Date.now();
   if ((now - healer.lastFullAssertAt) < SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS) return;
   healer.lastFullAssertAt = now;
@@ -249,6 +343,7 @@ async function assertFullActivity() {
 // PANIC MODE: drop parcial + bootstrap mínimo e agressivo
 async function panicMode() {
   if (isBooting()) { bootLog('BLOCKED panicMode'); return; }
+  if (isGraceActive()) { bootLog('BLOCKED panic during GRACE'); return; }
   await milLog('mil_action', `panic_mode_start: light since=${(Date.now()-(healer.lightEnterAt||autoMode.since||Date.now()))}ms cause=${healer.lastLightCause}`);
   try { robeQueue.clear(); } catch {}
   const nomesAtivos = Array.from(controllers.keys());
@@ -271,7 +366,7 @@ async function killPids(pids = []) {
 
 let _lastKillStrayRunAt = 0;
 async function killStrayChromes() {
-  if (isBooting()) { bootLog('BLOCKED killStrayChromes'); return; }
+  if (isBooting() || isGraceActive()) { bootLog('BLOCKED killStrayChromes'); return; }
   try {
     if (inflightLaunches > 0) {
       const now = Date.now();
@@ -715,7 +810,7 @@ async function closeExtraPages(browser, mainPage) {
 const _pruners = new Map(); // nome => pruneInterval
 
 function maybeStartPruneLoop(nome, browser, mainPage) {
-  if (isBooting()) { bootLog('BLOCKED maybeStartPruneLoop'); return; }
+  if (isBooting() || isGraceActive()) { bootLog('BLOCKED maybeStartPruneLoop'); return; }
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
     try {
@@ -742,8 +837,8 @@ let ramMonitorInterval = null;
 // Monitora RAM/CPU globalmente a cada N segundos, cross-platform
 async function ramCpuMonitorTick() {
   const perfisArr = loadPerfisJson();
-  const BOOT_GUARD = isBooting();
-  if (BOOT_GUARD) { bootLog('BLOCKED ramCpuMonitorTick/all discipline'); }
+  const IN_GUARD = (isBooting() || isGraceActive());
+  if (IN_GUARD) { bootLog('BLOCKED ramCpuMonitorTick/all discipline'); }
   // Build lookup userDataDir -> nome
   const nomeByUserDir = {};
   for (const p of perfisArr) {
@@ -827,7 +922,7 @@ async function ramCpuMonitorTick() {
     }
 
     // === STRAY CHROME KILL (perfil sem controller) ===
-    if (!BOOT_GUARD) {
+    if (!IN_GUARD) {
       try {
         for (const [nome, pids] of Object.entries(pidsByNome)) {
           if (!controllers.has(nome) && Array.isArray(pids) && pids.length) {
@@ -883,7 +978,7 @@ async function ramCpuMonitorTick() {
           robeMeta[nome].cpuPercent = typeof somaCpu === "number" ? Math.round(somaCpu) : null;
         }
 
-        if (BOOT_GUARD) return;
+        if (IN_GUARD) return;
 
         // Atualiza histórico CPU breaker persistente
         if (typeof robeMeta[nome].cpuPercent === "number") {
@@ -924,7 +1019,7 @@ async function ramCpuMonitorTick() {
   }
 
   // ===== PATCH MILITAR: RAM breaker inteligente por perfil =====
-  if (!BOOT_GUARD) {
+  if (!IN_GUARD) {
     for (const nome of Object.keys(robeMeta)) {
       const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
       if (ramMB == null) continue;
@@ -995,7 +1090,7 @@ async function ramCpuMonitorTick() {
   autoMode.cpuEma = _ema(autoMode.cpuEma, cpuApprox, AUTO_CFG.EMA_ALPHA_CPU);
   autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
 
-  if (!BOOT_GUARD) {
+  if (!IN_GUARD) {
     const enterPressure = (freeMB < AUTO_CFG.MEM_ENTER_MB) ||
       (autoMode.freeEmaMB != null && autoMode.freeEmaMB < AUTO_CFG.MEM_ENTER_MB) ||
       (cpuApprox > AUTO_CFG.CPU_ENTER) ||
@@ -1064,7 +1159,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 
 // --------------- ROBE/TICK
 async function robeTickGlobal() {
-  if (isBooting()) { bootLog('BLOCKED robeTickGlobal'); return; }
+  if (isBooting() || isGraceActive()) { bootLog('BLOCKED robeTickGlobal'); return; }
   console.log('[WORKER][robeTickGlobal] Tick fila global, hora:', new Date().toLocaleString());
 
   // === PATCH autoMode Light: gate para robeTickGlobal ===
@@ -1308,6 +1403,16 @@ try {
     bootLog('BLOCKED browser_disconnected reopenAt');
     return;
   }
+  if (isGraceActive()) {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].reopenAt = null;
+    planGraceReopen(nome);
+    issues.append(nome, 'mil_action', 'reopen_suppressed_grace').catch(()=>{});
+    bootLog('BLOCKED browser_disconnected reopenAt (GRACE)');
+    // Atualiza snapshot e sai
+    try { await snapshotStatusAndWrite(); } catch {}
+    return;
+  }
   const d = readJsonFile(desiredPath, { perfis: {} });
   const isDesiredActive = d.perfis?.[nome]?.active === true;
   robeMeta[nome] = robeMeta[nome] || {};
@@ -1399,7 +1504,7 @@ const handlers = {
   },
 
   async deactivate({ nome, reason, policy }) {
-  if (isBooting() && (policy !== 'forceDuringBoot')) {
+  if ((isBooting() && (policy !== 'forceDuringBoot')) || (isGraceActive() && (policy !== 'forceDuringGrace'))) {
     bootLog('BLOCKED deactivate (reason=' + (reason || '') + ')');
     return { ok: true, skipped: true };
   }
@@ -1783,7 +1888,17 @@ const handlers = {
       robeQueue: robeQueueList,
       autoMode,
       sys,
-      boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }
+      boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) },
+      grace: {
+        active: GRACE.active,
+        startedAt: GRACE.startedAt,
+        durationMs: GRACE.durationMs,
+        endsAt: GRACE.endsAt,
+        remainingMs: graceRemainingMs(),
+        plannedKillCount: GRACE.planned.kill.size,
+        plannedReopenCount: GRACE.planned.reopen.size,
+        okDuringGrace: graceOkCount()
+      }
     };
   },
 
@@ -1804,8 +1919,7 @@ const handlers = {
         BOOT.startedVirtus.add(nome);
         await new Promise(r=>setTimeout(r, 800));
       }
-      await new Promise(r => setTimeout(r, 10000)); // janela de estabilização, 10s
-      endBoot(true);
+      endBoot(true); // agora quem estabiliza é a GRACE (POST_BOOT_GRACE)
     })();
     return { ok: true };
   },
@@ -1816,7 +1930,17 @@ const handlers = {
       current: BOOT.current,
       total: BOOT.plan.length,
       opened: Array.from(BOOT.opened),
-      startedVirtus: Array.from(BOOT.startedVirtus)
+      startedVirtus: Array.from(BOOT.startedVirtus),
+      grace: {
+        active: GRACE.active,
+        startedAt: GRACE.startedAt,
+        durationMs: GRACE.durationMs,
+        endsAt: GRACE.endsAt,
+        remainingMs: graceRemainingMs(),
+        plannedKillCount: GRACE.planned.kill.size,
+        plannedReopenCount: GRACE.planned.reopen.size,
+        okDuringGrace: graceOkCount()
+      }
     };
   },
   async ['boot-cancel']() {
@@ -1882,7 +2006,7 @@ async function snapshotStatusAndWrite() {
         cores: (os.cpus()||[]).length,
         cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
       };
-      const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }, ts: Date.now() };
+      const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }, grace: { active: GRACE.active, startedAt: GRACE.startedAt, durationMs: GRACE.durationMs, endsAt: GRACE.endsAt, remainingMs: graceRemainingMs(), plannedKillCount: GRACE.planned.kill.size, plannedReopenCount: GRACE.planned.reopen.size, okDuringGrace: graceOkCount() }, ts: Date.now() };
       // Async atomic-ish write
       const dir = path.dirname(statusPath);
       try { await fs.promises.mkdir(dir, { recursive: true }); } catch {}
@@ -1911,6 +2035,23 @@ let _reconciling = false;
 
 async function reconcileOnce() {
 if (isBooting()) { bootLog('BLOCKED reconcile_skip_activation'); return; }
+if (isGraceActive()) {
+  // Durante a Fase de Estabilização: só auditoria de cooldown/freeze
+  try {
+    const perfisArrAudit = loadPerfisJson();
+    for (const p of perfisArrAudit) {
+      const nomeAudit = p && p.nome;
+      if (!nomeAudit) continue;
+      const ctrlAudit = controllers.get(nomeAudit);
+      const working = !!(ctrlAudit && ctrlAudit.browser && ctrlAudit.trabalhando && !ctrlAudit.configurando);
+      const humanControl = !!(ctrlAudit && ctrlAudit.humanControl);
+      if (working && !humanControl) unfreezeCooldownIfWorking(nomeAudit);
+      else freezeCooldownIfNotWorking(nomeAudit);
+    }
+    await snapshotStatusAndWrite();
+  } catch {}
+  return;
+}
 if (_reconciling) return;
 _reconciling = true;
 try {
@@ -2202,6 +2343,7 @@ async function tryReloadShort(p0, nome, attempt) {
 
 async function nurseTick() {
   if (isBooting()) { bootLog('BLOCKED nurse_tick_skip'); return; }
+  const IN_GRACE = isGraceActive();
   const now = Date.now();
   const desired = readJsonFile(desiredPath, { perfis: {} });
   for (const nome of Object.keys(desired.perfis || {})) {
@@ -2245,10 +2387,16 @@ async function nurseTick() {
     let pages = [];
     try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
     if (!pages || !pages[0]) {
-      await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
-      try { registerFailure(nome, 'no_pages'); } catch {}
-      await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
-      continue;
+      if (IN_GRACE) {
+        planGraceReopen(nome);
+        recordGraceCheck(nome, { alive: false, pagesOk: false, messengerOk: false, virtusOk: false, lastError: 'no_pages' });
+        continue;
+      } else {
+        await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
+        try { registerFailure(nome, 'no_pages'); } catch {}
+        await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+        continue;
+      }
     }
     const p0 = pages[0];
     let healthy = await pageReadyBasic(p0);
@@ -2260,10 +2408,16 @@ async function nurseTick() {
       if (healthy) {
         await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
       } else {
-        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
-        try { registerFailure(nome, 'zombie'); } catch {}
-        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
-        continue;
+        if (IN_GRACE) {
+          planGraceKill(nome, 'nurse_zombie');
+          recordGraceCheck(nome, { alive: false, pagesOk: false, messengerOk: false, virtusOk: false, lastError: 'zombie' });
+          continue;
+        } else {
+          await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
+          try { registerFailure(nome, 'zombie'); } catch {}
+          await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+          continue;
+        }
       }
     }
     // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
@@ -2273,12 +2427,17 @@ async function nurseTick() {
       console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
       continue;
     }
-    if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
-      try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
+    if (IN_GRACE) {
+      // Nada agressivo durante Grace
+    } else {
+      if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+        try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
+      }
     }
     if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
       try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
     }
+    recordGraceCheck(nome, { alive: true, pagesOk: true, messengerOk: true, virtusOk: true, lastError: '' });
   }
 }
 
