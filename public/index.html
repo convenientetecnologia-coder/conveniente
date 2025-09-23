@@ -223,79 +223,61 @@
 
     // ===================== INÍCIO: BOOT STATE GLOBAL + POLLING =====================
     window.isBootingGlobal = false;
+    let bootPerProfile = [];
+    let bootCurrent = null;
+    let bootTotal = null;
 
     async function pollBootState() {
-  try {
-    const r = await fetch('/api/boot/state').then(r=>r.json());
-    const bootActive = r && r.active === true;
-    const grace = r && r.grace || null;
-    const graceActive = !!(grace && grace.active);
+      try {
+        const r = await fetch('/api/boot/state').then(r=>r.json());
+        const bootActive = r && r.active === true;
+        bootPerProfile = Array.isArray(r && r.perProfile) ? r.perProfile : [];
+        bootCurrent = typeof r.current === "number" ? r.current : null;
+        bootTotal = typeof r.total === "number" ? r.total : null;
+        window.isBootingGlobal = bootActive;
 
-    window.isBootingGlobal = bootActive || graceActive;
-
-    const modoEl = document.getElementById('mModo');
-    if (modoEl) {
-      if (bootActive) {
-        modoEl.textContent = 'BOOT';
-        modoEl.style.color = '#ffcbcb';
-        if (modoEl.parentElement) modoEl.parentElement.title = 'Modo: BOOT — init sequencial ultra militar.';
-      } else if (graceActive) {
-        modoEl.textContent = 'Grace';
-        modoEl.style.color = '#f6cc87';
-        const rem = Math.max(0, Math.floor((grace.remainingMs||0)/1000));
-        const ok = grace.okDuringGrace || 0;
-        const planned = (grace.plannedKillCount||0) + (grace.plannedReopenCount||0);
-        if (modoEl.parentElement)
-          modoEl.parentElement.title = `Fase de Estabilização: ${rem}s restantes | OK: ${ok} | Planejados: ${planned}`;
-      } else {
-        modoEl.textContent = 'Full';
-        modoEl.style.color = '#c6f3e3';
-        if (modoEl.parentElement) modoEl.parentElement.title = 'Disciplina normal ativada';
-      }
+        const modoEl = document.getElementById('mModo');
+        if (modoEl) {
+          if (bootActive) {
+            modoEl.textContent = 'BOOT';
+            modoEl.style.color = '#ffcbcb';
+            if (modoEl.parentElement) modoEl.parentElement.title = 'Boot atômico 1×1 (nível humano, ultra robusto).';
+          } else {
+            modoEl.textContent = 'Full';
+            modoEl.style.color = '#c6f3e3';
+            if (modoEl.parentElement) modoEl.parentElement.title = 'Operação normal.';
+          }
+        }
+        // Barra de progresso de boot atômico
+        const graceProgress = document.getElementById('graceProgress');
+        const graceBar = document.getElementById('graceBar');
+        const gracePct = document.getElementById('gracePct');
+        if (bootActive && bootTotal && bootCurrent !== null && graceProgress && graceBar && gracePct) {
+          graceProgress.style.display = 'block';
+          const pct = Math.round(Math.min(100, 100 * ((bootCurrent + 1) / bootTotal)));
+          graceBar.style.width = pct + '%';
+          gracePct.textContent = `${bootCurrent+1}/${bootTotal}`;
+        } else if (graceProgress) {
+          graceProgress.style.display = 'none';
+        }
+        // Bloqueie todos os botões de ação durante o boot
+        [
+          'startAllBtn','stopAllBtn','robe24AllBtn','robeReleaseAllBtn','addPerfilBtn','citiesCountBtn'
+        ].forEach(id => {
+          const btn = document.getElementById(id);
+          if (btn) {
+            if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
+            btn.disabled = bootActive;
+            btn.style.opacity = bootActive ? '0.5' : '';
+            if (id === 'startAllBtn' && bootActive) btn.textContent = 'BOOT em Progresso...';
+            else btn.textContent = btn.dataset.idleTxt || btn.textContent;
+          }
+        });
+        // Cards serão atualizados em reloadPerfis para mostrar status por perfil.
+      } catch {}
     }
-    // Durante BOOT ou GRACE, bloqueie todos botões destrutivos/gerais
-    [
-      'startAllBtn',
-      'stopAllBtn',
-      'robe24AllBtn',
-      'robeReleaseAllBtn',
-      'addPerfilBtn',
-      'citiesCountBtn'
-    ].forEach(id => {
-      const btn = document.getElementById(id);
-      if (btn) {
-        if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
-        btn.disabled = (bootActive || graceActive);
-        btn.style.opacity = (bootActive || graceActive) ? '0.5' : '';
-        if (id === 'startAllBtn' && bootActive) btn.textContent = 'BOOT em Progresso...';
-        else if (id === 'startAllBtn' && graceActive) btn.textContent = 'Equilibrando...';
-        else btn.textContent = btn.dataset.idleTxt || btn.textContent;
-      }
-    });
-    // Também bloqueie botões por conta
-    document.querySelectorAll('.perfil .btn, .perfil .icon-btn').forEach(b => {
-      b.disabled = (bootActive || graceActive) || b.disabled;
-      if (bootActive || graceActive) b.style.opacity = '0.5';
-      else if (!b.disabled) b.style.opacity = '';
-    });
-
-    const graceBar = document.getElementById('graceBar');
-    const gracePct = document.getElementById('gracePct');
-    const graceProgress = document.getElementById('graceProgress');
-    if (graceActive && grace && graceProgress && graceBar) {
-      graceProgress.style.display = 'block';
-      const dur = grace.durationMs || 120000;
-      const t = Math.max(0, dur - (grace.endsAt - Date.now()));
-      const pct = Math.min(100, Math.round((t / dur) * 100));
-      graceBar.style.width = `${pct}%`;
-      if (gracePct) gracePct.textContent = `${100-pct}%`;
-    } else if (graceProgress) {
-      graceProgress.style.display = 'none';
-    }
-  } catch {}
-}
-setInterval(pollBootState, 2000);
-pollBootState();
+    setInterval(pollBootState, 2000);
+    pollBootState();
     // ===================== FIM: BOOT STATE GLOBAL + POLLING =====================
 
     // MODAL: criar conta (com loading + mensagens no próprio modal)
@@ -724,6 +706,33 @@ pollBootState();
         if (isFrozen) btnRobe24.disabled = true;
         if (window.isBootingGlobal) btnRobe24.disabled = true;
         titleRow.append(btnRobe24);
+
+        // === NOVO!!! INJETAR STATUS DO BOOT POR PERFIL ===
+        if (window.isBootingGlobal && Array.isArray(bootPerProfile)) {
+          const ent = bootPerProfile.find(x => x.nome === p.nome);
+          if (ent) {
+            const bootPill = buildPill(
+              'Boot: ' +
+              (ent.state === 'ok' ? 'OK' :
+              ent.state === 'pending' ? 'Aguardando' :
+              ent.state === 'retrying' ? 'Reabrindo' :
+              ent.state === 'fail' ? 'Erro' :
+              ent.state === 'frozen' ? 'Congelado' :
+              ent.state === 'retry_later' ? 'Erro, retry' :
+              ent.state || '—'
+              ),
+              ent.state === 'ok' ? 'good' :
+              ent.state === 'frozen' ? 'warn' :
+              ent.state === 'fail' || ent.state === 'retry_later' ? 'bad' :
+              'info'
+            );
+            titleRow.append(bootPill);
+            // Optionally put details in title:
+            card.title = (ent.stage ? `Boot: ${ent.stage}` : '') +
+              (ent.lastError ? ` (${ent.lastError})` : '');
+          }
+        }
+        // ===============
 
         const subRow = document.createElement('div'); subRow.className='subRow';
         subRow.textContent = p.cidade ? ('Cidade: ' + p.cidade) : '';

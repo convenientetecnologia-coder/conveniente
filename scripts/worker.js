@@ -64,8 +64,6 @@ function endBoot(success) {
   BOOT.suppressRobe = false;
   BOOT.suppressPruner = false;
   bootLog('BOOT FINISHED: success=' + success + ', opened=' + Array.from(BOOT.opened).join(','));
-  // INÍCIO GRACE
-  beginGrace(process.env.POST_BOOT_GRACE_MS); // 120s padrão (ajuste por env se desejar)
 }
 function isBooting() { return BOOT.active === true; }
 function bootLog(msg) {
@@ -85,96 +83,98 @@ async function ensureResourcesOk({ minFreeMB }) {
   }
 }
 
-// ===== POST-BOOT GRACE (Fase de Estabilização) =====
-const GRACE = {
+// ==== BOOT ATOMIC ====
+const BOOT_ATOMIC = {
   active: false,
   startedAt: 0,
-  durationMs: parseInt(process.env.POST_BOOT_GRACE_MS || '120000', 10), // 120s padrão
-  endsAt: 0,
-  planned: { kill: new Map(), reopen: new Set() }, // nome => reason | set de reaberturas
-  checks: new Map(), // nome => { alive, pagesOk, messengerOk, virtusOk, lastError, ts }
+  list: [],
+  idx: -1,
+  perProfile: new Map(), // nome => {state, attempts, lastError, stage, ts}
+  reopenQueue: [],
+  reopenDone: false
 };
 
-function isGraceActive() {
-  return GRACE.active && Date.now() < GRACE.endsAt;
-}
-function graceRemainingMs() {
-  return GRACE.active ? Math.max(0, GRACE.endsAt - Date.now()) : 0;
-}
-function planGraceKill(nome, reason) {
-  if (!isGraceActive()) return false;
-  GRACE.planned.kill.set(String(nome), String(reason || 'unknown'));
-  return true;
-}
-function planGraceReopen(nome) {
-  if (!isGraceActive()) return false;
-  GRACE.planned.reopen.add(String(nome));
-  return true;
-}
-function recordGraceCheck(nome, status) {
-  if (!isGraceActive()) return;
-  GRACE.checks.set(String(nome), { ...(status||{}), ts: Date.now() });
-}
-// Pequeno resumo de "OK" durante grace (navegador vivo + trabalhando)
-function graceOkCount() {
-  let ok = 0;
-  controllers.forEach((ctrl) => { if (ctrl && ctrl.browser && ctrl.trabalhando) ok++; });
-  return ok;
+function setBootState(nome, patch) {
+  const cur = BOOT_ATOMIC.perProfile.get(nome) || { state: 'pending', attempts: 0, lastError: '', stage: 'idle', ts: Date.now() };
+  Object.assign(cur, patch || {}, { ts: Date.now() });
+  BOOT_ATOMIC.perProfile.set(nome, cur);
 }
 
-async function beginGrace(ms) {
-  GRACE.active = true;
-  GRACE.startedAt = Date.now();
-  GRACE.durationMs = parseInt(ms || GRACE.durationMs, 10);
-  GRACE.endsAt = GRACE.startedAt + GRACE.durationMs;
-  GRACE.planned.kill.clear();
-  GRACE.planned.reopen.clear();
-  GRACE.checks.clear();
-  try { await reportAction('system', 'mil_action', `grace_enter(${GRACE.durationMs}ms)`); } catch {}
-  setTimeout(() => { finalizeGrace().catch(()=>{}); }, GRACE.durationMs + 50);
-}
+async function stabilizeProfileAtomically(nome, opts = {}) {
+  const ATTEMPTS = 1; // só um ciclo principal, reload dentro do helper
+  setBootState(nome, { stage: 'resources', state: 'pending' });
+  await ensureResourcesOk({ minFreeMB: OPEN_MIN_FREE_MB });
+  let ctrl = controllers.get(nome);
 
-async function finalizeGrace() {
-  if (!GRACE.active) return;
-  const now = Date.now();
-  GRACE.active = false;
-
-  // Commit das ações planejadas (com disciplina ativa)
-  const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-
-  // 1) Reopen planejados (para quem morreu durante a graça)
-  for (const nome of Array.from(GRACE.planned.reopen)) {
-    const want = desired.perfis?.[nome];
-    if (!want || want.active !== true) continue; // não reabrir se desired.off
-    if (controllers.has(nome)) continue; // já está ativo novamente
-    try {
-      await activateOnce(nome, 'grace_reopen');
-      await reportAction(nome, 'mil_action', 'grace_reopen_done');
-    } catch (e) {
-      try { await reportAction(nome, 'mil_action', 'grace_reopen_fail ' + (e && e.message || e)); } catch {}
+  if (!ctrl) {
+    setBootState(nome, { stage: 'activating' });
+    const r = await activateOnce(nome, 'boot_atomic');
+    if (!r || !r.ok) {
+      setBootState(nome, { stage: 'activate_fail', state: 'fail', lastError: (r && r.error) || 'activate_failed' });
+      return { ok: false, code: 'activate_failed' };
     }
+    const freeAfter = Math.round(require('os').freemem() / (1024*1024));
+    if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
+      await reportAction(nome, 'open_rollback_memory', `headroom=${freeAfter}MB`);
+      await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' });
+      setBootState(nome, { stage: 'rollback_headroom', state: 'fail', lastError: 'headroom_low' });
+      return { ok: false, code: 'headroom_low' };
+    }
+    ctrl = controllers.get(nome);
   }
 
-  // 2) Kills planejados (casos irrecuperáveis)
-  for (const [nome, reason] of Array.from(GRACE.planned.kill.entries())) {
-    // Se já fechou durante a graça, nada a fazer
-    if (!controllers.has(nome)) continue;
-    try {
-      await handlers.deactivate({ nome, reason: `grace_planned_${reason}`, policy: 'preserveDesired' });
-      await reportAction(nome, 'mil_action', `grace_kill_done(${reason})`);
-    } catch (e) {
-      try { await reportAction(nome, 'mil_action', `grace_kill_fail(${reason}) ${e && e.message || e}`); } catch {}
+  // Estabilização Messenger/Marketplace
+  try {
+    setBootState(nome, { stage: 'messenger_ready' });
+    const pages = await ctrl.browser.pages().catch(()=>[]);
+    const page = pages && pages[0] ? pages[0] : null;
+    if (!page) throw new Error('no_page');
+    const rdy = await require('./browser.js').ensureMessengerMarketplaceReady(ctrl.browser, nome, {
+      gotoTimeoutMs: 30000, readyTimeoutMs: 40000, reloadTimeoutMs: 15000, allowReloadOnce: true
+    });
+
+    if (!rdy || !rdy.ok) {
+      if (rdy && rdy.code === 'fb_temp_block') {
+        // congelar 2h
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].frozenUntil = Date.now() + 2*60*60*1000; // 2h
+        await reportAction(nome, 'mil_action', 'frozen_2h: fb_temp_block');
+        await ensureFrozenShutdown(nome, 'fb_temp_block');
+        setBootState(nome, { stage: 'frozen', state: 'frozen', lastError: 'fb_temp_block' });
+        return { ok: false, code: 'frozen' };
+      }
+      if (rdy && (rdy.code === 'fatal' || rdy.code === 'exception')) {
+        await reportAction(nome, 'nurse_kill', `boot_atomic_fatal: ${(rdy.err||rdy.code)}`);
+        await handlers.deactivate({ nome, reason: 'boot_atomic_fatal', policy: 'preserveDesired' });
+        setBootState(nome, { stage: 'fatal_kill', state: 'retry_later', lastError: rdy.err||rdy.code });
+        return { ok: false, code: 'retry_later' };
+      }
+      // erro intermediário: loga e segue
+      await reportAction(nome, 'mil_action', `boot_atomic_intermediate_fail: ${(rdy && rdy.code) || 'no_dom'}`);
+      setBootState(nome, { stage: 'intermediate', state: 'fail', lastError: (rdy && rdy.code)||'no_dom' });
+      return { ok: false, code: 'intermediate' };
     }
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    await reportAction(nome, 'nurse_kill', `boot_atomic_exception: ${msg}`);
+    await handlers.deactivate({ nome, reason: 'boot_atomic_exception', policy: 'preserveDesired' });
+    setBootState(nome, { stage: 'fatal_kill', state: 'retry_later', lastError: msg });
+    return { ok: false, code: 'retry_later' };
   }
 
-  try { await reportAction('system', 'mil_action', `grace_exit(reopen=${GRACE.planned.reopen.size}, kill=${GRACE.planned.kill.size})`); } catch {}
-  GRACE.planned.kill.clear();
-  GRACE.planned.reopen.clear();
-  GRACE.checks.clear();
+  // Ligar Virtus
+  setBootState(nome, { stage: 'virtus_start' });
+  const sw = await handlers.start_work({ nome });
+  if (!sw || !sw.ok) {
+    setBootState(nome, { stage: 'virtus_fail', state: 'fail', lastError: (sw && sw.error)||'virtus_start_failed' });
+    return { ok: false, code: 'virtus_start_failed' };
+  }
 
-  // Snapshot após commit
-  try { await snapshotStatusAndWrite(); } catch {}
+  setBootState(nome, { stage: 'ok', state: 'ok' });
+  return { ok: true, code: 'ok' };
 }
+
+// FIM: entidades helpers BOOT_ATOMIC
 
 // APÓS o bloco do AUTO_CFG, adicione:
 const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
@@ -323,8 +323,7 @@ function clearLightEscalator() {
 }
 
 async function assertFullActivity() {
-  if (isBooting()) { bootLog('BLOCKED assertFullActivity'); return; }
-  if (isGraceActive()) { bootLog('BLOCKED assertFullActivity during GRACE'); return; }
+  if (isBootingAtomic()) { bootLog('BLOCKED assertFullActivity'); return; }
   const now = Date.now();
   if ((now - healer.lastFullAssertAt) < SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS) return;
   healer.lastFullAssertAt = now;
@@ -342,8 +341,7 @@ async function assertFullActivity() {
 
 // PANIC MODE: drop parcial + bootstrap mínimo e agressivo
 async function panicMode() {
-  if (isBooting()) { bootLog('BLOCKED panicMode'); return; }
-  if (isGraceActive()) { bootLog('BLOCKED panic during GRACE'); return; }
+  if (isBootingAtomic()) { bootLog('BLOCKED panicMode'); return; }
   await milLog('mil_action', `panic_mode_start: light since=${(Date.now()-(healer.lightEnterAt||autoMode.since||Date.now()))}ms cause=${healer.lastLightCause}`);
   try { robeQueue.clear(); } catch {}
   const nomesAtivos = Array.from(controllers.keys());
@@ -366,7 +364,7 @@ async function killPids(pids = []) {
 
 let _lastKillStrayRunAt = 0;
 async function killStrayChromes() {
-  if (isBooting() || isGraceActive()) { bootLog('BLOCKED killStrayChromes'); return; }
+  if (isBootingAtomic()) { bootLog('BLOCKED killStrayChromes'); return; }
   try {
     if (inflightLaunches > 0) {
       const now = Date.now();
@@ -810,7 +808,7 @@ async function closeExtraPages(browser, mainPage) {
 const _pruners = new Map(); // nome => pruneInterval
 
 function maybeStartPruneLoop(nome, browser, mainPage) {
-  if (isBooting() || isGraceActive()) { bootLog('BLOCKED maybeStartPruneLoop'); return; }
+  if (isBootingAtomic()) { bootLog('BLOCKED maybeStartPruneLoop'); return; }
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
     try {
@@ -837,7 +835,7 @@ let ramMonitorInterval = null;
 // Monitora RAM/CPU globalmente a cada N segundos, cross-platform
 async function ramCpuMonitorTick() {
   const perfisArr = loadPerfisJson();
-  const IN_GUARD = (isBooting() || isGraceActive());
+  const IN_GUARD = isBootingAtomic();
   if (IN_GUARD) { bootLog('BLOCKED ramCpuMonitorTick/all discipline'); }
   // Build lookup userDataDir -> nome
   const nomeByUserDir = {};
@@ -1159,7 +1157,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 
 // --------------- ROBE/TICK
 async function robeTickGlobal() {
-  if (isBooting() || isGraceActive()) { bootLog('BLOCKED robeTickGlobal'); return; }
+  if (isBootingAtomic()) { bootLog('BLOCKED robeTickGlobal'); return; }
   console.log('[WORKER][robeTickGlobal] Tick fila global, hora:', new Date().toLocaleString());
 
   // === PATCH autoMode Light: gate para robeTickGlobal ===
@@ -1396,21 +1394,11 @@ stopPruneLoop(nome);
 // Registrar falha e agendar reabertura curta
 try { registerFailure(nome, 'disconnected'); } catch {}
 try {
-  if (isBooting()) {
+  if (isBootingAtomic()) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].reopenAt = null;
     issues.append(nome, 'mil_action', 'reopen_suppressed_boot').catch(()=>{});
     bootLog('BLOCKED browser_disconnected reopenAt');
-    return;
-  }
-  if (isGraceActive()) {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].reopenAt = null;
-    planGraceReopen(nome);
-    issues.append(nome, 'mil_action', 'reopen_suppressed_grace').catch(()=>{});
-    bootLog('BLOCKED browser_disconnected reopenAt (GRACE)');
-    // Atualiza snapshot e sai
-    try { await snapshotStatusAndWrite(); } catch {}
     return;
   }
   const d = readJsonFile(desiredPath, { perfis: {} });
@@ -1451,6 +1439,10 @@ function resolveChromeUserDataRoot() {
   }
   const os = require('os');
   return path.join(os.homedir(), '.config', 'google-chrome');
+}
+
+function isBootingAtomic() {
+  return BOOT_ATOMIC.active || BOOT.active;
 }
 
 const handlers = {
@@ -1504,7 +1496,7 @@ const handlers = {
   },
 
   async deactivate({ nome, reason, policy }) {
-  if ((isBooting() && (policy !== 'forceDuringBoot')) || (isGraceActive() && (policy !== 'forceDuringGrace'))) {
+  if (isBootingAtomic() && !(policy === 'preserveDesired' || policy === 'forceDuringBoot')) {
     bootLog('BLOCKED deactivate (reason=' + (reason || '') + ')');
     return { ok: true, skipped: true };
   }
@@ -1889,58 +1881,65 @@ const handlers = {
       autoMode,
       sys,
       boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) },
-      grace: {
-        active: GRACE.active,
-        startedAt: GRACE.startedAt,
-        durationMs: GRACE.durationMs,
-        endsAt: GRACE.endsAt,
-        remainingMs: graceRemainingMs(),
-        plannedKillCount: GRACE.planned.kill.size,
-        plannedReopenCount: GRACE.planned.reopen.size,
-        okDuringGrace: graceOkCount()
+      bootAtomic: {
+        active: !!(BOOT_ATOMIC.active || BOOT.active),
+        startedAt: BOOT_ATOMIC.startedAt || BOOT.startedAt,
+        current: (BOOT_ATOMIC.idx >= 0 ? BOOT_ATOMIC.idx : null),
+        total: (BOOT_ATOMIC.list && BOOT_ATOMIC.list.length) || (loadPerfisJson().length),
+        perProfile: Array.from(BOOT_ATOMIC.perProfile.entries()).map(([nome, st]) => ({ nome, ...st })),
+        reopenQueue: Array.from(BOOT_ATOMIC.reopenQueue || []),
+        reopenDone: !!BOOT_ATOMIC.reopenDone
       }
     };
   },
 
   async ['boot-start'](payload) {
-    if (BOOT.active) return { ok: false, error: 'boot_already_active' };
-    let perfisArr = loadPerfisJson();
-    let nomes = perfisArr.map(p=>p.nome);
-    beginBoot(nomes);
-    (async function executeBootSequence() {
-      for (const nome of nomes) {
-        await ensureResourcesOk({ minFreeMB: OPEN_MIN_FREE_MB });
-        let r = await activateOnce(nome, 'boot');
-        if (!r.ok) { bootLog('activate fail ' + nome); continue; }
-        BOOT.opened.add(nome); BOOT.current = nome;
-        await new Promise(r=>setTimeout(r, 1200));
-        let r2 = await handlers.start_work({ nome });
-        if (!r2.ok) { bootLog('start_work fail ' + nome); continue; }
-        BOOT.startedVirtus.add(nome);
-        await new Promise(r=>setTimeout(r, 800));
+  if (BOOT_ATOMIC.active || BOOT.active) return { ok: false, error: 'boot_already_active' };
+  // Set guards e state machine
+  BOOT_ATOMIC.active = true; BOOT.active = true;
+  BOOT_ATOMIC.startedAt = Date.now();
+  BOOT_ATOMIC.perProfile.clear();
+  BOOT_ATOMIC.reopenQueue = [];
+  BOOT_ATOMIC.reopenDone = false;
+  BOOT.suppressRobe = true;
+  BOOT.suppressPruner = true;
+  const perfisArr = loadPerfisJson();
+  const nomes = perfisArr.map(p => p.nome);
+  BOOT_ATOMIC.list = nomes;
+  for (let i=0;i<nomes.length;i++) {
+      BOOT_ATOMIC.idx = i;
+      const nome = nomes[i];
+      setBootState(nome, { state:'pending', stage:'opening' });
+      const res = await stabilizeProfileAtomically(nome);
+      if (!res.ok && (res.code === 'retry_later')) BOOT_ATOMIC.reopenQueue.push(nome);
+      await snapshotStatusAndWrite();
+  }
+  // tentativas de reopen no final
+  if (!BOOT_ATOMIC.reopenDone && BOOT_ATOMIC.reopenQueue.length) {
+      for (const nome of BOOT_ATOMIC.reopenQueue) {
+         setBootState(nome, { stage: 'reopen_try', state: 'retrying' });
+         const res = await stabilizeProfileAtomically(nome);
+         if (!res.ok) setBootState(nome, { stage: 'reopen_fail', state: 'fail', lastError: res.code });
+         else setBootState(nome, { stage: 'ok', state: 'ok' });
+         await snapshotStatusAndWrite();
       }
-      endBoot(true); // agora quem estabiliza é a GRACE (POST_BOOT_GRACE)
-    })();
-    return { ok: true };
-  },
+      BOOT_ATOMIC.reopenDone = true;
+  }
+  // libera discipline
+  BOOT.active = false; BOOT.suppressRobe = false; BOOT.suppressPruner = false; BOOT_ATOMIC.active = false;
+  await reportAction('system', 'mil_action', 'boot_atomic_finished');
+  await snapshotStatusAndWrite();
+  return { ok: true };
+},
   async ['boot-state']() {
     return {
-      active: BOOT.active,
-      startedAt: BOOT.startedAt,
-      current: BOOT.current,
-      total: BOOT.plan.length,
-      opened: Array.from(BOOT.opened),
-      startedVirtus: Array.from(BOOT.startedVirtus),
-      grace: {
-        active: GRACE.active,
-        startedAt: GRACE.startedAt,
-        durationMs: GRACE.durationMs,
-        endsAt: GRACE.endsAt,
-        remainingMs: graceRemainingMs(),
-        plannedKillCount: GRACE.planned.kill.size,
-        plannedReopenCount: GRACE.planned.reopen.size,
-        okDuringGrace: graceOkCount()
-      }
+      active: !!(BOOT_ATOMIC.active || BOOT.active),
+      startedAt: BOOT_ATOMIC.startedAt || BOOT.startedAt,
+      current: (BOOT_ATOMIC.idx >= 0 ? BOOT_ATOMIC.idx : null),
+      total: (BOOT_ATOMIC.list && BOOT_ATOMIC.list.length) || (loadPerfisJson().length),
+      perProfile: Array.from(BOOT_ATOMIC.perProfile.entries()).map(([nome, st]) => ({ nome, ...st })),
+      // Manter campos antigos se necessário para retrocompatibilidade UI:
+      boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }
     };
   },
   async ['boot-cancel']() {
@@ -2006,7 +2005,24 @@ async function snapshotStatusAndWrite() {
         cores: (os.cpus()||[]).length,
         cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
       };
-      const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }, grace: { active: GRACE.active, startedAt: GRACE.startedAt, durationMs: GRACE.durationMs, endsAt: GRACE.endsAt, remainingMs: graceRemainingMs(), plannedKillCount: GRACE.planned.kill.size, plannedReopenCount: GRACE.planned.reopen.size, okDuringGrace: graceOkCount() }, ts: Date.now() };
+      const statusObj = { 
+        perfis, 
+        robes, 
+        robeQueue: robeQueueList, 
+        autoMode, 
+        sys, 
+        boot: { active: BOOT.active, startedAt: BOOT.startedAt, current: BOOT.current, total: BOOT.plan.length, opened: Array.from(BOOT.opened), startedVirtus: Array.from(BOOT.startedVirtus) }, 
+        bootAtomic: {
+          active: !!(BOOT_ATOMIC.active || BOOT.active),
+          startedAt: BOOT_ATOMIC.startedAt || BOOT.startedAt,
+          current: (BOOT_ATOMIC.idx >= 0 ? BOOT_ATOMIC.idx : null),
+          total: (BOOT_ATOMIC.list && BOOT_ATOMIC.list.length) || (loadPerfisJson().length),
+          perProfile: Array.from(BOOT_ATOMIC.perProfile.entries()).map(([nome, st]) => ({ nome, ...st })),
+          reopenQueue: Array.from(BOOT_ATOMIC.reopenQueue || []),
+          reopenDone: !!BOOT_ATOMIC.reopenDone
+        }, 
+        ts: Date.now() 
+      };
       // Async atomic-ish write
       const dir = path.dirname(statusPath);
       try { await fs.promises.mkdir(dir, { recursive: true }); } catch {}
@@ -2034,24 +2050,7 @@ const RECONCILE_INTERVAL_MS = 1500;
 let _reconciling = false;
 
 async function reconcileOnce() {
-if (isBooting()) { bootLog('BLOCKED reconcile_skip_activation'); return; }
-if (isGraceActive()) {
-  // Durante a Fase de Estabilização: só auditoria de cooldown/freeze
-  try {
-    const perfisArrAudit = loadPerfisJson();
-    for (const p of perfisArrAudit) {
-      const nomeAudit = p && p.nome;
-      if (!nomeAudit) continue;
-      const ctrlAudit = controllers.get(nomeAudit);
-      const working = !!(ctrlAudit && ctrlAudit.browser && ctrlAudit.trabalhando && !ctrlAudit.configurando);
-      const humanControl = !!(ctrlAudit && ctrlAudit.humanControl);
-      if (working && !humanControl) unfreezeCooldownIfWorking(nomeAudit);
-      else freezeCooldownIfNotWorking(nomeAudit);
-    }
-    await snapshotStatusAndWrite();
-  } catch {}
-  return;
-}
+if (isBootingAtomic()) { bootLog('BLOCKED reconcile_skip_activation'); return; }
 if (_reconciling) return;
 _reconciling = true;
 try {
@@ -2342,8 +2341,7 @@ async function tryReloadShort(p0, nome, attempt) {
 }
 
 async function nurseTick() {
-  if (isBooting()) { bootLog('BLOCKED nurse_tick_skip'); return; }
-  const IN_GRACE = isGraceActive();
+  if (isBootingAtomic()) { bootLog('BLOCKED nurse_tick_skip'); return; }
   const now = Date.now();
   const desired = readJsonFile(desiredPath, { perfis: {} });
   for (const nome of Object.keys(desired.perfis || {})) {
@@ -2387,16 +2385,10 @@ async function nurseTick() {
     let pages = [];
     try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
     if (!pages || !pages[0]) {
-      if (IN_GRACE) {
-        planGraceReopen(nome);
-        recordGraceCheck(nome, { alive: false, pagesOk: false, messengerOk: false, virtusOk: false, lastError: 'no_pages' });
-        continue;
-      } else {
-        await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
-        try { registerFailure(nome, 'no_pages'); } catch {}
-        await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
-        continue;
-      }
+      await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
+      try { registerFailure(nome, 'no_pages'); } catch {}
+      await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+      continue;
     }
     const p0 = pages[0];
     let healthy = await pageReadyBasic(p0);
@@ -2408,16 +2400,10 @@ async function nurseTick() {
       if (healthy) {
         await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
       } else {
-        if (IN_GRACE) {
-          planGraceKill(nome, 'nurse_zombie');
-          recordGraceCheck(nome, { alive: false, pagesOk: false, messengerOk: false, virtusOk: false, lastError: 'zombie' });
-          continue;
-        } else {
-          await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
-          try { registerFailure(nome, 'zombie'); } catch {}
-          await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
-          continue;
-        }
+        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
+        try { registerFailure(nome, 'zombie'); } catch {}
+        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+        continue;
       }
     }
     // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
@@ -2427,17 +2413,12 @@ async function nurseTick() {
       console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
       continue;
     }
-    if (IN_GRACE) {
-      // Nada agressivo durante Grace
-    } else {
-      if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
-        try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
-      }
+    if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+      try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
     }
     if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
       try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].retryBackoffMs = 30000; } catch {}
     }
-    recordGraceCheck(nome, { alive: true, pagesOk: true, messengerOk: true, virtusOk: true, lastError: '' });
   }
 }
 
