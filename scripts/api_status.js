@@ -1,7 +1,5 @@
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
-const os = require('os');
-
 module.exports = (app, workerClient, fileStore) => {
   // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
   app.get('/api/status', async (req, res) => {
@@ -135,20 +133,20 @@ module.exports = (app, workerClient, fileStore) => {
         }
 
         // AGREGADO GLOBAL NO HEADER
-        let cpuGlobalPercent = null;
-        let ramTotalMB = null;
-        let ramFreeMB = null;
-        const sysMetrics = fileStore.getSysMetricsSnapshot && fileStore.getSysMetricsSnapshot();
-        if (sysMetrics) {
-          ramTotalMB = typeof sysMetrics.ramTotalMB === 'number' ? sysMetrics.ramTotalMB : null;
-          ramFreeMB = typeof sysMetrics.ramFreeMB === 'number' ? sysMetrics.ramFreeMB : null;
-          cpuGlobalPercent = (typeof sysMetrics.cpuPercent === 'number')
-            ? sysMetrics.cpuPercent
-            : (
-              sysMetrics.cpu && typeof sysMetrics.cpu.percent === 'number'
-                ? sysMetrics.cpu.percent : null
-            );
-        }
+        // let cpuGlobalPercent = null;
+        // let ramTotalMB = null;
+        // let ramFreeMB = null;
+        // const sysMetrics = fileStore.getSysMetricsSnapshot && fileStore.getSysMetricsSnapshot();
+        // if (sysMetrics) {
+        //   ramTotalMB = typeof sysMetrics.ramTotalMB === 'number' ? sysMetrics.ramTotalMB : null;
+        //   ramFreeMB = typeof sysMetrics.ramFreeMB === 'number' ? sysMetrics.ramFreeMB : null;
+        //   cpuGlobalPercent = (typeof sysMetrics.cpuPercent === 'number')
+        //     ? sysMetrics.cpuPercent
+        //     : (
+        //       sysMetrics.cpu && typeof sysMetrics.cpu.percent === 'number'
+        //         ? sysMetrics.cpu.percent : null
+        //     );
+        // }
 
         // Retornar todos campos mínimos exigidos pelo painel, nunca omitir
         // ATENÇÃO: Preserva SEMPRE autoMode e sys no shape original, nunca sobrescrevendo nem removendo ambos se existirem.
@@ -159,9 +157,9 @@ module.exports = (app, workerClient, fileStore) => {
           ts,
           ...(warning ? { warning } : {}),
           ...(erroMsg ? { error: erroMsg } : {}),
-          ramTotalMB,
-          ramFreeMB,
-          cpuGlobalPercent,
+          // ramTotalMB,
+          // ramFreeMB,
+          // cpuGlobalPercent,
           // Garante presença dos campos se não vierem do status.json
           autoMode: (typeof rawStatus.autoMode !== 'undefined') ? rawStatus.autoMode : null,
           sys: (typeof rawStatus.sys !== 'undefined') ? rawStatus.sys : null,

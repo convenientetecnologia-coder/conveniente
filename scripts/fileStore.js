@@ -178,30 +178,7 @@ function patchStatusField(nome, patchObj) {
   return true;
 }
 
-// Atualização "em lote" de vários perfis/campos (tipicamente payload do monitor RAM)
-function updateManyStatusFields(obj) {
-  // obj: { [nome]: {campo1:val1, campo2:val2, ...}, ... }
-  const snapshot = getStatusSnapshot();
-  const arr = Array.isArray(snapshot.perfis) ? snapshot.perfis : [];
-  if (!obj || typeof obj !== 'object') return false;
-  Object.entries(obj).forEach(([nome, patch]) => {
-    const idx = arr.findIndex(p => p && p.nome === nome);
-    if (idx >= 0 && patch && typeof patch === 'object') {
-      Object.entries(patch).forEach(([campo, valor]) => {
-        if (
-          ['ramMB', 'cpuPercent', 'numPages', 'robeFrozenUntil'].includes(campo)
-        ) {
-          // Militar: RAM desconhecida/null, nunca fake zero
-          arr[idx][campo] = (valor !== undefined && valor !== null) ? valor : null;
-        } else {
-          arr[idx][campo] = valor;
-        }
-      });
-    }
-  });
-  writeJsonAtomic(statusPath, snapshot);
-  return true;
-}
+// ******** REMOVIDA updateManyStatusFields(obj) ********
 
 // Função militar completa para ler TUDO (RAM, robeMeta, cooldowns etc.)
 function getFullStatusSnapshot() {
@@ -420,30 +397,7 @@ function getSysMetricsSnapshot() {
   };
 }
 
-// AGREGADO DE RAM/CPU TOTAL E MÉTRICAS GLOBAIS
-function getAggregateHealthMetrics() {
-  const snapshot = getStatusSnapshot();
-  let ramTotalMB = 0;
-  let ramCount = 0;
-  let cpuTotalPercent = 0;
-  let cpuCount = 0;
-  (snapshot.perfis || []).forEach(p => {
-    if (p && typeof p.ramMB === 'number') {
-      ramTotalMB += p.ramMB;
-      ramCount++;
-    }
-    if (p && typeof p.cpuPercent === 'number') {
-      cpuTotalPercent += p.cpuPercent;
-      cpuCount++;
-    }
-  });
-  return {
-    totalRamMB: ramTotalMB,
-    averageRamMB: ramCount ? ramTotalMB / ramCount : null,
-    totalCpuPercent: cpuTotalPercent,
-    averageCpuPercent: cpuCount ? cpuTotalPercent / cpuCount : null
-  };
-}
+// ******** REMOVIDA getAggregateHealthMetrics() ********
 
 // EXPORTAÇÃO EXPANDIDA PARA FUNÇÕES MILITARES
 module.exports = {
@@ -455,7 +409,5 @@ module.exports = {
   // Militares:
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,
-  getFullStatusSnapshot, updateStatusField, updateManyStatusFields,
-  // Agregado militar
-  getAggregateHealthMetrics
+  getFullStatusSnapshot, updateStatusField
 };

@@ -11,14 +11,6 @@ const locais = require('./locais.js');     // controlador de rotação de locali
 let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
 
-// Pasta Desktop/Área de Trabalho/fotos (mantido; útil para logs)
-function resolveFotosDir() {
-  const home = os.homedir();
-  let desktopPath = path.join(home, 'Desktop');
-  if (!fs.existsSync(desktopPath)) desktopPath = path.join(home, 'Área de Trabalho');
-  return path.join(desktopPath, 'fotos');
-}
-
 // Helpers básicos
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
@@ -416,30 +408,6 @@ async function preencherLocalizacao(page, cidade) {
   throw new Error('Localização não ficou válida após múltiplas tentativas (ciclo consumido).');
 }
 
-// Publicação inteligente (timings enxutos)
-async function publicarInteligente(page) {
-  const maxPassos = 8;
-  for (let i = 0; i < maxPassos; i++) {
-    let btn = await findEnabledButton(page, 'Publicar', 1000);
-    if (btn) {
-      await btn.click();
-      await sleep(jitter(500, 800));
-      const aindaHa = await findEnabledButton(page, 'Publicar', 500);
-      if (!aindaHa) return true;
-    }
-    btn = await findEnabledButton(page, 'Avançar', 1000);
-    if (btn) {
-      await btn.click();
-      await sleep(jitter(500, 800));
-      continue;
-    }
-    await sleep(jitter(400, 650));
-  }
-  const publicBtn = await findEnabledButton(page, 'Publicar', 500);
-  const avancBtn  = await findEnabledButton(page, 'Avançar', 500);
-  return !publicBtn && !avancBtn;
-}
-
 // Fechamento seguro da aba (anti-trava)
 async function safeClosePage(page) {
   if (!page) return;
@@ -555,47 +523,6 @@ async function publicarEFechar5s(page) {
 // GUARD: Armezenamento RAM/Status/Antiflood Backoff/FROZEN/Logging guard rails
 // RobeMeta militar (volátil, RAM)
 const robeMeta = {};  // nome -> { frozenUntil: Date, estado, ultimaTentativa, ultimaFilaMs, ... }
-
-// --------------------------------------------------
-// Export: expositor para métricas/health militar (RAM)
-function getRobeMetaStatus(nome) {
-  const m = robeMeta[nome] || {};
-  return {
-    lastPosted: m.lastPosted || null,
-    cooldownSec: m.cooldownSec || 0,
-    estado: m.estado || null,
-    ultimaTentativa: m.ultimaTentativa || null,
-    frozenUntil: m.frozenUntil || null,
-    emFila: !!m.emFila,
-    emExecucao: !!m.emExecucao,
-    ramMB: m.ramMB || null
-  };
-}
-
-// --------------------------------------------------
-// PRUNE: mantem 1 page aberta por browser, militar
-let pruneExtraWindowsInterval = null;
-function pruneExtraWindows(browsers = []) {
-  for (const browser of browsers) {
-    browser.pages && browser.pages().then(async pages => {
-      if (pages.length > 1) {
-        for (let i = 1; i < pages.length; i++) {
-          try {
-            await pages[i].close();
-          } catch {}
-        }
-      }
-    }).catch(()=>{});
-  }
-}
-
-function startBackgroundPrune(browsers = []) {
-  // PRUNE: ciclo de 120s que fecha páginas extras
-  if (pruneExtraWindowsInterval) clearInterval(pruneExtraWindowsInterval);
-  pruneExtraWindowsInterval = setInterval(() => {
-    pruneExtraWindows(browsers);
-  }, 120 * 1000);
-}
 
 // --------------------------------------------------
 
@@ -903,18 +830,8 @@ function robeQueueFilter(nome) {
 }
 
 // --------------------------------------------------
-// Exposição de health/metrics para status.json
-function robeHealthSummary(todosNomes) {
-  return (todosNomes || []).map(nome => getRobeMetaStatus(nome));
-}
-
-// --------------------------------------------------
 
 module.exports = {
   startRobe,
-  pruneExtraWindows,    // PRUNE: mantem 1 page aberta por browser, militar
-  startBackgroundPrune, // PRUNE: ciclo background se desejado
-  robeQueueFilter,      // GUARD: filtragem antiflood da fila
-  getRobeMetaStatus,    // Métricas/health por perfil
-  robeHealthSummary     // Métricas/health todas contas
+  robeQueueFilter
 };

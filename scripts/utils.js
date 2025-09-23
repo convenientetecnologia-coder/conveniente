@@ -28,29 +28,6 @@ function writeJsonSafe(file, obj) {
   }
 }
 
-function leastUsedPreset(presets, perfis, idField = 'uaPresetId') {
-  if (!Array.isArray(presets) || !presets.length) return null;
-  const counts = {};
-  presets.forEach(p => counts[p.id] = 0);
-  for (const pf of (perfis||[])) {
-    if (pf[idField]) counts[pf[idField]] = (counts[pf[idField]] || 0) + 1;
-  }
-  let min = Math.min(...Object.values(counts));
-  const candidates = presets.filter(p => counts[p.id] === min);
-  return candidates[Math.floor(Math.random()*candidates.length)];
-}
-
-function makeUniqueName(base, dir) {
-  let n = slugify(base);
-  let candidate = n;
-  let i = 2;
-  while (fs.existsSync(path.join(dir, candidate + '.json'))) {
-    candidate = n + '_' + i;
-    i++;
-  }
-  return candidate;
-}
-
 /**
  * Ultra-normalização robusta de cookies.
  */
@@ -194,7 +171,9 @@ function normalizeCookies(cookiesInput) {
         if (cookie.name === 'c_user' || cookie.name === 'xs' || cookie.name === 'fr') cookie.value = 'default';
         else if (cookie.name === 'sb' || cookie.name === 'datr') cookie.value = '0';
         else cookie.value = 'default';
-        console.warn(`[normalizeCookies][PATCH] cookie "${cookie.name}" sem value, ajustado para "${cookie.value}"`);
+        if (process.env.DEBUG_COOKIES === '1') {
+          console.warn(`[normalizeCookies][PATCH] cookie "${cookie.name}" sem value, ajustado para "${cookie.value}"`);
+        }
       }
 
       // expires: se não existir ou estiver no passado, seta para 180 dias à frente (em segundos)
@@ -217,12 +196,16 @@ function normalizeCookies(cookiesInput) {
     const foundEssenciais = new Set(arr.map(c => c.name));
     for (const nomeEss of ESSENCIAIS) {
       if (!foundEssenciais.has(nomeEss)) {
-        console.warn(`[normalizeCookies][WARNING] Cookie essencial ausente ou estranho: ${nomeEss}`);
+        if (process.env.DEBUG_COOKIES === '1') {
+          console.warn(`[normalizeCookies][WARNING] Cookie essencial ausente ou estranho: ${nomeEss}`);
+        }
       }
     }
 
     // DICA/robustez: log final do array retornado
-    console.log('[normalizeCookies][FINAL]', arr);
+    if (process.env.DEBUG_COOKIES === '1') {
+      console.log('[normalizeCookies][FINAL]', arr);
+    }
 
     // Final: retorna array ultra-limpo dos ESSENCIAIS normalizados
     return arr;
@@ -259,8 +242,6 @@ module.exports = {
   slugify,
   readJsonSafe,
   writeJsonSafe,
-  leastUsedPreset,
-  makeUniqueName,
   normalizeCookies,
   getCoords,
 };

@@ -407,7 +407,6 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
 
 // ======= INÍCIO: TRAVA DE ATIVAÇÃO SIMULTÂNEA =========
-const activating = new Set();
 // ======= FIM: TRAVA DE ATIVAÇÃO SIMULTÂNEA ============
 
 // ======= INÍCIO: LOCK GLOBAL DE ATIVAÇÃO (ULTRA ROBUSTO) =======
@@ -1843,7 +1842,7 @@ for (const nome of nomes) {
   if (want.invokeHuman === true) {
     try {
       const r = await handlers.invoke_human({ nome });
-      if (r && r.ok) {
+      if (r e && r.ok) {
         try {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
@@ -1921,10 +1920,8 @@ setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.
 // ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
   INTERVAL_MS: 5000,
-  PAGE_EVAL_TIMEOUT_MS: 1500,
-  ZOMBIE_STRIKES: 3
+  PAGE_EVAL_TIMEOUT_MS: 1500
 };
-const nurseState = new Map(); // nome => { strikes: number, lastOk: ts }
 
 // === ULTRA RECOVERY (militar) ===
 const ULTRA_RECOVERY = {
@@ -2159,7 +2156,7 @@ if (!utils.slugify) {
 // ===== Watchdog de stuck/frozen =====
 setInterval(() => {
   const now = Date.now();
-  for (const nome of Object.keys(obeMeta)) {
+  for (const nome of Object.keys(robeMeta)) {
     if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now && (robeMeta[nome].frozenUntil - now > 6 * 3600 * 1000)) {
       issues.append(nome, 'frozen_watchdog', 'Perfil congelado > 6h');
     }

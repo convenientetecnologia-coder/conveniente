@@ -18,10 +18,6 @@ const path = require('path');
 const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
 
-// ========== PATCH MILITAR: Import robeQueue ==========
-const robeQueue = require('./robeQueue.js');
-// ========== FIM PATCH ==========
-
 // ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
 function getPerfilManifest(nome) {
   const perfisArr = require('../dados/perfis.json');
@@ -349,10 +345,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
   // MILITAR: Timers unificados
   let filaInterval = null;
   let filaChatTimer = null;
-  // Militar: cleaning interval to prevent interval leak
-  let pruneInterval = null; // Militar: cleaning interval to prevent interval leak
   let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
-  let ramDebugInterval = null; // Militar: cleaning interval to prevent interval leak
 
   let lastScrollToTop = 0;
   let lastRamCheck = 0;
@@ -579,37 +572,6 @@ function startVirtus(browser, nome, robeMeta = {}) {
     return null;
   }
 
-  async function ensureChatAnchorInList(p, chatId, budgetMs = 8000) {
-    const start = Date.now();
-    let lastCount = -1;
-    const sel = `a[href^="/marketplace/t/${chatId}"]`;
-    while ((Date.now() - start) < budgetMs) {
-      const handle = await p.$(sel);
-      if (handle) return handle;
-      try {
-        const contSel = await p.evaluate(() => {
-          const cands = ['div[role="grid"]','div[role="rowgroup"]','div.x78zum5.xdt5ytf'];
-          for (const cs of cands) {
-            const el = document.querySelector(cs);
-            if (el && el.scrollHeight > el.clientHeight) return cs;
-          }
-          return 'body';
-        });
-        const count = await p.$$eval('a[href^="/marketplace/t/"]', els => els.length);
-        if (count !== lastCount) {
-          lastCount = count;
-        } else {
-          await p.evaluate(selector => {
-            const el = document.querySelector(selector) || document.scrollingElement || document.body;
-            el.scrollTop = el.scrollTop + Math.max(300, window.innerHeight * 0.5);
-          }, contSel);
-        }
-      } catch {}
-      await sleep(250);
-    }
-    return null;
-  }
-
   function incFail(chatId) {
     const n = (failCounts.get(chatId) || 0) + 1;
     failCounts.set(chatId, n);
@@ -653,9 +615,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
       return;
     }
     // Fim guard de vida browser
@@ -666,9 +626,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
       return;
     }
     // === FIM GUARD DE VIDA ===
@@ -832,9 +790,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
       return;
     }
     let p = await ensurePage();
@@ -844,9 +800,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
       return;
     }
     // === FIM GUARD DE VIDA ===
@@ -1010,9 +964,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
       return;
     }
     // Fim guard de vida browser
@@ -1027,9 +979,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
         running = false;
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
         if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
         if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-        if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
         return;
       }
 
@@ -1043,9 +993,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
         running = false;
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
         if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
         if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-        if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
         return;
       }
 
@@ -1172,9 +1120,7 @@ function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (pruneInterval) clearInterval(pruneInterval), pruneInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      if (ramDebugInterval) clearInterval(ramDebugInterval), ramDebugInterval = null;
       let pages = [];
       try { pages = await browser.pages(); } catch {}
       if (robeMeta && typeof nome !== "undefined") {

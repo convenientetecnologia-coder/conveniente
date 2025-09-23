@@ -63,7 +63,7 @@ module.exports = (app, workerClient, fileStore) => {
       while (fileStore.existsDir(path.join(fileStore.perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
       // UA com fallback
-      const preset = fileStore.pickUaPreset() || require('./fileStore').DEFAULT_UA || {};
+      const preset = fileStore.pickUaPreset() || {};
 
       const cookiesArr = require('./utils').normalizeCookies(cookies);
       if (
@@ -245,38 +245,6 @@ module.exports = (app, workerClient, fileStore) => {
 
       // Renomeia diretório lógico (dados/perfis/NOME) + atualiza manifest interno
       const resp = fileStore.renamePerfilSlug(nome, novoLabel);
-
-      // Reposiciona o userDataDir externo (Chrome User Data\Conveniente\NOME -> NOVO)
-      try {
-        const chromeRoot = resolveChromeUserDataRoot();
-        const oldDir = path.join(chromeRoot, 'Conveniente', nome);
-        const newDir = path.join(chromeRoot, 'Conveniente', resp.nome);
-        if (fs.existsSync(oldDir)) {
-          try { fs.mkdirSync(path.dirname(newDir), { recursive: true }); } catch {}
-          try { fs.renameSync(oldDir, newDir); }
-          catch {
-            // fallback: copia e remove
-            const copyDir = (src, dst) => {
-              if (!fs.existsSync(dst)) fs.mkdirSync(dst, { recursive: true });
-              const ents = fs.readdirSync(src, { withFileTypes: true });
-              for (const ent of ents) {
-                const s = path.join(src, ent.name);
-                const d = path.join(dst, ent.name);
-                if (ent.isDirectory()) copyDir(s, d);
-                else fs.copyFileSync(s, d);
-              }
-            };
-            copyDir(oldDir, newDir);
-            try { fs.rmSync(oldDir, { recursive: true, force: true }); } catch {}
-          }
-        }
-
-        // Atualiza manifest.userDataDir para o novo caminho - ATUALIZA O MANIFEST NO NOVO USERDATADIR EXTERNO
-        const manPath = path.join(newDir, 'manifest.json');
-        const man = fileStore.readJsonSafe(manPath, {});
-        man.userDataDir = newDir;
-        fs.writeFileSync(manPath, JSON.stringify(man, null, 2), 'utf8');
-      } catch {}
 
       // Atualiza label
       try { fileStore.updatePerfilLabel(resp.nome, String(novoLabel)); } catch {}
