@@ -234,7 +234,7 @@ async function killStrayChromes() {
       const nome = nomeByDir[normalizePath(userDir)];
       if (!nome) continue;
       if (controllers.has(nome)) continue; // não é stray
-      group[nome] = group[nome] || [];
+      group[nome] = group[nome] = [];
       group[nome].push(Number(proc.pid));
     }
     for (const [nome, pidList] of Object.entries(group)) {
@@ -822,7 +822,7 @@ async function ramCpuMonitorTick() {
     // PATCH MILITAR: nunca suicidar navegador por pico de boot/start/post,
     // só mata leak persistente e nunca perfil único.
     const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
-    if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue; // ignora <3min
+    if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue; // <3min
     if (vivos <= 1) continue; // nunca processa breaker se só 1 perfil trabalhando
 
     // Histórico curto
@@ -1186,10 +1186,18 @@ stopPruneLoop(nome);
 // Registrar falha e agendar reabertura curta
 try { registerFailure(nome, 'disconnected'); } catch {}
 try {
+  // Checagem de desired: só agenda reopenAt se desired.active === true
+  const d = readJsonFile(desiredPath, { perfis: {} });
+  const isDesiredActive = d.perfis?.[nome]?.active === true;
   robeMeta[nome] = robeMeta[nome] || {};
   if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
-    robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
-    issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+    if (isDesiredActive) {
+      robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+      issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+    } else {
+      robeMeta[nome].reopenAt = null;
+      issues.append(nome, 'mil_action', 'reopen_suppressed_desired_off').catch(()=>{});
+    }
   }
 } catch {}
 
@@ -1439,6 +1447,8 @@ const handlers = {
   async ['robe-play']({ nome }) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+    // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
+    if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
 
     // Zera cooldown no manifest
     try {
@@ -1505,7 +1515,7 @@ const handlers = {
             res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
           } catch (e) {
             // Penalidade por erro técnico
-            const penalSec = 60+Math.floor(Math.random()*241); // 60-300s
+            const penalSec = 60+Math.floor(Math.random() * 241); // 60-300s
             const man = readManifest(nome) || {};
             const nextCd = Date.now() + penalSec*1000;
             man.robeCooldownUntil = nextCd;
@@ -1751,10 +1761,15 @@ for (const nome of nomes) {
       // não reabre durante congelamento
       continue;
     }
-    // Auto-reabrir (militar)
-    robeMeta[nome].reopenAt = null;
-    robeMeta[nome].killHistory = [];
-    try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
+    // Só cumpre reopen se desired.active === true
+    if (want.active === true) {
+      robeMeta[nome].reopenAt = null;
+      robeMeta[nome].killHistory = [];
+      try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
+    } else {
+      robeMeta[nome].reopenAt = null;
+      issues.append(nome, 'mil_action', 'reopen_at_ignored_desired_off').catch(()=>{});
+    }
     continue;
   }
 
@@ -2023,6 +2038,11 @@ async function nurseTick() {
         continue;
       }
     }
+    // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
+    if (ctrl && ctrl.configurando) {
+      console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
+      continue;
+    }
     if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
       try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
     }
@@ -2139,7 +2159,7 @@ if (!utils.slugify) {
 // ===== Watchdog de stuck/frozen =====
 setInterval(() => {
   const now = Date.now();
-  for (const nome of Object.keys(robeMeta)) {
+  for (const nome of Object.keys(obeMeta)) {
     if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now && (robeMeta[nome].frozenUntil - now > 6 * 3600 * 1000)) {
       issues.append(nome, 'frozen_watchdog', 'Perfil congelado > 6h');
     }

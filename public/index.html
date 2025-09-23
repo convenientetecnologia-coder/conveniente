@@ -1173,20 +1173,26 @@
       if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
       try {
         const st = await window.electronAPI.getStatus();
-        const ativos = (st.perfis || []).filter(x => x.active);
-        for (const p of ativos) {
+        const perfis = st?.perfis || [];
+        // NOVO: desativa TODOS, não só ativos
+        for (const p of perfis) {
           try {
             await window.electronAPI.deactivate(p.nome);
-            await waitUntil(async () => {
-              const s2 = await window.electronAPI.getStatus();
-              const c2 = (s2.perfis || []).find(x => x.nome === p.nome);
-              return !c2 || !c2.active;
-            }, { timeoutMs: 60000, intervalMs: 400 });
-            await new Promise(r=>setTimeout(r,600));
           } catch (e) {
-            console.warn('[Fechar todos] falha fechando', p && p.nome, e && e.message || e);
+            console.warn('[Fechar todos] falha desativando', p && p.nome, e && e.message || e);
           }
         }
+        // Aguarda convergência global: todos inativos e robeQueue vazia
+        const ok = await waitUntil(async () => {
+          const st2 = await window.electronAPI.getStatus();
+          return (
+            (st2.perfis||[]).every(x => !x.active) &&
+            ((st2.robeQueue||[]).length === 0)
+          );
+        }, { timeoutMs: 120000, intervalMs: 600 });
+        // Sentinela: aguarda após convergência (6s)
+        await sleep(6000);
+        if (!ok) alert('Nem todos foram fechados após 2 minutos — verifique manualmente possíveis stucks.');
       } catch (e) {
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {
