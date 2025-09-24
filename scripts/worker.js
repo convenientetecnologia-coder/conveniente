@@ -80,7 +80,7 @@ const SELF_HEAL_CFG = {
   FULL_ASSERT_INTERVAL_MS: parseInt(process.env.FULL_ASSERT_INTERVAL_MS || '120000', 10), // 2min
   PANIC_LIGHT_MAX_MS: parseInt(process.env.PANIC_LIGHT_MAX_MS || '15601000', 10), // 15min
   PANIC_NO_PROGRESS_MS: parseInt(process.env.PANIC_NO_PROGRESS_MS || '8601000', 10), // 8min
-  MAX_LIGHT_CYCLES WITHOUT_PROGRESS: parseInt(process.env.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS || '2', 10)
+  MAX_LIGHT_CYCLES_WITHOUT_PROGRESS: parseInt(process.env.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS || '2', 10)
 };
 
 const healer = {
