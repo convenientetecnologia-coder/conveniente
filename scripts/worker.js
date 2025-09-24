@@ -80,7 +80,7 @@ const SELF_HEAL_CFG = {
   FULL_ASSERT_INTERVAL_MS: parseInt(process.env.FULL_ASSERT_INTERVAL_MS || '120000', 10), // 2min
   PANIC_LIGHT_MAX_MS: parseInt(process.env.PANIC_LIGHT_MAX_MS || '15601000', 10), // 15min
   PANIC_NO_PROGRESS_MS: parseInt(process.env.PANIC_NO_PROGRESS_MS || '8601000', 10), // 8min
-  MAX_LIGHT_CYCLES_WITHOUT_PROGRESS: parseInt(process.env.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS || '2', 10)
+  MAX_LIGHT_CYCLES WITHOUT_PROGRESS: parseInt(process.env.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS || '2', 10)
 };
 
 const healer = {
@@ -123,7 +123,7 @@ function chooseCandidatesToOpen(maxN = 2) {
   const candidates = allPerfis
     .map(p => p.nome)
     .filter(nome => desired.has(nome) && !controllers.has(nome))
-    .filter(nome => !(robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now))
+    .filter(nome => !isFrozenNow(nome))
     .slice(0);
   candidates.sort((a,b) => {
     const ra = typeof robeMeta[a]?.ramMB === 'number' ? robeMeta[a].ramMB : 999999;
@@ -428,6 +428,20 @@ try {
 // ======= INÍCIO: TRAVA DE ATIVAÇÃO SIMULTÂNEA =========
 // ======= FIM: TRAVA DE ATIVAÇÃO SIMULTÂNEA ============
 
+// ======= FUNÇÃO CENTRAL: isFrozenNow =======
+function isFrozenNow(nome) {
+  const now = Date.now();
+  const inMem = (robeMeta[nome] && robeMeta[nome].frozenUntil) || 0;
+  let inDisk = 0;
+  try {
+    const man = readManifest(nome);
+    if (man && typeof man.frozenUntil === 'number') inDisk = man.frozenUntil;
+  } catch {}
+  const until = Math.max(inMem, inDisk || 0);
+  return until > now ? until : 0;
+}
+// ============================================
+
 // ======= INÍCIO: LOCK GLOBAL DE ATIVAÇÃO (ULTRA ROBUSTO) =======
 const activationLocks = new Map(); // nome => Promise em andamento
 
@@ -437,12 +451,9 @@ if (!nome) return { ok: false, error: 'Nome ausente' };
 if (controllers.has(nome)) return { ok: true, already: true };
 
 // BLOQUEIO: não ativa se estiver congelado
-{
-  const now = Date.now();
-  if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now) {
-    await reportAction(nome, 'mil_action', 'block_activate_frozen');
-    return { ok: false, error: 'account_is_frozen' };
-  }
+if (isFrozenNow(nome)) {
+  await reportAction(nome, 'mil_action', 'block_activate_frozen');
+  return { ok: false, error: 'account_is_frozen' };
 }
 
 // Se já existe uma ativação em curso para este nome, aguarde finalização
@@ -995,7 +1006,7 @@ async function robeTickGlobal() {
     .map(p => p.nome)
     .filter(nome => {
       // ALTERAÇÃO: antifila militar - respeita frozen
-      if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
+      if (isFrozenNow(nome)) {
         return false; // GUARD: evita spam/OOM por manifest ausente, conta está congelada
       }
       // RAM kill/killbackoff (Terminator)
@@ -1219,14 +1230,12 @@ try {
   const d = readJsonFile(desiredPath, { perfis: {} });
   const isDesiredActive = d.perfis?.[nome]?.active === true;
   robeMeta[nome] = robeMeta[nome] || {};
-  if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
-    if (isDesiredActive) {
-      robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
-      issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
-    } else {
-      robeMeta[nome].reopenAt = null;
-      issues.append(nome, 'mil_action', 'reopen_suppressed_desired_off').catch(()=>{});
-    }
+  if (!isFrozenNow(nome) && isDesiredActive) {
+    robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+    issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+  } else {
+    robeMeta[nome].reopenAt = null;
+    issues.append(nome, 'mil_action', isFrozenNow(nome) ? 'reopen_suppressed_frozen' : 'reopen_suppressed_desired_off').catch(()=>{});
   }
 } catch {}
 
@@ -1315,12 +1324,10 @@ const handlers = {
   }
   const ctrl = controllers.get(nome);
   if (!ctrl) {
-    if (preserve) {
+    if (preserve && !isFrozenNow(nome)) {
       robeMeta[nome] = robeMeta[nome] || {};
-      if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
-        robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
-        issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
-      }
+      robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
+      issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
     }
     await snapshotStatusAndWrite();
     return { ok: true };
@@ -1347,7 +1354,7 @@ const handlers = {
     } catch {}
   } else {
     robeMeta[nome] = robeMeta[nome] || {};
-    if (!robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil <= Date.now()) {
+    if (!isFrozenNow(nome)) {
       robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
       issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
     }
@@ -1477,7 +1484,7 @@ const handlers = {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     // P0.3: recusa se frozen
-    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
+    if (isFrozenNow(nome)) {
       return { ok: false, error: 'account_frozen' }
     }
     // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
@@ -1755,10 +1762,9 @@ const nomes = Object.keys(perfisDesired);
 
 // Varre controllers e fecha se congelado, antes de ativações
 {
-const now = Date.now();
 controllers.forEach((ctrl, nome) => {
   try {
-    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now) {
+    if (isFrozenNow(nome)) {
       ensureFrozenShutdown(nome, 'reconcile_guard').catch(()=>{});
     }
   } catch {}
@@ -1790,7 +1796,7 @@ for (const nome of nomes) {
 
   // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
   if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
-    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
+    if (isFrozenNow(nome)) {
       // não reabre durante congelamento
       continue;
     }
@@ -1809,7 +1815,7 @@ for (const nome of nomes) {
   // Liga/desliga browser
   if (want.active === true && !ctrl) {
     // Guard-rail frozen: se estiver congelado, pula
-    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) continue;
+    if (isFrozenNow(nome)) continue;
 
     // === PATCH autoMode Light: gate para ativação no reconcileOnce ===
     const now = Date.now();
@@ -1850,6 +1856,11 @@ for (const nome of nomes) {
   }
 
   // Virtus on/off
+  if (isFrozenNow(nome)) {
+    if (ctrl2 && ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
+    continue;
+  }
+
   if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl2.trabalhando && !ctrl2.configurando) {
     try { ctrl2.virtus = virtusHelper.startVirtus(ctrl2.browser, nome, { restrictTab: 0 }); ctrl2.trabalhando = true; } catch {}
   } else if (want.virtus === 'off' && ctrl2.trabalhando) {
@@ -2085,15 +2096,13 @@ async function nurseTick() {
     const ctrl = controllers.get(nome);
 
     // GUARD: nunca manter ativo durante frozen
-    {
-      const now = Date.now();
-      if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > now) {
-        if (ctrl) { await ensureFrozenShutdown(nome, 'nurse_guard'); }
-        continue;
-      }
+    if (isFrozenNow(nome)) {
+      if (ctrl) { await ensureFrozenShutdown(nome, 'nurse_guard'); }
+      continue;
     }
 
     if (want.active === true && !ctrl) {
+      if (isFrozenNow(nome)) continue;
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
       try { await activateOnce(nome, 'nurse_auto'); } catch {}
       continue;

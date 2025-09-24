@@ -324,7 +324,22 @@ async function sendMessageSafe(p, campo, msg) {
 }
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
-function startVirtus(browser, nome, robeMeta = {}) {
+async function startVirtus(browser, nome, robeMeta = {}) {
+  // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 1 ==========
+  // Checagem ultra robusta de freezer
+  let manifestFrozenUntil = 0;
+  try {
+    const { manifest } = getPerfilManifest(nome);
+    manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+  } catch {}
+  if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+    const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
+    log(`[VIRTUS][${nome}] virtus_skip_frozen — perfil congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+    if (issues) try { await logIssue(nome, 'virtus_skip_frozen', `perfil congelado até ${new Date(manifestFrozenUntil).toISOString()}`); } catch {}
+    return { stop: async () => {} }; // Virtus runner no-op
+  }
+  // ========== FIM BLOCO FREEZER INSTRUÇÃO 1 ==========
+
   const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
 
   let running = true;
@@ -411,6 +426,22 @@ function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function ensurePage() {
+    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 3 ==========
+    let manifestFrozenUntil = 0;
+    try {
+      const { manifest } = getPerfilManifest(nome);
+      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+    } catch {}
+    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+      log(`[VIRTUS][${nome}] virtus_stop_because_frozen_and_dead_browser — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      return null;
+    }
+    // ========== FIM BLOCO FREEZER INSTRUÇÃO 3 ==========
+
     // === INÍCIO GUARD DE VIDA NO ENSUREPAGE ===
     if (!browser || (browser.isConnected && browser.isConnected() === false)) {
       log(`[VIRTUS][${nome}] Browser morto, não é possível garantir page.`);
@@ -608,6 +639,22 @@ function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function reloadUltraRobusto() {
+    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
+    let manifestFrozenUntil = 0;
+    try {
+      const { manifest } = getPerfilManifest(nome);
+      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+    } catch {}
+    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      return;
+    }
+    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
+
     // === INÍCIO GUARD DE VIDA ===
     if (!browser || browser.isConnected?.() === false) {
       log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
@@ -782,6 +829,22 @@ function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function responderChat(chatId) {
+    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
+    let manifestFrozenUntil = 0;
+    try {
+      const { manifest } = getPerfilManifest(nome);
+      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+    } catch {}
+    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      return;
+    }
+    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
+
     log(`[DETAILED] Início responderChat: ${chatId}`);
     // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
     if (!browser || browser.isConnected?.() === false) {
@@ -957,6 +1020,22 @@ function startVirtus(browser, nome, robeMeta = {}) {
   // === BLOCO MODIFICADO ===
   // ========================
   async function filaManagerLoop() {
+    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
+    let manifestFrozenUntil = 0;
+    try {
+      const { manifest } = getPerfilManifest(nome);
+      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+    } catch {}
+    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      return;
+    }
+    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
+
     // === INÍCIO GUARD DE VIDA NO FILAMANAGERLOOP ===
     if (!browser || browser.isConnected?.() === false) {
       log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
@@ -1100,9 +1179,41 @@ function startVirtus(browser, nome, robeMeta = {}) {
   // ==== FIM BLOCO MODIFICADO ====
 
   async function runner() {
+    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
+    let manifestFrozenUntil = 0;
+    try {
+      const { manifest } = getPerfilManifest(nome);
+      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+    } catch {}
+    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      return;
+    }
+    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
+
     await sleep(2000);
     let ready = false;
     while (!ready) {
+      // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
+      let manifestFrozenUntil = 0;
+      try {
+        const { manifest } = getPerfilManifest(nome);
+        manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+      } catch {}
+      if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+        running = false;
+        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+        log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+        return;
+      }
+      // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
+
       try {
         const p = await ensurePage();
         if (!p) { await sleep(2500); continue; }
