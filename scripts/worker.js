@@ -60,7 +60,7 @@ async function onEnterLightMode() {
       // Derruba pesados/zumbis (RAM >= 900MB) imediatamente
       const ramMB = (robeMeta[nome] && typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
       if (ramMB != null && ramMB >= AUTO_CFG.RAM_KILL_MB) {
-        await reportAction(nome, 'nurse_kill', `LEVE: kill pesado/zumbi (RAM=${ramMB}MB) preserveDesired`);
+        await reportAction(nome, 'nurse_kill', `LEVE: kill pesado/zumbi (RAM=${ramMB}MB) preserveDesired reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
         await handlers.deactivate({ nome, reason: 'light_ram_shed', policy: 'preserveDesired' });
       }
     } catch {}
@@ -405,6 +405,25 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 
 // Estado global do Robe (cooldown, fila, etc)
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
+
+// Repopular frozenUntil ao boot, lendo dos manifests
+try {
+  const perfisArr = loadPerfisJson();
+  for (const p of perfisArr) {
+    if (p && p.nome && p.userDataDir) {
+      const manifestPath = path.join(p.userDataDir, 'manifest.json');
+      if (fs.existsSync(manifestPath)) {
+        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (man.frozenUntil && man.frozenUntil > Date.now()) {
+          robeMeta[p.nome] = robeMeta[p.nome] || {};
+          robeMeta[p.nome].frozenUntil = man.frozenUntil;
+        }
+      }
+    }
+  }
+} catch (err) {
+  try { console.warn('[BOOT] Erro ao repopular frozenUntil dos manifests:', err && err.message || err); } catch {}
+}
 
 // ======= INÍCIO: TRAVA DE ATIVAÇÃO SIMULTÂNEA =========
 // ======= FIM: TRAVA DE ATIVAÇÃO SIMULTÂNEA ============
@@ -801,7 +820,7 @@ async function ramCpuMonitorTick() {
             if (ctrl && ctrl.configurando) return;
 
             handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'})
-              .then(() => reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas)`))
+              .then(() => reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`))
               .catch(()=>{});
             robeMeta[nome].cpuPercent = null; // marca null até a volta
           }
@@ -855,7 +874,7 @@ async function ramCpuMonitorTick() {
         if (ctrl && ctrl.configurando) return;
 
         handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' })
-        .then(() => reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK})`))
+        .then(() => reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK}) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`))
         .catch(()=>{});
         // Não limpar hist; preserveDesired reabrirá mais tarde
       }
@@ -1446,6 +1465,10 @@ const handlers = {
   async ['robe-play']({ nome }) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+    // P0.3: recusa se frozen
+    if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
+      return { ok: false, error: 'account_frozen' }
+    }
     // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
     if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
 
@@ -1816,8 +1839,8 @@ for (const nome of nomes) {
   }
 
   // Virtus on/off
-  if (want.virtus === 'on' && !ctrl2.trabalhando && !ctrl2.configurando) {
-    try { await handlers.start_work({ nome }); } catch {}
+  if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl2.trabalhando && !ctrl2.configurando) {
+    try { ctrl2.virtus = virtusHelper.startVirtus(ctrl2.browser, nome, { restrictTab: 0 }); ctrl2.trabalhando = true; } catch {}
   } else if (want.virtus === 'off' && ctrl2.trabalhando) {
     try { await stopVirtus(nome); } catch {}
   }
@@ -1920,7 +1943,7 @@ setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.
 // ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
   INTERVAL_MS: 5000,
-  PAGE_EVAL_TIMEOUT_MS: 1500
+  PAGE_EVAL_TIMEOUT_MS: 3000
 };
 
 // === ULTRA RECOVERY (militar) ===
@@ -1965,6 +1988,14 @@ async function registerFailure(nome, reason) {
   if (filtered.length > ULTRA_RECOVERY.FAIL_FREEZE_AFTER) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = now + ULTRA_RECOVERY.FAIL_FREEZE_MS;
+    try {
+      const manifestPath = manifestPathOf(nome);
+      if (fs.existsSync(manifestPath)) {
+        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        man.frozenUntil = robeMeta[nome].frozenUntil;
+        fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
+      }
+    } catch {}
     issues.append(nome, 'mil_action', `frozen_2h: >${ULTRA_RECOVERY.FAIL_FREEZE_AFTER} falhas em 3h (${filtered.length})`).catch(()=>{});
     await ensureFrozenShutdown(nome, 'fail_freeze');
   }
@@ -1981,7 +2012,9 @@ async function pageReadyBasic(p0) {
 }
 
 async function tryReloadShort(p0, nome, attempt) {
-  try { await reportAction(nome, 'mil_action', `nurse_reload_try #${attempt}`); } catch {}
+  try {
+    await reportAction(nome, 'mil_action', `nurse_reload_try #${attempt} url=${(p0 && p0.url && p0.url()) || ''} readyState=${await (async () => { try { return await p0.evaluate(()=>document.readyState); } catch { return '-'; } })()} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+  } catch {}
   try {
     await p0.reload({ waitUntil: 'domcontentloaded', timeout: ULTRA_RECOVERY.RELOAD_TIMEOUT_MS }).catch(()=>{});
     await new Promise(r=>setTimeout(r, ULTRA_RECOVERY.RELOAD_POST_WAIT_MS));
@@ -2014,7 +2047,7 @@ async function nurseTick() {
     let pages = [];
     try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
     if (!pages || !pages[0]) {
-      await reportAction(nome, 'nurse_kill', '0 pages detectadas — rollback preserveDesired');
+      await reportAction(nome, 'nurse_kill', `motivo=no_pages url= reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
       try { registerFailure(nome, 'no_pages'); } catch {}
       await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
       continue;
@@ -2022,6 +2055,25 @@ async function nurseTick() {
     const p0 = pages[0];
     let healthy = await pageReadyBasic(p0);
     if (!healthy) {
+      // Debounce: conta reloads nos últimos 60s, pausa se ultrapassar 3
+      robeMeta[nome] = robeMeta[nome] || {};
+      const now = Date.now();
+      if (!robeMeta[nome].reloadAttemptsWindow) robeMeta[nome].reloadAttemptsWindow = [];
+      robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => now - ts < 60000);
+
+      robeMeta[nome].reloadAttemptsWindow.push(now);
+      if (robeMeta[nome].reloadAttemptsWindow.length > 3) {
+        // Log e GRACE: não tente novo reload nos próximos 60s
+        robeMeta[nome].reloadBlockedUntil = now+60000;
+        await reportAction(nome, 'mil_action', 
+          `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${(p0.url&&p0.url())||''}`
+        );
+        continue; // Não tenta nem reload nem kill — só sai do loop até a próxima rodada.
+      }
+      if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > now) {
+        continue; // Se grace está ativo, pula hint de reload para este ciclo
+      }
+
       healthy = await tryReloadShort(p0, nome, 1);
       if (!healthy) {
         healthy = await tryReloadShort(p0, nome, 2);
@@ -2029,7 +2081,7 @@ async function nurseTick() {
       if (healthy) {
         await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
       } else {
-        await reportAction(nome, 'nurse_kill', 'page zombie/stuck após 2 reloads — rollback preserveDesired');
+        await reportAction(nome, 'nurse_kill', `motivo=page_zumbi url=${(p0.url&&p0.url())||''} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
         try { registerFailure(nome, 'zombie'); } catch {}
         await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
@@ -2065,6 +2117,14 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
     const frozenUntil = Date.now() + 12*60*60*1000;
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = frozenUntil;
+    try {
+      const manifestPath = manifestPathOf(nome);
+      if (fs.existsSync(manifestPath)) {
+        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        man.frozenUntil = robeMeta[nome].frozenUntil;
+        fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
+      }
+    } catch {}
     await reportAction(nome, 'robe_error', 'manifest ausente; congelado por 12h');
     await ensureFrozenShutdown(nome, 'manifest_missing'); // para manifest ausente
     return { ok: false, error: 'no_manifest' };
@@ -2074,6 +2134,14 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
   if (!manifest.cookies || !manifest.fp) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = Date.now() + 12*60*60*1000;
+    try {
+      const manifestPath = manifestPathOf(nome);
+      if (fs.existsSync(manifestPath)) {
+        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        man.frozenUntil = robeMeta[nome].frozenUntil;
+        fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
+      }
+    } catch {}
     await reportAction(nome, 'robe_error', 'manifest incompleto (cookies/fp); congelado por 12h');
     await ensureFrozenShutdown(nome, 'manifest_incomplete'); // para manifest incompleto
     return { ok: false, error: 'incomplete_manifest' };
@@ -2118,6 +2186,14 @@ function resolveManifest(nome) {
       // Congela se não existe em nenhum lugar!
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].frozenUntil = Date.now() + 12*60*60*1000;
+      try {
+        const manifestPath = manifestPathOf(nome);
+        if (fs.existsSync(manifestPath)) {
+          const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          man.frozenUntil = robeMeta[nome].frozenUntil;
+          fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
+        }
+      } catch {}
       return null;
     }
     const manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));

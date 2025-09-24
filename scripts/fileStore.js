@@ -399,6 +399,44 @@ function getSysMetricsSnapshot() {
 
 // ******** REMOVIDA getAggregateHealthMetrics() ********
 
+/**
+ * Persiste o frozenUntil DE UM PERFIL no seu manifest (para robustez do freeze, P0).
+ */
+function setPerfilFrozenUntil(nome, frozenUntil) {
+  try {
+    const perfisArr = loadPerfisJson();
+    const perfil = perfisArr.find(p => p && p.nome === nome);
+    if (!perfil || !perfil.userDataDir) return false;
+    const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
+    if (existsFile(manifestPath)) {
+      const man = readJsonSafe(manifestPath, {});
+      man.frozenUntil = frozenUntil;
+      writeJsonAtomic(manifestPath, man);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+/**
+ * Lê o frozenUntil de um manifest de perfil, caso exista.
+ */
+function getPerfilFrozenUntil(nome) {
+  try {
+    const perfisArr = loadPerfisJson();
+    const perfil = perfisArr.find(p => p && p.nome === nome);
+    if (!perfil || !perfil.userDataDir) return null;
+    const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
+    if (existsFile(manifestPath)) {
+      const man = readJsonSafe(manifestPath, {});
+      if (man && typeof man.frozenUntil === 'number' && man.frozenUntil > Date.now()) {
+        return man.frozenUntil;
+      }
+    }
+  } catch {}
+  return null;
+}
+
 // EXPORTAÇÃO EXPANDIDA PARA FUNÇÕES MILITARES
 module.exports = {
   dadosDir, perfisPath, perfisDir, presetsPath, desiredPath, statusPath,
@@ -409,5 +447,7 @@ module.exports = {
   // Militares:
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,
-  getFullStatusSnapshot, updateStatusField
+  getFullStatusSnapshot, updateStatusField,
+  setPerfilFrozenUntil,
+  getPerfilFrozenUntil,
 };
