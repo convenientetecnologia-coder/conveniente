@@ -417,6 +417,9 @@ try {
         if (man.frozenUntil && man.frozenUntil > Date.now()) {
           robeMeta[p.nome] = robeMeta[p.nome] || {};
           robeMeta[p.nome].frozenUntil = man.frozenUntil;
+          if (typeof man.frozenReason === 'string' && man.frozenReason) {
+            robeMeta[p.nome].frozenReason = String(man.frozenReason);
+          }
         }
       }
     }
@@ -1648,6 +1651,7 @@ const handlers = {
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
+        frozenReason: robeMeta[nome]?.frozenReason || null,
       };
     });
     const robes = {};
@@ -1664,6 +1668,7 @@ const handlers = {
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
         numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+        frozenReason: robeMeta[nome]?.frozenReason || null,
       };
     });
     const robeQueueList = robeQueue.queueList();
@@ -1715,6 +1720,7 @@ return {
   robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
   reopenAt: robeMeta[nome]?.reopenAt || null,
+  frozenReason: robeMeta[nome]?.frozenReason || null,
 };
 });
 const robes = {};
@@ -1731,6 +1737,7 @@ robes[nome] = {
   cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
   numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
   robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+  frozenReason: robeMeta[nome]?.frozenReason || null,
 };
 });
 const robeQueueList = robeQueue.queueList();
@@ -2007,6 +2014,19 @@ const ULTRA_RECOVERY = {
 // ===== INÍCIO DO MÉTODO ULTRA CIRÚRGICO: ensureFrozenShutdown =====
 async function ensureFrozenShutdown(nome, origin = 'frozen') {
   const ctrl = controllers.get(nome);
+  // Atualiza frozenReason mesmo que já esteja congelado; sincroniza RAM+manifest
+  try {
+    robeMeta[nome] = robeMeta[nome] || {};
+    const newReason = String(origin || '');
+    if (newReason) {
+      if (robeMeta[nome].frozenReason !== newReason) {
+        robeMeta[nome].frozenReason = newReason;
+        const man = readManifest(nome) || {};
+        man.frozenReason = robeMeta[nome].frozenReason;
+        writeManifest(nome, man);
+      }
+    }
+  } catch {}
   if (!ctrl) return;
   try { robeQueue.skip && robeQueue.skip(nome); } catch {}
   try { await reportAction(nome, 'mil_action', 'frozen_kill'); } catch {}
@@ -2034,16 +2054,18 @@ async function registerFailure(nome, reason) {
   if (filtered.length > ULTRA_RECOVERY.FAIL_FREEZE_AFTER) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = now + ULTRA_RECOVERY.FAIL_FREEZE_MS;
+    robeMeta[nome].frozenReason = 'fail_burst';
     try {
       const manifestPath = manifestPathOf(nome);
       if (fs.existsSync(manifestPath)) {
         const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         man.frozenUntil = robeMeta[nome].frozenUntil;
+        man.frozenReason = robeMeta[nome].frozenReason;
         fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
       }
     } catch {}
     issues.append(nome, 'mil_action', `frozen_2h: >${ULTRA_RECOVERY.FAIL_FREEZE_AFTER} falhas em 3h (${filtered.length})`).catch(()=>{});
-    await ensureFrozenShutdown(nome, 'fail_freeze');
+    await ensureFrozenShutdown(nome, 'fail_burst');
   }
 }
 
@@ -2077,8 +2099,10 @@ async function freezeProfileFor(nome, msDuration, reason) {
     const until = Date.now() + msDuration;
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = until;
+    robeMeta[nome].frozenReason = String(reason||'');
     const man = readManifest(nome) || {};
     man.frozenUntil = until;
+    man.frozenReason = robeMeta[nome].frozenReason;
     writeManifest(nome, man);
     await issues.append(nome, 'mil_action', `frozen_${Math.round(msDuration/60000)}min: ${reason||''}`);
     await ensureFrozenShutdown(nome, reason || 'frozen');
@@ -2214,11 +2238,13 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
     const frozenUntil = Date.now() + 12*60*60*1000;
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = frozenUntil;
+    robeMeta[nome].frozenReason = 'manifest_missing';
     try {
       const manifestPath = manifestPathOf(nome);
       if (fs.existsSync(manifestPath)) {
         const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         man.frozenUntil = robeMeta[nome].frozenUntil;
+        man.frozenReason = robeMeta[nome].frozenReason;
         fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
       }
     } catch {}
@@ -2231,11 +2257,13 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
   if (!manifest.cookies || !manifest.fp) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = Date.now() + 12*60*60*1000;
+    robeMeta[nome].frozenReason = 'manifest_incomplete';
     try {
       const manifestPath = manifestPathOf(nome);
       if (fs.existsSync(manifestPath)) {
         const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         man.frozenUntil = robeMeta[nome].frozenUntil;
+        man.frozenReason = robeMeta[nome].frozenReason;
         fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
       }
     } catch {}
@@ -2283,11 +2311,13 @@ function resolveManifest(nome) {
       // Congela se não existe em nenhum lugar!
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].frozenUntil = Date.now() + 12*60*60*1000;
+      robeMeta[nome].frozenReason = 'manifest_missing';
       try {
         const manifestPath = manifestPathOf(nome);
         if (fs.existsSync(manifestPath)) {
           const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
           man.frozenUntil = robeMeta[nome].frozenUntil;
+          man.frozenReason = robeMeta[nome].frozenReason;
           fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
         }
       } catch {}

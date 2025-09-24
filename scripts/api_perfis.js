@@ -303,4 +303,50 @@ module.exports = (app, workerClient, fileStore) => {
       res.json({ ok: false, error: e && e.message || String(e) });
     }
   });
+
+  // ========================
+  // PATCH 3 - Início
+  // ========================
+
+  // Descongelar (manual)
+  app.post('/api/perfis/:nome/unfreeze', async (req, res) => {
+    const nome = req.params.nome;
+    const reason = (req.body && req.body.reason) || 'manual_unfreeze';
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try {
+      // Handler militar no worker
+      const resp = await workerClient.sendWorkerCommand('unfreeze', { nome, reason });
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  // Congelar (manual) — ex: POST /api/perfis/NOME/freeze  body:{minutes, reason}
+  app.post('/api/perfis/:nome/freeze', async (req, res) => {
+    const nome = req.params.nome;
+    const minutes = Number(req.body && req.body.minutes) || 30;
+    const reason = (req.body && req.body.reason) || 'manual_freeze';
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try {
+      // Handler militar no worker
+      const resp = await workerClient.sendWorkerCommand('freeze', { nome, minutes, reason });
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  // Clear soft-gates de todos os perfis (antes de "Abrir Todos")
+  app.post('/api/perfis/clear-soft-gates', async (req, res) => {
+    try {
+      const resp = await workerClient.sendWorkerCommand('clear_soft_gates', {});
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+  // ========================
+  // PATCH 3 - Fim
+  // ========================
 };

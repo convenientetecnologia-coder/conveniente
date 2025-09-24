@@ -214,7 +214,11 @@
     // Tipos de ERRO considerados no log (Virtus/Robe)
     const ERROR_TYPES = new Set(['robe_error','robe_no_photo','virtus_blocked','virtus_no_composer','virtus_send_failed']);
     function isErrorIssue(it) {
-      try { return ERROR_TYPES.has(String(it && it.type || '')); } catch { return false; }
+      const t = String(it?.type||'');
+      const m = String(it?.message||'');
+      if (['robe_error','robe_no_photo','virtus_blocked','virtus_no_composer','virtus_send_failed'].includes(t)) return true;
+      if (t==='mil_action' && /frozen|blocked|mem_block|reopen|rollback|nurse|stuck|fail/i.test(m)) return true;
+      return false;
     }
 
     // MODAL: criar conta (com loading + mensagens no próprio modal)
@@ -378,6 +382,26 @@
           btn.innerHTML = btn.dataset.idleHtml;
         }
       };
+
+      // Botão “Congelar Manual (30 min)” na zona de perigo
+      const btnFreezeManual = document.createElement('button');
+      btnFreezeManual.className = 'btn';
+      btnFreezeManual.innerText = 'Congelar Manual (30 min)';
+      btnFreezeManual.onclick = async () => {
+        btnFreezeManual.disabled = true;
+        btnFreezeManual.innerHTML = `<span class="spinner"></span> Congelando...`;
+        try {
+          await window.electronAPI.freezePerfil(perfil.nome, 30, 'manual_freeze');
+          overlay.remove();
+          onClose && onClose();
+        } catch(e){
+          alert('Falha ao congelar: '+(e&&e.message||e));
+        } finally {
+          btnFreezeManual.disabled = false;
+          btnFreezeManual.innerText = 'Congelar Manual (30 min)';
+        }
+      };
+      box.querySelector('.danger-zone').appendChild(btnFreezeManual);
     }
 
     function buildPill(text, cls='info'){ const span=document.createElement('span'); span.className='pill '+cls; span.innerHTML=`<span class="dot"></span>${text}`; return span; }
@@ -419,9 +443,9 @@
       try {
         const ts = Number(p.robeFrozenUntil);
         if (!ts || ts < Date.now()) return null;
-        const agora = Date.now();
-        const restante = Math.max(0, Math.floor((ts-agora)/1000));
-        return buildPill(`ROBE Congelado (${tempoRestante(restante)})`, 'frozen');
+        const restante = Math.max(0, Math.floor((ts-Date.now())/1000));
+        const reason = p.frozenReason ? ` — Motivo: ${p.frozenReason}` : '';
+        return buildPill(`Congelado${reason} (${tempoRestante(restante)})`, 'frozen');
       } catch { return null; }
     }
 
@@ -621,6 +645,22 @@
 
         // -------- FROZEN pill explícito (primeiro) ---------
         if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
+
+        // Botão "Descongelar" ao lado da pill "Congelado"
+        if (isFrozen) {
+          const btnUnfreeze = document.createElement('button');
+          btnUnfreeze.className = 'icon-btn mini';
+          btnUnfreeze.title = 'Descongelar agora';
+          btnUnfreeze.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 1-4.95 11.95A.75.75 0 0 1 4.95 12.95 5.5 5.5 0 1 0 13.5 8a.75.75 0 0 1 1.5 0A7 7 0 0 1 8 1z"/></svg>`;
+          btnUnfreeze.onclick = async () => {
+            btnUnfreeze.disabled = true;
+            btnUnfreeze.innerHTML = `<span class="spinner"></span> Descongelando...`;
+            try { await window.electronAPI.unfreezePerfil(p.nome); await reloadPerfis(); }
+            catch(e){ alert('Falha ao descongelar: '+(e&&e.message||e)); }
+            finally { btnUnfreeze.disabled = false; btnUnfreeze.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 1-4.95 11.95A.75.75 0 0 1 4.95 12.95 5.5 5.5 0 1 0 13.5 8a.75.75 0 0 1 1.5 0A7 7 0 0 1 8 1z"/></svg>`; }
+          };
+          titleRow.append(btnUnfreeze);
+        }
 
         // ------- COOLDOWN (ADICIONAL) -------
         if (robeCooldownSec > 0) {
@@ -834,6 +874,7 @@
       ids.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.toggle('active',
+          (id==='filterAll'     && f==='all') ||
           (id==='filterAll'     && f==='all') ||
           (id==='filterActive'  && f==='active') ||
           (id==='filterInactive'&& f==='inactive') ||
@@ -1080,6 +1121,10 @@
       try {
         const st = await window.electronAPI.getStatus();
         const perfis = st?.perfis || [];
+
+        // Limpa soft gates antes de iniciar a sequência
+        try { await window.electronAPI.clearSoftGatesAll(); } catch{}
+
         // Ordem: como exibido
         for (let i = 0; i < perfis.length; i++) {
           const p = perfis[i];
@@ -1274,6 +1319,11 @@
         };
       }
     })();
+
+    // Suporte à nova API via window.electronAPI
+    window.electronAPI.unfreezePerfil = (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/unfreeze`, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: '{}' }).then(r=>r.json());
+    window.electronAPI.freezePerfil = (nome, minutes, reason) => fetch(`/api/perfis/${encodeURIComponent(nome)}/freeze`, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ minutes, reason }) }).then(r=>r.json());
+    window.electronAPI.clearSoftGatesAll = () => fetch('/api/perfis/clear-soft-gates', { method: 'POST' }).then(r=>r.json());
 
     reloadPerfis();
     setInterval(reloadPerfis, 3000);
