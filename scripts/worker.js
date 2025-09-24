@@ -618,13 +618,22 @@ function getWorkingProfileNames() {
 async function closeExtraPages(browser, mainPage) {
   try {
     const pages = await browser.pages();
+    let closed = 0;
     for (const page of pages) {
       if (mainPage && page === mainPage) continue;
-      if (!mainPage && pages[0] && page === pages[0]) continue; // fallback se mainPage desconhecida
-      try { await page.close(); } catch {}
+      if (!mainPage && pages[0] && page === pages[0]) continue;
+      try { await page.close(); closed++; } catch {}
     }
-    console.debug('[PRUNER] Fechou abas extras, restando:', (await browser.pages()).length);
-  } catch {}
+    if (closed > 0) {
+      console.log('[PRUNER] Fechou', closed, 'abas extras.');
+    } else if (process.env.PRUNE_DEBUG === '1') {
+      console.debug('[PRUNER] Nada a fechar.');
+    }
+  } catch (e) {
+    if (process.env.PRUNE_DEBUG === '1') {
+      console.warn('[PRUNER] Erro prune:', e && e.message || e);
+    }
+  }
 }
 
 // -------- PRUNE LOOP: Para cada browser, fecha abas extras periodicamente ---------
@@ -636,7 +645,9 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
     try {
       await closeExtraPages(browser, mainPage);
     } catch (e) {
-      console.warn('[PRUNER] Erro prune:', e && e.message || e);
+      if (process.env.PRUNE_DEBUG === '1') {
+        console.warn('[PRUNER] Erro prune:', e && e.message || e);
+      }
     }
   }, 2*60*1000);
   _pruners.set(nome, interval);
@@ -1943,13 +1954,13 @@ setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.
 // ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
   INTERVAL_MS: 5000,
-  PAGE_EVAL_TIMEOUT_MS: 3000
+  PAGE_EVAL_TIMEOUT_MS: 5000  // Mais tolerância, menos falso-positivo
 };
 
 // === ULTRA RECOVERY (militar) ===
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,                   // no máximo 2 reloads curtos por página zumbi
-  RELOAD_TIMEOUT_MS: 4500,          // timeout curto para reload
+  RELOAD_TIMEOUT_MS: 10000,         // Mais tempo para reload Messenger
   RELOAD_POST_WAIT_MS: 250,         // pequena espera pós-reload
   REOPEN_DELAY_SHORT_MS: 4000,      // reabrir "já já" (nurse_kill, no_pages)
   REOPEN_DELAY_RAMCPU_MS: 4*60*1000, // reabrir após 4–6min em RAM/CPU kill (usaremos também jitter)
@@ -2022,6 +2033,50 @@ async function tryReloadShort(p0, nome, attempt) {
   return await pageReadyBasic(p0);
 }
 
+// Funções adicionadas próximas ao nurseTick
+function ms(h) { return h * 60 * 60 * 1000; }
+
+// Congela perfil por um tempo (msDuration), persiste congelamento, faz shutdown.
+async function freezeProfileFor(nome, msDuration, reason) {
+  try {
+    const until = Date.now() + msDuration;
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].frozenUntil = until;
+    const man = readManifest(nome) || {};
+    man.frozenUntil = until;
+    writeManifest(nome, man);
+    await issues.append(nome, 'mil_action', `frozen_${Math.round(msDuration/60000)}min: ${reason||''}`);
+    await ensureFrozenShutdown(nome, reason || 'frozen');
+  } catch {}
+}
+
+// Detecta bloqueio temporário pelo DOM do Messenger, retorna {blocked, hasReloadBtn}
+async function detectMessengerTempBlock(page) {
+  try {
+    const url = page.url ? page.url() : '';
+    if (!/messenger.com/i.test(url)) return { blocked: false };
+    return await page.evaluate(() => {
+      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const texts = Array.from(document.querySelectorAll('h1,h2,span,div'))
+        .slice(0, 300)
+        .map(el => norm(el.innerText || el.textContent || ''))
+        .filter(Boolean);
+
+      const hasBlocked =
+        texts.some(t =>
+          t.includes('voce esta bloqueado temporariamente') ||
+          t.includes('você está bloqueado temporariamente') ||
+          t.includes('youre temporarily blocked') ||
+          t.includes('you’re temporarily blocked') ||
+          t.includes('temporarily blocked')
+        );
+      const hasReloadBtn =
+        !!document.querySelector('[aria-label*="Recarregar pagina"],[aria-label*="Recarregar página"],[aria-label*="Reload"]');
+      return { blocked: hasBlocked, hasReloadBtn };
+    });
+  } catch { return { blocked: false }; }
+}
+
 async function nurseTick() {
   const now = Date.now();
   const desired = readJsonFile(desiredPath, { perfis: {} });
@@ -2087,6 +2142,15 @@ async function nurseTick() {
         continue;
       }
     }
+
+    // Checagem de bloqueio temporário do Messenger (prioritário, antes de prune/reload/kill)
+    const det = await detectMessengerTempBlock(p0);
+    if (det && det.blocked) {
+      try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — congelando 2h'); } catch {}
+      await freezeProfileFor(nome, ms(2), 'messenger_temp_block');
+      continue; // Não tenta reload/kill, apenas sai.
+    }
+
     // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
     if (ctrl && ctrl.configurando) {
       console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);

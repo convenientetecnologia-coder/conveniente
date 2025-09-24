@@ -1069,6 +1069,30 @@ function startVirtus(browser, nome, robeMeta = {}) {
         // Reforço após 800ms para garantir Messenger reativo
         setTimeout(() => { scrollChatsToTop(p); }, 800);
       } catch {}
+
+      // ========== INÍCIO BLOCO ADICIONADO CONFORME INSTRUÇÃO ==========
+      // Checagem de bloqueio temporário Messenger (DOM) — apenas LOG, congelamento é feito pelo nurseTick
+      try {
+        const det = await p.evaluate(() => {
+          const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+          const texts = Array.from(document.querySelectorAll('h1,h2,span,div')).map(el => norm(el.innerText || el.textContent || ''));
+          const hasBlocked =
+            texts.some(t =>
+              t.includes('voce esta bloqueado temporariamente') ||
+              t.includes('você está bloqueado temporariamente') ||
+              t.includes('youre temporarily blocked') ||
+              t.includes('you’re temporarily blocked') ||
+              t.includes('temporarily blocked')
+            );
+          return { blocked: hasBlocked };
+        });
+        if (det && det.blocked) {
+          // Apenas LOG, não congele aqui! O nurseTick irá congelar.
+          if (issues) try { await logIssue(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado (Virtus/Marketplace)'); } catch {}
+        }
+      } catch {}
+      // ========== FIM BLOCO ADICIONADO ==========
+
     } finally {
       filaLoopBusy = false;
     }
