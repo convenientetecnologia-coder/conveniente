@@ -1646,6 +1646,8 @@ const handlers = {
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
         numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+        activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
+        reopenAt: robeMeta[nome]?.reopenAt || null,
       };
     });
     const robes = {};
@@ -1711,6 +1713,8 @@ return {
   cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
   numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
   robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+  activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
+  reopenAt: robeMeta[nome]?.reopenAt || null,
 };
 });
 const robes = {};
@@ -1815,17 +1819,30 @@ for (const nome of nomes) {
   // Liga/desliga browser
   if (want.active === true && !ctrl) {
     // Guard-rail frozen: se estiver congelado, pula
-    if (isFrozenNow(nome)) continue;
+    const until = isFrozenNow(nome);
+    if (until > Date.now()) {
+      if (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].frozenUntil = until;
+      }
+      await snapshotStatusAndWrite();
+      continue;
+    }
 
     // === PATCH autoMode Light: gate para ativação no reconcileOnce ===
     const now = Date.now();
-    if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > now) continue;
+    if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > now) {
+      await snapshotStatusAndWrite();
+      continue;
+    }
     if (autoMode.mode === 'light') {
       const base = 20000, factor = Math.min(9, 1 + (autoMode.hot||0)), jitter = Math.floor(Math.random()*5000);
       const holdMs = Math.min(180000, base*factor) + jitter;
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].activationHeldUntil = now + holdMs;
+      await issues.append(nome, 'mil_action', `activation_hold light ${holdMs}ms reason=${autoMode.reason} cpu≈${Math.round(autoMode.cpuEma||0)}% free≈${Math.round(autoMode.freeEmaMB||0)}MB`);
       autoMode.light.activationHeld++;
+      await snapshotStatusAndWrite();
       continue;
     }
     // === FIM PATCH autoMode Light ===
@@ -1857,6 +1874,13 @@ for (const nome of nomes) {
 
   // Virtus on/off
   if (isFrozenNow(nome)) {
+    // Sincronização frozen disco⇄memória e snapshot imediato antes de pular
+    const until = isFrozenNow(nome);
+    if (until > Date.now() && (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until)) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].frozenUntil = until;
+    }
+    await snapshotStatusAndWrite();
     if (ctrl2 && ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
     continue;
   }
@@ -2267,6 +2291,9 @@ function resolveManifest(nome) {
           fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
         }
       } catch {}
+      // Logs e snapshot imediatos (resolveManifest)
+      try { issues.append(nome, 'robe_error', 'manifest ausente/incompleto; congelado 12h (resolveManifest)').catch(()=>{}); } catch {}
+      try { snapshotStatusAndWrite().catch(()=>{}); } catch {}
       return null;
     }
     const manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));

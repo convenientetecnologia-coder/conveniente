@@ -425,6 +425,28 @@
       } catch { return null; }
     }
 
+    // Helper: activationHeldUntil pill
+    function buildActivationHeldPill(p) {
+      if (!p || !p.activationHeldUntil) return null;
+      try {
+        const ts = Number(p.activationHeldUntil);
+        if (!ts || ts < Date.now()) return null;
+        const restante = Math.max(0, Math.floor((ts - Date.now())/1000));
+        return buildPill(`Ativação em espera (${tempoRestante(restante)})`, 'warn');
+      } catch { return null; }
+    }
+
+    // Helper: reopenAt pill
+    function buildReopenAtPill(p) {
+      if (!p || !p.reopenAt) return null;
+      try {
+        const ts = Number(p.reopenAt);
+        if (!ts || ts < Date.now()) return null;
+        const restante = Math.max(0, Math.floor((ts - Date.now())/1000));
+        return buildPill(`Reabrirá em ${tempoRestante(restante)}`, 'info');
+      } catch { return null; }
+    }
+
     // Helper cooldown pill
     function buildCooldownPill(sec) {
       if (!sec || sec <= 0) return null;
@@ -537,6 +559,10 @@
         const isFrozen = (p.robeFrozenUntil && p.robeFrozenUntil > Date.now());
         if (isFrozen) card.classList.add('frozen');
 
+        // -- NOVO: Ativação em espera e Reabrirá em --
+        const activationHeldPill = buildActivationHeldPill(p);
+        const reopenAtPill = buildReopenAtPill(p);
+
         // LEFT: toggle
         const left = document.createElement('div'); left.className='leftCol';
         const toggle = document.createElement('button');
@@ -544,6 +570,10 @@
         toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
         toggle.onclick = () => toggleBrowserUI(p, toggle);
         if (isFrozen) toggle.disabled = true;
+        if (activationHeldPill) {
+          toggle.disabled = true;
+          toggle.title = 'Ativação em espera pelo sistema militar RAM/CPU';
+        }
         left.append(toggle);
 
         // NOVO: start 24h logo abaixo do toggle (com loading)
@@ -582,6 +612,12 @@
         // -------- RAM e CPU pill explícito ---------
         if (ramPill) titleRow.append(ramPill); // RAM por conta
         if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
+
+        // -- NOVO: Ativação em espera/hold --
+        if (activationHeldPill) titleRow.append(activationHeldPill);
+
+        // -- NOVO: Reabrirá em... --
+        if (reopenAtPill) titleRow.append(reopenAtPill);
 
         // -------- FROZEN pill explícito (primeiro) ---------
         if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar

@@ -71,7 +71,6 @@ module.exports = (app, workerClient, fileStore) => {
           // Indica se perfil está "congelado" (para cinzar ou mostrar warning no painel)
           const isFrozen = robeFrozenUntil && robeFrozenUntil > Date.now();
 
-          // Militar: sempre null para valores health não disponíveis
           return {
             nome,
             label,
@@ -89,6 +88,17 @@ module.exports = (app, workerClient, fileStore) => {
             robeEstado: (typeof robeEstado === 'string') ? robeEstado : (typeof robeMeta.robeEstado === 'string' ? robeMeta.robeEstado : null),
             robeCooldownSec: (typeof robeCooldownSec === 'number') ? robeCooldownSec : (typeof robeMeta.robeCooldownSec === 'number' ? robeMeta.robeCooldownSec : null),
             robeFrozenUntil: robeFrozenUntil || robeMeta.robeFrozenUntil || null,
+            // Campos solicitados: activationHeldUntil e reopenAt
+            activationHeldUntil: (typeof perfil.activationHeldUntil === 'number' && perfil.activationHeldUntil > 0)
+              ? perfil.activationHeldUntil
+              : (rest && typeof rest.activationHeldUntil === 'number' && rest.activationHeldUntil > 0
+                  ? rest.activationHeldUntil
+                  : (robeMeta.activationHeldUntil || null)),
+            reopenAt: (typeof perfil.reopenAt === 'number' && perfil.reopenAt > 0)
+              ? perfil.reopenAt
+              : (rest && typeof rest.reopenAt === 'number' && rest.reopenAt > 0
+                  ? rest.reopenAt
+                  : (robeMeta.reopenAt || null)),
             // Inclui todos os campos militares úteis do robeMeta e Virtus se não conflitam
             ...Object.fromEntries(
               Object.entries(robeMeta).filter(([k]) =>
