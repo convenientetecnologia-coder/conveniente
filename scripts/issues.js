@@ -181,31 +181,11 @@ function countErrors(nome) {
   }
 }
 
-// Adicionei countActionable conforme solicitado
-function countActionable(nome) {
-  try {
-    const file = getFilePath(nome);
-    const arr = readJsonSafe(file, []);
-    if (!Array.isArray(arr)) return { ok: true, count: 0, file };
-    let n = 0;
-    for (const it of arr) {
-      const t = it && it.type ? String(it.type) : '';
-      const m = it && it.message ? String(it.message) : '';
-      if (isErrorType(t)) { n++; continue; }
-      if (t === 'mil_action' && /frozen|blocked|mem_block|reopen|rollback|nurse|stuck|fail/i.test(m)) { n++; }
-    }
-    return { ok: true, count: n, file };
-  } catch (e) {
-    return { ok: false, count: 0, error: e && e.message || String(e) };
-  }
-}
-
 module.exports = {
   append,
   list,
   clear,
   count,
   countErrors,
-  countActionable,
   getFilePath
 };

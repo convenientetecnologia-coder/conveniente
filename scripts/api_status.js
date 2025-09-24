@@ -88,12 +88,6 @@ module.exports = (app, workerClient, fileStore) => {
             robeEstado: (typeof robeEstado === 'string') ? robeEstado : (typeof robeMeta.robeEstado === 'string' ? robeMeta.robeEstado : null),
             robeCooldownSec: (typeof robeCooldownSec === 'number') ? robeCooldownSec : (typeof robeMeta.robeCooldownSec === 'number' ? robeMeta.robeCooldownSec : null),
             robeFrozenUntil: robeFrozenUntil || robeMeta.robeFrozenUntil || null,
-            // PATCH 6: Expor frozenReason de forma militar/explicativa ao painel
-            frozenReason: (typeof perfil.frozenReason === 'string' && perfil.frozenReason.length > 0)
-              ? perfil.frozenReason
-              : (rest && typeof rest.frozenReason === 'string' && rest.frozenReason.length > 0
-                  ? rest.frozenReason
-                  : (robeMeta.frozenReason || null)),
             // Campos solicitados: activationHeldUntil e reopenAt
             activationHeldUntil: (typeof perfil.activationHeldUntil === 'number' && perfil.activationHeldUntil > 0)
               ? perfil.activationHeldUntil

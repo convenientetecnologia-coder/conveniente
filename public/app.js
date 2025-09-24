@@ -25,11 +25,6 @@ const api = {
   robesPause24hAll:    ()      => fetch('/api/robes/pause-24h-all',{method:'POST'}).then(r=>r.json()),
   robesReleaseAll:     ()      => fetch('/api/robes/release-all',{method:'POST'}).then(r=>r.json()),
   resumeHuman:         (nome)  => fetch(`/api/perfis/${encodeURIComponent(nome)}/human-resume`, { method: 'POST' }).then(r=>r.json()),
-
-  // PATCH 5 — novos endpoints freeze/unfreeze/clear-soft-gates
-  unfreezePerfil:      (nome)  => fetch(`/api/perfis/${encodeURIComponent(nome)}/unfreeze`, { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) }).then(r=>r.json()),
-  freezePerfil:        (nome, minutes=30, reason='manual_freeze') => fetch(`/api/perfis/${encodeURIComponent(nome)}/freeze`, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ minutes, reason }) }).then(r=>r.json()),
-  clearSoftGatesAll:   ()      => fetch('/api/perfis/clear-soft-gates', { method: 'POST' }).then(r=>r.json()),
 };
 
 // Expor como window.electronAPI para compatibilidade com o index.html atual
