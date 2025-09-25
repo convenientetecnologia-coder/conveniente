@@ -16,6 +16,42 @@ const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const pidusage = require('pidusage');
 const psList = require('ps-list');
 
+// =============== PATCH: HEALTH STATEFUL + RECOVERY ESCADA ===============
+const HEALTH_CFG = {
+  TICK_MS: 10000,
+  DEAD_NO_EVENT_MS: 45000,
+  DEAD_NO_DOM_MS: 45000,
+  DEAD_NO_NET_MS: 60000,
+  RECOVERY_COOLDOWN_MS: {
+    reload: 30000,
+    navHome: 45000,
+    newPage: 60000
+  },
+  SUCCESS_RESET_MS: 20000,
+  MAX_SOFT_RELOADS_10MIN: 2,
+  MAX_NAVHOME_10MIN: 2,
+  MAX_NEWPAGE_30MIN: 2,
+  ESCALATE_TO_REOPEN_AFTER: 2,
+  ABOUT_BLANK_GRACE_MS: 7000
+};
+const healthState = new Map();
+function getHealth(nome) {
+  const now = Date.now();
+  if (!healthState.has(nome)) {
+    healthState.set(nome, {
+      lastOkAt: 0, lastDomEventAt: 0, lastNetEventAt: 0, lastConsoleErrorAt: 0,
+      lastUrl: '', lastTitle: '', stage: 'ok', nextTryAt: 0,
+      counters: { softReloads10m: [], navHomes10m: [], newPages30m: [], cyclesWithoutLife: 0 }
+    });
+  }
+  return healthState.get(nome);
+}
+function _pruneWindow(arr, ms) {
+  const now = Date.now();
+  return arr.filter(ts => (now - ts) < ms);
+}
+// ============================ FIM PATCH HEALTH ============================
+
 // ===== PATCH MILITAR: BLOCO AUTO-ADAPTATIVO autoMode/sys/global =====
 const os = require('os');
 const AUTO_CFG = {
@@ -1095,7 +1131,10 @@ async function robeTickGlobal() {
         if (ctrl && ctrl.browser && !ctrl.mainPage) {
           try {
             const pages = await ctrl.browser.pages();
-            if (pages[0]) ctrl.mainPage = pages[0];
+            if (pages[0]) {
+              ctrl.mainPage = pages[0];
+              try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
+            }
           } catch {}
         }
         mainPage = ctrl.mainPage;
@@ -1572,7 +1611,10 @@ const handlers = {
           if (ctrl && ctrl.browser && !ctrl.mainPage) {
             try {
               const pages = await ctrl.browser.pages();
-              if (pages[0]) ctrl.mainPage = pages[0];
+              if (pages[0]) {
+                ctrl.mainPage = pages[0];
+                try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
+              }
             } catch {}
           }
           mainPage = ctrl.mainPage;
@@ -2183,7 +2225,9 @@ async function pageReadyBasic(p0) {
 
 async function tryReloadShort(p0, nome, attempt) {
   try {
-    await reportAction(nome, 'mil_action', `nurse_reload_try #${attempt} url=${(p0 && p0.url && p0.url()) || ''} readyState=${await (async () => { try { return await p0.evaluate(()=>document.readyState); } catch { return '-'; } })()} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+    if (process.env.NURSE_DEBUG === '1') {
+      await reportAction(nome, 'mil_action', `nurse_reload_try #${attempt} url=${(p0 && p0.url && p0.url()) || ''} readyState=${await (async () => { try { return await p0.evaluate(()=>document.readyState); } catch { return '-'; } })()} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+    }
   } catch {}
   try {
     await p0.reload({ waitUntil: 'domcontentloaded', timeout: ULTRA_RECOVERY.RELOAD_TIMEOUT_MS }).catch(()=>{});
@@ -2343,6 +2387,12 @@ async function nurseTick() {
       continue; // Não tenta reload/kill, apenas sai.
     }
 
+    // NÃO competir com recovery stateful
+    const hs = getHealth && getHealth(nome);
+    if (hs && (hs.stage === 'recover1' || hs.stage === 'recover2' || hs.stage === 'recover3')) {
+      continue;
+    }
+
     let healthy = await pageReadyBasic(p0);
     if (!healthy) {
       // Debounce: conta reloads nos últimos 60s, pausa se ultrapassar 3
@@ -2394,6 +2444,161 @@ async function nurseTick() {
 
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
+
+// =================== HEALTH: Observers, Heuristics e Recovery ===================
+async function wirePageObservers(nome, page) {
+  const st = getHealth(nome);
+  try {
+    page.removeAllListeners && page.removeAllListeners('domcontentloaded');
+    page.removeAllListeners && page.removeAllListeners('framenavigated');
+    page.removeAllListeners && page.removeAllListeners('requestfinished');
+    page.removeAllListeners && page.removeAllListeners('requestfailed');
+    page.removeAllListeners && page.removeAllListeners('console');
+    page.removeAllListeners && page.removeAllListeners('pageerror');
+  } catch {}
+  page.on('domcontentloaded', async () => {
+    const st = getHealth(nome);
+    st.lastDomEventAt = Date.now();
+    try { st.lastTitle = await page.title().catch(()=>st.lastTitle); } catch {}
+    try { st.lastUrl = page.url ? page.url() : st.lastUrl; } catch {}
+  });
+  page.on('framenavigated', (frame) => {
+    const st = getHealth(nome);
+    if (frame === page.mainFrame()) {
+      st.lastDomEventAt = Date.now();
+      try { st.lastUrl = page.url ? page.url() : st.lastUrl; } catch {}
+    }
+  });
+  page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
+  page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
+  page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
+  page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
+}
+
+async function isPageLikelyAlive(page, nome) {
+  const st = getHealth(nome);
+  const now = Date.now();
+  const noDom = (now - st.lastDomEventAt) > HEALTH_CFG.DEAD_NO_DOM_MS;
+  const noNet = (now - st.lastNetEventAt) > HEALTH_CFG.DEAD_NO_NET_MS;
+  let readyOk = false, url = '';
+  try {
+    const rs = await Promise.race([
+      page.evaluate(()=>document.readyState).catch(()=> 'err'),
+      new Promise(res=>setTimeout(()=>res('timeout'), 1200))
+    ]);
+    readyOk = (rs === 'interactive' || rs === 'complete');
+    url = page.url ? page.url() : '';
+  } catch {}
+  const aboutBlankStuck = (url === 'about:blank') && ((now - st.lastDomEventAt) > HEALTH_CFG.ABOUT_BLANK_GRACE_MS);
+  const urlIsFb = /facebook\.com|messenger\.com/i.test(url);
+  const aliveBySignals = (!noDom || !noNet);
+  const aliveByReady = (readyOk && urlIsFb && !aboutBlankStuck);
+  return aliveBySignals || aliveByReady;
+}
+
+async function recoveryStep(nome, page, step) {
+  const st = getHealth(nome);
+  const now = Date.now();
+  if (st.nextTryAt && st.nextTryAt > now) return false;
+  if (step === 'reload') {
+    st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
+    if (st.counters.softReloads10m.length >= HEALTH_CFG.MAX_SOFT_RELOADS_10MIN) return false;
+    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
+    st.counters.softReloads10m.push(Date.now());
+    st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.reload;
+    try { await issues.append(nome, 'mil_action', 'health_recover:reload'); } catch {}
+    return true;
+  }
+  if (step === 'navHome') {
+    st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
+    if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
+    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
+    st.counters.navHomes10m.push(Date.now());
+    st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
+    try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
+    return true;
+  }
+  if (step === 'newPage') {
+    st.counters.newPages30m = _pruneWindow(st.counters.newPages30m, 30*60*1000);
+    if (st.counters.newPages30m.length >= HEALTH_CFG.MAX_NEWPAGE_30MIN) return false;
+    try {
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser) return false;
+      const np = await ctrl.browser.newPage();
+      try { await browserHelper.patchPage(nome, np, utils.getCoords(readManifest(nome)?.cidade || '')); } catch {}
+      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+      ctrl.mainPage = np;
+      await wirePageObservers(nome, np);
+    } catch {}
+    st.counters.newPages30m.push(Date.now());
+    st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.newPage;
+    try { await issues.append(nome, 'mil_action', 'health_recover:newPage'); } catch {}
+    return true;
+  }
+  return false;
+}
+async function escalateToReopen(nome, reason='health_reopen') {
+  const ctrl = controllers.get(nome);
+  try { await issues.append(nome, 'mil_action', `health_escalate:${reason}`); } catch {}
+  await handlers.deactivate({ nome, reason, policy: 'preserveDesired' });
+  const st = getHealth(nome);
+  st.stage = 'reopen';
+  st.nextTryAt = Date.now() + 60000;
+}
+
+async function healthTick() {
+  for (const [nome, ctrl] of controllers) {
+    if (!ctrl || !ctrl.browser) continue;
+    const st = getHealth(nome);
+    const now = Date.now();
+    let pages = [];
+    try { pages = await ctrl.browser.pages(); } catch {}
+    if (!pages || !pages[0]) continue;
+    const page = pages[0];
+    if (page && ctrl.mainPage !== page) {
+      ctrl.mainPage = page;
+      await wirePageObservers(nome, page);
+    }
+    if (isFrozenNow(nome)) continue;
+    const alive = await isPageLikelyAlive(page, nome);
+    if (alive) {
+      st.lastOkAt = now;
+      st.stage = 'ok';
+      st.counters.cyclesWithoutLife = 0;
+      continue;
+    }
+    const noEventsFor = Math.max(now - st.lastDomEventAt, now - st.lastNetEventAt);
+    if (noEventsFor > HEALTH_CFG.DEAD_NO_EVENT_MS) {
+      st.counters.cyclesWithoutLife++;
+      if (st.stage === 'ok') st.stage = 'suspect';
+    }
+    try {
+      const url = page.url ? page.url() : '';
+      if (url === 'about:blank' && (now - st.lastDomEventAt) > HEALTH_CFG.ABOUT_BLANK_GRACE_MS) {
+        if (await recoveryStep(nome, page, 'navHome')) continue;
+      }
+    } catch {}
+    if (st.stage === 'suspect') {
+      if (await recoveryStep(nome, page, 'reload')) { st.stage = 'recover1'; continue; }
+      st.stage = 'recover1';
+    } else if (st.stage === 'recover1') {
+      if (await recoveryStep(nome, page, 'navHome')) { st.stage = 'recover2'; continue; }
+      st.stage = 'recover2';
+    } else if (st.stage === 'recover2') {
+      if (await recoveryStep(nome, page, 'newPage')) { st.stage = 'recover3'; continue; }
+      st.stage = 'recover3';
+    } else if (st.stage === 'recover3') {
+      if (st.counters.cyclesWithoutLife >= HEALTH_CFG.ESCALATE_TO_REOPEN_AFTER) {
+        await escalateToReopen(nome, 'health_no_progress');
+        try { await registerFailure(nome, 'health_no_progress', 'internal'); } catch {}
+      }
+    }
+  }
+}
+setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
+setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
+// =================== FIM HEALTH ===================
 
 // ============ INÍCIO: PATCH/MODO FROZEN SE MANIFEST AUSENTE ==============
 

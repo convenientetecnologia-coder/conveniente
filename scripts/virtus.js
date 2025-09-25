@@ -18,6 +18,10 @@ const path = require('path');
 const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
 
+// Debug flags por variável de ambiente
+const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
+const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
+
 // ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
 function getPerfilManifest(nome) {
   const perfisArr = require('../dados/perfis.json');
@@ -159,7 +163,7 @@ async function coletaChatsMarketplaceTodos(page) {
     });
     return items;
   } catch (err) {
-    console.log('[VIRTUS] Erro em coletaChatsMarketplaceTodos:', err + '');
+    if (VIRTUS_DETAILED_DEBUG) { console.log('[VIRTUS] Erro em coletaChatsMarketplaceTodos:', err + ''); }
     return [];
   }
 }
@@ -695,7 +699,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Chama scrollChatsToTop após reload ultra robusto
       try {
         const ok = await scrollChatsToTop(p);
-        log('[SCROLL TOP]', ok ? 'Scroll OK' : 'Scroll DEU RUIM');
+        if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'Scroll OK' : 'Scroll DEU RUIM'); }
       } catch {}
       // Reforce após 800ms
       setTimeout(() => { scrollChatsToTop(p); }, 800);
@@ -845,7 +849,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
 
-    log(`[DETAILED] Início responderChat: ${chatId}`);
+    if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
     // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
     if (!browser || browser.isConnected?.() === false) {
       log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
@@ -1013,7 +1017,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     fila = fila.filter(id => id !== chatId);
     chatAtivo = null;
-    log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`);
+    if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
   }
 
   // ========================
@@ -1110,7 +1114,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           setTimeout(()=>{}, 1);
         });
       } catch (err) {
-        try { console.log('[KEEPALIVE][EXCEPTION]', err && err.message); } catch{}
+        if (VIRTUS_DETAILED_DEBUG) { try { console.log('[KEEPALIVE][EXCEPTION]', err && err.message); } catch{} }
       }
       // --- FIM BLOCO KEEPALIVE ---
 
@@ -1130,7 +1134,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (!running) return;
           try {
             const ok = await scrollChatsToTop(p);
-            log('[SCROLL TOP]', ok ? 'OK' : 'FAIL');
+            if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
             if (ok) {
               lastScrollToTop = Date.now();
             }
@@ -1141,7 +1145,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       try {
         const scrolled = await scrollChatsToTop(p);
-        log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL');
+        if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL'); }
         if (scrolled) {
           lastScrollToTop = Date.now();
         }
@@ -1226,7 +1230,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         try {
           const ok = await scrollChatsToTop(p);
-          log('[SCROLL TOP]', ok ? 'OK' : 'FAIL');
+          if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
           if (ok) {
             lastScrollToTop = Date.now();
           }

@@ -214,9 +214,13 @@
 
     // Tipos de ERRO considerados no log (Virtus/Robe)
     const ERROR_TYPES = new Set([
+      // Robe/Virtus e falhas macro
       'robe_error','robe_no_photo','virtus_blocked','virtus_no_composer','virtus_send_failed',
       'browser_disconnected','virtus_page_dead','chrome_memory_spike','cpu_memory_spike','cookie_inject_failed','mil_action',
-      'admin_activate_request','admin_deactivate_request','admin_configure_request','admin_start_work_request','admin_invoke_human_request','admin_robe_play_request','admin_robe24h_request','admin_human_resume_request','admin_rename_label','admin_rename_slug','admin_delete_perfil','admin_unfreeze','admin_unfreeze_all'
+      // Admin/macros
+      'admin_activate_request','admin_deactivate_request','admin_configure_request','admin_start_work_request','admin_invoke_human_request','admin_robe_play_request','admin_robe24h_request','admin_human_resume_request','admin_rename_label','admin_rename_slug','admin_delete_perfil','admin_unfreeze','admin_unfreeze_all',
+      // Freezer e macro-transições adicionais
+      'robe_frozen','robe_unfrozen','profile_frozen','profile_unfrozen','auto_freeze','auto_unfreeze','robe_backoff','robe_paused','robe_resumed'
     ]);
     function isErrorIssue(it) {
       try { return ERROR_TYPES.has(String(it && it.type || '')); } catch { return false; }
@@ -946,8 +950,8 @@
       const box = document.createElement('div'); box.className='modal-box'; box.style.maxWidth='720px';
       box.innerHTML = `
         <h2>Logs — ${nome}</h2>
-        <div style="margin:6px 0">
-          <label><input type="checkbox" id="showAllIssues"/> Mostrar todos os registros</label>
+        <div style="margin:6px 0; display:none">
+          <label><input type="checkbox" id="showAllIssues" disabled/> Mostrar todos os registros</label>
         </div>
         <div id="issuesBody" style="max-height:420px; overflow:auto; border:1px solid #1f2a3a; border-radius:8px; padding:8px; background:#0b1322;">
           <div class="pill">Carregando...</div>
@@ -969,12 +973,11 @@
             return;
           }
 
-          const showAll = !!box.querySelector('#showAllIssues')?.checked;
           const all = Array.isArray(res.issues) ? res.issues : [];
-          const list = showAll ? all : all.filter(isErrorIssue);
+          const list = all.filter(isErrorIssue);
 
           if (!list.length) {
-            body.innerHTML = showAll ? '<div class="pill">Sem registros.</div>' : '<div class="pill">Sem registros de erros.</div>';
+            body.innerHTML = '<div class="pill">Sem registros de erros.</div>';
             return;
           }
 
@@ -1012,7 +1015,8 @@
         }
       };
 
-      box.querySelector('#showAllIssues').onchange = load;
+      const ck = box.querySelector('#showAllIssues');
+      if (ck) ck.onchange = load;
 
       load();
     }
