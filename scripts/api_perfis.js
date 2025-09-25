@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const issues = require('./issues.js');
 
 function resolveChromeUserDataRoot() {
   if (process.platform === 'win32') {
@@ -126,7 +127,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Ativar perfil (declarativo: reconciliador faz a abertura)
   app.post('/api/perfis/:nome/activate', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_activate_request', `by=${op}`);
 
     // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
     {
@@ -147,7 +150,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Desativar perfil (declarativo: reconciliador faz o fechamento)
   app.post('/api/perfis/:nome/deactivate', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_deactivate_request', `by=${op}`);
 
     try { fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch {}
 
@@ -158,7 +163,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Configurar/injetar cookies
   app.post('/api/perfis/:nome/configure', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_configure_request', `by=${op}`);
     // Timeout aumentado para 180000ms (3min) para comando configure
     const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
     return res.json(resp);
@@ -167,7 +174,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Iniciar atendimento/postagem
   app.post('/api/perfis/:nome/start-work', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_start_work_request', `by=${op}`);
 
     // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
     {
@@ -189,7 +198,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Invocar humano
   app.post('/api/perfis/:nome/invoke-human', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_invoke_human_request', `by=${op}`);
     const resp = await workerClient.sendWorkerCommand('invoke_human', { nome });
     return res.json(resp);
   });
@@ -197,7 +208,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Robe Play
   app.post('/api/perfis/:nome/robe-play', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_robe_play_request', `by=${op}`);
     const resp = await workerClient.sendWorkerCommand('robe-play', { nome });
     return res.json(resp);
   });
@@ -205,7 +218,9 @@ module.exports = (app, workerClient, fileStore) => {
   // Robe 24h (individual)
   app.post('/api/perfis/:nome/robe-24h', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_robe24h_request', `by=${op}`);
     fileStore.patchDesired(nome, { robePause24h: true });
     return res.json({ ok: true });
   });
@@ -214,7 +229,9 @@ module.exports = (app, workerClient, fileStore) => {
   // ***** MODIFICADO CONFORME INSTRUÇÃO *****
   app.post('/api/perfis/:nome/human-resume', async (req, res) => {
     const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_human_resume_request', `by=${op}`);
     // Marca o "fine" do modo humano e ativa virtus novamente
     try {
       fileStore.patchDesired(nome, { humanResume: true });
@@ -222,12 +239,33 @@ module.exports = (app, workerClient, fileStore) => {
     return res.json({ ok: true, queued: true });
   });
 
+  // Descongelar perfil manualmente
+  app.post('/api/perfis/:nome/unfreeze', async (req, res) => {
+    const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || 'unknown');
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    await issues.append(nome, 'admin_unfreeze', `by=${op}`);
+    // Passa comando ao worker e retorna resultado
+    const resp = await workerClient.sendWorkerCommand('unfreeze', { nome }, { timeoutMs: 10000 });
+    res.json(resp);
+  });
+
+  // Descongelar todos os perfis
+  app.post('/api/perfis/unfreeze-all', async (req, res) => {
+    const op = String(req.headers['x-operator'] || 'unknown');
+    await issues.append('system', 'admin_unfreeze_all', `by=${op}`);
+    const resp = await workerClient.sendWorkerCommand('unfreeze-all', {}, { timeoutMs: 20000 });
+    res.json(resp);
+  });
+
   // Alterar label do perfil (só label)
-  app.patch('/api/perfis/:nome/label', (req, res) => {
+  app.patch('/api/perfis/:nome/label', async (req, res) => {
     try {
       const nome = req.params.nome;
+      const op = String(req.headers['x-operator'] || 'unknown');
       const { novoLabel } = req.body || {};
       if (!nome || !novoLabel) return res.json({ ok: false, error: 'Parâmetros inválidos' });
+      await issues.append(nome, 'admin_rename_label', `by=${op}`);
       fileStore.updatePerfilLabel(nome, String(novoLabel));
       res.json({ ok: true, renamed: false, labelUpdated: true, nome });
     } catch (e) {
@@ -236,12 +274,14 @@ module.exports = (app, workerClient, fileStore) => {
   });
 
   // Rename slug físico (diretório) — só se inativo! + mover userDataDir externo
-  app.post('/api/perfis/:nome/rename', (req, res) => {
+  app.post('/api/perfis/:nome/rename', async (req, res) => {
     try {
       const nome = req.params.nome;
+      const op = String(req.headers['x-operator'] || 'unknown');
       const { novoLabel } = req.body || {};
       if (!nome || !novoLabel) return res.json({ ok: false, error: 'Parâmetros inválidos' });
       if (fileStore.isPerfilAtivo(nome)) return res.json({ ok: false, error: 'Feche o navegador desta conta antes de renomear.' });
+      await issues.append(nome, 'admin_rename_slug', `by=${op}`);
 
       // Renomeia diretório lógico (dados/perfis/NOME) + atualiza manifest interno
       const resp = fileStore.renamePerfilSlug(nome, novoLabel);
@@ -256,11 +296,13 @@ module.exports = (app, workerClient, fileStore) => {
   });
 
   // Delete perfil (apenas se inativo!) — remove também userDataDir externo, se existir
-  app.delete('/api/perfis/:nome', (req, res) => {
+  app.delete('/api/perfis/:nome', async (req, res) => {
     try {
       const nome = req.params.nome;
+      const op = String(req.headers['x-operator'] || 'unknown');
       if (!nome) return res.json({ ok: false, error: 'nome ausente' });
       if (fileStore.isPerfilAtivo(nome)) return res.json({ ok: false, error: 'Feche o navegador antes de excluir esta conta.' });
+      await issues.append(nome, 'admin_delete_perfil', `by=${op}`);
 
       // Tenta remover userDataDir externo de forma correta (busca perfis.json)
       try {

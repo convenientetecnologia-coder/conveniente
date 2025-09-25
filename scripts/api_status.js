@@ -1,3 +1,4 @@
+// api_status
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
 module.exports = (app, workerClient, fileStore) => {
@@ -58,6 +59,9 @@ module.exports = (app, workerClient, fileStore) => {
             robeEstado,
             robeCooldownSec,
             robeFrozenUntil,
+            frozenReason,
+            frozenAt,
+            frozenSetBy,
             ...rest
           } = perfil;
 
@@ -88,6 +92,10 @@ module.exports = (app, workerClient, fileStore) => {
             robeEstado: (typeof robeEstado === 'string') ? robeEstado : (typeof robeMeta.robeEstado === 'string' ? robeMeta.robeEstado : null),
             robeCooldownSec: (typeof robeCooldownSec === 'number') ? robeCooldownSec : (typeof robeMeta.robeCooldownSec === 'number' ? robeMeta.robeCooldownSec : null),
             robeFrozenUntil: robeFrozenUntil || robeMeta.robeFrozenUntil || null,
+            // Freezer: novo campos detalhados, sempre presentes no payload
+            frozenReason: (typeof frozenReason !== 'undefined') ? frozenReason : (typeof robeMeta.frozenReason !== 'undefined' ? robeMeta.frozenReason : null),
+            frozenAt: (typeof frozenAt !== 'undefined') ? frozenAt : (typeof robeMeta.frozenAt !== 'undefined' ? robeMeta.frozenAt : null),
+            frozenSetBy: (typeof frozenSetBy !== 'undefined') ? frozenSetBy : (typeof robeMeta.frozenSetBy !== 'undefined' ? robeMeta.frozenSetBy : null),
             // Campos solicitados: activationHeldUntil e reopenAt
             activationHeldUntil: (typeof perfil.activationHeldUntil === 'number' && perfil.activationHeldUntil > 0)
               ? perfil.activationHeldUntil

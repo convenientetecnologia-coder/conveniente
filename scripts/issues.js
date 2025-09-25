@@ -1,3 +1,5 @@
+// issues.js
+
 'use strict';
 
 const fs = require('fs');
@@ -17,7 +19,11 @@ const ERROR_TYPES = new Set([
   'virtus_send_failed',
   'virtus_page_dead',
   'chrome_memory_spike',
-  'cpu_memory_spike'
+  'cpu_memory_spike',
+  'mil_action',
+  'admin_activate_request', 'admin_deactivate_request', 'admin_configure_request', 'admin_start_work_request',
+  'admin_invoke_human_request', 'admin_robe_play_request', 'admin_robe24h_request', 'admin_human_resume_request',
+  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all'
 ]);
 
 function isErrorType(t) {
@@ -91,7 +97,10 @@ const ISSUE_TYPES_SET = new Set([
   'light_enter',
   'light_exit',
   'nurse_kill',
-  'nurse_restart'
+  'nurse_restart',
+  'admin_activate_request', 'admin_deactivate_request', 'admin_configure_request', 'admin_start_work_request',
+  'admin_invoke_human_request', 'admin_robe_play_request', 'admin_robe24h_request', 'admin_human_resume_request',
+  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all'
 ]);
 
 function padronizaType(type) {
@@ -123,9 +132,21 @@ function append(nome, type, message) {
         list.splice(0, list.length - MAX_ISSUES);
       }
       const ok = writeJsonAtomic(file, list);
-      return ok ? { ok: true, file, size: list.length, entry } :
-        { ok: false, error: 'write failed', file };
+      if (!ok) {
+        // Fallback: tente registrar em issues_fallback.log global (append-only)
+        try {
+          const fbFile = path.join(DADOS_DIR, 'issues_fallback.log');
+          fs.appendFileSync(fbFile, `[${nome}] ${JSON.stringify(entry)}\n`);
+        } catch {}
+        return { ok: false, error: 'write failed', file };
+      }
+      return { ok: true, file, size: list.length, entry };
     } catch (e) {
+      // Também registra fallback, já que o serialize/try pode falhar
+      try {
+        const fbFile = path.join(DADOS_DIR, 'issues_fallback.log');
+        fs.appendFileSync(fbFile, `[${nome}] ${JSON.stringify({fail: true, error: e && e.message || String(e), ...entry})}\n`);
+      } catch {}
       return { ok: false, error: e && e.message || String(e), file };
     }
   });

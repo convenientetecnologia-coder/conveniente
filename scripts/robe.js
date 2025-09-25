@@ -588,26 +588,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     perfilPath = path.join(perfil.userDataDir, 'manifest.json');
     manifest = readJsonSafe(perfilPath, null);
 
-    // GUARD: sem manifest -> freeze militar por 12h antiflood
+    // NOVO: Não congelar localmente — apenas detectar, logar e retornar para o worker decidir
     if (!manifest) {
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].frozenUntil = Date.now() + 43_200_000; // 12h
-      robeMeta[nome].estado = 'frozen_no_manifest';
-
-      // Persista o frozenUntil no manifest
-      try {
-        if (perfilPath && robeMeta[nome] && robeMeta[nome].frozenUntil) {
-          const man = readJsonSafe(perfilPath, {});
-          man.frozenUntil = robeMeta[nome].frozenUntil;
-          writeJsonAtomic(perfilPath, man);
-        }
-      } catch {}
-
-      try {
-        await logIssue(nome, 'robe_error', "manifest ausente; congelado por 12h");
-      } catch {}
-      // reporta erro e já retorna, não processa mais!
+      try { await logIssue(nome, 'robe_error', 'manifest ausente; flow deve congelar via worker'); } catch {}
       return { ok: false, error: 'no_manifest' };
+    }
+    if (!manifest.cookies || !manifest.fp) {
+      try { await logIssue(nome, 'robe_error', 'manifest incompleto (cookies/fp); flow deve congelar via worker'); } catch {}
+      return { ok: false, error: 'incomplete_manifest' };
     }
 
     // Cooldown: espera curto se faltar pouco; aborta sem mexer no cooldown se faltar muito
@@ -744,16 +732,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Limpa estado militar de erro/congelamento caso sucesso e manifest voltou
     if (robeMeta[nome]?.estado === 'frozen_no_manifest') {
       robeMeta[nome].estado = null;
-      robeMeta[nome].frozenUntil = null;
-
-      // Persista o frozenUntil no manifest
-      try {
-        if (perfilPath) {
-          const man = readJsonSafe(perfilPath, {});
-          man.frozenUntil = null;
-          writeJsonAtomic(perfilPath, man);
-        }
-      } catch {}
+      // Não alterar frozenUntil aqui; responsabilidade do worker.js
     }
 
     robeMeta[nome].estado = 'ok';
@@ -854,19 +833,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     console.log(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'} | logs:`, stepLog);
   }
 
-  // Persista o frozenUntil no manifest se for setado ou alterado no fluxo geral deste wrapper
-  // (uso futuro se mais casos surgirem, atender etapas intermediárias igualmente)
+  // Não persistir frozenUntil aqui; responsabilidade do worker.js
   if (robeMeta[nome] && typeof robeMeta[nome].frozenUntil !== 'undefined') {
-    try {
-      const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-      const perfil = perfisArr.find(p => p && p.nome === nome);
-      if (perfil && perfil.userDataDir) {
-        const perfilPath = path.join(perfil.userDataDir, 'manifest.json');
-        const man = readJsonSafe(perfilPath, {});
-        man.frozenUntil = robeMeta[nome].frozenUntil;
-        writeJsonAtomic(perfilPath, man);
-      }
-    } catch {}
+    // noop: congelamento/descongelamento centralizado no worker.js
   }
 
   return { ok: published, log: stepLog };

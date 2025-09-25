@@ -47,6 +47,18 @@ function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value +
 function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
 //— ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
 
+// ===== LOCKS ATÔMICOS (status e manifest) =====
+let _statusLock = Promise.resolve();
+
+const manifestLocks = new Map();
+function withManifestLock(nome, fn) {
+  const prev = manifestLocks.get(nome) || Promise.resolve();
+  const job = prev.then(() => Promise.resolve(fn()).catch((e)=>{ try { console.warn('[MANIFEST][lock] err', e && e.message || e); } catch {} })).catch(()=>{});
+  manifestLocks.set(nome, job);
+  return job;
+}
+// ===== FIM LOCKS ATÔMICOS =====
+
 // HOOKS de Modo LEVE/FULL (próximo aos patches militares - AUTO_CFG)
 async function onEnterLightMode() {
   try { await reportAction('system', 'light_enter', 'enter_light_mode'); } catch {}
@@ -312,6 +324,13 @@ function readManifest(nome) {
     return man || null;
   } catch { return null; }
 }
+async function readManifestLocked(nome) {
+  let man = null;
+  await withManifestLock(nome, async () => {
+    man = readManifest(nome);
+  });
+  return man;
+}
 function writeManifest(nome, man) {
   try {
     const mPath = manifestPathOf(nome);
@@ -326,7 +345,17 @@ function writeManifest(nome, man) {
       try { fs.unlinkSync(tmp); } catch {}
     }
     return true;
-  } catch { return false; }
+  } catch {
+    try { issues.append('system', 'persist_failed', `${nome}|write_manifest`).catch(()=>{}); } catch {}
+    return false;
+  }
+}
+async function writeManifestLocked(nome, man) {
+  let ok = false;
+  await withManifestLock(nome, async () => {
+    ok = writeManifest(nome, man);
+  });
+  return ok;
 }
 
 // Converte robeCooldownUntil -> robeCooldownRemainingMs quando a conta NÃO está apta a postar (congela)
@@ -343,7 +372,8 @@ function freezeCooldownIfNotWorking(nome) {
       const remain = man.robeCooldownUntil - now;
       man.robeCooldownRemainingMs = remain;
       man.robeCooldownUntil = 0;
-      writeManifest(nome, man);
+      const ok = writeManifest(nome, man);
+      if (!ok) { try { issues.append('system','persist_failed', `${nome}|freezeCooldownIfNotWorking`).catch(()=>{}); } catch {} }
     }
   } catch {}
 }
@@ -363,7 +393,8 @@ function unfreezeCooldownIfWorking(nome) {
       if (remaining > 0) {
         man.robeCooldownUntil = now + remaining;
         man.robeCooldownRemainingMs = 0;
-        writeManifest(nome, man);
+        const ok = writeManifest(nome, man);
+        if (!ok) { try { issues.append('system','persist_failed', `${nome}|unfreezeCooldownIfWorking`).catch(()=>{}); } catch {} }
       }
     }
   } catch {}
@@ -417,6 +448,9 @@ try {
         if (man.frozenUntil && man.frozenUntil > Date.now()) {
           robeMeta[p.nome] = robeMeta[p.nome] || {};
           robeMeta[p.nome].frozenUntil = man.frozenUntil;
+          if (man.frozenReason) robeMeta[p.nome].frozenReason = man.frozenReason;
+          if (man.frozenAt) robeMeta[p.nome].frozenAt = man.frozenAt;
+          if (man.frozenSetBy) robeMeta[p.nome].frozenSetBy = man.frozenSetBy;
         }
       }
     }
@@ -521,7 +555,10 @@ return p;
 });
 }
 if (!found) st.perfis.push({ nome, active: false });
-writeJsonAtomic(statusPath, st);
+_statusLock = _statusLock.then(async () => {
+  const ok = writeJsonAtomic(statusPath, st);
+  if (!ok) { try { await issues.append('system','persist_failed', `${nome}|activateOnce_fail_status`); } catch {} }
+});
 } catch {}
 try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
 console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
@@ -1224,7 +1261,7 @@ try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado
 stopPruneLoop(nome);
 
 // Registrar falha e agendar reabertura curta
-try { registerFailure(nome, 'disconnected'); } catch {}
+try { registerFailure(nome, 'disconnected', 'external'); } catch {}
 try {
   // Checagem de desired: só agenda reopenAt se desired.active === true
   const d = readJsonFile(desiredPath, { perfis: {} });
@@ -1350,7 +1387,8 @@ const handlers = {
       const d = readJsonFile(desiredPath, { perfis: {} });
       d.perfis = d.perfis || {};
       d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-      writeJsonAtomic(desiredPath, d);
+      const ok = writeJsonAtomic(desiredPath, d);
+      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|deactivate_desired_write`); } catch {} }
     } catch {}
   } else {
     robeMeta[nome] = robeMeta[nome] || {};
@@ -1632,6 +1670,7 @@ const handlers = {
           issuesCount = countErrorsLocal(nome); // fallback local
         }
       } catch { issuesCount = 0; }
+      const fail = getFailureCounts(nome);
       return {
         nome,
         label: p.label || null,
@@ -1646,6 +1685,13 @@ const handlers = {
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
         numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+        frozenReason: robeMeta[nome]?.frozenReason || null,
+        frozenAt: robeMeta[nome]?.frozenAt || null,
+        frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
+        internalFailCountWindow: fail.internal,
+        externalFailCountWindow: fail.external,
+        unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
+        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
       };
@@ -1653,6 +1699,7 @@ const handlers = {
     const robes = {};
     perfisArr.forEach(p => {
       const nome = p.nome;
+      const fail = getFailureCounts(nome);
       robes[nome] = {
         cooldownSec: robeCooldownLeft(nome),
         estado: robeMeta[nome]?.estado || '',
@@ -1664,6 +1711,13 @@ const handlers = {
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
         numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+        frozenReason: robeMeta[nome]?.frozenReason || null,
+        frozenAt: robeMeta[nome]?.frozenAt || null,
+        frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
+        internalFailCountWindow: fail.internal,
+        externalFailCountWindow: fail.external,
+        unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
+        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null
       };
     });
     const robeQueueList = robeQueue.queueList();
@@ -1681,11 +1735,29 @@ const handlers = {
       autoMode,
       sys
     };
+  },
+
+  async unfreeze({ nome, setBy }) {
+    if (!nome) return { ok: false, error: 'nome_obrigatorio' };
+    try { await unfreezeProfile(nome, setBy || 'admin'); } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
+    return { ok: true };
+  },
+
+  async ['unfreeze-all']() {
+    try {
+      const perfisArr = loadPerfisJson();
+      for (const p of perfisArr) {
+        if (!p || !p.nome) continue;
+        try { await unfreezeProfile(p.nome, 'admin_all'); } catch {}
+      }
+      return { ok: true };
+    } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
   }
 };
 
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
 async function snapshotStatusAndWrite() {
+_statusLock = _statusLock.then(async () => {
 try {
 const perfisArr = loadPerfisJson();
 const perfis = perfisArr.map(p => {
@@ -1699,6 +1771,7 @@ try {
     issuesCount = countErrorsLocal(nome); // fallback local
   }
 } catch {}
+const fail = getFailureCounts(nome);
 return {
   nome,
   label: p.label || null,
@@ -1713,6 +1786,13 @@ return {
   cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
   numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
   robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+  frozenReason: robeMeta[nome]?.frozenReason || null,
+  frozenAt: robeMeta[nome]?.frozenAt || null,
+  frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
+  internalFailCountWindow: fail.internal,
+  externalFailCountWindow: fail.external,
+  unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
+  lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
   reopenAt: robeMeta[nome]?.reopenAt || null,
 };
@@ -1720,6 +1800,7 @@ return {
 const robes = {};
 perfisArr.forEach(p => {
 const nome = p.nome;
+const fail = getFailureCounts(nome);
 robes[nome] = {
   cooldownSec: robeCooldownLeft(nome),
   estado: robeMeta[nome]?.estado || '',
@@ -1731,6 +1812,13 @@ robes[nome] = {
   cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
   numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
   robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
+  frozenReason: robeMeta[nome]?.frozenReason || null,
+  frozenAt: robeMeta[nome]?.frozenAt || null,
+  frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
+  internalFailCountWindow: fail.internal,
+  externalFailCountWindow: fail.external,
+  unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
+  lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null
 };
 });
 const robeQueueList = robeQueue.queueList();
@@ -1744,10 +1832,13 @@ const sys = {
 const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
 // Não inclui mais robeRam obsoleto, pois RAM por perfil já está em perfis/robes.
 // Unificado cross-platform.
-writeJsonAtomic(statusPath, statusObj);
+const ok = writeJsonAtomic(statusPath, statusObj);
+if (!ok) { try { await issues.append('system','persist_failed', 'status_write'); } catch {} }
 } catch (e) {
 try { console.warn('[WORKER][statusWrite] erro:', e && e.message || e); } catch {}
 }
+});
+return _statusLock;
 }
 // == FIM: snapshotStatusAndWrite ==
 
@@ -1865,7 +1956,8 @@ for (const nome of nomes) {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
             d2.perfis[nome].configureOnce = false;
-            writeJsonAtomic(desiredPath, d2);
+            const ok = writeJsonAtomic(desiredPath, d2);
+            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|configureOnce_desired_write`); } catch {} }
           }
         } catch {}
       }
@@ -1900,7 +1992,8 @@ for (const nome of nomes) {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
             d2.perfis[nome].robePlay = false;
-            writeJsonAtomic(desiredPath, d2);
+            const ok = writeJsonAtomic(desiredPath, d2);
+            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
           }
         } catch {}
       }
@@ -1916,7 +2009,8 @@ for (const nome of nomes) {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
             d2.perfis[nome].invokeHuman = false;
-            writeJsonAtomic(desiredPath, d2);
+            const ok = writeJsonAtomic(desiredPath, d2);
+            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|invokeHuman_desired_write`); } catch {} }
           }
         } catch {}
       }
@@ -1932,7 +2026,8 @@ for (const nome of nomes) {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
             d2.perfis[nome].humanResume = false;
-            writeJsonAtomic(desiredPath, d2);
+            const ok = writeJsonAtomic(desiredPath, d2);
+            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|humanResume_desired_write`); } catch {} }
           }
         } catch {}
       }
@@ -1955,12 +2050,14 @@ for (const nome of nomes) {
         man.robeCooldownUntil = 0;
         man.robeCooldownRemainingMs = plus24;
       }
-      writeManifest(nome, man);
+      const ok = writeManifest(nome, man);
+      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_manifest_write`); } catch {} }
 
       const d2 = readJsonFile(desiredPath, { perfis: {} });
       if (d2 && d2.perfis && d2.perfis[nome]) {
         d2.perfis[nome].robePause24h = false;
-        writeJsonAtomic(desiredPath, d2);
+        const ok2 = writeJsonAtomic(desiredPath, d2);
+        if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_desired_write`); } catch {} }
       }
     } catch (e) {
       try { console.warn('[WORKER][reconcile] robePause24h err:', e && e.message || e); } catch {}
@@ -2024,26 +2121,53 @@ async function ensureFrozenShutdown(nome, origin = 'frozen') {
 }
 // ===== FIM DO MÉTODO ULTRA CIRÚRGICO =====
 
-const profileFailures = new Map(); // nome => [ts, ts, ...]
-async function registerFailure(nome, reason) {
+// ===== CLASSIFICAÇÃO DE FALHAS =====
+const INTERNAL_REASONS = new Set(['ramKill','cpuKill','manifest_missing','manifest_incomplete','panic','open_headroom']);
+const EXTERNAL_REASONS = new Set(['disconnected','no_pages','zombie','network','fb_dom','messenger_temp_block','blocked']);
+
+function classifyReason(reason, fallback) {
+  if (INTERNAL_REASONS.has(reason)) return 'internal';
+  if (EXTERNAL_REASONS.has(reason)) return 'external';
+  return fallback || 'unknown';
+}
+
+function getFailureCounts(nome) {
   const now = Date.now();
-  const arr = profileFailures.get(nome) || [];
-  const filtered = arr.filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
-  filtered.push(now);
-  profileFailures.set(nome, filtered);
-  if (filtered.length > ULTRA_RECOVERY.FAIL_FREEZE_AFTER) {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].frozenUntil = now + ULTRA_RECOVERY.FAIL_FREEZE_MS;
+  const rec = profileFailures.get(nome);
+  if (!rec) return { internal: 0, external: 0, unknown: 0 };
+  const pruned = {
+    internal: (rec.internal||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS),
+    external: (rec.external||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS),
+    unknown: (rec.unknown||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS)
+  };
+  // Atualiza janela já podada
+  profileFailures.set(nome, pruned);
+  return { internal: pruned.internal.length, external: pruned.external.length, unknown: pruned.unknown.length };
+}
+
+const profileFailures = new Map(); // nome => { internal:[], external:[], unknown:[] }
+async function registerFailure(nome, reason, classification) {
+  const now = Date.now();
+  const cls = classification || classifyReason(reason, 'unknown');
+  const rec = profileFailures.get(nome) || { internal: [], external: [], unknown: [] };
+  // prune old
+  rec.internal = (rec.internal||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  rec.external = (rec.external||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  rec.unknown  = (rec.unknown ||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  // push
+  if (cls === 'internal') rec.internal.push(now);
+  else if (cls === 'external') rec.external.push(now);
+  else rec.unknown.push(now);
+  profileFailures.set(nome, rec);
+  const counts = getFailureCounts(nome);
+  try { await issues.append(nome, 'failure', `reason=${reason} class=${cls} internal=${counts.internal} external=${counts.external} unknown=${counts.unknown}`); } catch {}
+
+  // Congelar apenas por falhas INTERNAS
+  if (cls === 'internal' && counts.internal > ULTRA_RECOVERY.FAIL_FREEZE_AFTER) {
     try {
-      const manifestPath = manifestPathOf(nome);
-      if (fs.existsSync(manifestPath)) {
-        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        man.frozenUntil = robeMeta[nome].frozenUntil;
-        fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
-      }
+      await freezeProfileFor(nome, ULTRA_RECOVERY.FAIL_FREEZE_MS, `fail_threshold:${reason}`, 'system');
+      await ensureFrozenShutdown(nome, 'fail_freeze');
     } catch {}
-    issues.append(nome, 'mil_action', `frozen_2h: >${ULTRA_RECOVERY.FAIL_FREEZE_AFTER} falhas em 3h (${filtered.length})`).catch(()=>{});
-    await ensureFrozenShutdown(nome, 'fail_freeze');
   }
 }
 
@@ -2072,16 +2196,80 @@ async function tryReloadShort(p0, nome, attempt) {
 function ms(h) { return h * 60 * 60 * 1000; }
 
 // Congela perfil por um tempo (msDuration), persiste congelamento, faz shutdown.
-async function freezeProfileFor(nome, msDuration, reason) {
+async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
   try {
-    const until = Date.now() + msDuration;
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].frozenUntil = until;
-    const man = readManifest(nome) || {};
-    man.frozenUntil = until;
-    writeManifest(nome, man);
-    await issues.append(nome, 'mil_action', `frozen_${Math.round(msDuration/60000)}min: ${reason||''}`);
+    await withManifestLock(nome, async () => {
+      const now = Date.now();
+      const man = readManifest(nome) || {};
+      const existingMem = (robeMeta[nome] && robeMeta[nome].frozenUntil) || 0;
+      const existingDisk = (man && man.frozenUntil) || 0;
+      const existing = Math.max(existingMem, existingDisk, 0);
+      let until = now + msDuration;
+      let mode = 'set';
+      if (existing > now) {
+        until = existing + msDuration; // soma janela
+        mode = 'extended';
+      }
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].frozenUntil = until;
+      robeMeta[nome].frozenReason = String(reason || '');
+      robeMeta[nome].frozenAt = robeMeta[nome].frozenAt || now;
+      robeMeta[nome].frozenSetBy = setBy || 'system';
+
+      man.frozenUntil = until;
+      man.frozenReason = String(reason || '');
+      man.frozenAt = man.frozenAt || now;
+      man.frozenSetBy = setBy || 'system';
+
+      const ok = writeManifest(nome, man);
+      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|freeze_write_manifest`); } catch {} }
+      try {
+        await issues.append(
+          nome,
+          setBy && String(setBy).startsWith('admin') ? 'admin_action' : 'mil_action',
+          `frozen_${Math.round(msDuration/60000)}min(${mode}): reason=${reason||''} setBy=${setBy} until=${new Date(until).toISOString()}`
+        );
+      } catch {}
+    });
     await ensureFrozenShutdown(nome, reason || 'frozen');
+    await snapshotStatusAndWrite();
+  } catch {}
+}
+
+async function unfreezeProfile(nome, setBy = 'admin') {
+  try {
+    await withManifestLock(nome, async () => {
+      const now = Date.now();
+      robeMeta[nome] = robeMeta[nome] || {};
+      delete robeMeta[nome].frozenUntil;
+      delete robeMeta[nome].frozenReason;
+      delete robeMeta[nome].frozenAt;
+      delete robeMeta[nome].frozenSetBy;
+      robeMeta[nome].activationHeldUntil = now + 60*1000; // 60s hold
+      robeMeta[nome].reloadAttemptsWindow = [];
+      robeMeta[nome].unfreezeCount = (robeMeta[nome].unfreezeCount || 0) + 1;
+      robeMeta[nome].lastUnfreezeAt = now;
+
+      const man = readManifest(nome) || {};
+      if ('frozenUntil' in man) delete man.frozenUntil;
+      if ('frozenReason' in man) delete man.frozenReason;
+      if ('frozenAt' in man) delete man.frozenAt;
+      if ('frozenSetBy' in man) delete man.frozenSetBy;
+      const ok = writeManifest(nome, man);
+      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|unfreeze_write_manifest`); } catch {} }
+
+      // Zera falhas
+      profileFailures.set(nome, { internal: [], external: [], unknown: [] });
+
+      try {
+        await issues.append(
+          nome,
+          setBy && String(setBy).startsWith('admin') ? 'admin_action' : 'mil_action',
+          `unfreeze by=${setBy}`
+        );
+      } catch {}
+    });
+    await snapshotStatusAndWrite();
   } catch {}
 }
 
@@ -2136,29 +2324,43 @@ async function nurseTick() {
     try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
     if (!pages || !pages[0]) {
       await reportAction(nome, 'nurse_kill', `motivo=no_pages url= reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-      try { registerFailure(nome, 'no_pages'); } catch {}
+      try { registerFailure(nome, 'no_pages', 'external'); } catch {}
       await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
       continue;
     }
     const p0 = pages[0];
+    // Checagem de bloqueio temporário do Messenger (prioritário, antes de prune/reload/kill)
+    const det = await detectMessengerTempBlock(p0);
+    if (det && det.blocked) {
+      try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — stopVirtus e reabrir em ~2h'); } catch {}
+      try { await stopVirtus(nome); } catch {}
+      // Agendar reopen ~2h com jitter (sem freezer)
+      robeMeta[nome] = robeMeta[nome] || {};
+      const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000; // 5-26 min
+      robeMeta[nome].reopenAt = Date.now() + ms(2) + jitterMs;
+      try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+      await snapshotStatusAndWrite();
+      continue; // Não tenta reload/kill, apenas sai.
+    }
+
     let healthy = await pageReadyBasic(p0);
     if (!healthy) {
       // Debounce: conta reloads nos últimos 60s, pausa se ultrapassar 3
       robeMeta[nome] = robeMeta[nome] || {};
-      const now = Date.now();
+      const now2 = Date.now();
       if (!robeMeta[nome].reloadAttemptsWindow) robeMeta[nome].reloadAttemptsWindow = [];
-      robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => now - ts < 60000);
+      robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => now2 - ts < 60000);
 
-      robeMeta[nome].reloadAttemptsWindow.push(now);
+      robeMeta[nome].reloadAttemptsWindow.push(now2);
       if (robeMeta[nome].reloadAttemptsWindow.length > 3) {
         // Log e GRACE: não tente novo reload nos próximos 60s
-        robeMeta[nome].reloadBlockedUntil = now+60000;
+        robeMeta[nome].reloadBlockedUntil = now2+60000;
         await reportAction(nome, 'mil_action', 
           `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${(p0.url&&p0.url())||''}`
         );
         continue; // Não tenta nem reload nem kill — só sai do loop até a próxima rodada.
       }
-      if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > now) {
+      if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > now2) {
         continue; // Se grace está ativo, pula hint de reload para este ciclo
       }
 
@@ -2170,18 +2372,10 @@ async function nurseTick() {
         await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
       } else {
         await reportAction(nome, 'nurse_kill', `motivo=page_zumbi url=${(p0.url&&p0.url())||''} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-        try { registerFailure(nome, 'zombie'); } catch {}
+        try { registerFailure(nome, 'zombie', 'external'); } catch {}
         await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
       }
-    }
-
-    // Checagem de bloqueio temporário do Messenger (prioritário, antes de prune/reload/kill)
-    const det = await detectMessengerTempBlock(p0);
-    if (det && det.blocked) {
-      try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — congelando 2h'); } catch {}
-      await freezeProfileFor(nome, ms(2), 'messenger_temp_block');
-      continue; // Não tenta reload/kill, apenas sai.
     }
 
     // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
@@ -2210,18 +2404,8 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
   let manifest;
   try { manifest = readManifest(nome); } catch(e){}
   if (!manifest) {
-    // Congela por 12h!
-    const frozenUntil = Date.now() + 12*60*60*1000;
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].frozenUntil = frozenUntil;
-    try {
-      const manifestPath = manifestPathOf(nome);
-      if (fs.existsSync(manifestPath)) {
-        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        man.frozenUntil = robeMeta[nome].frozenUntil;
-        fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
-      }
-    } catch {}
+    // Congela por 12h via worker
+    try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_missing', 'system').catch(()=>{}); } catch {}
     await reportAction(nome, 'robe_error', 'manifest ausente; congelado por 12h');
     await ensureFrozenShutdown(nome, 'manifest_missing'); // para manifest ausente
     return { ok: false, error: 'no_manifest' };
@@ -2229,16 +2413,7 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
 
   // Circuit breaker/migração manifest incompleto
   if (!manifest.cookies || !manifest.fp) {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].frozenUntil = Date.now() + 12*60*60*1000;
-    try {
-      const manifestPath = manifestPathOf(nome);
-      if (fs.existsSync(manifestPath)) {
-        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        man.frozenUntil = robeMeta[nome].frozenUntil;
-        fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
-      }
-    } catch {}
+    try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system').catch(()=>{}); } catch {}
     await reportAction(nome, 'robe_error', 'manifest incompleto (cookies/fp); congelado por 12h');
     await ensureFrozenShutdown(nome, 'manifest_incomplete'); // para manifest incompleto
     return { ok: false, error: 'incomplete_manifest' };
@@ -2282,16 +2457,7 @@ function resolveManifest(nome) {
     if (!fs.existsSync(mPath)) {
       // Congela se não existe em nenhum lugar!
       robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].frozenUntil = Date.now() + 12*60*60*1000;
-      try {
-        const manifestPath = manifestPathOf(nome);
-        if (fs.existsSync(manifestPath)) {
-          const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-          man.frozenUntil = robeMeta[nome].frozenUntil;
-          fs.writeFileSync(manifestPath, JSON.stringify(man, null, 2), 'utf8');
-        }
-      } catch {}
-      // Logs e snapshot imediatos (resolveManifest)
+      try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_missing', 'system').catch(()=>{}); } catch {}
       try { issues.append(nome, 'robe_error', 'manifest ausente/incompleto; congelado 12h (resolveManifest)').catch(()=>{}); } catch {}
       try { snapshotStatusAndWrite().catch(()=>{}); } catch {}
       return null;

@@ -96,24 +96,44 @@ function getStatusSnapshot() {
   if (st && Array.isArray(st.perfis)) return st;
   // Fallback: cria estrutura básica a partir do perfis.json, SEM inventar campos ausentes
   const perfisArr = readJsonSafe(perfisPath, []);
-  const perfis = perfisArr.map(p => ({
-    nome: p.nome,
-    label: p.label || null,
-    cidade: p.cidade,
-    uaPresetId: p.uaPresetId,
-    active: false,
-    trabalhando: false,
-    configurando: false,
-    // Militar: RAM desconhecida/null, nunca fake zero
-    ramMB: null,
-    // Militar: CPU desconhecida/null, nunca fake zero
-    cpuPercent: null,
-    // Militar: numPages desconhecido/null
-    numPages: null,
-    // Militar: robeFrozenUntil desconhecido/null
-    robeFrozenUntil: null
-    // Adicione outros campos health militar que o painel consome, sempre iniciando com null se não disponível.
-  }));
+  // PATCH: persistir e expor freezer detalhado no status (retrocompatível)
+  const perfis = perfisArr.map(p => {
+    let frozenReason = null, frozenAt = null, frozenSetBy = null, robeFrozenUntil = null;
+    try {
+      if (p.userDataDir) {
+        const manifestPath = path.join(p.userDataDir, 'manifest.json');
+        if (fs.existsSync(manifestPath)) {
+          const man = readJsonSafe(manifestPath, {});
+          robeFrozenUntil = (typeof man.frozenUntil === 'number') ? man.frozenUntil : null;
+          frozenReason = man.frozenReason || null;
+          frozenAt    = man.frozenAt    || null;
+          frozenSetBy = man.frozenSetBy || null;
+        }
+      }
+    } catch {}
+    return {
+      nome: p.nome,
+      label: p.label || null,
+      cidade: p.cidade,
+      uaPresetId: p.uaPresetId,
+      active: false,
+      trabalhando: false,
+      configurando: false,
+      // Militar: RAM desconhecida/null, nunca fake zero
+      ramMB: null,
+      // Militar: CPU desconhecida/null, nunca fake zero
+      cpuPercent: null,
+      // Militar: numPages desconhecido/null
+      numPages: null,
+      // Militar: robeFrozenUntil
+      robeFrozenUntil,
+      // PATCH: campos detalhados do freezer
+      frozenReason,
+      frozenAt,
+      frozenSetBy
+      // Adicione outros campos health militar que o painel consome, sempre iniciando com null se não disponível.
+    };
+  });
   // Não inventa campos militares se não existem snapshot
   return { perfis, robes: {}, robeQueue: [], ts: Date.now() };
 }
@@ -136,6 +156,12 @@ function getStatusField(nome, campo) {
   ) {
     return (typeof ent[campo] === 'number' ? ent[campo] : (ent[campo] !== undefined ? ent[campo] : null));
   }
+  // PATCH: freezer detalhado (não inventar valores fake, null retrocompatível)
+  if (
+    ['frozenReason','frozenAt','frozenSetBy'].includes(campo)
+  ) {
+    return (ent[campo] !== undefined ? ent[campo] : null);
+  }
   return ent[campo];
 }
 
@@ -148,6 +174,12 @@ function writeStatusField(nome, campo, valor) {
   // Militar: RAM desconhecida/null, nunca fake zero
   if(
     ['ramMB', 'cpuPercent', 'numPages', 'robeFrozenUntil'].includes(campo)
+  ) {
+    arr[idx][campo] = (valor !== undefined && valor !== null) ? valor : null;
+  }
+  // PATCH: freezer detalhado (não inventar valores fake, sempre null se desconhecido)
+  else if (
+    ['frozenReason','frozenAt','frozenSetBy'].includes(campo)
   ) {
     arr[idx][campo] = (valor !== undefined && valor !== null) ? valor : null;
   } else {
@@ -169,6 +201,12 @@ function patchStatusField(nome, patchObj) {
       ['ramMB', 'cpuPercent', 'numPages', 'robeFrozenUntil'].includes(campo)
     ) {
       // Militar: RAM desconhecida/null, nunca fake zero
+      arr[idx][campo] = (valor !== undefined && valor !== null) ? valor : null;
+    }
+    // PATCH: freezer detalhado (não inventar valores fake, sempre null se desconhecido)
+    else if (
+      ['frozenReason','frozenAt','frozenSetBy'].includes(campo)
+    ) {
       arr[idx][campo] = (valor !== undefined && valor !== null) ? valor : null;
     } else {
       arr[idx][campo] = valor;

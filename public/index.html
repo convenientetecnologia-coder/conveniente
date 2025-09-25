@@ -190,6 +190,7 @@
         <button class="btn danger" id="stopAllBtn">Fechar todos</button>
         <button class="btn" id="robe24AllBtn">Robe 24h (todos)</button>
         <button class="btn" id="robeReleaseAllBtn">Liberar Robe (todos)</button>
+        <button class="btn" id="unfreezeAllBtn">Descongelar (todos)</button>
         <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
           <button class="btn" id="filterAll">Todas</button>
           <button class="btn" id="filterActive">Ativas</button>
@@ -212,7 +213,11 @@
     }
 
     // Tipos de ERRO considerados no log (Virtus/Robe)
-    const ERROR_TYPES = new Set(['robe_error','robe_no_photo','virtus_blocked','virtus_no_composer','virtus_send_failed']);
+    const ERROR_TYPES = new Set([
+      'robe_error','robe_no_photo','virtus_blocked','virtus_no_composer','virtus_send_failed',
+      'browser_disconnected','virtus_page_dead','chrome_memory_spike','cpu_memory_spike','cookie_inject_failed','mil_action',
+      'admin_activate_request','admin_deactivate_request','admin_configure_request','admin_start_work_request','admin_invoke_human_request','admin_robe_play_request','admin_robe24h_request','admin_human_resume_request','admin_rename_label','admin_rename_slug','admin_delete_perfil','admin_unfreeze','admin_unfreeze_all'
+    ]);
     function isErrorIssue(it) {
       try { return ERROR_TYPES.has(String(it && it.type || '')); } catch { return false; }
     }
@@ -421,7 +426,11 @@
         if (!ts || ts < Date.now()) return null;
         const agora = Date.now();
         const restante = Math.max(0, Math.floor((ts-agora)/1000));
-        return buildPill(`ROBE Congelado (${tempoRestante(restante)})`, 'frozen');
+        const reason = p.frozenReason ? String(p.frozenReason) : 'motivo não informado';
+        const sinceStr = p.frozenAt ? new Date(p.frozenAt).toLocaleString() : '';
+        const span = buildPill(`ROBE Congelado (${tempoRestante(restante)})`, 'frozen');
+        span.title = `Motivo: ${reason}\nDesde: ${sinceStr}`;
+        return span;
       } catch { return null; }
     }
 
@@ -480,6 +489,23 @@
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
       const st = await window.electronAPI.getStatus();
+
+      // Banner global de aviso (warning) caso backend informe
+      const warn = st && st.warning;
+      if (warn) {
+        let b = document.getElementById('globalWarn');
+        if (!b) {
+          b = document.createElement('div');
+          b.id = 'globalWarn';
+          b.style.cssText = 'margin:10px 0;padding:8px;border:1px solid #a66;background:#3a2222;color:#ffdede;border-radius:8px';
+          b.innerText = 'Aviso: ' + warn;
+          document.querySelector('.wrap').insertBefore(b, document.querySelector('.toolbar'));
+        } else b.innerText = 'Aviso: ' + warn;
+      } else {
+        const b = document.getElementById('globalWarn');
+        if (b) b.remove();
+      }
+
       const perfis = st?.perfis || [];
       const robes  = st?.robes  || {};
       const robeQueue = st?.robeQueue || [];
@@ -775,6 +801,30 @@
         }
         // ----------------------------------------------------------------------------------
 
+        // Botão "Descongelar" por perfil congelado
+        if (isFrozen) {
+          const btnUnfreeze = document.createElement('button');
+          btnUnfreeze.className = 'btn';
+          btnUnfreeze.textContent = 'Descongelar';
+          btnUnfreeze.title = 'Remover congelamento (permite retorno à operação)';
+          btnUnfreeze.onclick = async () => {
+            btnUnfreeze.disabled = true;
+            btnUnfreeze.textContent = 'Descongelando...';
+            try {
+              const r = await fetch(`/api/perfis/${encodeURIComponent(p.nome)}/unfreeze`, { method: 'POST' }).then(r=>r.json());
+              if (!r || !r.ok) alert('Falha ao descongelar: ' + ((r && r.error) || ''));
+              await new Promise(r=>setTimeout(r, 600));
+              reloadPerfis();
+            } catch (e) {
+              alert('Erro ao descongelar: ' + (e && e.message || e));
+            } finally {
+              btnUnfreeze.disabled = false;
+              btnUnfreeze.textContent = 'Descongelar';
+            }
+          };
+          right.appendChild(btnUnfreeze);
+        }
+
         card.append(left, center, right);
         lista.appendChild(card);
 
@@ -894,7 +944,19 @@
     function showIssuesModal(nome){
       const overlay = document.createElement('div'); overlay.className='modal-ov';
       const box = document.createElement('div'); box.className='modal-box'; box.style.maxWidth='720px';
-      box.innerHTML =      `<h2>Logs — ${nome}</h2>      <div id="issuesBody" style="max-height:420px; overflow:auto; border:1px solid #1f2a3a; border-radius:8px; padding:8px; background:#0b1322;">        <div class="pill">Carregando...</div>      </div>      <div class="modal-actions">        <button class="btn" id="closeIssues">Fechar</button>        <button class="btn danger" id="clearIssues">Limpar logs</button>      </div>   `;
+      box.innerHTML = `
+        <h2>Logs — ${nome}</h2>
+        <div style="margin:6px 0">
+          <label><input type="checkbox" id="showAllIssues"/> Mostrar todos os registros</label>
+        </div>
+        <div id="issuesBody" style="max-height:420px; overflow:auto; border:1px solid #1f2a3a; border-radius:8px; padding:8px; background:#0b1322;">
+          <div class="pill">Carregando...</div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="closeIssues">Fechar</button>
+          <button class="btn danger" id="clearIssues">Limpar logs</button>
+        </div>
+      `;
       overlay.append(box);
       document.body.append(overlay);
 
@@ -907,16 +969,16 @@
             return;
           }
 
-          // Filtra SOMENTE erros
+          const showAll = !!box.querySelector('#showAllIssues')?.checked;
           const all = Array.isArray(res.issues) ? res.issues : [];
-          const errs = all.filter(isErrorIssue);
+          const list = showAll ? all : all.filter(isErrorIssue);
 
-          if (!errs.length) {
-            body.innerHTML = '<div class="pill">Sem registros de erros.</div>';
+          if (!list.length) {
+            body.innerHTML = showAll ? '<div class="pill">Sem registros.</div>' : '<div class="pill">Sem registros de erros.</div>';
             return;
           }
 
-          const rows = errs.map(it => {
+          const rows = list.map(it => {
             const d = new Date(it.ts || Date.now());
             const hh = d.toLocaleString();
             const type = (it.type || '').toString();
@@ -949,6 +1011,8 @@
           btn.innerHTML = btn.dataset.idleHtml;
         }
       };
+
+      box.querySelector('#showAllIssues').onchange = load;
 
       load();
     }
@@ -1273,6 +1337,26 @@
           finally { btnRel.disabled=false; btnRel.style.opacity=''; btnRel.textContent=btnRel.dataset.idleTxt; }
         };
       }
+    })();
+
+    // Toolbar: botão "Descongelar todos"
+    (function bindUnfreezeAllBtn(){
+      const btn = document.getElementById('unfreezeAllBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        if (!confirm('Descongelar todos os perfis agora?')) return;
+        btn.disabled = true; btn.textContent = 'Descongelando...';
+        try {
+          const r = await fetch('/api/perfis/unfreeze-all', { method: 'POST' }).then(r=>r.json());
+          if (!r || !r.ok) alert('Falha ao descongelar todos: ' + ((r && r.error) || ''));
+          await new Promise(r=>setTimeout(r, 600));
+          reloadPerfis();
+        } catch (e) {
+          alert('Erro ao descongelar todos: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.textContent = 'Descongelar (todos)';
+        }
+      };
     })();
 
     reloadPerfis();
