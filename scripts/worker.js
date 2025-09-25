@@ -654,14 +654,28 @@ function getWorkingProfileNames() {
 }
 
 // ========== INICIO ALTERAÇÃO PRUNING DE ABAS ==============
-async function closeExtraPages(browser, mainPage) {
+async function closeExtraPages(browser, mainPage, nome) {
   try {
+    // GUARD EXTREMO: nunca prune se emExecucao==true para esse perfil
+    if (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true) {
+      return; // NÃO FECHA ABAS DURANTE O ROBE DESTE PERFIL
+    }
+
     const pages = await browser.pages();
     let closed = 0;
     for (const page of pages) {
       if (mainPage && page === mainPage) continue;
       if (!mainPage && pages[0] && page === pages[0]) continue;
-      try { await page.close(); closed++; } catch {}
+      // NOVO PATCH: n-u-n-c-a feche aba de Create Item (do Robe) deste perfil
+      if (nome) {
+        try {
+          const url = typeof page.url === 'function' ? page.url() : '';
+          if (/facebook\.com\/marketplace\/create\/item/i.test(url)) {
+            continue;
+          }
+        } catch {}
+      }
+      try { await page.close({ runBeforeUnload: false }); closed++; } catch {}
     }
     if (closed > 0) {
       console.log('[PRUNER] Fechou', closed, 'abas extras.');
@@ -682,7 +696,7 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
     try {
-      await closeExtraPages(browser, mainPage);
+      await closeExtraPages(browser, mainPage, nome);
     } catch (e) {
       if (process.env.PRUNE_DEBUG === '1') {
         console.warn('[PRUNER] Erro prune:', e && e.message || e);
@@ -1103,7 +1117,7 @@ async function robeTickGlobal() {
         }
 
         // PRUNE DE ABAS: sempre antes de começar (Virtus já parado)
-        try { await closeExtraPages(ctrl.browser, mainPage); } catch {}
+        try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
         // Pause curto pós-postagem
         const robePauseMs = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
@@ -1157,7 +1171,7 @@ async function robeTickGlobal() {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
       } finally {
         // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
-        try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
+        try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
 
         // Religa o Virtus se estava rodando antes
         if (virtusWasRunning) {
@@ -1184,11 +1198,12 @@ async function robeTickGlobal() {
     robeUpdateMeta(nome, { emFila: true });
   }
 
-  // Remove metainfos fantasmas
-  for (const nome of Object.keys(robeMeta)) {
-    const m = robeMeta[nome] || {};
-    delete m.emFila;
-    delete m.emExecucao;
+  // Limpe apenas flags efêmeros quando o perfil não está na fila nem executando
+  for (const n of Object.keys(robeMeta)) {
+    const m = robeMeta[n];
+    if (!m) continue;
+    if (!robeQueue.inQueue(n)) delete m.emFila;
+    if (!robeQueue.isActive(n)) delete m.emExecucao;
   }
 }
 
@@ -1583,7 +1598,7 @@ const handlers = {
           }
 
           // PRUNE ANTI-ABAS (Virtus parado)
-          try { await closeExtraPages(ctrl.browser, mainPage); } catch {}
+          try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
           // ==== ALTERAÇÃO HOTFIX: ANTIMANIFEST-FLOOD, COOL/PRUNED ERRORS ====
           let res;
@@ -1634,7 +1649,7 @@ const handlers = {
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
         } finally {
           // PRUNE DE ABAS antes de religar o Virtus
-          try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
+          try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
 
           if (virtusWasRunning) {
             try {
@@ -2397,7 +2412,7 @@ async function nurseTick() {
       continue;
     }
     if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
-      try { await closeExtraPages(ctrl.browser, p0).catch(()=>{}); } catch {}
+      try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
     }
     if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
       try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
