@@ -461,8 +461,20 @@
     }
 
     // Helper cooldown pill
-    function buildCooldownPill(sec) {
+    function buildCooldownPill(sec, opts) {
       if (!sec || sec <= 0) return null;
+      const o = opts || {};
+      const isFrozen = !!o.isFrozen;
+      // Se cooldown >= 23h, badge especial + tooltip (somente se NÃO estiver frozen)
+      if (!isFrozen && sec >= 23 * 3600) {
+        const span = buildPill(
+          `<span style="font-weight:bold;color:#f4d12d">⚠️</span> Robe: Pausado (limite de postagem) <span style="opacity:.65">${tempoRestante(sec)}</span>`,
+          'cooldown'
+        );
+        span.title = 'Robe pausado 24h devido ao limite de postagem do Facebook.\nDurante esse período, o Virtus/chat continua funcionando normalmente.';
+        return span;
+      }
+      // Cooldowns menores: pill padrão
       return buildPill(`Cooldown: ${tempoRestante(sec)}`, 'cooldown');
     }
 
@@ -654,7 +666,7 @@
 
         // ------- COOLDOWN (ADICIONAL) -------
         if (robeCooldownSec > 0) {
-          titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil
+          titleRow.append(buildCooldownPill(robeCooldownSec, { isFrozen, estado: robeStatus && robeStatus.estado })); // Cooldown por perfil (customizado)
         } else {
           if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
           else if (inQueue) titleRow.append(buildPill('Robe: Aguardando fila', 'info'));
@@ -947,7 +959,7 @@
     // Logs por conta (arquivo)
     function showIssuesModal(nome){
       const overlay = document.createElement('div'); overlay.className='modal-ov';
-      const box = document.createElement('div'); box.className='modal-box'; box.style.maxWidth='720px';
+      const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth='720px';
       box.innerHTML = `
         <h2>Logs — ${nome}</h2>
         <div style="margin:6px 0; display:none">
