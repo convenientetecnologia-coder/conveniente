@@ -6,6 +6,7 @@ const { patchPage/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
 const utils = require('./utils.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
+const manifestStore = require('./manifestStore.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -521,26 +522,7 @@ async function publicarEFechar5s(page) {
 
 // --------------------------------------------------
 // GUARD: Armezenamento RAM/Status/Antiflood Backoff/FROZEN/Logging guard rails
-// RobeMeta militar (volátil, RAM)
-const robeMeta = {};  // nome -> { frozenUntil: Date, estado, ultimaTentativa, ultimaFilaMs, ... }
-
-// -------------- LEIA frozenUntil DO MANIFEST SE for necessário popular robeMeta AQUI ------------------------
-try {
-  const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-  for (const p of perfisArr) {
-    if (p && p.nome && p.userDataDir) {
-      const manifestPath = path.join(p.userDataDir, 'manifest.json');
-      if (fs.existsSync(manifestPath)) {
-        const man = readJsonSafe(manifestPath, {});
-        if (man.frozenUntil && man.frozenUntil > Date.now()) {
-          robeMeta[p.nome] = robeMeta[p.nome] || {};
-          robeMeta[p.nome].frozenUntil = man.frozenUntil;
-        }
-      }
-    }
-  }
-} catch {}
-// -----------------------------------------------------------------------------------------------------------
+// (Removido: robeMeta e população a partir do manifest; controle de estado local não é mais utilizado)
 
 // --------------------------------------------------
 
@@ -559,34 +541,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
   const stepLog = [];
-  // RAM: registra uso para health militar
-  robeMeta[nome] = robeMeta[nome] || {};
-  robeMeta[nome].emExecucao = true;
-  try {
-    robeMeta[nome].ramMB = process.memoryUsage ? Math.round(process.memoryUsage().rss / 1048576) : null;
-  } catch {}
-
-  robeMeta[nome].ultimaTentativa = Date.now();
 
   console.log(`[ROBE][startRobe] INÍCIO para ${nome}, pauseMS=${robePauseMs}, horário=${new Date().toLocaleString()}`);
 
   let perfilPath, manifest;
 
-  // GUARD: bloqueia fila infinita sem manifest, evita OOM
-  // Verifica fouzen de antiflood
-  if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
-    // Bloqueado militar antiflood, nem tenta abrir perfil!
-    robeMeta[nome].estado = 'frozen_no_manifest';
-    return { ok: false, error: 'frozen_no_manifest_antiflood' };
-  }
-
   try {
-    // ALTERAÇÃO: Lê perfis.json, encontra o userDataDir do perfil, utiliza o path do manifest correto
-    const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-    const perfil = perfisArr.find(p => p && p.nome === nome);
-    if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
-    perfilPath = path.join(perfil.userDataDir, 'manifest.json');
-    manifest = readJsonSafe(perfilPath, null);
+    // Leitura do manifest via manifestStore (com lock)
+    manifest = await manifestStore.read(nome);
 
     // NOVO: Não congelar localmente — apenas detectar, logar e retornar para o worker decidir
     if (!manifest) {
@@ -601,7 +563,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Cooldown: espera curto se faltar pouco; aborta sem mexer no cooldown se faltar muito
     const now = Date.now();
     const leftMs = (manifest.robeCooldownUntil || 0) - now;
-    robeMeta[nome].cooldownSec = leftMs > 0 ? Math.ceil(leftMs / 1000) : 0;
     if (leftMs > 0) {
       if (leftMs <= 5000) {
         await sleep(leftMs + 300);
@@ -722,20 +683,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       stepLog.push(`[${nome}] AVISO: exceção ao registrar/excluir foto "${fotoNome}": ${e && e.message || e}`);
     }
 
-    // IMPORTANTE: Grava ultimaPostagemRobe ou outros campos do manifest aqui, SEMPRE usando perfilPath
-    if (manifest) {
-      manifest.ultimaPostagemRobe = Date.now();
-      writeJsonAtomic(perfilPath, manifest);
-      robeMeta[nome].lastPosted = manifest.ultimaPostagemRobe;
-    }
-
-    // Limpa estado militar de erro/congelamento caso sucesso e manifest voltou
-    if (robeMeta[nome]?.estado === 'frozen_no_manifest') {
-      robeMeta[nome].estado = null;
-      // Não alterar frozenUntil aqui; responsabilidade do worker.js
-    }
-
-    robeMeta[nome].estado = 'ok';
+    // IMPORTANTE: Grava ultimaPostagemRobe via manifestStore
+    await manifestStore.update(nome, m => {
+      m.ultimaPostagemRobe = Date.now();
+      return m;
+    });
 
     // LOG: evento de sucesso (uma mensagem por account/turno já é suficiente)
     try { await logIssue(nome, 'robe_success', 'Publicação concluída com sucesso.'); } catch {}
@@ -748,74 +700,38 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     const isNoPhoto = /sem foto dispon[ií]vel/i.test(errMsg);
     const issueType = isNoPhoto ? 'robe_no_photo' : 'robe_error';
 
-    // Qualquer erro (exceto “frozen por manifest”) em publicação/postagem:
-    let frozenManifestCondition = false;
-    if (robeMeta[nome]?.estado === 'frozen_no_manifest' ||
-        robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
-      frozenManifestCondition = true;
-    }
-
     // Registra issue (silencioso)
-    if (!frozenManifestCondition) {
-      try { await logIssue(nome, issueType, errMsg); } catch {}
-    }
+    try { await logIssue(nome, issueType, errMsg); } catch {}
 
-    // Log militar: backoff/cooldown mesmo para erro técnico (exceto se frozen)
-    // Se erro técnico, define cooldownRand (random 60–300s)
-    if (!frozenManifestCondition) {
-      try {
-        // Cooldown militar para erro técnico
-        // GUARD: tecnical error — aplica backoff cooldown
-        const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-        const perfil = perfisArr.find(p => p && p.nome === nome);
-        if (perfil && perfil.userDataDir) {
-          const perfilPath = path.join(perfil.userDataDir, 'manifest.json');
-          const manifest = readJsonSafe(perfilPath, null);
-          if (manifest) {
-            const cooldownRand = jitter(60000, 300000);
-            manifest.robeCooldownUntil = Date.now() + cooldownRand;
-            writeJsonAtomic(perfilPath, manifest);
-            robeMeta[nome].cooldownSec = Math.ceil(cooldownRand / 1000);
-            robeMeta[nome].estado = 'erro_grave_backoff';
-            // Evento de erro/backoff (robe_error, cooldown)
-            try { await logIssue(nome, 'robe_error', `Erro técnico/backoff, cooldown ${Math.ceil(cooldownRand/1000)}s: ${errMsg}`); } catch {}
-          }
-        }
-      } catch {}
-    }
+    // Cooldown militar para erro técnico (60–300s)
+    try {
+      const cooldownRand = jitter(60000, 300000);
+      await manifestStore.update(nome, m => {
+        m.robeCooldownUntil = Date.now() + cooldownRand;
+        return m;
+      });
+      try { await logIssue(nome, 'robe_error', `Erro técnico/backoff, cooldown ${Math.ceil(cooldownRand/1000)}s: ${errMsg}`); } catch {}
+    } catch {}
 
     return { ok: false, error: errMsg, log: stepLog };
 
   } finally {
-    // Memoriza média RAM/Saúde militar de worker
-    try { robeMeta[nome].ramMB = process.memoryUsage ? Math.round(process.memoryUsage().rss / 1048576) : null; } catch {}
-    robeMeta[nome].ultimaTentativa = Date.now();
-
     // Cooldown nível militar:
     // - published=true: 15–30min.
     // - abortedByCooldown=true: não mexe.
     // - erro técnico: backoff curto 60–300s (já tratado no catch acima).
 
     try {
-      // ALTERAÇÃO: garantir leitura e escrita sempre via userDataDir
-      const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-      const perfil = perfisArr.find(p => p && p.nome === nome);
-      if (perfil && perfil.userDataDir) {
-        const perfilPath = path.join(perfil.userDataDir, 'manifest.json');
-        const manifest = readJsonSafe(perfilPath, null);
-        let pause = 0;
-        if (published) {
-          const rndPause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
-          pause = (robePauseMs > 0 ? robePauseMs : rndPause);
-          manifest.robeCooldownUntil = Date.now() + pause;
-          writeJsonAtomic(perfilPath, manifest);
-          robeMeta[nome].cooldownSec = Math.ceil(pause / 1000);
-          robeMeta[nome].estado = 'ok';
-          robeMeta[nome].lastPosted = Date.now();
-          // Evento de sucesso já logado acima
-        }
-        // Se abortedByCooldown === true, não altera nada
+      if (published) {
+        const rndPause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
+        const pause = (robePauseMs > 0 ? robePauseMs : rndPause);
+        await manifestStore.update(nome, m => {
+          m.robeCooldownUntil = Date.now() + pause;
+          return m;
+        });
+        // Evento de sucesso já logado acima
       }
+      // Se abortedByCooldown === true, não altera nada
     } catch (err) {
       stepLog.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
     }
@@ -829,13 +745,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     if (page) {
       try { await safeClosePage(page); console.log(`[ROBE] ${nome}: aba fechada no finally`); } catch {}
     }
-    robeMeta[nome].emExecucao = false;
     console.log(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'} | logs:`, stepLog);
-  }
-
-  // Não persistir frozenUntil aqui; responsabilidade do worker.js
-  if (robeMeta[nome] && typeof robeMeta[nome].frozenUntil !== 'undefined') {
-    // noop: congelamento/descongelamento centralizado no worker.js
   }
 
   return { ok: published, log: stepLog };
@@ -844,10 +754,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 // --------------------------------------------------
 // Filtragem de fila/fila global militar
 function robeQueueFilter(nome) {
-  // GUARD: bloqueia fila infinita sem manifest, evita OOM
-  if (robeMeta[nome]?.frozenUntil && robeMeta[nome].frozenUntil > Date.now()) {
-    return false; // NÃO enfileira se está frozen antiflood
-  }
+  // Sem estado local; worker decide sobre frozen/controle de fila
   return true;
 }
 

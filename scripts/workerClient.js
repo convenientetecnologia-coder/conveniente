@@ -3,23 +3,25 @@ const { fork } = require('child_process');
 const path = require('path');
 
 // === MILITARY WATCHDOG (restart worker if nonresponsive) ===
-let _wd = { timer: null, failCount: 0 };
+let _wd = { timer: null, failCount: 0, lastOkAt: 0 };
 function startWatchdog() {
   if (_wd.timer) return;
   _wd.timer = setInterval(async () => {
     try {
       if (!workerChild) return; // sem child no momento (respawn já cuida)
-      const r = await sendWorkerCommand('get-status', {}, { timeoutMs: 2000 }).catch(() => null);
+      const r = await sendWorkerCommand('get-status', {}, { timeoutMs: 7000 }).catch(() => null);
       if (r && r.perfis) {
         _wd.failCount = 0;
+        _wd.lastOkAt = Date.now();
         return;
       }
     } catch {}
     _wd.failCount++;
-    if (_wd.failCount >= 3) {
+    if (_wd.failCount >= 8 && (Date.now() - _wd.lastOkAt) > 30000) {
       try { console.warn('[WATCHDOG] worker nonresponsive — restarting'); } catch {}
       try { workerChild && workerChild.kill && workerChild.kill('SIGKILL'); } catch {}
       _wd.failCount = 0;
+      _wd.lastOkAt = 0;
     }
   }, 5000);
 }

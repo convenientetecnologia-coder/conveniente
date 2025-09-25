@@ -13,10 +13,91 @@ const fileStore = require('./scripts/fileStore.js');
 const app = express();
 const PORT = parseInt(process.env.PORT || '8088', 10);
 
-// Middlewares padrão
-app.use(cors()); // Se quiser restringir depois, ajuste!
+// ===================== CORS restrito =====================
+/**
+ * CORS Middleware restritivo:
+ * - Permite apenas origens localhost:<PORT> e 127.0.0.1:<PORT>
+ * - Permite origin indefinido (Electron/localfile).
+ * - Bloqueia o resto com erro CORS explícito.
+ */
+const allowedOrigins = [
+  `http://localhost:${PORT}`,
+  `http://127.0.0.1:${PORT}`
+];
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (
+    !origin || // Electron/localfile (origin undefined)
+    allowedOrigins.includes(origin)
+  ) {
+    // Libera CORS somente para as origens válidas e undefined
+    res.header('Access-Control-Allow-Origin', origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      // Pré-flight para CORS
+      return res.sendStatus(204);
+    }
+    return next();
+  } else {
+    // Bloqueia tudo que não é de painel local
+    res.status(403).json({
+      error: 'CORS Restrito: apenas painel local pode acessar este serviço.'
+    });
+  }
+});
+// ===================== Fim CORS restrito =====================
+
+// ===================== Body Parsers =====================
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
+// ===================== Fim Body Parsers =====================
+
+// ===================== Middleware de autenticação =====================
+/*
+ * Middleware de autenticação obrigatória para rotas /api/
+ * - ADMIN_TOKEN DEVE estar presente como variável de ambiente.
+ * - Nunca deixe vazio em produção!
+ * - Exceções: /api/health e arquivos estáticos de /public/
+ */
+// ---> Recomenda-se export ADMIN_TOKEN no ambiente ou .env (NÃO use vazio em produção).
+
+const isDevEnv = (process.env.NODE_ENV === 'development');
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+
+// Panic/exit se token não estiver presente em produção
+if (!ADMIN_TOKEN && !isDevEnv) {
+  console.error('[FATAL] ADMIN_TOKEN não definido. Defina como export/env/.env e reinicie.');
+  process.exit(1);
+}
+
+function apiAuthMiddleware(req, res, next) {
+  // Libera health check sem auth
+  if (
+    req.path === '/api/health' || 
+    req.path === '/health' || 
+    // Libera acesso a arquivos estáticos em /public/
+    req.path.startsWith('/public/') ||
+    req.path.startsWith('/static/') ||
+    req.path.startsWith('/favicon.ico')
+  ) {
+    return next();
+  }
+  // Exige bearer token nas rotas /api/*
+  if (req.path.startsWith('/api/')) {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.split(' ')[1];
+    if (authHeader.startsWith('Bearer ') && token === ADMIN_TOKEN) {
+      return next();
+    }
+    // Token inválido, responde 401
+    return res.status(401).json({ error: 'Unauthorized: token inválido ou ausente' });
+  }
+  // Fora de /api, libera normalmente
+  return next();
+}
+app.use(apiAuthMiddleware);
+// ===================== Fim do middleware de autenticação =====================
 
 // Militar: Apenas arquivos públicos (UI) expostos. Backend nunca via HTTP!
 // SERVIÇO ESTÁTICO EXCLUSIVO DA PASTA /public/

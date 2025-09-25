@@ -4,6 +4,14 @@ const path = require('path');
 const os = require('os');
 const issues = require('./issues.js');
 
+// --- HELPERS DE VALIDAÇÃO (conforme instrução) ---
+const isValidSlug = s => typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
+function assertPerfilExists(fileStore, nome) {
+  if (!isValidSlug(nome)) throw new Error('nome invalido');
+  const perfis = fileStore.loadPerfisJson();
+  if (!perfis.find(p => p && p.nome === nome)) throw new Error('perfil inexistente');
+}
+
 function resolveChromeUserDataRoot() {
   if (process.platform === 'win32') {
     const la = process.env.LOCALAPPDATA;
@@ -129,6 +137,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_activate_request', `by=${op}`);
 
     // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
@@ -152,6 +161,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_deactivate_request', `by=${op}`);
 
     try { fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch {}
@@ -165,6 +175,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_configure_request', `by=${op}`);
     // Timeout aumentado para 180000ms (3min) para comando configure
     const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
@@ -176,6 +187,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_start_work_request', `by=${op}`);
 
     // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
@@ -200,6 +212,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_invoke_human_request', `by=${op}`);
     const resp = await workerClient.sendWorkerCommand('invoke_human', { nome });
     return res.json(resp);
@@ -210,6 +223,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_robe_play_request', `by=${op}`);
     const resp = await workerClient.sendWorkerCommand('robe-play', { nome });
     return res.json(resp);
@@ -220,6 +234,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_robe24h_request', `by=${op}`);
     fileStore.patchDesired(nome, { robePause24h: true });
     return res.json({ ok: true });
@@ -231,6 +246,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_human_resume_request', `by=${op}`);
     // Marca o "fine" do modo humano e ativa virtus novamente
     try {
@@ -244,6 +260,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_unfreeze', `by=${op}`);
     // Passa comando ao worker e retorna resultado
     const resp = await workerClient.sendWorkerCommand('unfreeze', { nome }, { timeoutMs: 10000 });
@@ -265,6 +282,7 @@ module.exports = (app, workerClient, fileStore) => {
       const op = String(req.headers['x-operator'] || 'unknown');
       const { novoLabel } = req.body || {};
       if (!nome || !novoLabel) return res.json({ ok: false, error: 'Parâmetros inválidos' });
+      try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
       await issues.append(nome, 'admin_rename_label', `by=${op}`);
       fileStore.updatePerfilLabel(nome, String(novoLabel));
       res.json({ ok: true, renamed: false, labelUpdated: true, nome });
@@ -280,6 +298,7 @@ module.exports = (app, workerClient, fileStore) => {
       const op = String(req.headers['x-operator'] || 'unknown');
       const { novoLabel } = req.body || {};
       if (!nome || !novoLabel) return res.json({ ok: false, error: 'Parâmetros inválidos' });
+      try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
       if (fileStore.isPerfilAtivo(nome)) return res.json({ ok: false, error: 'Feche o navegador desta conta antes de renomear.' });
       await issues.append(nome, 'admin_rename_slug', `by=${op}`);
 
@@ -301,6 +320,7 @@ module.exports = (app, workerClient, fileStore) => {
       const nome = req.params.nome;
       const op = String(req.headers['x-operator'] || 'unknown');
       if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+      try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
       if (fileStore.isPerfilAtivo(nome)) return res.json({ ok: false, error: 'Feche o navegador antes de excluir esta conta.' });
       await issues.append(nome, 'admin_delete_perfil', `by=${op}`);
 

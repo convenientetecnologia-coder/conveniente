@@ -14,6 +14,9 @@
  * robeQueue.activeCount() — quantidade de ativação simultânea (sempre 0 ou 1).
  * robeQueue.queueList() — retorna array dos nomes na fila de espera (ordem).
  * robeQueue.clear() — limpa toda a fila, inclusive ativa.
+ *
+ * ATENÇÃO: Em cenário multi-worker/sharding, instanciar a fila unicamente no master/shard supervisor,
+ * ou converter queue para fila distribuída/coordenada.
  */
 
 class RobeQueue {

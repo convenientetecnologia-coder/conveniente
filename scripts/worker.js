@@ -11,6 +11,7 @@ const utils        = require('./utils.js');
 const fotos        = require('./fotos.js'); // gestor central de fotos
 
 const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
+const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 
 // NOVO: Import RAM/CPU cross-platform
 const pidusage = require('pidusage');
@@ -86,13 +87,6 @@ function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOL
 // ===== LOCKS ATÔMICOS (status e manifest) =====
 let _statusLock = Promise.resolve();
 
-const manifestLocks = new Map();
-function withManifestLock(nome, fn) {
-  const prev = manifestLocks.get(nome) || Promise.resolve();
-  const job = prev.then(() => Promise.resolve(fn()).catch((e)=>{ try { console.warn('[MANIFEST][lock] err', e && e.message || e); } catch {} })).catch(()=>{});
-  manifestLocks.set(nome, job);
-  return job;
-}
 // ===== FIM LOCKS ATÔMICOS =====
 
 // HOOKS de Modo LEVE/FULL (próximo aos patches militares - AUTO_CFG)
@@ -282,7 +276,7 @@ async function killStrayChromes() {
       const nome = nomeByDir[normalizePath(userDir)];
       if (!nome) continue;
       if (controllers.has(nome)) continue; // não é stray
-      group[nome] = group[nome] = [];
+      if (!group[nome]) group[nome] = [];
       group[nome].push(Number(proc.pid));
     }
     for (const [nome, pidList] of Object.entries(group)) {
@@ -352,87 +346,45 @@ function manifestPathOf(nome) {
   if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
   return path.join(perfil.userDataDir, 'manifest.json');
 }
-function readManifest(nome) {
-  try {
-    const mPath = manifestPathOf(nome);
-    if (!fs.existsSync(mPath)) return null;
-    const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-    return man || null;
-  } catch { return null; }
-}
-async function readManifestLocked(nome) {
-  let man = null;
-  await withManifestLock(nome, async () => {
-    man = readManifest(nome);
-  });
-  return man;
-}
-function writeManifest(nome, man) {
-  try {
-    const mPath = manifestPathOf(nome);
-    const dir = path.dirname(mPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const tmp = mPath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(man, null, 2), 'utf8');
-    try { fs.unlinkSync(mPath); } catch {}
-    try { fs.renameSync(tmp, mPath); }
-    catch {
-      fs.copyFileSync(tmp, mPath);
-      try { fs.unlinkSync(tmp); } catch {}
-    }
-    return true;
-  } catch {
-    try { issues.append('system', 'persist_failed', `${nome}|write_manifest`).catch(()=>{}); } catch {}
-    return false;
-  }
-}
-async function writeManifestLocked(nome, man) {
-  let ok = false;
-  await withManifestLock(nome, async () => {
-    ok = writeManifest(nome, man);
-  });
-  return ok;
-}
 
 // Converte robeCooldownUntil -> robeCooldownRemainingMs quando a conta NÃO está apta a postar (congela)
-function freezeCooldownIfNotWorking(nome) {
+async function freezeCooldownIfNotWorking(nome) {
   try {
     const ctrl = controllers.get(nome);
     const working = !!(ctrl && ctrl.browser && ctrl.trabalhando && !ctrl.configurando);
     const humanControl = !!(ctrl && ctrl.humanControl);
     if (working && !humanControl) return;
-    const man = readManifest(nome);
-    if (!man) return;
-    const now = Date.now();
-    if (man.robeCooldownUntil && man.robeCooldownUntil > now) {
-      const remain = man.robeCooldownUntil - now;
-      man.robeCooldownRemainingMs = remain;
-      man.robeCooldownUntil = 0;
-      const ok = writeManifest(nome, man);
-      if (!ok) { try { issues.append('system','persist_failed', `${nome}|freezeCooldownIfNotWorking`).catch(()=>{}); } catch {} }
-    }
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      const now = Date.now();
+      if (m.robeCooldownUntil && m.robeCooldownUntil > now) {
+        m.robeCooldownRemainingMs = m.robeCooldownUntil - now;
+        m.robeCooldownUntil = 0;
+      }
+      return m;
+    });
   } catch {}
 }
 
 // Converte robeCooldownRemainingMs -> robeCooldownUntil quando a conta está apta a postar (descongela)
-function unfreezeCooldownIfWorking(nome) {
+async function unfreezeCooldownIfWorking(nome) {
   try {
     const ctrl = controllers.get(nome);
     const working = !!(ctrl && ctrl.browser && ctrl.trabalhando && !ctrl.configurando);
     const humanControl = !!(ctrl && ctrl.humanControl);
     if (!working || humanControl) return;
-    const man = readManifest(nome);
-    if (!man) return;
-    const now = Date.now();
-    if ((man.robeCooldownUntil || 0) <= now) {
-      const remaining = Number(man.robeCooldownRemainingMs || 0);
-      if (remaining > 0) {
-        man.robeCooldownUntil = now + remaining;
-        man.robeCooldownRemainingMs = 0;
-        const ok = writeManifest(nome, man);
-        if (!ok) { try { issues.append('system','persist_failed', `${nome}|unfreezeCooldownIfWorking`).catch(()=>{}); } catch {} }
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      const now = Date.now();
+      if ((m.robeCooldownUntil || 0) <= now) {
+        const remaining = Number(m.robeCooldownRemainingMs || 0);
+        if (remaining > 0) {
+          m.robeCooldownUntil = now + remaining;
+          m.robeCooldownRemainingMs = 0;
+        }
       }
-    }
+      return m;
+    });
   } catch {}
 }
 
@@ -504,8 +456,11 @@ function isFrozenNow(nome) {
   const inMem = (robeMeta[nome] && robeMeta[nome].frozenUntil) || 0;
   let inDisk = 0;
   try {
-    const man = readManifest(nome);
-    if (man && typeof man.frozenUntil === 'number') inDisk = man.frozenUntil;
+    const mPath = manifestPathOf(nome);
+    if (fs.existsSync(mPath)) {
+      const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+      if (man && typeof man.frozenUntil === 'number') inDisk = man.frozenUntil;
+    }
   } catch {}
   const until = Math.max(inMem, inDisk || 0);
   return until > now ? until : 0;
@@ -1160,11 +1115,13 @@ async function robeTickGlobal() {
         } catch (e) {
           // Penalidade por erro técnico
           const penalSec = 60+Math.floor(Math.random()*241); // 60-300s
-          const man = readManifest(nome) || {};
-          const nextCd = Date.now() + penalSec*1000;
-          man.robeCooldownUntil = nextCd;
-          man.robeCooldownRemainingMs = 0;
-          writeManifest(nome, man);
+          await manifestStore.update(nome, (m)=>{
+            m = m || {};
+            const now = Date.now();
+            m.robeCooldownUntil = now + penalSec*1000;
+            m.robeCooldownRemainingMs = 0;
+            return m;
+          });
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].cooldownSec = penalSec;
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
@@ -1176,12 +1133,11 @@ async function robeTickGlobal() {
 
         if (res && res.ok) {
           try {
-            const perfilPath = manifestPathOf(nome);
-            if (fs.existsSync(perfilPath)) {
-              const p = JSON.parse(fs.readFileSync(perfilPath, 'utf8'));
-              p.ultimaPostagemRobe = Date.now();
-              fs.writeFileSync(perfilPath, JSON.stringify(p, null, 2));
-            }
+            await manifestStore.update(nome, (m) => {
+              m = m || {};
+              m.ultimaPostagemRobe = Date.now();
+              return m;
+            });
           } catch {}
           robeUpdateMeta(nome, {
             estado: 'ok',
@@ -1229,9 +1185,10 @@ async function robeTickGlobal() {
   }
 
   // Remove metainfos fantasmas
-  for (const nome in robeMeta) {
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser) delete robeMeta[nome];
+  for (const nome of Object.keys(robeMeta)) {
+    const m = robeMeta[nome] || {};
+    delete m.emFila;
+    delete m.emExecucao;
   }
 }
 
@@ -1569,13 +1526,12 @@ const handlers = {
 
     // Zera cooldown no manifest
     try {
-      const manifestPath = manifestPathOf(nome);
-      if (fs.existsSync(manifestPath)) {
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        manifest.robeCooldownUntil = Date.now();
-        manifest.robeCooldownRemainingMs = 0;
-        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-      }
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.robeCooldownUntil = Date.now();
+        m.robeCooldownRemainingMs = 0;
+        return m;
+      });
     } catch {}
 
     // Se não está na fila nem ativo, enfileira o callback REAL igual ao robeTickGlobal:
@@ -1636,11 +1592,13 @@ const handlers = {
           } catch (e) {
             // Penalidade por erro técnico
             const penalSec = 60+Math.floor(Math.random() * 241); // 60-300s
-            const man = readManifest(nome) || {};
-            const nextCd = Date.now() + penalSec*1000;
-            man.robeCooldownUntil = nextCd;
-            man.robeCooldownRemainingMs = 0;
-            writeManifest(nome, man);
+            await manifestStore.update(nome, (m)=>{
+              m = m || {};
+              const now = Date.now();
+              m.robeCooldownUntil = now + penalSec*1000;
+              m.robeCooldownRemainingMs = 0;
+              return m;
+            });
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].cooldownSec = penalSec;
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
@@ -1652,12 +1610,11 @@ const handlers = {
 
           if (res && res.ok) {
             try {
-              const perfilPath = manifestPathOf(nome);
-              if (fs.existsSync(perfilPath)) {
-                const p = JSON.parse(fs.readFileSync(perfilPath, 'utf8'));
-                p.ultimaPostagemRobe = Date.now();
-                fs.writeFileSync(perfilPath, JSON.stringify(p, null, 2));
-              }
+              await manifestStore.update(nome, (m) => {
+                m = m || {};
+                m.ultimaPostagemRobe = Date.now();
+                return m;
+              });
             } catch {}
             robeUpdateMeta(nome, {
               estado: 'ok',
@@ -1676,7 +1633,7 @@ const handlers = {
         } catch (e) {
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
         } finally {
-          // PRUNE DE ABAS antes de religar Virtus
+          // PRUNE DE ABAS antes de religar o Virtus
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage); } catch {}
 
           if (virtusWasRunning) {
@@ -2082,18 +2039,19 @@ for (const nome of nomes) {
       const now = Date.now();
       const ctrl3 = controllers.get(nome);
       const working = !!(ctrl3 && ctrl3.browser && ctrl3.trabalhando && !ctrl3.configurando);
-      const man = readManifest(nome) || {};
       const plus24 = 24 * 60 * 60 * 1000;
       const humanControl = !!(ctrl3 && ctrl3.humanControl);
-      if (working && !humanControl) {
-        man.robeCooldownUntil = now + plus24;
-        man.robeCooldownRemainingMs = 0;
-      } else {
-        man.robeCooldownUntil = 0;
-        man.robeCooldownRemainingMs = plus24;
-      }
-      const ok = writeManifest(nome, man);
-      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_manifest_write`); } catch {} }
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        if (working && !humanControl) {
+          man.robeCooldownUntil = now + plus24;
+          man.robeCooldownRemainingMs = 0;
+        } else {
+          man.robeCooldownUntil = 0;
+          man.robeCooldownRemainingMs = plus24;
+        }
+        return man;
+      });
 
       const d2 = readJsonFile(desiredPath, { perfis: {} });
       if (d2 && d2.perfis && d2.perfis[nome]) {
@@ -2242,9 +2200,10 @@ function ms(h) { return h * 60 * 60 * 1000; }
 // Congela perfil por um tempo (msDuration), persiste congelamento, faz shutdown.
 async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
   try {
-    await withManifestLock(nome, async () => {
-      const now = Date.now();
-      const man = readManifest(nome) || {};
+    const now = Date.now();
+    let applied = { until: now + msDuration, mode: 'set' };
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
       const existingMem = (robeMeta[nome] && robeMeta[nome].frozenUntil) || 0;
       const existingDisk = (man && man.frozenUntil) || 0;
       const existing = Math.max(existingMem, existingDisk, 0);
@@ -2254,27 +2213,30 @@ async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
         until = existing + msDuration; // soma janela
         mode = 'extended';
       }
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].frozenUntil = until;
-      robeMeta[nome].frozenReason = String(reason || '');
-      robeMeta[nome].frozenAt = robeMeta[nome].frozenAt || now;
-      robeMeta[nome].frozenSetBy = setBy || 'system';
+      applied.until = until;
+      applied.mode = mode;
 
       man.frozenUntil = until;
       man.frozenReason = String(reason || '');
       man.frozenAt = man.frozenAt || now;
       man.frozenSetBy = setBy || 'system';
-
-      const ok = writeManifest(nome, man);
-      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|freeze_write_manifest`); } catch {} }
-      try {
-        await issues.append(
-          nome,
-          setBy && String(setBy).startsWith('admin') ? 'admin_action' : 'mil_action',
-          `frozen_${Math.round(msDuration/60000)}min(${mode}): reason=${reason||''} setBy=${setBy} until=${new Date(until).toISOString()}`
-        );
-      } catch {}
+      return man;
     });
+
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].frozenUntil = applied.until;
+    robeMeta[nome].frozenReason = String(reason || '');
+    robeMeta[nome].frozenAt = robeMeta[nome].frozenAt || now;
+    robeMeta[nome].frozenSetBy = setBy || 'system';
+
+    try {
+      await issues.append(
+        nome,
+        setBy && String(setBy).startsWith('admin') ? 'admin_action' : 'mil_action',
+        `frozen_${Math.round(msDuration/60000)}min(${applied.mode}): reason=${reason||''} setBy=${setBy} until=${new Date(applied.until).toISOString()}`
+      );
+    } catch {}
+
     await ensureFrozenShutdown(nome, reason || 'frozen');
     await snapshotStatusAndWrite();
   } catch {}
@@ -2282,37 +2244,38 @@ async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
 
 async function unfreezeProfile(nome, setBy = 'admin') {
   try {
-    await withManifestLock(nome, async () => {
-      const now = Date.now();
-      robeMeta[nome] = robeMeta[nome] || {};
-      delete robeMeta[nome].frozenUntil;
-      delete robeMeta[nome].frozenReason;
-      delete robeMeta[nome].frozenAt;
-      delete robeMeta[nome].frozenSetBy;
-      robeMeta[nome].activationHeldUntil = now + 60*1000; // 60s hold
-      robeMeta[nome].reloadAttemptsWindow = [];
-      robeMeta[nome].unfreezeCount = (robeMeta[nome].unfreezeCount || 0) + 1;
-      robeMeta[nome].lastUnfreezeAt = now;
+    const now = Date.now();
 
-      const man = readManifest(nome) || {};
+    robeMeta[nome] = robeMeta[nome] || {};
+    delete robeMeta[nome].frozenUntil;
+    delete robeMeta[nome].frozenReason;
+    delete robeMeta[nome].frozenAt;
+    delete robeMeta[nome].frozenSetBy;
+    robeMeta[nome].activationHeldUntil = now + 60*1000; // 60s hold
+    robeMeta[nome].reloadAttemptsWindow = [];
+    robeMeta[nome].unfreezeCount = (robeMeta[nome].unfreezeCount || 0) + 1;
+    robeMeta[nome].lastUnfreezeAt = now;
+
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
       if ('frozenUntil' in man) delete man.frozenUntil;
       if ('frozenReason' in man) delete man.frozenReason;
       if ('frozenAt' in man) delete man.frozenAt;
       if ('frozenSetBy' in man) delete man.frozenSetBy;
-      const ok = writeManifest(nome, man);
-      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|unfreeze_write_manifest`); } catch {} }
-
-      // Zera falhas
-      profileFailures.set(nome, { internal: [], external: [], unknown: [] });
-
-      try {
-        await issues.append(
-          nome,
-          setBy && String(setBy).startsWith('admin') ? 'admin_action' : 'mil_action',
-          `unfreeze by=${setBy}`
-        );
-      } catch {}
+      return man;
     });
+
+    // Zera falhas
+    profileFailures.set(nome, { internal: [], external: [], unknown: [] });
+
+    try {
+      await issues.append(
+        nome,
+        setBy && String(setBy).startsWith('admin') ? 'admin_action' : 'mil_action',
+        `unfreeze by=${setBy}`
+      );
+    } catch {}
+
     await snapshotStatusAndWrite();
   } catch {}
 }
@@ -2525,7 +2488,10 @@ async function recoveryStep(nome, page, step) {
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser) return false;
       const np = await ctrl.browser.newPage();
-      try { await browserHelper.patchPage(nome, np, utils.getCoords(readManifest(nome)?.cidade || '')); } catch {}
+      try {
+        const man = await manifestStore.read(nome).catch(() => null);
+        await browserHelper.patchPage(nome, np, utils.getCoords((man && man.cidade) || ''));
+      } catch {}
       await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ctrl.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
       ctrl.mainPage = np;
@@ -2607,7 +2573,7 @@ const _startRobeOrig = robeHelper.startRobe;
 robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
   // GUARD: antifila infinito, antiflood militar se manifest ausente
   let manifest;
-  try { manifest = readManifest(nome); } catch(e){}
+  try { manifest = await manifestStore.read(nome); } catch(e){}
   if (!manifest) {
     // Congela por 12h via worker
     try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_missing', 'system').catch(()=>{}); } catch {}

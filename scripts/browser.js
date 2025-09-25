@@ -99,7 +99,7 @@ async function patchPage(nome, page, coords) {
   const hardwareConcurrency = manifest.fp?.hardwareConcurrency || 8;
 
   // --- PATCH FULL UA/UA-CH ---
-  if (ua) await page.setUserAgent(ua);
+  try { if (ua) await page.setUserAgent(ua); } catch {}
   if (ua && uaCh && uaCh.brands) {
     try {
       const client = await page.target().createCDPSession();
@@ -115,8 +115,8 @@ async function patchPage(nome, page, coords) {
   }
 
   // --- IDIOMA E REGION ---
-  await page.setExtraHTTPHeaders({ 'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await page.emulateTimezone('America/Sao_Paulo');
+  try { await page.setExtraHTTPHeaders({ 'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' }); } catch {}
+  try { await page.emulateTimezone('America/Sao_Paulo'); } catch {}
 
   // --- viewport, deviceScale, threads ---
   await page.evaluateOnNewDocument((hwc) => {

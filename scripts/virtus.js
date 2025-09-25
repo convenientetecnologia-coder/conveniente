@@ -24,12 +24,12 @@ const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
 
 // ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
 function getPerfilManifest(nome) {
-  const perfisArr = require('../dados/perfis.json');
+  const perfisArr = JSON.parse(fsRaw.readFileSync(path.join(__dirname, '../dados/perfis.json'), 'utf8'));
   const perfil = perfisArr.find(p => p && p.nome === nome);
   if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
   const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
   if (!fsRaw.existsSync(manifestPath)) throw new Error('Manifest não existe: ' + manifestPath);
-  return { manifest: require(manifestPath), perfil };
+  return { manifest: JSON.parse(fsRaw.readFileSync(manifestPath, 'utf8')), perfil };
 }
 // ========== FIM HELPER ==========
 
@@ -461,6 +461,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const newP = await browser.newPage();
         try {
           // --- Interceptação de assets pesados no Messenger ---
+          // REMOVIDO CONFORME INSTRUÇÃO: Interceptação deve ser feita apenas em patchPage
+          /*
           if (newP.url && typeof newP.url === 'function' && /messenger\.com/.test(await newP.url())) {
             try {
               await newP.setRequestInterception(true);
@@ -479,6 +481,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               log('[VIRTUS] Erro ao aplicar interception:', e + '');
             }
           }
+          */
           // --- FIM Interceptação ---
 
           try {
@@ -508,6 +511,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       page = pages[0];
       // --- Interceptação de assets pesados no Messenger (garantir para pages já abertas) ---
+      // REMOVIDO CONFORME INSTRUÇÃO: Interceptação deve ser feita apenas em patchPage
+      /*
       if (page.url && typeof page.url === 'function' && /messenger\.com/.test(await page.url())) {
         try {
           await page.setRequestInterception(true);
@@ -529,6 +534,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           log('[VIRTUS] Erro ao aplicar interception:', e + '');
         }
       }
+      */
       // GUARD para page fechada
       if (page && page.isClosed && page.isClosed()) {
         log(`[VIRTUS][${nome}] Page principal fechada.`);

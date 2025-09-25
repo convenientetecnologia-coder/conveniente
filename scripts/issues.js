@@ -19,11 +19,7 @@ const ERROR_TYPES = new Set([
   'virtus_send_failed',
   'virtus_page_dead',
   'chrome_memory_spike',
-  'cpu_memory_spike',
-  'mil_action',
-  'admin_activate_request', 'admin_deactivate_request', 'admin_configure_request', 'admin_start_work_request',
-  'admin_invoke_human_request', 'admin_robe_play_request', 'admin_robe24h_request', 'admin_human_resume_request',
-  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all'
+  'cpu_memory_spike'
 ]);
 
 function isErrorType(t) {

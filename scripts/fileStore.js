@@ -475,6 +475,16 @@ function getPerfilFrozenUntil(nome) {
   return null;
 }
 
+// === Helpers de validação de nome/slug e de existência de perfil ===
+function isValidSlug(s) {
+  return typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
+}
+function assertPerfilExists(fileStore, nome) {
+  if (!isValidSlug(nome)) throw new Error('nome invalido');
+  const perfis = fileStore.loadPerfisJson();
+  if (!perfis.find(p => p && p.nome === nome)) throw new Error('perfil inexistente');
+}
+
 // EXPORTAÇÃO EXPANDIDA PARA FUNÇÕES MILITARES
 module.exports = {
   dadosDir, perfisPath, perfisDir, presetsPath, desiredPath, statusPath,
@@ -488,4 +498,7 @@ module.exports = {
   getFullStatusSnapshot, updateStatusField,
   setPerfilFrozenUntil,
   getPerfilFrozenUntil,
+  // Novos helpers (APIs):
+  isValidSlug,
+  assertPerfilExists,
 };
