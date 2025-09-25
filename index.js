@@ -53,8 +53,9 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 // ===================== Fim Body Parsers =====================
 
-// ===================== Middleware de autenticação =====================
+// ===================== (REMOVIDO) Middleware de autenticação =====================
 /*
+ * [REMOVIDO POR INSTRUÇÃO DO USUÁRIO]
  * Middleware de autenticação obrigatória para rotas /api/
  * - ADMIN_TOKEN DEVE estar presente como variável de ambiente.
  * - Nunca deixe vazio em produção!
@@ -62,41 +63,41 @@ app.use(express.urlencoded({ extended: true }));
  */
 // ---> Recomenda-se export ADMIN_TOKEN no ambiente ou .env (NÃO use vazio em produção).
 
-const isDevEnv = (process.env.NODE_ENV === 'development');
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+// const isDevEnv = (process.env.NODE_ENV === 'development');
+// const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
-// Panic/exit se token não estiver presente em produção
-if (!ADMIN_TOKEN && !isDevEnv) {
-  console.error('[FATAL] ADMIN_TOKEN não definido. Defina como export/env/.env e reinicie.');
-  process.exit(1);
-}
+// // Panic/exit se token não estiver presente em produção
+// if (!ADMIN_TOKEN && !isDevEnv) {
+//   console.error('[FATAL] ADMIN_TOKEN não definido. Defina como export/env/.env e reinicie.');
+//   process.exit(1);
+// }
 
-function apiAuthMiddleware(req, res, next) {
-  // Libera health check sem auth
-  if (
-    req.path === '/api/health' || 
-    req.path === '/health' || 
-    // Libera acesso a arquivos estáticos em /public/
-    req.path.startsWith('/public/') ||
-    req.path.startsWith('/static/') ||
-    req.path.startsWith('/favicon.ico')
-  ) {
-    return next();
-  }
-  // Exige bearer token nas rotas /api/*
-  if (req.path.startsWith('/api/')) {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.split(' ')[1];
-    if (authHeader.startsWith('Bearer ') && token === ADMIN_TOKEN) {
-      return next();
-    }
-    // Token inválido, responde 401
-    return res.status(401).json({ error: 'Unauthorized: token inválido ou ausente' });
-  }
-  // Fora de /api, libera normalmente
-  return next();
-}
-app.use(apiAuthMiddleware);
+// function apiAuthMiddleware(req, res, next) {
+//   // Libera health check sem auth
+//   if (
+//     req.path === '/api/health' || 
+//     req.path === '/health' || 
+//     // Libera acesso a arquivos estáticos em /public/
+//     req.path.startsWith('/public/') ||
+//     req.path.startsWith('/static/') ||
+//     req.path.startsWith('/favicon.ico')
+//   ) {
+//     return next();
+//   }
+//   // Exige bearer token nas rotas /api/*
+//   if (req.path.startsWith('/api/')) {
+//     const authHeader = req.headers.authorization || '';
+//     const token = authHeader.split(' ')[1];
+//     if (authHeader.startsWith('Bearer ') && token === ADMIN_TOKEN) {
+//       return next();
+//     }
+//     // Token inválido, responde 401
+//     return res.status(401).json({ error: 'Unauthorized: token inválido ou ausente' });
+//   }
+//   // Fora de /api, libera normalmente
+//   return next();
+// }
+// app.use(apiAuthMiddleware);
 // ===================== Fim do middleware de autenticação =====================
 
 // Militar: Apenas arquivos públicos (UI) expostos. Backend nunca via HTTP!
