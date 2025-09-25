@@ -23,8 +23,7 @@ const ERROR_TYPES = new Set([
   'mil_action',
   'admin_activate_request', 'admin_deactivate_request', 'admin_configure_request', 'admin_start_work_request',
   'admin_invoke_human_request', 'admin_robe_play_request', 'admin_robe24h_request', 'admin_human_resume_request',
-  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all',
-  'robe_limit_pause_24h' // <---- ADICIONADO AQUI
+  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all'
 ]);
 
 function isErrorType(t) {
@@ -101,8 +100,7 @@ const ISSUE_TYPES_SET = new Set([
   'nurse_restart',
   'admin_activate_request', 'admin_deactivate_request', 'admin_configure_request', 'admin_start_work_request',
   'admin_invoke_human_request', 'admin_robe_play_request', 'admin_robe24h_request', 'admin_human_resume_request',
-  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all',
-  'robe_limit_pause_24h' // <---- ADICIONADO AQUI
+  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all'
 ]);
 
 function padronizaType(type) {

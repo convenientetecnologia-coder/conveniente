@@ -645,25 +645,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       timeout: 20000
     });
 
-    // ----- Checagem militar: limite de postagem atingido (pause só do Robe 24h) -----
-    const limiteDetectado = await page.evaluate(() => {
-      // Pode expandir se outras variações/legendas forem encontradas
-      const textos = Array.from(document.querySelectorAll('span, div, h2, h1')).map(el => (el.innerText||el.textContent||'').trim());
-      return textos.some(t =>
-        /limite atingido/i.test(t) ||
-        /você não pode mais criar novos classificados/i.test(t)
-      );
-    });
-    if (limiteDetectado) {
-      // Só pausa o Robe (robeCooldownUntil) por 24h, sem freezer global
-      const now = Date.now();
-      manifest.robeCooldownUntil = now + 24*60*60*1000;
-      writeJsonAtomic(perfilPath, manifest);
-      robeMeta[nome].cooldownSec = Math.ceil((manifest.robeCooldownUntil-now)/1000);
-      await logIssue(nome, 'robe_limit_pause_24h', 'Detectado limite de postagem. Robe pausado 24h.');
-      return { ok: false, error: 'robe_limit_pause_24h' };
-    }
-
     // Fast-lane readiness (3.5s). Se não ficar pronto, fallback com seletor (8s).
     const readyFast = await waitForCreateItemReady(page, { timeout: 3500 });
     if (!readyFast) {
