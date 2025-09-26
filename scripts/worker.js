@@ -1276,7 +1276,7 @@ async function ramCpuMonitorTick() {
         const A = hist[0], B = hist[hist.length-1];
         const dMin = Math.max(0.5, (B.t - A.t)/60000);
         const slope = (B.mb - A.mb) / dMin;
-        const avg = hist.reduce((a,b)=>a+b.mb,0)/hist.length);
+        const avg = hist.reduce((a, b) => a + b.mb, 0) / hist.length;
         slopeOK = (slope > 50) && (avg > 800);
       }
       // Só kill se comprovado leak real!
