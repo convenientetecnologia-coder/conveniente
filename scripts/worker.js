@@ -17,6 +17,7 @@ const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NO
 const pidusage = require('pidusage');
 const psList = require('ps-list');
 const serverCap = require('./serverCap.js');
+const autoTuner = require('./autoTuner.js');
 
 // =============== PATCH: HEALTH STATEFUL + RECOVERY ESCADA ===============
 const HEALTH_CFG = {
@@ -253,20 +254,24 @@ function desiredActiveNames() {
 }
 
 function chooseCandidatesToOpen(maxN = 2) {
-  const now = Date.now();
   const desired = new Set(desiredActiveNames());
   const allPerfis = loadPerfisJson();
-  const candidates = allPerfis
-    .map(p => p.nome)
-    .filter(nome => desired.has(nome) && !controllers.has(nome))
-    .filter(nome => !isFrozenNow(nome))
-    .slice(0);
-  candidates.sort((a,b) => {
+  const essentials = [], normals = [];
+  for (const p of allPerfis) {
+    if (!desired.has(p.nome)) continue;
+    if (controllers.has(p.nome)) continue;
+    if (isFrozenNow(p.nome)) continue;
+    const d = readJsonFile(desiredPath, { perfis: {} });
+    const ent = d.perfis?.[p.nome] || {};
+    (ent.essential ? essentials : normals).push(p.nome);
+  }
+  const sorted = (arr) => arr.sort((a,b) => {
     const ra = typeof robeMeta[a]?.ramMB === 'number' ? robeMeta[a].ramMB : 999999;
     const rb = typeof robeMeta[b]?.ramMB === 'number' ? robeMeta[b].ramMB : 999999;
     return ra - rb;
   });
-  return candidates.slice(0, Math.max(1, maxN));
+  const list = sorted(essentials).concat(sorted(normals));
+  return list.slice(0, Math.max(1, maxN));
 }
 
 async function escalateTowardsFull() {
@@ -431,13 +436,59 @@ console.log('[WORKER][BOOT]', {
 } catch (e) {
 try { console.log('[WORKER][BOOT] log error', e && e.message || e); } catch {}
 }
+
+// INSTRUÇÃO 6: Funções wrappers de timer reprogramável
+let _robeTickIntervalMs = 7000;
+let _robeTimer = null;
+function setRobeTickInterval(ms) {
+  _robeTickIntervalMs = Math.max(4000, Math.min(20000, Number(ms)||7000));
+  if (_robeTimer) clearInterval(_robeTimer);
+  _robeTimer = setInterval(robeTickGlobal, _robeTickIntervalMs);
+}
+
+let _nurseIntervalMs = 5000;
+let _nurseTimer = null;
+function setNurseInterval(ms) {
+  _nurseIntervalMs = Math.max(3000, Math.min(15000, Number(ms)||5000));
+  if (_nurseTimer) clearInterval(_nurseTimer);
+  _nurseTimer = setInterval(() => { nurseTick().catch(()=>{}); }, _nurseIntervalMs);
+}
+
+let _healthIntervalMs = 10000;
+let _healthTimer = null;
+function setHealthInterval(ms) {
+  _healthIntervalMs = Math.max(5000, Math.min(30000, Number(ms)||10000));
+  if (_healthTimer) clearInterval(_healthTimer);
+  _healthTimer = setInterval(() => { healthTick().catch(()=>{}); }, _healthIntervalMs);
+}
+
+// INSTRUÇÃO 3: Boot com autoStressTestBoot e runtimeSelfTuning
 (async () => {
   try { 
     const cap = await serverCap.calibrateIfNeeded();
     console.log('[CAP]', cap);
   } catch(e){
-    console.warn('[CAP] calibrate failed', e && e.message || e); 
+    console.warn('[CAP] calibrate failed', e && e.message || e);
   }
+  try {
+    await autoTuner.autoStressTestBoot({
+      maxRaise: 4,
+      observeMs: 10000,
+      minHeadroomAfterOpenMB: 2048
+    });
+  } catch (e) {
+    try { await issues.append('system', 'mil_action', 'auto_stress_boot_fail ' + (e && e.message || e)); } catch {}
+  }
+  // inicia tuning contínuo com reschedule de timers dinâmicos
+  await autoTuner.runtimeSelfTuning({
+    reschedule: ({ robeTickMs, nurseMs, healthMs }) => {
+      try {
+        if (robeTickMs && robeTickMs !== _robeTickIntervalMs) { setRobeTickInterval(robeTickMs); }
+        if (nurseMs && nurseMs !== _nurseIntervalMs) { setNurseInterval(nurseMs); }
+        if (healthMs && healthMs !== _healthIntervalMs) { setHealthInterval(healthMs); }
+      } catch {}
+    }
+  });
 })();
 
 // Caminhos principais
@@ -588,7 +639,13 @@ const openGate = {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].activationHeldUntil = Date.now() + Math.max(15000, (this.cap?.minOpenSpacingMs||9000));
     robeMeta[nome].activationHeldReason = 'cap_reached';
-    if (!this.queue.includes(nome)) this.queue.push(nome);
+    const isEssential = (()=> {
+      try { const d=readJsonFile(desiredPath, {perfis:{}}); return !!(d.perfis?.[nome]?.essential); } catch { return false; }
+    })();
+    if (!this.queue.includes(nome)) {
+      if (isEssential) this.queue.unshift(nome);
+      else this.queue.push(nome);
+    }
     try { await issues.append(nome, 'mil_action', `activation_queued(cap) src=${source}`); } catch {}
     return { ok: true, now: false, queued: true };
   },
@@ -703,10 +760,26 @@ try {
   }
 }
 
+// INSTRUÇÃO 4: instrumentação de open
+const t0 = Date.now();
+const freeBeforeMB = Math.round(os.freemem()/(1024*1024));
+
 const browser = await browserHelper.openBrowser(manifest);
 if (!browser || typeof browser.newPage !== 'function') {
 throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
 }
+
+// registro do open sucedido (antes do set controllers)
+try {
+  const freeAfterMB = Math.round(os.freemem()/(1024*1024));
+  autoTuner.noteOpenEvent({
+    nome, ok: true,
+    durMs: Date.now() - t0,
+    freeBeforeMB,
+    freeAfterMB
+  });
+} catch {}
+
 controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 openGate.lastOpenAt = Date.now();
 
@@ -766,6 +839,21 @@ if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(Strin
   try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (activateOnce)'); } catch {}
 }
 // FIM DA INSTRUÇÃO 9
+
+// INSTRUÇÃO 4: instrumentação de open falho
+try {
+  if (typeof t0 === 'number') {
+    autoTuner.noteOpenEvent({
+      nome,
+      ok: false,
+      durMs: Date.now() - t0,
+      freeBeforeMB: typeof freeBeforeMB === 'number' ? freeBeforeMB : Math.round(os.freemem()/(1024*1024)),
+      freeAfterMB: Math.round(os.freemem()/(1024*1024)),
+      error: e && e.message || String(e)
+    });
+  }
+} catch {}
+
 console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
 return { ok: false, error: e && e.message || String(e) };
 } finally {
@@ -1291,6 +1379,9 @@ async function robeTickGlobal() {
     console.log(`[WORKER][robeTickGlobal] Enfileirando ${nome}? cooldown=${robeCooldownLeft(nome)}s inQueue=${robeQueue.inQueue(nome)}, isActive=${robeQueue.isActive(nome)}`);
 
     robeQueue.enqueue(nome, async () => {
+      const tStartRobe = Date.now();
+      let _robeOkFlag = null;
+
       // === PATCH autoMode Light: após enfileirar em modo light, rate limit ===
       if (autoMode.mode === 'light') {
         autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
@@ -1309,6 +1400,7 @@ async function robeTickGlobal() {
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         robeUpdateMeta(nome, { estado: 'erro' });
         try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (guard)'); } catch {}
+        try { autoTuner.noteRobeCycle({ nome, ok: false, durMs: Date.now() - tStartRobe }); } catch {}
         return;
       }
 
@@ -1361,6 +1453,8 @@ async function robeTickGlobal() {
           robeMeta[nome].cooldownSec = penalSec;
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: penalSec });
+          _robeOkFlag = false;
+          try { autoTuner.noteRobeCycle({ nome, ok: false, durMs: Date.now() - tStartRobe }); } catch {}
           try { console.warn('[WORKER][robeTickGlobal] Robe error:', e && e.message || e); } catch {}
           return; // não crasha fila global
         }
@@ -1380,6 +1474,7 @@ async function robeTickGlobal() {
             proximaPostagem: robeLastPosted(nome) + robePauseMs,
             ultimaPostagem: Date.now()
           });
+          _robeOkFlag = true;
           try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso'); } catch {}
           try { console.log(`[WORKER][robeTickGlobal] Robe success: ${nome}`); } catch {}
         } else {
@@ -1387,9 +1482,11 @@ async function robeTickGlobal() {
             estado: 'idle',
             cooldownSec: robeCooldownLeft(nome)
           });
+          _robeOkFlag = false;
         }
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
+        _robeOkFlag = false;
       } finally {
         // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
@@ -1413,6 +1510,9 @@ async function robeTickGlobal() {
         // Log de término do Robe
         try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado'); } catch {}
         try { console.log(`[WORKER][robeTickGlobal] Robe end: ${nome}`); } catch {}
+
+        // INSTRUMENTAÇÃO: fim do ciclo do Robe
+        try { autoTuner.noteRobeCycle({ nome, ok: _robeOkFlag === true, durMs: Date.now() - tStartRobe }); } catch {}
       }
     });
 
@@ -1428,7 +1528,8 @@ async function robeTickGlobal() {
   }
 }
 
-setInterval(robeTickGlobal, 7000);
+// INSTRUÇÃO 6: uso dos wrappers para agendar o robeTick
+setRobeTickInterval(7000);
 setTimeout(robeTickGlobal, 3500);
 
 // ===== GC DE FOTOS (mantido/instalado) =====
@@ -2002,6 +2103,18 @@ const handlers = {
   }
 };
 
+// INSTRUÇÃO 2: Inicializar autoTuner com contexto do worker
+autoTuner.init({
+  controllers,
+  robeMeta,
+  desiredPath,
+  readJsonFile,
+  serverCap: require('./serverCap.js'),
+  openGate,
+  handlers,
+  activateOnce, // para autoStressTestBoot
+});
+
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
 async function snapshotStatusAndWrite() {
 _statusLock = _statusLock.then(async () => {
@@ -2077,6 +2190,7 @@ const sys = {
   cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
 };
 const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
+try { statusObj.tuning = require('./autoTuner.js').getState(); } catch {}
 // Não inclui mais robeRam obsoleto, pois RAM por perfil já está em perfis/robes.
 // Unificado cross-platform.
 const ok = writeJsonAtomic(statusPath, statusObj);
@@ -2687,7 +2801,8 @@ async function nurseTick() {
   }
 }
 
-setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
+// INSTRUÇÃO 6: uso dos wrappers para agendar o nurseTick
+setNurseInterval(5000);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 
 // =================== HEALTH: Observers, Heuristics e Recovery ===================
@@ -2844,7 +2959,9 @@ async function healthTick() {
     }
   }
 }
-setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
+
+// INSTRUÇÃO 6: uso dos wrappers para agendar o healthTick
+setHealthInterval(10000);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
 // =================== FIM HEALTH ===================
 
