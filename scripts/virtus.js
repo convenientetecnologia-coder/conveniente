@@ -169,19 +169,24 @@ async function coletaChatsMarketplaceTodos(page) {
 }
 
 // Messenger helpers
-async function garantirMarketplace(page) {
+async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
-
   let url = '';
   try { url = page.url() || ''; } catch {}
-
-  if (url === 'about:blank' || !url.includes('/marketplace')) {
-    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded' });
-    url = page.url();
+  if (!/messenger.com\/marketplace/i.test(url)) {
+    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(()=>{});
   }
-  await page.waitForSelector('header span, header h1', { timeout: 15000 });
-  const header = await page.$eval('header span, header h1', el => el.textContent || "");
-  if (!header.toLowerCase().includes('marketplace')) throw new Error('Não está no Marketplace!');
+  // Espera robusta por UI
+  const ok = await Promise.race([
+    page.waitForFunction(() => {
+      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
+      const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
+      const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
+      return hasAnchor || hasGrid || hasRow;
+    }, { timeout: timeoutMs }),
+    page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: timeoutMs }).catch(() => null)
+  ]);
+  if (!ok) throw new Error('Marketplace UI não ficou pronta a tempo');
 }
 
 // ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
@@ -429,123 +434,57 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     return mudanca;
   }
 
+  let ensurePagePromise = null;
+  let lastDeadLogAt = 0;
+
   async function ensurePage() {
-    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 3 ==========
-    let manifestFrozenUntil = 0;
-    try {
-      const { manifest } = getPerfilManifest(nome);
-      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
-    } catch {}
-    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-      log(`[VIRTUS][${nome}] virtus_stop_because_frozen_and_dead_browser — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      return null;
+    if (!running) return null;
+    if (ensurePagePromise) {
+      try { return await ensurePagePromise; } catch { return null; }
     }
-    // ========== FIM BLOCO FREEZER INSTRUÇÃO 3 ==========
-
-    // === INÍCIO GUARD DE VIDA NO ENSUREPAGE ===
-    if (!browser || (browser.isConnected && browser.isConnected() === false)) {
-      log(`[VIRTUS][${nome}] Browser morto, não é possível garantir page.`);
-      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
-      return null;
-    }
-    // ...seguir rotina normal...
-    // === FIM GUARD DE VIDA NO ENSUREPAGE ===
-    try {
-      let pages = await browser.pages();
-      if (!pages || !pages[0]) {
-        // Cria nova aba e aplica patchPage nela (ambiente idêntico às outras)
-        const newP = await browser.newPage();
-        try {
-          // --- Interceptação de assets pesados no Messenger ---
-          // REMOVIDO CONFORME INSTRUÇÃO: Interceptação deve ser feita apenas em patchPage
-          /*
-          if (newP.url && typeof newP.url === 'function' && /messenger\.com/.test(await newP.url())) {
-            try {
-              await newP.setRequestInterception(true);
-              newP.on('request', req => {
-                const resource = req.resourceType();
-                // PATCH: liberar "image" no intercept
-                if (resource === 'media' || resource === 'video' || resource === 'font') {
-                  return req.abort();
-                }
-                if (resource === 'image') {
-                  return req.continue();
-                }
-                return req.continue();
-              });
-            } catch (e) {
-              log('[VIRTUS] Erro ao aplicar interception:', e + '');
-            }
+    ensurePagePromise = (async () => {
+      if (!browser || (browser.isConnected && browser.isConnected() === false)) {
+        const now = Date.now();
+        if (now - lastDeadLogAt > 8000) {
+          lastDeadLogAt = now;
+          log(`[VIRTUS][${nome}] Browser morto, não é possível garantir page.`);
+          if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
+        }
+        return null;
+      }
+      try {
+        let pages = await browser.pages();
+        if (pages && pages[0]) {
+          page = pages[0];
+          if (page && typeof page.isClosed === 'function' && page.isClosed()) {
+            page = null;
           }
-          */
-          // --- FIM Interceptação ---
-
+        }
+        if (!page) {
+          // cria nova aba
+          const newP = await browser.newPage();
           try {
             const { manifest } = getPerfilManifest(nome);
             const coords = utils.getCoords(manifest.cidade || '');
             await patchPage(nome, newP, coords);
             await ensureMinimizedWindowForPage(newP);
           } catch (e) {
-            log('ensurePage: falha ao obter manifest ou patchPage:', e + '');
+            log('ensurePage: falha patchPage/minimize na nova aba:', e + '');
           }
-        } catch (e) {
-          log('ensurePage: falha ao aplicar patchPage/minimize na nova aba:', e + '');
+          try { newP.once && newP.once('close', () => { if (page === newP) page = null; }); } catch {}
+          page = newP;
         }
-        page = newP;
-        // GUARD extra para page morta após newPage
-        if (!browser || (browser.isConnected && browser.isConnected() === false)) {
-          log(`[VIRTUS][${nome}] Browser morto após newPage.`);
-          if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected após newPage'); } catch {}
-          return null;
-        }
-        if (page && page.isClosed && page.isClosed()) {
-          log(`[VIRTUS][${nome}] Page principal fechada.`);
-          if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
-          return null;
-        }
+        if (!running) return null;
+        if (!browser || (browser.isConnected && browser.isConnected() === false)) return null;
+        if (page && typeof page.isClosed === 'function' && page.isClosed()) return null;
         return page;
-      }
-      page = pages[0];
-      // --- Interceptação de assets pesados no Messenger (garantir para pages já abertas) ---
-      // REMOVIDO CONFORME INSTRUÇÃO: Interceptação deve ser feita apenas em patchPage
-      /*
-      if (page.url && typeof page.url === 'function' && /messenger\.com/.test(await page.url())) {
-        try {
-          await page.setRequestInterception(true);
-          if (!page._virtusIntercepted) {
-            page.on('request', req => {
-              const resource = req.resourceType();
-              // PATCH: liberar "image" no intercept
-              if (resource === 'media' || resource === 'video' || resource === 'font') {
-                return req.abort();
-              }
-              if (resource === 'image') {
-                return req.continue();
-              }
-              return req.continue();
-            });
-            page._virtusIntercepted = true;
-          }
-        } catch (e) {
-          log('[VIRTUS] Erro ao aplicar interception:', e + '');
-        }
-      }
-      */
-      // GUARD para page fechada
-      if (page && page.isClosed && page.isClosed()) {
-        log(`[VIRTUS][${nome}] Page principal fechada.`);
-        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
+      } catch (e) {
+        log('ensurePage falhou:', e + '');
         return null;
       }
-      return page;
-    } catch (e) {
-      log('ensurePage falhou:', e + '');
-      return null;
-    }
+    })();
+    try { return await ensurePagePromise; }
+    finally { ensurePagePromise = null; }
   }
 
   function bumpRecoverBackoff() {
@@ -649,6 +588,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function reloadUltraRobusto() {
+    if (!running) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -839,6 +779,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function responderChat(chatId) {
+    if (!running) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -1004,6 +945,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (Array.isArray(msg)) msg = msg.join('\n');
       if (typeof msg !== 'string') msg = String(msg);
 
+      if (!running) { chatAtivo = null; return; }
+      if (!browser || browser.isConnected?.() === false) { chatAtivo = null; return; }
+      if (!p || p.isClosed?.()) { chatAtivo = null; return; }
       // -------- SUBSTITUIR PELO USO sendMessageSafe --------
       await sendMessageSafe(p, campo, msg);
       // -----------------------------------------------------
@@ -1016,9 +960,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       await salvaHistorico();
 
     } catch (err) {
-      log(`[ERRO] Erro ao responder chat ${chatId}:`, err && err.stack ? err.stack : err + '');
-      const msg = (err && err.message) ? err.message : String(err);
-      try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msg}`); } catch {}
+      const msgErr = (err && err.message) ? err.message : String(err);
+      // Se alvo fechou, classificar corretamente e sair silenciosamente
+      if (/Target closed|Protocol error.*Target closed|Session closed/i.test(msgErr)) {
+        try { await logIssue(nome, 'browser_disconnected', `chat ${chatId}: target/page closed during send`); } catch {}
+      } else {
+        try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msgErr}`); } catch {}
+      }
     }
 
     fila = fila.filter(id => id !== chatId);
@@ -1030,6 +978,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // === BLOCO MODIFICADO ===
   // ========================
   async function filaManagerLoop() {
+    if (!running) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -1207,53 +1156,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     await sleep(2000);
     let ready = false;
-    while (!ready) {
-      // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
-      let manifestFrozenUntil = 0;
-      try {
-        const { manifest } = getPerfilManifest(nome);
-        manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
-      } catch {}
-      if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-        running = false;
-        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-        log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
-        return;
-      }
-      // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
-
+    while (running && !ready) {
+      if (!running) return;
       try {
         const p = await ensurePage();
+        if (!running) return;
         if (!p) { await sleep(2500); continue; }
-        if (p.url() === 'about:blank' || !p.url().includes('/marketplace')) {
+        if (p.url() === 'about:blank' || !/messenger\.com\/marketplace/i.test(p.url())) {
           try {
-            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded' });
-          } catch { bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue; }
+            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          } catch {
+            bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue;
+          }
         }
-        await garantirMarketplace(p);
-
+        await garantirMarketplace(p, { timeoutMs: 25000 });
         try {
           const ok = await scrollChatsToTop(p);
-          if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
-          if (ok) {
-            lastScrollToTop = Date.now();
-          }
-          // Reforço após 800ms
           setTimeout(() => { scrollChatsToTop(p); }, 800);
         } catch {}
-
         ready = true;
         log('Aba zero da Virtus iniciada e garantida: Marketplace pronta.');
       } catch (err) {
+        if (!running) return;
         log('Falha ao garantir aba zero no startup Virtus:', err + '');
         await sleep(2500);
       }
     }
-
+    if (!running) return;
     await initHistoricoSePreciso();
-
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
   }

@@ -1440,30 +1440,28 @@ const handlers = {
   },
 
   async start_work({ nome }) {
-    // ALTERAÇÃO 1: mantenha/simplifique, nunca chamado via workerClient, só via desired.json + reconciliador.
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    if (ctrl.trabalhando) return { ok: true }; // já trabalhando
+  const ctrl = controllers.get(nome);
+  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
-    try {
-      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
-      ctrl.trabalhando = true;
+  // PATCH: não repetir trabalho se virtus já iniciando/ativo
+  if (ctrl.trabalhando && ctrl.virtus) return { ok: true }; // já trabalhando
+  if (ctrl._virtusStarting) return { ok: true };
 
-      // === GARANTE PRUNE SÓ NESTE MOMENTO (PRODUÇÃO!) ===
-      try {
-        if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
-          await browserHelper.forceCloseExtras(ctrl.browser);
-        }
-      } catch (e) {
-        try { console.warn('[WORKER][start_work] prune/forceCloseExtras fail:', e && e.message || e); } catch {}
-      }
-
-      await snapshotStatusAndWrite();
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e && e.message || String(e) };
+  try {
+    ctrl._virtusStarting = true;
+    ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
+    ctrl.trabalhando = true;
+    if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
+      await browserHelper.forceCloseExtras(ctrl.browser);
     }
-  },
+    await snapshotStatusAndWrite();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e && e.message || String(e) };
+  } finally {
+    ctrl._virtusStarting = false;
+  }
+},
 
   async invoke_human({ nome }) {
     const ctrl = controllers.get(nome);
