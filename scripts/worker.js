@@ -74,6 +74,88 @@ const AUTO_CFG = {
 const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '2048', 10); // mínimo RAM que deve sobrar pós-abertura
 
+// INICIO DA INSTRUÇÃO (scripts/worker.js – MODO LEVE INTELIGENTE, ORÇAMENTO DINÂMICO, FAIRNESS REAL)
+// 1. Logo após o bloco do AUTO_CFG, adicione:
+const LIGHT_BUDGET_CFG = {
+  BROWSER_DEFAULT_MB: 600,
+  SAFETY_FREE_MB:     1024,
+  MIN_KEEP:           1,
+  PRIORITY:           'LOW_RAM_FIRST',
+  HOLD_MS:            90000,
+  REEVAL_MS:          15000
+};
+const lightPlan = {
+  keep: new Set(),
+  drop: new Set(),
+  lastEvalAt: 0
+};
+
+// 2. Função para calcular capacidade (RAM budget/cap):
+function computeLightCapacity() {
+  const freeMB = Math.round(require('os').freemem()/(1024*1024));
+  const active = Array.from(controllers.keys());
+  const measured = active
+    .map(n => robeMeta[n] && robeMeta[n].ramMB)
+    .filter(v => typeof v === 'number' && v > 0);
+  const avgMB = measured.length
+    ? Math.max(350, Math.round(measured.reduce((a,b)=>a+b,0)/measured.length))
+    : LIGHT_BUDGET_CFG.BROWSER_DEFAULT_MB;
+  const cap = Math.max(LIGHT_BUDGET_CFG.MIN_KEEP,
+    Math.floor(Math.max(0, freeMB - LIGHT_BUDGET_CFG.SAFETY_FREE_MB) / avgMB)
+  );
+  return { cap, avgMB, freeMB };
+}
+
+// 3. Função para orquestrar quem fica e quem cai em modo leve:
+async function enforceLightBudget(reason = 'light_tick') {
+  const { cap, avgMB, freeMB } = computeLightCapacity();
+  const active = Array.from(controllers.keys());
+  if (active.length <= cap) {
+    lightPlan.keep = new Set(active);
+    lightPlan.drop.clear();
+    await milLog('mil_action', `light_budget_ok active=${active.length} cap=${cap} free=${freeMB}MB avg=${avgMB}MB`);
+    return;
+  }
+  // Prioridade LOW_RAM_FIRST:
+  const scored = active.map(n => {
+    const ram = (robeMeta[n] && typeof robeMeta[n].ramMB === 'number') ? robeMeta[n].ramMB : 9999;
+    const last = (robeMeta[n] && robeMeta[n].ultimaPostagem) || 0;
+    return { n, ram, last };
+  });
+  scored.sort((a,b) => a.ram - b.ram || a.last - b.last);
+  const keepN = Math.max(LIGHT_BUDGET_CFG.MIN_KEEP, cap);
+  const keep = scored.slice(0, keepN).map(x=>x.n);
+  const drop = scored.slice(keepN).map(x=>x.n);
+
+  lightPlan.keep = new Set(keep);
+  lightPlan.drop = new Set(drop);
+
+  await milLog('mil_action', `light_budget_drop drop=${drop.length}/${active.length} cap=${cap} keep=${keep.length} free=${freeMB}MB avg=${avgMB}MB policy=${LIGHT_BUDGET_CFG.PRIORITY}`);
+
+  for (const nome of drop) {
+    try {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].activationHeldUntil = Date.now() + LIGHT_BUDGET_CFG.HOLD_MS;
+      robeMeta[nome].lightDropUntil = Date.now() + LIGHT_BUDGET_CFG.HOLD_MS;
+      await handlers.deactivate({ nome, reason: 'light_budget', policy: 'preserveDesired' });
+    } catch {}
+  }
+}
+
+// 4. Funções para agendar/desagendar reavaliação periódica do light-budget:
+let _lightReevalTimer = null;
+function scheduleLightReeval() {
+  if (_lightReevalTimer) return;
+  _lightReevalTimer = setInterval(() => {
+    if (autoMode.mode === 'light') enforceLightBudget('reeval').catch(()=>{});
+  }, LIGHT_BUDGET_CFG.REEVAL_MS);
+}
+function clearLightReeval() {
+  if (_lightReevalTimer) clearInterval(_lightReevalTimer);
+  _lightReevalTimer = null;
+}
+// FIM DA INSTRUÇÃO (scripts/worker.js – MODO LEVE INTELIGENTE, ORÇAMENTO DINÂMICO, FAIRNESS REAL)
+
 const autoMode = {
   mode: 'full', since: Date.now(), reason: '',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
@@ -99,7 +181,6 @@ async function onEnterLightMode() {
         await ctrl.virtus.stop().catch(()=>{});
       }
       if (ctrl) { ctrl.virtus = null; ctrl.trabalhando = false; }
-      // Derruba pesados/zumbis (RAM >= 900MB) imediatamente
       const ramMB = (robeMeta[nome] && typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
       if (ramMB != null && ramMB >= AUTO_CFG.RAM_KILL_MB) {
         await reportAction(nome, 'nurse_kill', `LEVE: kill pesado/zumbi (RAM=${ramMB}MB) preserveDesired reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
@@ -107,11 +188,23 @@ async function onEnterLightMode() {
       }
     } catch {}
   }
+  await enforceLightBudget('enter_light');
+  scheduleLightReeval();
 }
 
 async function onExitLightMode() {
   try { await reportAction('system', 'light_exit', 'exit_light_mode'); } catch {}
-  // Reconciliador retomará Virtus/ativação por desired; não força nada aqui.
+  try {
+    for (const nome of Object.keys(robeMeta)) {
+      if (!robeMeta[nome]) continue;
+      delete robeMeta[nome].lightDropUntil;
+      const held = robeMeta[nome].activationHeldUntil || 0;
+      if (held && held > Date.now()) {
+        delete robeMeta[nome].activationHeldUntil;
+      }
+    }
+  } catch {}
+  clearLightReeval();
 }
 
 // ======= AUTOFIX/HEAL CONFIG =======
@@ -177,20 +270,30 @@ function chooseCandidatesToOpen(maxN = 2) {
 
 async function escalateTowardsFull() {
   if (autoMode.mode !== 'light') return;
-  if (countActive() === 0) {
-    const need = Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 1);
-    const cand = chooseCandidatesToOpen(need);
-    if (cand.length) {
-      await milLog('mil_action', `assert_min_active: abrindo ${cand.length} para não ficar em zero`);
-      for (const nome of cand) { try { await activateOnce(nome, 'heal_min_active'); healer.lastProgressAt = Date.now(); } catch {} }
-    }
+  const { cap } = computeLightCapacity();
+  const ativos = countActive();
+  if (ativos >= cap) {
+    await milLog('mil_action', `light_escalate_cap: ativos=${ativos} cap=${cap} — nenhum open`);
     return;
   }
-  const cand = chooseCandidatesToOpen(SELF_HEAL_CFG.LIGHT_ESCALATE_STEP);
+  const slots = Math.max(0, cap - ativos);
+  if (slots === 0) return;
+
+  const candAll = chooseCandidatesToOpen(999);
+  const cand = candAll.slice(0, slots);
+
   if (cand.length) {
-    await milLog('mil_action', `light_escalate: tentando abrir ${cand.length} perfis`);
+    await milLog('mil_action', `light_escalate: tentando abrir ${cand.length} perfis (cap=${cap})`);
     for (const nome of cand) {
-      try { await activateOnce(nome, 'heal_escalate'); healer.lastProgressAt = Date.now(); } catch {}
+      try {
+        const r = await activateOnce(nome, 'heal_escalate');
+        if (r && r.ok) healer.lastProgressAt = Date.now();
+        else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+          await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
+        }
+      } catch {}
     }
     healer.lightAttempts++;
   }
@@ -264,7 +367,7 @@ async function killStrayChromes() {
     const perfisArr = loadPerfisJson();
     const nomeByDir = {};
     for (const p of perfisArr) {
-      if (p && p.userDataDir) nomeByDir[normalizePath(p.userDataDir)] = p.nome;
+      if (p && p.nome && p.userDataDir) nomeByDir[normalizePath(p.userDataDir)] = p.nome;
     }
     const procs = await psList().catch(()=>[]);
     const group = {};
@@ -552,6 +655,13 @@ _statusLock = _statusLock.then(async () => {
 });
 } catch {}
 try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
+// INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
+if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+  try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (activateOnce)'); } catch {}
+}
+// FIM DA INSTRUÇÃO 9
 console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
 return { ok: false, error: e && e.message || String(e) };
 } finally {
@@ -1938,6 +2048,12 @@ for (const nome of nomes) {
       await snapshotStatusAndWrite();
       continue;
     }
+    // INICIO DA INSTRUÇÃO 7: respeita lightDropUntil
+    if (robeMeta[nome]?.lightDropUntil && robeMeta[nome].lightDropUntil > Date.now()) {
+      await snapshotStatusAndWrite();
+      continue;
+    }
+    // FIM DA INSTRUÇÃO 7
     if (autoMode.mode === 'light') {
       const base = 20000, factor = Math.min(9, 1 + (autoMode.hot||0)), jitter = Math.floor(Math.random()*5000);
       const holdMs = Math.min(180000, base*factor) + jitter;
@@ -2004,8 +2120,9 @@ for (const nome of nomes) {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
             d2.perfis[nome].robePlay = false;
-            const ok = writeJsonAtomic(desiredPath, d2);
-            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
+            const ok = writeJsonAtomic(d2siredPath, d2);
+            const ok2 = writeJsonAtomic(desiredPath, d2);
+            if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
           }
         } catch {}
       }
@@ -2333,12 +2450,36 @@ async function nurseTick() {
       continue;
     }
 
+    // INICIO DA INSTRUÇÃO 6: substituição do trecho nurseTick para modo leve e holds
     if (want.active === true && !ctrl) {
       if (isFrozenNow(nome)) continue;
+
+      // Modo leve: nurse não ativa
+      if (autoMode.mode === 'light') {
+        const now = Date.now();
+        robeMeta[nome] = robeMeta[nome] || {};
+        if (!robeMeta[nome].activationHeldUntil || robeMeta[nome].activationHeldUntil < now) {
+          robeMeta[nome].activationHeldUntil = now + 60000;
+          await reportAction(nome, 'mil_action', 'nurse_hold_light 60s');
+        }
+        continue;
+      }
+
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
-      try { await activateOnce(nome, 'nurse_auto'); } catch {}
+      try {
+        const r = await activateOnce(nome, 'nurse_auto');
+        if (!r || !r.ok) {
+          if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+            await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s');
+          }
+        }
+      } catch {}
       continue;
     }
+    // FIM DA INSTRUÇÃO 6
+
     if (!ctrl || !ctrl.browser) continue;
     let pages = [];
     try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
