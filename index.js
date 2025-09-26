@@ -9,10 +9,6 @@ const open = require('open'); // <-- adicione/mova isso aqui!
 const workerClient = require('./scripts/workerClient.js');
 const fileStore = require('./scripts/fileStore.js');
 
-// ======= INÍCIO DAS ALTERAÇÕES PARA INTEGRAÇÃO DO JOB MANAGER GLOBAL =======
-const jobManager = require('./scripts/jobManager.js');
-// ======= FIM DA IMPORTAÇÃO DO JOB MANAGER =======
-
 // Inicialização
 const app = express();
 const PORT = parseInt(process.env.PORT || '8088', 10);
@@ -111,22 +107,6 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 // app.use('/', express.static(path.join(__dirname, 'scripts')));
 // app.use('/scripts', express.static(path.join(__dirname, 'scripts')));
 
-// ======= INÍCIO INICIALIZAÇÃO DO JOB MANAGER (após requires e helpers, antes das rotas) =======
-console.log('[BOOT] Garantindo arquivos base...');
-fileStore.ensureDesired();
-fileStore.ensurePerfisJson();
-
-// Política de reset: (descomente se desejar sempre “start fresh”)
-// fileStore.resetDesiredAllOffOnBoot();
-
-console.log('[BOOT] Spawning worker (automação)...');
-workerClient.fork();
-
-// Inicializa o Job Manager após o workerClient.fork()
-console.log('[BOOT] Inicializando Job Manager...');
-jobManager.init(workerClient);
-// ======= FIM INICIALIZAÇÃO DO JOB MANAGER =======
-
 // API endpoints (militar por arquivo de rota, modular, fácil de achar)
 require('./scripts/api_status.js')(app, workerClient, fileStore);
 require('./scripts/api_perfis.js')(app, workerClient, fileStore);
@@ -136,9 +116,15 @@ require('./scripts/api_sys.js')(app, workerClient, fileStore);
 require('./scripts/api_issues.js')(app, workerClient, fileStore);
 // Se usar api_static.js/adicional, inclua aqui: require('./scripts/api_static.js')(app);
 
-// ======= INÍCIO DA INCLUSÃO DA NOVA ROTA DE JOBS PARA A API =======
-require('./scripts/api_jobs.js')(app, workerClient, fileStore, jobManager);
-// ======= FIM DA INCLUSÃO DA NOVA ROTA DE JOBS PARA A API =======
+console.log('[BOOT] Garantindo arquivos base...');
+fileStore.ensureDesired();
+fileStore.ensurePerfisJson();
+
+// Política de reset: (descomente se desejar sempre “start fresh”)
+// fileStore.resetDesiredAllOffOnBoot();
+
+console.log('[BOOT] Spawning worker (automação)...');
+workerClient.fork();
 
 // Health check endpoint (opcional)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));

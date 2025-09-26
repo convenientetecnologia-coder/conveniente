@@ -178,9 +178,6 @@
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
-      <div class="metric"><span>Limite</span><b id="mCap">--</b></div>
-      <div class="metric"><span>Aberturas/min</span><b id="mOpenRate">--</b></div>
-      <div class="metric"><span>Fila de abertura</span><b id="mOpenQ">0</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
     </div>
   </header>
@@ -201,18 +198,6 @@
           <button class="btn" id="filterIssues">Com problema</button>
         </div>
       </div> 
-    </div>
-    <div class="jobs-panel" style="margin-bottom:18px;">
-      <h3 style="margin:8px 0 6px 2px; font-size:15px; color:#b2c9e6">Jobs / Backlog</h3>
-      <div style="display:flex;gap:15px;align-items:center;font-size:13px;margin-bottom:5px;">
-        <span>Pending: <b id="jbPending">0</b></span>
-        <span>Running: <b id="jbRunning">0</b></span>
-        <span>Failed: <b id="jbFailed">0</b></span>
-        <span>Succeeded: <b id="jbSuc">0</b></span>
-        <button id="jbRefreshBtn" class="btn" style="font-size:12px;padding:4px 10px">Atualizar</button>
-        <button id="jbShowBacklogBtn" class="btn" style="font-size:12px;padding:4px 10px">Ver Backlog</button>
-      </div>
-      <div id="jbList" style="max-height:150px;overflow:auto;background:#10182a;border-radius:7px;border:1px solid #243148;"></div>
     </div>
     <div id="listaPerfis" class="list"></div>
   </div>
@@ -509,15 +494,6 @@
     async function reloadPerfis() {
       const st = await window.electronAPI.getStatus();
 
-      // Cap / OpenRate / Fila de abertura
-      const cap = st && st.cap;
-      if (cap) {
-        const openRate = cap.minOpenSpacingMs ? Math.max(1, Math.round(60000 / cap.minOpenSpacingMs)) : null;
-        document.getElementById('mCap').textContent = String(cap.safeMaxBrowsers ?? '--');
-        document.getElementById('mOpenRate').textContent = openRate ? String(openRate) : '--';
-        document.getElementById('mOpenQ').textContent = String(cap.openQueueLen || 0);
-      }
-
       // Banner global de aviso (warning) caso backend informe
       const warn = st && st.warning;
       if (warn) {
@@ -669,9 +645,6 @@
 
         // -- NOVO: Ativação em espera/hold --
         if (activationHeldPill) titleRow.append(activationHeldPill);
-        if (p.activationHeldReason === 'cap_reached' && p.activationHeldUntil && p.activationHeldUntil > Date.now()) {
-          titleRow.append(buildPill('Aguardando capacidade do servidor', 'warn'));
-        }
 
         // -- NOVO: Reabrirá em... --
         if (reopenAtPill) titleRow.append(reopenAtPill);
@@ -796,7 +769,7 @@
           if (isFrozen) btnHuman.disabled = true;
           right.append(btnCookies, btnHuman, btnCfg, btnLog);
         }
-        // ----------------------------------------------------------------------------------
+        // ===========================================================
 
         // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
         // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
@@ -862,47 +835,6 @@
       });
     }
 
-    // Job utilities - app.js já garante getJobs/getJobsQueue/getJob
-    async function loadJobsPanel(showBacklog=false) {
-      let res;
-      if (showBacklog) res = await window.electronAPI.getJobsQueue().catch(()=>({ok:false,queue:[]})); 
-      else res = await window.electronAPI.getJobs({ limit: 100 }).catch(()=>({ok:false,jobs:[]}));
-      let list = showBacklog ? (res && res.queue) : (res && res.jobs) || [];
-      const map = {pending:0,running:0,failed:0,succeeded:0};
-      list.forEach(j=>{
-        if(j.status==='pending') map.pending++;
-        if(j.status==='running') map.running++;
-        if(j.status==='failed') map.failed++;
-        if(j.status==='succeeded') map.succeeded++;
-      });
-      document.getElementById('jbPending').textContent=map.pending||'0';
-      document.getElementById('jbRunning').textContent=map.running||'0';
-      document.getElementById('jbFailed').textContent=map.failed||'0';
-      document.getElementById('jbSuc').textContent=map.succeeded||'0';
-      const jbList = document.getElementById('jbList');
-      jbList.innerHTML = '';
-      list.forEach(it => {
-        const div = document.createElement('div');
-        div.style.cssText='border-bottom:1px solid #18243a;padding:4px 4px;font-size:12px;display:flex;gap:10px;align-items:center;';
-        div.innerHTML = `
-          <span style="font-weight:700">${it.type||it.kind||'-'}</span>
-          <span>${it.perfil||'-'}</span>
-          <span>${it.status||'-'}</span>
-          <span>${it.reason?('<span title="'+it.reason+'">'+it.reason+'</span>'):''}</span>
-          <span>${it.durMs!==undefined ? `🕒 ${Math.round(it.durMs/1000)}s` : ''}</span>
-          <span>${it.wait ? `<span style="color:#FDB700" title="${it.wait}">${it.wait}</span>` : ''}</span>
-          <span style="color:#999">${it.id ? it.id.slice(-8) : ''}</span>
-        `;
-        jbList.appendChild(div);
-      });
-    }
-
-    // Auto atualizar painel Jobs
-    setInterval(()=>{ loadJobsPanel(false); }, 3500);
-    document.getElementById('jbRefreshBtn').onclick=()=>loadJobsPanel(false);
-    document.getElementById('jbShowBacklogBtn').onclick=()=>loadJobsPanel(true);
-    loadJobsPanel(false);
-
     // Nova Conta (chama o modal; o modal faz a criação com loading)
     document.getElementById('addPerfilBtn').onclick = async () => {
       let cidades = [];
@@ -956,7 +888,6 @@
       ids.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.toggle('active',
-          (id==='filterAll'     && f==='all') ||
           (id==='filterAll'     && f==='all') ||
           (id==='filterActive'  && f==='active') ||
           (id==='filterInactive'&& f==='inactive') ||
@@ -1427,8 +1358,7 @@
         } catch (e) {
           alert('Erro ao descongelar todos: ' + (e && e.message || e));
         } finally {
-          btn.disabled = false;
-          btn.textContent = 'Descongelar (todos)';
+          btn.disabled = false; btn.textContent = 'Descongelar (todos)';
         }
       };
     })();

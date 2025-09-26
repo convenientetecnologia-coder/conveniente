@@ -1,8 +1,6 @@
 // scripts/workerClient.js
 const { fork } = require('child_process');
 const path = require('path');
-const serverCap = require('./serverCap.js');
-const jobManager = require('./jobManager.js'); // IMPORTAÇÃO DO JOB MANAGER
 
 // === MILITARY WATCHDOG (restart worker if nonresponsive) ===
 let _wd = { timer: null, failCount: 0, lastOkAt: 0 };
@@ -20,10 +18,7 @@ function startWatchdog() {
     } catch {}
     _wd.failCount++;
     if (_wd.failCount >= 8 && (Date.now() - _wd.lastOkAt) > 30000) {
-      try { 
-        console.warn('[WATCHDOG] worker nonresponsive — restarting'); 
-        serverCap.bumpDown('watchdog_restart');
-      } catch {}
+      try { console.warn('[WATCHDOG] worker nonresponsive — restarting'); } catch {}
       try { workerChild && workerChild.kill && workerChild.kill('SIGKILL'); } catch {}
       _wd.failCount = 0;
       _wd.lastOkAt = 0;
@@ -34,9 +29,6 @@ function startWatchdog() {
 
 let workerChild = null;
 let isQuitting = false;
-
-let _jobManager = jobManager; // Permite sobrescrever com setJobManager, se desejado
-function setJobManager(jm) { _jobManager = jm; }
 
 // ---- Função para spawnar o worker ----
 function forkWorker() {
@@ -61,15 +53,6 @@ function forkWorker() {
     setTimeout(forkWorker, 2000);
   });
 
-  workerChild.on('message', (msg) => {
-    // PATCH: Integração com Job Manager para eventos de job
-    if (msg && msg.type === 'job_event' && msg.payload && _jobManager && typeof _jobManager.onWorkerEvent === 'function') {
-      _jobManager.onWorkerEvent(msg.payload);
-      return; // não processa como reply
-    }
-    // O resto (replyTo) é manipulado abaixo no sendWorkerCommand
-  });
-
   startWatchdog();
 }
 
@@ -91,7 +74,6 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
     const handler = (msg) => {
       try {
         if (done) return;
-        // PATCH: NÃO necessário aqui, pois já tratado no .on('message') acima
         if (msg && msg.replyTo === msgId) {
           done = true;
           try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
@@ -139,6 +121,5 @@ function killWorker() {
 module.exports = {
   fork: forkWorker,
   sendWorkerCommand,
-  kill: killWorker,
-  setJobManager // Opcional, caso queira plugar outro jobManager
+  kill: killWorker
 };

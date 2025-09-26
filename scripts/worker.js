@@ -16,20 +16,6 @@ const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NO
 // NOVO: Import RAM/CPU cross-platform
 const pidusage = require('pidusage');
 const psList = require('ps-list');
-const serverCap = require('./serverCap.js');
-const autoTuner = require('./autoTuner.js');
-
-// Job Manager (plug supervisor/job manager)
-const jobManager = require('./jobManager.js');
-
-// Função global para emitir eventos de job para o Job Manager.
-function emitJobEvent(payload) {
-  try {
-    if (process && typeof process.send === 'function') {
-      process.send({ type: 'job_event', payload });
-    }
-  } catch {}
-}
 
 // =============== PATCH: HEALTH STATEFUL + RECOVERY ESCADA ===============
 const HEALTH_CFG = {
@@ -266,24 +252,20 @@ function desiredActiveNames() {
 }
 
 function chooseCandidatesToOpen(maxN = 2) {
+  const now = Date.now();
   const desired = new Set(desiredActiveNames());
   const allPerfis = loadPerfisJson();
-  const essentials = [], normals = [];
-  for (const p of allPerfis) {
-    if (!desired.has(p.nome)) continue;
-    if (controllers.has(p.nome)) continue;
-    if (isFrozenNow(p.nome)) continue;
-    const d = readJsonFile(desiredPath, { perfis: {} });
-    const ent = d.perfis?.[p.nome] || {};
-    (ent.essential ? essentials : normals).push(p.nome);
-  }
-  const sorted = (arr) => arr.sort((a,b) => {
+  const candidates = allPerfis
+    .map(p => p.nome)
+    .filter(nome => desired.has(nome) && !controllers.has(nome))
+    .filter(nome => !isFrozenNow(nome))
+    .slice(0);
+  candidates.sort((a,b) => {
     const ra = typeof robeMeta[a]?.ramMB === 'number' ? robeMeta[a].ramMB : 999999;
     const rb = typeof robeMeta[b]?.ramMB === 'number' ? robeMeta[b].ramMB : 999999;
     return ra - rb;
   });
-  const list = sorted(essentials).concat(sorted(normals));
-  return list.slice(0, Math.max(1, maxN));
+  return candidates.slice(0, Math.max(1, maxN));
 }
 
 async function escalateTowardsFull() {
@@ -304,17 +286,12 @@ async function escalateTowardsFull() {
     await milLog('mil_action', `light_escalate: tentando abrir ${cand.length} perfis (cap=${cap})`);
     for (const nome of cand) {
       try {
-        const gate = await openGate.trySchedule(nome, 'heal_escalate');
-        if (gate.now) {
-          const r = await activateOnce(nome, 'heal_escalate');
-          if (r && r.ok) healer.lastProgressAt = Date.now();
-          else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-            await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
-          }
-        } else {
-          await issues.append(nome, 'mil_action', 'activation_queued(cap) src=heal_escalate');
+        const r = await activateOnce(nome, 'heal_escalate');
+        if (r && r.ok) healer.lastProgressAt = Date.now();
+        else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+          await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
         }
       } catch {}
     }
@@ -358,17 +335,7 @@ async function assertFullActivity() {
     const cand = chooseCandidatesToOpen(need);
     if (cand.length) {
       await milLog('mil_action', `assert_full_activity: subir ${cand.length} para não ficar em zero`);
-      for (const nome of cand) {
-        try {
-          const gate = await openGate.trySchedule(nome, 'assert_full_activity');
-          if (gate.now) {
-            await activateOnce(nome, 'assert_full_activity');
-            healer.lastProgressAt = Date.now();
-          } else {
-            await issues.append(nome, 'mil_action', 'activation_queued(cap) src=assert_full_activity');
-          }
-        } catch {}
-      }
+      for (const nome of cand) { try { await activateOnce(nome, 'assert_full_activity'); healer.lastProgressAt = Date.now(); } catch {} }
     }
   }
 }
@@ -384,17 +351,7 @@ async function panicMode() {
   try { await killStrayChromes(); } catch {}
   const cand = chooseCandidatesToOpen(Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 2));
   await milLog('mil_action', `panic_min_bootstrap: abrindo ${cand.length}`);
-  for (const nome of cand) {
-    try {
-      const gate = await openGate.trySchedule(nome, 'panic_bootstrap');
-      if (gate.now) {
-        await activateOnce(nome, 'panic_bootstrap');
-        healer.lastProgressAt = Date.now();
-      } else {
-        await issues.append(nome, 'mil_action', 'activation_queued(cap) src=panic_bootstrap');
-      }
-    } catch {}
-  }
+  for (const nome of cand) { try { await activateOnce(nome, 'panic_bootstrap'); healer.lastProgressAt = Date.now(); } catch {} }
   await milLog('mil_action', `panic_mode_end`);
 }
 
@@ -448,60 +405,6 @@ console.log('[WORKER][BOOT]', {
 } catch (e) {
 try { console.log('[WORKER][BOOT] log error', e && e.message || e); } catch {}
 }
-
-// INSTRUÇÃO 6: Funções wrappers de timer reprogramável
-let _robeTickIntervalMs = 7000;
-let _robeTimer = null;
-function setRobeTickInterval(ms) {
-  _robeTickIntervalMs = Math.max(4000, Math.min(20000, Number(ms)||7000));
-  if (_robeTimer) clearInterval(_robeTimer);
-  _robeTimer = setInterval(robeTickGlobal, _robeTickIntervalMs);
-}
-
-let _nurseIntervalMs = 5000;
-let _nurseTimer = null;
-function setNurseInterval(ms) {
-  _nurseIntervalMs = Math.max(3000, Math.min(15000, Number(ms)||5000));
-  if (_nurseTimer) clearInterval(_nurseTimer);
-  _nurseTimer = setInterval(() => { nurseTick().catch(()=>{}); }, _nurseIntervalMs);
-}
-
-let _healthIntervalMs = 10000;
-let _healthTimer = null;
-function setHealthInterval(ms) {
-  _healthIntervalMs = Math.max(5000, Math.min(30000, Number(ms)||10000));
-  if (_healthTimer) clearInterval(_healthTimer);
-  _healthTimer = setInterval(() => { healthTick().catch(()=>{}); }, _healthIntervalMs);
-}
-
-// INSTRUÇÃO 3: Boot com autoStressTestBoot e runtimeSelfTuning
-(async () => {
-  try { 
-    const cap = await serverCap.calibrateIfNeeded();
-    console.log('[CAP]', cap);
-  } catch(e){
-    console.warn('[CAP] calibrate failed', e && e.message || e);
-  }
-  try {
-    await autoTuner.autoStressTestBoot({
-      maxRaise: 4,
-      observeMs: 10000,
-      minHeadroomAfterOpenMB: 2048
-    });
-  } catch (e) {
-    try { await issues.append('system', 'mil_action', 'auto_stress_boot_fail ' + (e && e.message || e)); } catch {}
-  }
-  // inicia tuning contínuo com reschedule de timers dinâmicos
-  await autoTuner.runtimeSelfTuning({
-    reschedule: ({ robeTickMs, nurseMs, healthMs }) => {
-      try {
-        if (robeTickMs && robeTickMs !== _robeTickIntervalMs) { setRobeTickInterval(robeTickMs); }
-        if (nurseMs && nurseMs !== _nurseIntervalMs) { setNurseInterval(nurseMs); }
-        if (healthMs && healthMs !== _healthIntervalMs) { setHealthInterval(healthMs); }
-      } catch {}
-    }
-  });
-})();
 
 // Caminhos principais
 const perfisPath = path.join(__dirname, '../dados', 'perfis.json');
@@ -614,8 +517,6 @@ if (!nome) return;
 if (!issues || typeof issues.append !== 'function') return;
 const msg = String(message == null ? '' : message).slice(0, 400);
 await issues.append(nome, type, msg);
-// INSTRUMENTAÇÃO: relatar ação -> Job Manager
-emitJobEvent({ perfil: nome, kind: 'report', type, message: msg, ts: Date.now() });
 } catch {}
 }
 // ===================================================================
@@ -626,60 +527,6 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 
 // Estado global do Robe (cooldown, fila, etc)
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
-
-// 2. CRIAR openGate GLOBAL DE ABERTURA
-const openGate = {
-  cap: null,
-  lastOpenAt: 0,
-  queue: [],
-  initDone: false,
-  async init() {
-    if (this.initDone) return;
-    this.cap = await serverCap.calibrateIfNeeded();
-    this.initDone = true;
-    setInterval(()=>this.tick().catch(()=>{}), 1000);
-  },
-  currentOpen() { return controllers.size; },
-  canOpenNow() {
-    const cap = this.cap || serverCap.getCap() || {};
-    const max = cap.safeMaxBrowsers || 1;
-    const spacing = cap.minOpenSpacingMs || 9000;
-    const timeOk = (Date.now() - this.lastOpenAt) >= spacing;
-    return this.currentOpen() < max && timeOk;
-  },
-  async trySchedule(nome, source='reconcile') {
-    await this.init();
-    if (this.canOpenNow()) return { ok: true, now: true };
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].activationHeldUntil = Date.now() + Math.max(15000, (this.cap?.minOpenSpacingMs||9000));
-    robeMeta[nome].activationHeldReason = 'cap_reached';
-    const isEssential = (()=> {
-      try { const d=readJsonFile(desiredPath, {perfis:{}}); return !!(d.perfis?.[nome]?.essential); } catch { return false; }
-    })();
-    if (!this.queue.includes(nome)) {
-      if (isEssential) this.queue.unshift(nome);
-      else this.queue.push(nome);
-    }
-    try { await issues.append(nome, 'mil_action', `activation_queued(cap) src=${source}`); } catch {}
-    return { ok: true, now: false, queued: true };
-  },
-  async tick() {
-    if (!this.queue.length) return;
-    if (!this.canOpenNow()) return;
-    const nome = this.queue.shift();
-    const desired = readJsonFile(desiredPath, { perfis: {} });
-    if (!desired.perfis?.[nome]?.active || isFrozenNow(nome)) return;
-    this.lastOpenAt = Date.now();
-    try {
-      const r = await activateOnce(nome, 'openGate');
-      if (!r || !r.ok) {
-        this.lastOpenAt = Date.now() - (this.cap?.minOpenSpacingMs||9000) + 2000;
-        setTimeout(()=> this.queue.push(nome), 3000);
-      }
-    } catch { setTimeout(()=> this.queue.push(nome), 4000); }
-  }
-};
-openGate.init().catch(()=>{});
 
 // Repopular frozenUntil ao boot, lendo dos manifests
 try {
@@ -752,19 +599,6 @@ console.log('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
 const manifest = resolveManifest(nome);
 if (!manifest) throw new Error('Perfil não encontrado');
 
-try {
-  await openGate.init();
-  const cap = openGate.cap || serverCap.getCap() || {};
-  const max = cap.safeMaxBrowsers || 1;
-  if (controllers.size >= max) {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].activationHeldUntil = Date.now() + (cap.minOpenSpacingMs || 9000);
-    robeMeta[nome].activationHeldReason = 'cap_reached';
-    await issues.append(nome, 'mil_action', `block_activate_cap_reached max=${max} active=${controllers.size}`);
-    return { ok: false, error: 'cap_reached' };
-  }
-} catch {}
-
 // GATE DE RAM antes de abrir (livre > 3GB)
 {
   const freeMB = Math.round(os.freemem() / (1024*1024));
@@ -774,48 +608,11 @@ try {
   }
 }
 
-// INSTRUÇÃO 4: instrumentação de open
-const t0 = Date.now();
-const freeBeforeMB = Math.round(os.freemem()/(1024*1024));
-emitJobEvent({
-  job: (typeof arguments[1] === 'object' && arguments[1]._jobId) || null, // se vier de API/workerClient
-  perfil: nome,
-  kind: 'openBrowser.start',
-  ts: Date.now(),
-  cap: require('./serverCap.js').getCap(),
-  freeBeforeMB: typeof freeBeforeMB !== 'undefined' ? freeBeforeMB : Math.round(os.freemem()/(1024*1024)),
-  source
-});
-
 const browser = await browserHelper.openBrowser(manifest);
 if (!browser || typeof browser.newPage !== 'function') {
 throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
 }
-
-// registro do open sucedido (antes do set controllers)
-try {
-  const freeAfterMB = Math.round(os.freemem()/(1024*1024));
-  autoTuner.noteOpenEvent({
-    nome, ok: true,
-    durMs: Date.now() - t0,
-    freeBeforeMB,
-    freeAfterMB
-  });
-} catch {}
-
 controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
-// INSTRUÇÃO 4: sucesso openBrowser.end
-emitJobEvent({
-  job: (typeof arguments[1] === 'object' && arguments[1]._jobId) || null,
-  perfil: nome,
-  kind: 'openBrowser.end',
-  ok: true,
-  durMs: Date.now() - t0,
-  freeAfterMB: Math.round(os.freemem()/(1024*1024)),
-  source
-});
-
-openGate.lastOpenAt = Date.now();
 
 // HEADROOM pós-abrir (rollback se < 2GB)
 {
@@ -858,14 +655,6 @@ _statusLock = _statusLock.then(async () => {
 });
 } catch {}
 try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
-const msg = (e && e.message) || '';
-if (/Session closed|Target closed|Target\.createTarget|main frame too early|Navigation timeout/i.test(msg)) {
-  try { require('./serverCap.js').bumpDown('open_fail_spike'); } catch {}
-  // hold individual
-  robeMeta[nome] = robeMeta[nome] || {};
-  robeMeta[nome].reopenAt = Date.now() + (45 + Math.floor(Math.random()*45))*1000;
-  await issues.append(nome, 'mil_action', `reopen_delayed(${Math.round((robeMeta[nome].reopenAt-Date.now())/1000)}s) reason=${msg.slice(0,60)}`);
-}
 // INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
 if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
   robeMeta[nome] = robeMeta[nome] || {};
@@ -873,33 +662,6 @@ if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(Strin
   try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (activateOnce)'); } catch {}
 }
 // FIM DA INSTRUÇÃO 9
-
-// INSTRUÇÃO 4: instrumentação de open falho
-try {
-  if (typeof t0 === 'number') {
-    autoTuner.noteOpenEvent({
-      nome,
-      ok: false,
-      durMs: Date.now() - t0,
-      freeBeforeMB: typeof freeBeforeMB === 'number' ? freeBeforeMB : Math.round(os.freemem()/(1024*1024)),
-      freeAfterMB: Math.round(os.freemem()/(1024*1024)),
-      error: e && e.message || String(e)
-    });
-  }
-} catch {}
-
-// INSTRUMENTAÇÃO: openBrowser.end (falha)
-emitJobEvent({
-  job: (typeof arguments[1] === 'object' && arguments[1]._jobId) || null,
-  perfil: nome,
-  kind: 'openBrowser.end',
-  ok: false,
-  error: e && e.message || String(e),
-  durMs: typeof t0 === 'number' ? (Date.now() - t0) : undefined,
-  freeAfterMB: Math.round(os.freemem()/(1024*1024)),
-  source
-});
-
 console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
 return { ok: false, error: e && e.message || String(e) };
 } finally {
@@ -1276,7 +1038,7 @@ async function ramCpuMonitorTick() {
         const A = hist[0], B = hist[hist.length-1];
         const dMin = Math.max(0.5, (B.t - A.t)/60000);
         const slope = (B.mb - A.mb) / dMin;
-        const avg = hist.reduce((a, b) => a + b.mb, 0) / hist.length;
+        const avg = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
         slopeOK = (slope > 50) && (avg > 800);
       }
       // Só kill se comprovado leak real!
@@ -1357,13 +1119,6 @@ async function ramCpuMonitorTick() {
   // ===== FIM PATCH MILITAR: Avaliação/autoMode global =====
 
   // No final, snapshot status global, nunca direto!
-  try {
-    const vals = Object.values(robeMeta).map(m => (typeof m.ramMB === 'number' ? m.ramMB : null)).filter(x => x != null && x > 50 && x < 2000);
-    if (vals.length >= 3) {
-      const avg = Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
-      require('./serverCap.js').recordRuntimeSample({ perBrowserMBAvg: avg });
-    }
-  } catch {}
   await snapshotStatusAndWrite();
 
   // Agenda próxima rodada (3–4s)
@@ -1425,12 +1180,6 @@ async function robeTickGlobal() {
     console.log(`[WORKER][robeTickGlobal] Enfileirando ${nome}? cooldown=${robeCooldownLeft(nome)}s inQueue=${robeQueue.inQueue(nome)}, isActive=${robeQueue.isActive(nome)}`);
 
     robeQueue.enqueue(nome, async () => {
-      const tStartRobe = Date.now();
-      let _robeOkFlag = null;
-
-      // INSTRUMENTAÇÃO: início do ciclo do Robe (global)
-      emitJobEvent({ perfil: nome, kind: 'robe.start', ts: Date.now() });
-
       // === PATCH autoMode Light: após enfileirar em modo light, rate limit ===
       if (autoMode.mode === 'light') {
         autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
@@ -1449,9 +1198,6 @@ async function robeTickGlobal() {
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         robeUpdateMeta(nome, { estado: 'erro' });
         try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (guard)'); } catch {}
-        try { autoTuner.noteRobeCycle({ nome, ok: false, durMs: Date.now() - tStartRobe }); } catch {}
-        // INSTRUMENTAÇÃO: fim do ciclo do Robe (global)
-        emitJobEvent({ perfil: nome, kind: 'robe.end', ok: _robeOkFlag === true, durMs: Date.now() - tStartRobe });
         return;
       }
 
@@ -1504,8 +1250,6 @@ async function robeTickGlobal() {
           robeMeta[nome].cooldownSec = penalSec;
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: penalSec });
-          _robeOkFlag = false;
-          try { autoTuner.noteRobeCycle({ nome, ok: false, durMs: Date.now() - tStartRobe }); } catch {}
           try { console.warn('[WORKER][robeTickGlobal] Robe error:', e && e.message || e); } catch {}
           return; // não crasha fila global
         }
@@ -1525,7 +1269,6 @@ async function robeTickGlobal() {
             proximaPostagem: robeLastPosted(nome) + robePauseMs,
             ultimaPostagem: Date.now()
           });
-          _robeOkFlag = true;
           try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso'); } catch {}
           try { console.log(`[WORKER][robeTickGlobal] Robe success: ${nome}`); } catch {}
         } else {
@@ -1533,11 +1276,9 @@ async function robeTickGlobal() {
             estado: 'idle',
             cooldownSec: robeCooldownLeft(nome)
           });
-          _robeOkFlag = false;
         }
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
-        _robeOkFlag = false;
       } finally {
         // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
@@ -1561,12 +1302,6 @@ async function robeTickGlobal() {
         // Log de término do Robe
         try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado'); } catch {}
         try { console.log(`[WORKER][robeTickGlobal] Robe end: ${nome}`); } catch {}
-
-        // INSTRUMENTAÇÃO: fim do ciclo do Robe (global)
-        emitJobEvent({ perfil: nome, kind: 'robe.end', ok: _robeOkFlag === true, durMs: Date.now() - tStartRobe });
-
-        // INSTRUMENTAÇÃO: fim do ciclo do Robe
-        try { autoTuner.noteRobeCycle({ nome, ok: _robeOkFlag === true, durMs: Date.now() - tStartRobe }); } catch {}
       }
     });
 
@@ -1582,8 +1317,7 @@ async function robeTickGlobal() {
   }
 }
 
-// INSTRUÇÃO 6: uso dos wrappers para agendar o robeTick
-setRobeTickInterval(7000);
+setInterval(robeTickGlobal, 7000);
 setTimeout(robeTickGlobal, 3500);
 
 // ===== GC DE FOTOS (mantido/instalado) =====
@@ -1686,28 +1420,18 @@ function resolveChromeUserDataRoot() {
 }
 
 const handlers = {
-  async ['criar-perfil']({ cidade, cookies, _jobId }) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: null, kind: 'criar-perfil.start', ts: Date.now() });
-
-    if (!cidade || !cookies) {
-      emitJobEvent({ job: _jobId || null, perfil: null, kind: 'criar-perfil.end', ok: false, durMs: Date.now()-__t0, error: 'Cidade e cookies obrigatórios.' });
-      return { ok: false, error: 'Cidade e cookies obrigatórios.' };
-    }
+  async ['criar-perfil']({ cidade, cookies }) {
+    if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
     if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random()*100);
 
     const preset = pickUaPreset();
-    if (!preset) {
-      emitJobEvent({ job: _jobId || null, perfil: null, kind: 'criar-perfil.end', ok: false, durMs: Date.now()-__t0, error: 'UA preset esgotado.' });
-      return { ok: false, error: 'UA preset esgotado.' };
-    }
+    if (!preset) return { ok: false, error: 'UA preset esgotado.' };
 
     const cookiesArr = utils.normalizeCookies(cookies);
     if (!cookiesArr.length || !cookiesArr.find(c => c.name === 'c_user') || !cookiesArr.find(c => c.name === 'xs')) {
-      emitJobEvent({ job: _jobId || null, perfil: null, kind: 'criar-perfil.end', ok: false, durMs: Date.now()-__t0, error: 'Cookies inválidos ou ausentes: precisa de c_user e xs!' });
       return { ok: false, error: 'Cookies inválidos ou ausentes: precisa de c_user e xs!' };
     }
 
@@ -1738,29 +1462,14 @@ const handlers = {
 
     // REMOVIDO: gravação antiga/duplicada no dados/perfis/NOME
 
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'criar-perfil.end', ok: true, durMs: Date.now()-__t0 });
     return { ok: true, perfil: perfilObj };
   },
 
-  async activate({ nome, _jobId }) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'activate.start', ts: Date.now() });
-    const gate = await openGate.trySchedule(nome, 'message');
-    if (gate.now) {
-      const r = await activateOnce(nome, 'message');
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'activate.end', ok: !!(r && r.ok), durMs: Date.now()-__t0, error: r && !r.ok ? (r.error || null) : null });
-      return r;
-    } else {
-      await issues.append(nome, 'mil_action', 'activation_queued(cap) src=message').catch(()=>{});
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'activate.end', ok: true, durMs: Date.now()-__t0 });
-      return { ok: true, queued: true, now: false };
-    }
+  async activate({ nome }) {
+    return await activateOnce(nome, 'message');
   },
 
-  async deactivate({ nome, reason, policy, _jobId }) {
-  const __t0 = Date.now();
-  emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'deactivate.start', ts: Date.now() });
-
+  async deactivate({ nome, reason, policy }) {
   const preserve = (policy === 'preserveDesired');
   let reopenDelayMs = 0;
   if (preserve) {
@@ -1779,7 +1488,6 @@ const handlers = {
       issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
     }
     await snapshotStatusAndWrite();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'deactivate.end', ok: true, durMs: Date.now()-__t0 });
     return { ok: true };
   }
   try {
@@ -1811,45 +1519,29 @@ const handlers = {
     }
   }
   await snapshotStatusAndWrite();
-  emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'deactivate.end', ok: true, durMs: Date.now()-__t0 });
   return { ok: true };
 },
 
-  async configure({ nome, _jobId }) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'configure.start', ts: Date.now() });
-
+  async configure({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'configure.end', ok: false, durMs: Date.now()-__t0, error: 'Navegador não está aberto/vivo para esta conta!' });
-      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    }
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     const perfisArr = loadPerfisJson();
     const perfil = perfisArr.find(p => p && p.nome === nome);
-    if (!perfil || !perfil.userDataDir) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'configure.end', ok: false, durMs: Date.now()-__t0, error: 'Perfil não encontrado!' });
-      return { ok: false, error: 'Perfil não encontrado!' };
-    }
+    if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
     const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
-    if (!fs.existsSync(manifestPath)) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'configure.end', ok: false, durMs: Date.now()-__t0, error: 'Manifest não existe para este perfil!' });
-      return { ok: false, error: 'Manifest não existe para este perfil!' };
-    }
+    if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     if (!Array.isArray(manifest.cookies) || !manifest.cookies.length) {
       try { await issues.append(nome, 'cookie_inject_failed', 'Cookies não encontrados no manifest!'); } catch {}
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'configure.end', ok: false, durMs: Date.now()-__t0, error: 'Cookies não encontrados no manifest!' });
       return { ok: false, error: 'Cookies não encontrados no manifest!' };
     }
     ctrl.configurando = true;
     try {
       await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
       // NÃO execute closeExtraPages/prune aqui!
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'configure.end', ok: true, durMs: Date.now()-__t0 });
       return { ok: true };
     } catch (e) {
       try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'configure.end', ok: false, durMs: Date.now()-__t0, error: e && e.message || 'falha_injetar_cookies' });
       return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
     } finally {
       ctrl.configurando = false;
@@ -1857,25 +1549,13 @@ const handlers = {
     }
   },
 
-  async start_work({ nome, _jobId }) {
-  const __t0 = Date.now();
-  emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'start_work.start', ts: Date.now() });
-
+  async start_work({ nome }) {
   const ctrl = controllers.get(nome);
-  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'start_work.end', ok: false, durMs: Date.now()-__t0, error: 'Navegador não está aberto/vivo para esta conta!' });
-    return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-  }
+  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
   // PATCH: não repetir trabalho se virtus já iniciando/ativo
-  if (ctrl.trabalhando && ctrl.virtus) {
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'start_work.end', ok: true, durMs: Date.now()-__t0 });
-    return { ok: true }; // já trabalhando
-  }
-  if (ctrl._virtusStarting) {
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'start_work.end', ok: true, durMs: Date.now()-__t0 });
-    return { ok: true };
-  }
+  if (ctrl.trabalhando && ctrl.virtus) return { ok: true }; // já trabalhando
+  if (ctrl._virtusStarting) return { ok: true };
 
   try {
     ctrl._virtusStarting = true;
@@ -1885,25 +1565,17 @@ const handlers = {
       await browserHelper.forceCloseExtras(ctrl.browser);
     }
     await snapshotStatusAndWrite();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'start_work.end', ok: true, durMs: Date.now()-__t0 });
     return { ok: true };
   } catch (e) {
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'start_work.end', ok: false, durMs: Date.now()-__t0, error: e && e.message || String(e) });
     return { ok: false, error: e && e.message || String(e) };
   } finally {
     ctrl._virtusStarting = false;
   }
 },
 
-  async invoke_human({ nome, _jobId }) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'invoke_human.start', ts: Date.now() });
-
+  async invoke_human({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'invoke_human.end', ok: false, durMs: Date.now()-__t0, error: 'Navegador não está aberto/vivo para esta conta!' });
-      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    }
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     // 1. Esperar Robe terminar (se estiver em execução para esta conta)
     const robes = robeMeta[nome] || {};
@@ -1935,19 +1607,12 @@ const handlers = {
 
     await snapshotStatusAndWrite();
 
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'invoke_human.end', ok: true, durMs: Date.now()-__t0 });
     return { ok: true };
   },
 
-  async ['human-resume']({ nome, _jobId }) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'human-resume.start', ts: Date.now() });
-
+  async ['human-resume']({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'human-resume.end', ok: false, durMs: Date.now()-__t0, error: 'Navegador não está aberto/vivo para esta conta!' });
-      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    }
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
 
@@ -1968,30 +1633,19 @@ const handlers = {
     try { unfreezeCooldownIfWorking(nome); } catch {}
 
     await snapshotStatusAndWrite();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'human-resume.end', ok: true, durMs: Date.now()-__t0 });
     return { ok:true };
   },
 
   // == ALTERAÇÃO 3: Handler robe-play substituído ==
-  async ['robe-play']({ nome, _jobId }) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'robe-play.start', ts: Date.now() });
-
+  async ['robe-play']({ nome }) {
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'robe-play.end', ok: false, durMs: Date.now()-__t0, error: 'Navegador não está aberto/vivo para esta conta!' });
-      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    }
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     // P0.3: recusa se frozen
     if (isFrozenNow(nome)) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'robe-play.end', ok: false, durMs: Date.now()-__t0, error: 'account_frozen' });
       return { ok: false, error: 'account_frozen' }
     }
     // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
-    if (ctrl && ctrl.configurando) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'robe-play.end', ok: false, durMs: Date.now()-__t0, error: 'perfil_em_configuracao' });
-      return { ok: false, error: 'perfil_em_configuracao' };
-    }
+    if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
 
     // Zera cooldown no manifest
     try {
@@ -2006,7 +1660,6 @@ const handlers = {
     // Se não está na fila nem ativo, enfileira o callback REAL igual ao robeTickGlobal:
     if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
       robeUpdateMeta(nome, { emFila: true });
-      const jobIdLocal = _jobId || null;
       robeQueue.enqueue(nome, async () => {
         // === PATCH autoMode Light: após enfileirar em modo light, rate limit ===
         if (autoMode.mode === 'light') {
@@ -2014,10 +1667,6 @@ const handlers = {
           autoMode.light.robeSkipped = (autoMode.light.robeSkipped || 0) + 1;
         }
         // === FIM patch ===
-
-        const tStartRobe = Date.now();
-        // INSTRUMENTAÇÃO: início do ciclo do Robe (robe-play)
-        emitJobEvent({ job: jobIdLocal, perfil: nome, kind: 'robe.start', ts: Date.now() });
 
         robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
@@ -2029,8 +1678,6 @@ const handlers = {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
           robeUpdateMeta(nome, { estado: 'erro' });
           try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (robe-play guard)'); } catch {}
-          // INSTRUMENTAÇÃO: fim do ciclo do Robe (robe-play)
-          emitJobEvent({ job: jobIdLocal, perfil: nome, kind: 'robe.end', ok: false, durMs: Date.now() - tStartRobe });
           return;
         }
 
@@ -2080,8 +1727,6 @@ const handlers = {
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
             robeUpdateMeta(nome, { estado: 'erro', cooldownSec: penalSec });
             try { console.warn('[WORKER][robe-play] Robe error:', e && e.message || e); } catch {}
-            // INSTRUMENTAÇÃO: fim do ciclo do Robe (robe-play)
-            emitJobEvent({ job: jobIdLocal, perfil: nome, kind: 'robe.end', ok: false, durMs: Date.now() - tStartRobe });
             return; // não crasha fila global
           }
           // ==== EOF COOL/PRUNED ERRORS ====
@@ -2126,22 +1771,15 @@ const handlers = {
           // Log de término do Robe (robe-play)
           try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
           try { console.log(`[WORKER][robe-play] Robe end: ${nome}`); } catch {}
-
-          // INSTRUMENTAÇÃO: fim do ciclo do Robe (robe-play)
-          emitJobEvent({ job: jobIdLocal, perfil: nome, kind: 'robe.end', ok: true, durMs: Date.now() - tStartRobe });
         }
       });
       await snapshotStatusAndWrite();
     }
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'robe-play.end', ok: true, durMs: Date.now()-__t0 });
     return { ok: true };
   },
   // == FIM ALTERAÇÃO 3 ==
 
   async ['get-status']() {
-    const __t0 = Date.now();
-    emitJobEvent({ perfil: 'system', kind: 'get-status.start', ts: Date.now() });
-
     const perfisArr = loadPerfisJson();
     const perfis = perfisArr.map(p => {
       const nome = p.nome;
@@ -2212,70 +1850,32 @@ const handlers = {
       cores: (os.cpus()||[]).length,
       cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
     };
-    const cap = require('./serverCap.js').getCap();
-    emitJobEvent({ perfil: 'system', kind: 'get-status.end', ok: true, durMs: Date.now()-__t0 });
     return {
       perfis,
       robes,
       robeQueue: robeQueueList,
       autoMode,
-      sys,
-      cap: {
-        safeMaxBrowsers: cap?.safeMaxBrowsers || null,
-        perBrowserMB: cap?.perBrowserMB || null,
-        reserveMB: cap?.reserveMB || null,
-        minOpenSpacingMs: cap?.minOpenSpacingMs || null,
-        openQueueLen: (openGate.queue||[]).length
-      }
+      sys
     };
   },
 
-  async unfreeze({ nome, setBy, _jobId }) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'unfreeze.start', ts: Date.now() });
-
-    if (!nome) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'unfreeze.end', ok: false, durMs: Date.now()-__t0, error: 'nome_obrigatorio' });
-      return { ok: false, error: 'nome_obrigatorio' };
-    }
-    try { await unfreezeProfile(nome, setBy || 'admin'); } catch (e) {
-      emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'unfreeze.end', ok: false, durMs: Date.now()-__t0, error: e && e.message || String(e) });
-      return { ok: false, error: e && e.message || String(e) };
-    }
-    emitJobEvent({ job: _jobId || null, perfil: nome, kind: 'unfreeze.end', ok: true, durMs: Date.now()-__t0 });
+  async unfreeze({ nome, setBy }) {
+    if (!nome) return { ok: false, error: 'nome_obrigatorio' };
+    try { await unfreezeProfile(nome, setBy || 'admin'); } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
     return { ok: true };
   },
 
-  async ['unfreeze-all']({ _jobId } = {}) {
-    const __t0 = Date.now();
-    emitJobEvent({ job: _jobId || null, perfil: 'system', kind: 'unfreeze-all.start', ts: Date.now() });
-
+  async ['unfreeze-all']() {
     try {
       const perfisArr = loadPerfisJson();
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
         try { await unfreezeProfile(p.nome, 'admin_all'); } catch {}
       }
-      emitJobEvent({ job: _jobId || null, perfil: 'system', kind: 'unfreeze-all.end', ok: true, durMs: Date.now()-__t0 });
       return { ok: true };
-    } catch (e) {
-      emitJobEvent({ job: _jobId || null, perfil: 'system', kind: 'unfreeze-all.end', ok: false, durMs: Date.now()-__t0, error: e && e.message || String(e) });
-      return { ok: false, error: e && e.message || String(e) };
-    }
+    } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
   }
 };
-
-// INSTRUÇÃO 2: Inicializar autoTuner com contexto do worker
-autoTuner.init({
-  controllers,
-  robeMeta,
-  desiredPath,
-  readJsonFile,
-  serverCap: require('./serverCap.js'),
-  openGate,
-  handlers,
-  activateOnce, // para autoStressTestBoot
-});
 
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
 async function snapshotStatusAndWrite() {
@@ -2352,7 +1952,6 @@ const sys = {
   cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
 };
 const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
-try { statusObj.tuning = require('./autoTuner.js').getState(); } catch {}
 // Não inclui mais robeRam obsoleto, pois RAM por perfil já está em perfis/robes.
 // Unificado cross-platform.
 const ok = writeJsonAtomic(statusPath, statusObj);
@@ -2415,14 +2014,14 @@ for (const nome of nomes) {
   // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
   if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
     if (isFrozenNow(nome)) {
+      // não reabre durante congelamento
       continue;
     }
+    // Só cumpre reopen se desired.active === true
     if (want.active === true) {
       robeMeta[nome].reopenAt = null;
       robeMeta[nome].killHistory = [];
-      const gate = await openGate.trySchedule(nome, 'reopenAt');
-      if (gate.now) { await activateOnce(nome, 'reopenAt-preserveDesired'); }
-      else { await issues.append(nome, 'mil_action', 'reopen_queued(cap)'); }
+      try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
     } else {
       robeMeta[nome].reopenAt = null;
       issues.append(nome, 'mil_action', 'reopen_at_ignored_desired_off').catch(()=>{});
@@ -2467,10 +2066,7 @@ for (const nome of nomes) {
     }
     // === FIM PATCH autoMode Light ===
 
-    const gate = await openGate.trySchedule(nome, 'reconcile');
-    if (gate.now) { try { await activateOnce(nome, 'reconcile'); } catch {} }
-    else { await issues.append(nome, 'mil_action', 'activation_queued(cap)'); }
-    continue;
+    try { await activateOnce(nome, 'reconcile'); } catch {}
   } else if (want.active === false && ctrl) {
     try { await handlers.deactivate({ nome }); } catch {}
     continue;
@@ -2524,6 +2120,7 @@ for (const nome of nomes) {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
             d2.perfis[nome].robePlay = false;
+            const ok = writeJsonAtomic(d2siredPath, d2);
             const ok2 = writeJsonAtomic(desiredPath, d2);
             if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
           }
@@ -2636,13 +2233,8 @@ const ULTRA_RECOVERY = {
 
 // ===== INÍCIO DO MÉTODO ULTRA CIRÚRGICO: ensureFrozenShutdown =====
 async function ensureFrozenShutdown(nome, origin = 'frozen') {
-  emitJobEvent({ perfil: nome, kind: 'kill.start', ts: Date.now(), origin });
-
   const ctrl = controllers.get(nome);
-  if (!ctrl) {
-    emitJobEvent({ perfil: nome, kind: 'kill.end', ok: true, durMs: 0, origin });
-    return;
-  }
+  if (!ctrl) return;
   try { robeQueue.skip && robeQueue.skip(nome); } catch {}
   try { await reportAction(nome, 'mil_action', 'frozen_kill'); } catch {}
   try {
@@ -2656,8 +2248,6 @@ async function ensureFrozenShutdown(nome, origin = 'frozen') {
     robeMeta[nome].activationHeldUntil = robeMeta[nome].frozenUntil || (Date.now() + 3600_000);
   } catch {}
   try { await snapshotStatusAndWrite(); } catch {}
-
-  emitJobEvent({ perfil: nome, kind: 'kill.end', ok: true, durMs: 0, origin });
 }
 // ===== FIM DO MÉTODO ULTRA CIRÚRGICO =====
 
@@ -2739,9 +2329,6 @@ function ms(h) { return h * 60 * 60 * 1000; }
 
 // Congela perfil por um tempo (msDuration), persiste congelamento, faz shutdown.
 async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
-  const __t0 = Date.now();
-  emitJobEvent({ perfil: nome, kind: 'freeze.start', ts: Date.now(), reason, setBy });
-
   try {
     const now = Date.now();
     let applied = { until: now + msDuration, mode: 'set' };
@@ -2783,13 +2370,9 @@ async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
     await ensureFrozenShutdown(nome, reason || 'frozen');
     await snapshotStatusAndWrite();
   } catch {}
-  emitJobEvent({ perfil: nome, kind: 'freeze.end', ok: true, durMs: Date.now()-__t0, reason, setBy });
 }
 
 async function unfreezeProfile(nome, setBy = 'admin') {
-  const __t0 = Date.now();
-  emitJobEvent({ perfil: nome, kind: 'unfreeze.start', ts: Date.now(), setBy });
-
   try {
     const now = Date.now();
 
@@ -2825,7 +2408,6 @@ async function unfreezeProfile(nome, setBy = 'admin') {
 
     await snapshotStatusAndWrite();
   } catch {}
-  emitJobEvent({ perfil: nome, kind: 'unfreeze.end', ok: true, durMs: Date.now()-__t0, setBy });
 }
 
 // Detecta bloqueio temporário pelo DOM do Messenger, retorna {blocked, hasReloadBtn}
@@ -2856,9 +2438,6 @@ async function detectMessengerTempBlock(page) {
 }
 
 async function nurseTick() {
-  const __t0 = Date.now();
-  emitJobEvent({ perfil: 'system', kind: 'nurse.start', ts: Date.now() });
-
   const now = Date.now();
   const desired = readJsonFile(desiredPath, { perfis: {} });
   for (const nome of Object.keys(desired.perfis || {})) {
@@ -2887,8 +2466,7 @@ async function nurseTick() {
       }
 
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
-      const gate = await openGate.trySchedule(nome, 'nurse_auto');
-      if (gate.now) {
+      try {
         const r = await activateOnce(nome, 'nurse_auto');
         if (!r || !r.ok) {
           if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
@@ -2897,7 +2475,7 @@ async function nurseTick() {
             await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s');
           }
         }
-      } else { await reportAction(nome, 'mil_action', 'nurse_activation_queued(cap)'); }
+      } catch {}
       continue;
     }
     // FIM DA INSTRUÇÃO 6
@@ -2923,7 +2501,7 @@ async function nurseTick() {
       robeMeta[nome].reopenAt = Date.now() + ms(2) + jitterMs;
       try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
       await snapshotStatusAndWrite();
-      continue; // Não tenta reload/kill, apenas sai do loop até a próxima rodada.
+      continue; // Não tenta reload/kill, apenas sai.
     }
 
     // NÃO competir com recovery stateful
@@ -2979,12 +2557,9 @@ async function nurseTick() {
       try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
     }
   }
-
-  emitJobEvent({ perfil: 'system', kind: 'nurse.end', ok: true, durMs: Date.now()-__t0 });
 }
 
-// INSTRUÇÃO 6: uso dos wrappers para agendar o nurseTick
-setNurseInterval(5000);
+setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 
 // =================== HEALTH: Observers, Heuristics e Recovery ===================
@@ -3084,22 +2659,15 @@ async function recoveryStep(nome, page, step) {
   return false;
 }
 async function escalateToReopen(nome, reason='health_reopen') {
-  emitJobEvent({ perfil: nome, kind: 'health.escalate.start', ts: Date.now(), reason });
-
   const ctrl = controllers.get(nome);
   try { await issues.append(nome, 'mil_action', `health_escalate:${reason}`); } catch {}
   await handlers.deactivate({ nome, reason, policy: 'preserveDesired' });
   const st = getHealth(nome);
   st.stage = 'reopen';
   st.nextTryAt = Date.now() + 60000;
-
-  emitJobEvent({ perfil: nome, kind: 'health.escalate.end', ok: true, reason });
 }
 
 async function healthTick() {
-  const __t0 = Date.now();
-  emitJobEvent({ perfil: 'system', kind: 'health.start', ts: Date.now() });
-
   for (const [nome, ctrl] of controllers) {
     if (!ctrl || !ctrl.browser) continue;
     const st = getHealth(nome);
@@ -3147,12 +2715,8 @@ async function healthTick() {
       }
     }
   }
-
-  emitJobEvent({ perfil: 'system', kind: 'health.end', ok: true, durMs: Date.now()-__t0 });
 }
-
-// INSTRUÇÃO 6: uso dos wrappers para agendar o healthTick
-setHealthInterval(10000);
+setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
 // =================== FIM HEALTH ===================
 
