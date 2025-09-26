@@ -178,6 +178,9 @@
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
+      <div class="metric"><span>Limite</span><b id="mCap">--</b></div>
+      <div class="metric"><span>Aberturas/min</span><b id="mOpenRate">--</b></div>
+      <div class="metric"><span>Fila de abertura</span><b id="mOpenQ">0</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
     </div>
   </header>
@@ -494,6 +497,15 @@
     async function reloadPerfis() {
       const st = await window.electronAPI.getStatus();
 
+      // Cap / OpenRate / Fila de abertura
+      const cap = st && st.cap;
+      if (cap) {
+        const openRate = cap.minOpenSpacingMs ? Math.max(1, Math.round(60000 / cap.minOpenSpacingMs)) : null;
+        document.getElementById('mCap').textContent = String(cap.safeMaxBrowsers ?? '--');
+        document.getElementById('mOpenRate').textContent = openRate ? String(openRate) : '--';
+        document.getElementById('mOpenQ').textContent = String(cap.openQueueLen || 0);
+      }
+
       // Banner global de aviso (warning) caso backend informe
       const warn = st && st.warning;
       if (warn) {
@@ -645,6 +657,9 @@
 
         // -- NOVO: Ativação em espera/hold --
         if (activationHeldPill) titleRow.append(activationHeldPill);
+        if (p.activationHeldReason === 'cap_reached' && p.activationHeldUntil && p.activationHeldUntil > Date.now()) {
+          titleRow.append(buildPill('Aguardando capacidade do servidor', 'warn'));
+        }
 
         // -- NOVO: Reabrirá em... --
         if (reopenAtPill) titleRow.append(reopenAtPill);
@@ -888,6 +903,7 @@
       ids.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.toggle('active',
+          (id==='filterAll'     && f==='all') ||
           (id==='filterAll'     && f==='all') ||
           (id==='filterActive'  && f==='active') ||
           (id==='filterInactive'&& f==='inactive') ||
@@ -1358,7 +1374,8 @@
         } catch (e) {
           alert('Erro ao descongelar todos: ' + (e && e.message || e));
         } finally {
-          btn.disabled = false; btn.textContent = 'Descongelar (todos)';
+          btn.disabled = false;
+          btn.textContent = 'Descongelar (todos)';
         }
       };
     })();

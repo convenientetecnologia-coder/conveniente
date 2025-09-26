@@ -1,6 +1,7 @@
 // scripts/workerClient.js
 const { fork } = require('child_process');
 const path = require('path');
+const serverCap = require('./serverCap.js');
 
 // === MILITARY WATCHDOG (restart worker if nonresponsive) ===
 let _wd = { timer: null, failCount: 0, lastOkAt: 0 };
@@ -18,7 +19,10 @@ function startWatchdog() {
     } catch {}
     _wd.failCount++;
     if (_wd.failCount >= 8 && (Date.now() - _wd.lastOkAt) > 30000) {
-      try { console.warn('[WATCHDOG] worker nonresponsive — restarting'); } catch {}
+      try { 
+        console.warn('[WATCHDOG] worker nonresponsive — restarting'); 
+        serverCap.bumpDown('watchdog_restart');
+      } catch {}
       try { workerChild && workerChild.kill && workerChild.kill('SIGKILL'); } catch {}
       _wd.failCount = 0;
       _wd.lastOkAt = 0;

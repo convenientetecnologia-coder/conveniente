@@ -18,6 +18,7 @@ module.exports = (app, workerClient, fileStore) => {
 
         // Modularidade: status pode ser null
         if (!rawStatus || !Array.isArray(rawStatus.perfis)) {
+          const cap = rawStatus?.cap || null; // garante cap, mesmo em caminhos de erro
           return {
             perfis: [],
             robes: {},
@@ -27,7 +28,8 @@ module.exports = (app, workerClient, fileStore) => {
             ...(erroMsg ? { error: erroMsg } : {}),
             // autoMode/sys sempre presentes (null explícito), shape militar
             autoMode: (typeof rawStatus?.autoMode !== 'undefined') ? rawStatus.autoMode : null,
-            sys: (typeof rawStatus?.sys !== 'undefined') ? rawStatus.sys : null
+            sys: (typeof rawStatus?.sys !== 'undefined') ? rawStatus.sys : null,
+            cap: cap // <-- ACRESCENTADO
           };
         }
 
@@ -169,6 +171,7 @@ module.exports = (app, workerClient, fileStore) => {
         // Retornar todos campos mínimos exigidos pelo painel, nunca omitir
         // ATENÇÃO: Preserva SEMPRE autoMode e sys no shape original, nunca sobrescrevendo nem removendo ambos se existirem.
         // Se ausentes, inclui explicitamente como null (para shape previsível).
+        const cap = rawStatus.cap || null; // <-- ACRESCENTADO
         return {
           ...rawStatus, // Vai herdar autoMode e sys se vierem do worker
           perfis,
@@ -181,6 +184,7 @@ module.exports = (app, workerClient, fileStore) => {
           // Garante presença dos campos se não vierem do status.json
           autoMode: (typeof rawStatus.autoMode !== 'undefined') ? rawStatus.autoMode : null,
           sys: (typeof rawStatus.sys !== 'undefined') ? rawStatus.sys : null,
+          cap: cap // <-- ACRESCENTADO
         };
       }
 
@@ -205,6 +209,8 @@ module.exports = (app, workerClient, fileStore) => {
         ) {
           if (!('autoMode' in workerStatus)) workerStatus.autoMode = null;
           if (!('sys' in workerStatus)) workerStatus.sys = null;
+          // Garantia cap presente
+          if (!('cap' in workerStatus)) workerStatus.cap = null;
           const payload = montarPayloadCompleto(workerStatus, erroMsg, warning);
           return res.json(payload);
         } else {
@@ -218,6 +224,7 @@ module.exports = (app, workerClient, fileStore) => {
       if (fallbackStatus && typeof fallbackStatus === 'object') {
         if (!('autoMode' in fallbackStatus)) fallbackStatus.autoMode = null;
         if (!('sys' in fallbackStatus)) fallbackStatus.sys = null;
+        if (!('cap' in fallbackStatus)) fallbackStatus.cap = null; // Garantia CAP no fallback
       }
       // Nunca devolva array vazia: se não tem campo, null; nunca “perfil sumido”.
       if (
@@ -227,6 +234,7 @@ module.exports = (app, workerClient, fileStore) => {
       ) {
         // CRÍTICO: nunca omitir perfis, todos os campos null (não sumir nenhum perfil)
         // (Aqui, como não tem perfis disponíveis, seguir lógica anterior, mas será sempre vazio)
+        const cap = fallbackStatus?.cap || null; // garantia redundante
         return res.json({
           perfis: [],
           robes: {},
@@ -234,7 +242,8 @@ module.exports = (app, workerClient, fileStore) => {
           ts: Date.now(),
           warning: "status temporarily unavailable",
           autoMode: (typeof fallbackStatus?.autoMode !== 'undefined') ? fallbackStatus.autoMode : null,
-          sys: (typeof fallbackStatus?.sys !== 'undefined') ? fallbackStatus.sys : null
+          sys: (typeof fallbackStatus?.sys !== 'undefined') ? fallbackStatus.sys : null,
+          cap: cap // <-- ACRESCENTADO
         });
       }
       // No fallback, alertar warning caso haja pane Worker
@@ -250,7 +259,8 @@ module.exports = (app, workerClient, fileStore) => {
         ts: Date.now(),
         error: String(e && e.message || e),
         autoMode: null,
-        sys: null
+        sys: null,
+        cap: null // <-- ACRESCENTADO
       });
     }
   });

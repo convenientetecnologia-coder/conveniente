@@ -26,6 +26,10 @@ const api = {
   resumeHuman:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/human-resume`, { method: 'POST' }).then(r=>r.json()),
 };
 
+// (Opcional) Endpoints para ajuste manual do cap se implementou no backend
+api.capUp = () => fetch('/api/sys/cap/up', {method:'POST'}).then(r=>r.json());
+api.capDown = () => fetch('/api/sys/cap/down', {method:'POST'}).then(r=>r.json());
+
 // Expor como window.electronAPI para compatibilidade com o index.html atual
 if (typeof window !== 'undefined') {
   window.electronAPI = api;

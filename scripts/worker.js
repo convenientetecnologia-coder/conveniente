@@ -16,6 +16,7 @@ const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NO
 // NOVO: Import RAM/CPU cross-platform
 const pidusage = require('pidusage');
 const psList = require('ps-list');
+const serverCap = require('./serverCap.js');
 
 // =============== PATCH: HEALTH STATEFUL + RECOVERY ESCADA ===============
 const HEALTH_CFG = {
@@ -286,12 +287,17 @@ async function escalateTowardsFull() {
     await milLog('mil_action', `light_escalate: tentando abrir ${cand.length} perfis (cap=${cap})`);
     for (const nome of cand) {
       try {
-        const r = await activateOnce(nome, 'heal_escalate');
-        if (r && r.ok) healer.lastProgressAt = Date.now();
-        else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-          await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
+        const gate = await openGate.trySchedule(nome, 'heal_escalate');
+        if (gate.now) {
+          const r = await activateOnce(nome, 'heal_escalate');
+          if (r && r.ok) healer.lastProgressAt = Date.now();
+          else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+            await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
+          }
+        } else {
+          await issues.append(nome, 'mil_action', 'activation_queued(cap) src=heal_escalate');
         }
       } catch {}
     }
@@ -335,7 +341,17 @@ async function assertFullActivity() {
     const cand = chooseCandidatesToOpen(need);
     if (cand.length) {
       await milLog('mil_action', `assert_full_activity: subir ${cand.length} para não ficar em zero`);
-      for (const nome of cand) { try { await activateOnce(nome, 'assert_full_activity'); healer.lastProgressAt = Date.now(); } catch {} }
+      for (const nome of cand) {
+        try {
+          const gate = await openGate.trySchedule(nome, 'assert_full_activity');
+          if (gate.now) {
+            await activateOnce(nome, 'assert_full_activity');
+            healer.lastProgressAt = Date.now();
+          } else {
+            await issues.append(nome, 'mil_action', 'activation_queued(cap) src=assert_full_activity');
+          }
+        } catch {}
+      }
     }
   }
 }
@@ -351,7 +367,17 @@ async function panicMode() {
   try { await killStrayChromes(); } catch {}
   const cand = chooseCandidatesToOpen(Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 2));
   await milLog('mil_action', `panic_min_bootstrap: abrindo ${cand.length}`);
-  for (const nome of cand) { try { await activateOnce(nome, 'panic_bootstrap'); healer.lastProgressAt = Date.now(); } catch {} }
+  for (const nome of cand) {
+    try {
+      const gate = await openGate.trySchedule(nome, 'panic_bootstrap');
+      if (gate.now) {
+        await activateOnce(nome, 'panic_bootstrap');
+        healer.lastProgressAt = Date.now();
+      } else {
+        await issues.append(nome, 'mil_action', 'activation_queued(cap) src=panic_bootstrap');
+      }
+    } catch {}
+  }
   await milLog('mil_action', `panic_mode_end`);
 }
 
@@ -405,6 +431,14 @@ console.log('[WORKER][BOOT]', {
 } catch (e) {
 try { console.log('[WORKER][BOOT] log error', e && e.message || e); } catch {}
 }
+(async () => {
+  try { 
+    const cap = await serverCap.calibrateIfNeeded();
+    console.log('[CAP]', cap);
+  } catch(e){
+    console.warn('[CAP] calibrate failed', e && e.message || e); 
+  }
+})();
 
 // Caminhos principais
 const perfisPath = path.join(__dirname, '../dados', 'perfis.json');
@@ -528,6 +562,54 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 // Estado global do Robe (cooldown, fila, etc)
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
 
+// 2. CRIAR openGate GLOBAL DE ABERTURA
+const openGate = {
+  cap: null,
+  lastOpenAt: 0,
+  queue: [],
+  initDone: false,
+  async init() {
+    if (this.initDone) return;
+    this.cap = await serverCap.calibrateIfNeeded();
+    this.initDone = true;
+    setInterval(()=>this.tick().catch(()=>{}), 1000);
+  },
+  currentOpen() { return controllers.size; },
+  canOpenNow() {
+    const cap = this.cap || serverCap.getCap() || {};
+    const max = cap.safeMaxBrowsers || 1;
+    const spacing = cap.minOpenSpacingMs || 9000;
+    const timeOk = (Date.now() - this.lastOpenAt) >= spacing;
+    return this.currentOpen() < max && timeOk;
+  },
+  async trySchedule(nome, source='reconcile') {
+    await this.init();
+    if (this.canOpenNow()) return { ok: true, now: true };
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].activationHeldUntil = Date.now() + Math.max(15000, (this.cap?.minOpenSpacingMs||9000));
+    robeMeta[nome].activationHeldReason = 'cap_reached';
+    if (!this.queue.includes(nome)) this.queue.push(nome);
+    try { await issues.append(nome, 'mil_action', `activation_queued(cap) src=${source}`); } catch {}
+    return { ok: true, now: false, queued: true };
+  },
+  async tick() {
+    if (!this.queue.length) return;
+    if (!this.canOpenNow()) return;
+    const nome = this.queue.shift();
+    const desired = readJsonFile(desiredPath, { perfis: {} });
+    if (!desired.perfis?.[nome]?.active || isFrozenNow(nome)) return;
+    this.lastOpenAt = Date.now();
+    try {
+      const r = await activateOnce(nome, 'openGate');
+      if (!r || !r.ok) {
+        this.lastOpenAt = Date.now() - (this.cap?.minOpenSpacingMs||9000) + 2000;
+        setTimeout(()=> this.queue.push(nome), 3000);
+      }
+    } catch { setTimeout(()=> this.queue.push(nome), 4000); }
+  }
+};
+openGate.init().catch(()=>{});
+
 // Repopular frozenUntil ao boot, lendo dos manifests
 try {
   const perfisArr = loadPerfisJson();
@@ -599,6 +681,19 @@ console.log('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
 const manifest = resolveManifest(nome);
 if (!manifest) throw new Error('Perfil não encontrado');
 
+try {
+  await openGate.init();
+  const cap = openGate.cap || serverCap.getCap() || {};
+  const max = cap.safeMaxBrowsers || 1;
+  if (controllers.size >= max) {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].activationHeldUntil = Date.now() + (cap.minOpenSpacingMs || 9000);
+    robeMeta[nome].activationHeldReason = 'cap_reached';
+    await issues.append(nome, 'mil_action', `block_activate_cap_reached max=${max} active=${controllers.size}`);
+    return { ok: false, error: 'cap_reached' };
+  }
+} catch {}
+
 // GATE DE RAM antes de abrir (livre > 3GB)
 {
   const freeMB = Math.round(os.freemem() / (1024*1024));
@@ -613,6 +708,7 @@ if (!browser || typeof browser.newPage !== 'function') {
 throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
 }
 controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+openGate.lastOpenAt = Date.now();
 
 // HEADROOM pós-abrir (rollback se < 2GB)
 {
@@ -655,6 +751,14 @@ _statusLock = _statusLock.then(async () => {
 });
 } catch {}
 try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
+const msg = (e && e.message) || '';
+if (/Session closed|Target closed|Target\.createTarget|main frame too early|Navigation timeout/i.test(msg)) {
+  try { require('./serverCap.js').bumpDown('open_fail_spike'); } catch {}
+  // hold individual
+  robeMeta[nome] = robeMeta[nome] || {};
+  robeMeta[nome].reopenAt = Date.now() + (45 + Math.floor(Math.random()*45))*1000;
+  await issues.append(nome, 'mil_action', `reopen_delayed(${Math.round((robeMeta[nome].reopenAt-Date.now())/1000)}s) reason=${msg.slice(0,60)}`);
+}
 // INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
 if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
   robeMeta[nome] = robeMeta[nome] || {};
@@ -1119,6 +1223,13 @@ async function ramCpuMonitorTick() {
   // ===== FIM PATCH MILITAR: Avaliação/autoMode global =====
 
   // No final, snapshot status global, nunca direto!
+  try {
+    const vals = Object.values(robeMeta).map(m => (typeof m.ramMB === 'number' ? m.ramMB : null)).filter(x => x != null && x > 50 && x < 2000);
+    if (vals.length >= 3) {
+      const avg = Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
+      require('./serverCap.js').recordRuntimeSample({ perBrowserMBAvg: avg });
+    }
+  } catch {}
   await snapshotStatusAndWrite();
 
   // Agenda próxima rodada (3–4s)
@@ -1466,7 +1577,13 @@ const handlers = {
   },
 
   async activate({ nome }) {
-    return await activateOnce(nome, 'message');
+    const gate = await openGate.trySchedule(nome, 'message');
+    if (gate.now) {
+      return await activateOnce(nome, 'message');
+    } else {
+      await issues.append(nome, 'mil_action', 'activation_queued(cap) src=message').catch(()=>{});
+      return { ok: true, queued: true, now: false };
+    }
   },
 
   async deactivate({ nome, reason, policy }) {
@@ -1850,12 +1967,20 @@ const handlers = {
       cores: (os.cpus()||[]).length,
       cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
     };
+    const cap = require('./serverCap.js').getCap();
     return {
       perfis,
       robes,
       robeQueue: robeQueueList,
       autoMode,
-      sys
+      sys,
+      cap: {
+        safeMaxBrowsers: cap?.safeMaxBrowsers || null,
+        perBrowserMB: cap?.perBrowserMB || null,
+        reserveMB: cap?.reserveMB || null,
+        minOpenSpacingMs: cap?.minOpenSpacingMs || null,
+        openQueueLen: (openGate.queue||[]).length
+      }
     };
   },
 
@@ -2014,14 +2139,14 @@ for (const nome of nomes) {
   // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
   if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
     if (isFrozenNow(nome)) {
-      // não reabre durante congelamento
       continue;
     }
-    // Só cumpre reopen se desired.active === true
     if (want.active === true) {
       robeMeta[nome].reopenAt = null;
       robeMeta[nome].killHistory = [];
-      try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
+      const gate = await openGate.trySchedule(nome, 'reopenAt');
+      if (gate.now) { await activateOnce(nome, 'reopenAt-preserveDesired'); }
+      else { await issues.append(nome, 'mil_action', 'reopen_queued(cap)'); }
     } else {
       robeMeta[nome].reopenAt = null;
       issues.append(nome, 'mil_action', 'reopen_at_ignored_desired_off').catch(()=>{});
@@ -2066,7 +2191,10 @@ for (const nome of nomes) {
     }
     // === FIM PATCH autoMode Light ===
 
-    try { await activateOnce(nome, 'reconcile'); } catch {}
+    const gate = await openGate.trySchedule(nome, 'reconcile');
+    if (gate.now) { try { await activateOnce(nome, 'reconcile'); } catch {} }
+    else { await issues.append(nome, 'mil_action', 'activation_queued(cap)'); }
+    continue;
   } else if (want.active === false && ctrl) {
     try { await handlers.deactivate({ nome }); } catch {}
     continue;
@@ -2120,7 +2248,6 @@ for (const nome of nomes) {
           const d2 = readJsonFile(desiredPath, { perfis: {} });
           if (d2 && d2.perfis && d2.perfis[nome]) {
             d2.perfis[nome].robePlay = false;
-            const ok = writeJsonAtomic(d2siredPath, d2);
             const ok2 = writeJsonAtomic(desiredPath, d2);
             if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
           }
@@ -2466,7 +2593,8 @@ async function nurseTick() {
       }
 
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
-      try {
+      const gate = await openGate.trySchedule(nome, 'nurse_auto');
+      if (gate.now) {
         const r = await activateOnce(nome, 'nurse_auto');
         if (!r || !r.ok) {
           if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
@@ -2475,7 +2603,7 @@ async function nurseTick() {
             await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s');
           }
         }
-      } catch {}
+      } else { await reportAction(nome, 'mil_action', 'nurse_activation_queued(cap)'); }
       continue;
     }
     // FIM DA INSTRUÇÃO 6
@@ -2501,7 +2629,7 @@ async function nurseTick() {
       robeMeta[nome].reopenAt = Date.now() + ms(2) + jitterMs;
       try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
       await snapshotStatusAndWrite();
-      continue; // Não tenta reload/kill, apenas sai.
+      continue; // Não tenta reload/kill, apenas sai do loop até a próxima rodada.
     }
 
     // NÃO competir com recovery stateful

@@ -33,6 +33,19 @@ function getPerfilManifest(nome) {
 }
 // ========== FIM HELPER ==========
 
+// Freezer por boot timeout — mapa de falhas de boot
+// Se o perfil falhar 3 vezes para garantir a aba zero do Messenger em 10 minutos, entra em frozen por 45 min.
+// Libera slots, evita loop de falhas e storm no worker/openGate.
+const BOOT_FAIL = new Map();
+function _recordBootFail(nome){
+  const now = Date.now();
+  const arr = BOOT_FAIL.get(nome) || [];
+  const pruned = arr.filter(ts => now - ts < 10*60*1000);
+  pruned.push(now);
+  BOOT_FAIL.set(nome, pruned);
+  return pruned.length;
+}
+
 // Log de issues (robusto; falha silenciosa se o módulo não existir)
 let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
@@ -1179,6 +1192,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       } catch (err) {
         if (!running) return;
         log('Falha ao garantir aba zero no startup Virtus:', err + '');
+        // FREEZER de boot: após 3 falhas em 10min, congelar por 45min
+        const n = _recordBootFail(nome);
+        if (n >= 3) {
+          try {
+            const ms = 45*60*1000;
+            await require('./manifestStore.js').update(nome, (m)=>{ 
+              m=m||{}; 
+              m.frozenUntil = Date.now()+ms; 
+              m.frozenReason='virtus_boot_timeout'; 
+              m.frozenAt=Date.now(); 
+              m.frozenSetBy='system'; 
+              return m; 
+            });
+            if (issues) await logIssue(nome, 'mil_action', `virtus_boot_timeout_freeze_45min`);
+          } catch(e){}
+        }
         await sleep(2500);
       }
     }

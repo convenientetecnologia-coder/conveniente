@@ -21,4 +21,27 @@ module.exports = (app, workerClient, fileStore) => {
       res.json({ ok: false, error: e && e.message || String(e) });
     }
   });
+
+  // POST /api/sys/cap/up — aumenta o cap em +1 (admin/override)
+  app.post('/api/sys/cap/up', (req, res) => {
+    try {
+      const sc = require('./serverCap.js');
+      sc.bumpUp('admin_override');
+      res.json({ ok:true, cap: sc.getCap() });
+    } catch(e){
+      res.json({ ok:false, error: e && e.message || String(e) });
+    }
+  });
+
+  // POST /api/sys/cap/down — reduz o cap em -1 (admin/override)
+  app.post('/api/sys/cap/down', (req, res) => {
+    try {
+      const sc = require('./serverCap.js');
+      sc.bumpDown('admin_override');
+      res.json({ ok:true, cap: sc.getCap() });
+    } catch(e){
+      res.json({ ok:false, error: e && e.message || String(e) });
+    }
+  });
+
 };
