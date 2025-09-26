@@ -26,6 +26,17 @@ const api = {
   resumeHuman:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/human-resume`, { method: 'POST' }).then(r=>r.json()),
 };
 
+// JOB API
+api.getJobs = (params={}) => {
+  const qs = Object.keys(params).length
+    ? '?' + Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+    : '';
+  return fetch('/api/jobs' + qs).then(r=>r.json());
+};
+api.getJob = (jobId) => fetch(`/api/jobs/${encodeURIComponent(jobId)}`).then(r=>r.json());
+api.getJobsQueue = () => fetch('/api/jobs/queue').then(r=>r.json());
+api.cancelJob = (jobId) => fetch(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }).then(r=>r.json());
+
 // (Opcional) Endpoints para ajuste manual do cap se implementou no backend
 api.capUp = () => fetch('/api/sys/cap/up', {method:'POST'}).then(r=>r.json());
 api.capDown = () => fetch('/api/sys/cap/down', {method:'POST'}).then(r=>r.json());

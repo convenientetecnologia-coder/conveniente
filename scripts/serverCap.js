@@ -1,3 +1,5 @@
+//serverCap.js
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -78,11 +80,13 @@ function computeCapFrom(hw, bench) {
   if (bench.cpuIters != null && bench.cpuIters < 4000) penalty *= 0.85;
   if (bench.latencyMs != null && bench.latencyMs > 60) penalty *= 0.9;
 
-  const maxByThreads = Math.max(1, Math.floor(threads * 0.6));
+  // Trecho alterado conforme instrução:
+  const maxByThreads = Math.max(1, Math.floor(threads * 2)); // permite usar mais o hardware se aguentar
   const byMem = Math.max(1, Math.floor((totalMB - reserveMB) / perBrowserMB));
   let base = Math.max(1, Math.floor(Math.min(byMem, maxByThreads) * penalty));
 
-  const hardCeil = Math.min(24, byMem, Math.max(2, Math.floor(threads)));
+  // Novo teto: deixa abrir até 64, mas ainda depende de RAM/threads
+  const hardCeil = Math.min(byMem, maxByThreads, 64); // máximo absoluto 64
   base = Math.min(base, hardCeil);
 
   return { perBrowserMB, reserveMB, base, hardCeil };
@@ -105,6 +109,10 @@ async function calibrateIfNeeded({ force=false } = {}) {
       totalMB: Math.round(os.totalmem()/(1024*1024))
     };
     const cap0 = computeCapFrom(hw, { cpuIters, disk, latencyMs: net.avgMs });
+
+    // Log conforme recomendado na instrução:
+    console.log(`[SERVERCAP] CALC cap0: perBrowserMB=${cap0.perBrowserMB} reserveMB=${cap0.reserveMB} base=${cap0.base} hardCeil=${cap0.hardCeil}`);
+
     cap = {
       calibratedAt: now,
       hw, bench: { cpuIters, disk, latencyMs: net.avgMs },

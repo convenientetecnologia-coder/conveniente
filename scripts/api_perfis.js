@@ -4,6 +4,9 @@ const path = require('path');
 const os = require('os');
 const issues = require('./issues.js');
 
+// --- IMPORTAÇÃO DO Job Manager ---
+const jobManager = require('./jobManager.js');
+
 // --- HELPERS DE VALIDAÇÃO (conforme instrução) ---
 const isValidSlug = s => typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
 function assertPerfilExists(fileStore, nome) {
@@ -150,10 +153,12 @@ module.exports = (app, workerClient, fileStore) => {
       }
     }
 
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'openBrowser', perfil: nome, source: 'api', payload: {} });
     try { fileStore.patchDesired(nome, { active: true }); } catch {}
 
     // Não chama o worker diretamente para evitar corrida com o reconciliador
-    return res.json({ ok: true, queued: true });
+    return res.json({ ok: true, jobId: job.id, queued: true });
   });
 
   // Desativar perfil (declarativo: reconciliador faz o fechamento)
@@ -164,10 +169,12 @@ module.exports = (app, workerClient, fileStore) => {
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_deactivate_request', `by=${op}`);
 
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'closeBrowser', perfil: nome, source: 'api', payload: {} });
     try { fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch {}
 
     // Não chama o worker diretamente para evitar corrida com o reconciliador
-    return res.json({ ok: true, queued: true });
+    return res.json({ ok: true, jobId: job.id, queued: true });
   });
 
   // Configurar/injetar cookies
@@ -177,9 +184,15 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_configure_request', `by=${op}`);
+
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'configure', perfil: nome, source: 'api', payload: {} });
+
+    try { fileStore.patchDesired(nome, { configureOnce: true }); } catch {}
+
     // Timeout aumentado para 180000ms (3min) para comando configure
-    const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
-    return res.json(resp);
+    const resp = await workerClient.sendWorkerCommand('configure', { nome, _jobId: job.id }, { timeoutMs: 180000 });
+    return res.json({ ...resp, jobId: job.id, queued: true });
   });
 
   // Iniciar atendimento/postagem
@@ -200,11 +213,15 @@ module.exports = (app, workerClient, fileStore) => {
       }
     }
 
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'startVirtus', perfil: nome, source: 'api', payload: {} });
+
     try {
       fileStore.patchDesired(nome, { virtus: 'on', active: true, robePause24h: true });
     } catch (e) {}
+
     // Apenas declara o desejo, reconciliador executa de fato
-    return res.json({ ok: true, queued: true });
+    return res.json({ ok: true, jobId: job.id, queued: true });
   });
 
   // Invocar humano
@@ -214,8 +231,12 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_invoke_human_request', `by=${op}`);
-    const resp = await workerClient.sendWorkerCommand('invoke_human', { nome });
-    return res.json(resp);
+
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'invokeHuman', perfil: nome, source: 'api', payload: {} });
+
+    const resp = await workerClient.sendWorkerCommand('invoke_human', { nome, _jobId: job.id });
+    return res.json({ ...resp, jobId: job.id, queued: true });
   });
 
   // Robe Play
@@ -225,8 +246,12 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_robe_play_request', `by=${op}`);
-    const resp = await workerClient.sendWorkerCommand('robe-play', { nome });
-    return res.json(resp);
+
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'robePlay', perfil: nome, source: 'api', payload: {} });
+
+    const resp = await workerClient.sendWorkerCommand('robe-play', { nome, _jobId: job.id });
+    return res.json({ ...resp, jobId: job.id, queued: true });
   });
 
   // Robe 24h (individual)
@@ -236,8 +261,12 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_robe24h_request', `by=${op}`);
+
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'robePause24h', perfil: nome, source: 'api', payload: {} });
+
     fileStore.patchDesired(nome, { robePause24h: true });
-    return res.json({ ok: true });
+    return res.json({ ok: true, jobId: job.id, queued: true });
   });
 
   // Retomar trabalho (desabilita controle humano e religa virtus/robe)
@@ -248,11 +277,15 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_human_resume_request', `by=${op}`);
+
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'humanResume', perfil: nome, source: 'api', payload: {} });
+
     // Marca o "fine" do modo humano e ativa virtus novamente
     try {
       fileStore.patchDesired(nome, { humanResume: true });
     } catch (e) {}
-    return res.json({ ok: true, queued: true });
+    return res.json({ ok: true, jobId: job.id, queued: true });
   });
 
   // Descongelar perfil manualmente
@@ -262,17 +295,25 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_unfreeze', `by=${op}`);
+
+    // JOB MANAGER PATCH
+    const job = jobManager.createJob({ type: 'unfreeze', perfil: nome, source: 'api', payload: {} });
+
     // Passa comando ao worker e retorna resultado
-    const resp = await workerClient.sendWorkerCommand('unfreeze', { nome }, { timeoutMs: 10000 });
-    res.json(resp);
+    const resp = await workerClient.sendWorkerCommand('unfreeze', { nome, _jobId: job.id }, { timeoutMs: 10000 });
+    res.json({ ...resp, jobId: job.id, queued: true });
   });
 
   // Descongelar todos os perfis
   app.post('/api/perfis/unfreeze-all', async (req, res) => {
     const op = String(req.headers['x-operator'] || 'unknown');
     await issues.append('system', 'admin_unfreeze_all', `by=${op}`);
-    const resp = await workerClient.sendWorkerCommand('unfreeze-all', {}, { timeoutMs: 20000 });
-    res.json(resp);
+
+    // JOB MANAGER PATCH:
+    const job = jobManager.createJob({ type: 'unfreezeAll', perfil: null, source: 'api', payload: {} });
+
+    const resp = await workerClient.sendWorkerCommand('unfreeze-all', { _jobId: job.id }, { timeoutMs: 20000 });
+    res.json({ ...resp, jobId: job.id, queued: true });
   });
 
   // Alterar label do perfil (só label)
