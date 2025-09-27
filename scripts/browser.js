@@ -781,6 +781,16 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       } catch {}
     };
 
+    // Após toda a abertura e logo antes de return:
+    if (browser && typeof browser.process === "function") {
+      browser._rootPid = null;
+      try {
+        const proc = browser.process();
+        if (proc && proc.pid) {
+          browser._rootPid = proc.pid;
+        }
+      } catch {}
+    }
     return browser;
   } catch (err) {
     try { await safeCloseBrowser(browser); } catch {}
@@ -1200,7 +1210,7 @@ async function attachHealthProbes(page, nome, onPing) {
         });
         // Erros JS
         window.addEventListener('error', (e) => safeCall({ type:'js_error', msg: (e && e.message) || '' }));
-        window.addEventListener('unhandledrejection', (e) => safeCall({ type:'js_unhandledrejection', msg: (e && (e.reason && e.reason.message || e.reason)) || '' }));
+        window.addEventListener('unhandledrejection', (e) => safeCall({ type:'js_unhandledrejection', msg: (e) && ((e.reason && e.reason.message) || e.reason) || '' }));
       })();
     });
   } catch {}

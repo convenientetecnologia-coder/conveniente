@@ -25,6 +25,7 @@ async function requestOpen(perfil, url) {
     try {
       js = await resp.json();
     } catch(e) {
+      console.warn('[supervisorClient] requestOpen erro:', e && e.message || e);
       return { ok: false, error: "supervisor_invalid_json", detail: e && e.message || e };
     }
     if (resp.status === 429 || (js && (js.reason === 'cooldown' || js.reason === 'flood' || js.reason === 'throttle'))) {
@@ -33,6 +34,7 @@ async function requestOpen(perfil, url) {
     }
     return js;
   } catch (e) {
+    console.warn('[supervisorClient] requestOpen erro:', e && e.message || e);
     return { ok: false, error: 'supervisor_unreachable', detail: e && e.message || e };
   }
 }
@@ -49,9 +51,11 @@ async function notifyOpened(perfil, resultado = "ok", url) {
     try {
       return await resp.json();
     } catch(e) {
+      console.warn('[supervisorClient] notifyOpened erro:', e && e.message || e);
       return { ok: false, error: "supervisor_invalid_json", detail: e && e.message || e };
     }
   } catch (e) {
+    console.warn('[supervisorClient] notifyOpened erro:', e && e.message || e);
     return { ok: false, error: 'supervisor_unreachable', detail: e && e.message || e };
   }
 }
@@ -68,9 +72,11 @@ async function sendTelemetria(evt, url) {
     try {
       return await resp.json();
     } catch(e) {
+      console.warn('[supervisorClient] sendTelemetria erro:', e && e.message || e);
       return { ok: false, error: "supervisor_invalid_json", detail: e && e.message || e };
     }
   } catch (e) {
+    console.warn('[supervisorClient] sendTelemetria erro:', e && e.message || e);
     return { ok: false, error: 'supervisor_unreachable', detail: e && e.message || e };
   }
 }
@@ -83,9 +89,11 @@ async function getStatus(url) {
     try {
       return await resp.json();
     } catch(e) {
+      console.warn('[supervisorClient] getStatus erro:', e && e.message || e);
       return { ok: false, error: "supervisor_invalid_json", detail: e && e.message || e };
     }
   } catch (e) {
+    console.warn('[supervisorClient] getStatus erro:', e && e.message || e);
     return { ok: false, error: 'supervisor_unreachable', detail: e && e.message || e };
   }
 }
@@ -98,9 +106,11 @@ async function getRam(url) {
     try {
       return await resp.json();
     } catch(e) {
+      console.warn('[supervisorClient] getRam erro:', e && e.message || e);
       return { ok: false, error: "supervisor_invalid_json", detail: e && e.message || e };
     }
   } catch (e) {
+    console.warn('[supervisorClient] getRam erro:', e && e.message || e);
     return { ok: false, error: 'supervisor_unreachable', detail: e && e.message || e };
   }
 }
@@ -108,8 +118,18 @@ async function getRam(url) {
 // Limpa histórico de slots/eventos (opcional/admin)
 async function resetSupervisor(url) {
   const _url = url || SUPERVISOR_URL;
-  const resp = await fetch(`${_url}/reset`, { method: "POST" });
-  return resp.json();
+  try {
+    const resp = await fetch(`${_url}/reset`, { method: "POST" });
+    try {
+      return await resp.json();
+    } catch(e) {
+      console.warn('[supervisorClient] resetSupervisor erro:', e && e.message || e);
+      return { ok: false, error: "supervisor_invalid_json", detail: e && e.message || e };
+    }
+  } catch (e) {
+    console.warn('[supervisorClient] resetSupervisor erro:', e && e.message || e);
+    return { ok: false, error: 'supervisor_unreachable', detail: e && e.message || e };
+  }
 }
 
 module.exports = {

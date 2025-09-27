@@ -17,6 +17,11 @@ const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NO
 const pidusage = require('pidusage');
 const psList = require('ps-list');
 
+// Supervisor externo (slots)
+const supervisorClient = require('./supervisorClient.js');
+// Helper RAM disponível realista (utils)
+const { getAvailableMB } = utils;
+
 // =============== PATCH: HEALTH STATEFUL + RECOVERY ESCADA ===============
 const HEALTH_CFG = {
   TICK_MS: 10000,
@@ -383,6 +388,47 @@ async function killPids(pids = []) {
   }
 }
 
+async function killProcessTreeByRootPid(pid) {
+  if (!pid) return;
+  try {
+    if (process.platform === 'win32') {
+      const { execFile } = require('child_process');
+      await new Promise(res=>{
+        execFile('powershell.exe', ['-NoProfile','-Command', `
+$parent = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; 
+if ($parent) {
+  $queue = @($parent);
+  for ($i=0; $i -lt $queue.Count; $i++) {
+    $cur = $queue[$i];
+    $children = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $cur.ProcessId };
+    $queue += $children;
+  }
+  $queue | Sort-Object -Property ProcessId -Descending | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
+}
+        `], {stdio:'ignore'}, ()=>res());
+      });
+    } else {
+      const { exec } = require('child_process');
+      const getAll = (pid, cb) => {
+        exec(`pgrep -P ${pid}`, (e, stdout) => {
+          const pids = stdout.trim().split(/\s+/).filter(Boolean).map(Number);
+          if (!pids.length) return cb([]);
+          let all = [];
+          let pending = pids.length;
+          pids.forEach(child => getAll(child, (desc) => {
+            all.push(child, ...desc);
+            if (--pending === 0) cb(all);
+          }));
+        });
+      };
+      getAll(pid, (all) => {
+        for (const id of all) { try { process.kill(id, 'SIGKILL'); } catch{} }
+        try { process.kill(pid, 'SIGKILL'); } catch{}
+      });
+    }
+  } catch {}
+}
+
 async function killStrayChromes() {
   try {
     const perfisArr = loadPerfisJson();
@@ -602,14 +648,34 @@ async function activateOnce(nome, source = '') {
   // Proteção adicional: flag 'opening' evita colisões e dá pistas ao killStray
   if (opening[nome]) return { ok: false, error: 'already_opening' };
   opening[nome] = true;
+
+  // Supervisor slot request
+  let _supervisorSlotGranted = false;
   try {
-    if (!nome) return { ok: false, error: 'Nome ausente' };
+    const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
+    if (!slotResp || !slotResp.ok) {
+      // Hold curto, não crasha
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].activationHeldUntil = Date.now() + 30000;
+      await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'}`);
+      return { ok:false, error: `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}` };
+    }
+    _supervisorSlotGranted = true;
+
+    if (!nome) {
+      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+      return { ok: false, error: 'Nome ausente' };
+    }
     // Já está ativo?
-    if (controllers.has(nome)) return { ok: true, already: true };
+    if (controllers.has(nome)) {
+      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+      return { ok: true, already: true };
+    }
 
     // BLOQUEIO: não ativa se estiver congelado
     if (isFrozenNow(nome)) {
       await reportAction(nome, 'mil_action', 'block_activate_frozen');
+      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
       return { ok: false, error: 'account_is_frozen' };
     }
 
@@ -617,6 +683,7 @@ async function activateOnce(nome, source = '') {
     const inflight = activationLocks.get(nome);
     if (inflight) {
       try { await inflight.catch(() => {}); } catch {}
+      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
       return controllers.has(nome)
       ? { ok: true, already: true }
       : { ok: false, error: 'activation_in_progress' };
@@ -630,7 +697,7 @@ async function activateOnce(nome, source = '') {
 
         // GATE DE RAM antes de abrir (livre > 3GB)
         {
-          const freeMB = Math.round(os.freemem() / (1024*1024));
+          const freeMB = getAvailableMB();
           if (freeMB <= OPEN_MIN_FREE_MB) {
             await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
             throw new Error('ram_insuficiente_para_ativar');
@@ -641,14 +708,21 @@ async function activateOnce(nome, source = '') {
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
         }
+        // Salve rootPid para killProcessTree depois
+        const proc = browser.process && browser.process();
+        if (proc && proc.pid) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].rootPid = proc.pid;
+        }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
         // HEADROOM pós-abrir (rollback se < 2GB)
         {
-          const freeAfter = Math.round(os.freemem() / (1024*1024));
+          const freeAfter = getAvailableMB();
           if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
             await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
             try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
+            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
             return { ok: false, error: 'headroom_below_min_after_open' };
           }
         }
@@ -665,6 +739,7 @@ async function activateOnce(nome, source = '') {
         try { attachBrowserLifecycle(nome, browser); } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
+        if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
         return { ok: true };
       } catch (e) {
         // Mantém status consistente (active:false) no snapshot em caso de falha
@@ -692,6 +767,7 @@ async function activateOnce(nome, source = '') {
         }
         // FIM DA INSTRUÇÃO 9
         console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
+        if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
         return { ok: false, error: e && e.message || String(e) };
       } finally {
         activationLocks.delete(nome);
@@ -1008,6 +1084,16 @@ async function ramCpuMonitorTick() {
           while (robeMeta[nome].cpuHistory.length > 8) robeMeta[nome].cpuHistory.shift();
         }
 
+        // Resets de streaks RAM/CPU em leituras baixas
+        if (typeof robeMeta[nome].cpuPercent === 'number' && robeMeta[nome].cpuPercent < 120) {
+          const ch = robeMeta[nome].cpuHistory || [];
+          if (ch.length >= 2 && ch.slice(-2).every(h => h.p < 120)) robeMeta[nome].cpuHistory = [];
+        }
+        if (typeof robeMeta[nome].ramMB === 'number' && robeMeta[nome].ramMB < 800) {
+          const rh = robeMeta[nome].ramHist || [];
+          if (rh.length >= 2 && rh.slice(-2).every(h => h.mb < 800)) robeMeta[nome].ramHist = [];
+        }
+
         // PATCH MILITAR: nunca suicidar navegador por pico de boot/start/post,
         // só mata leak persistente e nunca perfil único.
         const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
@@ -1053,6 +1139,16 @@ async function ramCpuMonitorTick() {
     const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
     hist.push({ t: Date.now(), mb: ramMB });
     while (hist.length > 6) hist.shift();
+
+    // Resets de streaks RAM/CPU em leituras baixas (após atualizar históricos)
+    if (typeof robeMeta[nome].cpuPercent === 'number' && robeMeta[nome].cpuPercent < 120) {
+      const ch = robeMeta[nome].cpuHistory || [];
+      if (ch.length >= 2 && ch.slice(-2).every(h => h.p < 120)) robeMeta[nome].cpuHistory = [];
+    }
+    if (typeof robeMeta[nome].ramMB === 'number' && robeMeta[nome].ramMB < 800) {
+      const rh = robeMeta[nome].ramHist || [];
+      if (rh.length >= 2 && rh.slice(-2).every(h => h.mb < 800)) robeMeta[nome].ramHist = [];
+    }
 
     // Warn apenas se RAM muito alta, sem kill
     if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < AUTO_CFG.RAM_KILL_MB) {
@@ -1119,7 +1215,6 @@ async function ramCpuMonitorTick() {
 
   // if (enterPressure) { autoMode.hot++; autoMode.cool = 0; }
   // else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
-  // else { autoMode.hot = 0; autoMode.cool = 0; }
 
   // if (autoMode.mode === 'full' && autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
   //   autoMode.mode = 'light';
@@ -1166,6 +1261,19 @@ function extractUserDataDir(cmd) {
 
 // Inicia monitor global
 setTimeout(ramCpuMonitorTick, 5000);
+
+// Manutenção rotativa (opcinal, recomendado)
+async function maintenanceFlushCycle() {
+  const active = Array.from(controllers.keys());
+  if (active.length < 4) return;
+  const subset = active.filter((_,i)=> i % 10 === 0);
+  for (const nome of subset) {
+    await handlers.deactivate({ nome, reason:'maint_flush', policy:'preserveDesired' });
+    for (let i=0;i<10;i++) { await new Promise(r=>setTimeout(r, 3000)); }
+    await activateOnce(nome, 'maint_flush');
+  }
+}
+setInterval(()=>maintenanceFlushCycle().catch(()=>{}), 4*60*60*1000);
 
 // ========== FIM ALTERAÇÃO RAM/CHROME & CPU MONITOR CROSS-PLATFORM ==========
 
@@ -1524,6 +1632,14 @@ const handlers = {
   try {
     if (ctrl.browser && ctrl.browser.close) {
       await ctrl.browser.close();
+    }
+  } catch {}
+  // Kill árvore de processos órfãos (rootPid salvo em robeMeta)
+  try {
+    const root = robeMeta[nome]?.rootPid;
+    if (root) {
+      await killProcessTreeByRootPid(root);
+      robeMeta[nome].rootPid = null;
     }
   } catch {}
   try { freezeCooldownIfNotWorking(nome); } catch {}

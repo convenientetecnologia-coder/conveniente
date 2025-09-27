@@ -1,5 +1,9 @@
+// utils.js
+
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
 
 function slugify(str) {
   return String(str || '')
@@ -238,10 +242,41 @@ function getCoords(cidade) {
   } catch { return null; }
 }
 
+/**
+ * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos:
+ * Linux: MemAvailable em /proc/meminfo
+ * Windows: FreePhysicalMemory no Win32_OperatingSystem
+ * Fallback: os.freemem()
+ */
+function getAvailableMB() {
+  // Linux (via /proc/meminfo)
+  if (process.platform === 'linux') {
+    try {
+      const txt = fs.readFileSync('/proc/meminfo','utf8');
+      const m = /MemAvailable:\s+(\d+)\s+kB/i.exec(txt);
+      if (m) return Math.round(parseInt(m[1],10)/1024);
+    } catch {}
+  }
+  // Windows (via powershell)
+  if (process.platform === 'win32') {
+    try {
+      const out = execSync(
+        'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"',
+        {stdio:['ignore','pipe','ignore']}
+      ).toString().trim();
+      const kb = parseInt(out,10);
+      if (!isNaN(kb)) return Math.round(kb/1024);
+    } catch {}
+  }
+  // Fallback: Node.js standard
+  return Math.round(os.freemem()/(1024*1024));
+}
+
 module.exports = {
   slugify,
   readJsonSafe,
   writeJsonSafe,
   normalizeCookies,
   getCoords,
+  getAvailableMB,
 };

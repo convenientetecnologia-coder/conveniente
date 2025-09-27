@@ -11,6 +11,7 @@ const express = require("express");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
+const { getAvailableMB } = require('./utils.js'); // ADICIONADO CONFORME INSTRUÇÃO
 
 // Configs
 const PORT = parseInt(process.env.SUPERVISOR_PORT || '9800', 10);
@@ -39,6 +40,19 @@ let state = {
 /** Estado dos perfis ativos atualmente */
 let ativos = new Map(); // nomePerfil => {openAt, status, ramAntes, ...}
 
+// TTL reclaim de slots abertos que não chamaram notifyOpened
+setInterval(() => {
+  const now = Date.now();
+  for (const [perfil, info] of ativos) {
+    if (now - info.openAt > 60000) { // TTL 60s
+      state.slotsAbertos = Math.max(0, state.slotsAbertos - 1);
+      ativos.delete(perfil);
+      pushEvent({type:'slot_reclaimed_ttl', perfil, age: now-info.openAt});
+      saveState();
+    }
+  }
+}, 5000);
+
 /** Histórico de eventos para telemetria */
 const eventStream = [];
 function pushEvent(evt) {
@@ -61,9 +75,16 @@ function loadState() {
 }
 loadState();
 
-// Get RAM livre atual
+// Probe dinâmico de slots
+state.nextProbeAt = state.nextProbeAt || 0;
 function getFreeMB() {
-  return Math.round(os.freemem() / (1024 * 1024));
+  return getAvailableMB();
+}
+function canProbe() {
+  const now = Date.now();
+  return state.maxSlots && state.slotsAbertos >= state.maxSlots &&
+    getFreeMB() >= (MIN_FREE_RAM_MB + 1024) &&
+    now >= state.nextProbeAt;
 }
 
 /** Decide se pode abrir um novo slot agora */
@@ -90,6 +111,16 @@ function podeAbrirNovoSlot() {
 app.post("/requestOpen", (req, res) => {
   // body {perfil: string}
   const resp = podeAbrirNovoSlot();
+  if (!resp.ok && resp.reason === 'slots' && canProbe()) {
+    // Permite um probe extra de slot (slot de teste)
+    state.maxSlots = Math.max(1, state.maxSlots);
+    state.slotsAbertos++;
+    state.nextProbeAt = Date.now() + 8 * 60 * 1000; // 8 min
+    ativos.set(req.body && req.body.perfil, { openAt: Date.now(), probe: true });
+    pushEvent({type:"open_granted_probe", perfil:req.body && req.body.perfil});
+    saveState();
+    return res.json({ ok:true, probe:true, nextSlot: state.slotsAbertos });
+  }
   if (!resp.ok) return res.status(429).json(resp);
 
   state.slotsAbertos++;
@@ -122,6 +153,19 @@ app.post("/notifyOpened", (req, res) => {
     pushEvent({type:"abrir_err", perfil:nome, maxSlots:state.maxSlots});
   }
   if (nome) ativos.delete(nome);
+
+  // bloco inserido conforme instrução para probe dinâmico ao notificar abertura
+  const info = ativos.get(nome);
+  if (info && info.probe) {
+    if (result === 'ok') {
+      state.maxSlots = (state.maxSlots||0) + 1;
+      pushEvent({type:"probe_succeeded", maxSlots: state.maxSlots});
+    } else {
+      state.openBlockedUntil = Date.now() + 20000;
+      pushEvent({type:"probe_failed", maxSlots: state.maxSlots});
+    }
+  }
+
   pushEvent({type: "opened_result", perfil: nome, result, dur});
   saveState();
   res.json({ok:true});
@@ -144,9 +188,14 @@ app.get("/status", (req, res) => {
       maxEver: state.maxEver,
       ramLivre: getFreeMB(),
       ramMin: MIN_FREE_RAM_MB,
+      ativosSize: ativos.size,
       tempoAbertura: state.tempoAbertura.slice(-20),
       openBlockedUntil: state.openBlockedUntil,
-      slotHistory: state.slotHistory.slice(-20)
+      slotHistory: state.slotHistory.slice(-20),
+      nextProbeAt: state.nextProbeAt,
+      reclaimedSlots: eventStream.filter(evt => evt.type === 'slot_reclaimed_ttl').length,
+      probeSuccess: eventStream.filter(evt => evt.type === 'probe_succeeded').length,
+      probeFail: eventStream.filter(evt => evt.type === 'probe_failed').length
     },
     eventos: eventStream.slice(-100)
   });

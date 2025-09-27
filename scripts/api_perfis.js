@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const issues = require('./issues.js');
+const { getAvailableMB } = require('./utils.js'); // <<< ADICIONADO CONFORME INSTRUÇÃO
 
 // --- HELPERS DE VALIDAÇÃO (conforme instrução) ---
 const isValidSlug = s => typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
@@ -42,8 +43,7 @@ module.exports = (app, workerClient, fileStore) => {
 
       // BLOQUEIO DE CADASTRO (militar): bloqueia cadastro se RAM <= 3GB
       {
-        const osmod = require('os');
-        const freeMB = Math.floor(osmod.freemem() / (1024*1024));
+        const freeMB = getAvailableMB();
         const MIN_CREATE_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
         if (freeMB <= MIN_CREATE_MB) {
           try { require('./issues.js').append('system', 'mem_block_signup', `Cadastro bloqueado: RAM livre=${freeMB}MB <= ${MIN_CREATE_MB}MB`); } catch {}
@@ -140,7 +140,7 @@ module.exports = (app, workerClient, fileStore) => {
 
     // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
     {
-      const freeMB = Math.floor(require('os').freemem() / (1024*1024));
+      const freeMB = getAvailableMB();
       const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
       if (freeMB <= MIN_OPEN_MB) {
         try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
@@ -195,7 +195,7 @@ module.exports = (app, workerClient, fileStore) => {
 
     // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
     {
-      const freeMB = Math.floor(require('os').freemem() / (1024*1024));
+      const freeMB = getAvailableMB();
       const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
       if (freeMB <= MIN_OPEN_MB) {
         try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
@@ -289,10 +289,11 @@ module.exports = (app, workerClient, fileStore) => {
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_human_resume_request', `by=${op}`);
     // Marca o "fine" do modo humano e ativa virtus novamente
-    try {
-      await fileStore.patchDesired(nome, { humanResume: true });
-    } catch (e) {}
-    return res.json({ ok: true, queued: true });
+    const resp = await workerClient.sendWorkerCommand('human-resume', { nome }, { timeoutMs: 60000 }).catch(()=>null);
+    if (!resp || resp.ok !== true) {
+      return res.json({ ok: false, error: (resp && resp.error) || 'human_resume_failed' });
+    }
+    return res.json({ ok: true });
   });
 
   // Descongelar perfil manualmente
