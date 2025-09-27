@@ -5,7 +5,7 @@ const path = require('path');
 // ========== FLOOD/REENTRADA/FILA PROTECTION ADDED ==========
 // Proteção: Evita flood de comandos “open”/“activate”/“startWork”. Garantido que só 1 em andamento por perfil ou globalmente.
 const inflightOp = new Map(); // Key: type+name ou type (se global)
-const pLimit = require('p-limit');
+const pLimit = require('p-limit').default;
 const limitCount = 6; // 6 comandos simultâneos permitidos globais (ajuste conforme desejado)
 const globalCommandPool = pLimit(limitCount);
 // DEBUG
