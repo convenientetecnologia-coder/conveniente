@@ -21,8 +21,30 @@ const api = {
   getFotosCount:   () => fetch('/api/fotos/count').then(r => r.json()),
   getIssues:       (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/issues`).then(r => r.json()),
   clearIssues:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/issues`, { method:'DELETE' }).then(r => r.json()),
-  robesPause24hAll: () => fetch('/api/robes/pause-24h-all', { method:'POST' }).then(r => r.json()),
-  robesReleaseAll: () => fetch('/api/robes/release-all', { method:'POST' }).then(r => r.json()),
+  robesPause24hAll: async () => {
+    const res = await fetch('/api/robes/pause-24h-all', { method:'POST' });
+    const data = await res.json();
+    if (!data || data.ok === false) {
+      alert(data && data.error ? data.error : "Falha ao pausar Robe 24h (todos).");
+    }
+    return data;
+  },
+  robesReleaseAll: async () => {
+    const res = await fetch('/api/robes/release-all', { method:'POST' });
+    const data = await res.json();
+    if (!data || data.ok === false) {
+      alert(data && data.error ? data.error : "Falha ao liberar Robe (todos).");
+    }
+    return data;
+  },
+  robePause24h: async (nome) => {
+    const res = await fetch(`/api/perfis/${encodeURIComponent(nome)}/robe-24h`, { method: 'POST' });
+    const data = await res.json();
+    if (!data || data.ok === false) {
+      alert(data && data.error ? data.error : "Falha ao pausar Robe 24h" + (nome ? " (" + nome + ")" : "") + ".");
+    }
+    return data;
+  },
   resumeHuman:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/human-resume`, { method: 'POST' }).then(r => r.json()),
 };
 

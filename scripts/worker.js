@@ -1267,19 +1267,9 @@ async function robeTickGlobal() {
         try {
           res = await robeHelper.startRobe(ctrl.browser, nome, robePauseMs, workingNow);
         } catch (e) {
-          // Penalidade por erro técnico
-          const penalSec = 60+Math.floor(Math.random()*241); // 60-300s
-          await manifestStore.update(nome, (m)=>{
-            m = m || {};
-            const now = Date.now();
-            m.robeCooldownUntil = now + penalSec*1000;
-            m.robeCooldownRemainingMs = 0;
-            return m;
-          });
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].cooldownSec = penalSec;
-          await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
-          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: penalSec });
+          // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
+          await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
+          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
           try { console.warn('[WORKER][robeTickGlobal] Robe error:', e && e.message || e); } catch {}
           return; // não crasha fila global
         }
@@ -1686,9 +1676,9 @@ const handlers = {
     // Zera cooldown no manifest
     try {
       await manifestStore.update(nome, (m) => {
+        // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
+        // Não modificar cooldown aqui; o robe.js é o único responsável por aplicá-lo.
         m = m || {};
-        m.robeCooldownUntil = Date.now();
-        m.robeCooldownRemainingMs = 0;
         return m;
       });
     } catch {}
@@ -1750,19 +1740,9 @@ const handlers = {
           try {
             res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
           } catch (e) {
-            // Penalidade por erro técnico
-            const penalSec = 60+Math.floor(Math.random() * 241); // 60-300s
-            await manifestStore.update(nome, (m)=>{
-              m = m || {};
-              const now = Date.now();
-              m.robeCooldownUntil = now + penalSec*1000;
-              m.robeCooldownRemainingMs = 0;
-              return m;
-            });
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].cooldownSec = penalSec;
-            await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown militar ${penalSec}s`);
-            robeUpdateMeta(nome, { estado: 'erro', cooldownSec: penalSec });
+            // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
+            await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
+            robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
             try { console.warn('[WORKER][robe-play] Robe error:', e && e.message || e); } catch {}
             return; // não crasha fila global
           }
@@ -2800,11 +2780,8 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
     return { ok: false, error: 'incomplete_manifest' };
   }
 
-  // HANDLER novo: verifica backoff por erro militar
+  // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
   const now = Date.now();
-  if (robeMeta[nome]?.backoffUntil && robeMeta[nome].backoffUntil > now) {
-    return { ok: false, error: 'backoff_militar' };
-  }
   // RAM killbackoff (Terminator)
   if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > Date.now()) {
     return { ok: false, error: 'ram_backoff' };
@@ -2813,12 +2790,8 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
     // Chamando normalmente
     return await _startRobeOrig.apply(this, arguments);
   } catch (e) {
-    // Penalidade/robustez
-    const minSec = 60, maxSec = 300;
-    let sec = minSec+Math.floor(Math.random()*(maxSec-minSec+1));
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].backoffUntil = Date.now() + sec*1000;
-    await reportAction(nome, 'robe_error', `Erro técnico; militar backoff ${sec}s. ${e&&e.message}`);
+    // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
+    await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão (15–30min) será aplicado por robe.js`);
     return { ok: false, error: String(e&&e.message||e) };
   }
 };

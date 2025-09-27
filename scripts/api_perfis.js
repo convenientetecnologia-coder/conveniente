@@ -1,5 +1,3 @@
-// ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
-
 // scripts/api_perfis.js
 const fs = require('fs');
 const path = require('path');
@@ -200,8 +198,22 @@ module.exports = (app, workerClient, fileStore) => {
       }
     }
 
+    const manifestStore = require('./manifestStore.js');
+    const plus24 = 24 * 60 * 60 * 1000;
     try {
-      await fileStore.patchDesired(nome, { virtus: 'on', active: true, robePause24h: true });
+      await manifestStore.update(nome, man => {
+        const now = Date.now();
+        man = man || {};
+        man.robeCooldownUntil = now + plus24;
+        man.robeCooldownRemainingMs = 0;
+        return man;
+      });
+    } catch (e) {
+      await issues.append(nome, 'robe24h_failed', e && e.message || e);
+      return res.json({ ok: false, error: 'Não foi possível aplicar pause 24h: ' + (e && e.message || e) });
+    }
+    try {
+      await fileStore.patchDesired(nome, { virtus: 'on', active: true }); // remova robePause24h
     } catch (e) {}
     // Apenas declara o desejo, reconciliador executa de fato
     return res.json({ ok: true, queued: true });
@@ -236,8 +248,23 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_robe24h_request', `by=${op}`);
-    await fileStore.patchDesired(nome, { robePause24h: true });
-    return res.json({ ok: true });
+    const manifestStore = require('./manifestStore.js');
+    const plus24 = 24 * 60 * 60 * 1000;
+    try {
+      await manifestStore.update(nome, man => {
+        const now = Date.now();
+        man = man || {};
+        man.robeCooldownUntil = now + plus24; // worker em working
+        man.robeCooldownRemainingMs = 0; // worker não working
+        return man;
+      });
+      // Remover ou comentar a chamada ao patchDesired(nome, { robePause24h }) – não é mais necessária
+      // await fileStore.patchDesired(nome, { robePause24h: true });
+      res.json({ ok: true });
+    } catch (e) {
+      await issues.append(nome, 'robe24h_failed', e && e.message || e);
+      res.json({ ok: false, error: 'Não foi possível aplicar pause 24h: ' + (e && e.message || e) });
+    }
   });
 
   // Retomar trabalho (desabilita controle humano e religa virtus/robe)

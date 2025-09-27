@@ -14,6 +14,7 @@
     "express": "^5.1.0",
     "open": "^8.4.2",
     "os-utils": "^0.0.14",
+    "p-limit": "^7.1.1",
     "pidusage": "^4.0.1",
     "ps-list": "^8.1.1",
     "puppeteer": "^24.22.0",

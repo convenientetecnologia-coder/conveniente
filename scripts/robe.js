@@ -530,7 +530,7 @@ async function publicarEFechar5s(page) {
  * Start Robe — rápido e robusto:
  * - Fast-lane readiness (3.5s) + fallback curto.
  * - Espera curta se restar <5s de cooldown; aborta sem mexer no cooldown se faltar mais.
- * - Pause 15–30min apenas no sucesso, 60s em erro técnico, nada no abort por cooldown.
+ * - Cooldown padrão 15–30min após sucesso ou erro; nada no abort por cooldown. NUNCA penalidade/backoff especial.
  * - Pós-publicação: se detectar “painel/listagem” fecha imediatamente; senão fecha em até 3s (sem popup).
  *   Se houver popup, aceita e espera ~2.5s, depois fecha.
  * - Minimização suave apenas desta aba (após anti-detect).
@@ -540,6 +540,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let published = false;
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
+  let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
+
+  // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
   const stepLog = [];
 
   console.log(`[ROBE][startRobe] INÍCIO para ${nome}, pauseMS=${robePauseMs}, horário=${new Date().toLocaleString()}`);
@@ -703,35 +706,30 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Registra issue (silencioso)
     try { await logIssue(nome, issueType, errMsg); } catch {}
 
-    // Cooldown militar para erro técnico (60–300s)
+    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
     try {
-      const cooldownRand = jitter(60000, 300000);
+      const pause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
       await manifestStore.update(nome, m => {
-        m.robeCooldownUntil = Date.now() + cooldownRand;
+        m.robeCooldownUntil = Date.now() + pause;
         return m;
       });
-      try { await logIssue(nome, 'robe_error', `Erro técnico/backoff, cooldown ${Math.ceil(cooldownRand/1000)}s: ${errMsg}`); } catch {}
+      cooldownApplied = true;
+      try { await logIssue(nome, 'robe_error', `Erro técnico; cooldown padrão ${Math.ceil(pause/60000)}min: ${errMsg}`); } catch {}
     } catch {}
 
     return { ok: false, error: errMsg, log: stepLog };
 
   } finally {
-    // Cooldown nível militar:
-    // - published=true: 15–30min.
-    // - abortedByCooldown=true: não mexe.
-    // - erro técnico: backoff curto 60–300s (já tratado no catch acima).
-
+    // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
+    // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
     try {
-      if (published) {
-        const rndPause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
-        const pause = (robePauseMs > 0 ? robePauseMs : rndPause);
+      if (!abortedByCooldown && !cooldownApplied) {
+        const pause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
         await manifestStore.update(nome, m => {
           m.robeCooldownUntil = Date.now() + pause;
           return m;
         });
-        // Evento de sucesso já logado acima
       }
-      // Se abortedByCooldown === true, não altera nada
     } catch (err) {
       stepLog.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
     }
