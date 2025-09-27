@@ -149,9 +149,12 @@ module.exports = (app, workerClient, fileStore) => {
     }
 
     try { await fileStore.patchDesired(nome, { active: true }); } catch {}
-
-    // Não chama o worker diretamente para evitar corrida com o reconciliador
-    return res.json({ ok: true, queued: true });
+    // Chama worker para ativar imediatamente:
+    const r = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 }).catch(()=>null);
+    if (!r || r.ok !== true) {
+      return res.json({ ok: false, error: (r && r.error) || 'activate_failed' });
+    }
+    return res.json({ ok: true });
   });
 
   // Desativar perfil (declarativo: reconciliador faz o fechamento)
@@ -163,9 +166,11 @@ module.exports = (app, workerClient, fileStore) => {
     await issues.append(nome, 'admin_deactivate_request', `by=${op}`);
 
     try { await fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch {}
-
-    // Não chama o worker diretamente para evitar corrida com o reconciliador
-    return res.json({ ok: true, queued: true });
+    // Chama worker para desativar imediatamente:
+    try {
+      await workerClient.sendWorkerCommand('deactivate', { nome, reason: 'admin', policy: null }, { timeoutMs: 20000 });
+    } catch (e) {}
+    return res.json({ ok: true });
   });
 
   // Configurar/injetar cookies
@@ -215,8 +220,16 @@ module.exports = (app, workerClient, fileStore) => {
     try {
       await fileStore.patchDesired(nome, { virtus: 'on', active: true }); // remova robePause24h
     } catch (e) {}
-    // Apenas declara o desejo, reconciliador executa de fato
-    return res.json({ ok: true, queued: true });
+    // Garante ativação do browser e início do Virtus imediatamente
+    const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 }).catch(()=>null);
+    if (!r1 || r1.ok !== true) {
+      return res.json({ ok: false, error: (r1 && r1.error) || 'activate_failed' });
+    }
+    const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 }).catch(()=>null);
+    if (!r2 || r2.ok !== true) {
+      return res.json({ ok: false, error: (r2 && r2.error) || 'start_work_failed' });
+    }
+    return res.json({ ok: true });
   });
 
   // Invocar humano

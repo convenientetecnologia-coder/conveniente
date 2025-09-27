@@ -17,7 +17,7 @@ const desiredPath = path.join(dadosDir, 'desired.json');
 const statusPath  = path.join(dadosDir, 'status.json');
 
 // ManifestStore import para setPerfilFrozenUntil
-const manifestStore = require('./manifestStore.js');
+// const manifestStore = require('./manifestStore.js');
 
 //// (opcional) Locks locais por perfil (adicione se/quando precisar) ////
 // const profileLocks = {};
@@ -473,8 +473,10 @@ async function setPerfilFrozenUntil(nome, frozenUntil) {
     const perfisArr = loadPerfisJson();
     const perfil = perfisArr.find(p => p && p.nome === nome);
     if (!perfil || !perfil.userDataDir) return false;
-    await manifestStore.update(nome, man => { man = man || {}; man.frozenUntil = frozenUntil; return man; });
-    return true;
+    const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
+    const man = readJsonSafe(manifestPath, {}) || {};
+    man.frozenUntil = frozenUntil;
+    return writeJsonAtomic(manifestPath, man);
   } catch { return false; }
 }
 

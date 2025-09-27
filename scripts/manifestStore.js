@@ -6,13 +6,14 @@
 
 const fs = require('fs');
 const path = require('path');
-const fileStore = require('./fileStore.js'); // Para loadPerfisJson etc.
 
 const locks = new Map();
 
 /** Resolve o caminho absoluto do manifest.json de um perfil (por slug/nome). */
 function getManifestPath(nome) {
-  const arr = fileStore.loadPerfisJson();
+  // Lê perfis.json diretamente para resolver o caminho do manifest
+  const perfisPath = path.join(__dirname, '..', 'dados', 'perfis.json');
+  const arr = readJsonSafe(perfisPath, []);
   const p = arr.find(x => x && x.nome === nome);
   if (!p || !p.userDataDir) throw new Error('userDataDir não encontrado: ' + nome);
   return path.join(p.userDataDir, 'manifest.json');

@@ -754,7 +754,7 @@ function robeCooldownLeft(nome) {
       } else {
         const remaining = Number(p.robeCooldownRemainingMs || 0);
         if (remaining > 0) {
-          left = Math.floor(remaining / 1000);
+          left = Math.floor(remaining > 0 ? remaining / 1000 : 0);
         } else {
           // fallback defensivo (se por acaso houver until setado enquanto inativo)
           const until = Number(p.robeCooldownUntil || 0);
@@ -2410,6 +2410,7 @@ async function unfreezeProfile(nome, setBy = 'admin') {
     robeMeta[nome].reloadAttemptsWindow = [];
     robeMeta[nome].unfreezeCount = (robeMeta[nome].unfreezeCount || 0) + 1;
     robeMeta[nome].lastUnfreezeAt = now;
+    robeMeta[nome].reopenAt = null; // <<< LIMPA HOLDS RESIDUAIS AO DESCONGELAR
 
     await manifestStore.update(nome, (man) => {
       man = man || {};
@@ -2490,7 +2491,7 @@ async function nurseTick() {
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) continue;
 
         // Slot global de aberturas
-        if (slotsInUse >= MAX_OPEN_CONCURRENCY) break;
+        if (slotsInUse >= MAX_OPEN_CONCURRENCY) continue;
         slotsInUse++;
         try {
           await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
