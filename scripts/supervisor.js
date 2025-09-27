@@ -7,7 +7,8 @@
 
 "use strict";
 
-const express = require("express");
+// EXPRESS REMOVIDO
+// const express = require("express");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
@@ -20,8 +21,9 @@ const MIN_FREE_RAM_MB = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '3072', 10);
 // Ciclo de auto-tune em ms
 const CYCLE_MS = parseInt(process.env.SUP_CYCLE_MS || '1600', 10);
 
-const app = express();
-app.use(express.json());
+// EXPRESS REMOVIDO
+// const app = express();
+// app.use(express.json());
 
 /** Estado do Supervisor */
 let state = {
@@ -107,57 +109,57 @@ function podeAbrirNovoSlot() {
   return {ok: true, freeMB};
 }
 
+// ---------------------- INICIO DAS FUNÇÕES SINGLETON ---------------------------
+
 /** Painel pede para abrir um novo navegador (requestOpen) */
-app.post("/requestOpen", (req, res) => {
-  // body {perfil: string}
+// Era /requestOpen: POST body {perfil}
+// AGORA: function requestOpen(perfil)
+function requestOpen(perfil) {
   const resp = podeAbrirNovoSlot();
+  // Logic for probe (como antes)
   if (!resp.ok && resp.reason === 'slots' && canProbe()) {
-    // Permite um probe extra de slot (slot de teste)
     state.maxSlots = Math.max(1, state.maxSlots);
     state.slotsAbertos++;
     state.nextProbeAt = Date.now() + 8 * 60 * 1000; // 8 min
-    ativos.set(req.body && req.body.perfil, { openAt: Date.now(), probe: true });
-    pushEvent({type:"open_granted_probe", perfil:req.body && req.body.perfil});
+    ativos.set(perfil, { openAt: Date.now(), probe: true });
+    pushEvent({type:"open_granted_probe", perfil});
     saveState();
-    return res.json({ ok:true, probe:true, nextSlot: state.slotsAbertos });
+    return { ok:true, probe:true, nextSlot: state.slotsAbertos };
   }
-  if (!resp.ok) return res.status(429).json(resp);
+  if (!resp.ok) return { ...resp, ok: false };
 
   state.slotsAbertos++;
   state.tempoUltAbertura = Date.now();
-  ativos.set(req.body && req.body.perfil, {openAt: Date.now()});
-  pushEvent({type:"open_granted", perfil:req.body && req.body.perfil});
+  ativos.set(perfil, { openAt: Date.now() });
+  pushEvent({type:"open_granted", perfil});
   saveState();
-  res.json({ok:true, nextSlot: state.slotsAbertos});
-});
+  return { ok:true, nextSlot: state.slotsAbertos };
+}
 
 /** Notifica término de abertura do navegador (ok ou erro) */
-app.post("/notifyOpened", (req, res) => {
-  // body: {perfil, resultado}
-  const nome = req.body.perfil;
-  const result = req.body.resultado || "ok";
-  let openAt = null; if (ativos.has(nome)) { openAt = ativos.get(nome).openAt; }
+// Era POST /notifyOpened {perfil, resultado}
+// AGORA: function notifyOpened(perfil, resultado = "ok")
+function notifyOpened(perfil, resultado = "ok") {
+  let openAt = null; if (ativos.has(perfil)) { openAt = ativos.get(perfil).openAt; }
   const dur = openAt ? Date.now() - openAt : null;
   state.slotsAbertos = Math.max(0, state.slotsAbertos-1);
-  state.slotHistory.push({perfil: nome, result, dur, ramFree: getFreeMB(), ts: Date.now()});
+  state.slotHistory.push({perfil, result: resultado, dur, ramFree: getFreeMB(), ts: Date.now()});
   if (state.slotHistory.length > 600) state.slotHistory.shift();
 
-  // Auto-tune: se abriu ok e dur < 12seg, pode tentar subir mais
-  if (result === "ok") {
+  if (resultado === "ok") {
     if (!state.maxSlots || state.slotsAbertos > state.maxSlots) state.maxSlots = state.slotsAbertos;
     if (state.maxSlots > state.maxEver) state.maxEver = state.maxSlots;
   } else {
-    // Se erro: backoff/cooldown
     state.openBlockedUntil = Date.now() + 15000;
     state.maxSlots = Math.max(1, (state.maxSlots||1) -1);
-    pushEvent({type:"abrir_err", perfil:nome, maxSlots:state.maxSlots});
+    pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots});
   }
-  if (nome) ativos.delete(nome);
+  if (perfil) ativos.delete(perfil);
 
-  // bloco inserido conforme instrução para probe dinâmico ao notificar abertura
-  const info = ativos.get(nome);
+  // Probe
+  const info = ativos.get(perfil);
   if (info && info.probe) {
-    if (result === 'ok') {
+    if (resultado === 'ok') {
       state.maxSlots = (state.maxSlots||0) + 1;
       pushEvent({type:"probe_succeeded", maxSlots: state.maxSlots});
     } else {
@@ -166,21 +168,23 @@ app.post("/notifyOpened", (req, res) => {
     }
   }
 
-  pushEvent({type: "opened_result", perfil: nome, result, dur});
+  pushEvent({type: "opened_result", perfil, result: resultado, dur});
   saveState();
-  res.json({ok:true});
-});
+  return { ok:true };
+}
 
-/** PUT: Woker/painel pode enviar telemetria fina */
-app.post("/telemetria", (req, res) => {
-  // body: {perfil, evento, ...}
-  pushEvent({...req.body, type:"telemetria"});
-  res.json({ok:true});
-});
+/** PUT: telemetria fina */
+// Era POST /telemetria {body: evt}
+// AGORA: function sendTelemetria(evt)
+function sendTelemetria(evt) {
+  pushEvent({ ...evt, type: "telemetria" });
+  return { ok:true };
+}
 
 /** Consulta estado e eventos do supervisor */
-app.get("/status", (req, res) => {
-  res.json({
+// Era GET /status
+function getStatus() {
+  return {
     ok: true,
     supervisor: {
       slotsAbertos: state.slotsAbertos,
@@ -198,11 +202,18 @@ app.get("/status", (req, res) => {
       probeFail: eventStream.filter(evt => evt.type === 'probe_failed').length
     },
     eventos: eventStream.slice(-100)
-  });
-});
+  };
+}
+
+/** Consulta de RAM livre */
+// Era GET /ram
+function getRam() {
+  return { livre: getFreeMB(), min: MIN_FREE_RAM_MB };
+}
 
 /** Limpar histórico de eventos */
-app.post('/reset', (req, res) => {
+// Era POST /reset
+function resetSupervisor() {
   Object.assign(state, {
     slotsAbertos: 0,
     maxSlots: null,
@@ -215,14 +226,20 @@ app.post('/reset', (req, res) => {
   });
   eventStream.length = 0;
   saveState();
-  res.json({ok:true});
-});
+  return { ok:true };
+}
 
-/** Consulta de RAM livre */
-app.get("/ram", (req, res) => {
-  res.json({livre: getFreeMB(), min: MIN_FREE_RAM_MB});
-});
+// ---------------------- FIM DAS FUNÇÕES SINGLETON ---------------------------
 
-app.listen(PORT, () =>{
-  console.log(`[SUPERVISOR] Supervisor universal rodando em http://localhost:${PORT}/ (minFreeRAM=${MIN_FREE_RAM_MB}MB, ciclo auto-tune ${CYCLE_MS}ms)`);
-});
+// EXPRESS REMOVIDO: 
+// Todas as rotas e app.listen foram removidas conforme instrução
+
+// Exporta o singleton com os métodos
+module.exports = {
+  requestOpen,
+  notifyOpened,
+  sendTelemetria,
+  getStatus,
+  getRam,
+  resetSupervisor
+};

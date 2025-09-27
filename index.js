@@ -9,6 +9,9 @@ const open = require('open'); // <-- adicione/mova isso aqui!
 const workerClient = require('./scripts/workerClient.js');
 const fileStore = require('./scripts/fileStore.js');
 
+// supervisor interno unificado (importação obrigatória — side effect: inicializa timers ttl/probe)
+const supervisor = require('./scripts/supervisor.js');
+
 // Inicialização
 const app = express();
 const PORT = parseInt(process.env.PORT || '8088', 10);
