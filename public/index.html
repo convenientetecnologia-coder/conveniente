@@ -207,6 +207,25 @@
   </div>
   <script src="app.js"></script>
   <script>
+    // Lock para impedir múltiplos comandos em massa simultâneos — fortalece UX com fluxo único!
+    let startAllLock = false; // lock para "Abrir Todos e Iniciar 24h"
+    let stopAllLock = false;  // lock para "Fechar todos"
+    function isMassActionRunning(){ return startAllLock || stopAllLock; }
+    function alertMassActionRunning(msg){
+      alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
+    }
+    function setGlobalActionButtonsDisabled(disable, { exclude = [] } = {}) {
+      const ids = ['startAllBtn','stopAllBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn'];
+      ids.forEach(id => {
+        if (exclude.includes(id)) return;
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.disabled = !!disable;
+        el.style.opacity = disable ? '0.7' : '';
+        el.style.cursor = disable ? 'not-allowed' : '';
+      });
+    }
+
     // ---- SUPORTE À AUTENTICAÇÃO ADMIN ----
     const tokenInput = document.getElementById('adminTokenInput');
     const setTokenBtn = document.getElementById('setTokenBtn');
@@ -1138,6 +1157,7 @@
       const btn = document.getElementById('citiesCountBtn');
       if (!btn) return;
       btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
         try {
           const resp = await window.electronAPI.listarCidadesPerfisCount();
           if (resp && resp.ok) {
@@ -1168,6 +1188,10 @@
     }
 
     async function startAllSequential() {
+      if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
+      if (stopAllLock)  { alertMassActionRunning(); return; }
+      startAllLock = true;
+      setGlobalActionButtonsDisabled(true);
       const startBtn = document.getElementById('startAllBtn');
       if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
       try {
@@ -1213,6 +1237,8 @@
         alert('Falha na sequência: ' + (e && e.message || e));
       } finally {
         if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir Todos e Iniciar 24h'; }
+        setGlobalActionButtonsDisabled(false);
+        startAllLock = false;
         reloadPerfis();
       }
     }
@@ -1298,6 +1324,10 @@
 
     // 4.4) Fechar todos sequencialmente com feedback
     async function stopAllSequential() {
+      if (stopAllLock) { alert('Fechamento em massa já está em andamento.'); return; }
+      if (startAllLock) { alertMassActionRunning(); return; }
+      stopAllLock = true;
+      setGlobalActionButtonsDisabled(true);
       const stopBtn = document.getElementById('stopAllBtn');
       if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
       try {
@@ -1326,6 +1356,8 @@
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {
         if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar todos'; }
+        setGlobalActionButtonsDisabled(false);
+        stopAllLock = false;
         reloadPerfis();
       }
     }
@@ -1349,6 +1381,7 @@
       const btn24 = document.getElementById('robe24AllBtn');
       if (btn24) {
         btn24.onclick = async () => {
+          if (isMassActionRunning()) { alertMassActionRunning(); return; }
           if (!btn24.dataset.idleTxt) btn24.dataset.idleTxt = btn24.textContent;
           btn24.disabled = true; btn24.style.opacity='0.7'; btn24.textContent='Pausando 24h...';
           try { await window.electronAPI.robesPause24hAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
@@ -1359,6 +1392,7 @@
       const btnRel = document.getElementById('robeReleaseAllBtn');
       if (btnRel) {
         btnRel.onclick = async () => {
+          if (isMassActionRunning()) { alertMassActionRunning(); return; }
           if (!btnRel.dataset.idleTxt) btnRel.dataset.idleTxt = btnRel.textContent;
           btnRel.disabled = true; btnRel.style.opacity='0.7'; btnRel.textContent='Liberando...';
           try { await window.electronAPI.robesReleaseAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
@@ -1373,6 +1407,7 @@
       const btn = document.getElementById('unfreezeAllBtn');
       if (!btn) return;
       btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
         if (!confirm('Descongelar todos os perfis agora?')) return;
         btn.disabled = true; btn.textContent = 'Descongelando...';
         try {

@@ -374,6 +374,9 @@ async function milLog(type, msg) {
 // }
 
 // === Stray kill helpers ===
+// ======= OPENING FLAG (global) para proteção durante abertura e killStray =======
+let opening = {}; // { [nome]: true } enquanto activateOnce estiver em curso
+
 async function killPids(pids = []) {
   for (const pid of (pids || [])) {
     try { process.kill(pid, 'SIGKILL'); } catch {}
@@ -401,6 +404,10 @@ async function killStrayChromes() {
       group[nome].push(Number(proc.pid));
     }
     for (const [nome, pidList] of Object.entries(group)) {
+      if (opening[nome]) { // proteção: não matar perfis em abertura
+        await milLog('mil_action', `stray_skip_opening: ${nome} pids=${pidList.join(',')}`);
+        continue;
+      }
       if (!pidList || !pidList.length) continue;
       await milLog('mil_action', `stray_kill: ${nome} pids=${pidList.join(',')}`);
       await killPids(pidList);
@@ -592,103 +599,110 @@ function isFrozenNow(nome) {
 const activationLocks = new Map(); // nome => Promise em andamento
 
 async function activateOnce(nome, source = '') {
-if (!nome) return { ok: false, error: 'Nome ausente' };
-// Já está ativo?
-if (controllers.has(nome)) return { ok: true, already: true };
+  // Proteção adicional: flag 'opening' evita colisões e dá pistas ao killStray
+  if (opening[nome]) return { ok: false, error: 'already_opening' };
+  opening[nome] = true;
+  try {
+    if (!nome) return { ok: false, error: 'Nome ausente' };
+    // Já está ativo?
+    if (controllers.has(nome)) return { ok: true, already: true };
 
-// BLOQUEIO: não ativa se estiver congelado
-if (isFrozenNow(nome)) {
-  await reportAction(nome, 'mil_action', 'block_activate_frozen');
-  return { ok: false, error: 'account_is_frozen' };
-}
+    // BLOQUEIO: não ativa se estiver congelado
+    if (isFrozenNow(nome)) {
+      await reportAction(nome, 'mil_action', 'block_activate_frozen');
+      return { ok: false, error: 'account_is_frozen' };
+    }
 
-// Se já existe uma ativação em curso para este nome, aguarde finalização
-const inflight = activationLocks.get(nome);
-if (inflight) {
-try { await inflight.catch(() => {}); } catch {}
-return controllers.has(nome)
-? { ok: true, already: true }
-: { ok: false, error: 'activation_in_progress' };
-}
+    // Se já existe uma ativação em curso para este nome, aguarde finalização
+    const inflight = activationLocks.get(nome);
+    if (inflight) {
+      try { await inflight.catch(() => {}); } catch {}
+      return controllers.has(nome)
+      ? { ok: true, already: true }
+      : { ok: false, error: 'activation_in_progress' };
+    }
 
-const job = (async () => {
-try {
-console.log('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
-const manifest = resolveManifest(nome);
-if (!manifest) throw new Error('Perfil não encontrado');
+    const job = (async () => {
+      try {
+        console.log('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
+        const manifest = resolveManifest(nome);
+        if (!manifest) throw new Error('Perfil não encontrado');
 
-// GATE DE RAM antes de abrir (livre > 3GB)
-{
-  const freeMB = Math.round(os.freemem() / (1024*1024));
-  if (freeMB <= OPEN_MIN_FREE_MB) {
-    await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
-    throw new Error('ram_insuficiente_para_ativar');
+        // GATE DE RAM antes de abrir (livre > 3GB)
+        {
+          const freeMB = Math.round(os.freemem() / (1024*1024));
+          if (freeMB <= OPEN_MIN_FREE_MB) {
+            await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
+            throw new Error('ram_insuficiente_para_ativar');
+          }
+        }
+
+        const browser = await browserHelper.openBrowser(manifest);
+        if (!browser || typeof browser.newPage !== 'function') {
+          throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
+        }
+        controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+
+        // HEADROOM pós-abrir (rollback se < 2GB)
+        {
+          const freeAfter = Math.round(os.freemem() / (1024*1024));
+          if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
+            await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
+            try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
+            return { ok: false, error: 'headroom_below_min_after_open' };
+          }
+        }
+
+        // PATCH MILITAR: marcar ativação e limpar históricos/avisos
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].activatedAt = Date.now();
+        robeMeta[nome].ramHist = [];
+        robeMeta[nome].cpuHistory = [];
+        robeMeta[nome].lastWarn = null;
+
+        try { healer.lastProgressAt = Date.now(); } catch {}
+
+        try { attachBrowserLifecycle(nome, browser); } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
+        return { ok: true };
+      } catch (e) {
+        // Mantém status consistente (active:false) no snapshot em caso de falha
+        try {
+          const st = readJsonFile(statusPath, null) || { perfis: [] };
+          let found = false;
+          if (Array.isArray(st.perfis)) {
+            st.perfis = st.perfis.map(p => {
+              if (p && p.nome === nome) { found = true; return { ...p, active: false }; }
+              return p;
+            });
+          }
+          if (!found) st.perfis.push({ nome, active: false });
+          _statusLock = _statusLock.then(async () => {
+            const ok = writeJsonAtomic(statusPath, st);
+            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|activateOnce_fail_status`); } catch {} }
+          });
+        } catch {}
+        try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
+        // INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
+        if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (activateOnce)'); } catch {}
+        }
+        // FIM DA INSTRUÇÃO 9
+        console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
+        return { ok: false, error: e && e.message || String(e) };
+      } finally {
+        activationLocks.delete(nome);
+      }
+    })();
+
+    activationLocks.set(nome, job);
+    return await job;
+  } finally {
+    delete opening[nome];
   }
-}
-
-const browser = await browserHelper.openBrowser(manifest);
-if (!browser || typeof browser.newPage !== 'function') {
-throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
-}
-controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
-
-// HEADROOM pós-abrir (rollback se < 2GB)
-{
-  const freeAfter = Math.round(os.freemem() / (1024*1024));
-  if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
-    await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
-    try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
-    return { ok: false, error: 'headroom_below_min_after_open' };
-  }
-}
-
-// PATCH MILITAR: marcar ativação e limpar históricos/avisos
-robeMeta[nome] = robeMeta[nome] || {};
-robeMeta[nome].activatedAt = Date.now();
-robeMeta[nome].ramHist = [];
-robeMeta[nome].cpuHistory = [];
-robeMeta[nome].lastWarn = null;
-
-try { healer.lastProgressAt = Date.now(); } catch {}
-
-try { attachBrowserLifecycle(nome, browser); } catch {}
-try { await snapshotStatusAndWrite(); } catch {}
-console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
-return { ok: true };
-} catch (e) {
-// Mantém status consistente (active:false) no snapshot em caso de falha
-try {
-const st = readJsonFile(statusPath, null) || { perfis: [] };
-let found = false;
-if (Array.isArray(st.perfis)) {
-st.perfis = st.perfis.map(p => {
-if (p && p.nome === nome) { found = true; return { ...p, active: false }; }
-return p;
-});
-}
-if (!found) st.perfis.push({ nome, active: false });
-_statusLock = _statusLock.then(async () => {
-  const ok = writeJsonAtomic(statusPath, st);
-  if (!ok) { try { await issues.append('system','persist_failed', `${nome}|activateOnce_fail_status`); } catch {} }
-});
-} catch {}
-try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
-// INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
-if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
-  robeMeta[nome] = robeMeta[nome] || {};
-  robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-  try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (activateOnce)'); } catch {}
-}
-// FIM DA INSTRUÇÃO 9
-console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
-return { ok: false, error: e && e.message || String(e) };
-} finally {
-activationLocks.delete(nome);
-}
-})();
-
-activationLocks.set(nome, job);
-return await job;
 }
 // ======= FIM: LOCK GLOBAL DE ATIVAÇÃO (ULTRA ROBUSTO) =======
 
@@ -2245,6 +2259,11 @@ const NURSE_CFG = {
   PAGE_EVAL_TIMEOUT_MS: 5000  // Mais tolerância, menos falso-positivo
 };
 
+// Pequeno slot global para abrir perfis em série + delay entre aberturas
+const MAX_OPEN_CONCURRENCY = 1; // hard para servidor fraco!
+let slotsInUse = 0;
+const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10); // delay entre ativações
+
 // === ULTRA RECOVERY (militar) ===
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,                   // no máximo 2 reloads curtos por página zumbi
@@ -2463,125 +2482,136 @@ async function detectMessengerTempBlock(page) {
   } catch { return { blocked: false }; }
 }
 
+// LOCK de reentrada do nurseTick
+let _nurseTickRunning = false;
+
 async function nurseTick() {
-  const now = Date.now();
-  const desired = readJsonFile(desiredPath, { perfis: {} });
-  for (const nome of Object.keys(desired.perfis || {})) {
-    const want = desired.perfis[nome] || {};
-    const ctrl = controllers.get(nome);
+  if (_nurseTickRunning) return;
+  _nurseTickRunning = true;
+  try {
+    const now = Date.now();
+    const desired = readJsonFile(desiredPath, { perfis: {} });
+    for (const nome of Object.keys(desired.perfis || {})) {
+      const want = desired.perfis[nome] || {};
+      const ctrl = controllers.get(nome);
 
-    // GUARD: nunca manter ativo durante frozen
-    if (isFrozenNow(nome)) {
-      if (ctrl) { await ensureFrozenShutdown(nome, 'nurse_guard'); }
-      continue;
-    }
-
-    // INICIO DA INSTRUÇÃO 6: substituição do trecho nurseTick para modo leve e holds
-    if (want.active === true && !ctrl) {
-      if (isFrozenNow(nome)) continue;
-
-      // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
-      // if (autoMode.mode === 'light') {
-      //   const now = Date.now();
-      //   robeMeta[nome] = robeMeta[nome] || {};
-      //   if (!robeMeta[nome].activationHeldUntil || robeMeta[nome].activationHeldUntil < now) {
-      //     robeMeta[nome].activationHeldUntil = now + 60000;
-      //     await reportAction(nome, 'mil_action', 'nurse_hold_light 60s');
-      //   }
-      //   continue;
-      // }
-
-      await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
-      try {
-        const r = await activateOnce(nome, 'nurse_auto');
-        if (!r || !r.ok) {
-          if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-            await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s');
-          }
-        }
-      } catch {}
-      continue;
-    }
-    // FIM DA INSTRUÇÃO 6
-
-    if (!ctrl || !ctrl.browser) continue;
-    let pages = [];
-    try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
-    if (!pages || !pages[0]) {
-      await reportAction(nome, 'nurse_kill', `motivo=no_pages url= reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-      try { registerFailure(nome, 'no_pages', 'external'); } catch {}
-      await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
-      continue;
-    }
-    const p0 = pages[0];
-    // Checagem de bloqueio temporário do Messenger (prioritário, antes de prune/reload/kill)
-    const det = await detectMessengerTempBlock(p0);
-    if (det && det.blocked) {
-      try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — stopVirtus e reabrir em ~2h'); } catch {}
-      try { await stopVirtus(nome); } catch {}
-      // Agendar reopen ~2h com jitter (sem freezer)
-      robeMeta[nome] = robeMeta[nome] || {};
-      const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000; // 5-26 min
-      robeMeta[nome].reopenAt = Date.now() + ms(2) + jitterMs;
-      try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
-      await snapshotStatusAndWrite();
-      continue; // Não tenta reload/kill, apenas sai.
-    }
-
-    // NÃO competir com recovery stateful
-    const hs = getHealth && getHealth(nome);
-    if (hs && (hs.stage === 'recover1' || hs.stage === 'recover2' || hs.stage === 'recover3')) {
-      continue;
-    }
-
-    let healthy = await pageReadyBasic(p0);
-    if (!healthy) {
-      // Debounce: conta reloads nos últimos 60s, pausa se ultrapassar 3
-      robeMeta[nome] = robeMeta[nome] || {};
-      const now2 = Date.now();
-      if (!robeMeta[nome].reloadAttemptsWindow) robeMeta[nome].reloadAttemptsWindow = [];
-      robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => now2 - ts < 60000);
-
-      robeMeta[nome].reloadAttemptsWindow.push(now2);
-      if (robeMeta[nome].reloadAttemptsWindow.length > 3) {
-        // Log e GRACE: não tente novo reload nos próximos 60s
-        robeMeta[nome].reloadBlockedUntil = now2+60000;
-        await reportAction(nome, 'mil_action', 
-          `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${(p0.url&&p0.url())||''}`
-        );
-        continue; // Não tenta nem reload nem kill — só sai do loop até a próxima rodada.
-      }
-      if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > now2) {
-        continue; // Se grace está ativo, pula hint de reload para este ciclo
-      }
-
-      healthy = await tryReloadShort(p0, nome, 1);
-      if (!healthy) {
-        healthy = await tryReloadShort(p0, nome, 2);
-      }
-      if (healthy) {
-        await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
-      } else {
-        await reportAction(nome, 'nurse_kill', `motivo=page_zumbi url=${(p0.url&&p0.url())||''} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-        try { registerFailure(nome, 'zombie', 'external'); } catch {}
-        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+      // GUARD: nunca manter ativo durante frozen
+      if (isFrozenNow(nome)) {
+        if (ctrl) { await ensureFrozenShutdown(nome, 'nurse_guard'); }
         continue;
       }
-    }
 
-    // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
-    if (ctrl && ctrl.configurando) {
-      console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
-      continue;
+      // INICIO DA INSTRUÇÃO 6: substituição do trecho nurseTick para modo leve e holds
+      if (want.active === true && !ctrl) {
+        if (isFrozenNow(nome)) continue;
+
+        // Respeitar holds e agendamentos de reabertura
+        if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) continue;
+        if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) continue;
+
+        // Slot global de aberturas
+        if (slotsInUse >= MAX_OPEN_CONCURRENCY) break;
+        slotsInUse++;
+        try {
+          await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
+          try {
+            const r = await activateOnce(nome, 'nurse_auto');
+            if (!r || !r.ok) {
+              if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
+                robeMeta[nome] = robeMeta[nome] || {};
+                robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+                await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s');
+              }
+            }
+          } catch {}
+        } finally {
+          slotsInUse--;
+        }
+        // Pequeno delay entre ativações
+        await new Promise(r => setTimeout(r, OPEN_ACTIVATION_DELAY_MS));
+        continue;
+      }
+      // FIM DA INSTRUÇÃO 6
+
+      if (!ctrl || !ctrl.browser) continue;
+      let pages = [];
+      try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
+      if (!pages || !pages[0]) {
+        await reportAction(nome, 'nurse_kill', `motivo=no_pages url= reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+        try { registerFailure(nome, 'no_pages', 'external'); } catch {}
+        await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+        continue;
+      }
+      const p0 = pages[0];
+      // Checagem de bloqueio temporário do Messenger (prioritário, antes de prune/reload/kill)
+      const det = await detectMessengerTempBlock(p0);
+      if (det && det.blocked) {
+        try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — stopVirtus e reabrir em ~2h'); } catch {}
+        try { await stopVirtus(nome); } catch {}
+        // Agendar reopen ~2h com jitter (sem freezer)
+        robeMeta[nome] = robeMeta[nome] || {};
+        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000; // 5-26 min
+        robeMeta[nome].reopenAt = Date.now() + ms(2) + jitterMs;
+        try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+        await snapshotStatusAndWrite();
+        continue; // Não tenta reload/kill, apenas sai.
+      }
+
+      // NÃO competir com recovery stateful
+      const hs = getHealth && getHealth(nome);
+      if (hs && (hs.stage === 'recover1' || hs.stage === 'recover2' || hs.stage === 'recover3')) {
+        continue;
+      }
+
+      let healthy = await pageReadyBasic(p0);
+      if (!healthy) {
+        // Debounce: conta reloads nos últimos 60s, pausa se ultrapassar 3
+        robeMeta[nome] = robeMeta[nome] || {};
+        const now2 = Date.now();
+        if (!robeMeta[nome].reloadAttemptsWindow) robeMeta[nome].reloadAttemptsWindow = [];
+        robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => now2 - ts < 60000);
+
+        robeMeta[nome].reloadAttemptsWindow.push(now2);
+        if (robeMeta[nome].reloadAttemptsWindow.length > 3) {
+          // Log e GRACE: não tente novo reload nos próximos 60s
+          robeMeta[nome].reloadBlockedUntil = now2+60000;
+          await reportAction(nome, 'mil_action', 
+            `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${(p0.url&&p0.url())||''}`
+          );
+          continue; // Não tenta nem reload nem kill — só sai do loop até a próxima rodada.
+        }
+        if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > now2) {
+          continue; // Se grace está ativo, pula hint de reload para este ciclo
+        }
+
+        healthy = await tryReloadShort(p0, nome, 1);
+        if (!healthy) {
+          healthy = await tryReloadShort(p0, nome, 2);
+        }
+        if (healthy) {
+          await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
+        } else {
+          await reportAction(nome, 'nurse_kill', `motivo=page_zumbi url=${(p0.url&&p0.url())||''} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+          try { registerFailure(nome, 'zombie', 'external'); } catch {}
+          await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+          continue;
+        }
+      }
+
+      // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
+      if (ctrl && ctrl.configurando) {
+        console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
+        continue;
+      }
+      if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+        try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
+      }
+      if (want.virtus === 'on' && !ctrl.trabalhando && !ctrl.configurando) {
+        try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
+      }
     }
-    if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
-      try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
-    }
-    if (want.virtus === 'on' && !ctrl.trabalhando && !ctrl.configurando) {
-      try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
-    }
+  } finally {
+    _nurseTickRunning = false;
   }
 }
 

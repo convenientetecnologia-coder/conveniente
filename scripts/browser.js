@@ -264,9 +264,55 @@ function cleanupUserDataLocks(userDataDir) {
 /**
  * Mata processos do Chrome usando ESTE userDataDir (Windows).
  */
-function killChromeProfileProcesses(userDataDir) {
+function killChromeProfileProcesses(userDataDir, openingMap) {
   if (process.platform !== 'win32') return;
   try {
+    // Nunca mate Chromes associados ao map de perfis em abertura (openingMap[nome] = true).
+    // Isso protege contra race de avalanche/init!
+    if (openingMap && typeof openingMap === 'object' && userDataDir) {
+      let nomePerfil = null;
+
+      // 1) Tenta ler manifest.json dentro do próprio userDataDir
+      try {
+        const manifestPath = path.join(userDataDir, 'manifest.json');
+        if (fs.existsSync(manifestPath)) {
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          if (manifest && manifest.nome) nomePerfil = String(manifest.nome);
+        }
+      } catch {}
+
+      // 2) Tenta resolver via dados/perfis.json
+      if (!nomePerfil) {
+        try {
+          const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
+          if (Array.isArray(perfisArr)) {
+            const perfil = perfisArr.find(p =>
+              p && p.userDataDir &&
+              path.normalize(String(p.userDataDir)) === path.normalize(String(userDataDir))
+            );
+            if (perfil && perfil.nome) nomePerfil = String(perfil.nome);
+          }
+        } catch {}
+      }
+
+      // 3) Fallback: tenta basenome do diretório
+      if (!nomePerfil) {
+        try {
+          const base = path.basename(userDataDir);
+          if (base && base.length && base !== 'Conveniente' && base !== 'User Data') {
+            nomePerfil = base;
+          }
+        } catch {}
+      }
+
+      if (nomePerfil && openingMap[nomePerfil] === true) {
+        if (process.env.BROWSER_DEBUG === '1') {
+          console.log(`[BROWSER] SKIP KILL, nome em opening: ${nomePerfil}`);
+        }
+        return; // Proteção: não mata processos deste perfil enquanto está em abertura
+      }
+    }
+
     const { execFileSync } = require('child_process');
     const dirForPs = userDataDir.replace(/\\/g, '\\\\').replace(/"/g, '""');
     const psCmd = `
@@ -528,7 +574,7 @@ function findChromeStable() {
 /**
  * Ativar perfil: abre browser dedicado.
  */
-async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, ctrl=undefined } = {}) {
+async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, ctrl=undefined, openingMap=undefined } = {}) {
   let browser = null;
   let pruneTimer = null;
   try {
@@ -547,7 +593,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
 
     // RAM: Encerra processos do perfil e limpa locks
-    try { killChromeProfileProcesses(userDataDir); } catch {}
+    try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
     try { cleanupUserDataLocks(userDataDir); } catch {}
 
     if (process.env.BROWSER_DEBUG === '1') {
@@ -631,13 +677,13 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     let browserTry = await tryLaunch(launchArgs, 'LAUNCH 1');
 
     if (!browserTry) {
-      try { killChromeProfileProcesses(userDataDir); } catch {}
+      try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
       browserTry = await tryLaunch(launchArgs, 'LAUNCH 2');
     }
 
     if (!browserTry) {
-      try { killChromeProfileProcesses(userDataDir); } catch {}
+      try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
       browserTry = await tryLaunch(launchArgs, 'LAUNCH 3');
     }

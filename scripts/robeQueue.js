@@ -17,6 +17,11 @@
  *
  * ATENÇÃO: Em cenário multi-worker/sharding, instanciar a fila unicamente no master/shard supervisor,
  * ou converter queue para fila distribuída/coordenada.
+ *
+ * IMPORTANTE PARA AMBIENTE CLUSTER:
+ * Este singleton da fila deve ser centralizado e instanciado/apontado apenas no supervisor/master.
+ * Não utilizar múltiplas instâncias (uma por worker) ou haverá quebras da invariante de exclusividade!
+ * Se portar para cluster, garantir design de fila única coordenada.
  */
 
 class RobeQueue {
@@ -41,6 +46,7 @@ class RobeQueue {
 
   skip(nome) {
     // Remove da fila se ainda não foi executado
+    // Nenhum callback ou código externo pode mexer diretamente na fila
     this.fila = this.fila.filter(ent => ent.nome !== nome);
     // Não remove se já está "executando"
     if (this.executando && this.executando.nome === nome) {
@@ -57,6 +63,9 @@ class RobeQueue {
   }
 
   activeCount() {
+    // INVARIANTE: Nunca haverá mais de uma execução ativa da Robe no sistema.
+    // (Só 1 Robe postando a qualquer momento!)
+    // Garantia reforçada: só pode retornar 0 ou 1.
     return this.executando ? 1 : 0;
   }
 
@@ -67,6 +76,7 @@ class RobeQueue {
   }
 
   clear() {
+    // Toda alteração de fila/executando ocorre APENAS via métodos oficiais!
     this.fila = [];
     this.executando = null;
   }
@@ -77,16 +87,22 @@ class RobeQueue {
 
     setImmediate(async () => {
       try {
+        // INVARIANTE: Nunca haverá mais de uma execução ativa da Robe no sistema.
+        // O tick só avança após cb finalizar.
         if (!this.executando && this.fila.length > 0) {
           // Pega o próximo da fila
           const next = this.fila.shift();
           this.executando = { nome: next.nome, startedAt: Date.now() };
+          if (process.env.ROBEQUEUE_DEBUG === '1') {
+            console.log('[ROBE-QUEUE] Iniciando execução de', next.nome);
+          }
           try {
             await Promise.resolve(next.cb());
           } catch (e) {
             // O callback do Robe sempre precisa dar catch aos próprios erros!
             try { console.warn('[ROBE-QUEUE] erro no cb', e && e.message); } catch {}
           }
+          // Sempre set executando = null; antes de chamar novo tick!
           this.executando = null;
           // Chama tick recursivo para partir para o próximo (se houver)
           this._tickRunning = false;
