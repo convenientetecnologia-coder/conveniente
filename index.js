@@ -53,54 +53,7 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 // ===================== Fim Body Parsers =====================
 
-// ===================== Middleware de autenticação (READEQUADO/REATIVADO) =====================
-/*
- * Middleware de autenticação obrigatória para rotas /api/
- * - ADMIN_TOKEN DEVE estar presente como variável de ambiente.
- * - Nunca deixe vazio em produção!
- * - Exceções: /api/health e arquivos estáticos de /public/ e /static/, /favicon.ico
- */
-
-const isDevEnv = (process.env.NODE_ENV === 'development');
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
-
-// Panic/exit se token não estiver presente em produção
-if ((!ADMIN_TOKEN || ADMIN_TOKEN.trim() === '') && !isDevEnv) {
-  console.error('[FATAL] ADMIN_TOKEN não definido. Defina como export/env/.env e reinicie.');
-  process.exit(1);
-}
-
-function apiAuthMiddleware(req, res, next) {
-  // Exceções obrigatórias (sem auth)
-  if (
-    req.path === '/api/health' ||
-    req.path === '/health' || // compat
-    req.path.startsWith('/public/') ||
-    req.path.startsWith('/static/') ||
-    req.path.startsWith('/favicon.ico')
-  ) {
-    return next();
-  }
-  // Exige bearer token nas rotas /api/*
-  if (req.path.startsWith('/api/')) {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.split(' ')[1];
-    if (authHeader.startsWith('Bearer ') && token === ADMIN_TOKEN) {
-      return next();
-    }
-    // Token inválido, responde 401
-    return res.status(401).json({ error: 'Unauthorized: token inválido ou ausente' });
-  }
-  // Fora de /api, libera normalmente
-  return next();
-}
-app.use(apiAuthMiddleware);
-
-const authStatusMsg = (!ADMIN_TOKEN || ADMIN_TOKEN.trim() === '')
-  ? '[SECURE] Middleware de autenticação: DESATIVADO (somente em dev, inseguro!)'
-  : '[SECURE] Middleware de autenticação: ATIVO para /api/*';
-
-// ===================== Fim do middleware de autenticação =====================
+// ===================== Middleware de autenticação (REMOVIDO) =====================
 
 // Militar: Apenas arquivos públicos (UI) expostos. Backend nunca via HTTP!
 // SERVIÇO ESTÁTICO EXCLUSIVO DA PASTA /public/
@@ -136,7 +89,6 @@ app.listen(PORT, () => {
   console.log(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
   console.log('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
   // Logging claro: status da proteção e do modo de abertura do painel
-  console.log(authStatusMsg);
 
   if (process.env.OPEN_CHROMIUM_ON_START == '1') {
     console.log('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
