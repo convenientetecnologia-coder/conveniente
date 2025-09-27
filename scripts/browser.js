@@ -115,8 +115,11 @@ async function patchPage(nome, page, coords) {
   }
 
   // --- IDIOMA E REGION ---
-  try { await page.setExtraHTTPHeaders({ 'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' }); } catch {}
-  try { await page.emulateTimezone('America/Sao_Paulo'); } catch {}
+  // ATENÇÃO: idioma/timezone agora podem ser configurados via env BROWSER_LANG e BROWSER_TZ
+  const patchLang = process.env.BROWSER_LANG || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
+  const patchTz = process.env.BROWSER_TZ || 'America/Sao_Paulo';
+  try { await page.setExtraHTTPHeaders({ 'accept-language': patchLang }); } catch {}
+  try { await page.emulateTimezone(patchTz); } catch {}
 
   // --- viewport, deviceScale, threads ---
   await page.evaluateOnNewDocument((hwc) => {
@@ -473,13 +476,19 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
 
 // END -- PRUNING PATCH
 
-// ====== FIND CHROME STABLE - Only use Chrome Stable, nunca Chromium ======
+// ====== FIND CHROME STABLE ======
+// Tenta Chrome Stable por CHROME_PATH/CHROMIUM_PATH variáveis de ambiente, depois paths padrão de OS.
 function findChromeStable() {
-  // 1. CHROME_PATH env explicit override
-  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
-    return process.env.CHROME_PATH;
+  const envChrome = process.env.CHROME_PATH;
+  if (envChrome && fs.existsSync(envChrome)) {
+    return envChrome;
   }
-  // 2. Default installs, by OS
+  const envChromium = process.env.CHROMIUM_PATH;
+  if (envChromium && fs.existsSync(envChromium)) {
+    return envChromium;
+  }
+
+  // Default installs, by OS
   const candidates = [];
   if (process.platform === 'win32') {
     candidates.push(
@@ -500,10 +509,16 @@ function findChromeStable() {
       '/snap/bin/chromium'
     );
   }
+
+  // Adiciona ao final dos candidatos o path do Chromium por variável de ambiente, se definido
+  if (envChromium) {
+    candidates.push(envChromium);
+  }
+
   for (const file of candidates) {
     if (file && fs.existsSync(file)) return file;
   }
-  throw new Error('Chrome Stable não encontrado. Favor instalar o Chrome Stable OU setar a variável de ambiente CHROME_PATH.');
+  throw new Error('Chrome/Chromium não encontrado. Instale o Chrome Stable ou defina CHROME_PATH/CHROMIUM_PATH.');
 }
 
 //
@@ -1089,7 +1104,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
 
 // ===============
 // invocarHumano USA A LEITURA correta do manifest se precisar
-// ===============
+// Desabilitado por padrão: abrir interface/painel automático só pode via opt-in, frontend ou chamada manual/intencional.
 async function invocarHumano(browser, nome) {
   try {
     const pages = await browser.pages();

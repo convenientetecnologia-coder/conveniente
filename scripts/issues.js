@@ -112,6 +112,7 @@ function padronizaType(type) {
 
 // API
 function append(nome, type, message) {
+  // FUTURO: suportar append estruturado para event stream com correlationId
   const file = getFilePath(nome);
   const entry = {
     ts: Date.now(),
@@ -160,6 +161,7 @@ function list(nome) {
   }
 }
 
+// ATENÇÃO: clear deve ser chamado SOMENTE via issues.clear. Não escreva issues.json diretamente!
 function clear(nome) {
   const file = getFilePath(nome);
   return _serialize(nome, () => {
@@ -198,6 +200,7 @@ function countErrors(nome) {
   }
 }
 
+// Exportado: use sempre issues.clear(nome) para zerar issues com lock. Não sobrescreva issues.json manualmente fora deste módulo!
 module.exports = {
   append,
   list,

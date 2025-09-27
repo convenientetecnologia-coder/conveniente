@@ -1,4 +1,6 @@
-// scripts/statusAggregator.js
+// statusAggregator.js
+// INFRAESTRUTURA OPCIONAL: Este módulo é para agregaçao de status em multi-worker/sharding (cluster). 
+// NÃO integrá-lo na pipeline principal de produção sem orquestração direta do Supervisor externo e sem ativação formal do modo cluster!
 
 'use strict';
 
@@ -76,5 +78,5 @@ async function aggregateStatus(timeoutMs = 6000) {
 }
 
 module.exports = {
-  aggregateStatus
+  aggregateStatus // TODO/SUPERVISOR: Plug aggregateStatus diretamente à interface do Supervisor para consolidar status cross-shard.
 };

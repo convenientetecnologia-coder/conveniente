@@ -53,51 +53,53 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 // ===================== Fim Body Parsers =====================
 
-// ===================== (REMOVIDO) Middleware de autenticação =====================
+// ===================== Middleware de autenticação (READEQUADO/REATIVADO) =====================
 /*
- * [REMOVIDO POR INSTRUÇÃO DO USUÁRIO]
  * Middleware de autenticação obrigatória para rotas /api/
  * - ADMIN_TOKEN DEVE estar presente como variável de ambiente.
  * - Nunca deixe vazio em produção!
- * - Exceções: /api/health e arquivos estáticos de /public/
+ * - Exceções: /api/health e arquivos estáticos de /public/ e /static/, /favicon.ico
  */
-// ---> Recomenda-se export ADMIN_TOKEN no ambiente ou .env (NÃO use vazio em produção).
 
-// const isDevEnv = (process.env.NODE_ENV === 'development');
-// const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+const isDevEnv = (process.env.NODE_ENV === 'development');
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
-// // Panic/exit se token não estiver presente em produção
-// if (!ADMIN_TOKEN && !isDevEnv) {
-//   console.error('[FATAL] ADMIN_TOKEN não definido. Defina como export/env/.env e reinicie.');
-//   process.exit(1);
-// }
+// Panic/exit se token não estiver presente em produção
+if ((!ADMIN_TOKEN || ADMIN_TOKEN.trim() === '') && !isDevEnv) {
+  console.error('[FATAL] ADMIN_TOKEN não definido. Defina como export/env/.env e reinicie.');
+  process.exit(1);
+}
 
-// function apiAuthMiddleware(req, res, next) {
-//   // Libera health check sem auth
-//   if (
-//     req.path === '/api/health' || 
-//     req.path === '/health' || 
-//     // Libera acesso a arquivos estáticos em /public/
-//     req.path.startsWith('/public/') ||
-//     req.path.startsWith('/static/') ||
-//     req.path.startsWith('/favicon.ico')
-//   ) {
-//     return next();
-//   }
-//   // Exige bearer token nas rotas /api/*
-//   if (req.path.startsWith('/api/')) {
-//     const authHeader = req.headers.authorization || '';
-//     const token = authHeader.split(' ')[1];
-//     if (authHeader.startsWith('Bearer ') && token === ADMIN_TOKEN) {
-//       return next();
-//     }
-//     // Token inválido, responde 401
-//     return res.status(401).json({ error: 'Unauthorized: token inválido ou ausente' });
-//   }
-//   // Fora de /api, libera normalmente
-//   return next();
-// }
-// app.use(apiAuthMiddleware);
+function apiAuthMiddleware(req, res, next) {
+  // Exceções obrigatórias (sem auth)
+  if (
+    req.path === '/api/health' ||
+    req.path === '/health' || // compat
+    req.path.startsWith('/public/') ||
+    req.path.startsWith('/static/') ||
+    req.path.startsWith('/favicon.ico')
+  ) {
+    return next();
+  }
+  // Exige bearer token nas rotas /api/*
+  if (req.path.startsWith('/api/')) {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.split(' ')[1];
+    if (authHeader.startsWith('Bearer ') && token === ADMIN_TOKEN) {
+      return next();
+    }
+    // Token inválido, responde 401
+    return res.status(401).json({ error: 'Unauthorized: token inválido ou ausente' });
+  }
+  // Fora de /api, libera normalmente
+  return next();
+}
+app.use(apiAuthMiddleware);
+
+const authStatusMsg = (!ADMIN_TOKEN || ADMIN_TOKEN.trim() === '')
+  ? '[SECURE] Middleware de autenticação: DESATIVADO (somente em dev, inseguro!)'
+  : '[SECURE] Middleware de autenticação: ATIVO para /api/*';
+
 // ===================== Fim do middleware de autenticação =====================
 
 // Militar: Apenas arquivos públicos (UI) expostos. Backend nunca via HTTP!
@@ -133,49 +135,60 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 app.listen(PORT, () => {
   console.log(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
   console.log('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
+  // Logging claro: status da proteção e do modo de abertura do painel
+  console.log(authStatusMsg);
+
+  if (process.env.OPEN_CHROMIUM_ON_START == '1') {
+    console.log('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
+  } else {
+    console.log('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
+  }
 });
 
-// Tenta abrir sempre o painel no Chromium azul
-setTimeout(() => {
-  // const open = require('open'); // <-- NÃO mais necessário aqui, pois subiu para o topo conforme instrução!
-  // Defina o caminho certo para o Chromium azul instalado
-  // Exemplos comuns:
-  // - Windows: 'C:\\Program Files\\Chromium\\Application\\chrome.exe'
-  // - Linux:   '/usr/bin/chromium-browser' ou '/usr/bin/chromium'
-  // - Mac:     '/Applications/Chromium.app/Contents/MacOS/Chromium'
-  const chromiumPaths = [
-    'C:\\Users\\PC\\AppData\\Local\\Chromium\\Application\\chrome.exe',
-    'C:\\Program Files\\Chromium\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Chromium\\Application\\chrome.exe',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium'
-  ];
-  const painelUrl = `http://localhost:${PORT}/index.html`;
+// Tenta abrir sempre o painel no Chromium azul (agora OPT-IN)
+if (process.env.OPEN_CHROMIUM_ON_START == '1') {
+  setTimeout(() => {
+    // Usar CHROME_PATH (variável de ambiente) como prioridade
+    const defaultChromiumPaths = [
+      'C:\\Users\\PC\\AppData\\Local\\Chromium\\Application\\chrome.exe',
+      'C:\\Program Files\\Chromium\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Chromium\\Application\\chrome.exe',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium'
+    ];
+    const painelUrl = `http://localhost:${PORT}/index.html`;
 
-  // Tenta com todos os caminhos possíveis até abrir
-  (async () => {
-    let opened = false;
-    for (const chromium of chromiumPaths) {
-      try {
-        await open(painelUrl, {app: {name: chromium}});
-        opened = true;
-        break;
-      } catch {}
-    }
-    // Se não achou Chromium, tenta abrir no 'chromium' da variável de ambiente ou path
-    if (!opened) {
-      try {
-        await open(painelUrl, {app: {name: 'chromium'}});
-        opened = true;
-      } catch {}
-    }
-    // IMPORTANTE: não abrir no Chrome e nem no browser padrão.
-    if (!opened) {
-      console.log('[WARN] Não foi possível abrir automaticamente no Chromium. Abra manualmente:', painelUrl);
-    }
-  })();
-}, 1200); // Delay de 1.2s para garantir o servidor up antes do browser abrir
+    (async () => {
+      let opened = false;
+
+      let chromiumPaths = defaultChromiumPaths;
+      // Se CHROME_PATH estiver definido, tenta PRIMEIRO
+      if (process.env.CHROME_PATH && process.env.CHROME_PATH.trim() !== '') {
+        chromiumPaths = [process.env.CHROME_PATH.trim(), ...defaultChromiumPaths];
+      }
+
+      for (const chromium of chromiumPaths) {
+        try {
+          await open(painelUrl, {app: {name: chromium}});
+          opened = true;
+          break;
+        } catch {}
+      }
+      // Se não achou Chromium, tenta abrir no 'chromium' da variável de ambiente ou path
+      if (!opened) {
+        try {
+          await open(painelUrl, {app: {name: 'chromium'}});
+          opened = true;
+        } catch {}
+      }
+      // IMPORTANTE: não abrir no Chrome e nem no browser padrão.
+      if (!opened) {
+        console.log('[WARN] Não foi possível abrir automaticamente no Chromium. Abra manualmente:', painelUrl);
+      }
+    })();
+  }, 1200); // Delay de 1.2s para garantir o servidor up antes do browser abrir
+}
 
 // Graceful shutdown — encerra worker e faz cleanup
 process.on('SIGINT', async () => {

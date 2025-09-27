@@ -1,4 +1,6 @@
-// scripts/master.js
+// master.js
+// INFRAESTRUTURA OPCIONAL: sharding/cluster não está integrado ao fluxo principal padrão; use apenas sob planejamento e sob comando do supervisor.
+// Não altere fluxo principal nem rotinas do worker convencional ainda!
 
 'use strict';
 
@@ -30,10 +32,15 @@ function computeShardAssignment() {
 }
 
 // Processos filhos (shards)
+// ATENÇÃO: O array `shards` é gerenciado internamente e só faz sentido se iniciou via `startShards`.
+// Não utilizar no fluxo principal. Pronto para integração mas não plugado no boot principal.
 const shards = [];
 let shardReady = Array(SHARD_COUNT).fill(false);
 
 // Lançar os workers/shards
+// ATENÇÃO: startShards existe apenas para orquestração em modo cluster/sharding.
+// Não utilize no fluxo padrão; use apenas se a arquitetura migrar para cluster sob planejamento/supervisão.
+// TODO/SUPERVISOR: When deploying distributed Supervisor, integrate startShards into main server boot.
 function startShards() {
   const workersPerfis = computeShardAssignment();
   for (let i = 0; i < SHARD_COUNT; i++) {
@@ -56,11 +63,13 @@ function startShards() {
       console.warn(`[MASTER][SHARD ${i}] morto, code=${code}, signal=${signal}, reiniciando em 2s`);
       shardReady[i] = false;
       setTimeout(() => { /* Implementar respawn igual ao startShards, só para o i */ }, 2000);
+      // TODO/SUPERVISOR: Definir política de reinício conforme orquestrador externo
     });
   }
 }
 
 // Health monitor por shard
+// ATENÇÃO: Health-check dos shards faz sentido apenas quando sharding está ativo por comando externo/supervisão.
 setInterval(() => {
   const now = Date.now();
   shards.forEach((shard, i) => {
@@ -74,6 +83,9 @@ setInterval(() => {
 }, 15000);
 
 // Comando: agregador de status
+// ATENÇÃO: getClusterStatus só deve ser utilizado em contexto de operação em cluster/sharding
+// Não utilize em rotina usual ou single-worker!
+// TODO/SUPERVISOR: Integrar com event-stream/status centralizados se for adotada a arquitetura de cluster.
 async function getClusterStatus() {
   const proms = shards.map((sh, i) =>
     new Promise(resolve => {
@@ -113,6 +125,9 @@ async function getClusterStatus() {
 }
 
 // Comando: dispatcher (rotear por nome do perfil)
+// ATENÇÃO: findShardForNome, sendCommandToShard — uso restrito ao ambiente cluster/sharding.
+// Não utilizar em produção única ou sem shard; somente sob comando/supervisão caso arquitetura evolua.
+// TODO/SUPERVISOR: Integrar dispatcher externo ou camada de API para comandos de cluster.
 function findShardForNome(nome) {
   return shardIdFor(nome);
 }
@@ -142,11 +157,13 @@ async function sendCommandToShard(nome, type, payload, opts) {
   });
 }
 
+// ATENÇÃO: Exporte apenas as funções; uso exclusivo para gerenciamento em cluster/sharding sob futuro/supervisão.
+// Não utilizar via index.js, workerClient.js ou outros scripts — responsabilidade exclusiva do Supervisor externo no futuro.
 module.exports = {
-  startShards,
-  getClusterStatus,
-  sendCommandToShard,
-  findShardForNome,
+  startShards,           // Apenas para uso em cluster; não plugado no boot principal
+  getClusterStatus,      // Apenas para uso em cluster; pronto para integração com supervisor/orquestrador externo
+  sendCommandToShard,    // Apenas para uso em cluster; dispatcher de comandos, não use com worker simples
+  findShardForNome,      // Apenas para uso em cluster/sharding
   SHARD_COUNT,
-  shards
+  shards                 // ATENÇÃO: acesso ao array shards só faz sentido após startShards ser executado
 };

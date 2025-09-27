@@ -1,3 +1,5 @@
+// ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
+
 // scripts/api_perfis.js
 const fs = require('fs');
 const path = require('path');
@@ -120,11 +122,9 @@ module.exports = (app, workerClient, fileStore) => {
       // Grava manifest.json SOMENTE no userDataDir externo
       fs.writeFileSync(path.join(userDataDir, 'manifest.json'), JSON.stringify(perfilObj, null, 2), 'utf8');
 
-      // desired.json default (não liga nada)
-      const desired = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} });
-      desired.perfis = desired.perfis || {};
-      desired.perfis[nome] = desired.perfis[nome] || { active: false, virtus: 'off' };
-      fileStore.writeJsonAtomic(fileStore.desiredPath, desired);
+      // desired.json default (não liga nada) - ATOMICIDADE GARANTIDA PELO LOCK!
+      // ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
+      await fileStore.patchDesired(nome, { active: false, virtus: 'off' });
 
       res.json({ ok: true, perfil: perfilObj });
     } catch (e) {
@@ -150,7 +150,7 @@ module.exports = (app, workerClient, fileStore) => {
       }
     }
 
-    try { fileStore.patchDesired(nome, { active: true }); } catch {}
+    try { await fileStore.patchDesired(nome, { active: true }); } catch {}
 
     // Não chama o worker diretamente para evitar corrida com o reconciliador
     return res.json({ ok: true, queued: true });
@@ -164,7 +164,7 @@ module.exports = (app, workerClient, fileStore) => {
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_deactivate_request', `by=${op}`);
 
-    try { fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch {}
+    try { await fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch {}
 
     // Não chama o worker diretamente para evitar corrida com o reconciliador
     return res.json({ ok: true, queued: true });
@@ -201,7 +201,7 @@ module.exports = (app, workerClient, fileStore) => {
     }
 
     try {
-      fileStore.patchDesired(nome, { virtus: 'on', active: true, robePause24h: true });
+      await fileStore.patchDesired(nome, { virtus: 'on', active: true, robePause24h: true });
     } catch (e) {}
     // Apenas declara o desejo, reconciliador executa de fato
     return res.json({ ok: true, queued: true });
@@ -236,7 +236,7 @@ module.exports = (app, workerClient, fileStore) => {
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ ok:false, error:e.message }); }
     await issues.append(nome, 'admin_robe24h_request', `by=${op}`);
-    fileStore.patchDesired(nome, { robePause24h: true });
+    await fileStore.patchDesired(nome, { robePause24h: true });
     return res.json({ ok: true });
   });
 
@@ -250,7 +250,7 @@ module.exports = (app, workerClient, fileStore) => {
     await issues.append(nome, 'admin_human_resume_request', `by=${op}`);
     // Marca o "fine" do modo humano e ativa virtus novamente
     try {
-      fileStore.patchDesired(nome, { humanResume: true });
+      await fileStore.patchDesired(nome, { humanResume: true });
     } catch (e) {}
     return res.json({ ok: true, queued: true });
   });
@@ -340,11 +340,8 @@ module.exports = (app, workerClient, fileStore) => {
 
       // Remove desired.json
       try {
-        const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} });
-        if (d.perfis && d.perfis[nome]) {
-          delete d.perfis[nome];
-          fileStore.writeJsonAtomic(fileStore.desiredPath, d);
-        }
+        // ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
+        await fileStore.patchDesired(nome, null);
       } catch {}
 
       // Remove diretório do perfil (manifest/meta)

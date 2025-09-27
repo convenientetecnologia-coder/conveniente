@@ -1,5 +1,6 @@
 // scripts/api_issues.js
 const path = require('path');
+const issues = require('./issues'); // Adicionado para uso do método issues.clear
 
 const isValidSlug = s => typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
 
@@ -28,14 +29,14 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // Limpar issues deve SEMPRE usar await issues.clear(nome) para garantir atomicidade/lock.
   // DELETE /api/perfis/:nome/issues — limpa o arquivo de issues desse perfil
-  app.delete('/api/perfis/:nome/issues', (req, res) => {
+  app.delete('/api/perfis/:nome/issues', async (req, res) => {
     try {
       const nome = req.params.nome;
       if (!nome) return res.json({ ok: false, error: 'nome ausente' });
       assertSafePerfilDir(fileStore, nome);
-      const file = path.join(fileStore.perfisDir, nome, 'issues.json');
-      fileStore.writeJsonAtomic(file, []);
+      await issues.clear(nome);
       res.json({ ok: true });
     } catch (e) {
       res.json({ ok: false, error: e && e.message || String(e) });

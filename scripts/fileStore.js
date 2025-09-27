@@ -16,6 +16,9 @@ const presetsPath = path.join(dadosDir, 'ua_presets.json');
 const desiredPath = path.join(dadosDir, 'desired.json');
 const statusPath  = path.join(dadosDir, 'status.json');
 
+// ManifestStore import para setPerfilFrozenUntil
+const manifestStore = require('./manifestStore.js');
+
 //// (opcional) Locks locais por perfil (adicione se/quando precisar) ////
 // const profileLocks = {};
 
@@ -78,14 +81,36 @@ function pickUaPreset() {
   } catch { return null; }
 }
 
+///// === LOCK INTERNO DE desired.json  (Promise chain FIFO) === /////
+let _desiredLock = Promise.resolve();
+// Executa a função asyncFn(desejado atual), espera resultado, salva, retorna novo desired.
+// Garantido em ordem serial via promise chain lock.
+async function withDesiredLock(asyncFn) {
+  let ret;
+  _desiredLock = _desiredLock
+    .then(async () => {
+      ensureDesired();
+      let desired = readJsonSafe(desiredPath, { perfis: {} });
+      const novo = await asyncFn(desired);
+      // Só salva se retornou objeto (não null/undefined)
+      if (novo && typeof novo === 'object') {
+        writeJsonAtomic(desiredPath, novo);
+      }
+      ret = novo;
+    })
+    .catch(()=>{});
+  await _desiredLock;
+  return ret;
+}
+
 //// PATCH DESIRED PERFIL ////
-function patchDesired(nome, patch) {
-  ensureDesired();
-  const desired = readJsonSafe(desiredPath, { perfis: {} });
-  desired.perfis = desired.perfis || {};
-  desired.perfis[nome] = { ...(desired.perfis[nome] || {}), ...(patch || {}) };
-  writeJsonAtomic(desiredPath, desired);
-  return desired.perfis[nome];
+// Refatorada: lock atômico global
+async function patchDesired(nome, patch) {
+  return withDesiredLock(desired => {
+    desired.perfis = desired.perfis || {};
+    desired.perfis[nome] = { ...(desired.perfis[nome] || {}), ...(patch || {}) };
+    return desired;
+  });
 }
 
 //// STATUS SNAPSHOT: fallback a perfis.json se status.json ausente/inválido ////
@@ -310,6 +335,7 @@ function updatePerfilLabel(nome, novoLabel) {
   return true;
 }
 function renamePerfilSlug(nomeAntigo, nomeNovoDesejado) {
+  // ATUALIZADO: desired e manifest proteção por lock/store
   const novoSlug = utils.slugify(nomeNovoDesejado || '');
   if (!novoSlug) throw new Error('novo nome inválido');
   if (nomeAntigo === novoSlug) return { ok: true, renamed: false, nome: nomeAntigo };
@@ -334,13 +360,15 @@ function renamePerfilSlug(nomeAntigo, nomeNovoDesejado) {
   man.userDataDir = newDir;
   writeJsonAtomic(manifestPath, man);
   // --- FIM DO NOVO BLOCO ---
-  // desired.json
-  const desired = readJsonSafe(desiredPath, { perfis: {} });
-  if (desired.perfis && desired.perfis[nomeAntigo]) {
-    desired.perfis[novoSlug] = { ...(desired.perfis[novoSlug] || {}), ...(desired.perfis[nomeAntigo]) };
-    delete desired.perfis[nomeAntigo];
-    writeJsonAtomic(desiredPath, desired);
-  }
+  // desired.json (usando lock)
+  withDesiredLock(desired => {
+    if (desired.perfis && desired.perfis[nomeAntigo]) {
+      desired.perfis[novoSlug] = { ...(desired.perfis[novoSlug] || {}), ...(desired.perfis[nomeAntigo]) };
+      delete desired.perfis[nomeAntigo];
+      return desired;
+    }
+    return desired;
+  });
   // status.json (opcional)
   try {
     const st = readJsonSafe(statusPath, null);
@@ -362,12 +390,12 @@ function isPerfilAtivo(nome) {
   } catch { return false; }
 }
 
-//// RESETAR desired TODOS OFF ao boot ////
+//// RESETAR desired TODOS OFF ao boot //// 
 function resetDesiredAllOffOnBoot() {
-  try {
+  // ATUALIZADO: lock
+  withDesiredLock(desired => {
     ensureDesired();
     const perfisArr = loadPerfisJson();
-    const desired = readJsonSafe(desiredPath, { perfis: {} });
     desired.perfis = desired.perfis || {};
     for (const p of perfisArr) {
       if (!p || !p.nome) continue;
@@ -381,8 +409,8 @@ function resetDesiredAllOffOnBoot() {
         invokeHuman: false
       };
     }
-    writeJsonAtomic(desiredPath, desired);
-  } catch (e) {}
+    return desired;
+  });
 }
 
 //// MÉTRICAS DO SISTEMA (RAM, CPU%) ////
@@ -440,20 +468,14 @@ function getSysMetricsSnapshot() {
 /**
  * Persiste o frozenUntil DE UM PERFIL no seu manifest (para robustez do freeze, P0).
  */
-function setPerfilFrozenUntil(nome, frozenUntil) {
+async function setPerfilFrozenUntil(nome, frozenUntil) {
   try {
     const perfisArr = loadPerfisJson();
     const perfil = perfisArr.find(p => p && p.nome === nome);
     if (!perfil || !perfil.userDataDir) return false;
-    const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
-    if (existsFile(manifestPath)) {
-      const man = readJsonSafe(manifestPath, {});
-      man.frozenUntil = frozenUntil;
-      writeJsonAtomic(manifestPath, man);
-      return true;
-    }
-  } catch {}
-  return false;
+    await manifestStore.update(nome, man => { man = man || {}; man.frozenUntil = frozenUntil; return man; });
+    return true;
+  } catch { return false; }
 }
 
 /**
@@ -488,7 +510,8 @@ function assertPerfilExists(fileStore, nome) {
 // EXPORTAÇÃO EXPANDIDA PARA FUNÇÕES MILITARES
 module.exports = {
   dadosDir, perfisPath, perfisDir, presetsPath, desiredPath, statusPath,
-  readJsonSafe, writeJsonAtomic, ensureDesired, ensurePerfisJson, patchDesired,
+  readJsonSafe, writeJsonAtomic, ensureDesired, ensurePerfisJson,
+  patchDesired, // agora async/lock
   loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
   resetDesiredAllOffOnBoot, getSysMetricsSnapshot, existsFile, existsDir,
@@ -501,4 +524,6 @@ module.exports = {
   // Novos helpers (APIs):
   isValidSlug,
   assertPerfilExists,
+  // Lock helper export
+  withDesiredLock,
 };

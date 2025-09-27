@@ -2,6 +2,7 @@
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
 module.exports = (app, workerClient, fileStore) => {
+  // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
   // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
   app.get('/api/status', async (req, res) => {
     try {
@@ -254,6 +255,8 @@ module.exports = (app, workerClient, fileStore) => {
       });
     }
   });
+
+  // ATENÇÃO: nunca altere o shape de resposta deste endpoint, nem remova campos esperados pelo painel! Fallbacks SEMPRE devem garantir compatibilidade retroativa.     
 
   // Militar: retorna shape exato esperado pelo painel — { mem: {...}, cpu: {...} }
   // Mantenha extras apenas como extensão, mas NUNCA altere/remova mem/cpu.

@@ -1,4 +1,6 @@
-// scripts/manifestStore.js
+// manifestStore.js
+// ATENÇÃO: Toda gravação/mutação em manifest.json (qualquer perfil) DEVE ser feita exclusivamente via manifestStore.update(nome, fnPatch), que já provê lock serializado.
+// É PROIBIDO qualquer write/disco a manifest.json por fora deste módulo!
 
 'use strict';
 
@@ -33,6 +35,7 @@ function writeJsonAtomic(file, obj) {
 }
 
 /** Lock atômico simples por perfil para serialização de IO/disco. */
+// TODO/FUTURE: Aqui pode-se limitar (por perfil) o número de jobs/Promises simultâneos na fila, caso sobrecarga percebida
 function withLock(nome, fn) {
   const prev = locks.get(nome) || Promise.resolve();
   const job = prev.then(() => Promise.resolve(fn()).catch(()=>{}));
@@ -66,4 +69,5 @@ async function update(nome, patchFn) {
   });
 }
 
+// Só use read/write/update deste módulo para trabalhar com manifest.json em workers, apis ou scripts! Não acesse nem escreva o arquivo direto!
 module.exports = { getManifestPath, read, write, update };

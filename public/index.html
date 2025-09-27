@@ -179,6 +179,10 @@
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
+      <div id="tokenControl" style="margin-left: 12px; display:flex; align-items: center;">
+        <input type="password" id="adminTokenInput" placeholder="Token Admin (obrigatório)" style="width:130px; font-size:13px; padding:5px; border-radius:6px; margin-right:4px;" />
+        <button id="setTokenBtn" type="button" class="btn" style="padding:5px 12px;">OK</button>
+      </div>
     </div>
   </header>
   <div class="wrap">
@@ -203,6 +207,27 @@
   </div>
   <script src="app.js"></script>
   <script>
+    // ---- SUPORTE À AUTENTICAÇÃO ADMIN ----
+    const tokenInput = document.getElementById('adminTokenInput');
+    const setTokenBtn = document.getElementById('setTokenBtn');
+    if (tokenInput && setTokenBtn && window.electronAPI && window.electronAPI.setToken) {
+      // Carregar se existente
+      try {
+        const prev = window.sessionStorage && window.sessionStorage.getItem('_adminToken');
+        if (prev) tokenInput.value = prev;
+      } catch {}
+      setTokenBtn.onclick = () => {
+        const val = tokenInput.value.trim();
+        window.electronAPI.setToken && window.electronAPI.setToken(val);
+        window.sessionStorage && window.sessionStorage.setItem('_adminToken', val);
+        // Visual cue
+        setTokenBtn.textContent = "OK!";
+        setTimeout(() => { setTokenBtn.textContent = "OK"; }, 1200);
+      };
+      // Enter ativa também
+      tokenInput.addEventListener('keydown', e => { if (e.key === "Enter") setTokenBtn.click(); });
+    }
+
     // Util: tempo restante
     function tempoRestante(seg) {
       if (seg <= 0) return 'Pronto!';

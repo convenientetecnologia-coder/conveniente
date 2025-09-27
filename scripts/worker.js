@@ -75,93 +75,105 @@ const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);  
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '2048', 10); // mínimo RAM que deve sobrar pós-abertura
 
 // INICIO DA INSTRUÇÃO (scripts/worker.js – MODO LEVE INTELIGENTE, ORÇAMENTO DINÂMICO, FAIRNESS REAL)
-// 1. Logo após o bloco do AUTO_CFG, adicione:
-const LIGHT_BUDGET_CFG = {
-  BROWSER_DEFAULT_MB: 600,
-  SAFETY_FREE_MB:     1024,
-  MIN_KEEP:           1,
-  PRIORITY:           'LOW_RAM_FIRST',
-  HOLD_MS:            90000,
-  REEVAL_MS:          15000
-};
-const lightPlan = {
-  keep: new Set(),
-  drop: new Set(),
-  lastEvalAt: 0
-};
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// const LIGHT_BUDGET_CFG = {
+//   BROWSER_DEFAULT_MB: 600,
+//   SAFETY_FREE_MB:     1024,
+//   MIN_KEEP:           1,
+//   PRIORITY:           'LOW_RAM_FIRST',
+//   HOLD_MS:            90000,
+//   REEVAL_MS:          15000
+// };
+// const lightPlan = {
+//   keep: new Set(),
+//   drop: new Set(),
+//   lastEvalAt: 0
+// };
 
 // 2. Função para calcular capacidade (RAM budget/cap):
-function computeLightCapacity() {
-  const freeMB = Math.round(require('os').freemem()/(1024*1024));
-  const active = Array.from(controllers.keys());
-  const measured = active
-    .map(n => robeMeta[n] && robeMeta[n].ramMB)
-    .filter(v => typeof v === 'number' && v > 0);
-  const avgMB = measured.length
-    ? Math.max(350, Math.round(measured.reduce((a,b)=>a+b,0)/measured.length))
-    : LIGHT_BUDGET_CFG.BROWSER_DEFAULT_MB;
-  const cap = Math.max(LIGHT_BUDGET_CFG.MIN_KEEP,
-    Math.floor(Math.max(0, freeMB - LIGHT_BUDGET_CFG.SAFETY_FREE_MB) / avgMB)
-  );
-  return { cap, avgMB, freeMB };
-}
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// function computeLightCapacity() {
+//   const freeMB = Math.round(require('os').freemem()/(1024*1024));
+//   const active = Array.from(controllers.keys());
+//   const measured = active
+//     .map(n => robeMeta[n] && robeMeta[n].ramMB)
+//     .filter(v => typeof v === 'number' && v > 0);
+//   const avgMB = measured.length
+//     ? Math.max(350, Math.round(measured.reduce((a,b)=>a+b,0)/measured.length))
+//     : LIGHT_BUDGET_CFG.BROWSER_DEFAULT_MB;
+//   const cap = Math.max(LIGHT_BUDGET_CFG.MIN_KEEP,
+//     Math.floor(Math.max(0, freeMB - LIGHT_BUDGET_CFG.SAFETY_FREE_MB) / avgMB)
+//   );
+//   return { cap, avgMB, freeMB };
+// }
 
 // 3. Função para orquestrar quem fica e quem cai em modo leve:
-async function enforceLightBudget(reason = 'light_tick') {
-  const { cap, avgMB, freeMB } = computeLightCapacity();
-  const active = Array.from(controllers.keys());
-  if (active.length <= cap) {
-    lightPlan.keep = new Set(active);
-    lightPlan.drop.clear();
-    await milLog('mil_action', `light_budget_ok active=${active.length} cap=${cap} free=${freeMB}MB avg=${avgMB}MB`);
-    return;
-  }
-  // Prioridade LOW_RAM_FIRST:
-  const scored = active.map(n => {
-    const ram = (robeMeta[n] && typeof robeMeta[n].ramMB === 'number') ? robeMeta[n].ramMB : 9999;
-    const last = (robeMeta[n] && robeMeta[n].ultimaPostagem) || 0;
-    return { n, ram, last };
-  });
-  scored.sort((a,b) => a.ram - b.ram || a.last - b.last);
-  const keepN = Math.max(LIGHT_BUDGET_CFG.MIN_KEEP, cap);
-  const keep = scored.slice(0, keepN).map(x=>x.n);
-  const drop = scored.slice(keepN).map(x=>x.n);
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// async function enforceLightBudget(reason = 'light_tick') {
+//   const { cap, avgMB, freeMB } = computeLightCapacity();
+//   const active = Array.from(controllers.keys());
+//   if (active.length <= cap) {
+//     lightPlan.keep = new Set(active);
+//     lightPlan.drop.clear();
+//     await milLog('mil_action', `light_budget_ok active=${active.length} cap=${cap} free=${freeMB}MB avg=${avgMB}MB`);
+//     return;
+//   }
+//   // Prioridade LOW_RAM_FIRST:
+//   const scored = active.map(n => {
+//     const ram = (robeMeta[n] && typeof robeMeta[n].ramMB === 'number') ? robeMeta[n].ramMB : 9999;
+//     const last = (robeMeta[n] && robeMeta[n].ultimaPostagem) || 0;
+//     return { n, ram, last };
+//   });
+//   scored.sort((a,b) => a.ram - b.ram || a.last - b.last);
+//   const keepN = Math.max(LIGHT_BUDGET_CFG.MIN_KEEP, cap);
+//   const keep = scored.slice(0, keepN).map(x=>x.n);
+//   const drop = scored.slice(keepN).map(x=>x.n);
 
-  lightPlan.keep = new Set(keep);
-  lightPlan.drop = new Set(drop);
+//   lightPlan.keep = new Set(keep);
+//   lightPlan.drop = new Set(drop);
 
-  await milLog('mil_action', `light_budget_drop drop=${drop.length}/${active.length} cap=${cap} keep=${keep.length} free=${freeMB}MB avg=${avgMB}MB policy=${LIGHT_BUDGET_CFG.PRIORITY}`);
+//   await milLog('mil_action', `light_budget_drop drop=${drop.length}/${active.length} cap=${cap} keep=${keep.length} free=${freeMB}MB avg=${avgMB}MB policy=${LIGHT_BUDGET_CFG.PRIORITY}`);
 
-  for (const nome of drop) {
-    try {
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].activationHeldUntil = Date.now() + LIGHT_BUDGET_CFG.HOLD_MS;
-      robeMeta[nome].lightDropUntil = Date.now() + LIGHT_BUDGET_CFG.HOLD_MS;
-      await handlers.deactivate({ nome, reason: 'light_budget', policy: 'preserveDesired' });
-    } catch {}
-  }
-}
+//   for (const nome of drop) {
+//     try {
+//       robeMeta[nome] = robeMeta[nome] || {};
+//       robeMeta[nome].activationHeldUntil = Date.now() + LIGHT_BUDGET_CFG.HOLD_MS;
+//       robeMeta[nome].lightDropUntil = Date.now() + LIGHT_BUDGET_CFG.HOLD_MS;
+//       await handlers.deactivate({ nome, reason: 'light_budget', policy: 'preserveDesired' });
+//     } catch {}
+//   }
+// }
 
 // 4. Funções para agendar/desagendar reavaliação periódica do light-budget:
-let _lightReevalTimer = null;
-function scheduleLightReeval() {
-  if (_lightReevalTimer) return;
-  _lightReevalTimer = setInterval(() => {
-    if (autoMode.mode === 'light') enforceLightBudget('reeval').catch(()=>{});
-  }, LIGHT_BUDGET_CFG.REEVAL_MS);
-}
-function clearLightReeval() {
-  if (_lightReevalTimer) clearInterval(_lightReevalTimer);
-  _lightReevalTimer = null;
-}
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// let _lightReevalTimer = null;
+// function scheduleLightReeval() {
+//   if (_lightReevalTimer) return;
+//   _lightReevalTimer = setInterval(() => {
+//     if (autoMode.mode === 'light') enforceLightBudget('reeval').catch(()=>{});
+//   }, LIGHT_BUDGET_CFG.REEVAL_MS);
+// }
+// function clearLightReeval() {
+//   if (_lightReevalTimer) clearInterval(_lightReevalTimer);
+//   _lightReevalTimer = null;
+// }
 // FIM DA INSTRUÇÃO (scripts/worker.js – MODO LEVE INTELIGENTE, ORÇAMENTO DINÂMICO, FAIRNESS REAL)
 
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// Mantemos objeto autoMode para compatibilidade de status, porém sem mecânica dinâmica.
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
 const autoMode = {
-  mode: 'full', since: Date.now(), reason: '',
+  mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
   light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
 };
 
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
 function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
 //— ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
@@ -172,188 +184,194 @@ let _statusLock = Promise.resolve();
 // ===== FIM LOCKS ATÔMICOS =====
 
 // HOOKS de Modo LEVE/FULL (próximo aos patches militares - AUTO_CFG)
-async function onEnterLightMode() {
-  try { await reportAction('system', 'light_enter', 'enter_light_mode'); } catch {}
-  try { robeQueue.clear(); } catch {}
-  for (const [nome, ctrl] of controllers) {
-    try {
-      if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-        await ctrl.virtus.stop().catch(()=>{});
-      }
-      if (ctrl) { ctrl.virtus = null; ctrl.trabalhando = false; }
-      const ramMB = (robeMeta[nome] && typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
-      if (ramMB != null && ramMB >= AUTO_CFG.RAM_KILL_MB) {
-        await reportAction(nome, 'nurse_kill', `LEVE: kill pesado/zumbi (RAM=${ramMB}MB) preserveDesired reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-        await handlers.deactivate({ nome, reason: 'light_ram_shed', policy: 'preserveDesired' });
-      }
-    } catch {}
-  }
-  await enforceLightBudget('enter_light');
-  scheduleLightReeval();
-}
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// async function onEnterLightMode() {
+//   try { await reportAction('system', 'light_enter', 'enter_light_mode'); } catch {}
+//   try { robeQueue.clear(); } catch {}
+//   for (const [nome, ctrl] of controllers) {
+//     try {
+//       if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+//         await ctrl.virtus.stop().catch(()=>{});
+//       }
+//       if (ctrl) { ctrl.virtus = null; ctrl.trabalhando = false; }
+//       const ramMB = (robeMeta[nome] && typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
+//       if (ramMB != null && ramMB >= AUTO_CFG.RAM_KILL_MB) {
+//         await reportAction(nome, 'nurse_kill', `LEVE: kill pesado/zumbi (RAM=${ramMB}MB) preserveDesired reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+//         await handlers.deactivate({ nome, reason: 'light_ram_shed', policy: 'preserveDesired' });
+//       }
+//     } catch {}
+//   }
+//   await enforceLightBudget('enter_light');
+//   scheduleLightReeval();
+// }
 
-async function onExitLightMode() {
-  try { await reportAction('system', 'light_exit', 'exit_light_mode'); } catch {}
-  try {
-    for (const nome of Object.keys(robeMeta)) {
-      if (!robeMeta[nome]) continue;
-      delete robeMeta[nome].lightDropUntil;
-      const held = robeMeta[nome].activationHeldUntil || 0;
-      if (held && held > Date.now()) {
-        delete robeMeta[nome].activationHeldUntil;
-      }
-    }
-  } catch {}
-  clearLightReeval();
-}
+// async function onExitLightMode() {
+//   try { await reportAction('system', 'light_exit', 'exit_light_mode'); } catch {}
+//   try {
+//     for (const nome of Object.keys(robeMeta)) {
+//       if (!robeMeta[nome]) continue;
+//       delete robeMeta[nome].lightDropUntil;
+//       const held = robeMeta[nome].activationHeldUntil || 0;
+//       if (held && held > Date.now()) {
+//         delete robeMeta[nome].activationHeldUntil;
+//       }
+//     }
+//   } catch {}
+//   clearLightReeval();
+// }
 
 // ======= AUTOFIX/HEAL CONFIG =======
-const SELF_HEAL_CFG = {
-  SURVIVAL_MIN_ACTIVE: parseInt(process.env.SURVIVAL_MIN_ACTIVE || '2', 10),
-  LIGHT_ESCALATE_STEP: parseInt(process.env.LIGHT_ESCALATE_STEP || '3', 10),
-  LIGHT_ESCALATE_INTERVAL_MS: parseInt(process.env.LIGHT_ESCALATE_INTERVAL_MS || '180000', 10), // 3min
-  FULL_ASSERT_INTERVAL_MS: parseInt(process.env.FULL_ASSERT_INTERVAL_MS || '120000', 10), // 2min
-  PANIC_LIGHT_MAX_MS: parseInt(process.env.PANIC_LIGHT_MAX_MS || '15601000', 10), // 15min
-  PANIC_NO_PROGRESS_MS: parseInt(process.env.PANIC_NO_PROGRESS_MS || '8601000', 10), // 8min
-  MAX_LIGHT_CYCLES_WITHOUT_PROGRESS: parseInt(process.env.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS || '2', 10)
-};
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// const SELF_HEAL_CFG = {
+//   SURVIVAL_MIN_ACTIVE: parseInt(process.env.SURVIVAL_MIN_ACTIVE || '2', 10),
+//   LIGHT_ESCALATE_STEP: parseInt(process.env.LIGHT_ESCALATE_STEP || '3', 10),
+//   LIGHT_ESCALATE_INTERVAL_MS: parseInt(process.env.LIGHT_ESCALATE_INTERVAL_MS || '180000', 10), // 3min
+//   FULL_ASSERT_INTERVAL_MS: parseInt(process.env.FULL_ASSERT_INTERVAL_MS || '120000', 10), // 2min
+//   PANIC_LIGHT_MAX_MS: parseInt(process.env.PANIC_LIGHT_MAX_MS || '15601000', 10), // 15min
+//   PANIC_NO_PROGRESS_MS: parseInt(process.env.PANIC_NO_PROGRESS_MS || '8601000', 10), // 8min
+//   MAX_LIGHT_CYCLES_WITHOUT_PROGRESS: parseInt(process.env.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS || '2', 10)
+// };
 
-const healer = {
-  lastProgressAt: Date.now(),
-  lastFullAssertAt: 0,
-  lightEnterAt: 0,
-  lightCycles: 0,
-  lightAttempts: 0,
-  noProgressCycles: 0,
-  escalateTimer: null,
-  assertTimer: null,
-  lastLightCause: ''
-};
+// const healer = {
+//   lastProgressAt: Date.now(),
+//   lastFullAssertAt: 0,
+//   lightEnterAt: 0,
+//   lightCycles: 0,
+//   lightAttempts: 0,
+//   noProgressCycles: 0,
+//   escalateTimer: null,
+//   assertTimer: null,
+//   lastLightCause: ''
+// };
 
 async function milLog(type, msg) {
   try { await reportAction('system', type || 'mil_action', String(msg || '')); } catch {}
 }
 
-function countActive() {
-  let n = 0;
-  controllers.forEach((ctrl) => { if (ctrl && ctrl.browser) n++; });
-  return n;
-}
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// function countActive() {
+//   let n = 0;
+//   controllers.forEach((ctrl) => { if (ctrl && ctrl.browser) n++; });
+//   return n;
+// }
 
-function countWorking() {
-  let n = 0;
-  controllers.forEach((ctrl) => { if (ctrl && ctrl.browser && ctrl.trabalhando) n++; });
-  return n;
-}
+// function countWorking() {
+//   let n = 0;
+//   controllers.forEach((ctrl) => { if (ctrl && ctrl.browser && ctrl.trabalhando) n++; });
+//   return n;
+// }
 
-function desiredActiveNames() {
-  const d = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-  return Object.entries(d.perfis || {}).filter(([_, ent]) => ent && ent.active === true).map(([nome]) => nome);
-}
+// function desiredActiveNames() {
+//   const d = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+//   return Object.entries(d.perfis || {}).filter(([_, ent]) => ent && ent.active === true).map(([nome]) => nome);
+// }
 
-function chooseCandidatesToOpen(maxN = 2) {
-  const now = Date.now();
-  const desired = new Set(desiredActiveNames());
-  const allPerfis = loadPerfisJson();
-  const candidates = allPerfis
-    .map(p => p.nome)
-    .filter(nome => desired.has(nome) && !controllers.has(nome))
-    .filter(nome => !isFrozenNow(nome))
-    .slice(0);
-  candidates.sort((a,b) => {
-    const ra = typeof robeMeta[a]?.ramMB === 'number' ? robeMeta[a].ramMB : 999999;
-    const rb = typeof robeMeta[b]?.ramMB === 'number' ? robeMeta[b].ramMB : 999999;
-    return ra - rb;
-  });
-  return candidates.slice(0, Math.max(1, maxN));
-}
+// function chooseCandidatesToOpen(maxN = 2) {
+//   const now = Date.now();
+//   const desired = new Set(desiredActiveNames());
+//   const allPerfis = loadPerfisJson();
+//   const candidates = allPerfis
+//     .map(p => p.nome)
+//     .filter(nome => desired.has(nome) && !controllers.has(nome))
+//     .filter(nome => !isFrozenNow(nome))
+//     .slice(0);
+//   candidates.sort((a,b) => {
+//     const ra = typeof robeMeta[a]?.ramMB === 'number' ? robeMeta[a].ramMB : 999999;
+//     const rb = typeof robeMeta[b]?.ramMB === 'number' ? robeMeta[b].ramMB : 999999;
+//     return ra - rb;
+//   });
+//   return candidates.slice(0, Math.max(1, maxN));
+// }
 
-async function escalateTowardsFull() {
-  if (autoMode.mode !== 'light') return;
-  const { cap } = computeLightCapacity();
-  const ativos = countActive();
-  if (ativos >= cap) {
-    await milLog('mil_action', `light_escalate_cap: ativos=${ativos} cap=${cap} — nenhum open`);
-    return;
-  }
-  const slots = Math.max(0, cap - ativos);
-  if (slots === 0) return;
+// async function escalateTowardsFull() {
+//   if (autoMode.mode !== 'light') return;
+//   const { cap } = computeLightCapacity();
+//   const ativos = countActive();
+//   if (ativos >= cap) {
+//     await milLog('mil_action', `light_escalate_cap: ativos=${ativos} cap=${cap} — nenhum open`);
+//     return;
+//   }
+//   const slots = Math.max(0, cap - ativos);
+//   if (slots === 0) return;
 
-  const candAll = chooseCandidatesToOpen(999);
-  const cand = candAll.slice(0, slots);
+//   const candAll = chooseCandidatesToOpen(999);
+//   const cand = candAll.slice(0, slots);
 
-  if (cand.length) {
-    await milLog('mil_action', `light_escalate: tentando abrir ${cand.length} perfis (cap=${cap})`);
-    for (const nome of cand) {
-      try {
-        const r = await activateOnce(nome, 'heal_escalate');
-        if (r && r.ok) healer.lastProgressAt = Date.now();
-        else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-          await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
-        }
-      } catch {}
-    }
-    healer.lightAttempts++;
-  }
-}
+//   if (cand.length) {
+//     await milLog('mil_action', `light_escalate: tentando abrir ${cand.length} perfis (cap=${cap})`);
+//     for (const nome of cand) {
+//       try {
+//         const r = await activateOnce(nome, 'heal_escalate');
+//         if (r && r.ok) healer.lastProgressAt = Date.now();
+//         else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
+//           robeMeta[nome] = robeMeta[nome] || {};
+//           robeMeta[nome].activationHeldUntil = Date.now() + 60000;
+//           await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
+//         }
+//       } catch {}
+//     }
+//     healer.lightAttempts++;
+//   }
+// }
 
-function scheduleLightEscalator() {
-  if (healer.escalateTimer) return;
-  healer.escalateTimer = setInterval(async () => {
-    if (autoMode.mode === 'light') {
-      const since = healer.lightEnterAt || autoMode.since || Date.now();
-      const elapsed = Date.now() - since;
-      const noProgElapsed = Date.now() - healer.lastProgressAt;
-      if (elapsed > SELF_HEAL_CFG.PANIC_LIGHT_MAX_MS || noProgElapsed > SELF_HEAL_CFG.PANIC_NO_PROGRESS_MS) {
-        healer.noProgressCycles++;
-        if (healer.noProgressCycles >= SELF_HEAL_CFG.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS) {
-          panicMode();
-          healer.noProgressCycles = 0;
-        }
-      }
-      await escalateTowardsFull();
-    }
-  }, SELF_HEAL_CFG.LIGHT_ESCALATE_INTERVAL_MS);
-}
+// function scheduleLightEscalator() {
+//   if (healer.escalateTimer) return;
+//   healer.escalateTimer = setInterval(async () => {
+//     if (autoMode.mode === 'light') {
+//       const since = healer.lightEnterAt || autoMode.since || Date.now();
+//       const elapsed = Date.now() - since;
+//       const noProgElapsed = Date.now() - healer.lastProgressAt;
+//       if (elapsed > SELF_HEAL_CFG.PANIC_LIGHT_MAX_MS || noProgElapsed > SELF_HEAL_CFG.PANIC_NO_PROGRESS_MS) {
+//         healer.noProgressCycles++;
+//         if (healer.noProgressCycles >= SELF_HEAL_CFG.MAX_LIGHT_CYCLES_WITHOUT_PROGRESS) {
+//           panicMode();
+//           healer.noProgressCycles = 0;
+//         }
+//       }
+//       await escalateTowardsFull();
+//     }
+//   }, SELF_HEAL_CFG.LIGHT_ESCALATE_INTERVAL_MS);
+// }
 
-function clearLightEscalator() {
-  if (healer.escalateTimer) { clearInterval(healer.escalateTimer); healer.escalateTimer = null; }
-  healer.lightAttempts = 0;
-  healer.noProgressCycles = 0;
-}
+// function clearLightEscalator() {
+//   if (healer.escalateTimer) { clearInterval(healer.escalateTimer); healer.escalateTimer = null; }
+//   healer.lightAttempts = 0;
+//   healer.noProgressCycles = 0;
+// }
 
-async function assertFullActivity() {
-  const now = Date.now();
-  if ((now - healer.lastFullAssertAt) < SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS) return;
-  healer.lastFullAssertAt = now;
-  try { await killStrayChromes(); } catch {}
+// async function assertFullActivity() {
+//   const now = Date.now();
+//   if ((now - healer.lastFullAssertAt) < SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS) return;
+//   healer.lastFullAssertAt = now;
+//   try { await killStrayChromes(); } catch {}
   
-  if (countActive() === 0) {
-    const need = Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 1);
-    const cand = chooseCandidatesToOpen(need);
-    if (cand.length) {
-      await milLog('mil_action', `assert_full_activity: subir ${cand.length} para não ficar em zero`);
-      for (const nome of cand) { try { await activateOnce(nome, 'assert_full_activity'); healer.lastProgressAt = Date.now(); } catch {} }
-    }
-  }
-}
+//   if (countActive() === 0) {
+//     const need = Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 1);
+//     const cand = chooseCandidatesToOpen(need);
+//     if (cand.length) {
+//       await milLog('mil_action', `assert_full_activity: subir ${cand.length} para não ficar em zero`);
+//       for (const nome of cand) { try { await activateOnce(nome, 'assert_full_activity'); healer.lastProgressAt = Date.now(); } catch {} }
+//     }
+//   }
+// }
 
-// PANIC MODE: drop parcial + bootstrap mínimo e agressivo
-async function panicMode() {
-  await milLog('mil_action', `panic_mode_start: light since=${(Date.now()-(healer.lightEnterAt||autoMode.since||Date.now()))}ms cause=${healer.lastLightCause}`);
-  try { robeQueue.clear(); } catch {}
-  const nomesAtivos = Array.from(controllers.keys());
-  for (const nome of nomesAtivos) {
-    try { await handlers.deactivate({ nome, reason: 'panic', policy: 'preserveDesired' }); } catch {}
-  }
-  try { await killStrayChromes(); } catch {}
-  const cand = chooseCandidatesToOpen(Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 2));
-  await milLog('mil_action', `panic_min_bootstrap: abrindo ${cand.length}`);
-  for (const nome of cand) { try { await activateOnce(nome, 'panic_bootstrap'); healer.lastProgressAt = Date.now(); } catch {} }
-  await milLog('mil_action', `panic_mode_end`);
-}
+// // PANIC MODE: drop parcial + bootstrap mínimo e agressivo
+// async function panicMode() {
+//   await milLog('mil_action', `panic_mode_start: light since=${(Date.now()-(healer.lightEnterAt||autoMode.since||Date.now()))}ms cause=${healer.lastLightCause}`);
+//   try { robeQueue.clear(); } catch {}
+//   const nomesAtivos = Array.from(controllers.keys());
+//   for (const nome of nomesAtivos) {
+//     try { await handlers.deactivate({ nome, reason: 'panic', policy: 'preserveDesired' }); } catch {}
+//   }
+//   try { await killStrayChromes(); } catch {}
+//   const cand = chooseCandidatesToOpen(Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 2));
+//   await milLog('mil_action', `panic_min_bootstrap: abrindo ${cand.length}`);
+//   for (const nome of cand) { try { await activateOnce(nome, 'panic_bootstrap'); healer.lastProgressAt = Date.now(); } catch {} }
+//   await milLog('mil_action', `panic_mode_end`);
+// }
 
 // === Stray kill helpers ===
 async function killPids(pids = []) {
@@ -1062,60 +1080,56 @@ async function ramCpuMonitorTick() {
     // Mantido bloco para integridade estrutural, sem ação aqui.
   }
   // ===== PATCH MILITAR: Avaliação/autoMode global =====
-  // CPU global e RAM livre
-  let chromeTotalCpu = 0;
-  for (const k of Object.keys(robeMeta)) {
-    const v = robeMeta[k] && robeMeta[k].cpuPercent;
-    if (typeof v === 'number') chromeTotalCpu += v;
-  }
-  const cores = Math.max(1, (os.cpus() || []).length);
-  const cpuApprox = Math.min(100, Math.round(chromeTotalCpu / cores));
-  const freeMB = Math.round(os.freemem() / (1024*1024));
+  // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+  // *** LEGADO: pode remover após estabilizar Supervisor externo *
+  // let chromeTotalCpu = 0;
+  // for (const k of Object.keys(robeMeta)) {
+  //   const v = robeMeta[k] && robeMeta[k].cpuPercent;
+  //   if (typeof v === 'number') chromeTotalCpu += v;
+  // }
+  // const cores = Math.max(1, (os.cpus() || []).length);
+  // const cpuApprox = Math.min(100, Math.round(chromeTotalCpu / cores));
+  // const freeMB = Math.round(os.freemem() / (1024*1024));
 
-  // EMA
-  autoMode.cpuEma = _ema(autoMode.cpuEma, cpuApprox, AUTO_CFG.EMA_ALPHA_CPU);
-  autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
+  // autoMode.cpuEma = _ema(autoMode.cpuEma, cpuApprox, AUTO_CFG.EMA_ALPHA_CPU);
+  // autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
 
-  const enterPressure = (freeMB < AUTO_CFG.MEM_ENTER_MB) ||
-    (autoMode.freeEmaMB != null && autoMode.freeEmaMB < AUTO_CFG.MEM_ENTER_MB) ||
-    (cpuApprox > AUTO_CFG.CPU_ENTER) ||
-    (autoMode.cpuEma != null && autoMode.cpuEma > (AUTO_CFG.CPU_ENTER - 3));
-  const exitPressure = (freeMB >= AUTO_CFG.MEM_EXIT_MB) &&
-    (autoMode.freeEmaMB != null && autoMode.freeEmaMB >= AUTO_CFG.MEM_EXIT_MB) &&
-    (cpuApprox <= AUTO_CFG.CPU_EXIT) &&
-    (autoMode.cpuEma != null && autoMode.cpuEma <= AUTO_CFG.CPU_EXIT);
+  // const enterPressure = (freeMB < AUTO_CFG.MEM_ENTER_MB) ||
+  //   (autoMode.freeEmaMB != null && autoMode.freeEmaMB < AUTO_CFG.MEM_ENTER_MB) ||
+  //   (cpuApprox > AUTO_CFG.CPU_ENTER) ||
+  //   (autoMode.cpuEma != null && autoMode.cpuEma > (AUTO_CFG.CPU_ENTER - 3));
+  // const exitPressure = (freeMB >= AUTO_CFG.MEM_EXIT_MB) &&
+  //   (autoMode.freeEmaMB != null && autoMode.freeEmaMB >= AUTO_CFG.MEM_EXIT_MB) &&
+  //   (cpuApprox <= AUTO_CFG.CPU_EXIT) &&
+  //   (autoMode.cpuEma != null && autoMode.cpuEma <= AUTO_CFG.CPU_EXIT);
 
-  if (enterPressure) { autoMode.hot++; autoMode.cool = 0; }
-  else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
-  else { autoMode.hot = 0; autoMode.cool = 0; }
+  // if (enterPressure) { autoMode.hot++; autoMode.cool = 0; }
+  // else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
+  // else { autoMode.hot = 0; autoMode.cool = 0; }
 
-  // ENTER light
-  if (autoMode.mode === 'full' && autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
-    autoMode.mode = 'light';
-    autoMode.since = Date.now();
-    autoMode.reason = `CPU≈${cpuApprox}% (EMA≈${Math.round(autoMode.cpuEma||0)}%), freeMB=${freeMB} (EMA≈${Math.round(autoMode.freeEmaMB||0)})`;
-    autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
-    healer.lightEnterAt = autoMode.since;
-    healer.lightCycles++;
-    healer.lastLightCause = autoMode.reason;
-    await reportAction('system', 'auto_mode', 'enter_light: ' + autoMode.reason);
-    // HOOK: entrar no Modo Leve — pausa Virtus, limpa fila, derruba pesados/zumbis
-    await onEnterLightMode();
-    scheduleLightEscalator(); // NOVO
-  }
+  // if (autoMode.mode === 'full' && autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
+  //   autoMode.mode = 'light';
+  //   autoMode.since = Date.now();
+  //   autoMode.reason = `CPU≈${cpuApprox}% (EMA≈${Math.round(autoMode.cpuEma||0)}%), freeMB=${freeMB} (EMA≈${Math.round(autoMode.freeEmaMB||0)})`;
+  //   autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
+  //   healer.lightEnterAt = autoMode.since;
+  //   healer.lightCycles++;
+  //   healer.lastLightCause = autoMode.reason;
+  //   await reportAction('system', 'auto_mode', 'enter_light: ' + autoMode.reason);
+  //   await onEnterLightMode();
+  //   scheduleLightEscalator();
+  // }
 
-  // EXIT light
-  if (autoMode.mode === 'light' && autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
-    autoMode.mode = 'full';
-    autoMode.since = Date.now();
-    autoMode.reason = '';
-    healer.noProgressCycles = 0;
-    healer.lightAttempts = 0;
-    await reportAction('system', 'auto_mode', 'exit_light');
-    // HOOK: sair do Modo Leve
-    await onExitLightMode();
-    clearLightEscalator(); // NOVO
-  }
+  // if (autoMode.mode === 'light' && autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
+  //   autoMode.mode = 'full';
+  //   autoMode.since = Date.now();
+  //   autoMode.reason = '';
+  //   healer.noProgressCycles = 0;
+  //   healer.lightAttempts = 0;
+  //   await reportAction('system', 'auto_mode', 'exit_light');
+  //   await onExitLightMode();
+  //   clearLightEscalator();
+  // }
   // ===== FIM PATCH MILITAR: Avaliação/autoMode global =====
 
   // No final, snapshot status global, nunca direto!
@@ -1146,11 +1160,12 @@ async function robeTickGlobal() {
   console.log('[WORKER][robeTickGlobal] Tick fila global, hora:', new Date().toLocaleString());
 
   // === PATCH autoMode Light: gate para robeTickGlobal ===
-  if (autoMode.mode === 'light') {
-    if (Date.now() < autoMode.light.nextRobeEnqueueAt) {
-      return;
-    }
-  }
+  // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+  // if (autoMode.mode === 'light') {
+  //   if (Date.now() < autoMode.light.nextRobeEnqueueAt) {
+  //     return;
+  //   }
+  // }
   // === FIM patch ===
 
   const perfisArr = loadPerfisJson();
@@ -1181,10 +1196,11 @@ async function robeTickGlobal() {
 
     robeQueue.enqueue(nome, async () => {
       // === PATCH autoMode Light: após enfileirar em modo light, rate limit ===
-      if (autoMode.mode === 'light') {
-        autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
-        autoMode.light.robeSkipped = (autoMode.light.robeSkipped || 0) + 1;
-      }
+      // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+      // if (autoMode.mode === 'light') {
+      //   autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
+      //   autoMode.light.robeSkipped = (autoMode.light.robeSkipped || 0) + 1;
+      // }
       // === FIM patch ===
 
       robeUpdateMeta(nome, { emExecucao: true, emFila: false });
@@ -1408,6 +1424,7 @@ try { await snapshotStatusAndWrite(); } catch {}
 // == FIM função ciclo de vida browser ==
 
 // ========== HANDLERS ==========
+// *** SOMENTE SUPERVISOR DEVE CHAMAR ESSE HANDLER DIRETAMENTE ***
 function resolveChromeUserDataRoot() {
   if (process.platform === 'win32') {
     const la = process.env.LOCALAPPDATA;
@@ -1457,8 +1474,13 @@ const handlers = {
     perfisArr.push(perfilObj);
     savePerfisJson(perfisArr);
 
-    // NOVO: gravar manifest somente no userDataDir
-    fs.writeFileSync(path.join(perfilObj.userDataDir, 'manifest.json'), JSON.stringify(perfilObj, null, 2));
+    // NOVO: gravar manifest via manifestStore.update (atomicidade/locks)
+    try {
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        return Object.assign({}, m, perfilObj);
+      });
+    } catch {}
 
     // REMOVIDO: gravação antiga/duplicada no dados/perfis/NOME
 
@@ -1662,10 +1684,11 @@ const handlers = {
       robeUpdateMeta(nome, { emFila: true });
       robeQueue.enqueue(nome, async () => {
         // === PATCH autoMode Light: após enfileirar em modo light, rate limit ===
-        if (autoMode.mode === 'light') {
-          autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
-          autoMode.light.robeSkipped = (autoMode.light.robeSkipped || 0) + 1;
-        }
+        // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+        // if (autoMode.mode === 'light') {
+        //   autoMode.light.nextRobeEnqueueAt = Date.now() + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
+        //   autoMode.light.robeSkipped = (autoMode.light.robeSkipped || 0) + 1;
+        // }
         // === FIM patch ===
 
         robeUpdateMeta(nome, { emExecucao: true, emFila: false });
@@ -1965,253 +1988,256 @@ return _statusLock;
 // == FIM: snapshotStatusAndWrite ==
 
 // == INÍCIO: reconciliador declarativo (lê desired.json e executa ações) ==
-const RECONCILE_INTERVAL_MS = 1500;
-let _reconciling = false;
+// *** RECONCILIADOR DESATIVADO PARA SUPERVISOR EXTERNO ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// const RECONCILE_INTERVAL_MS = 1500;
+// let _reconciling = false;
 
-async function reconcileOnce() {
-if (_reconciling) return;
-_reconciling = true;
-try {
-ensureDesired();
-const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-const perfisDesired = (desired && desired.perfis && typeof desired.perfis === 'object') ? desired.perfis : {};
-const nomes = Object.keys(perfisDesired);
+// async function reconcileOnce() {
+// if (_reconciling) return;
+// _reconciling = true;
+// try {
+// ensureDesired();
+// const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+// const perfisDesired = (desired && desired.perfis && typeof desired.perfis === 'object') ? desired.perfis : {};
+// const nomes = Object.keys(perfisDesired);
 
-// Varre controllers e fecha se congelado, antes de ativações
-{
-controllers.forEach((ctrl, nome) => {
-  try {
-    if (isFrozenNow(nome)) {
-      ensureFrozenShutdown(nome, 'reconcile_guard').catch(()=>{});
-    }
-  } catch {}
-});
-}
+// // Varre controllers e fecha se congelado, antes de ativações
+// {
+// controllers.forEach((ctrl, nome) => {
+//   try {
+//     if (isFrozenNow(nome)) {
+//       ensureFrozenShutdown(nome, 'reconcile_guard').catch(()=>{});
+//     }
+//   } catch {}
+// });
+// }
 
-// AUDITORIA GLOBAL DE COOLDOWN: congela/descongela por perfil conforme estado real
-try {
-const perfisArrAudit = loadPerfisJson();
-// ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (INÍCIO) ===========
-for (const p of perfisArrAudit) {
-  const nomeAudit = p && p.nome;
-  if (!nomeAudit) continue;
-  const ctrlAudit = controllers.get(nomeAudit);
-  const working = !!(ctrlAudit && ctrlAudit.browser && ctrlAudit.trabalhando && !ctrlAudit.configurando);
-  const humanControl = !!(ctrlAudit && ctrlAudit.humanControl);
-  if (working && !humanControl) { // Só descongela se NÃO estiver em modo humano!
-    unfreezeCooldownIfWorking(nomeAudit);
-  } else {
-    freezeCooldownIfNotWorking(nomeAudit);
-  }
-}
-// ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (FIM) ===========
-} catch {}
+// // AUDITORIA GLOBAL DE COOLDOWN: congela/descongela por perfil conforme estado real
+// try {
+// const perfisArrAudit = loadPerfisJson();
+// // ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (INÍCIO) ===========
+// for (const p of perfisArrAudit) {
+//   const nomeAudit = p && p.nome;
+//   if (!nomeAudit) continue;
+//   const ctrlAudit = controllers.get(nomeAudit);
+//   const working = !!(ctrlAudit && ctrlAudit.browser && ctrlAudit.trabalhando && !ctrlAudit.configurando);
+//   const humanControl = !!(ctrlAudit && ctrlAudit.humanControl);
+//   if (working && !humanControl) { // Só descongela se NÃO estiver em modo humano!
+//     unfreezeCooldownIfWorking(nomeAudit);
+//   } else {
+//     freezeCooldownIfNotWorking(nomeAudit);
+//   }
+// }
+// // ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (FIM) ===========
+// } catch {}
 
-for (const nome of nomes) {
-  const want = perfisDesired[nome] || {};
-  const ctrl = controllers.get(nome);
+// for (const nome of nomes) {
+//   const want = perfisDesired[nome] || {};
+//   const ctrl = controllers.get(nome);
 
-  // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
-  if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
-    if (isFrozenNow(nome)) {
-      // não reabre durante congelamento
-      continue;
-    }
-    // Só cumpre reopen se desired.active === true
-    if (want.active === true) {
-      robeMeta[nome].reopenAt = null;
-      robeMeta[nome].killHistory = [];
-      try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
-    } else {
-      robeMeta[nome].reopenAt = null;
-      issues.append(nome, 'mil_action', 'reopen_at_ignored_desired_off').catch(()=>{});
-    }
-    continue;
-  }
+//   // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
+//   if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
+//     if (isFrozenNow(nome)) {
+//       // não reabre durante congelamento
+//       continue;
+//     }
+//     // Só cumpre reopen se desired.active === true
+//     if (want.active === true) {
+//       robeMeta[nome].reopenAt = null;
+//       robeMeta[nome].killHistory = [];
+//       try { await activateOnce(nome, 'reopenAt-preserveDesired'); } catch {}
+//     } else {
+//       robeMeta[nome].reopenAt = null;
+//       issues.append(nome, 'mil_action', 'reopen_at_ignored_desired_off').catch(()=>{});
+//     }
+//     continue;
+//   }
 
-  // Liga/desliga browser
-  if (want.active === true && !ctrl) {
-    // Guard-rail frozen: se estiver congelado, pula
-    const until = isFrozenNow(nome);
-    if (until > Date.now()) {
-      if (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until) {
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].frozenUntil = until;
-      }
-      await snapshotStatusAndWrite();
-      continue;
-    }
+//   // Liga/desliga browser
+//   if (want.active === true && !ctrl) {
+//     // Guard-rail frozen: se estiver congelado, pula
+//     const until = isFrozenNow(nome);
+//     if (until > Date.now()) {
+//       if (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until) {
+//         robeMeta[nome] = robeMeta[nome] || {};
+//         robeMeta[nome].frozenUntil = until;
+//       }
+//       await snapshotStatusAndWrite();
+//       continue;
+//     }
 
-    // === PATCH autoMode Light: gate para ativação no reconcileOnce ===
-    const now = Date.now();
-    if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > now) {
-      await snapshotStatusAndWrite();
-      continue;
-    }
-    // INICIO DA INSTRUÇÃO 7: respeita lightDropUntil
-    if (robeMeta[nome]?.lightDropUntil && robeMeta[nome].lightDropUntil > Date.now()) {
-      await snapshotStatusAndWrite();
-      continue;
-    }
-    // FIM DA INSTRUÇÃO 7
-    if (autoMode.mode === 'light') {
-      const base = 20000, factor = Math.min(9, 1 + (autoMode.hot||0)), jitter = Math.floor(Math.random()*5000);
-      const holdMs = Math.min(180000, base*factor) + jitter;
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].activationHeldUntil = now + holdMs;
-      await issues.append(nome, 'mil_action', `activation_hold light ${holdMs}ms reason=${autoMode.reason} cpu≈${Math.round(autoMode.cpuEma||0)}% free≈${Math.round(autoMode.freeEmaMB||0)}MB`);
-      autoMode.light.activationHeld++;
-      await snapshotStatusAndWrite();
-      continue;
-    }
-    // === FIM PATCH autoMode Light ===
+//     // === PATCH autoMode Light: gate para ativação no reconcileOnce ===
+//     const now = Date.now();
+//     if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > now) {
+//       await snapshotStatusAndWrite();
+//       continue;
+//     }
+//     // INICIO DA INSTRUÇÃO 7: respeita lightDropUntil
+//     if (robeMeta[nome]?.lightDropUntil && robeMeta[nome].lightDropUntil > Date.now()) {
+//       await snapshotStatusAndWrite();
+//       continue;
+//     }
+//     // FIM DA INSTRUÇÃO 7
+//     if (autoMode.mode === 'light') {
+//       const base = 20000, factor = Math.min(9, 1 + (autoMode.hot||0)), jitter = Math.floor(Math.random()*5000);
+//       const holdMs = Math.min(180000, base*factor) + jitter;
+//       robeMeta[nome] = robeMeta[nome] || {};
+//       robeMeta[nome].activationHeldUntil = now + holdMs;
+//       await issues.append(nome, 'mil_action', `activation_hold light ${holdMs}ms reason=${autoMode.reason} cpu≈${Math.round(autoMode.cpuEma||0)}% free≈${Math.round(autoMode.freeEmaMB||0)}MB`);
+//       autoMode.light.activationHeld++;
+//       await snapshotStatusAndWrite();
+//       continue;
+//     }
+//     // === FIM PATCH autoMode Light ===
 
-    try { await activateOnce(nome, 'reconcile'); } catch {}
-  } else if (want.active === false && ctrl) {
-    try { await handlers.deactivate({ nome }); } catch {}
-    continue;
-  }
+//     try { await activateOnce(nome, 'reconcile'); } catch {}
+//   } else if (want.active === false && ctrl) {
+//     try { await handlers.deactivate({ nome }); } catch {}
+//     continue;
+//   }
 
-  const ctrl2 = controllers.get(nome);
-  if (!ctrl2) continue;
+//   const ctrl2 = controllers.get(nome);
+//   if (!ctrl2) continue;
 
-  // configureOnce
-  if (want.configureOnce === true && !ctrl2.configurando) {
-    try {
-      const r = await handlers.configure({ nome });
-      if (r && r.ok) {
-        try {
-          const d2 = readJsonFile(desiredPath, { perfis: {} });
-          if (d2 && d2.perfis && d2.perfis[nome]) {
-            d2.perfis[nome].configureOnce = false;
-            const ok = writeJsonAtomic(desiredPath, d2);
-            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|configureOnce_desired_write`); } catch {} }
-          }
-        } catch {}
-      }
-    } catch {}
-  }
+//   // configureOnce
+//   if (want.configureOnce === true && !ctrl2.configurando) {
+//     try {
+//       const r = await handlers.configure({ nome });
+//       if (r && r.ok) {
+//         try {
+//           const d2 = readJsonFile(desiredPath, { perfis: {} });
+//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//             d2.perfis[nome].configureOnce = false;
+//             const ok = writeJsonAtomic(desiredPath, d2);
+//             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|configureOnce_desired_write`); } catch {} }
+//           }
+//         } catch {}
+//       }
+//     } catch {}
+//   }
 
-  // Virtus on/off
-  if (isFrozenNow(nome)) {
-    // Sincronização frozen disco⇄memória e snapshot imediato antes de pular
-    const until = isFrozenNow(nome);
-    if (until > Date.now() && (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until)) {
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].frozenUntil = until;
-    }
-    await snapshotStatusAndWrite();
-    if (ctrl2 && ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
-    continue;
-  }
+//   // Virtus on/off
+//   if (isFrozenNow(nome)) {
+//     // Sincronização frozen disco⇄memória e snapshot imediato antes de pular
+//     const until = isFrozenNow(nome);
+//     if (until > Date.now() && (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until)) {
+//       robeMeta[nome] = robeMeta[nome] || {};
+//       robeMeta[nome].frozenUntil = until;
+//     }
+//     await snapshotStatusAndWrite();
+//     if (ctrl2 && ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
+//     continue;
+//   }
 
-  if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl2.trabalhando && !ctrl2.configurando) {
-    try { ctrl2.virtus = virtusHelper.startVirtus(ctrl2.browser, nome, { restrictTab: 0 }); ctrl2.trabalhando = true; } catch {}
-  } else if (want.virtus === 'off' && ctrl2.trabalhando) {
-    try { await stopVirtus(nome); } catch {}
-  }
+//   if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl2.trabalhando && !ctrl2.configurando) {
+//     try { ctrl2.virtus = virtusHelper.startVirtus(ctrl2.browser, nome, { restrictTab: 0 }); ctrl2.trabalhando = true; } catch {}
+//   } else if (want.virtus === 'off' && ctrl2.trabalhando) {
+//     try { await stopVirtus(nome); } catch {}
+//   }
 
-  // RobePlay
-  if (want.robePlay === true) {
-    try {
-      const r = await handlers['robe-play']({ nome });
-      if (r && r.ok) {
-        try {
-          const d2 = readJsonFile(desiredPath, { perfis: {} });
-          if (d2 && d2.perfis && d2.perfis[nome]) {
-            d2.perfis[nome].robePlay = false;
-            const ok = writeJsonAtomic(d2siredPath, d2);
-            const ok2 = writeJsonAtomic(desiredPath, d2);
-            if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
-          }
-        } catch {}
-      }
-    } catch {}
-  }
+//   // RobePlay
+//   if (want.robePlay === true) {
+//     try {
+//       const r = await handlers['robe-play']({ nome });
+//       if (r && r.ok) {
+//         try {
+//           const d2 = readJsonFile(desiredPath, { perfis: {} });
+//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//             d2.perfis[nome].robePlay = false;
+//             const ok = writeJsonAtomic(desiredPath, d2);
+//             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
+//           }
+//         } catch {}
+//       }
+//     } catch {}
+//   }
 
-  // Invocar Humano
-  if (want.invokeHuman === true) {
-    try {
-      const r = await handlers.invoke_human({ nome });
-      if (r && r.ok) {
-        try {
-          const d2 = readJsonFile(desiredPath, { perfis: {} });
-          if (d2 && d2.perfis && d2.perfis[nome]) {
-            d2.perfis[nome].invokeHuman = false;
-            const ok = writeJsonAtomic(desiredPath, d2);
-            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|invokeHuman_desired_write`); } catch {} }
-          }
-        } catch {}
-      }
-    } catch {}
-  }
+//   // Invocar Humano
+//   if (want.invokeHuman === true) {
+//     try {
+//       const r = await handlers.invoke_human({ nome });
+//       if (r && r.ok) {
+//         try {
+//           const d2 = readJsonFile(desiredPath, { perfis: {} });
+//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//             d2.perfis[nome].invokeHuman = false;
+//             const ok = writeJsonAtomic(desiredPath, d2);
+//             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|invokeHuman_desired_write`); } catch {} }
+//           }
+//         } catch {}
+//       }
+//     } catch {}
+//   }
 
-  // Human Resume (Retomar Trabalho)
-  if (want.humanResume === true) {
-    try {
-      const r = await handlers['human-resume']({ nome });
-      if (r && r.ok) {
-        try {
-          const d2 = readJsonFile(desiredPath, { perfis: {} });
-          if (d2 && d2.perfis && d2.perfis[nome]) {
-            d2.perfis[nome].humanResume = false;
-            const ok = writeJsonAtomic(desiredPath, d2);
-            if (!ok) { try { await issues.append('system','persist_failed', `${nome}|humanResume_desired_write`); } catch {} }
-          }
-        } catch {}
-      }
-    } catch {}
-  }
+//   // Human Resume (Retomar Trabalho)
+//   if (want.humanResume === true) {
+//     try {
+//       const r = await handlers['human-resume']({ nome });
+//       if (r && r.ok) {
+//         try {
+//           const d2 = readJsonFile(desiredPath, { perfis: {} });
+//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//             d2.perfis[nome].humanResume = false;
+//             const ok = writeJsonAtomic(desiredPath, d2);
+//             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|humanResume_desired_write`); } catch {} }
+//           }
+//         } catch {}
+//       }
+//     } catch {}
+//   }
 
-  // RobePause24h
-  if (want.robePause24h === true) {
-    try {
-      const now = Date.now();
-      const ctrl3 = controllers.get(nome);
-      const working = !!(ctrl3 && ctrl3.browser && ctrl3.trabalhando && !ctrl3.configurando);
-      const plus24 = 24 * 60 * 60 * 1000;
-      const humanControl = !!(ctrl3 && ctrl3.humanControl);
-      await manifestStore.update(nome, (man) => {
-        man = man || {};
-        if (working && !humanControl) {
-          man.robeCooldownUntil = now + plus24;
-          man.robeCooldownRemainingMs = 0;
-        } else {
-          man.robeCooldownUntil = 0;
-          man.robeCooldownRemainingMs = plus24;
-        }
-        return man;
-      });
+//   // RobePause24h
+//   if (want.robePause24h === true) {
+//     try {
+//       const now = Date.now();
+//       const ctrl3 = controllers.get(nome);
+//       const working = !!(ctrl3 && ctrl3.browser && ctrl3.trabalhando && !ctrl3.configurando);
+//       const plus24 = 24 * 60 * 60 * 1000;
+//       const humanControl = !!(ctrl3 && ctrl3.humanControl);
+//       await manifestStore.update(nome, (man) => {
+//         man = man || {};
+//         if (working && !humanControl) {
+//           man.robeCooldownUntil = now + plus24;
+//           man.robeCooldownRemainingMs = 0;
+//         } else {
+//           man.robeCooldownUntil = 0;
+//           man.robeCooldownRemainingMs = plus24;
+//         }
+//         return man;
+//       });
 
-      const d2 = readJsonFile(desiredPath, { perfis: {} });
-      if (d2 && d2.perfis && d2.perfis[nome]) {
-        d2.perfis[nome].robePause24h = false;
-        const ok2 = writeJsonAtomic(desiredPath, d2);
-        if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_desired_write`); } catch {} }
-      }
-    } catch (e) {
-      try { console.warn('[WORKER][reconcile] robePause24h err:', e && e.message || e); } catch {}
-    }
+//       const d2 = readJsonFile(desiredPath, { perfis: {} });
+//       if (d2 && d2.perfis && d2.perfis[nome]) {
+//         d2.perfis[nome].robePause24h = false;
+//         const ok2 = writeJsonAtomic(desiredPath, d2);
+//         if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_desired_write`); } catch {} }
+//       }
+//     } catch (e) {
+//       try { console.warn('[WORKER][reconcile] robePause24h err:', e && e.message || e); } catch {}
+//     }
 
-  }
-}
+//   }
+// }
 
-await snapshotStatusAndWrite();
+// await snapshotStatusAndWrite();
 
-} catch (e) {
-try { console.warn('[WORKER][reconcileOnce] erro:', e && e.message || e); } catch {}
-} finally {
-_reconciling = false;
-}
-}
+// } catch (e) {
+// try { console.warn('[WORKER][reconcileOnce] erro:', e && e.message || e); } catch {}
+// } finally {
+// _reconciling = false;
+// }
+// }
 
-// Agendadores do reconciliador
-setInterval(() => { reconcileOnce().catch(()=>{}); }, RECONCILE_INTERVAL_MS);
-setTimeout(() => { reconcileOnce().catch(()=>{}); }, 300);
- // == FIM: reconciliador declarativo ==
+// // Agendadores do reconciliador
+// setInterval(() => { reconcileOnce().catch(()=>{}); }, RECONCILE_INTERVAL_MS);
+// setTimeout(() => { reconcileOnce().catch(()=>{}); }, 300);
+// == FIM: reconciliador declarativo ==
 
 // === ASSERT FULL-ACTIVITY TIMER ===
-setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.floor(SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS/2)));
+// *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+// *** LEGADO: pode remover após estabilizar Supervisor externo *
+// setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.floor(SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS/2)));
 
 // ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
@@ -2454,16 +2480,16 @@ async function nurseTick() {
     if (want.active === true && !ctrl) {
       if (isFrozenNow(nome)) continue;
 
-      // Modo leve: nurse não ativa
-      if (autoMode.mode === 'light') {
-        const now = Date.now();
-        robeMeta[nome] = robeMeta[nome] || {};
-        if (!robeMeta[nome].activationHeldUntil || robeMeta[nome].activationHeldUntil < now) {
-          robeMeta[nome].activationHeldUntil = now + 60000;
-          await reportAction(nome, 'mil_action', 'nurse_hold_light 60s');
-        }
-        continue;
-      }
+      // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
+      // if (autoMode.mode === 'light') {
+      //   const now = Date.now();
+      //   robeMeta[nome] = robeMeta[nome] || {};
+      //   if (!robeMeta[nome].activationHeldUntil || robeMeta[nome].activationHeldUntil < now) {
+      //     robeMeta[nome].activationHeldUntil = now + 60000;
+      //     await reportAction(nome, 'mil_action', 'nurse_hold_light 60s');
+      //   }
+      //   continue;
+      // }
 
       await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
       try {
@@ -2553,7 +2579,7 @@ async function nurseTick() {
     if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
       try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
     }
-    if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl.trabalhando && !ctrl.configurando) {
+    if (want.virtus === 'on' && !ctrl.trabalhando && !ctrl.configurando) {
       try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
     }
   }
@@ -2771,15 +2797,35 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
 function resolveManifest(nome) {
   try {
     const mPath = manifestPathOf(nome);
+    let manifest = null;
+
     if (!fs.existsSync(mPath)) {
       // Tenta migrar do dados/perfis/NOME/manifest.json
       const oldPath = path.join(perfisDir, nome, 'manifest.json');
       if (fs.existsSync(oldPath)) {
-        fs.mkdirSync(path.dirname(mPath), { recursive: true });
-        fs.copyFileSync(oldPath, mPath);
+        try {
+          const oldMan = JSON.parse(fs.readFileSync(oldPath, 'utf8'));
+          manifest = oldMan;
+          // Persistir via manifestStore.update (assíncrono, sem aguardar)
+          try {
+            const chromeRootMig = resolveChromeUserDataRoot();
+            const desiredDirMig = path.join(chromeRootMig, 'Conveniente', nome);
+            manifestStore.update(nome, (m) => {
+              m = m || {};
+              return Object.assign({}, m, oldMan, { userDataDir: desiredDirMig });
+            }).catch(()=>{});
+          } catch {}
+        } catch {}
       }
     }
-    if (!fs.existsSync(mPath)) {
+
+    if (!manifest && fs.existsSync(mPath)) {
+      try {
+        manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+      } catch {}
+    }
+
+    if (!manifest) {
       // Congela se não existe em nenhum lugar!
       robeMeta[nome] = robeMeta[nome] || {};
       try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_missing', 'system').catch(()=>{}); } catch {}
@@ -2787,20 +2833,19 @@ function resolveManifest(nome) {
       try { snapshotStatusAndWrite().catch(()=>{}); } catch {}
       return null;
     }
-    const manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+
     // GARANTIR userDataDir em User Data\Conveniente\NOME
     const chromeRoot = resolveChromeUserDataRoot();
     const desiredDir = path.join(chromeRoot, 'Conveniente', nome);
     if (!manifest.userDataDir || !String(manifest.userDataDir).startsWith(chromeRoot)) {
       manifest.userDataDir = desiredDir;
       try { fs.mkdirSync(desiredDir, { recursive: true }); } catch {}
-      // persiste alteração no manifest
+      // Persiste alteração via manifestStore.update (assíncrono, sem aguardar)
       try {
-        const tmp = mPath + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2), 'utf8');
-        try { fs.unlinkSync(mPath); } catch {}
-        try { fs.renameSync(tmp, mPath); }
-        catch { fs.copyFileSync(tmp, mPath); try { fs.unlinkSync(tmp); } catch {} }
+        manifestStore.update(nome, (m) => {
+          m = m || {};
+          return Object.assign({}, m, manifest, { userDataDir: desiredDir });
+        }).catch(()=>{});
       } catch {}
     } else {
       // garante que o diretório existe
