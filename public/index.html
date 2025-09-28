@@ -176,7 +176,6 @@
       <div class="metric"><span>Fila Robe</span><b id="mFila">0</b></div>
       <div class="metric"><span>RAM livre</span><b id="mRam">--</b></div>
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
-      <div class="metric"><span>Perfis &gt;600MB</span><b id="mGordos">0</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
@@ -511,30 +510,16 @@
 
     // NOVOS HELPERS (Gordo, Última manutenção, Δ última)
     function buildGordoPill(p) {
-      if (!p || typeof p.ramMB !== 'number' || p.ramMB < 600) return null;
-      const span = buildPill(`Gordo: ${p.ramMB} MB`, 'ramBad');
-      if (p.overweightSince) {
-        const elapsedSec = Math.max(0, Math.floor((Date.now() - Number(p.overweightSince)) / 1000));
-        span.title = `Tempo desde início: ${tempoRestante(elapsedSec)}\nAtual: ${p.ramMB} MB`;
-      } else {
-        span.title = `Atual: ${p.ramMB} MB`;
-      }
-      return span;
+      // Suprimido conforme instrução Uptime First — não exibir pill "Gordo"
+      return null;
     }
     function buildLastMaintenancePill(lastMaintenanceAt) {
-      if (lastMaintenanceAt == null) return null;
-      const d = new Date(lastMaintenanceAt);
-      const hhmm = d.toLocaleTimeString();
-      const pill = buildPill(`Última manutenção: ${hhmm}`, 'info');
-      pill.title = d.toLocaleString();
-      return pill;
+      // Suprimido conforme instrução — não exibir "Última manutenção"
+      return null;
     }
     function buildLastDeltaPill(lastDeltaMB) {
-      if (lastDeltaMB == null) return null;
-      const val = Math.round(Number(lastDeltaMB));
-      const sign = val > 0 ? '+' : '';
-      const cls = val > 0 ? 'bad' : (val < 0 ? 'good' : 'info');
-      return buildPill(`Δ última: ${sign}${val} MB`, cls);
+      // Suprimido conforme instrução — não exibir "Δ última"
+      return null;
     }
     // ============================= FIM ALTERAÇÕES PEDIDAS – RESTO SÓ CHAMADA NOS LUGARES =============================
 
@@ -587,7 +572,7 @@
       } else {
         document.getElementById('mRamPanel').style.display = 'none';
       }
-      // Métrica Perfis >600MB (Gordos)
+      // Métrica Perfis >600MB (Gordos) — removida da interface; manter sem efeito visual
       const gordEl = document.getElementById('mGordos');
       if (gordEl) gordEl.textContent = String(gordoCount);
 
@@ -695,11 +680,11 @@
         if (ramPill) titleRow.append(ramPill); // RAM por conta
         if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
 
-        // -------- NOVO: Pill "Gordo" (>=600MB) ----------
+        // -------- NOVO: Pill "Gordo" (>=600MB) — suprimido --------
         const gordoPill = buildGordoPill(p);
         if (gordoPill) titleRow.append(gordoPill);
 
-        // -------- NOVO: Última manutenção e Δ última ----------
+        // -------- NOVO: Última manutenção e Δ última — suprimidos --------
         const lastMaintPill = buildLastMaintenancePill(p.lastMaintenanceAt);
         if (lastMaintPill) titleRow.append(lastMaintPill);
         const lastDeltaPill = buildLastDeltaPill(p.lastDeltaMB);
