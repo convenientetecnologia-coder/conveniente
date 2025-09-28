@@ -2939,7 +2939,7 @@ function resolveManifest(nome) {
       }
     }
 
-    if (!manifest e fs.existsSync(mPath)) {
+    if (!manifest && fs.existsSync(mPath)) {
       try {
         manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
       } catch {}
