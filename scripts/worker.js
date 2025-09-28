@@ -71,13 +71,14 @@ const AUTO_CFG = {
   COOL_TICKS: 3,
   MIN_HOLD_MS: 45000,
   ROBE_LIGHT_MIN_SPACING_MS: 60000,
-  RAM_KILL_MB: 900,
+  RAM_KILL_MB: 1600, // Use pelo menos 1.6GB
   RAM_WARN_MB: 700
 };
 
 // APÓS o bloco do AUTO_CFG, adicione:
-const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
-const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '2048', 10); // mínimo RAM que deve sobrar pós-abertura
+const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10);   // mínimo RAM livre para abrir navegador
+const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10); // mínimo RAM que deve sobrar pós-abertura (desativado)
+const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10); // alvo de perfis vivos para SWAP quando abaixo
 
 // INICIO DA INSTRUÇÃO (scripts/worker.js – MODO LEVE INTELIGENTE, ORÇAMENTO DINÂMICO, FAIRNESS REAL)
 // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
@@ -271,7 +272,7 @@ async function milLog(type, msg) {
 
 // function desiredActiveNames() {
 //   const d = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-//   return Object.entries(d.perfis || {}).filter(([_, ent]) => ent && ent.active === true).map(([nome]) => nome);
+//   return Object.entries(d.perfis || {}).filter(([_, ent]) => ent e ent.active === true).map(([nome]) => nome);
 // }
 
 // function chooseCandidatesToOpen(maxN = 2) {
@@ -408,29 +409,18 @@ if ($parent) {
         `], {stdio:'ignore'}, ()=>res());
       });
     } else {
-      const { exec } = require('child_process');
-      const getAll = (pid, cb) => {
-        exec(`pgrep -P ${pid}`, (e, stdout) => {
-          const pids = stdout.trim().split(/\s+/).filter(Boolean).map(Number);
-          if (!pids.length) return cb([]);
-          let all = [];
-          let pending = pids.length;
-          pids.forEach(child => getAll(child, (desc) => {
-            all.push(child, ...desc);
-            if (--pending === 0) cb(all);
-          }));
-        });
-      };
-      getAll(pid, (all) => {
-        for (const id of all) { try { process.kill(id, 'SIGKILL'); } catch{} }
-        try { process.kill(pid, 'SIGKILL'); } catch{}
-      });
+      // Linux/macOS: desativado — kills apenas via PowerShell/Windows
+      return;
     }
   } catch {}
 }
 
 async function killStrayChromes() {
   try {
+    if (process.platform !== 'win32') {
+      // Somente Windows: congelado em outras plataformas
+      return;
+    }
     const perfisArr = loadPerfisJson();
     const nomeByDir = {};
     for (const p of perfisArr) {
@@ -716,16 +706,16 @@ async function activateOnce(nome, source = '') {
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
-        // HEADROOM pós-abrir (rollback se < 2GB)
-        {
-          const freeAfter = getAvailableMB();
-          if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
-            await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
-            try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
-            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
-            return { ok: false, error: 'headroom_below_min_after_open' };
-          }
-        }
+        // HEADROOM pós-abrir (rollback se < 2GB) — DESATIVADO POR POLÍTICA UPTIME FIRST
+        // {
+        //   const freeAfter = getAvailableMB();
+        //   if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
+        //     await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
+        //     try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
+        //     if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+        //     return { ok: false, error: 'headroom_below_min_after_open' };
+        //   }
+        // }
 
         // PATCH MILITAR: marcar ativação e limpar históricos/avisos
         robeMeta[nome] = robeMeta[nome] || {};
@@ -737,6 +727,18 @@ async function activateOnce(nome, source = '') {
         try { healer.lastProgressAt = Date.now(); } catch {}
 
         try { attachBrowserLifecycle(nome, browser); } catch {}
+        try {
+          // Define mainPage e observadores; inicia Pruner de abas
+          const ctrl = controllers.get(nome);
+          if (ctrl) {
+            const pages = await browser.pages().catch(()=>[]);
+            if (pages && pages[0]) {
+              ctrl.mainPage = pages[0];
+              try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
+            }
+            maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
+          }
+        } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
@@ -762,8 +764,8 @@ async function activateOnce(nome, source = '') {
         // INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
         if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
           robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (activateOnce)'); } catch {}
+          robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s (activateOnce)'); } catch {}
         }
         // FIM DA INSTRUÇÃO 9
         console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
@@ -1164,10 +1166,12 @@ async function ramCpuMonitorTick() {
       let slopeOK = false;
       if (!allHigh) {
         const A = hist[0], B = hist[hist.length-1];
-        const dMin = Math.max(0.5, (B.t - A.t)/60000);
+        const elapsedMs = (B.t - A.t);
+        const dMin = Math.max(0.5, elapsedMs/60000);
         const slope = (B.mb - A.mb) / dMin;
         const avg = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
-        slopeOK = (slope > 50) && (avg > 800);
+        // Exige pelo menos 2 minutos de janela para acionar por slope
+        slopeOK = (elapsedMs >= 120000) && (slope > 50) && (avg > 800);
       }
       // Só kill se comprovado leak real!
       if (allHigh || slopeOK) {
@@ -1263,19 +1267,203 @@ function extractUserDataDir(cmd) {
 setTimeout(ramCpuMonitorTick, 5000);
 
 // Manutenção rotativa (opcinal, recomendado)
-async function maintenanceFlushCycle() {
-  const active = Array.from(controllers.keys());
-  if (active.length < 4) return;
-  const subset = active.filter((_,i)=> i % 10 === 0);
-  for (const nome of subset) {
-    await handlers.deactivate({ nome, reason:'maint_flush', policy:'preserveDesired' });
-    for (let i=0;i<10;i++) { await new Promise(r=>setTimeout(r, 3000)); }
-    await activateOnce(nome, 'maint_flush');
-  }
-}
-setInterval(()=>maintenanceFlushCycle().catch(()=>{}), 4*60*60*1000);
+// async function maintenanceFlushCycle() {
+//   const active = Array.from(controllers.keys());
+//   if (active.length < 4) return;
+//   const subset = active.filter((_,i)=> i % 10 === 0);
+//   for (const nome of subset) {
+//     await handlers.deactivate({ nome, reason:'maint_flush', policy: 'preserveDesired' });
+//     for (let i=0;i<10;i++) { await new Promise(r=>setTimeout(r, 3000)); }
+//     await activateOnce(nome, 'maint_flush');
+//   }
+// }
+// setInterval(()=>maintenanceFlushCycle().catch(()=>{}), 4*60*60*1000);
 
 // ========== FIM ALTERAÇÃO RAM/CHROME & CPU MONITOR CROSS-PLATFORM ==========
+
+// ========== INÍCIO: LEANKEEPER (Magreza Permanente + Round-Robin/Swap) ==========
+// let _leanBusy = false;
+
+// function _desiredActiveSet() {
+//   try {
+//     const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+//     const set = new Set();
+//     for (const [n, ent] of Object.entries(desired.perfis || {})) {
+//       if (ent && ent.active === true) set.add(n);
+//     }
+//     return set;
+//   } catch { return new Set(); }
+// }
+
+// function _aliveNames() { return Array.from(controllers.keys()); }
+
+// function _fattestActiveName(thresholdMB = 0) {
+//   let best = null;
+//   for (const nome of _aliveNames()) {
+//     const mb = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : -1;
+//     if (mb >= thresholdMB) {
+//       if (!best || mb > best.mb) best = { nome, mb };
+//     }
+//   }
+//   return best;
+// }
+
+// function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// function _sleepRandom(minMs, maxMs) { const ms = minMs + Math.floor(Math.random()*(maxMs-minMs+1)); return _sleep(ms); }
+
+// async function leanKeeperTick() {
+//   if (_leanBusy) return;
+//   _leanBusy = true;
+//   try {
+//     const now = Date.now();
+//     const OVER_MB = 600;
+
+//     // Atualiza snapshot de RAM imediata antes de decisões
+//     try { await ramCpuMonitorTick(); } catch {}
+
+//     // Marca overweightNow/overweightSince rápido para os vivos
+//     for (const nome of _aliveNames()) {
+//       const mb = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : 0;
+//       robeMeta[nome] = robeMeta[nome] || {};
+//       if (mb > OVER_MB) {
+//         robeMeta[nome].overweightNow = true;
+//         robeMeta[nome].overweightSince = robeMeta[nome].overweightSince || now;
+//       } else {
+//         robeMeta[nome].overweightNow = false;
+//         robeMeta[nome].overweightSince = 0;
+//       }
+//     }
+
+//     // 1) Manutenção: reseta o mais gordo > 600MB (no máximo 1 por rodada)
+//     const fat = _fattestActiveName(OVER_MB);
+//     if (fat && fat.nome) {
+//       const nome = fat.nome;
+//       const beforeMB = fat.mb || 0;
+//       robeMeta[nome] = robeMeta[nome] || {};
+//       robeMeta[nome].lastMaintenanceAt = now;
+//       robeMeta[nome].lastRamBeforeReset = beforeMB;
+
+//       await reportAction(nome, 'lean_maintenance', `soft_reset_start before=${beforeMB}MB reason=overweight`);
+
+//       // Soft reset
+//       try { await handlers.deactivate({ nome, reason: 'lean_soft_reset', policy: 'preserveDesired' }); } catch {}
+//       // Cancelar reabertura tardia e reabrir imediatamente
+//       robeMeta[nome].reopenAt = null;
+
+//       const r = await activateOnce(nome, 'lean_soft_reset');
+//       if (!r || !r.ok) {
+//         await reportAction(nome, 'lean_maintenance', `soft_reset_activate_failed error=${(r && r.error) || 'unknown'}`);
+//       }
+
+//       robeMeta[nome].lastResetAt = Date.now();
+
+//       // Aguarda 300–800ms p/ RAM estabilizar
+//       await _sleepRandom(300, 800);
+
+//       // Força atualização de RAM e mede "depois"
+//       await ramCpuMonitorTick();
+//       const afterMB = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : null;
+//       robeMeta[nome].lastRamAfterReset = afterMB;
+//       robeMeta[nome].lastDeltaMB = (afterMB != null ? beforeMB - afterMB : null);
+//       robeMeta[nome].lastMaintenanceAt = Date.now();
+
+//       const stillOver = (afterMB != null) && afterMB > OVER_MB;
+//       await reportAction(nome, 'lean_maintenance', `soft_reset_done before=${beforeMB}MB after=${afterMB}MB delta=${(beforeMB - (afterMB||0))}MB stillOver=${stillOver}`);
+
+//       // Atualiza flags overweight de acordo
+//       robeMeta[nome].overweightNow = !!stillOver;
+//       robeMeta[nome].overweightSince = stillOver ? (robeMeta[nome].overweightSince || now) : 0;
+
+//       // Se ainda gordo, faz hardCleanProfileOnDisk e reabre
+//       if (stillOver) {
+//         await reportAction(nome, 'lean_maintenance', `hard_clean_start before=${afterMB}MB`);
+//         try { await handlers.deactivate({ nome, reason: 'lean_hard_clean', policy: 'preserveDesired' }); } catch {}
+//         robeMeta[nome].reopenAt = null;
+//         try {
+//           if (browserHelper && typeof browserHelper.hardCleanProfileOnDisk === 'function') {
+//             await browserHelper.hardCleanProfileOnDisk(nome);
+//           } else {
+//             await issues.append(nome, 'maintenance_warn', 'hardCleanProfileOnDisk ausente em browser.js');
+//           }
+//         } catch (e) {
+//           try { await issues.append(nome, 'maintenance_error', `hardClean exception: ${e && e.message || e}`); } catch {}
+//         }
+//         const r2 = await activateOnce(nome, 'lean_hard_reopen');
+//         if (!r2 || !r2.ok) {
+//           await reportAction(nome, 'lean_maintenance', `hard_clean_activate_failed error=${(r2 && r2.error) || 'unknown'}`);
+//         }
+//         robeMeta[nome].lastResetAt = Date.now();
+
+//         await _sleepRandom(300, 800);
+//         await ramCpuMonitorTick();
+//         const afterMB2 = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : null;
+
+//         robeMeta[nome].lastRamAfterReset = afterMB2;
+//         robeMeta[nome].lastDeltaMB = (afterMB2 != null ? beforeMB - afterMB2 : null);
+//         robeMeta[nome].lastMaintenanceAt = Date.now();
+
+//         const stillOver2 = (afterMB2 != null) && afterMB2 > OVER_MB;
+//         robeMeta[nome].overweightNow = !!stillOver2;
+//         robeMeta[nome].overweightSince = stillOver2 ? (robeMeta[nome].overweightSince || now) : 0;
+
+//         await reportAction(nome, 'lean_maintenance', `hard_clean_done before=${beforeMB}MB after=${afterMB2}MB delta=${(beforeMB - (afterMB2||0))}MB stillOver=${stillOver2}`);
+
+//         if (stillOver2) {
+//           try { await issues.append(nome, 'maintenance_failed', `RAM permaneceu alta após hardClean: ${afterMB2}MB`); } catch {}
+//         }
+//       }
+
+//       await snapshotStatusAndWrite();
+//       return; // Apenas 1 manutenção por rodada
+//     }
+
+//     // 2) SWAP quando alive < TARGET_ALIVE (mantém slots fixos)
+//     if (TARGET_ALIVE > 0) {
+//       const aliveNow = _aliveNames().length;
+//       if (aliveNow < TARGET_ALIVE) {
+//         const desired = _desiredActiveSet();
+//         const missing = Array.from(desired).filter(n => !controllers.has(n) && !isFrozenNow(n));
+//         if (missing.length > 0 && aliveNow > 0) {
+//           const ramSorted = _aliveNames()
+//             .map(n => ({ n, mb: (typeof robeMeta[n]?.ramMB === 'number') ? robeMeta[n].ramMB : -1 }))
+//             .sort((a,b)=> (b.mb - a.mb));
+//           const closeNome = (ramSorted[0] && ramSorted[0].n) || _aliveNames()[0];
+//           const closeMb = (ramSorted[0] && ramSorted[0].mb) || (robeMeta[closeNome]?.ramMB || 0);
+//           const openNome = missing[0];
+
+//           await reportAction(closeNome, 'lean_swap', `swap_close target=${TARGET_ALIVE} alive=${aliveNow} open=${openNome} closeRAM=${closeMb}MB`);
+
+//           try { await handlers.deactivate({ nome: closeNome, reason: 'lean_swap', policy: 'preserveDesired' }); } catch {}
+//           robeMeta[closeNome] = robeMeta[closeNome] || {};
+//           robeMeta[closeNome].reopenAt = null;
+
+//           try {
+//             const rr = await activateOnce(openNome, 'lean_swap_open');
+//             if (!rr || !rr.ok) {
+//               await reportAction(openNome, 'lean_swap', `open_missing_failed error=${(rr && rr.error) || 'unknown'}`);
+//               // Rollback para manter slot fixo
+//               try { await activateOnce(closeNome, 'lean_swap_rollback'); } catch {}
+//             } else {
+//               await _sleepRandom(300, 800);
+//             }
+//           } catch (e) {
+//             try { await issues.append('system', 'lean_swap_error', `open exception: ${e && e.message || e}`); } catch {}
+//             try { await activateOnce(closeNome, 'lean_swap_rollback'); } catch {}
+//           }
+//           await snapshotStatusAndWrite();
+//           return;
+//         }
+//       }
+//     }
+//   } catch (e) {
+//     try { await issues.append('system', 'lean_keeper_error', e && e.message || String(e)); } catch {}
+//   } finally {
+//     _leanBusy = false;
+//   }
+// }
+// setInterval(() => { leanKeeperTick().catch(()=>{}); }, 90*1000);
+// setTimeout(() => { leanKeeperTick().catch(()=>{}); }, 15000);
+// ========== FIM: LEANKEEPER (Magreza Permanente + Round-Robin/Swap) ==========
 
 // --------------- ROBE/TICK
 async function robeTickGlobal() {
@@ -1554,7 +1742,7 @@ const handlers = {
     if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
     let nome = utils.slugify(cidade) + '-' + Date.now();
-    while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random()*100);
+    while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
     const preset = pickUaPreset();
     if (!preset) return { ok: false, error: 'UA preset esgotado.' };
@@ -2044,12 +2232,17 @@ return {
   frozenReason: robeMeta[nome]?.frozenReason || null,
   frozenAt: robeMeta[nome]?.frozenAt || null,
   frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
-  internalFailCountWindow: fail.internal,
-  externalFailCountWindow: fail.external,
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
-  reopenAt: robeMeta[nome]?.reopenAt || null,
+  reopenAt: robeMeta[nome]?.reopenAt || null
+  // overweightNow: !!robeMeta[nome]?.overweightNow,
+  // overweightSince: robeMeta[nome]?.overweightSince || null,
+  // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
+  // lastResetAt: robeMeta[nome]?.lastResetAt || null,
+  // lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
+  // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
+  // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
 });
 const robes = {};
@@ -2070,10 +2263,15 @@ robes[nome] = {
   frozenReason: robeMeta[nome]?.frozenReason || null,
   frozenAt: robeMeta[nome]?.frozenAt || null,
   frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
-  internalFailCountWindow: fail.internal,
-  externalFailCountWindow: fail.external,
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null
+  // overweightNow: !!robeMeta[nome]?.overweightNow,
+  // overweightSince: robeMeta[nome]?.overweightSince || null,
+  // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
+  // lastResetAt: robeMeta[nome]?.lastResetAt || null,
+  // lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
+  // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
+  // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
 });
 const robeQueueList = robeQueue.queueList();
@@ -2109,7 +2307,7 @@ return _statusLock;
 // try {
 // ensureDesired();
 // const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-// const perfisDesired = (desired && desired.perfis && typeof desired.perfis === 'object') ? desired.perfis : {};
+// const perfisDesired = (desired e desired.perfis e typeof desired.perfis === 'object') ? desired.perfis : {};
 // const nomes = Object.keys(perfisDesired);
 
 // // Varre controllers e fecha se congelado, antes de ativações
@@ -2128,12 +2326,12 @@ return _statusLock;
 // const perfisArrAudit = loadPerfisJson();
 // // ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (INÍCIO) ===========
 // for (const p of perfisArrAudit) {
-//   const nomeAudit = p && p.nome;
+//   const nomeAudit = p e p.nome;
 //   if (!nomeAudit) continue;
 //   const ctrlAudit = controllers.get(nomeAudit);
-//   const working = !!(ctrlAudit && ctrlAudit.browser && ctrlAudit.trabalhando && !ctrlAudit.configurando);
-//   const humanControl = !!(ctrlAudit && ctrlAudit.humanControl);
-//   if (working && !humanControl) { // Só descongela se NÃO estiver em modo humano!
+//   const working = !!(ctrlAudit e ctrlAudit.browser e ctrlAudit.trabalhando e !ctrlAudit.configurando);
+//   const humanControl = !!(ctrlAudit e ctrlAudit.humanControl);
+//   if (working e !humanControl) { // Só descongela se NÃO estiver em modo humano!
 //     unfreezeCooldownIfWorking(nomeAudit);
 //   } else {
 //     freezeCooldownIfNotWorking(nomeAudit);
@@ -2147,7 +2345,7 @@ return _statusLock;
 //   const ctrl = controllers.get(nome);
 
 //   // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
-//   if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
+//   if (robeMeta[nome]?.reopenAt e robeMeta[nome].reopenAt <= Date.now() e !ctrl) {
 //     if (isFrozenNow(nome)) {
 //       // não reabre durante congelamento
 //       continue;
@@ -2165,7 +2363,7 @@ return _statusLock;
 //   }
 
 //   // Liga/desliga browser
-//   if (want.active === true && !ctrl) {
+//   if (want.active === true e !ctrl) {
 //     // Guard-rail frozen: se estiver congelado, pula
 //     const until = isFrozenNow(nome);
 //     if (until > Date.now()) {
@@ -2179,12 +2377,12 @@ return _statusLock;
 
 //     // === PATCH autoMode Light: gate para ativação no reconcileOnce ===
 //     const now = Date.now();
-//     if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > now) {
+//     if (robeMeta[nome]?.activationHeldUntil e robeMeta[nome].activationHeldUntil > now) {
 //       await snapshotStatusAndWrite();
 //       continue;
 //     }
 //     // INICIO DA INSTRUÇÃO 7: respeita lightDropUntil
-//     if (robeMeta[nome]?.lightDropUntil && robeMeta[nome].lightDropUntil > Date.now()) {
+//     if (robeMeta[nome]?.lightDropUntil e robeMeta[nome].lightDropUntil > Date.now()) {
 //       await snapshotStatusAndWrite();
 //       continue;
 //     }
@@ -2202,7 +2400,7 @@ return _statusLock;
 //     // === FIM PATCH autoMode Light ===
 
 //     try { await activateOnce(nome, 'reconcile'); } catch {}
-//   } else if (want.active === false && ctrl) {
+//   } else if (want.active === false e ctrl) {
 //     try { await handlers.deactivate({ nome }); } catch {}
 //     continue;
 //   }
@@ -2211,13 +2409,13 @@ return _statusLock;
 //   if (!ctrl2) continue;
 
 //   // configureOnce
-//   if (want.configureOnce === true && !ctrl2.configurando) {
+//   if (want.configureOnce === true e !ctrl2.configurando) {
 //     try {
 //       const r = await handlers.configure({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].configureOnce = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|configureOnce_desired_write`); } catch {} }
@@ -2231,18 +2429,18 @@ return _statusLock;
 //   if (isFrozenNow(nome)) {
 //     // Sincronização frozen disco⇄memória e snapshot imediato antes de pular
 //     const until = isFrozenNow(nome);
-//     if (until > Date.now() && (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until)) {
+//     if (until > Date.now() e (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until)) {
 //       robeMeta[nome] = robeMeta[nome] || {};
 //       robeMeta[nome].frozenUntil = until;
 //     }
 //     await snapshotStatusAndWrite();
-//     if (ctrl2 && ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
+//     if (ctrl2 e ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
 //     continue;
 //   }
 
-//   if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl2.trabalhando && !ctrl2.configurando) {
+//   if (want.virtus === 'on' e autoMode.mode === 'full' e !ctrl2.trabalhando e !ctrl2.configurando) {
 //     try { ctrl2.virtus = virtusHelper.startVirtus(ctrl2.browser, nome, { restrictTab: 0 }); ctrl2.trabalhando = true; } catch {}
-//   } else if (want.virtus === 'off' && ctrl2.trabalhando) {
+//   } else if (want.virtus === 'off' e ctrl2.trabalhando) {
 //     try { await stopVirtus(nome); } catch {}
 //   }
 
@@ -2250,10 +2448,10 @@ return _statusLock;
 //   if (want.robePlay === true) {
 //     try {
 //       const r = await handlers['robe-play']({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].robePlay = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
@@ -2267,10 +2465,10 @@ return _statusLock;
 //   if (want.invokeHuman === true) {
 //     try {
 //       const r = await handlers.invoke_human({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].invokeHuman = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|invokeHuman_desired_write`); } catch {} }
@@ -2284,10 +2482,10 @@ return _statusLock;
 //   if (want.humanResume === true) {
 //     try {
 //       const r = await handlers['human-resume']({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].humanResume = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|humanResume_desired_write`); } catch {} }
@@ -2302,12 +2500,12 @@ return _statusLock;
 //     try {
 //       const now = Date.now();
 //       const ctrl3 = controllers.get(nome);
-//       const working = !!(ctrl3 && ctrl3.browser && ctrl3.trabalhando && !ctrl3.configurando);
+//       const working = !!(ctrl3 e ctrl3.browser e ctrl3.trabalhando e !ctrl3.configurando);
 //       const plus24 = 24 * 60 * 60 * 1000;
-//       const humanControl = !!(ctrl3 && ctrl3.humanControl);
+//       const humanControl = !!(ctrl3 e ctrl3.humanControl);
 //       await manifestStore.update(nome, (man) => {
 //         man = man || {};
-//         if (working && !humanControl) {
+//         if (working e !humanControl) {
 //           man.robeCooldownUntil = now + plus24;
 //           man.robeCooldownRemainingMs = 0;
 //         } else {
@@ -2318,7 +2516,7 @@ return _statusLock;
 //       });
 
 //       const d2 = readJsonFile(desiredPath, { perfis: {} });
-//       if (d2 && d2.perfis && d2.perfis[nome]) {
+//       if (d2 e d2.perfis e d2.perfis[nome]) {
 //         d2.perfis[nome].robePause24h = false;
 //         const ok2 = writeJsonAtomic(desiredPath, d2);
 //         if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_desired_write`); } catch {} }
@@ -2365,8 +2563,8 @@ const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,                   // no máximo 2 reloads curtos por página zumbi
   RELOAD_TIMEOUT_MS: 10000,         // Mais tempo para reload Messenger
   RELOAD_POST_WAIT_MS: 250,         // pequena espera pós-reload
-  REOPEN_DELAY_SHORT_MS: 4000,      // reabrir "já já" (nurse_kill, no_pages)
-  REOPEN_DELAY_RAMCPU_MS: 4*60*1000, // reabrir após 4–6min em RAM/CPU kill (usaremos também jitter)
+  REOPEN_DELAY_SHORT_MS: 60000,      // reabrir "já já" (nurse_kill, no_pages)
+  REOPEN_DELAY_RAMCPU_MS: 60000, // reabrir após 60s em RAM/CPU kill (usaremos também jitter)
   FAIL_WINDOW_MS: 3*60*60*1000,     // 3h janela
   FAIL_FREEZE_AFTER: 5,             // >5 falhas em 3h => congela
   FAIL_FREEZE_MS: 2*60*60*1000      // congela por 2h
@@ -2433,13 +2631,13 @@ async function registerFailure(nome, reason, classification) {
   const counts = getFailureCounts(nome);
   try { await issues.append(nome, 'failure', `reason=${reason} class=${cls} internal=${counts.internal} external=${counts.external} unknown=${counts.unknown}`); } catch {}
 
-  // Congelar apenas por falhas INTERNAS
-  if (cls === 'internal' && counts.internal > ULTRA_RECOVERY.FAIL_FREEZE_AFTER) {
-    try {
-      await freezeProfileFor(nome, ULTRA_RECOVERY.FAIL_FREEZE_MS, `fail_threshold:${reason}`, 'system');
-      await ensureFrozenShutdown(nome, 'fail_freeze');
-    } catch {}
+  // CONGELAR APENAS POR MOTIVO LÍCITO
+  const ALLOWED_FREEZE_REASONS = new Set(['manifest_missing','manifest_incomplete']);
+  if (ALLOWED_FREEZE_REASONS.has(reason)) {
+    await freezeProfileFor(nome, 12*60*60*1000, reason, 'system'); // 12h
+    await ensureFrozenShutdown(nome, 'allowed_freeze');
   }
+  // Qualquer outro motivo: NUNCA congele; apenas log.
 }
 
 async function pageReadyBasic(p0) {
@@ -2616,8 +2814,8 @@ async function nurseTick() {
             if (!r || !r.ok) {
               if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
                 robeMeta[nome] = robeMeta[nome] || {};
-                robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-                await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s');
+                robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+                await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s');
               }
             }
           } catch {}
@@ -2636,7 +2834,7 @@ async function nurseTick() {
       if (!pages || !pages[0]) {
         await reportAction(nome, 'nurse_kill', `motivo=no_pages url= reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
         try { registerFailure(nome, 'no_pages', 'external'); } catch {}
-        await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
       }
       const p0 = pages[0];
@@ -2864,7 +3062,7 @@ async function healthTick() {
     } else if (st.stage === 'recover3') {
       if (st.counters.cyclesWithoutLife >= HEALTH_CFG.ESCALATE_TO_REOPEN_AFTER) {
         await escalateToReopen(nome, 'health_no_progress');
-        try { await registerFailure(nome, 'health_no_progress', 'internal'); } catch {}
+        // try { await registerFailure(nome, 'health_no_progress', 'internal'); } catch {}
       }
     }
   }
