@@ -1732,7 +1732,7 @@ const handlers = {
 
     // 2. Pausa Virtus
     ctrl.trabalhando = false;
-    if (ctrl.virtus e typeof ctrl.virtus.stop === 'function') {
+    if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
       try { await ctrl.virtus.stop(); } catch {}
     }
     ctrl.virtus = null;
