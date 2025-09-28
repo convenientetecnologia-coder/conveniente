@@ -16,8 +16,8 @@ const { getAvailableMB } = require('./utils.js'); // ADICIONADO CONFORME INSTRU�
 
 // Configs
 const PORT = parseInt(process.env.SUPERVISOR_PORT || '9800', 10);
-// Quantidade reserva de RAM a manter livre (em MB, padrão: 2048)
-const MIN_FREE_RAM_MB = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '2048', 10);
+// Quantidade reserva de RAM a manter livre (em MB, padrão: 3072)
+const MIN_FREE_RAM_MB = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '3072', 10);
 // Ciclo de auto-tune em ms
 const CYCLE_MS = parseInt(process.env.SUP_CYCLE_MS || '1600', 10);
 
