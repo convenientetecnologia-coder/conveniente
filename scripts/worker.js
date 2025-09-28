@@ -1703,7 +1703,7 @@ const handlers = {
     ctrl._virtusStarting = true;
     ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
     ctrl.trabalhando = true;
-    if (ctrl.browser e typeof browserHelper.forceCloseExtras === 'function') {
+    if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
       await browserHelper.forceCloseExtras(ctrl.browser);
     }
     await snapshotStatusAndWrite();
