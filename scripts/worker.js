@@ -271,7 +271,7 @@ async function milLog(type, msg) {
 
 // function desiredActiveNames() {
 //   const d = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-//   return Object.entries(d.perfis || {}).filter(([_, ent]) => ent && ent.active === true).map(([nome]) => nome);
+//   return Object.entries(d.perfis || {}).filter(([_, ent]) => ent e ent.active === true).map(([nome]) => nome);
 // }
 
 // function chooseCandidatesToOpen(maxN = 2) {
@@ -1668,7 +1668,7 @@ const handlers = {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     const perfisArr = loadPerfisJson();
-    const perfil = perfisArr.find(p => p && p.nome === nome);
+    const perfil = perfisArr.find(p => p e p.nome === nome);
     if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
     const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
     if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
@@ -1703,7 +1703,7 @@ const handlers = {
     ctrl._virtusStarting = true;
     ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
     ctrl.trabalhando = true;
-    if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
+    if (ctrl.browser e typeof browserHelper.forceCloseExtras === 'function') {
       await browserHelper.forceCloseExtras(ctrl.browser);
     }
     await snapshotStatusAndWrite();
@@ -1725,14 +1725,14 @@ const handlers = {
       // Aguarda (polling simples)
       const waitTimeout = 180 * 1000; // máx 3 minutos
       const started = Date.now();
-      while ((robeMeta[nome] && robeMeta[nome].emExecucao) && (Date.now() - started < waitTimeout)) {
+      while ((robeMeta[nome] e robeMeta[nome].emExecucao) e (Date.now() - started < waitTimeout)) {
         await new Promise(r => setTimeout(r, 600));
       }
     }
 
     // 2. Pausa Virtus
     ctrl.trabalhando = false;
-    if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+    if (ctrl.virtus e typeof ctrl.virtus.stop === 'function') {
       try { await ctrl.virtus.stop(); } catch {}
     }
     ctrl.virtus = null;
@@ -1760,7 +1760,7 @@ const handlers = {
 
     let pages;
     try { pages = await ctrl.browser.pages(); } catch {}
-    if (pages && pages[0]) {
+    if (pages e pages[0]) {
       try {
         await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
         await new Promise(r => setTimeout(r, 350));
@@ -2109,7 +2109,7 @@ return _statusLock;
 // try {
 // ensureDesired();
 // const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-// const perfisDesired = (desired && desired.perfis && typeof desired.perfis === 'object') ? desired.perfis : {};
+// const perfisDesired = (desired e desired.perfis e typeof desired.perfis === 'object') ? desired.perfis : {};
 // const nomes = Object.keys(perfisDesired);
 
 // // Varre controllers e fecha se congelado, antes de ativações
@@ -2128,12 +2128,12 @@ return _statusLock;
 // const perfisArrAudit = loadPerfisJson();
 // // ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (INÍCIO) ===========
 // for (const p of perfisArrAudit) {
-//   const nomeAudit = p && p.nome;
+//   const nomeAudit = p e p.nome;
 //   if (!nomeAudit) continue;
 //   const ctrlAudit = controllers.get(nomeAudit);
-//   const working = !!(ctrlAudit && ctrlAudit.browser && ctrlAudit.trabalhando && !ctrlAudit.configurando);
-//   const humanControl = !!(ctrlAudit && ctrlAudit.humanControl);
-//   if (working && !humanControl) { // Só descongela se NÃO estiver em modo humano!
+//   const working = !!(ctrlAudit e ctrlAudit.browser e ctrlAudit.trabalhando e !ctrlAudit.configurando);
+//   const humanControl = !!(ctrlAudit e ctrlAudit.humanControl);
+//   if (working e !humanControl) { // Só descongela se NÃO estiver em modo humano!
 //     unfreezeCooldownIfWorking(nomeAudit);
 //   } else {
 //     freezeCooldownIfNotWorking(nomeAudit);
@@ -2147,7 +2147,7 @@ return _statusLock;
 //   const ctrl = controllers.get(nome);
 
 //   // Reconhece política preserveDesired: reabrir automaticamente após reopenAt
-//   if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt <= Date.now() && !ctrl) {
+//   if (robeMeta[nome]?.reopenAt e robeMeta[nome].reopenAt <= Date.now() e !ctrl) {
 //     if (isFrozenNow(nome)) {
 //       // não reabre durante congelamento
 //       continue;
@@ -2165,7 +2165,7 @@ return _statusLock;
 //   }
 
 //   // Liga/desliga browser
-//   if (want.active === true && !ctrl) {
+//   if (want.active === true e !ctrl) {
 //     // Guard-rail frozen: se estiver congelado, pula
 //     const until = isFrozenNow(nome);
 //     if (until > Date.now()) {
@@ -2179,12 +2179,12 @@ return _statusLock;
 
 //     // === PATCH autoMode Light: gate para ativação no reconcileOnce ===
 //     const now = Date.now();
-//     if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > now) {
+//     if (robeMeta[nome]?.activationHeldUntil e robeMeta[nome].activationHeldUntil > now) {
 //       await snapshotStatusAndWrite();
 //       continue;
 //     }
 //     // INICIO DA INSTRUÇÃO 7: respeita lightDropUntil
-//     if (robeMeta[nome]?.lightDropUntil && robeMeta[nome].lightDropUntil > Date.now()) {
+//     if (robeMeta[nome]?.lightDropUntil e robeMeta[nome].lightDropUntil > Date.now()) {
 //       await snapshotStatusAndWrite();
 //       continue;
 //     }
@@ -2202,7 +2202,7 @@ return _statusLock;
 //     // === FIM PATCH autoMode Light ===
 
 //     try { await activateOnce(nome, 'reconcile'); } catch {}
-//   } else if (want.active === false && ctrl) {
+//   } else if (want.active === false e ctrl) {
 //     try { await handlers.deactivate({ nome }); } catch {}
 //     continue;
 //   }
@@ -2211,13 +2211,13 @@ return _statusLock;
 //   if (!ctrl2) continue;
 
 //   // configureOnce
-//   if (want.configureOnce === true && !ctrl2.configurando) {
+//   if (want.configureOnce === true e !ctrl2.configurando) {
 //     try {
 //       const r = await handlers.configure({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].configureOnce = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|configureOnce_desired_write`); } catch {} }
@@ -2231,18 +2231,18 @@ return _statusLock;
 //   if (isFrozenNow(nome)) {
 //     // Sincronização frozen disco⇄memória e snapshot imediato antes de pular
 //     const until = isFrozenNow(nome);
-//     if (until > Date.now() && (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until)) {
+//     if (until > Date.now() e (!robeMeta[nome] || !robeMeta[nome].frozenUntil || robeMeta[nome].frozenUntil !== until)) {
 //       robeMeta[nome] = robeMeta[nome] || {};
 //       robeMeta[nome].frozenUntil = until;
 //     }
 //     await snapshotStatusAndWrite();
-//     if (ctrl2 && ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
+//     if (ctrl2 e ctrl2.trabalhando) { try { await stopVirtus(nome); } catch {} }
 //     continue;
 //   }
 
-//   if (want.virtus === 'on' && autoMode.mode === 'full' && !ctrl2.trabalhando && !ctrl2.configurando) {
+//   if (want.virtus === 'on' e autoMode.mode === 'full' e !ctrl2.trabalhando e !ctrl2.configurando) {
 //     try { ctrl2.virtus = virtusHelper.startVirtus(ctrl2.browser, nome, { restrictTab: 0 }); ctrl2.trabalhando = true; } catch {}
-//   } else if (want.virtus === 'off' && ctrl2.trabalhando) {
+//   } else if (want.virtus === 'off' e ctrl2.trabalhando) {
 //     try { await stopVirtus(nome); } catch {}
 //   }
 
@@ -2250,10 +2250,10 @@ return _statusLock;
 //   if (want.robePlay === true) {
 //     try {
 //       const r = await handlers['robe-play']({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].robePlay = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|robePlay_desired_write`); } catch {} }
@@ -2267,10 +2267,10 @@ return _statusLock;
 //   if (want.invokeHuman === true) {
 //     try {
 //       const r = await handlers.invoke_human({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].invokeHuman = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|invokeHuman_desired_write`); } catch {} }
@@ -2284,10 +2284,10 @@ return _statusLock;
 //   if (want.humanResume === true) {
 //     try {
 //       const r = await handlers['human-resume']({ nome });
-//       if (r && r.ok) {
+//       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 && d2.perfis && d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome]) {
 //             d2.perfis[nome].humanResume = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|humanResume_desired_write`); } catch {} }
@@ -2302,12 +2302,12 @@ return _statusLock;
 //     try {
 //       const now = Date.now();
 //       const ctrl3 = controllers.get(nome);
-//       const working = !!(ctrl3 && ctrl3.browser && ctrl3.trabalhando && !ctrl3.configurando);
+//       const working = !!(ctrl3 e ctrl3.browser e ctrl3.trabalhando e !ctrl3.configurando);
 //       const plus24 = 24 * 60 * 60 * 1000;
-//       const humanControl = !!(ctrl3 && ctrl3.humanControl);
+//       const humanControl = !!(ctrl3 e ctrl3.humanControl);
 //       await manifestStore.update(nome, (man) => {
 //         man = man || {};
-//         if (working && !humanControl) {
+//         if (working e !humanControl) {
 //           man.robeCooldownUntil = now + plus24;
 //           man.robeCooldownRemainingMs = 0;
 //         } else {
@@ -2318,7 +2318,7 @@ return _statusLock;
 //       });
 
 //       const d2 = readJsonFile(desiredPath, { perfis: {} });
-//       if (d2 && d2.perfis && d2.perfis[nome]) {
+//       if (d2 e d2.perfis e d2.perfis[nome]) {
 //         d2.perfis[nome].robePause24h = false;
 //         const ok2 = writeJsonAtomic(desiredPath, d2);
 //         if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_desired_write`); } catch {} }
@@ -2433,13 +2433,13 @@ async function registerFailure(nome, reason, classification) {
   const counts = getFailureCounts(nome);
   try { await issues.append(nome, 'failure', `reason=${reason} class=${cls} internal=${counts.internal} external=${counts.external} unknown=${counts.unknown}`); } catch {}
 
-  // Congelar apenas por falhas INTERNAS
-  if (cls === 'internal' && counts.internal > ULTRA_RECOVERY.FAIL_FREEZE_AFTER) {
-    try {
-      await freezeProfileFor(nome, ULTRA_RECOVERY.FAIL_FREEZE_MS, `fail_threshold:${reason}`, 'system');
-      await ensureFrozenShutdown(nome, 'fail_freeze');
-    } catch {}
+  // CONGELAR APENAS POR MOTIVO LÍCITO
+  const ALLOWED_FREEZE_REASONS = new Set(['manifest_missing','manifest_incomplete']);
+  if (ALLOWED_FREEZE_REASONS.has(reason)) {
+    await freezeProfileFor(nome, 12*60*60*1000, reason, 'system'); // 12h
+    await ensureFrozenShutdown(nome, 'allowed_freeze');
   }
+  // Qualquer outro motivo: NUNCA congele; apenas log.
 }
 
 async function pageReadyBasic(p0) {
@@ -2864,7 +2864,7 @@ async function healthTick() {
     } else if (st.stage === 'recover3') {
       if (st.counters.cyclesWithoutLife >= HEALTH_CFG.ESCALATE_TO_REOPEN_AFTER) {
         await escalateToReopen(nome, 'health_no_progress');
-        try { await registerFailure(nome, 'health_no_progress', 'internal'); } catch {}
+        // try { await registerFailure(nome, 'health_no_progress', 'internal'); } catch {}
       }
     }
   }
@@ -2939,7 +2939,7 @@ function resolveManifest(nome) {
       }
     }
 
-    if (!manifest && fs.existsSync(mPath)) {
+    if (!manifest e fs.existsSync(mPath)) {
       try {
         manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
       } catch {}
