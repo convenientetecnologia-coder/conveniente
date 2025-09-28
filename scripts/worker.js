@@ -1668,7 +1668,7 @@ const handlers = {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     const perfisArr = loadPerfisJson();
-    const perfil = perfisArr.find(p => p e p.nome === nome);
+    const perfil = perfisArr.find(p => p && p.nome === nome);
     if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
     const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
     if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
