@@ -1725,7 +1725,7 @@ const handlers = {
       // Aguarda (polling simples)
       const waitTimeout = 180 * 1000; // máx 3 minutos
       const started = Date.now();
-      while ((robeMeta[nome] e robeMeta[nome].emExecucao) e (Date.now() - started < waitTimeout)) {
+      while ((robeMeta[nome] && robeMeta[nome].emExecucao) e (Date.now() - started < waitTimeout)) {
         await new Promise(r => setTimeout(r, 600));
       }
     }
