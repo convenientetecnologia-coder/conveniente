@@ -76,8 +76,9 @@ const AUTO_CFG = {
 };
 
 // APÓS o bloco do AUTO_CFG, adicione:
-const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
-const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '2048', 10); // mínimo RAM que deve sobrar pós-abertura
+const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '1024', 10);   // mínimo RAM livre para abrir navegador
+const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '1024', 10); // mínimo RAM que deve sobrar pós-abertura
+const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10); // alvo de perfis vivos para SWAP quando abaixo
 
 // INICIO DA INSTRUÇÃO (scripts/worker.js – MODO LEVE INTELIGENTE, ORÇAMENTO DINÂMICO, FAIRNESS REAL)
 // *** AUTOTUNE DESATIVADO - CONTROLADO PELO SUPERVISOR ***
@@ -408,29 +409,18 @@ if ($parent) {
         `], {stdio:'ignore'}, ()=>res());
       });
     } else {
-      const { exec } = require('child_process');
-      const getAll = (pid, cb) => {
-        exec(`pgrep -P ${pid}`, (e, stdout) => {
-          const pids = stdout.trim().split(/\s+/).filter(Boolean).map(Number);
-          if (!pids.length) return cb([]);
-          let all = [];
-          let pending = pids.length;
-          pids.forEach(child => getAll(child, (desc) => {
-            all.push(child, ...desc);
-            if (--pending === 0) cb(all);
-          }));
-        });
-      };
-      getAll(pid, (all) => {
-        for (const id of all) { try { process.kill(id, 'SIGKILL'); } catch{} }
-        try { process.kill(pid, 'SIGKILL'); } catch{}
-      });
+      // Linux/macOS: desativado — kills apenas via PowerShell/Windows
+      return;
     }
   } catch {}
 }
 
 async function killStrayChromes() {
   try {
+    if (process.platform !== 'win32') {
+      // Somente Windows: congelado em outras plataformas
+      return;
+    }
     const perfisArr = loadPerfisJson();
     const nomeByDir = {};
     for (const p of perfisArr) {
@@ -737,6 +727,18 @@ async function activateOnce(nome, source = '') {
         try { healer.lastProgressAt = Date.now(); } catch {}
 
         try { attachBrowserLifecycle(nome, browser); } catch {}
+        try {
+          // Define mainPage e observadores; inicia Pruner de abas
+          const ctrl = controllers.get(nome);
+          if (ctrl) {
+            const pages = await browser.pages().catch(()=>[]);
+            if (pages && pages[0]) {
+              ctrl.mainPage = pages[0];
+              try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
+            }
+            maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
+          }
+        } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
@@ -762,8 +764,8 @@ async function activateOnce(nome, source = '') {
         // INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
         if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
           robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (activateOnce)'); } catch {}
+          robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s (activateOnce)'); } catch {}
         }
         // FIM DA INSTRUÇÃO 9
         console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
@@ -1276,6 +1278,190 @@ async function maintenanceFlushCycle() {
 setInterval(()=>maintenanceFlushCycle().catch(()=>{}), 4*60*60*1000);
 
 // ========== FIM ALTERAÇÃO RAM/CHROME & CPU MONITOR CROSS-PLATFORM ==========
+
+// ========== INÍCIO: LEANKEEPER (Magreza Permanente + Round-Robin/Swap) ==========
+let _leanBusy = false;
+
+function _desiredActiveSet() {
+  try {
+    const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+    const set = new Set();
+    for (const [n, ent] of Object.entries(desired.perfis || {})) {
+      if (ent && ent.active === true) set.add(n);
+    }
+    return set;
+  } catch { return new Set(); }
+}
+
+function _aliveNames() { return Array.from(controllers.keys()); }
+
+function _fattestActiveName(thresholdMB = 0) {
+  let best = null;
+  for (const nome of _aliveNames()) {
+    const mb = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : -1;
+    if (mb >= thresholdMB) {
+      if (!best || mb > best.mb) best = { nome, mb };
+    }
+  }
+  return best;
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function _sleepRandom(minMs, maxMs) { const ms = minMs + Math.floor(Math.random()*(maxMs-minMs+1)); return _sleep(ms); }
+
+async function leanKeeperTick() {
+  if (_leanBusy) return;
+  _leanBusy = true;
+  try {
+    const now = Date.now();
+    const OVER_MB = 600;
+
+    // Atualiza snapshot de RAM imediata antes de decisões
+    try { await ramCpuMonitorTick(); } catch {}
+
+    // Marca overweightNow/overweightSince rápido para os vivos
+    for (const nome of _aliveNames()) {
+      const mb = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : 0;
+      robeMeta[nome] = robeMeta[nome] || {};
+      if (mb > OVER_MB) {
+        robeMeta[nome].overweightNow = true;
+        robeMeta[nome].overweightSince = robeMeta[nome].overweightSince || now;
+      } else {
+        robeMeta[nome].overweightNow = false;
+        robeMeta[nome].overweightSince = 0;
+      }
+    }
+
+    // 1) Manutenção: reseta o mais gordo > 600MB (no máximo 1 por rodada)
+    const fat = _fattestActiveName(OVER_MB);
+    if (fat && fat.nome) {
+      const nome = fat.nome;
+      const beforeMB = fat.mb || 0;
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].lastMaintenanceAt = now;
+      robeMeta[nome].lastRamBeforeReset = beforeMB;
+
+      await reportAction(nome, 'lean_maintenance', `soft_reset_start before=${beforeMB}MB reason=overweight`);
+
+      // Soft reset
+      try { await handlers.deactivate({ nome, reason: 'lean_soft_reset', policy: 'preserveDesired' }); } catch {}
+      // Cancelar reabertura tardia e reabrir imediatamente
+      robeMeta[nome].reopenAt = null;
+
+      const r = await activateOnce(nome, 'lean_soft_reset');
+      if (!r || !r.ok) {
+        await reportAction(nome, 'lean_maintenance', `soft_reset_activate_failed error=${(r && r.error) || 'unknown'}`);
+      }
+
+      robeMeta[nome].lastResetAt = Date.now();
+
+      // Aguarda 300–800ms p/ RAM estabilizar
+      await _sleepRandom(300, 800);
+
+      // Força atualização de RAM e mede "depois"
+      await ramCpuMonitorTick();
+      const afterMB = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : null;
+      robeMeta[nome].lastRamAfterReset = afterMB;
+      robeMeta[nome].lastDeltaMB = (afterMB != null ? beforeMB - afterMB : null);
+      robeMeta[nome].lastMaintenanceAt = Date.now();
+
+      const stillOver = (afterMB != null) && afterMB > OVER_MB;
+      await reportAction(nome, 'lean_maintenance', `soft_reset_done before=${beforeMB}MB after=${afterMB}MB delta=${(beforeMB - (afterMB||0))}MB stillOver=${stillOver}`);
+
+      // Atualiza flags overweight de acordo
+      robeMeta[nome].overweightNow = !!stillOver;
+      robeMeta[nome].overweightSince = stillOver ? (robeMeta[nome].overweightSince || now) : 0;
+
+      // Se ainda gordo, faz hardCleanProfileOnDisk e reabre
+      if (stillOver) {
+        await reportAction(nome, 'lean_maintenance', `hard_clean_start before=${afterMB}MB`);
+        try { await handlers.deactivate({ nome, reason: 'lean_hard_clean', policy: 'preserveDesired' }); } catch {}
+        robeMeta[nome].reopenAt = null;
+        try {
+          if (browserHelper && typeof browserHelper.hardCleanProfileOnDisk === 'function') {
+            await browserHelper.hardCleanProfileOnDisk(nome);
+          } else {
+            await issues.append(nome, 'maintenance_warn', 'hardCleanProfileOnDisk ausente em browser.js');
+          }
+        } catch (e) {
+          try { await issues.append(nome, 'maintenance_error', `hardClean exception: ${e && e.message || e}`); } catch {}
+        }
+        const r2 = await activateOnce(nome, 'lean_hard_reopen');
+        if (!r2 || !r2.ok) {
+          await reportAction(nome, 'lean_maintenance', `hard_clean_activate_failed error=${(r2 && r2.error) || 'unknown'}`);
+        }
+        robeMeta[nome].lastResetAt = Date.now();
+
+        await _sleepRandom(300, 800);
+        await ramCpuMonitorTick();
+        const afterMB2 = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : null;
+
+        robeMeta[nome].lastRamAfterReset = afterMB2;
+        robeMeta[nome].lastDeltaMB = (afterMB2 != null ? beforeMB - afterMB2 : null);
+        robeMeta[nome].lastMaintenanceAt = Date.now();
+
+        const stillOver2 = (afterMB2 != null) && afterMB2 > OVER_MB;
+        robeMeta[nome].overweightNow = !!stillOver2;
+        robeMeta[nome].overweightSince = stillOver2 ? (robeMeta[nome].overweightSince || now) : 0;
+
+        await reportAction(nome, 'lean_maintenance', `hard_clean_done before=${beforeMB}MB after=${afterMB2}MB delta=${(beforeMB - (afterMB2||0))}MB stillOver=${stillOver2}`);
+
+        if (stillOver2) {
+          try { await issues.append(nome, 'maintenance_failed', `RAM permaneceu alta após hardClean: ${afterMB2}MB`); } catch {}
+        }
+      }
+
+      await snapshotStatusAndWrite();
+      return; // Apenas 1 manutenção por rodada
+    }
+
+    // 2) SWAP quando alive < TARGET_ALIVE (mantém slots fixos)
+    if (TARGET_ALIVE > 0) {
+      const aliveNow = _aliveNames().length;
+      if (aliveNow < TARGET_ALIVE) {
+        const desired = _desiredActiveSet();
+        const missing = Array.from(desired).filter(n => !controllers.has(n) && !isFrozenNow(n));
+        if (missing.length > 0 && aliveNow > 0) {
+          const ramSorted = _aliveNames()
+            .map(n => ({ n, mb: (typeof robeMeta[n]?.ramMB === 'number') ? robeMeta[n].ramMB : -1 }))
+            .sort((a,b)=> (b.mb - a.mb));
+          const closeNome = (ramSorted[0] && ramSorted[0].n) || _aliveNames()[0];
+          const closeMb = (ramSorted[0] && ramSorted[0].mb) || (robeMeta[closeNome]?.ramMB || 0);
+          const openNome = missing[0];
+
+          await reportAction(closeNome, 'lean_swap', `swap_close target=${TARGET_ALIVE} alive=${aliveNow} open=${openNome} closeRAM=${closeMb}MB`);
+
+          try { await handlers.deactivate({ nome: closeNome, reason: 'lean_swap', policy: 'preserveDesired' }); } catch {}
+          robeMeta[closeNome] = robeMeta[closeNome] || {};
+          robeMeta[closeNome].reopenAt = null;
+
+          try {
+            const rr = await activateOnce(openNome, 'lean_swap_open');
+            if (!rr || !rr.ok) {
+              await reportAction(openNome, 'lean_swap', `open_missing_failed error=${(rr && rr.error) || 'unknown'}`);
+              // Rollback para manter slot fixo
+              try { await activateOnce(closeNome, 'lean_swap_rollback'); } catch {}
+            } else {
+              await _sleepRandom(300, 800);
+            }
+          } catch (e) {
+            try { await issues.append('system', 'lean_swap_error', `open exception: ${e && e.message || e}`); } catch {}
+            try { await activateOnce(closeNome, 'lean_swap_rollback'); } catch {}
+          }
+          await snapshotStatusAndWrite();
+          return;
+        }
+      }
+    }
+  } catch (e) {
+    try { await issues.append('system', 'lean_keeper_error', e && e.message || String(e)); } catch {}
+  } finally {
+    _leanBusy = false;
+  }
+}
+setInterval(() => { leanKeeperTick().catch(()=>{}); }, 90*1000);
+setTimeout(() => { leanKeeperTick().catch(()=>{}); }, 15000);
+// ========== FIM: LEANKEEPER (Magreza Permanente + Round-Robin/Swap) ==========
 
 // --------------- ROBE/TICK
 async function robeTickGlobal() {
@@ -2050,6 +2236,13 @@ return {
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
   reopenAt: robeMeta[nome]?.reopenAt || null,
+  overweightNow: !!robeMeta[nome]?.overweightNow,
+  overweightSince: robeMeta[nome]?.overweightSince || null,
+  lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
+  lastResetAt: robeMeta[nome]?.lastResetAt || null,
+  lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
+  lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
+  lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
 });
 const robes = {};
@@ -2073,7 +2266,14 @@ robes[nome] = {
   internalFailCountWindow: fail.internal,
   externalFailCountWindow: fail.external,
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
-  lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null
+  lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
+  overweightNow: !!robeMeta[nome]?.overweightNow,
+  overweightSince: robeMeta[nome]?.overweightSince || null,
+  lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
+  lastResetAt: robeMeta[nome]?.lastResetAt || null,
+  lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
+  lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
+  lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
 });
 const robeQueueList = robeQueue.queueList();
@@ -2616,8 +2816,8 @@ async function nurseTick() {
             if (!r || !r.ok) {
               if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
                 robeMeta[nome] = robeMeta[nome] || {};
-                robeMeta[nome].activationHeldUntil = Date.now() + 60000;
-                await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s');
+                robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+                await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s');
               }
             }
           } catch {}
@@ -2636,7 +2836,7 @@ async function nurseTick() {
       if (!pages || !pages[0]) {
         await reportAction(nome, 'nurse_kill', `motivo=no_pages url= reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
         try { registerFailure(nome, 'no_pages', 'external'); } catch {}
-        await handlers.deactivate({ nome, reason: 'no_pages', policy: 'preserveDesired' });
+        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
         continue;
       }
       const p0 = pages[0];

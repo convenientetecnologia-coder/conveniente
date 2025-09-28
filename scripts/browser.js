@@ -1216,6 +1216,125 @@ async function attachHealthProbes(page, nome, onPing) {
   } catch {}
 }
 
+/**
+ * Limpeza HARD de caches e magreza de perfil preservando cookies/login.
+ * - Localiza userDataDir a partir do perfis.json/manifest do perfil.
+ * - Encerra quaisquer processos do Chrome que estejam usando esse userDataDir.
+ * - Remove diretórios pesados (Cache/Code Cache/GPUCache/Service Worker caches/Shader/Dawn/Media).
+ * - NÃO remove Cookies/Local Storage nem o próprio userDataDir.
+ * - Retorna { ok: true, removed: N }.
+ */
+async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
+  try {
+    // 1) Resolver userDataDir via perfis.json
+    let userDataDir = null;
+    try {
+      const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
+      const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+      if (perfil && perfil.userDataDir) userDataDir = String(perfil.userDataDir);
+    } catch {}
+
+    // Fallback: usar caminho padrão sob Chrome/User Data/Conveniente/NOME (mesma lógica do ensureUserDataDirUnderChrome)
+    if (!userDataDir) {
+      try {
+        const chromeRoot = (process.platform === 'win32')
+          ? (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'User Data') : path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data'))
+          : path.join(os.homedir(), '.config', 'google-chrome');
+        const guess = path.join(chromeRoot, 'Conveniente', String(nome));
+        if (fs.existsSync(guess)) userDataDir = guess;
+      } catch {}
+    }
+
+    if (!userDataDir || !fs.existsSync(userDataDir)) {
+      // Nada a fazer
+      return { ok: true, removed: 0 };
+    }
+
+    // 2) Encerrar processos do Chrome que usem esse userDataDir
+    try { killChromeProfileProcesses(userDataDir); } catch {}
+    if (process.platform !== 'win32') {
+      try {
+        const { execSync } = require('child_process');
+        // Tenta pkill por path
+        try { execSync(`pkill -f "${userDataDir.replace(/"/g, '\\"')}"`, { stdio: 'ignore' }); } catch {}
+        // Fallback parse de ps
+        try {
+          let out = '';
+          try { out = execSync('ps -axo pid=,command=', { encoding: 'utf8' }); } catch {}
+          if (!out) { try { out = execSync('ps -eo pid=,args=', { encoding: 'utf8' }); } catch {} }
+          const lines = (out || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+          const ud1 = path.normalize(userDataDir).replace(/\\/g, '/');
+          const ud2 = path.normalize(userDataDir);
+          for (const line of lines) {
+            const m = line.match(/^(\d+)\s+(.*)$/);
+            if (!m) continue;
+            const pid = parseInt(m[1], 10);
+            const cmd = m[2] || '';
+            if (!/chrome|Chromium|Google Chrome/i.test(cmd)) continue;
+            if (cmd.includes(userDataDir) || cmd.includes(ud1) || cmd.includes(ud2)) {
+              try { process.kill(pid, 'SIGKILL'); } catch {}
+            }
+          }
+        } catch {}
+      } catch {}
+    }
+    try { await new Promise(r => setTimeout(r, 350)); } catch {}
+
+    // Remove locks residuais
+    try { cleanupUserDataLocks(userDataDir); } catch {}
+
+    // 3) Remover diretórios pesados
+    const targets = [
+      path.join(userDataDir, 'Default', 'Cache'),
+      path.join(userDataDir, 'Default', 'Code Cache'),
+      path.join(userDataDir, 'Default', 'GPUCache'),
+      path.join(userDataDir, 'Default', 'Service Worker', 'CacheStorage'),
+      path.join(userDataDir, 'Default', 'Service Worker', 'ScriptCache'),
+      path.join(userDataDir, 'Default', 'GrShaderCache'),
+      path.join(userDataDir, 'Default', 'ShaderCache'),
+      path.join(userDataDir, 'Default', 'DawnCache'),
+      path.join(userDataDir, 'Default', 'Media Cache'),
+      path.join(userDataDir, 'ShaderCache'),
+    ];
+
+    const protectedPaths = [
+      path.join(userDataDir, 'Default', 'Cookies'),
+      path.join(userDataDir, 'Default', 'Local Storage'),
+    ];
+
+    let removed = 0;
+    for (const p of targets) {
+      try {
+        if (!fs.existsSync(p)) continue;
+        // Proteção adicional contra alvos críticos
+        const pNorm = path.normalize(p);
+        let isProtected = false;
+        for (const prot of protectedPaths) {
+          const protNorm = path.normalize(prot);
+          if (pNorm === protNorm) { isProtected = true; break; }
+        }
+        if (isProtected) continue;
+
+        // rm -rf
+        try {
+          if (fs.rmSync) fs.rmSync(p, { recursive: true, force: true });
+          else fs.rmdirSync(p, { recursive: true }); // fallback
+          removed++;
+        } catch (e) {
+          console.warn('[BROWSER][hardClean] falha ao remover', p, e && e.message ? e.message : e);
+        }
+      } catch (e) {
+        console.warn('[BROWSER][hardClean] erro ao acessar', p, e && e.message ? e.message : e);
+      }
+    }
+
+    return { ok: true, removed };
+  } catch (e) {
+    try { console.warn('[BROWSER][hardClean] erro inesperado:', e && e.message ? e.message : e); } catch {}
+    return { ok: true, removed: 0 };
+  }
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1233,4 +1352,5 @@ module.exports = {
     try { await browser.forceCloseExtras(); } catch {}
   },
   attachHealthProbes, // NOVO!
+  hardCleanProfileOnDisk,
 };

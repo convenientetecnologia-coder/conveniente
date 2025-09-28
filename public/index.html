@@ -176,6 +176,7 @@
       <div class="metric"><span>Fila Robe</span><b id="mFila">0</b></div>
       <div class="metric"><span>RAM livre</span><b id="mRam">--</b></div>
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
+      <div class="metric"><span>Perfis &gt;600MB</span><b id="mGordos">0</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
@@ -507,6 +508,34 @@
       }
       return null;
     }
+
+    // NOVOS HELPERS (Gordo, Última manutenção, Δ última)
+    function buildGordoPill(p) {
+      if (!p || typeof p.ramMB !== 'number' || p.ramMB < 600) return null;
+      const span = buildPill(`Gordo: ${p.ramMB} MB`, 'ramBad');
+      if (p.overweightSince) {
+        const elapsedSec = Math.max(0, Math.floor((Date.now() - Number(p.overweightSince)) / 1000));
+        span.title = `Tempo desde início: ${tempoRestante(elapsedSec)}\nAtual: ${p.ramMB} MB`;
+      } else {
+        span.title = `Atual: ${p.ramMB} MB`;
+      }
+      return span;
+    }
+    function buildLastMaintenancePill(lastMaintenanceAt) {
+      if (lastMaintenanceAt == null) return null;
+      const d = new Date(lastMaintenanceAt);
+      const hhmm = d.toLocaleTimeString();
+      const pill = buildPill(`Última manutenção: ${hhmm}`, 'info');
+      pill.title = d.toLocaleString();
+      return pill;
+    }
+    function buildLastDeltaPill(lastDeltaMB) {
+      if (lastDeltaMB == null) return null;
+      const val = Math.round(Number(lastDeltaMB));
+      const sign = val > 0 ? '+' : '';
+      const cls = val > 0 ? 'bad' : (val < 0 ? 'good' : 'info');
+      return buildPill(`Δ última: ${sign}${val} MB`, cls);
+    }
     // ============================= FIM ALTERAÇÕES PEDIDAS – RESTO SÓ CHAMADA NOS LUGARES =============================
 
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
@@ -535,12 +564,13 @@
 
       // ----- ALTERAÇÃO: GLOBAL HEALTH PANEL ------
       // Militar: somar apenas perfis com RAM !== null
-      let ramTotal = 0, ramMilit = 0, ramMax = 0, pCooldown = 0, pFrozen = 0;
+      let ramTotal = 0, ramMilit = 0, ramMax = 0, pCooldown = 0, pFrozen = 0, gordoCount = 0;
       for (const p of perfis) {
         if (typeof p.ramMB === 'number') {
           ramTotal += p.ramMB;
           if (p.ramMB >= 700) ramMilit++;
           if (p.ramMB > ramMax) ramMax = p.ramMB;
+          if (p.ramMB >= 600) gordoCount++;
         }
         if (p.robeFrozenUntil && p.robeFrozenUntil > Date.now()) pFrozen++;
         const robeStatus = robes[p.nome] || {};
@@ -557,6 +587,9 @@
       } else {
         document.getElementById('mRamPanel').style.display = 'none';
       }
+      // Métrica Perfis >600MB (Gordos)
+      const gordEl = document.getElementById('mGordos');
+      if (gordEl) gordEl.textContent = String(gordoCount);
 
       // Militar: badge de modo full/leve, tooltip detalhado do autoMode/state
       const auto = st && st.autoMode || null;
@@ -661,6 +694,16 @@
         // -------- RAM e CPU pill explícito ---------
         if (ramPill) titleRow.append(ramPill); // RAM por conta
         if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
+
+        // -------- NOVO: Pill "Gordo" (>=600MB) ----------
+        const gordoPill = buildGordoPill(p);
+        if (gordoPill) titleRow.append(gordoPill);
+
+        // -------- NOVO: Última manutenção e Δ última ----------
+        const lastMaintPill = buildLastMaintenancePill(p.lastMaintenanceAt);
+        if (lastMaintPill) titleRow.append(lastMaintPill);
+        const lastDeltaPill = buildLastDeltaPill(p.lastDeltaMB);
+        if (lastDeltaPill) titleRow.append(lastDeltaPill);
 
         // -- NOVO: Ativação em espera/hold --
         if (activationHeldPill) titleRow.append(activationHeldPill);
