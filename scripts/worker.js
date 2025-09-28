@@ -1760,7 +1760,7 @@ const handlers = {
 
     let pages;
     try { pages = await ctrl.browser.pages(); } catch {}
-    if (pages e pages[0]) {
+    if (pages && pages[0]) {
       try {
         await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
         await new Promise(r => setTimeout(r, 350));
