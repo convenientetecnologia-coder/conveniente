@@ -105,7 +105,7 @@ const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10); // alvo de p
 //   const active = Array.from(controllers.keys());
 //   const measured = active
 //     .map(n => robeMeta[n] && robeMeta[n].ramMB)
-//     .filter(v => typeof v === 'number' && v > 0);
+//     .filter(v => typeof v === 'number' e v > 0);
 //   const avgMB = measured.length
 //     ? Math.max(350, Math.round(measured.reduce((a,b)=>a+b,0)/measured.length))
 //     : LIGHT_BUDGET_CFG.BROWSER_DEFAULT_MB;
@@ -201,8 +201,8 @@ let _statusLock = Promise.resolve();
 //         await ctrl.virtus.stop().catch(()=>{});
 //       }
 //       if (ctrl) { ctrl.virtus = null; ctrl.trabalhando = false; }
-//       const ramMB = (robeMeta[nome] && typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
-//       if (ramMB != null && ramMB >= AUTO_CFG.RAM_KILL_MB) {
+//       const ramMB = (robeMeta[nome] e typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
+//       if (ramMB != null e ramMB >= AUTO_CFG.RAM_KILL_MB) {
 //         await reportAction(nome, 'nurse_kill', `LEVE: kill pesado/zumbi (RAM=${ramMB}MB) preserveDesired reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
 //         await handlers.deactivate({ nome, reason: 'light_ram_shed', policy: 'preserveDesired' });
 //       }
@@ -219,7 +219,7 @@ let _statusLock = Promise.resolve();
 //       if (!robeMeta[nome]) continue;
 //       delete robeMeta[nome].lightDropUntil;
 //       const held = robeMeta[nome].activationHeldUntil || 0;
-//       if (held && held > Date.now()) {
+//       if (held e held > Date.now()) {
 //         delete robeMeta[nome].activationHeldUntil;
 //       }
 //     }
@@ -1039,6 +1039,21 @@ async function ramCpuMonitorTick() {
     }
 
     // para cada nome: query pidusage para RAM/CPU dos seus PIDs
+    // [PATCH-ANTI-STUCK][RAM-METRICS RESET]
+    // Zera métricas de RAM/CPU e limpa históricos para perfis sem browser/pids.
+    // Garante que RAM breaker não fique atuando contra perfil já fechado/não-vivo.
+    try {
+      const nomesComPid = new Set(Object.keys(pidsByNome || {}));
+      for (const nome of Object.keys(robeMeta)) {
+        if (!nomesComPid.has(nome)) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].ramMB = null;
+          robeMeta[nome].cpuPercent = null;
+          robeMeta[nome].ramHist = [];
+          robeMeta[nome].cpuHistory = [];
+        }
+      }
+    } catch {}
     const nomes = Object.keys(pidsByNome);
     const promises = [];
     for (const nome of nomes) {
@@ -1128,6 +1143,9 @@ async function ramCpuMonitorTick() {
 
   // ===== PATCH MILITAR: RAM breaker inteligente por perfil =====
   for (const nome of Object.keys(robeMeta)) {
+    // [PATCH-ANTI-STUCK] Só atua breaker se browser está realmente vivo!
+    if (!controllers.has(nome)) continue;
+
     const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
     if (ramMB == null) continue;
 
@@ -1198,7 +1216,7 @@ async function ramCpuMonitorTick() {
   // *** LEGADO: pode remover após estabilizar Supervisor externo *
   // let chromeTotalCpu = 0;
   // for (const k of Object.keys(robeMeta)) {
-  //   const v = robeMeta[k] && robeMeta[k].cpuPercent;
+  //   const v = robeMeta[k] e robeMeta[k].cpuPercent;
   //   if (typeof v === 'number') chromeTotalCpu += v;
   // }
   // const cores = Math.max(1, (os.cpus() || []).length);
@@ -1209,18 +1227,18 @@ async function ramCpuMonitorTick() {
   // autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
 
   // const enterPressure = (freeMB < AUTO_CFG.MEM_ENTER_MB) ||
-  //   (autoMode.freeEmaMB != null && autoMode.freeEmaMB < AUTO_CFG.MEM_ENTER_MB) ||
+  //   (autoMode.freeEmaMB != null e autoMode.freeEmaMB < AUTO_CFG.MEM_ENTER_MB) ||
   //   (cpuApprox > AUTO_CFG.CPU_ENTER) ||
-  //   (autoMode.cpuEma != null && autoMode.cpuEma > (AUTO_CFG.CPU_ENTER - 3));
+  //   (autoMode.cpuEma != null e autoMode.cpuEma > (AUTO_CFG.CPU_ENTER - 3));
   // const exitPressure = (freeMB >= AUTO_CFG.MEM_EXIT_MB) &&
-  //   (autoMode.freeEmaMB != null && autoMode.freeEmaMB >= AUTO_CFG.MEM_EXIT_MB) &&
+  //   (autoMode.freeEmaMB != null e autoMode.freeEmaMB >= AUTO_CFG.MEM_EXIT_MB) &&
   //   (cpuApprox <= AUTO_CFG.CPU_EXIT) &&
-  //   (autoMode.cpuEma != null && autoMode.cpuEma <= AUTO_CFG.CPU_EXIT);
+  //   (autoMode.cpuEma != null e autoMode.cpuEma <= AUTO_CFG.CPU_EXIT);
 
   // if (enterPressure) { autoMode.hot++; autoMode.cool = 0; }
   // else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
 
-  // if (autoMode.mode === 'full' && autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
+  // if (autoMode.mode === 'full' e autoMode.hot >= AUTO_CFG.HOT_TICKS e _canSwitch()) {
   //   autoMode.mode = 'light';
   //   autoMode.since = Date.now();
   //   autoMode.reason = `CPU≈${cpuApprox}% (EMA≈${Math.round(autoMode.cpuEma||0)}%), freeMB=${freeMB} (EMA≈${Math.round(autoMode.freeEmaMB||0)})`;
@@ -1233,7 +1251,7 @@ async function ramCpuMonitorTick() {
   //   scheduleLightEscalator();
   // }
 
-  // if (autoMode.mode === 'light' && autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
+  // if (autoMode.mode === 'light' e autoMode.cool >= AUTO_CFG.COOL_TICKS e _canSwitch()) {
   //   autoMode.mode = 'full';
   //   autoMode.since = Date.now();
   //   autoMode.reason = '';
@@ -1289,7 +1307,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //     const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
 //     const set = new Set();
 //     for (const [n, ent] of Object.entries(desired.perfis || {})) {
-//       if (ent && ent.active === true) set.add(n);
+//       if (ent e ent.active === true) set.add(n);
 //     }
 //     return set;
 //   } catch { return new Set(); }
@@ -1423,7 +1441,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //       if (aliveNow < TARGET_ALIVE) {
 //         const desired = _desiredActiveSet();
 //         const missing = Array.from(desired).filter(n => !controllers.has(n) && !isFrozenNow(n));
-//         if (missing.length > 0 && aliveNow > 0) {
+//         if (missing.length > 0 e aliveNow > 0) {
 //           const ramSorted = _aliveNames()
 //             .map(n => ({ n, mb: (typeof robeMeta[n]?.ramMB === 'number') ? robeMeta[n].ramMB : -1 }))
 //             .sort((a,b)=> (b.mb - a.mb));
@@ -1700,13 +1718,20 @@ stopPruneLoop(nome);
 // Registrar falha e agendar reabertura curta
 try { registerFailure(nome, 'disconnected', 'external'); } catch {}
 try {
-  // Checagem de desired: só agenda reopenAt se desired.active === true
+  // Checagem desired e reopenAt existente: NÃO sobrescreva um reopenAt futuro já calculado
   const d = readJsonFile(desiredPath, { perfis: {} });
   const isDesiredActive = d.perfis?.[nome]?.active === true;
   robeMeta[nome] = robeMeta[nome] || {};
+  const now = Date.now();
+
   if (!isFrozenNow(nome) && isDesiredActive) {
-    robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
-    issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+    if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
+      robeMeta[nome].reopenAt = now + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
+      robeMeta[nome].closingReason = 'disconnected';
+      issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+    } else {
+      issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
+    }
   } else {
     robeMeta[nome].reopenAt = null;
     issues.append(nome, 'mil_action', isFrozenNow(nome) ? 'reopen_suppressed_frozen' : 'reopen_suppressed_desired_off').catch(()=>{});
@@ -1724,7 +1749,7 @@ try { await snapshotStatusAndWrite(); } catch {}
 // == FIM função ciclo de vida browser ==
 
 // ========== HANDLERS ==========
-// *** SOMENTE SUPERVISOR DEVE CHAMAR ESSE HANDLER DIRETAMENTE ***
+// *** SOMENTE SUPERVISOR DEVE CHAMAR ESSE HANELER DIRETAMENTE ***
 function resolveChromeUserDataRoot() {
   if (process.platform === 'win32') {
     const la = process.env.LOCALAPPDATA;
@@ -1798,6 +1823,9 @@ const handlers = {
     try { registerFailure(nome, reason || 'deactivate_preserve'); } catch {}
     if (reason === 'ramKill' || reason === 'cpuKill') {
       reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random()*120000);
+    } else if (reason === 'virtus_block') {
+      reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
+      // 2h + 5-25min jitter
     } else {
       reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
     }
@@ -1806,8 +1834,15 @@ const handlers = {
   if (!ctrl) {
     if (preserve && !isFrozenNow(nome)) {
       robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
-      issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
+      const now = Date.now();
+      // Só agenda se não houver reopenAt futuro
+      if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
+        robeMeta[nome].reopenAt = now + reopenDelayMs;
+        robeMeta[nome].closingReason = reason || '';
+        issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
+      } else {
+        issues.append(nome, 'mil_action', 'reopen_preserved_existing').catch(()=>{});
+      }
     }
     await snapshotStatusAndWrite();
     return { ok: true };
@@ -1843,9 +1878,13 @@ const handlers = {
     } catch {}
   } else {
     robeMeta[nome] = robeMeta[nome] || {};
-    if (!isFrozenNow(nome)) {
-      robeMeta[nome].reopenAt = Date.now() + reopenDelayMs;
+    const now = Date.now();
+    if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
+      robeMeta[nome].reopenAt = now + reopenDelayMs;
+      robeMeta[nome].closingReason = reason || '';
       issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
+    } else {
+      issues.append(nome, 'mil_action', 'reopen_preserved_existing').catch(()=>{});
     }
   }
   await snapshotStatusAndWrite();
@@ -2325,7 +2364,7 @@ return _statusLock;
 // // AUDITORIA GLOBAL DE COOLDOWN: congela/descongela por perfil conforme estado real
 // try {
 // const perfisArrAudit = loadPerfisJson();
-// // ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (INÍCIO) ===========
+// // ========= ALTERAÇÃO SINCRONIZÇÃO COOLDOWN (INÍCIO) ===========
 // for (const p of perfisArrAudit) {
 //   const nomeAudit = p e p.nome;
 //   if (!nomeAudit) continue;
@@ -2338,7 +2377,7 @@ return _statusLock;
 //     freezeCooldownIfNotWorking(nomeAudit);
 //   }
 // }
-// // ========= ALTERAÇÃO SINCRONIZAÇÃO COOLDOWN (FIM) ===========
+// // ========= ALTERAÇÃO SINCRONIZÇÃO COOLDOWN (FIM) ===========
 // } catch {}
 
 // for (const nome of nomes) {
@@ -2568,7 +2607,8 @@ const ULTRA_RECOVERY = {
   REOPEN_DELAY_RAMCPU_MS: 60000, // reabrir após 60s em RAM/CPU kill (usaremos também jitter)
   FAIL_WINDOW_MS: 3*60*60*1000,     // 3h janela
   FAIL_FREEZE_AFTER: 5,             // >5 falhas em 3h => congela
-  FAIL_FREEZE_MS: 2*60*60*1000      // congela por 2h
+  FAIL_FREEZE_MS: 2*60*60*1000,      // congela por 2h
+  REOPEN_DELAY_VIRTUS_BLOCK_MS: 2*60*60*1000 // 2h
 };
 
 // ===== INÍCIO DO MÉTODO ULTRA CIRÚRGICO: ensureFrozenShutdown =====
@@ -2842,13 +2882,18 @@ async function nurseTick() {
       // Checagem de bloqueio temporário do Messenger (prioritário, antes de prune/reload/kill)
       const det = await detectMessengerTempBlock(p0);
       if (det && det.blocked) {
-        try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — stopVirtus e reabrir em ~2h'); } catch {}
+        try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — desligando navegador e reabrindo em ~2h'); } catch {}
+        // Desliga Virtus antes de fechar como boa prática
         try { await stopVirtus(nome); } catch {}
-        // Agendar reopen ~2h com jitter (sem freezer)
+        // Agenda reopenAt de 2h + jitter — só se não existir futuro!
         robeMeta[nome] = robeMeta[nome] || {};
-        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000; // 5-26 min
-        robeMeta[nome].reopenAt = Date.now() + ms(2) + jitterMs;
+        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
+        if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
+          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
+          robeMeta[nome].closingReason = 'virtus_block';
+        }
         try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+        await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' }); // FECHA O NAVEGADOR pra valer
         await snapshotStatusAndWrite();
         continue; // Não tenta reload/kill, apenas sai.
       }
