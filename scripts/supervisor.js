@@ -77,6 +77,18 @@ function loadState() {
 }
 loadState();
 
+// INSTRUÇÃO 1: SANEAMENTO IMEDIATO NO BOOT
+function sanitizeOnBoot() {
+  if (state.slotsAbertos > 0) {
+    pushEvent({type:'boot_autofix_slots', prev:state.slotsAbertos});
+    state.slotsAbertos = 0;
+  }
+  state.openBlockedUntil = 0;
+  state.nextProbeAt = 0;
+  saveState();
+}
+sanitizeOnBoot();
+
 // Probe dinâmico de slots
 state.nextProbeAt = state.nextProbeAt || 0;
 function getFreeMB() {
@@ -154,10 +166,10 @@ function notifyOpened(perfil, resultado = "ok") {
     state.maxSlots = Math.max(1, (state.maxSlots||1) -1);
     pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots});
   }
-  if (perfil) ativos.delete(perfil);
 
-  // Probe
+  // INSTRUÇÃO 2: BUGFIX DE PROBE EM notifyOpened
   const info = ativos.get(perfil);
+
   if (info && info.probe) {
     if (resultado === 'ok') {
       state.maxSlots = (state.maxSlots||0) + 1;
@@ -167,6 +179,7 @@ function notifyOpened(perfil, resultado = "ok") {
       pushEvent({type:"probe_failed", maxSlots: state.maxSlots});
     }
   }
+  if (perfil) ativos.delete(perfil);
 
   pushEvent({type: "opened_result", perfil, result: resultado, dur});
   saveState();
@@ -230,6 +243,28 @@ function resetSupervisor() {
 }
 
 // ---------------------- FIM DAS FUNÇÕES SINGLETON ---------------------------
+
+// INSTRUÇÃO 3: RECONCILIADOR PERIÓDICO DE SLOTS
+function reconcileSlots() {
+  try {
+    const stPath = path.join(__dirname, '..', 'dados', 'status.json');
+    if (!fs.existsSync(stPath)) return;
+    const st = JSON.parse(fs.readFileSync(stPath, 'utf8'));
+    const tsStatus = st.ts || Date.now();
+    const age = (Date.now() - tsStatus)/1000;
+    const aliveBrowsers = (st.perfis||[]).filter(x=>x && x.active).length;
+    if (age > 120) {
+      pushEvent({type:'auto_reset_slots', reason:'status_stale', age});
+      state.slotsAbertos = 0; state.openBlockedUntil = 0; saveState();
+      return;
+    }
+    if (aliveBrowsers === 0 && state.slotsAbertos > 0) {
+      pushEvent({type:'auto_reset_slots', reason:'zero_active_long'});
+      state.slotsAbertos = 0; state.openBlockedUntil = 0; saveState();
+    }
+  } catch {}
+}
+setInterval(reconcileSlots, 2000);
 
 // EXPRESS REMOVIDO: 
 // Todas as rotas e app.listen foram removidas conforme instrução

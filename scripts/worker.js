@@ -2291,6 +2291,7 @@ if (!ok) { try { await issues.append('system','persist_failed', 'status_write');
 try { console.warn('[WORKER][statusWrite] erro:', e && e.message || e); } catch {}
 }
 });
+try { supervisorClient.sendTelemetria({ type: 'hb', alive: controllers.size }); } catch {}
 return _statusLock;
 }
 // == FIM: snapshotStatusAndWrite ==
