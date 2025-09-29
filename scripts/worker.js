@@ -40,6 +40,149 @@ const HEALTH_CFG = {
   ESCALATE_TO_REOPEN_AFTER: 2,
   ABOUT_BLANK_GRACE_MS: 7000
 };
+
+// INICIO DA INSTRUÇÃO (worker.js)
+//
+// ATUALIZAÇÃO ULTRA ROBUSTA PARA “PHANTOM STATE/SKELETON” DO MESSENGER
+//
+// 1) Adição após HEALTH_CFG
+const PHANTOM_CFG = {
+  INITIAL_GRACE_MS: 9000,          // quanto tempo esperar “de boa” ao abrir Messenger
+  PERSIST_MS: 20000,               // skeleton por mais de 20s = stuck real
+  CHECK_INTERVAL_MS: 5000,         // nurseTick já usa, não precisa timer extra
+  COOLDOWN_BETWEEN_TRIES_MS: 30000,
+  MAX_PHTM_RELOADS_10M: 2,
+  MAX_PHTM_NAV_10M: 2,
+  MAX_PHTM_NEWPAGE_30M: 2,
+  ESCALATE_AFTER_STEPS: 2
+};
+function _prune(arr, ms) {
+  const now = Date.now();
+  return (arr||[]).filter(ts => (now - ts) < ms);
+}
+function getPhantomState(nome) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  robeMeta[nome].phantom = robeMeta[nome].phantom || {
+    firstSeenAt: 0,
+    lastOkAt: 0,
+    lastActionAt: 0,
+    actions10m: [],
+    navs10m: [],
+    reloads10m: [],
+    newpages30m: [],
+    failures: 0
+  };
+  return robeMeta[nome].phantom;
+}
+// 2) Snapshot DOM para o Messenger
+async function evaluateChatsState(page) {
+  try {
+    const res = await page.evaluate(() => {
+      const norm = (s) => (s||'').toLowerCase();
+      let grid = Array.from(document.querySelectorAll('div[role="grid"]'))
+      .find(g => {
+        const al = (g.getAttribute('aria-label') || g.getAttribute('aria-labelledby') || '');
+        const t = norm(al);
+        return t.includes('conversas') || t.includes('conversations');
+      });
+      if (!grid) {
+        const pagelet = document.querySelector('div[data-pagelet="MWThreadList"]');
+        if (pagelet) {
+          const g2 = pagelet.querySelector('div[role="grid"]');
+          if (g2) grid = g2;
+        }
+      }
+      let rows = 0, anchors = 0, skeletons = 0;
+      if (grid) {
+        rows = grid.querySelectorAll('div[role="row"]').length;
+        anchors = grid.querySelectorAll('a[href^="/marketplace/t/"]').length;
+        skeletons = grid.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
+      } else {
+        skeletons = document.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
+      }
+      return { hasGrid: !!grid, rows, anchors, skeletons };
+    });
+    return res || { hasGrid:false, rows:0, anchors:0, skeletons:0 };
+  } catch {
+    return { hasGrid:false, rows:0, anchors:0, skeletons:0 };
+  }
+}
+// 3) Helpers de análise
+function isPhantomFromSnapshot(snap) {
+  const noThreads = (snap.rows === 0 && snap.anchors === 0);
+  if (noThreads && snap.skeletons > 0) return true;
+  return false;
+}
+function isOkFromSnapshot(snap) {
+  return (snap.rows > 0 || snap.anchors > 0);
+}
+// 4) Auto-curing principal
+async function tryFixPhantom(nome, page) {
+  const ph = getPhantomState(nome);
+  const now = Date.now();
+  ph.actions10m = _prune(ph.actions10m, 10601000);
+  ph.navs10m = _prune(ph.navs10m, 10601000);
+  ph.reloads10m = _prune(ph.reloads10m, 10601000);
+  ph.newpages30m = _prune(ph.newpages30m, 30601000);
+
+  if ((now - ph.lastActionAt) < PHANTOM_CFG.COOLDOWN_BETWEEN_TRIES_MS) return false;
+
+  // Evite durante Robe/config
+  const ctrl = controllers.get(nome);
+  if (!ctrl || !ctrl.browser || ctrl.configurando) return false;
+  if (robeMeta[nome] && robeMeta[nome].emExecucao) return false;
+
+  // 1) navHome
+  if (ph.navs10m.length < PHANTOM_CFG.MAX_PHTM_NAV_10M) {
+    try {
+      await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      ph.navs10m.push(now);
+      ph.actions10m.push(now);
+      ph.lastActionAt = now;
+      await issues.append(nome, 'mil_action', 'phantom_fix:navHome');
+      return true;
+    } catch {}
+  }
+  // 2) reload
+  if (ph.reloads10m.length < PHANTOM_CFG.MAX_PHTM_RELOADS_10M) {
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      ph.reloads10m.push(now);
+      ph.actions10m.push(now);
+      ph.lastActionAt = now;
+      await issues.append(nome, 'mil_action', 'phantom_fix:reload');
+      return true;
+    } catch {}
+  }
+  // 3) newPage
+  if (ph.newpages30m.length < PHANTOM_CFG.MAX_PHTM_NEWPAGE_30M) {
+    try {
+      const ctrl2 = controllers.get(nome);
+      const np = await ctrl2.browser.newPage();
+      try {
+        const man = await manifestStore.read(nome).catch(()=>null);
+        await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || ''));
+      } catch {}
+      await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      try { await ctrl2.mainPage.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+      ctrl2.mainPage = np;
+      await wirePageObservers(nome, np);
+      ph.newpages30m.push(now);
+      ph.actions10m.push(now);
+      ph.lastActionAt = now;
+      await issues.append(nome, 'mil_action', 'phantom_fix:newPage');
+      return true;
+    } catch {}
+  }
+  // 4) Escalade: reopen browser
+  ph.failures = (ph.failures || 0) + 1;
+  await issues.append(nome, 'mil_action', `phantom_escalate:reopen failures=${ph.failures}`);
+  await handlers.deactivate({ nome, reason: 'phantom_reopen', policy: 'preserveDesired' });
+  ph.lastActionAt = now;
+  return true;
+}
+// FIM DA INSTRUÇÃO (worker.js) – PHANTOM STATE
+
 const healthState = new Map();
 function getHealth(nome) {
   const now = Date.now();
@@ -2938,6 +3081,33 @@ async function nurseTick() {
           continue;
         }
       }
+
+      // INSTRUÇÃO 5 — INSERIR EXATAMENTE AQUI (DEPOIS de pageReadyBasic/reloads e ANTES de prune/virtus)
+      try {
+        const url = p0.url ? p0.url() : '';
+        if (/messenger\.com\/.*marketplace/i.test(url) && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao)) {
+          const ph = getPhantomState(nome);
+          const snap = await evaluateChatsState(p0);
+          if (isOkFromSnapshot(snap)) {
+            ph.lastOkAt = Date.now(); ph.firstSeenAt = 0;
+          } else {
+            const now = Date.now();
+            if (isPhantomFromSnapshot(snap)) {
+              if (!ph.firstSeenAt) ph.firstSeenAt = now;
+              const elapsed = now - ph.firstSeenAt;
+              const sinceOk = ph.lastOkAt ? (now - ph.lastOkAt) : Infinity;
+              if (elapsed > PHANTOM_CFG.PERSIST_MS && sinceOk > PHANTOM_CFG.INITIAL_GRACE_MS) {
+                await issues.append(nome, 'mil_action',
+                  `phantom_detected rows=${snap.rows} anchors=${snap.anchors} sk=${snap.skeletons} elapsed=${elapsed}ms`);
+                await tryFixPhantom(nome, p0);
+              }
+            } else if (snap.skeletons === 0) {
+              ph.firstSeenAt = 0; // vazio legítimo: não perturbar
+            }
+          }
+        }
+      } catch {}
+      // FIM DA INSERÇÃO DA INSTRUÇÃO 5
 
       // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
       if (ctrl && ctrl.configurando) {
