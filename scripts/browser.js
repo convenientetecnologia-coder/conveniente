@@ -1313,7 +1313,7 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
       path.join(userDataDir, 'Default', 'Service Worker', 'ScriptCache'),
       path.join(userDataDir, 'Default', 'GrShaderCache'),
       path.join(userDataDir, 'Default', 'ShaderCache'),
-      path.join(userDataDir', 'Default', 'DawnCache'),
+      path.join(userDataDir, 'Default', 'DawnCache'),
       path.join(userDataDir, 'Default', 'Media Cache'),
       path.join(userDataDir, 'ShaderCache'),
     ];
