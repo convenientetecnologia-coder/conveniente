@@ -379,10 +379,9 @@ module.exports = (app, workerClient, fileStore) => {
       const arr = fileStore.loadPerfisJson().filter(p => p && p.nome !== nome);
       fileStore.savePerfisJson(arr);
 
-      // Remove desired.json
+      // Remove desired.json COMPLETAMENTE
       try {
-        // ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
-        await fileStore.patchDesired(nome, null);
+        await fileStore.removeDesired(nome);
       } catch {}
 
       // Remove diretório do perfil (manifest/meta)

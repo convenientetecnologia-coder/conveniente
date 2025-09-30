@@ -113,6 +113,15 @@ async function patchDesired(nome, patch) {
   });
 }
 
+// Remove uma entrada completamente do desired.json (lock atômico)
+async function removeDesired(nome) {
+  return withDesiredLock(desired => {
+    desired.perfis = desired.perfis || {};
+    if (desired.perfis[nome]) delete desired.perfis[nome];
+    return desired;
+  });
+}
+
 //// STATUS SNAPSHOT: fallback a perfis.json se status.json ausente/inválido ////
 function getStatusSnapshot() {
   // Militar: snapshot status unificado, null-safe, sem corridas, todos campos para painel
@@ -528,4 +537,5 @@ module.exports = {
   assertPerfilExists,
   // Lock helper export
   withDesiredLock,
+  removeDesired, // <<--------- NOVO EXPORT
 };

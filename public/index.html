@@ -699,6 +699,19 @@
         // -------- FROZEN pill explícito (primeiro) ---------
         if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
 
+        // -------- NOVO: Pill para manifestStatus --------
+        if (p.manifestStatus === 'incomplete') {
+          titleRow.append(buildPill('Manifesto incompleto', 'warn'));
+        }
+        if (p.manifestStatus === 'missing') {
+          titleRow.append(buildPill('Manifesto ausente', 'bad'));
+        }
+
+        // -------- Opcional: Bloqueio temporário Messenger (virtus_block) --------
+        if (typeof p.frozenReason === 'string' && p.frozenReason.toLowerCase().includes('virtus_block')) {
+          titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
+        }
+
         // ------- COOLDOWN (ADICIONAL) -------
         if (robeCooldownSec > 0) {
           titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil

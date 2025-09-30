@@ -1356,6 +1356,41 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
   }
 }
 
+// PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO
+async function detectMessengerTempBlock(page) {
+  try {
+    // Novos padrões para flag de bloqueio temp
+    function urlLooksMessenger(u) {
+      return /messenger\.com/i.test(u) || /facebook\.com\/messages/i.test(u) || /facebook\.com\/marketplace\/t\//i.test(u);
+    }
+
+    const url = page.url ? page.url() : '';
+    // Agora escaneia em messenger.com, facebook.com/messages e afins
+    if (!urlLooksMessenger(url)) {
+      // Não force return false; deixa continuar para varredura de textos
+    }
+    return await page.evaluate(() => {
+      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0, 500);
+      const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
+      const hasBlocked =
+        texts.some(t =>
+          t.includes('voce esta bloqueado temporariamente') ||
+          t.includes('você está bloqueado temporariamente') ||
+          t.includes('youre temporarily blocked') ||
+          t.includes('you’re temporarily blocked') ||
+          t.includes('¡has sido bloqueado temporalmente!') ||
+          t.includes('temporalmente restringido') ||
+          t.includes('temporarily blocked') ||
+          t.includes('este recurso esta indisponivel temporariamente')
+        );
+      const hasReloadBtn =
+        !!document.querySelector('[aria-label*="Recarregar pagina"],[aria-label*="Recarregar página"],[aria-label*="Reload"],[aria-label*="Recargar"]');
+      return { blocked: hasBlocked, hasReloadBtn };
+    });
+  } catch { return { blocked: false }; }
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1374,4 +1409,5 @@ module.exports = {
   },
   attachHealthProbes, // NOVO!
   hardCleanProfileOnDisk,
+  detectMessengerTempBlock, // NOVO: exportado para uso pelo worker
 };

@@ -1007,6 +1007,48 @@ function pickUaPreset() {
 }
 
 // -- Utils Robe Timer
+
+// PATCH 1 — Função normalizeCooldown (blindagem e correção até/remaining)
+async function normalizeCooldown(nome) {
+  try {
+    const now = Date.now();
+    const ctrl = controllers.get(nome);
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (!man) return 0;
+    const until = Number(man.robeCooldownUntil || 0);
+    const remaining = Number(man.robeCooldownRemainingMs || 0);
+    const leftUntil = until > now ? (until - now) : 0;
+    const leftRem = remaining > 0 ? remaining : 0;
+
+    // Se ambos existem e diferem bastante, privilegia maior janela
+    if (leftUntil > 0 && leftRem > 0 && Math.abs(leftUntil - leftRem) > 60*1000) {
+      const winner = Math.max(leftUntil, leftRem);
+      if (ctrl && ctrl.trabalhando && !ctrl.humanControl) {
+        await manifestStore.update(nome, m => {
+          m = m || {};
+          m.robeCooldownUntil = now + winner;
+          m.robeCooldownRemainingMs = 0;
+          return m;
+        });
+        await issues.append(nome, 'mil_action', `cooldown_reconciled: using until=${winner}ms (from both)`);
+        return Math.floor(winner/1000);
+      } else {
+        await manifestStore.update(nome, m => {
+          m = m || {};
+          m.robeCooldownUntil = 0;
+          m.robeCooldownRemainingMs = winner;
+          return m;
+        });
+        await issues.append(nome, 'mil_action', `cooldown_reconciled: using remaining=${winner}ms (from both)`);
+        return Math.floor(winner/1000);
+      }
+    }
+    // Só um existe
+    const finalMs = leftUntil > 0 ? leftUntil : leftRem;
+    return Math.max(0, Math.floor(finalMs/1000));
+  } catch { return 0; }
+}
+
 function robeCooldownLeft(nome) {
   let left = 0;
   try {
@@ -1690,30 +1732,27 @@ async function robeTickGlobal() {
   // === FIM patch ===
 
   const perfisArr = loadPerfisJson();
-  const prontos = perfisArr
-    .map(p => p.nome)
-    .filter(nome => {
-      // ALTERAÇÃO: antifila militar - respeita frozen
-      if (isFrozenNow(nome)) {
-        return false; // GUARD: evita spam/OOM por manifest ausente, conta está congelada
-      }
-      // RAM kill/killbackoff (Terminator)
-      if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > Date.now()) {
-        return false; // GUARD: bloqueado até cooldown após RAM spike
-      }
-      const ctrl = controllers.get(nome);
-      if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return false; // Atualização: impede fila em modo humano
-      const cooldown = robeCooldownLeft(nome);
-      const inFila = robeQueue.inQueue(nome);
-      const exec = robeQueue.isActive(nome);
-      return cooldown === 0 && (!inFila) && (!exec);
-    });
+  // PATCH 2 — Usar normalizeCooldown em vez de robeCooldownLeft (pré-filtragem com Promise.all)
+  const nomesAll = perfisArr.map(p => p.nome);
+  const prontosArr = await Promise.all(nomesAll.map(async (nome) => {
+    if (isFrozenNow(nome)) return null; // GUARD: evita spam/OOM por manifest ausente, conta está congelada
+    if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > Date.now()) {
+      return null; // GUARD: bloqueado até cooldown após RAM spike
+    }
+    const ctrl = controllers.get(nome);
+    if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null; // impede fila em modo humano
+    const cooldown = await normalizeCooldown(nome);
+    const inFila = robeQueue.inQueue(nome);
+    const exec = robeQueue.isActive(nome);
+    return (cooldown === 0 && (!inFila) && (!exec)) ? nome : null;
+  }));
+  const prontos = prontosArr.filter(Boolean);
 
   for (const nome of prontos) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser) continue;
 
-    console.log(`[WORKER][robeTickGlobal] Enfileirando ${nome}? cooldown=${robeCooldownLeft(nome)}s inQueue=${robeQueue.inQueue(nome)}, isActive=${robeQueue.isActive(nome)}`);
+    console.log(`[WORKER][robeTickGlobal] Enfileirando ${nome}? cooldown=${await normalizeCooldown(nome)}s inQueue=${robeQueue.inQueue(nome)}, isActive=${robeQueue.isActive(nome)}`);
 
     robeQueue.enqueue(nome, async () => {
       // === PATCH autoMode Light: após enfileirar em modo light, rate limit ===
@@ -1776,7 +1815,7 @@ async function robeTickGlobal() {
         } catch (e) {
           // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
-          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
+          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { console.warn('[WORKER][robeTickGlobal] Robe error:', e && e.message || e); } catch {}
           return; // não crasha fila global
         }
@@ -1792,7 +1831,7 @@ async function robeTickGlobal() {
           } catch {}
           robeUpdateMeta(nome, {
             estado: 'ok',
-            cooldownSec: robeCooldownLeft(nome),
+            cooldownSec: await normalizeCooldown(nome),
             proximaPostagem: robeLastPosted(nome) + robePauseMs,
             ultimaPostagem: Date.now()
           });
@@ -1801,11 +1840,11 @@ async function robeTickGlobal() {
         } else {
           robeUpdateMeta(nome, {
             estado: 'idle',
-            cooldownSec: robeCooldownLeft(nome)
+            cooldownSec: await normalizeCooldown(nome)
           });
         }
       } catch (e) {
-        robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
+        robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
         // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
@@ -2126,6 +2165,13 @@ const handlers = {
     if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
       await browserHelper.forceCloseExtras(ctrl.browser);
     }
+
+    // PATCH 3 — Correção automática no start_work
+    try { 
+      await unfreezeCooldownIfWorking(nome);
+      await normalizeCooldown(nome);
+    } catch {}
+
     await snapshotStatusAndWrite();
     return { ok: true };
   } catch (e) {
@@ -2278,7 +2324,7 @@ const handlers = {
           } catch (e) {
             // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
-            robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
+            robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
             try { console.warn('[WORKER][robe-play] Robe error:', e && e.message || e); } catch {}
             return; // não crasha fila global
           }
@@ -2294,7 +2340,7 @@ const handlers = {
             } catch {}
             robeUpdateMeta(nome, {
               estado: 'ok',
-              cooldownSec: robeCooldownLeft(nome),
+              cooldownSec: await normalizeCooldown(nome),
               proximaPostagem: robeLastPosted(nome) + ((15+Math.floor(Math.random()*16))*60*1000),
               ultimaPostagem: Date.now()
             });
@@ -2303,11 +2349,11 @@ const handlers = {
           } else {
             robeUpdateMeta(nome, {
               estado: 'idle',
-              cooldownSec: robeCooldownLeft(nome)
+              cooldownSec: await normalizeCooldown(nome)
             });
           }
         } catch (e) {
-          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: robeCooldownLeft(nome) });
+          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
         } finally {
           // PRUNE DE ABAS antes de religar o Virtus
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
@@ -2393,11 +2439,11 @@ const handlers = {
       };
     });
     const robes = {};
-    perfisArr.forEach(p => {
+    for (const p of perfisArr) {
       const nome = p.nome;
       const fail = getFailureCounts(nome);
       robes[nome] = {
-        cooldownSec: robeCooldownLeft(nome),
+        cooldownSec: await normalizeCooldown(nome),
         estado: robeMeta[nome]?.estado || '',
         proximaPostagem: robeMeta[nome]?.proximaPostagem || null,
         ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
@@ -2415,7 +2461,7 @@ const handlers = {
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null
       };
-    });
+    }
     const robeQueueList = robeQueue.queueList();
     // PATCH autoMode/sys: incluir autoMode e sys
     const sys = {
@@ -2520,11 +2566,11 @@ return {
 };
 });
 const robes = {};
-perfisArr.forEach(p => {
+for (const p of perfisArr) {
 const nome = p.nome;
 const fail = getFailureCounts(nome);
 robes[nome] = {
-  cooldownSec: robeCooldownLeft(nome),
+  cooldownSec: await normalizeCooldown(nome),
   estado: robeMeta[nome]?.estado || '',
   proximaPostagem: robeMeta[nome]?.proximaPostagem || null,
   ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
@@ -2547,7 +2593,7 @@ robes[nome] = {
   // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
   // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
-});
+}
 const robeQueueList = robeQueue.queueList();
 // PATCH autoMode/sys: incluir no statusObj
 const sys = {
@@ -2760,7 +2806,8 @@ return _statusLock;
 //       if (r e r.ok) {
 //         try {
 //           const d2 = readJsonFile(desiredPath, { perfis: {} });
-//           if (d2 e d2.perfis e d2.perfis[nome]) {
+//           if (d2 e d2.perfis e d2.perfis[nome])
+//           {
 //             d2.perfis[nome].humanResume = false;
 //             const ok = writeJsonAtomic(desiredPath, d2);
 //             if (!ok) { try { await issues.append('system','persist_failed', `${nome}|humanResume_desired_write`); } catch {} }
