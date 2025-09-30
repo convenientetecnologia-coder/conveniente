@@ -16,6 +16,7 @@ module.exports = (app, workerClient, fileStore) => {
             man = man || {};
             man.robeCooldownUntil = now + plus24;
             man.robeCooldownRemainingMs = 0;
+            man.robePauseReason = 'manual';
             return man;
           });
           total++;

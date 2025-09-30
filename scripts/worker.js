@@ -933,6 +933,9 @@ async function activateOnce(nome, source = '') {
           }
         } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
+        // INSTRUÇÃO 4: Limpa closingReason ao abrir e autenticar com sucesso
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].closingReason = null;
         console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
         return { ok: true };
@@ -1469,9 +1472,6 @@ async function ramCpuMonitorTick() {
   //   (autoMode.freeEmaMB != null e autoMode.freeEmaMB >= AUTO_CFG.MEM_EXIT_MB) &&
   //   (cpuApprox <= AUTO_CFG.CPU_EXIT) &&
   //   (autoMode.cpuEma != null e autoMode.cpuEma <= AUTO_CFG.CPU_EXIT);
-
-  // if (enterPressure) { autoMode.hot++; autoMode.cool = 0; }
-  // else if (exitPressure) { autoMode.cool++; autoMode.hot = 0; }
 
   // if (autoMode.mode === 'full' e autoMode.hot >= AUTO_CFG.HOT_TICKS e _canSwitch()) {
   //   autoMode.mode = 'light';
@@ -2435,7 +2435,8 @@ const handlers = {
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
-        manifestStatus
+        manifestStatus,
+        closingReason: robeMeta[nome]?.closingReason || null
       };
     });
     const robes = {};
@@ -2459,7 +2460,9 @@ const handlers = {
         internalFailCountWindow: fail.internal,
         externalFailCountWindow: fail.external,
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
-        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null
+        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
+        pauseReason: robeMeta[nome]?.pauseReason || null,
+        lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
       };
     }
     const robeQueueList = robeQueue.queueList();
@@ -2555,7 +2558,8 @@ return {
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
   reopenAt: robeMeta[nome]?.reopenAt || null,
-  manifestStatus
+  manifestStatus,
+  closingReason: robeMeta[nome]?.closingReason || null
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
   // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
@@ -2584,7 +2588,9 @@ robes[nome] = {
   frozenAt: robeMeta[nome]?.frozenAt || null,
   frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
-  lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null
+  lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
+  pauseReason: robeMeta[nome]?.pauseReason || null,
+  lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
   // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
@@ -3161,12 +3167,13 @@ async function nurseTick() {
         continue;
       }
       const p0 = pages[0];
-      // Checagem de bloqueio temporário do Messenger/FB (prioritário, antes de prune/reload/kill)
+      // INSTRUÇÃO 1: SUBSTITUIR LÓGICA DE DETECÇÃO
       const det = await browserHelper.detectMessengerTempBlock(p0);
+
       if (det && det.blocked) {
         if (det.domain === 'messenger') {
-          // BLOQUEIO NO MESSENGER! Fecha navegador e agenda reabertura.
-          try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — desligando navegador e reabrindo em ~2h'); } catch {}
+          // Desliga Virtus, fecha navegador, agenda reopenAt, loga, UX: Bloqueio temporário Messenger
+          try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
           try { await stopVirtus(nome); } catch {}
           robeMeta[nome] = robeMeta[nome] || {};
           const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
@@ -3175,20 +3182,19 @@ async function nurseTick() {
             robeMeta[nome].closingReason = 'virtus_block';
           }
           try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
-          await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' }); // FECHA O NAVEGADOR
+          await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
           await snapshotStatusAndWrite();
           continue;
         }
         if (det.domain === 'facebook') {
-          // BLOQUEIO SÓ NO FACEBOOK (Robe): Pausa Robe/postagem 24h, Virtus continua! NÃO fecha navegador.
-          try { await issues.append(nome, 'robe_blocked', 'Facebook bloqueou postagens/marketplace — Robe pausado 24h, virtus ativo'); } catch {}
+          // Pausa só o Robe, Virtus segue ativo; log, carimba motivo
+          try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
           const now = Date.now();
           const plus24 = 24 * 60 * 60 * 1000;
-          // PATCH: só aplica se não já estiver em cooldown >80k
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
             const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - now) : 0;
-            if (!man || curLeft < 80*60*1000) { // se faltar menos de 80min (para previnir gaps curtos), força pause de 24h
+            if (!man || curLeft < 80*60*1000) {
               await manifestStore.update(nome, m => {
                 m = m || {};
                 m.robeCooldownUntil = now + plus24;
@@ -3197,10 +3203,14 @@ async function nurseTick() {
               });
             }
           } catch {}
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].pauseReason = 'fb_block';
+          robeMeta[nome].lastRobeBlockAt = Date.now();
           await snapshotStatusAndWrite();
           continue;
         }
       }
+      // FIM INSTRUÇÃO 1
 
       // NÃO competir com recovery stateful
       const hs = getHealth && getHealth(nome);
@@ -3236,7 +3246,7 @@ async function nurseTick() {
         if (healthy) {
           await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
         } else {
-          await reportAction(nome, 'nurse_kill', `motivo=page_zumbi url=${(p0.url&&p0.url())||''} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+          await reportAction(nome, 'nurse_kill', `motivo=page_zumbi url=${((p0.url&&p0.url())||'')} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
           try { registerFailure(nome, 'zombie', 'external'); } catch {}
           await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
           continue;
@@ -3409,12 +3419,12 @@ async function healthTick() {
       await wirePageObservers(nome, page);
     }
 
-    // DETECÇÃO DE BLOQUEIO (Messenger vs Facebook) — healthTick
+    // DETECÇÃO DE BLOQUEIO (Messenger vs Facebook) — healthTick (INSTRUÇÃO 2)
     const det = await browserHelper.detectMessengerTempBlock(page);
     if (det && det.blocked) {
       if (det.domain === 'messenger') {
-        // (repete mesmo bloco do nurseTick: fecha virtus, agenda reopen)
-        try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado (healthTick)'); } catch {}
+        // Desliga Virtus, fecha navegador, agenda reopenAt, loga, UX: Bloqueio temporário Messenger
+        try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         try { await stopVirtus(nome); } catch {}
         robeMeta[nome] = robeMeta[nome] || {};
         const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
@@ -3428,11 +3438,10 @@ async function healthTick() {
         continue;
       }
       if (det.domain === 'facebook') {
-        // BLOQUEIO SÓ NO FACEBOOK (Robe): Pausa Robe/postagem 24h, Virtus continua! NÃO fecha navegador.
-        try { await issues.append(nome, 'robe_blocked', 'Facebook bloqueou postagens/marketplace — Robe pausado 24h, virtus ativo (healthTick)'); } catch {}
+        // Pausa só o Robe, Virtus segue ativo; log, carimba motivo
+        try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         const now = Date.now();
         const plus24 = 24 * 60 * 60 * 1000;
-        // PATCH: só aplica se não já estiver em cooldown >80k
         try {
           const man = await manifestStore.read(nome).catch(()=>null);
           const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - now) : 0;
@@ -3445,6 +3454,9 @@ async function healthTick() {
             });
           }
         } catch {}
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].pauseReason = 'fb_block';
+        robeMeta[nome].lastRobeBlockAt = Date.now();
         await snapshotStatusAndWrite();
         continue;
       }

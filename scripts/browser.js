@@ -1359,60 +1359,66 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
 // PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO
 async function detectMessengerTempBlock(page) {
   try {
-    const url = page.url ? page.url() : '';
-    // Regra: Se Messenger está bloqueado, obrigatoriamente o Facebook está; vice-versa, não. Identificar ambos.
-    return await page.evaluate(() => {
+    const href = typeof page.url === 'function' ? (page.url() || '') : '';
+    const isMessengerCtx = /messenger\.com/i.test(href) || /facebook\.com\/messages/i.test(href) || /facebook\.com\/marketplace\/t\//i.test(href);
+    const isFacebookCtx = /facebook\.com/i.test(href);
+
+    const det = await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0, 800);
+      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,button')).slice(0, 1200);
       const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
+      const any = pats => texts.some(t => pats.some(p => t.includes(p)));
 
-      // Bloqueio Messenger (virtuais Messenger, t, messages, bloqueio total)
-      const blockedMessenger = texts.some(t =>
-        t.includes('messenger') && (
-          t.includes('voce esta bloqueado temporariamente') ||
-          t.includes('você está bloqueado temporariamente') ||
-          t.includes('voce esta bloqueada temporariamente') ||
-          t.includes('você está bloqueada temporariamente') ||
-          t.includes('bloqueamos temporariamente') ||
-          t.includes('youre temporarily blocked') ||
-          t.includes('you’re temporarily blocked') ||
-          t.includes('esto recurso esta indisponivel temporariamente') ||
-          t.includes('has sido bloqueado temporalmente') ||
-          t.includes('has sido bloqueada temporalmente')
-        )
-      );
+      // Lista ampla de bloqueios (multilíngue e variações)
+      const genericBlock = any([
+        'voce esta bloqueado temporariamente',
+        'voce esta bloqueada temporariamente',
+        'você está bloqueado temporariamente',
+        'você está bloqueada temporariamente',
+        'bloqueamos temporariamente',
+        'bloqueio temporario',
+        'youre temporarily blocked',
+        'you’re temporarily blocked',
+        'temporarily blocked',
+        'this feature is temporarily unavailable',
+        'you cant use this feature right now',
+        'limitamos a frequencia com que voce pode fazer isso',
+        'estas temporalmente bloqueado',
+        'estas temporalmente bloqueada',
+        'has sido bloqueado temporalmente',
+        'has sido bloqueada temporalmente',
+        'funcion no esta disponible temporalmente'
+      ]);
 
-      // Bloqueio só Facebook (Marketplace, postagem, banners ou texto sobre publicações)
-      const blockedRobe = !blockedMessenger && (
-        texts.some(t =>
-          (
-            t.includes('publicacao bloqueada temporariamente') ||
-            t.includes('postagem bloqueada temporariamente') ||
-            t.includes('sua conta foi temporariamente impedida de postar') ||
-            t.includes('temporariamente impedido de realizar esta acao') ||
-            (t.includes('bloqueado') && t.includes('marketplace')) ||
-            (t.includes('bloqueada') && t.includes('marketplace'))
-          )
-        ));
+      // Específicos para postagem/marketplace
+      const robeSpecific = any([
+        'publicacao bloqueada temporariamente',
+        'postagem bloqueada temporariamente',
+        'sua conta foi temporariamente impedida de postar',
+        'temporariamente impedido de realizar esta acao',
+        'nao e possivel publicar agora',
+        'you cant post right now',
+        'you cant list right now',
+        'marketplace',
+        'vender no marketplace',
+        'publicar no marketplace'
+      ]);
 
-      const hasReloadBtn =
-        !!document.querySelector('[aria-label*="Recarregar pagina"],[aria-label*="Recarregar página"],[aria-label*="Reload"],[aria-label*="Recargar"]');
-        
-      // Se está em /messenger.com/ ou /messages/, e tem bloqueio nas mensagens, reporta messenger
-      const dom = location.href || '';
-      if (
-        /messenger\.com/i.test(dom) ||
-        /facebook\.com\/messages/i.test(dom) ||
-        /facebook\.com\/marketplace\/t\//i.test(dom)
-      ) {
-        if (blockedMessenger) return { blocked: true, domain: 'messenger', hasReloadBtn };
-      }
+      const hasReloadBtn = !!document.querySelector('[aria-label*="recarregar"],[aria-label*="reload"],[aria-label*="recargar"]');
 
-      if (blockedRobe)
-        return { blocked: true, domain: 'facebook', hasReloadBtn };
-
-      return { blocked: false, domain: null };
+      return { genericBlock, robeSpecific, hasReloadBtn, href: location.href };
     });
+
+    let domain = null;
+    if (det.genericBlock) {
+      if (isMessengerCtx) domain = 'messenger';
+      else if (det.robeSpecific) domain = 'facebook';
+      else if (isFacebookCtx) domain = 'facebook';
+    } else if (det.robeSpecific) {
+      domain = 'facebook';
+    }
+
+    return { blocked: !!domain, domain, hasReloadBtn: !!det.hasReloadBtn };
   } catch {
     return { blocked: false, domain: null };
   }

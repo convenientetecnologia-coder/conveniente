@@ -203,20 +203,6 @@ module.exports = (app, workerClient, fileStore) => {
       }
     }
 
-    const manifestStore = require('./manifestStore.js');
-    const plus24 = 24 * 60 * 60 * 1000;
-    try {
-      await manifestStore.update(nome, man => {
-        const now = Date.now();
-        man = man || {};
-        man.robeCooldownUntil = now + plus24;
-        man.robeCooldownRemainingMs = 0;
-        return man;
-      });
-    } catch (e) {
-      await issues.append(nome, 'robe24h_failed', e && e.message || e);
-      return res.json({ ok: false, error: 'Não foi possível aplicar pause 24h: ' + (e && e.message || e) });
-    }
     try {
       await fileStore.patchDesired(nome, { virtus: 'on', active: true }); // remova robePause24h
     } catch (e) {}

@@ -711,19 +711,19 @@
           titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
         }
 
-        // Pill "Robe em pausa 24h (FB bloqueado)" — cooldown muito alto mas não virtus_block/frozen
-        if (
-          !isFrozen &&
-          p.manifestStatus === 'ok' &&
-          p.closingReason !== 'virtus_block' &&
-          (robes && robes[p.nome] && robes[p.nome].cooldownSec > 80000) // ~22h
-        ) {
-          titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
-        }
-
-        // -------- Opcional: Bloqueio temporário Messenger (virtus_block) --------
-        if (typeof p.frozenReason === 'string' && p.frozenReason.toLowerCase().includes('virtus_block')) {
-          titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
+        // Pill “Robe em pausa 24h (FB bloqueado)” — só aparece se houve bloqueio real recente (pauseReason==='fb_block' + cooldown>22h + lastRobeBlockAt<25h)
+        {
+          const r = robes && robes[p.nome];
+          if (
+            !isFrozen &&
+            p.manifestStatus === 'ok' &&
+            p.closingReason !== 'virtus_block' &&
+            r && r.cooldownSec > 80000 &&
+            r.pauseReason === 'fb_block' &&
+            r.lastRobeBlockAt && (Date.now() - r.lastRobeBlockAt) < 25*60*60*1000
+          ) {
+            titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
+          }
         }
 
         // ------- COOLDOWN (ADICIONAL) -------
