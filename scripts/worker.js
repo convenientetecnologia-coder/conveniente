@@ -1693,7 +1693,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //           try {
 //             const rr = await activateOnce(openNome, 'lean_swap_open');
 //             if (!rr || !rr.ok) {
-//               await reportAction(openNome, 'lean_swap', `open_missing_failed error=${(rr && rr.error) || 'unknown'}`);
+//               await reportAction(openNome, 'lean_swap', `open_missing_failed error=${(rr && r.error) || 'unknown'}`);
 //               // Rollback para manter slot fixo
 //               try { await activateOnce(closeNome, 'lean_swap_rollback'); } catch {}
 //             } else {
@@ -2255,14 +2255,18 @@ const handlers = {
     // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
     if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
 
-    // Zera cooldown no manifest
+    // Zera cooldown REAL no manifest (libera imediatamente este perfil) e limpa fb_block
     try {
       await manifestStore.update(nome, (m) => {
-        // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
-        // Não modificar cooldown aqui; o robe.js é o único responsável por aplicá-lo.
         m = m || {};
+        m.robeCooldownUntil = Date.now();
+        m.robeCooldownRemainingMs = 0;
         return m;
       });
+      if (robeMeta[nome]) {
+        delete robeMeta[nome].pauseReason;
+        delete robeMeta[nome].lastRobeBlockAt;
+      }
     } catch {}
 
     // Se não está na fila nem ativo, enfileira o callback REAL igual ao robeTickGlobal:
@@ -2599,6 +2603,14 @@ robes[nome] = {
   // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
   // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
+// (Opcional Higiene) – limpeza defensiva pós-cooldown
+if (robes[nome].cooldownSec === 0 && robeMeta[nome] && robeMeta[nome].pauseReason === 'fb_block') {
+  const ts = robeMeta[nome].lastRobeBlockAt || 0;
+  if (ts && (Date.now() - ts) > 25*60*60*1000) {
+    delete robeMeta[nome].pauseReason;
+    delete robeMeta[nome].lastRobeBlockAt;
+  }
+}
 }
 const robeQueueList = robeQueue.queueList();
 // PATCH autoMode/sys: incluir no statusObj

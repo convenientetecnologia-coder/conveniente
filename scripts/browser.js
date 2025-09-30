@@ -296,10 +296,8 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
       // 1) Tenta ler manifest.json dentro do próprio userDataDir
       try {
         const manifestPath = path.join(userDataDir, 'manifest.json');
-        if (fs.existsSync(manifestPath)) {
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-          if (manifest && manifest.nome) nomePerfil = String(manifest.nome);
-        }
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (manifest && manifest.nome) nomePerfil = String(manifest.nome);
       } catch {}
 
       // 2) Tenta resolver via dados/perfis.json
@@ -1365,8 +1363,19 @@ async function detectMessengerTempBlock(page) {
 
     const det = await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,button')).slice(0, 1200);
-      const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
+      function isVisible(el) {
+        try {
+          const st = window.getComputedStyle(el);
+          if (!st) return false;
+          if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+          if (el.offsetParent === null) return false;
+          const r = el.getBoundingClientRect();
+          return r && r.width > 0 && r.height > 0;
+        } catch { return false; }
+      }
+      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,button')).slice(0, 800)
+        .filter(isVisible);
+      const texts = nodes.map(el => norm(el.innerText || '')).filter(Boolean);
       const any = pats => texts.some(t => pats.some(p => t.includes(p)));
 
       // Lista ampla de bloqueios (multilíngue e variações)
