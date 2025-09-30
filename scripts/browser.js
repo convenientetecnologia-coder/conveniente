@@ -84,14 +84,35 @@ async function injectCookies(page, cookies) {
 // ===============================
 // patchPage agora usa leitura correta do manifest
 // ===============================
-async function patchPage(nome, page, coords) {
-  // LEITURA DE MANIFEST VIA userDataDir DEFINIDO EM perfis.json
-  const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-  const perfil = perfisArr.find(p => p && p.nome === nome);
-  if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
-  const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const manifestStore = require('./manifestStore.js');
 
+async function patchPage(nome, page, coords) {
+  // BLINDAGEM: nome obrigatório
+  if (!nome) throw new Error('manifest_incomplete: nome ausente (perfil corrompido)');
+
+  let manifest = null;
+  try {
+    // Tente ler do manifestStore
+    manifest = await manifestStore.read(nome);
+
+    // FALLBACK: Se não tem userDataDir, tenta perfis.json
+    if (!manifest || !manifest.userDataDir) {
+      const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
+      const perfil = perfisArr.find(p => p && p.nome === nome);
+      if (perfil && perfil.userDataDir) {
+        manifest = Object.assign({}, perfil, manifest || {});
+        await manifestStore.write(nome, manifest);
+      }
+    }
+  } catch (e) {}
+
+  // Hard-check — se manifest ou nome ou userDataDir estão inválidos, throw explicativo
+  if (!manifest || !manifest.nome || !manifest.userDataDir) {
+    // Opcional: log no disco ou em issues.json — aqui preferimos fail fast/clear
+    throw new Error('manifest_incomplete: Falta nome/userDataDir para ' + (nome || 'undefined') + '. Corrija manifest/perfis.json para autocura.');
+  }
+
+  // --- RESTANTE INALTERADO (só troquei para usar manifest lido acima) ---
   const ua = manifest.uaString;
   const uaCh = manifest.uaCh || {};
   const viewport = manifest.fp?.viewport || { width: 1366, height: 768 };

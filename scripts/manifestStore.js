@@ -64,7 +64,9 @@ async function update(nome, patchFn) {
   return withLock(nome, async () => {
     const file = getManifestPath(nome);
     const cur = readJsonSafe(file, {}) || {};
-    const next = await Promise.resolve(patchFn(cur)) || cur;
+    let next = await Promise.resolve(patchFn(cur)) || cur;
+    // Sempre garante merge: mescla campos do cur manifest caso patchFn não os retorne!
+    next = Object.assign({}, cur, next);
     writeJsonAtomic(file, next);
     return next;
   });

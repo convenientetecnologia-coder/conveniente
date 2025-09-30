@@ -403,13 +403,13 @@ async function milLog(type, msg) {
 // *** LEGADO: pode remover após estabilizar Supervisor externo *
 // function countActive() {
 //   let n = 0;
-//   controllers.forEach((ctrl) => { if (ctrl && ctrl.browser) n++; });
+//   controllers.forEach((ctrl) => { if (ctrl e ctrl.browser) n++; });
 //   return n;
 // }
 
 // function countWorking() {
 //   let n = 0;
-//   controllers.forEach((ctrl) => { if (ctrl && ctrl.browser && ctrl.trabalhando) n++; });
+//   controllers.forEach((ctrl) => { if (ctrl e ctrl.browser e ctrl.trabalhando) n++; });
 //   return n;
 // }
 
@@ -714,6 +714,51 @@ function countErrorsLocal(nome) {
 }
 // =============== FIM: Helpers/Contagem de ERROS ========================
 
+/* PATCH 1 — Função de auto-cura e validação do manifest
+   Adicionada logo acima de resolveManifest */
+function ensureManifestValid(nome) {
+  // Campos essenciais: nome, cidade, uaPresetId, uaString, uaCh, fp, cookies, userDataDir
+  function hasEssentials(man) {
+    return man &&
+      typeof man.nome === 'string' && man.nome &&
+      typeof man.cidade === 'string' && man.cidade &&
+      typeof man.uaPresetId !== 'undefined' &&
+      typeof man.uaString === 'string' && man.uaString &&
+      typeof man.uaCh === 'object' && man.uaCh &&
+      typeof man.fp === 'object' && man.fp &&
+      Array.isArray(man.cookies) && man.cookies.length &&
+      typeof man.userDataDir === 'string' && man.userDataDir;
+  }
+
+  let manifest = null;
+  try {
+    const mPath = manifestPathOf(nome);
+    if (fs.existsSync(mPath)) {
+      manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+    }
+  } catch {}
+  if (hasEssentials(manifest)) return manifest;
+
+  // Tenta curar (merge) com perfis.json
+  try {
+    const perfisArr = loadPerfisJson();
+    const perfil = perfisArr.find(p => p && p.nome === nome);
+    if (perfil && hasEssentials(perfil)) {
+      const merged = Object.assign({}, perfil, manifest || {});
+      // Persiste merge, agora sanado
+      if (merged.userDataDir && !fs.existsSync(merged.userDataDir)) {
+        fs.mkdirSync(merged.userDataDir, { recursive: true });
+      }
+      // Escreve autosanado
+      fs.writeFileSync(manifestPathOf(nome), JSON.stringify(merged, null, 2), 'utf8');
+      return merged;
+    }
+  } catch {}
+
+  // Se não curou, retorna null
+  return null;
+}
+
 // =============== Issues/Actions logger (silencioso) ================
 async function reportAction(nome, type, message) {
 try {
@@ -824,8 +869,14 @@ async function activateOnce(nome, source = '') {
     const job = (async () => {
       try {
         console.log('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
-        const manifest = resolveManifest(nome);
-        if (!manifest) throw new Error('Perfil não encontrado');
+        const manifest = ensureManifestValid(nome);
+        if (!manifest) {
+          // Não foi possível auto-curar (manifest + perfis.json quebrado)
+          await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
+          await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; perfil congelado 12h');
+          if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+          return { ok:false, error: 'manifest_incomplete' };
+        }
 
         // GATE DE RAM antes de abrir (livre > 3GB)
         {
@@ -1496,7 +1547,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 
 //     // 1) Manutenção: reseta o mais gordo > 600MB (no máximo 1 por rodada)
 //     const fat = _fattestActiveName(OVER_MB);
-//     if (fat && fat.nome) {
+//     if (fat e fat.nome) {
 //       const nome = fat.nome;
 //       const beforeMB = fat.mb || 0;
 //       robeMeta[nome] = robeMeta[nome] || {};
@@ -2295,6 +2346,26 @@ const handlers = {
         }
       } catch { issuesCount = 0; }
       const fail = getFailureCounts(nome);
+      // PATCH 7 — manifestStatus
+      let manifestStatus = 'missing';
+      try {
+        const mPath = manifestPathOf(nome);
+        if (fs.existsSync(mPath)) {
+          const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+          const ok = man &&
+            typeof man.nome === 'string' && man.nome &&
+            typeof man.cidade === 'string' && man.cidade &&
+            typeof man.uaPresetId !== 'undefined' &&
+            typeof man.uaString === 'string' && man.uaString &&
+            typeof man.uaCh === 'object' && man.uaCh &&
+            typeof man.fp === 'object' && man.fp &&
+            Array.isArray(man.cookies) && man.cookies.length &&
+            typeof man.userDataDir === 'string' && man.userDataDir;
+          manifestStatus = ok ? 'ok' : 'incomplete';
+        } else {
+          manifestStatus = 'missing';
+        }
+      } catch { manifestStatus = 'missing'; }
       return {
         nome,
         label: p.label || null,
@@ -2318,6 +2389,7 @@ const handlers = {
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
+        manifestStatus
       };
     });
     const robes = {};
@@ -2396,6 +2468,26 @@ try {
   }
 } catch {}
 const fail = getFailureCounts(nome);
+// PATCH 7 — manifestStatus
+let manifestStatus = 'missing';
+try {
+  const mPath = manifestPathOf(nome);
+  if (fs.existsSync(mPath)) {
+    const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+    const ok = man &&
+      typeof man.nome === 'string' && man.nome &&
+      typeof man.cidade === 'string' && man.cidade &&
+      typeof man.uaPresetId !== 'undefined' &&
+      typeof man.uaString === 'string' && man.uaString &&
+      typeof man.uaCh === 'object' && man.uaCh &&
+      typeof man.fp === 'object' && man.fp &&
+      Array.isArray(man.cookies) && man.cookies.length &&
+      typeof man.userDataDir === 'string' && man.userDataDir;
+    manifestStatus = ok ? 'ok' : 'incomplete';
+  } else {
+    manifestStatus = 'missing';
+  }
+} catch { manifestStatus = 'missing'; }
 return {
   nome,
   label: p.label || null,
@@ -2416,7 +2508,8 @@ return {
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
-  reopenAt: robeMeta[nome]?.reopenAt || null
+  reopenAt: robeMeta[nome]?.reopenAt || null,
+  manifestStatus
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
   // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
@@ -2720,7 +2813,7 @@ return _statusLock;
 // }
 
 // // Agendadores do reconciliador
-// setInterval(() => { reconcileOnce().catch(()=>{}); }, RECONCILE_INTERVAL_MS);
+// setInterval(() => { reconcileOnce().catch(()=>{}); }, RECONCILIADOR_INTERVAL_MS);
 // setTimeout(() => { reconcileOnce().catch(()=>{}); }, 300);
 // == FIM: reconciliador declarativo ==
 
@@ -3359,11 +3452,7 @@ function resolveManifest(nome) {
     }
 
     if (!manifest) {
-      // Congela se não existe em nenhum lugar!
-      robeMeta[nome] = robeMeta[nome] || {};
-      try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_missing', 'system').catch(()=>{}); } catch {}
-      try { issues.append(nome, 'robe_error', 'manifest ausente/incompleto; congelado 12h (resolveManifest)').catch(()=>{}); } catch {}
-      try { snapshotStatusAndWrite().catch(()=>{}); } catch {}
+      // Retorna null sem congelar; cura/quarentena será tratada por ensureManifestValid/activateOnce
       return null;
     }
 
