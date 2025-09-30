@@ -778,13 +778,27 @@ function isFrozenNow(nome) {
 const activationLocks = new Map(); // nome => Promise em andamento
 
 async function activateOnce(nome, source = '') {
-  // Proteção adicional: flag 'opening' evita colisões e dá pistas ao killStray
   if (opening[nome]) return { ok: false, error: 'already_opening' };
-  opening[nome] = true;
 
-  // Supervisor slot request
+  // EARLY EXIT: já está ativo? Não peça slot nem chame notifyOpened!
+  if (controllers.has(nome)) {
+    return { ok: true, already: true };
+  }
+
+  // EARLY EXIT: já há job de ativação pendente? Não peça slot nem chame notifyOpened!
+  const inflight = activationLocks.get(nome);
+  if (inflight) {
+    try { await inflight.catch(() => {}); } catch {}
+    return controllers.has(nome)
+      ? { ok: true, already: true }
+      : { ok: false, error: 'activation_in_progress' };
+  }
+
+  // Chegou aqui, precisa abrir navegador mesmo — registre opening antes para killStray protection.
+  opening[nome] = true;
   let _supervisorSlotGranted = false;
   try {
+    // SÓ AGORA peça slot ao supervisor
     const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
       // Hold curto, não crasha
@@ -799,27 +813,12 @@ async function activateOnce(nome, source = '') {
       if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
       return { ok: false, error: 'Nome ausente' };
     }
-    // Já está ativo?
-    if (controllers.has(nome)) {
-      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
-      return { ok: true, already: true };
-    }
 
     // BLOQUEIO: não ativa se estiver congelado
     if (isFrozenNow(nome)) {
       await reportAction(nome, 'mil_action', 'block_activate_frozen');
       if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
       return { ok: false, error: 'account_is_frozen' };
-    }
-
-    // Se já existe uma ativação em curso para este nome, aguarde finalização
-    const inflight = activationLocks.get(nome);
-    if (inflight) {
-      try { await inflight.catch(() => {}); } catch {}
-      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
-      return controllers.has(nome)
-      ? { ok: true, already: true }
-      : { ok: false, error: 'activation_in_progress' };
     }
 
     const job = (async () => {
@@ -1617,7 +1616,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //       }
 //     }
 //   } catch (e) {
-//     try { await issues.append('system', 'lean_keeper_error', e && e.message || String(e)); } catch {}
+//     try { await issues.append('system', 'lean_keeper_error', e && e.message || String(e) ); } catch {}
 //   } finally {
 //     _leanBusy = false;
 //   }

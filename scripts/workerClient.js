@@ -89,15 +89,16 @@ function forkWorker() {
 // ---- Comunica com o worker via msgId e reply ----
 // Proteção: Evita flood e múltiplos comandos “open”/“activate”/“startWork” simultâneos do mesmo tipo/nome (por perfil)
 function sendWorkerCommand(type, payload = {}, opts = {}) {
-  // 1. Gera chave de serialização/lock por tipo + nome de perfil
+  // 1. Gera chave de serialização/lock FORTALECIDA/UNIFORMIZADA por tipo + perfil (conforme instrução)
   let opKey = null;
+  let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
+  if (perfilNome) perfilNome = String(perfilNome);
+
   if (
-    type === 'open' ||
-    type === 'activate' ||
-    type === 'startWork'
+    ['open','activate','startWork'].includes(type)
   ) {
-    let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
-    opKey = `${type}::${perfilNome}`;
+    // *** TODOS os comandos que envolvem ativação do mesmo perfil compartilham lock ***
+    opKey = `@@PROFILE_OP_LOCK@@::${perfilNome}`;
   } else if (type === 'get-status') {
     opKey = 'get-status';
   } else {

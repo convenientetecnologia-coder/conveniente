@@ -39,6 +39,9 @@ let state = {
   erroJaRetornado: false
 };
 
+/** Cooldowns individuais por perfil */
+let cooldownPerAcc = new Map(); // perfil => timestamp until
+
 /** Estado dos perfis ativos atualmente */
 let ativos = new Map(); // nomePerfil => {openAt, status, ramAntes, ...}
 
@@ -54,6 +57,14 @@ setInterval(() => {
     }
   }
 }, 5000);
+
+/** Opcional/Robustez: limpar cooldowns antigos */
+setInterval(() => {
+  const now = Date.now();
+  for (const [perfil, until] of cooldownPerAcc) {
+    if (until < now - 60000) cooldownPerAcc.delete(perfil);
+  }
+}, 30000);
 
 /** Histórico de eventos para telemetria */
 const eventStream = [];
@@ -102,20 +113,26 @@ function canProbe() {
 }
 
 /** Decide se pode abrir um novo slot agora */
-function podeAbrirNovoSlot() {
+function podeAbrirNovoSlot(perfil) {
   const now = Date.now();
   const freeMB = getFreeMB();
+  // Checagem de RAM
   if (freeMB <= MIN_FREE_RAM_MB) {
-    pushEvent({type: "denied", reason: "ram_low", freeMB});
+    pushEvent({type: "denied", reason: "ram_low", freeMB, perfil});
     return {ok: false, reason: "ram_low", freeMB};
   }
-  if (state.openBlockedUntil > now) {
-    pushEvent({type: "denied", reason: "cooldown", until: state.openBlockedUntil});
-    return {ok: false, reason: "cooldown", waitMs: state.openBlockedUntil-now};
+  // Cooldown PER-PERFIL (novo)
+  const cooldownUntil = cooldownPerAcc.get(perfil) || 0;
+  if (cooldownUntil > now) {
+    pushEvent({type: "denied", reason: "cooldown_account", perfil, until: cooldownUntil});
+    return {ok: false, reason: "cooldown", waitMs: cooldownUntil-now, perfil};
   }
-  // Limitador por slots
+  // (ANTIGO global - pode remover ou restringir para edge-cases de hard fault, mas por now deixamos sem efeito)
+  // if (state.openBlockedUntil > now) { ... }
+
+  // Limitador por slots (mantém igual)
   if (state.maxSlots && state.slotsAbertos >= state.maxSlots) {
-    pushEvent({type:"denied", reason:"slots", maxSlots:state.maxSlots, slotsAbertos: state.slotsAbertos});
+    pushEvent({type:"denied", reason:"slots", maxSlots:state.maxSlots, slotsAbertos: state.slotsAbertos, perfil});
     return {ok: false, reason: "slots", maxSlots: state.maxSlots};
   }
   return {ok: true, freeMB};
@@ -127,7 +144,7 @@ function podeAbrirNovoSlot() {
 // Era /requestOpen: POST body {perfil}
 // AGORA: function requestOpen(perfil)
 function requestOpen(perfil) {
-  const resp = podeAbrirNovoSlot();
+  const resp = podeAbrirNovoSlot(perfil);
   // Logic for probe (como antes)
   if (!resp.ok && resp.reason === 'slots' && canProbe()) {
     state.maxSlots = Math.max(1, state.maxSlots);
@@ -161,10 +178,12 @@ function notifyOpened(perfil, resultado = "ok") {
   if (resultado === "ok") {
     if (!state.maxSlots || state.slotsAbertos > state.maxSlots) state.maxSlots = state.slotsAbertos;
     if (state.maxSlots > state.maxEver) state.maxEver = state.maxSlots;
+    cooldownPerAcc.delete(perfil); // Limpa cooldown ativo (robustez extra)
   } else {
-    state.openBlockedUntil = Date.now() + 15000;
+    const until = Date.now() + 15000;
+    cooldownPerAcc.set(perfil, until); // SÓ aplica cooldown para este perfil
     state.maxSlots = Math.max(1, (state.maxSlots||1) -1);
-    pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots});
+    pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots, cooldownUntil:until});
   }
 
   // INSTRUÇÃO 2: BUGFIX DE PROBE EM notifyOpened
