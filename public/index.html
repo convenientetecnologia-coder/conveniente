@@ -356,7 +356,6 @@
         <div class="form-row">
           <label>Nome exibido (label)</label>
           <input type="text" id="labelInput" placeholder="Ex.: Nome do Facebook" value="${labelAtual.replace(/"/g,'&quot;')}"/>
-          <div style="font-size:12px;color:#9fb2cf;margin-top:6px">O nome exibido aparece apenas no gerenciador, não altera o identificador do perfil.</div>
         </div>
         <div class="form-row">
           <label><input type="checkbox" id="renameSlugCk" ${ativo ? 'disabled' : ''}/> Renomear identificador/diretório (somente com navegador fechado)</label>
@@ -705,6 +704,21 @@
         }
         if (p.manifestStatus === 'missing') {
           titleRow.append(buildPill('Manifesto ausente', 'bad'));
+        }
+
+        // Pill "Bloqueio temporário Messenger"
+        if (typeof p.closingReason === 'string' && p.closingReason === 'virtus_block') {
+          titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
+        }
+
+        // Pill "Robe em pausa 24h (FB bloqueado)" — cooldown muito alto mas não virtus_block/frozen
+        if (
+          !isFrozen &&
+          p.manifestStatus === 'ok' &&
+          p.closingReason !== 'virtus_block' &&
+          (robes && robes[p.nome] && robes[p.nome].cooldownSec > 80000) // ~22h
+        ) {
+          titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
         }
 
         // -------- Opcional: Bloqueio temporário Messenger (virtus_block) --------

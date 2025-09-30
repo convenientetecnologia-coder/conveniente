@@ -3161,23 +3161,45 @@ async function nurseTick() {
         continue;
       }
       const p0 = pages[0];
-      // Checagem de bloqueio temporário do Messenger (prioritário, antes de prune/reload/kill)
-      const det = await detectMessengerTempBlock(p0);
+      // Checagem de bloqueio temporário do Messenger/FB (prioritário, antes de prune/reload/kill)
+      const det = await browserHelper.detectMessengerTempBlock(p0);
       if (det && det.blocked) {
-        try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — desligando navegador e reabrindo em ~2h'); } catch {}
-        // Desliga Virtus antes de fechar como boa prática
-        try { await stopVirtus(nome); } catch {}
-        // Agenda reopenAt de 2h + jitter — só se não existir futuro!
-        robeMeta[nome] = robeMeta[nome] || {};
-        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
-        if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
-          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
-          robeMeta[nome].closingReason = 'virtus_block';
+        if (det.domain === 'messenger') {
+          // BLOQUEIO NO MESSENGER! Fecha navegador e agenda reabertura.
+          try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado — desligando navegador e reabrindo em ~2h'); } catch {}
+          try { await stopVirtus(nome); } catch {}
+          robeMeta[nome] = robeMeta[nome] || {};
+          const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
+          if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
+            robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
+            robeMeta[nome].closingReason = 'virtus_block';
+          }
+          try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+          await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' }); // FECHA O NAVEGADOR
+          await snapshotStatusAndWrite();
+          continue;
         }
-        try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
-        await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' }); // FECHA O NAVEGADOR pra valer
-        await snapshotStatusAndWrite();
-        continue; // Não tenta reload/kill, apenas sai.
+        if (det.domain === 'facebook') {
+          // BLOQUEIO SÓ NO FACEBOOK (Robe): Pausa Robe/postagem 24h, Virtus continua! NÃO fecha navegador.
+          try { await issues.append(nome, 'robe_blocked', 'Facebook bloqueou postagens/marketplace — Robe pausado 24h, virtus ativo'); } catch {}
+          const now = Date.now();
+          const plus24 = 24 * 60 * 60 * 1000;
+          // PATCH: só aplica se não já estiver em cooldown >80k
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - now) : 0;
+            if (!man || curLeft < 80*60*1000) { // se faltar menos de 80min (para previnir gaps curtos), força pause de 24h
+              await manifestStore.update(nome, m => {
+                m = m || {};
+                m.robeCooldownUntil = now + plus24;
+                m.robeCooldownRemainingMs = 0;
+                return m;
+              });
+            }
+          } catch {}
+          await snapshotStatusAndWrite();
+          continue;
+        }
       }
 
       // NÃO competir com recovery stateful
@@ -3386,6 +3408,48 @@ async function healthTick() {
       ctrl.mainPage = page;
       await wirePageObservers(nome, page);
     }
+
+    // DETECÇÃO DE BLOQUEIO (Messenger vs Facebook) — healthTick
+    const det = await browserHelper.detectMessengerTempBlock(page);
+    if (det && det.blocked) {
+      if (det.domain === 'messenger') {
+        // (repete mesmo bloco do nurseTick: fecha virtus, agenda reopen)
+        try { await issues.append(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado (healthTick)'); } catch {}
+        try { await stopVirtus(nome); } catch {}
+        robeMeta[nome] = robeMeta[nome] || {};
+        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
+        if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
+          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
+          robeMeta[nome].closingReason = 'virtus_block';
+        }
+        try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+        await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
+        await snapshotStatusAndWrite();
+        continue;
+      }
+      if (det.domain === 'facebook') {
+        // BLOQUEIO SÓ NO FACEBOOK (Robe): Pausa Robe/postagem 24h, Virtus continua! NÃO fecha navegador.
+        try { await issues.append(nome, 'robe_blocked', 'Facebook bloqueou postagens/marketplace — Robe pausado 24h, virtus ativo (healthTick)'); } catch {}
+        const now = Date.now();
+        const plus24 = 24 * 60 * 60 * 1000;
+        // PATCH: só aplica se não já estiver em cooldown >80k
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - now) : 0;
+          if (!man || curLeft < 80*60*1000) {
+            await manifestStore.update(nome, m => {
+              m = m || {};
+              m.robeCooldownUntil = now + plus24;
+              m.robeCooldownRemainingMs = 0;
+              return m;
+            });
+          }
+        } catch {}
+        await snapshotStatusAndWrite();
+        continue;
+      }
+    }
+
     if (isFrozenNow(nome)) continue;
     const alive = await isPageLikelyAlive(page, nome);
     if (alive) {

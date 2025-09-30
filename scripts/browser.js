@@ -1313,7 +1313,7 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
       path.join(userDataDir, 'Default', 'Service Worker', 'ScriptCache'),
       path.join(userDataDir, 'Default', 'GrShaderCache'),
       path.join(userDataDir, 'Default', 'ShaderCache'),
-      path.join(userDataDir, 'Default', 'DawnCache'),
+      path.join(userDataDir', 'Default', 'DawnCache'),
       path.join(userDataDir, 'Default', 'Media Cache'),
       path.join(userDataDir, 'ShaderCache'),
     ];
@@ -1359,36 +1359,63 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
 // PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO
 async function detectMessengerTempBlock(page) {
   try {
-    // Novos padrões para flag de bloqueio temp
-    function urlLooksMessenger(u) {
-      return /messenger\.com/i.test(u) || /facebook\.com\/messages/i.test(u) || /facebook\.com\/marketplace\/t\//i.test(u);
-    }
-
     const url = page.url ? page.url() : '';
-    // Agora escaneia em messenger.com, facebook.com/messages e afins
-    if (!urlLooksMessenger(url)) {
-      // Não force return false; deixa continuar para varredura de textos
-    }
+    // Regra: Se Messenger está bloqueado, obrigatoriamente o Facebook está; vice-versa, não. Identificar ambos.
     return await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0, 500);
+      const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0, 800);
       const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
-      const hasBlocked =
-        texts.some(t =>
+
+      // Bloqueio Messenger (virtuais Messenger, t, messages, bloqueio total)
+      const blockedMessenger = texts.some(t =>
+        t.includes('messenger') && (
           t.includes('voce esta bloqueado temporariamente') ||
           t.includes('você está bloqueado temporariamente') ||
+          t.includes('voce esta bloqueada temporariamente') ||
+          t.includes('você está bloqueada temporariamente') ||
+          t.includes('bloqueamos temporariamente') ||
           t.includes('youre temporarily blocked') ||
           t.includes('you’re temporarily blocked') ||
-          t.includes('¡has sido bloqueado temporalmente!') ||
-          t.includes('temporalmente restringido') ||
-          t.includes('temporarily blocked') ||
-          t.includes('este recurso esta indisponivel temporariamente')
-        );
+          t.includes('esto recurso esta indisponivel temporariamente') ||
+          t.includes('has sido bloqueado temporalmente') ||
+          t.includes('has sido bloqueada temporalmente')
+        )
+      );
+
+      // Bloqueio só Facebook (Marketplace, postagem, banners ou texto sobre publicações)
+      const blockedRobe = !blockedMessenger && (
+        texts.some(t =>
+          (
+            t.includes('publicacao bloqueada temporariamente') ||
+            t.includes('postagem bloqueada temporariamente') ||
+            t.includes('sua conta foi temporariamente impedida de postar') ||
+            t.includes('temporariamente impedido de realizar esta acao') ||
+            (t.includes('bloqueado') && t.includes('marketplace')) ||
+            (t.includes('bloqueada') && t.includes('marketplace'))
+          )
+        ));
+
       const hasReloadBtn =
         !!document.querySelector('[aria-label*="Recarregar pagina"],[aria-label*="Recarregar página"],[aria-label*="Reload"],[aria-label*="Recargar"]');
-      return { blocked: hasBlocked, hasReloadBtn };
+        
+      // Se está em /messenger.com/ ou /messages/, e tem bloqueio nas mensagens, reporta messenger
+      const dom = location.href || '';
+      if (
+        /messenger\.com/i.test(dom) ||
+        /facebook\.com\/messages/i.test(dom) ||
+        /facebook\.com\/marketplace\/t\//i.test(dom)
+      ) {
+        if (blockedMessenger) return { blocked: true, domain: 'messenger', hasReloadBtn };
+      }
+
+      if (blockedRobe)
+        return { blocked: true, domain: 'facebook', hasReloadBtn };
+
+      return { blocked: false, domain: null };
     });
-  } catch { return { blocked: false }; }
+  } catch {
+    return { blocked: false, domain: null };
+  }
 }
 
 module.exports = {
