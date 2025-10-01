@@ -340,7 +340,7 @@ let _statusLock = Promise.resolve();
 //   try { robeQueue.clear(); } catch {}
 //   for (const [nome, ctrl] of controllers) {
 //     try {
-//       if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+//       if (ctrl && ctrl.virtus e typeof ctrl.virtus.stop === 'function') {
 //         await ctrl.virtus.stop().catch(()=>{});
 //       }
 //       if (ctrl) { ctrl.virtus = null; ctrl.trabalhando = false; }
@@ -1633,7 +1633,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //         try { await handlers.deactivate({ nome, reason: 'lean_hard_clean', policy: 'preserveDesired' }); } catch {}
 //         robeMeta[nome].reopenAt = null;
 //         try {
-//           if (browserHelper && typeof browserHelper.hardCleanProfileOnDisk === 'function') {
+//           if (browserHelper e typeof browserHelper.hardCleanProfileOnDisk === 'function') {
 //             await browserHelper.hardCleanProfileOnDisk(nome);
 //           } else {
 //             await issues.append(nome, 'maintenance_warn', 'hardCleanProfileOnDisk ausente em browser.js');
@@ -1652,7 +1652,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //         const afterMB2 = (typeof robeMeta[nome]?.ramMB === 'number') ? robeMeta[nome].ramMB : null;
 
 //         robeMeta[nome].lastRamAfterReset = afterMB2;
-//         robeMeta[nome].lastDeltaMB = (afterMB2 != null ? beforeMB - afterMB2 : null);
+//         robeMeta[nome].lastDeltaMB = (beforeMB - (afterMB2||0));
 //         robeMeta[nome].lastMaintenanceAt = Date.now();
 
 //         const stillOver2 = (afterMB2 != null) && afterMB2 > OVER_MB;
@@ -2871,7 +2871,7 @@ return _statusLock;
 // await snapshotStatusAndWrite();
 
 // } catch (e) {
-// try { console.warn('[WORKER][reconcileOnce] erro:', e && e.message || e); } catch {}
+// try { console.warn('[WORKER][reconcileOnce] erro:', e e e.message || e); } catch {}
 // } finally {
 // _reconciling = false;
 // }
@@ -3180,11 +3180,21 @@ async function nurseTick() {
       }
       const p0 = pages[0];
       // INSTRUÇÃO 1: SUBSTITUIR LÓGICA DE DETECÇÃO
-      const det = await browserHelper.detectMessengerTempBlock(p0);
+      // INSTRUÇÃO 1: BLOQUEIO SÓ EM CONTEXTO VÁLIDO (Robe ativo OU rota lista/criação)
+      let det = { blocked: false };
+      try {
+        const urlNow = (typeof p0.url === 'function') ? (p0.url() || '') : '';
+        const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+        const isCreateOrSellerRoute =
+          /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
+        if (robeRunning || isCreateOrSellerRoute) {
+          det = await browserHelper.detectMessengerTempBlock(p0);
+        }
+      } catch {}
 
       if (det && det.blocked) {
         if (det.domain === 'messenger') {
-          // Desliga Virtus, fecha navegador, agenda reopenAt, loga, UX: Bloqueio temporário Messenger
+          // Bloco INALTERADO ...
           try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
           try { await stopVirtus(nome); } catch {}
           robeMeta[nome] = robeMeta[nome] || {};
@@ -3199,7 +3209,7 @@ async function nurseTick() {
           continue;
         }
         if (det.domain === 'facebook') {
-          // Pausa só o Robe, Virtus segue ativo; log, carimba motivo
+          // Bloco INALTERADO ...
           try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
           const now = Date.now();
           const plus24 = 24 * 60 * 60 * 1000;
@@ -3431,8 +3441,17 @@ async function healthTick() {
       await wirePageObservers(nome, page);
     }
 
-    // DETECÇÃO DE BLOQUEIO (Messenger vs Facebook) — healthTick (INSTRUÇÃO 2)
-    const det = await browserHelper.detectMessengerTempBlock(page);
+    // DETECÇÃO DE BLOQUEIO SÓ EM CONTEXTO VÁLIDO (Robe ativo OU rota lista/criação/seller)
+    let det = { blocked: false };
+    try {
+      const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
+      const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+      const isCreateOrSellerRoute =
+        /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
+      if (robeRunning || isCreateOrSellerRoute) {
+        det = await browserHelper.detectMessengerTempBlock(page);
+      }
+    } catch {}
     if (det && det.blocked) {
       if (det.domain === 'messenger') {
         // Desliga Virtus, fecha navegador, agenda reopenAt, loga, UX: Bloqueio temporário Messenger

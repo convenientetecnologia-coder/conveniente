@@ -1354,80 +1354,68 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
   }
 }
 
-// PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO
+// PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO APRIMORADA E SAFETY-GATED
 async function detectMessengerTempBlock(page) {
   try {
     const href = typeof page.url === 'function' ? (page.url() || '') : '';
-    const isMessengerCtx = /messenger\.com/i.test(href) || /facebook\.com\/messages/i.test(href) || /facebook\.com\/marketplace\/t\//i.test(href);
-    const isFacebookCtx = /facebook\.com/i.test(href);
+    const isMessengerCtx = /(^https?:\/\/)?(www\.)?messenger\.com/i.test(href);
+    const isFacebookCtx  = /(^https?:\/\/)?(www\.)?facebook\.com/i.test(href);
+    const isCreateOrSellerRoute = /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(href);
 
-    const det = await page.evaluate(() => {
-      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      function isVisible(el) {
+    const ctx = await page.evaluate(() => {
+      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const isVisible = (el) => {
         try {
           const st = window.getComputedStyle(el);
           if (!st) return false;
-          if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+          if (st.visibility === 'hidden' || st.display === 'none') return false;
           if (el.offsetParent === null) return false;
           const r = el.getBoundingClientRect();
           return r && r.width > 0 && r.height > 0;
         } catch { return false; }
-      }
-      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,button')).slice(0, 800)
-        .filter(isVisible);
-      const texts = nodes.map(el => norm(el.innerText || '')).filter(Boolean);
-      const any = pats => texts.some(t => pats.some(p => t.includes(p)));
-
-      // Lista ampla de bloqueios (multilíngue e variações)
-      const genericBlock = any([
-        'voce esta bloqueado temporariamente',
-        'voce esta bloqueada temporariamente',
-        'você está bloqueado temporariamente',
-        'você está bloqueada temporariamente',
-        'bloqueamos temporariamente',
-        'bloqueio temporario',
-        'youre temporarily blocked',
-        'you’re temporarily blocked',
-        'temporarily blocked',
-        'this feature is temporarily unavailable',
-        'you cant use this feature right now',
-        'limitamos a frequencia com que voce pode fazer isso',
-        'estas temporalmente bloqueado',
-        'estas temporalmente bloqueada',
-        'has sido bloqueado temporalmente',
-        'has sido bloqueada temporalmente',
-        'funcion no esta disponible temporalmente'
-      ]);
-
-      // Específicos para postagem/marketplace
-      const robeSpecific = any([
-        'publicacao bloqueada temporariamente',
-        'postagem bloqueada temporariamente',
-        'sua conta foi temporariamente impedida de postar',
-        'temporariamente impedido de realizar esta acao',
-        'nao e possivel publicar agora',
-        'you cant post right now',
-        'you cant list right now',
-        'marketplace',
-        'vender no marketplace',
-        'publicar no marketplace'
-      ]);
-
+      };
+      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button')).filter(isVisible).slice(0, 1200);
+      const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
       const hasReloadBtn = !!document.querySelector('[aria-label*="recarregar"],[aria-label*="reload"],[aria-label*="recargar"]');
-
-      return { genericBlock, robeSpecific, hasReloadBtn, href: location.href };
+      return { texts, hasReloadBtn };
     });
 
-    let domain = null;
-    if (det.genericBlock) {
-      if (isMessengerCtx) domain = 'messenger';
-      else if (det.robeSpecific) domain = 'facebook';
-      else if (isFacebookCtx) domain = 'facebook';
-    } else if (det.robeSpecific) {
-      domain = 'facebook';
+    // BLOQUEIO genérico (mensagens clássicas de "temporariamente bloqueado")
+    const genericBlock = ctx.texts.some(t =>
+      t.includes('voce esta bloqueado temporariamente') ||
+      t.includes('você está bloqueado temporariamente') ||
+      t.includes('youre temporarily blocked') ||
+      t.includes('you’re temporarily blocked') ||
+      t.includes('temporarily blocked') ||
+      t.includes('this feature is temporarily unavailable') ||
+      t.includes('funcion no esta disponible temporalmente')
+    );
+
+    // BLOQUEIO explícito de publicação/listagem (somente FB e em rotas de publish/sell)
+    const explicitFbBlock = ctx.texts.some(t =>
+      t.includes('voce nao pode publicar agora') ||
+      t.includes('você não pode publicar agora') ||
+      t.includes('voce nao pode listar agora') ||
+      t.includes('você não pode listar agora') ||
+      t.includes('you cant post right now') ||
+      t.includes('you can’t post right now') ||
+      t.includes('you cant list right now') ||
+      t.includes('you can’t list right now') ||
+      t.includes('sua conta foi temporariamente impedida de publicar') ||
+      t.includes('temporariamente impedido de realizar esta acao') ||
+      t.includes('temporariamente impedido de realizar esta ação')
+    );
+
+    // REGRAS CIRÚRGICAS DE DOMÍNIO
+    if (genericBlock && isMessengerCtx) {
+      return { blocked: true, domain: 'messenger', hasReloadBtn: ctx.hasReloadBtn };
+    }
+    if (explicitFbBlock && isFacebookCtx && isCreateOrSellerRoute) {
+      return { blocked: true, domain: 'facebook', hasReloadBtn: ctx.hasReloadBtn };
     }
 
-    return { blocked: !!domain, domain, hasReloadBtn: !!det.hasReloadBtn };
+    // Caso contrário, jamais considerar bloqueado
+    return { blocked: false, domain: null, hasReloadBtn: ctx.hasReloadBtn };
   } catch {
     return { blocked: false, domain: null };
   }
