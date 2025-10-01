@@ -1354,7 +1354,7 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
   }
 }
 
-// PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO APRIMORADA E SAFETY-GATED
+// PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO — ROBUSTA, TODOS OS GÊNEROS/IDIOMAS/VARIAÇÕES
 async function detectMessengerTempBlock(page) {
   try {
     const href = typeof page.url === 'function' ? (page.url() || '') : '';
@@ -1374,39 +1374,71 @@ async function detectMessengerTempBlock(page) {
           return r && r.width > 0 && r.height > 0;
         } catch { return false; }
       };
-      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button')).filter(isVisible).slice(0, 1200);
+      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button')).filter(isVisible).slice(0, 2000);
       const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
-      const hasReloadBtn = !!document.querySelector('[aria-label*="recarregar"],[aria-label*="reload"],[aria-label*="recargar"]');
-      return { texts, hasReloadBtn };
+      const joined = texts.join(' ');
+      const hasReloadBtn = !!document.querySelector(
+        '[aria-label*="recarregar"],[aria-label*="reload"],[aria-label*="recargar"],[aria-label*="atualizar"],[aria-label*="actualizar"]'
+      );
+      return { texts, joined, hasReloadBtn };
     });
 
-    // BLOQUEIO genérico (mensagens clássicas de "temporariamente bloqueado")
-    const genericBlock = ctx.texts.some(t =>
-      t.includes('voce esta bloqueado temporariamente') ||
-      t.includes('você está bloqueado temporariamente') ||
-      t.includes('youre temporarily blocked') ||
-      t.includes('you’re temporarily blocked') ||
-      t.includes('temporarily blocked') ||
-      t.includes('this feature is temporarily unavailable') ||
-      t.includes('funcion no esta disponible temporalmente')
-    );
+    // Helpers
+    const someMatch = (arr, regs) => arr.some(t => regs.some(rx => rx.test(t)));
 
-    // BLOQUEIO explícito de publicação/listagem (somente FB e em rotas de publish/sell)
-    const explicitFbBlock = ctx.texts.some(t =>
-      t.includes('voce nao pode publicar agora') ||
-      t.includes('você não pode publicar agora') ||
-      t.includes('voce nao pode listar agora') ||
-      t.includes('você não pode listar agora') ||
-      t.includes('you cant post right now') ||
-      t.includes('you can’t post right now') ||
-      t.includes('you cant list right now') ||
-      t.includes('you can’t list right now') ||
-      t.includes('sua conta foi temporariamente impedida de publicar') ||
-      t.includes('temporariamente impedido de realizar esta acao') ||
-      t.includes('temporariamente impedido de realizar esta ação')
-    );
+    // Regex normalizados (NFD + lowercase) para todas as variações
+    const RX = {
+      // Português — bloqueado(a)/bloqueado(a) temporariamente (+ variações de “está/foi”, ordem, e com/sem “(a)”)
+      pt_a1: /voce\s+esta\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,    // você está bloqueado(a) temporariamente
+      pt_a2: /voce\s+foi\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,     // você foi bloqueado(a) temporariamente
+      pt_a3: /temporar\w*\s+bloquead[oa](?:\(?a\)?)?/,               // temporariamente bloqueado(a)
+      // Português — termos alternativos frequentes
+      pt_b1: /temporar\w*\s+restrit[oa]/,                            // temporariamente restrito(a)
+      pt_b2: /impedid[oa].{0,40}temporar\w*/,                       // impedido(a) … temporariamente
+      pt_b3: /bloquead[oa].{0,40}enviar\s+mensagens/,               // bloqueado(a) … enviar mensagens
+      // Inglês — clássicos e variações
+      en_a1: /you(?:'|’)?re\s+temporar(?:ily)?\s+block/,            // you're temporarily blocked
+      en_a2: /you(?:\s+are|\s*ve|\s*’ve)?\s+been\s+temporar(?:ily)?\s+block/, // you've/you have been temporarily blocked
+      en_a3: /temporar(?:ily)?\s+restricted/,                        // temporarily restricted
+      en_a4: /block(?:ed)?\s+from\s+sending\s+messages/,            // blocked from sending messages
+      en_a5: /we(?:'|’)?ve\s+temporar(?:ily)?\s+block/,             // we've temporarily blocked
+      // Espanhol — clássicos
+      es_a1: /estas\s+temporalmente\s+bloquead[oa]/,                // estás temporalmente bloqueado(a)
+      es_a2: /has\s+sido\s+bloquead[oa]\s+temporalmente/,           // has sido bloqueado(a) temporalmente
+      es_a3: /funcion\s+no\s+esta\s+disponible\s+temporalmente/     // función no está disponible temporalmente
+    };
 
-    // REGRAS CIRÚRGICAS DE DOMÍNIO
+    // Heurística: co-ocorrência em um mesmo nó (ou texto unido) de “bloquead” + “temporar”
+    const coOccurInNode = ctx.texts.some(t => /bloquead[oa]/.test(t) && /temporar\w*/.test(t));
+    const coOccurJoined = /bloquead[oa].{0,80}temporar\w*/.test(ctx.joined) || /temporar\w*.{0,80}bloquead[oa]/.test(ctx.joined);
+
+    // Detector genérico (multi-idioma e variações)
+    const genericBlock =
+      someMatch(ctx.texts, [
+        RX.pt_a1,RX.pt_a2,RX.pt_a3,
+        RX.pt_b1,RX.pt_b2,RX.pt_b3,
+        RX.en_a1,RX.en_a2,RX.en_a3,RX.en_a4,RX.en_a5,
+        RX.es_a1,RX.es_a2,RX.es_a3
+      ])
+      || coOccurInNode
+      || coOccurJoined;
+
+    // Detector explícito Marketplace (Facebook) — manter e ampliar o que já havia
+    const explicitFbBlock = someMatch(ctx.texts, [
+      /voce\s+nao\s+pode\s+publicar\s+agora/,
+      /voce\s+nao\s+pode\s+listar\s+agora/,
+      /voce\s+nao\s+pode\s+enviar\s+mensagens/,
+      /voces?\s+nao\s+podem\s+publicar\s+agora/,
+      /voces?\s+nao\s+podem\s+listar\s+agora/,
+      /voce\s+esta\s+temporar\w*\s+impedid[oa]/,
+      /temporar\w*\s+impedid[oa]\s+de\s+realizar/,
+      /voces?\s+estao\s+temporar\w*\s+impedid[oa]s?/,
+      /you\s+can(?:'|’)?t\s+post\s+right\s+now/,
+      /you\s+can(?:'|’)?t\s+list\s+right\s+now/,
+      /you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+posting/,
+      /you(?:'|’)?re\s+temporar(?:ily)?\s+restricted\s+from\s+posting/
+    ]);
+
     if (genericBlock && isMessengerCtx) {
       return { blocked: true, domain: 'messenger', hasReloadBtn: ctx.hasReloadBtn };
     }
@@ -1416,6 +1448,7 @@ async function detectMessengerTempBlock(page) {
 
     // Caso contrário, jamais considerar bloqueado
     return { blocked: false, domain: null, hasReloadBtn: ctx.hasReloadBtn };
+
   } catch {
     return { blocked: false, domain: null };
   }
