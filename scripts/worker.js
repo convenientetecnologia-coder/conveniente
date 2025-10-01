@@ -799,6 +799,29 @@ try {
   try { console.warn('[BOOT] Erro ao repopular frozenUntil dos manifests:', err && err.message || err); } catch {}
 }
 
+// === BOOT DEFAULT ROBE COOLDOWN 24h (sem pauseReason) ===
+async function applyBootCooldown24h() {
+  const plus24 = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const perfisArr = loadPerfisJson();
+  for (const p of perfisArr) {
+    if (!p || !p.nome) continue;
+    try {
+      await manifestStore.update(p.nome, (m) => {
+        m = m || {};
+        m.robeCooldownUntil = now + plus24;
+        m.robeCooldownRemainingMs = 0;
+        return m;
+      });
+    } catch {}
+  }
+  try { await issues.append('system', 'mil_action', 'boot_cooldown_24h_applied'); } catch {}
+  try { await snapshotStatusAndWrite(); } catch {}
+}
+
+// chama no boot
+applyBootCooldown24h().catch(()=>{});
+
 // ======= INÍCIO: TRAVA DE ATIVAÇÃO SIMULTÂNEA =========
 // ======= FIM: TRAVA DE ATIVAÇÃO SIMULTÂNEA ============
 
@@ -938,6 +961,19 @@ async function activateOnce(nome, source = '') {
         robeMeta[nome].closingReason = null;
         console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
+
+        // DEFAULT cooldown 24h sempre que abrir manualmente
+        try {
+          const now = Date.now();
+          const plus24 = 24 * 60 * 60 * 1000;
+          await manifestStore.update(nome, (m) => {
+            m = m || {};
+            m.robeCooldownUntil = now + plus24;
+            m.robeCooldownRemainingMs = 0;
+            return m;
+          });
+        } catch {}
+
         return { ok: true };
       } catch (e) {
         // Mantém status consistente (active:false) no snapshot em caso de falha
@@ -3180,14 +3216,18 @@ async function nurseTick() {
       }
       const p0 = pages[0];
       // INSTRUÇÃO 1: SUBSTITUIR LÓGICA DE DETECÇÃO
-      // INSTRUÇÃO 1: BLOQUEIO SÓ EM CONTEXTO VÁLIDO (Robe ativo OU rota lista/criação)
-      let det = { blocked: false };
+      // DETECÇÃO: sempre checar Messenger; checar Facebook só em create/seller
+      let det = { blocked:false };
       try {
         const urlNow = (typeof p0.url === 'function') ? (p0.url() || '') : '';
+        const isMessenger = /messenger.com/i.test(urlNow);
         const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const isCreateOrSellerRoute =
           /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
-        if (robeRunning || isCreateOrSellerRoute) {
+
+        if (isMessenger) {
+          det = await browserHelper.detectMessengerTempBlock(p0);
+        } else if (robeRunning || isCreateOrSellerRoute) {
           det = await browserHelper.detectMessengerTempBlock(p0);
         }
       } catch {}
@@ -3441,14 +3481,18 @@ async function healthTick() {
       await wirePageObservers(nome, page);
     }
 
-    // DETECÇÃO DE BLOQUEIO SÓ EM CONTEXTO VÁLIDO (Robe ativo OU rota lista/criação/seller)
-    let det = { blocked: false };
+    // DETECÇÃO: sempre checar Messenger; checar Facebook só em create/seller
+    let det = { blocked:false };
     try {
       const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
+      const isMessenger = /messenger.com/i.test(urlNow);
       const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
       const isCreateOrSellerRoute =
         /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
-      if (robeRunning || isCreateOrSellerRoute) {
+
+      if (isMessenger) {
+        det = await browserHelper.detectMessengerTempBlock(page);
+      } else if (robeRunning || isCreateOrSellerRoute) {
         det = await browserHelper.detectMessengerTempBlock(page);
       }
     } catch {}
