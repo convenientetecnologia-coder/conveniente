@@ -7,6 +7,7 @@ const utils = require('./utils.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
 const manifestStore = require('./manifestStore.js');
+const stepLog = require('./stepLog.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -508,15 +509,7 @@ async function publicarEFechar5s(page) {
     return (!visible) || disabled;
   }, { timeout: 15000 }).catch(() => false);
 
-  // 3) Espera heurística de conclusão (dashboard/lista) e fecha
-  // Se dashboard detectado, fecha em seguida; se não, aguarda até 3s e fecha.
-  try {
-    const sawPopupRef = { value: false };
-    await waitAndCloseAfterPublishSmart(page, { hardMaxMs: 3000, popupExtraMs: 2500, sawPopupRef });
-  } catch {
-    try { await safeClosePage(page); } catch {}
-  }
-
+  // 3) Não fechar a página aqui; confirmação será feita por heurísticas externas
   return true;
 }
 
@@ -525,6 +518,39 @@ async function publicarEFechar5s(page) {
 // (Removido: robeMeta e população a partir do manifest; controle de estado local não é mais utilizado)
 
 // --------------------------------------------------
+
+async function waitPublishedEvidence(page, titulo, {maxMs=15000}={}) {
+  const t0 = Date.now();
+  while (Date.now()-t0 < maxMs) {
+    try {
+      const ok = await page.evaluate((t) => {
+        const norm = s => (s||'').toLowerCase();
+        const txts = Array.from(document.querySelectorAll('div, span, h1, h2')).slice(0, 400).map(el => norm(el.innerText || el.textContent || ''));
+        if (txts.some(s => s.includes('sua publicação') && s.includes('foi concluída'))) return true;
+        if (txts.some(s => s.includes('anúncio') && s.includes('publicado'))) return true;
+        return false;
+      }, titulo);
+      if (ok) return true;
+    } catch {}
+    await sleep(300);
+  }
+  return false;
+}
+
+async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
+  try {
+    await page.goto('https://www.facebook.com/marketplace/you/selling', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(800);
+    // Busca pelo título
+    const found = await page.evaluate((t) => {
+      const norm = s => (s||'').toLowerCase();
+      const want = norm(t).slice(0, 30);
+      const cards = Array.from(document.querySelectorAll('a, div')).slice(0, 800);
+      return cards.some(el => norm(el.innerText || el.textContent || '').includes(want));
+    }, titulo);
+    return !!found;
+  } catch { return false; }
+}
 
 /**
  * Start Robe — rápido e robusto:
@@ -543,7 +569,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
 
   // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
-  const stepLog = [];
+  const stepLogArr = [];
+
+  const attId = stepLog.attemptId();
+  stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'start', robePauseMs });
 
   console.log(`[ROBE][startRobe] INÍCIO para ${nome}, pauseMS=${robePauseMs}, horário=${new Date().toLocaleString()}`);
 
@@ -571,10 +600,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         await sleep(leftMs + 300);
       } else {
         const ate = new Date(manifest.robeCooldownUntil).toLocaleString();
-        stepLog.push(`[${nome}] Cooldown ainda ativo por ${Math.ceil(leftMs/1000)}s (até ${ate}). Abortando sem atualizar pause.`);
+        stepLogArr.push(`[${nome}] Cooldown ainda ativo por ${Math.ceil(leftMs/1000)}s (até ${ate}). Abortando sem atualizar pause.`);
         abortedByCooldown = true;
         // NÃO criar mensagens para “abortedByCooldown”
-        return { ok: false, error: `cooldown_until_${ate}`, log: stepLog };
+        return { ok: false, error: `cooldown_until_${ate}`, log: stepLogArr };
       }
     }
 
@@ -584,7 +613,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     const coords = utils.getCoords(manifest.cidade || '');
     // ALTERAÇÃO AQUI: patchPage recebe nome (string), não manifest
     await patchPage(nome, page, coords);
-    stepLog.push(`[${nome}] Nova aba criada para Robe`);
+    stepLogArr.push(`[${nome}] Nova aba criada para Robe`);
 
     // Captura possíveis diálogos
     page.on('dialog', async dlg => {
@@ -604,10 +633,24 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Marketplace create/posting: NÃO bloquear NENHUM asset. Mantém patchPage limpo.
 
     // Navegação rápida + readiness rápido
-    await page.goto('https://www.facebook.com/marketplace/create/item', {
-      waitUntil: 'domcontentloaded',
-      timeout: 20000
-    });
+    {
+      const url = 'https://www.facebook.com/marketplace/create/item';
+      let okNav = false, navErr = null;
+      for (let i=0;i<2 && !okNav;i++) {
+        try {
+          stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create', try: i+1 });
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          okNav = true;
+        } catch (e) {
+          navErr = e && e.message || String(e);
+          await page.waitForTimeout(800);
+        }
+      }
+      if (!okNav) {
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create_fail', err: navErr });
+        throw new Error('nav_create_timeout');
+      }
+    }
 
     // Fast-lane readiness (3.5s). Se não ficar pronto, fallback com seletor (8s).
     const readyFast = await waitForCreateItemReady(page, { timeout: 3500 });
@@ -616,10 +659,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         timeout: 8000
       }).catch(() => {});
     }
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });
 
     // Micro settle (2 frames + 100–220 ms); substituído por sleep apenas (alteração)
     await sleep(jitter(100, 220));
-    stepLog.push(`[${nome}] Tela de criar item pronta (fast-lane)`);
+    stepLogArr.push(`[${nome}] Tela de criar item pronta (fast-lane)`);
 
     // FOTO — via fotos.js
     const pick = await fotos.pickPhotoForAccount(nome, workingNames);
@@ -634,6 +678,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     let inputFoto = await page.$('input[type="file"][accept*="image"]');
     if (!inputFoto) inputFoto = await page.$('input[type="file"]');
     if (!inputFoto) throw new Error('Campo para upload de foto não localizado.');
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
     await sleep(jitter(250, 450));
 
@@ -641,33 +686,54 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     const titulos = readJsonSafe(path.join(__dirname, '..', 'dados', 'titulos.json'), []);
     const titulo = titulos.length ? titulos[Math.floor(Math.random()*titulos.length)] : 'Título padrão';
     await preencherTitulo(page, titulo);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'title_ok', value: titulo });
     await sleep(jitter(120, 220));
 
     // PREÇO
     await preencherPreco(page);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'price_ok', value: '0' });
 
     // CATEGORIA
     await selecionarCategoriaMoveis(page);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'category_ok', value: 'Móveis' });
 
     // CONDIÇÃO
     await selecionarCondicaoNovo(page);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'condition_ok', value: 'Novo' });
 
     // LOCALIZAÇÃO
     const cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
     const localUsada = await preencherLocalizacao(page, cidadePerfil);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
 
     // —————— ALTERAÇÃO APLICADA: Rotina publicarEFechar5s no lugar do pós-publicação anterior ——————
 
-    // PUBLICAR e FECHAR (novo fluxo militar)
-    const okPub = await publicarEFechar5s(page);
-    if (!okPub) throw new Error('Falha ao publicar (nenhum clique efetivo em Publicar/Avançar).');
+    // PATCH — PUBLICAÇÃO COMPROVADA (EVIDENCE + 2 TENTATIVAS)
+    let publishedOk = false, pubErr = null;
+    for (let i=0;i<2 && !publishedOk;i++) {
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try', try: i+1 });
+      const okPub = await publicarEFechar5s(page);
+      if (!okPub) { pubErr = 'publish_click_fail'; continue; }
+      // Heurística 1: detector in-page
+      const ev1 = await waitPublishedEvidence(page, titulo, { maxMs: 12000 });
+      // Heurística 2: seller listing contendo título
+      const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 20000 });
+      publishedOk = ev1 || ev2;
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_evidence', ev1, ev2 });
+      if (!publishedOk) await page.waitForTimeout(1200);
+    }
+    if (!publishedOk) {
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_fail', err: pubErr });
+      throw new Error('publish_not_confirmed');
+    }
     published = true;
-    stepLog.push(`[${nome}] Publicação concluída; aguardado rotina militar e aba fechada.`);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
 
     // Confirmar localização usada (após publicar — mantém)
     try { await locais.confirmUsed(cidadePerfil, localUsada); } catch {}
 
     // Aba já foi fechada pela publicarEFechar5s; solta a referência
+    try { await safeClosePage(page); } catch {}
     page = null;
 
     // Registrar e possivelmente excluir a foto via fotos.js
@@ -675,15 +741,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       const res = await fotos.markPostedAndMaybeDelete(nome, fotoNome, workingNames);
       if (res && res.ok) {
         if (res.deleted) {
-          stepLog.push(`[${nome}] Foto "${fotoNome}" removida (todas as contas trabalhando já usaram).`);
+          stepLogArr.push(`[${nome}] Foto "${fotoNome}" removida (todas as contas trabalhando já usaram).`);
         } else {
-          stepLog.push(`[${nome}] Foto "${fotoNome}" registrada (ainda ativa para outras contas).`);
+          stepLogArr.push(`[${nome}] Foto "${fotoNome}" registrada (ainda ativa para outras contas).`);
         }
       } else {
-        stepLog.push(`[${nome}] AVISO: falha ao registrar foto "${fotoNome}": ${(res && res.error) || 'desconhecido'}`);
+        stepLogArr.push(`[${nome}] AVISO: falha ao registrar foto "${fotoNome}": ${(res && res.error) || 'desconhecido'}`);
       }
     } catch (e) {
-      stepLog.push(`[${nome}] AVISO: exceção ao registrar/excluir foto "${fotoNome}": ${e && e.message || e}`);
+      stepLogArr.push(`[${nome}] AVISO: exceção ao registrar/excluir foto "${fotoNome}": ${e && e.message || e}`);
     }
 
     // IMPORTANTE: Grava ultimaPostagemRobe via manifestStore
@@ -697,7 +763,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
   } catch (e) {
     const errMsg = (e && e.message) ? e.message : String(e);
-    stepLog.push(`[${nome}] ERRO: ${errMsg}`);
+    stepLogArr.push(`[${nome}] ERRO: ${errMsg}`);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'error', err: (e && e.message) || String(e) });
 
     // Tipo de issue (no-photo vs erro geral)
     const isNoPhoto = /sem foto dispon[ií]vel/i.test(errMsg);
@@ -717,7 +784,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try { await logIssue(nome, 'robe_error', `Erro técnico; cooldown padrão ${Math.ceil(pause/60000)}min: ${errMsg}`); } catch {}
     } catch {}
 
-    return { ok: false, error: errMsg, log: stepLog };
+    return { ok: false, error: errMsg, log: stepLogArr };
 
   } finally {
     // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
@@ -731,7 +798,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         });
       }
     } catch (err) {
-      stepLog.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
+      stepLogArr.push(`[${nome}] ERRO ao atualizar cooldown: ${err && err.message || err}`);
     }
 
     // OPCIONAL RECOMENDADO: logging do beforeunload dialog
@@ -743,10 +810,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     if (page) {
       try { await safeClosePage(page); console.log(`[ROBE] ${nome}: aba fechada no finally`); } catch {}
     }
-    console.log(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'} | logs:`, stepLog);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
+    console.log(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'} | logs:`, stepLogArr);
   }
 
-  return { ok: published, log: stepLog };
+  return { ok: published, log: stepLogArr };
 }
 
 // --------------------------------------------------

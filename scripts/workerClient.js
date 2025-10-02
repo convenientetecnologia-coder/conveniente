@@ -39,7 +39,7 @@ function startWatchdog() {
         return; 
       }
 
-      const r = await module.exports.sendWorkerCommand('get-status', {}, { timeoutMs: 7000 }).catch(() => null);
+      const r = await module.exports.sendWorkerCommand('get-status', {}, { timeoutMs: 12000 }).catch(() => null);
       if (r && r.perfis) {
         _wd.failCount = 0;
         _wd.lastOkAt = Date.now();
@@ -53,7 +53,7 @@ function startWatchdog() {
       _wd.failCount = 0;
       _wd.lastOkAt = 0;
     }
-  }, 5000);
+  }, 7000); // Troque 5000 por 7000 ms aqui!
 }
 // === END WATCHDOG ===
 

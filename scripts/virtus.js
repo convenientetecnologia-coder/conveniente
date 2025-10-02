@@ -17,6 +17,8 @@ const fsRaw = require('fs'); // Necessário para uso síncrono dentro de getPerf
 const path = require('path');
 const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
+const stepLog = require('./stepLog.js');
+const chatLock = require('./chatLock.js');
 
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
@@ -337,6 +339,9 @@ async function sendMessageSafe(p, campo, msg) {
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
 async function startVirtus(browser, nome, robeMeta = {}) {
+  const attId = stepLog.attemptId();
+  stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'start' });
+
   // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 1 ==========
   // Checagem ultra robusta de freezer
   let manifestFrozenUntil = 0;
@@ -480,6 +485,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!running) return null;
         if (!browser || (browser.isConnected && browser.isConnected() === false)) return null;
         if (page && typeof page.isClosed === 'function' && page.isClosed()) return null;
+
+        try {
+          page.on('dialog', async (dlg) => {
+            try {
+              const t = dlg.type && dlg.type();
+              const m = (dlg.message && dlg.message()) || '';
+              if (t === 'beforeunload' || /recarregar|atualizar|leave this page|continuar/i.test(m)) {
+                await dlg.accept().catch(()=>{});
+                stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'beforeunload_accept' });
+              } else {
+                await dlg.dismiss().catch(()=>{});
+              }
+            } catch {}
+          });
+        } catch {}
+
         return page;
       } catch (e) {
         log('ensurePage falhou:', e + '');
@@ -775,6 +796,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const delay = randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
     log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
     filaChatTimer = setTimeout(async () => {
+      stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next, in: delay });
       filaChatTimer = null;
       await responderChat(next);
       scheduleNextIfIdle();
@@ -799,182 +821,209 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
 
-    if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
-    // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
-    if (!browser || browser.isConnected?.() === false) {
-      log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
-      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      return;
-    }
-    let p = await ensurePage();
-    if (!p || (p.isClosed && p.isClosed())) {
-      log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
-      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      return;
-    }
-    // === FIM GUARD DE VIDA ===
-    if (!chatId) return;
-    chatAtivo = chatId;
-
+    let _chatLockAcquired = false;
     try {
-      p = await ensurePage();
-      if (!p) {
+      // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
+      if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
+      if (!browser || browser.isConnected?.() === false) {
+        log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
+        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
+        running = false;
+        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+        return;
+      }
+      let p = await ensurePage();
+      if (!p || (p.isClosed && p.isClosed())) {
+        log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
+        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
+        running = false;
+        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+        return;
+      }
+      // === FIM GUARD DE VIDA ===
+      if (!chatId) return;
+
+      // Lock de disco POR chatId!
+      if (!chatLock.acquire(nome, chatId)) {
+        stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
         return;
       }
-      await garantirMarketplace(p);
+      _chatLockAcquired = true;
+      stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
 
-      const tsPrev = respondedCache.get(chatId);
-      if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
-        log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
-      }
+      chatAtivo = chatId;
 
-      let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-      let found = await p.$(anchorSel);
-
-      if (!found) {
-        log(`[WARN] Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`);
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
-      }
-
-      await p.evaluate((sel) => {
-        const el = document.querySelector(sel);
-        if (el) {
-          el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-          el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      try {
+        p = await ensurePage();
+        if (!p) {
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
         }
-      }, anchorSel);
+        await garantirMarketplace(p);
 
-      let attempts = 0;
-      let achou = false;
-      let urlAtual = '';
-      while (attempts < 8) {
-        urlAtual = await p.evaluate(() => location.pathname);
-        if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
-          achou = true;
-          break;
+        const tsPrev = respondedCache.get(chatId);
+        if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
+          log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
         }
-        await sleep(250);
-        attempts++;
-      }
-      if (!achou) {
-        log(`[ERRO] Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`);
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
-      }
 
-      if (await isChatBlocked(p)) {
-        log(`[WARN] Chat ${chatId} bloqueado/indisponível. Marcando como respondido para evitar looping.`);
-        const tsNow = agoraEpoch();
-        historico[chatId] = tsNow;
-        respondedCache.set(chatId, tsNow);
-        ultimoAtendimento = tsNow;
-        await salvaHistorico();
-        try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        resetFail(chatId);
-        return;
-      }
+        let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+        let found = await p.$(anchorSel);
 
-      let campo = await waitForComposer(p, 10000);
-      if (!campo) {
-        log(`[WARN] Composer não encontrado. Fallback: goto direto e revalidar.`);
-        try {
-          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          await sleep(800);
-        } catch {}
+        if (!found) {
+          log(`[WARN] Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`);
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        await p.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (el) {
+            el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+            el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+          }
+        }, anchorSel);
+
+        let attempts = 0;
+        let achou = false;
+        let urlAtual = '';
+        while (attempts < 8) {
+          urlAtual = await p.evaluate(() => location.pathname);
+          if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
+            achou = true;
+            break;
+          }
+          await sleep(250);
+          attempts++;
+        }
+        if (!achou) {
+          log(`[ERRO] Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`);
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
         if (await isChatBlocked(p)) {
-          log(`[WARN] Chat ${chatId} bloqueado no fallback. Marcando como respondido para evitar looping.`);
+          log(`[WARN] Chat ${chatId} bloqueado/indisponível. Marcando como respondido para evitar looping.`);
           const tsNow = agoraEpoch();
           historico[chatId] = tsNow;
           respondedCache.set(chatId, tsNow);
           ultimoAtendimento = tsNow;
           await salvaHistorico();
-          try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
+          try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           resetFail(chatId);
           return;
         }
-        campo = await waitForComposer(p, 8000);
-      }
 
-      if (!campo) {
-        const fails = incFail(chatId);
-        log(`[ERRO] Composer indisponível para chat ${chatId}. Tentativas: ${fails}`);
-        if (fails >= 2) {
-          log(`[WARN] ${chatId} falhou 2x. Marcando como respondido para não travar fila.`);
-          const tsNow = agoraEpoch();
-          historico[chatId] = tsNow;
-          respondedCache.set(chatId, tsNow);
-          ultimoAtendimento = tsNow;
-          await salvaHistorico();
-          try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
+        let campo = await waitForComposer(p, 10000);
+        if (!campo) {
+          log(`[WARN] Composer não encontrado. Fallback: goto direto e revalidar.`);
+          try {
+            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await sleep(800);
+          } catch {}
+          if (await isChatBlocked(p)) {
+            log(`[WARN] Chat ${chatId} bloqueado no fallback. Marcando como respondido para evitar looping.`);
+            const tsNow = agoraEpoch();
+            historico[chatId] = tsNow;
+            respondedCache.set(chatId, tsNow);
+            ultimoAtendimento = tsNow;
+            await salvaHistorico();
+            try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            resetFail(chatId);
+            return;
+          }
+          campo = await waitForComposer(p, 8000);
         }
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
+
+        if (!campo) {
+          const fails = incFail(chatId);
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'composer_missing', chatId, failCount: fails });
+          log(`[ERRO] Composer indisponível para chat ${chatId}. Tentativas: ${fails}`);
+          if (fails >= 2) {
+            log(`[WARN] ${chatId} falhou 2x. Marcando como respondido para não travar fila.`);
+            const tsNow = agoraEpoch();
+            historico[chatId] = tsNow;
+            respondedCache.set(chatId, tsNow);
+            ultimoAtendimento = tsNow;
+            await salvaHistorico();
+            try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
+          }
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        resetFail(chatId);
+
+        if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
+          log('[ERRO] atendimento.json vazio. Não será enviada resposta!');
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        let msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
+        if (Array.isArray(msg)) msg = msg.join('\n');
+        if (typeof msg !== 'string') msg = String(msg);
+
+        if (!running) { chatAtivo = null; return; }
+        if (!browser || browser.isConnected?.() === false) { chatAtivo = null; return; }
+        if (!p || p.isClosed?.()) { chatAtivo = null; return; }
+
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
+        try { await campo.focus(); } catch {}
+        const isFocused = await p.evaluate((el)=> document.activeElement===el, campo).catch(()=>false);
+        if (!isFocused) { try { await campo.focus(); } catch {} }
+
+        // -------- SUBSTITUIR PELO USO sendMessageSafe --------
+        await sendMessageSafe(p, campo, msg);
+        // -----------------------------------------------------
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
+
+        log(`Mensagem enviada para chat ${chatId}`);
+        const tsNow = agoraEpoch();
+        historico[chatId] = tsNow;
+        respondedCache.set(chatId, tsNow);
+        ultimoAtendimento = tsNow;
+        await salvaHistorico();
+
+      } catch (err) {
+        const msgErr = (err && err.message) ? err.message : String(err);
+        // Se alvo fechou, classificar corretamente e sair silenciosamente
+        if (/Target closed|Protocol error.*Target closed|Session closed/i.test(msgErr)) {
+          try { await logIssue(nome, 'browser_disconnected', `chat ${chatId}: target/page closed during send`); } catch {}
+        } else {
+          try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msgErr}`); } catch {}
+        }
       }
 
-      resetFail(chatId);
-
-      if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
-        log('[ERRO] atendimento.json vazio. Não será enviada resposta!');
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
-      }
-
-      let msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
-      if (Array.isArray(msg)) msg = msg.join('\n');
-      if (typeof msg !== 'string') msg = String(msg);
-
-      if (!running) { chatAtivo = null; return; }
-      if (!browser || browser.isConnected?.() === false) { chatAtivo = null; return; }
-      if (!p || p.isClosed?.()) { chatAtivo = null; return; }
-      // -------- SUBSTITUIR PELO USO sendMessageSafe --------
-      await sendMessageSafe(p, campo, msg);
-      // -----------------------------------------------------
-
-      log(`Mensagem enviada para chat ${chatId}`);
-      const tsNow = agoraEpoch();
-      historico[chatId] = tsNow;
-      respondedCache.set(chatId, tsNow);
-      ultimoAtendimento = tsNow;
-      await salvaHistorico();
-
-    } catch (err) {
-      const msgErr = (err && err.message) ? err.message : String(err);
-      // Se alvo fechou, classificar corretamente e sair silenciosamente
-      if (/Target closed|Protocol error.*Target closed|Session closed/i.test(msgErr)) {
-        try { await logIssue(nome, 'browser_disconnected', `chat ${chatId}: target/page closed during send`); } catch {}
-      } else {
-        try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msgErr}`); } catch {}
+      fila = fila.filter(id => id !== chatId);
+      chatAtivo = null;
+      if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
+    } finally {
+      if (_chatLockAcquired) {
+        try { chatLock.release(nome, chatId); } catch {}
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
       }
     }
-
-    fila = fila.filter(id => id !== chatId);
-    chatAtivo = null;
-    if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
   }
 
   // ========================
@@ -1195,6 +1244,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   return {
     stop: async () => {
+      stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'stop' });
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;

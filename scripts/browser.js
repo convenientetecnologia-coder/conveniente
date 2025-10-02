@@ -230,6 +230,13 @@ async function patchPage(nome, page, coords) {
     }
   }
   // ==== FIM DO PATCH ====
+
+  // PATCH: Hook redundante de beforeunload para toda nova page
+  try {
+    await page.evaluateOnNewDocument(() => {
+      window.addEventListener('beforeunload', (e) => { try { e.stopImmediatePropagation(); } catch {} }, true);
+    });
+  } catch {}
 }
 
 // Minimização suave
@@ -712,6 +719,14 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
     browser = browserTry;
 
+    // 1. PATCH: Set protocol timeout GLOBAL para 60s
+    try {
+      const conn = browser && browser._connection;
+      if (conn && typeof conn.setProtocolTimeout === 'function') {
+        conn.setProtocolTimeout(60000); // 60s para operações CDP
+      }
+    } catch {}
+
     // 1) Garantir pages()
     let pages;
     try {
@@ -740,6 +755,35 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     } catch (e) {
       if (process.env.BROWSER_DEBUG === '1') console.warn('[BROWSER] Falha ao maximizar (seguindo normal):', e && e.message);
     }
+
+    // 2. PATCH: Configuração defaultTimeout, defaultNavigationTimeout e interceptação beforeunload para TODAS as new pages!
+    try {
+      const setDefaults = async (p) => {
+        try {
+          p.setDefaultTimeout(30000); // 30s ações padrão
+          p.setDefaultNavigationTimeout(45000); // 45s navegação
+          p.on('dialog', async (dlg) => {
+            try {
+              const t = dlg.type && dlg.type();
+              const m = (dlg.message && dlg.message()) || '';
+              if (t === 'beforeunload' || /sair|deixar|leave this page|continuar|recarregar|atualizar/i.test(m)) {
+                await dlg.accept().catch(()=>{});
+              } else {
+                await dlg.dismiss().catch(()=>{});
+              }
+            } catch {}
+          });
+        } catch {}
+      };
+      const pagesNow = await browser.pages();
+      for (const p of (pagesNow||[])) await setDefaults(p);
+      browser.on('targetcreated', async (t) => {
+        try {
+          const p = await t.page().catch(()=>null);
+          if (p) await setDefaults(p);
+        } catch {}
+      });
+    } catch {}
 
     // 3) Permissões GEO (se falhar, segue)
     try {
