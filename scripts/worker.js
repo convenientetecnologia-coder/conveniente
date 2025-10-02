@@ -177,7 +177,13 @@ async function tryFixPhantom(nome, page) {
   // 4) Escalade: reopen browser
   ph.failures = (ph.failures || 0) + 1;
   await issues.append(nome, 'mil_action', `phantom_escalate:reopen failures=${ph.failures}`);
+  // Interlock anti-flap
+  if (killGuardActive(nome)) {
+    await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+    return true;
+  }
   await handlers.deactivate({ nome, reason: 'phantom_reopen', policy: 'preserveDesired' });
+  setKillGuard(nome);
   ph.lastActionAt = now;
   return true;
 }
@@ -777,6 +783,15 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 // Estado global do Robe (cooldown, fila, etc)
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
 
+// Interlock global anti-flap per profile
+function killGuardActive(nome) {
+  return robeMeta[nome]?.killGuardUntil && robeMeta[nome].killGuardUntil > Date.now();
+}
+function setKillGuard(nome, ms=90000) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  robeMeta[nome].killGuardUntil = Date.now() + ms;
+}
+
 // Repopular frozenUntil ao boot, lendo dos manifests
 try {
   const perfisArr = loadPerfisJson();
@@ -797,6 +812,56 @@ try {
   }
 } catch (err) {
   try { console.warn('[BOOT] Erro ao repopular frozenUntil dos manifests:', err && err.message || err); } catch {}
+}
+
+// Wrapper para enriquecer automaticamente os logs de issues.append (contexto completo)
+const _issuesAppendOrig = issues && issues.append ? issues.append.bind(issues) : null;
+if (_issuesAppendOrig) {
+  issues.append = async function(nome, type, msg) {
+    try {
+      const now = Date.now();
+      let url = '', readyState = '', pagesCount = 0;
+      let deltaDom = '', deltaNet = '';
+      let healthStage = '';
+      let killGuardUntil = robeMeta[nome]?.killGuardUntil || 0;
+      let recoveryHysteresisUntil = robeMeta[nome]?.recoveryHysteresisUntil || 0;
+      let blockHysteresisUntil = robeMeta[nome]?.blockHysteresisUntil || 0;
+      let strikes = 0;
+
+      const ctrl = controllers.get(nome);
+      let page = null;
+      if (ctrl && ctrl.browser) {
+        try {
+          const pages = await ctrl.browser.pages().catch(()=>[]);
+          pagesCount = Array.isArray(pages) ? pages.length : 0;
+          if (pages && pages[0]) page = pages[0];
+        } catch {}
+      }
+      if (page) {
+        try { url = typeof page.url === 'function' ? (page.url() || '') : ''; } catch {}
+        try {
+          readyState = await Promise.race([
+            (async () => await page.evaluate(() => document.readyState).catch(()=>''))(),
+            new Promise(res => setTimeout(()=>res(''), 300))
+          ]);
+        } catch {}
+      }
+      const st = getHealth && getHealth(nome);
+      if (st) {
+        healthStage = st.stage || '';
+        if (st.lastDomEventAt) deltaDom = String(now - st.lastDomEventAt);
+        if (st.lastNetEventAt) deltaNet = String(now - st.lastNetEventAt);
+      }
+      const rm = robeMeta[nome] || {};
+      strikes = rm.noPagesStrikes || rm.zombieStrikes || (Array.isArray(rm.blockDetectWindow) ? rm.blockDetectWindow.length : 0) || 0;
+
+      const extra = ` url=${url||''} readyState=${readyState||''} deltaDom=${deltaDom} deltaNet=${deltaNet} pagesCount=${pagesCount} strikes=${strikes} killGuardUntil=${killGuardUntil||0} recoveryHysteresisUntil=${recoveryHysteresisUntil||0} blockHysteresisUntil=${blockHysteresisUntil||0} healthStage=${healthStage||''}`;
+      const newMsg = (msg == null ? '' : String(msg)) + extra;
+      return await _issuesAppendOrig(nome, type, newMsg);
+    } catch (e) {
+      try { return await _issuesAppendOrig(nome, type, msg); } catch {}
+    }
+  };
 }
 
 // === BOOT DEFAULT ROBE COOLDOWN 24h (sem pauseReason) ===
@@ -866,6 +931,12 @@ async function activateOnce(nome, source = '') {
   opening[nome] = true;
   let _supervisorSlotGranted = false;
   try {
+    // Supervisor interlock para aberturas durante kill_guard
+    if (killGuardActive(nome)) {
+      await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
+      return { ok:false, error:"kill_guard_until" };
+    }
+
     // SÓ AGORA peça slot ao supervisor
     const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
@@ -1402,9 +1473,15 @@ async function ramCpuMonitorTick() {
             const ctrl = controllers.get(nome);
             if (ctrl && ctrl.configurando) return;
 
-            handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'})
-              .then(() => reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`))
-              .catch(()=>{});
+            // Interlock anti-flap
+            if (killGuardActive(nome)) {
+              await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+              return;
+            }
+
+            await handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'});
+            setKillGuard(nome);
+            await reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
             robeMeta[nome].cpuPercent = null; // marca null até a volta
           }
         }
@@ -1420,6 +1497,13 @@ async function ramCpuMonitorTick() {
     // [PATCH-ANTI-STUCK] Só atua breaker se browser está realmente vivo!
     if (!controllers.has(nome)) continue;
 
+    const now = Date.now();
+    // Histerese: não agir se recente kill RAM
+    if (robeMeta[nome]?.ramKillHysteresisUntil && robeMeta[nome].ramKillHysteresisUntil > now) {
+      await issues.append(nome, 'ram_hysteresis_skip', `skip_until=${robeMeta[nome].ramKillHysteresisUntil}`);
+      continue;
+    }
+
     const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
     if (ramMB == null) continue;
 
@@ -1428,6 +1512,9 @@ async function ramCpuMonitorTick() {
     const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
     if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue; // <3min
     if (vivos <= 1) continue; // nunca processa breaker se só 1 perfil trabalhando
+
+    // Thresholds: 2200MB em Windows, senão 1600MB
+    const RAM_KILL_MB_LOCAL = process.platform === 'win32' ? 2200 : 1600;
 
     // Histórico curto
     const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
@@ -1445,7 +1532,7 @@ async function ramCpuMonitorTick() {
     }
 
     // Warn apenas se RAM muito alta, sem kill
-    if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < AUTO_CFG.RAM_KILL_MB) {
+    if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < RAM_KILL_MB_LOCAL) {
       if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
         try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
         robeMeta[nome].lastWarn = Date.now();
@@ -1454,7 +1541,8 @@ async function ramCpuMonitorTick() {
 
     // **Agora só KILL se leak comprovado**
     if (hist.length >= 5) {
-      const allHigh = hist.slice(-5).every(h => h.mb >= AUTO_CFG.RAM_KILL_MB);
+      const recent = hist.slice(-5);
+      const allHigh = recent.every(h => h.mb >= RAM_KILL_MB_LOCAL);
       let slopeOK = false;
       if (!allHigh) {
         const A = hist[0], B = hist[hist.length-1];
@@ -1467,14 +1555,65 @@ async function ramCpuMonitorTick() {
       }
       // Só kill se comprovado leak real!
       if (allHigh || slopeOK) {
+        // Dupla amostragem com delay
+        try {
+          await new Promise(r=>setTimeout(r,1500));
+          let newStats = null;
+          const pids = (pidsByNome && pidsByNome[nome]) || [];
+          let ramMB2 = null;
+          if (Array.isArray(pids) && pids.length) {
+            try {
+              newStats = await pidusage(pids);
+              let somaRam2 = 0, count2 = 0;
+              for (const pid of pids) {
+                const st2 = newStats[pid];
+                if (!st2) continue;
+                if (typeof st2.memory === 'number') { somaRam2 += st2.memory; count2++; }
+              }
+              if (count2 > 0) ramMB2 = Math.round(somaRam2/1024/1024);
+            } catch {}
+          }
+          // Atualiza leitura no hist somente se conseguimos nova amostra
+          if (typeof ramMB2 === 'number') {
+            hist.push({ t: Date.now(), mb: ramMB2 });
+            while (hist.length > 6) hist.shift();
+          }
+          const last5 = hist.slice(-5);
+          const allHigh2 = last5.every(h => h.mb >= RAM_KILL_MB_LOCAL);
+          let slopeOK2 = false;
+          {
+            const A2 = hist[0], B2 = hist[hist.length-1];
+            const elapsedMs2 = (B2.t - A2.t);
+            const dMin2 = Math.max(0.5, elapsedMs2/60000);
+            const slope2 = (B2.mb - A2.mb) / dMin2;
+            const avg2 = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
+            slopeOK2 = (elapsedMs2 >= 120000) && (slope2 > 50) && (avg2 > 800);
+          }
+
+          if (!(allHigh2 || slopeOK2)) {
+            await issues.append(nome, 'ram_double_sample_clear', `skip=${ramMB2!=null?ramMB2:'n/a'}MB`);
+            continue;
+          }
+        } catch {}
+
         // GUARD: Nunca realizar kill durante configuração — ctrl.configurando
         const ctrl = controllers.get(nome);
-        if (ctrl && ctrl.configurando) return;
+        if (ctrl && ctrl.configurando) continue;
 
-        handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' })
-        .then(() => reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK}) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`))
-        .catch(()=>{});
-        // Não limpar hist; preserveDesired reabrirá mais tarde
+        // Interlock anti-flap
+        if (killGuardActive(nome)) {
+          await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+          continue;
+        }
+
+        await handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' });
+        setKillGuard(nome);
+        await reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK}) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+
+        // Histerese 3min
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].ramKillHysteresisUntil = Date.now() + 180000;
+        robeMeta[nome].ramKilledAt = Date.now();
       }
     }
   }
@@ -1997,6 +2136,7 @@ try {
       robeMeta[nome].reopenAt = now + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
       robeMeta[nome].closingReason = 'disconnected';
       issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
+      setKillGuard(nome, 30000); // 30s para janela 'disconnected'
     } else {
       issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
     }
@@ -2923,6 +3063,18 @@ return _statusLock;
 // *** LEGADO: pode remover após estabilizar Supervisor externo *
 // setInterval(() => { assertFullActivity().catch(()=>{}); }, Math.max(15000, Math.floor(SELF_HEAL_CFG.FULL_ASSERT_INTERVAL_MS/2)));
 
+// Debounce de logs via Nurse (1x/60s por diagnóstico)
+async function appendIssueNurseDebounced(nome, type, message, key) {
+  if (!nome) return;
+  robeMeta[nome] = robeMeta[nome] || {};
+  robeMeta[nome].nurseLogDebounce = robeMeta[nome].nurseLogDebounce || {};
+  const k = key || type;
+  const last = robeMeta[nome].nurseLogDebounce[k] || 0;
+  if (Date.now() - last < 60000) return;
+  robeMeta[nome].nurseLogDebounce[k] = Date.now();
+  await issues.append(nome, type, message);
+}
+
 // ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
   INTERVAL_MS: 5000,
@@ -3173,6 +3325,13 @@ async function nurseTick() {
         continue;
       }
 
+      // nurseTick não compete se healthTick recovering (histerese de recuperação)
+      const hs = getHealth && getHealth(nome);
+      if (hs && ['recover1','recover2','recover3'].includes(hs.stage)) {
+        await appendIssueNurseDebounced(nome,'mil_action','health_recovery_in_progress_skip','health_recovery_in_progress_skip');
+        continue;
+      }
+
       // INICIO DA INSTRUÇÃO 6: substituição do trecho nurseTick para modo leve e holds
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
@@ -3208,12 +3367,45 @@ async function nurseTick() {
       if (!ctrl || !ctrl.browser) continue;
       let pages = [];
       try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
+
+      // INSTRUÇÃO 2: Dupla confirmação no_pages + retry + strikes
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].noPagesStrikes = robeMeta[nome].noPagesStrikes || 0;
+      robeMeta[nome].lastNoPagesAt = robeMeta[nome].lastNoPagesAt || 0;
+
       if (!pages || !pages[0]) {
-        await reportAction(nome, 'nurse_kill', `motivo=no_pages url= reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-        try { registerFailure(nome, 'no_pages', 'external'); } catch {}
-        await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
-        continue;
+        let retryFailed = false;
+        // Se browser.isConnected?.() é true — tente pages() novamente após 400ms
+        if (ctrl.browser.isConnected?.()) {
+          await new Promise(r=>setTimeout(r,400));
+          let retryPages = [];
+          try { retryPages = await ctrl.browser.pages(); } catch {}
+          if (!retryPages || !retryPages[0]) retryFailed = true;
+        } else {
+          retryFailed = true;
+        }
+        if (retryFailed) {
+          robeMeta[nome].noPagesStrikes += 1;
+          robeMeta[nome].lastNoPagesAt = Date.now();
+          await appendIssueNurseDebounced(nome, `suspect_no_pages`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_pages');
+          if (robeMeta[nome].noPagesStrikes >= 2 && (Date.now() - robeMeta[nome].lastNoPagesAt) >= 5000) {
+            if (killGuardActive(nome)) {
+              await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until', 'guard_skip_nopages');
+              continue;
+            }
+            await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
+            await registerFailure(nome, 'no_pages', 'external');
+            await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+            setKillGuard(nome);
+            robeMeta[nome].noPagesStrikes = 0;
+            continue;
+          }
+          continue;
+        }
+      } else {
+        robeMeta[nome].noPagesStrikes = 0;
       }
+
       const p0 = pages[0];
       // INSTRUÇÃO 1: SUBSTITUIR LÓGICA DE DETECÇÃO
       // DETECÇÃO: sempre checar Messenger; checar Facebook só em create/seller
@@ -3227,77 +3419,103 @@ async function nurseTick() {
 
         if (isMessenger) {
           det = await browserHelper.detectMessengerTempBlock(p0);
+          det.domain = 'messenger';
         } else if (robeRunning || isCreateOrSellerRoute) {
           det = await browserHelper.detectMessengerTempBlock(p0);
+          det.domain = det.domain || 'facebook';
         }
       } catch {}
 
-      if (det && det.blocked) {
-        if (det.domain === 'messenger') {
-          // Bloco INALTERADO ...
-          try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
-          try { await stopVirtus(nome); } catch {}
-          robeMeta[nome] = robeMeta[nome] || {};
-          const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
-          if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
-            robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
+      // INSTRUÇÃO 5: Bloqueio Messenger – Confirmação 2-de-3 leituras (janela 5s), blockHysteresisUntil
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow || [];
+      let now2 = Date.now();
+
+      if (det && det.blocked && det.domain === 'messenger') {
+        // Mantenha array dos últimos 3 detecções em 5s
+        robeMeta[nome].blockDetectWindow.push(now2);
+        // mantém só strikes na janela de 5s
+        robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow.filter(ts => now2 - ts <= 5000);
+
+        if (robeMeta[nome].blockDetectWindow.length >= 2 && (!robeMeta[nome].blockHysteresisUntil || robeMeta[nome].blockHysteresisUntil < now2)) {
+          // Confirme: se for 2 de 3 strikes, só aqui desativa
+          await appendIssueNurseDebounced(nome, `action_virtus_block`, `blockDetectWindow=${robeMeta[nome].blockDetectWindow.length}`, 'action_virtus_block');
+          robeMeta[nome].blockHysteresisUntil = now2 + 15*60*1000; // 15min block window
+          if (killGuardActive(nome)) {
+            await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)', 'guard_skip_block');
+            continue;
+          }
+          await stopVirtus(nome);
+          if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now2)) {
+            robeMeta[nome].reopenAt = now2 + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
             robeMeta[nome].closingReason = 'virtus_block';
           }
-          try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+          await registerFailure(nome, 'messenger_temp_block', 'external');
           await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
+          setKillGuard(nome);
           await snapshotStatusAndWrite();
           continue;
-        }
-        if (det.domain === 'facebook') {
-          // Bloco INALTERADO ...
-          try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
-          const now = Date.now();
-          const plus24 = 24 * 60 * 60 * 1000;
-          try {
-            const man = await manifestStore.read(nome).catch(()=>null);
-            const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - now) : 0;
-            if (!man || curLeft < 80*60*1000) {
-              await manifestStore.update(nome, m => {
-                m = m || {};
-                m.robeCooldownUntil = now + plus24;
-                m.robeCooldownRemainingMs = 0;
-                return m;
-              });
-            }
-          } catch {}
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].pauseReason = 'fb_block';
-          robeMeta[nome].lastRobeBlockAt = Date.now();
-          await snapshotStatusAndWrite();
+        } else {
+          await appendIssueNurseDebounced(nome, `suspect_messenger_block`, `strike=${robeMeta[nome].blockDetectWindow.length}`, 'suspect_messenger_block');
           continue;
         }
       }
-      // FIM INSTRUÇÃO 1
+      if (robeMeta[nome].blockHysteresisUntil && robeMeta[nome].blockHysteresisUntil > now2) continue; // suprime dentro da block window
 
-      // NÃO competir com recovery stateful
-      const hs = getHealth && getHealth(nome);
-      if (hs && (hs.stage === 'recover1' || hs.stage === 'recover2' || hs.stage === 'recover3')) {
+      // Facebook block (mantém comportamento anterior)
+      if (det && det.blocked && det.domain === 'facebook') {
+        try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
+        const nowf = Date.now();
+        const plus24 = 24 * 60 * 60 * 1000;
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - nowf) : 0;
+          if (!man || curLeft < 80*60*1000) {
+            await manifestStore.update(nome, m => {
+              m = m || {};
+              m.robeCooldownUntil = nowf + plus24;
+              m.robeCooldownRemainingMs = 0;
+              return m;
+            });
+          }
+        } catch {}
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].pauseReason = 'fb_block';
+        robeMeta[nome].lastRobeBlockAt = Date.now();
+        await snapshotStatusAndWrite();
+        continue;
+      }
+
+      // NÃO competir com recovery stateful (redundante, mas mantém)
+      const hs2 = getHealth && getHealth(nome);
+      if (hs2 && (hs2.stage === 'recover1' || hs2.stage === 'recover2' || hs2.stage === 'recover3')) {
         continue;
       }
 
       let healthy = await pageReadyBasic(p0);
       if (!healthy) {
+        // Histerese pós-reload recover: suprime por 90s
+        if (robeMeta[nome].recoveryHysteresisUntil && robeMeta[nome].recoveryHysteresisUntil > Date.now()) {
+          await appendIssueNurseDebounced(nome, 'hysteresis_skip', 'Aguardando histerese pós-recover', 'hysteresis_skip_after_recover');
+          continue;
+        }
+
         // Debounce: conta reloads nos últimos 60s, pausa se ultrapassar 3
         robeMeta[nome] = robeMeta[nome] || {};
-        const now2 = Date.now();
+        const nowReload = Date.now();
         if (!robeMeta[nome].reloadAttemptsWindow) robeMeta[nome].reloadAttemptsWindow = [];
-        robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => now2 - ts < 60000);
+        robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => nowReload - ts < 60000);
 
-        robeMeta[nome].reloadAttemptsWindow.push(now2);
+        robeMeta[nome].reloadAttemptsWindow.push(nowReload);
         if (robeMeta[nome].reloadAttemptsWindow.length > 3) {
           // Log e GRACE: não tente novo reload nos próximos 60s
-          robeMeta[nome].reloadBlockedUntil = now2+60000;
+          robeMeta[nome].reloadBlockedUntil = nowReload+60000;
           await reportAction(nome, 'mil_action', 
             `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${(p0.url&&p0.url())||''}`
           );
           continue; // Não tenta nem reload nem kill — só sai do loop até a próxima rodada.
         }
-        if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > now2) {
+        if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > nowReload) {
           continue; // Se grace está ativo, pula hint de reload para este ciclo
         }
 
@@ -3307,12 +3525,29 @@ async function nurseTick() {
         }
         if (healthy) {
           await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
+          // Histerese pós-reload
+          robeMeta[nome].recoveryHysteresisUntil = Date.now() + 90000;
         } else {
-          await reportAction(nome, 'nurse_kill', `motivo=page_zumbi url=${((p0.url&&p0.url())||'')} reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-          try { registerFailure(nome, 'zombie', 'external'); } catch {}
-          await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+          // INSTRUÇÃO 4: “page_zumbi” dupla de falha em ciclos (anti-flap)
+          robeMeta[nome].zombieStrikes = robeMeta[nome].zombieStrikes || 0;
+          robeMeta[nome].zombieStrikes += 1;
+          await appendIssueNurseDebounced(nome, `suspect_page_zombie`, `strike=${robeMeta[nome].zombieStrikes}`, 'suspect_page_zombie');
+          if (robeMeta[nome].zombieStrikes >= 2) {
+            if (killGuardActive(nome)) {
+              await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until', 'guard_skip_page_zombie');
+              continue;
+            }
+            await appendIssueNurseDebounced(nome, `action_nurse_kill_page_zombie`, `Strike=${robeMeta[nome].zombieStrikes}`, 'action_nurse_kill_page_zombie');
+            try { registerFailure(nome, 'zombie', 'external'); } catch {}
+            await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
+            setKillGuard(nome);
+            robeMeta[nome].zombieStrikes = 0;
+            continue;
+          }
           continue;
         }
+      } else {
+        robeMeta[nome].zombieStrikes = 0;
       }
 
       // INSTRUÇÃO 5 — INSERIR EXATAMENTE AQUI (DEPOIS de pageReadyBasic/reloads e ANTES de prune/virtus)
@@ -3461,7 +3696,12 @@ async function recoveryStep(nome, page, step) {
 async function escalateToReopen(nome, reason='health_reopen') {
   const ctrl = controllers.get(nome);
   try { await issues.append(nome, 'mil_action', `health_escalate:${reason}`); } catch {}
+  if (killGuardActive(nome)) {
+    await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+    return;
+  }
   await handlers.deactivate({ nome, reason, policy: 'preserveDesired' });
+  setKillGuard(nome);
   const st = getHealth(nome);
   st.stage = 'reopen';
   st.nextTryAt = Date.now() + 60000;
@@ -3492,8 +3732,10 @@ async function healthTick() {
 
       if (isMessenger) {
         det = await browserHelper.detectMessengerTempBlock(page);
+        det.domain = 'messenger';
       } else if (robeRunning || isCreateOrSellerRoute) {
         det = await browserHelper.detectMessengerTempBlock(page);
+        det.domain = det.domain || 'facebook';
       }
     } catch {}
     if (det && det.blocked) {
@@ -3508,7 +3750,12 @@ async function healthTick() {
           robeMeta[nome].closingReason = 'virtus_block';
         }
         try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+        if (killGuardActive(nome)) {
+          await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)');
+          continue;
+        }
         await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
+        setKillGuard(nome);
         await snapshotStatusAndWrite();
         continue;
       }

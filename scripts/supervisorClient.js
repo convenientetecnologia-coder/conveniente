@@ -7,7 +7,31 @@
 
 const supervisor = require('./supervisor.js');
 
+// Patch kill_guard_until: bloqueio proativo
+const fs = require('fs');
+const path = require('path');
+const statusJsonPath = path.join(__dirname, '..', 'dados', 'status.json');
+
+// Função para checar kill_guard_until antes de pedir slot ao supervisor
+function localKillGuardActive(perfil) {
+    try {
+        if (!fs.existsSync(statusJsonPath)) return false;
+        const st = JSON.parse(fs.readFileSync(statusJsonPath, 'utf8'));
+        if (st && Array.isArray(st.perfis)) {
+            const ent = st.perfis.find(x => x && x.nome === perfil);
+            if (ent && typeof ent.killGuardUntil === 'number' && ent.killGuardUntil > Date.now()) {
+                return true;
+            }
+        }
+    } catch {}
+    return false;
+}
+// --- FIM PATCH local function
+
 async function requestOpen(perfil, url) {
+  if (localKillGuardActive(perfil)) {
+    return { ok: false, error: 'kill_guard_until', msg: 'Abertura de slot negada por kill_guard_until' };
+  }
   try {
     return supervisor.requestOpen(perfil);
   } catch (e) {

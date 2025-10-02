@@ -110,15 +110,72 @@ function padronizaType(type) {
   }
 }
 
+// Padronização dos tipos conforme instrução
+function prefixType(type, message) {
+  let t = String(type || '').trim();
+
+  // Already has prefix
+  if (t.startsWith('suspect_') || t.startsWith('action_')) {
+    return t;
+  }
+
+  // Cases that must be action_
+  if (
+    t.startsWith('nurse_kill') ||
+    t.startsWith('nurse_restart') ||
+    t.startsWith('block_detected') ||
+    t.startsWith('light_enter') ||
+    t.startsWith('light_exit') ||
+    t.startsWith('open_rollback_memory') ||
+    t.startsWith('mem_block_signup') ||
+    t.startsWith('mem_block_activate') ||
+    t.startsWith('admin_')
+  ) {
+    return 'action_' + t;
+  }
+
+  // Suspect indicators (zumbi, bloqueio, etc)
+  const suspectKeywords = ['no_pages', 'page_zumbi', 'messenger_block', 'fb_block', 'page_invisivel', 'autoban'];
+  for (const kw of suspectKeywords) {
+    if (t.indexOf(kw) >= 0) {
+      if (
+        /aviso|warn|suspect|suspeita|alert/i.test(message || t)
+      ) {
+        return 'suspect_' + t;
+      } else {
+        return 'action_' + t;
+      }
+    }
+  }
+
+  // Fallback: se não reconhecido, devolve o original padronizado ou misc.
+  return t;
+}
+
 // API
 function append(nome, type, message) {
   // FUTURO: suportar append estruturado para event stream com correlationId
   const file = getFilePath(nome);
+
+  // Padronização militar conforme instrução (annotation ENRIQUECIMENTO)
+  const origType = type;
+  const enrichedType = prefixType(type, message);
+
   const entry = {
     ts: Date.now(),
-    type: padronizaType(type),
-    message: sanitizeMessage(message)
+    type: padronizaType(enrichedType),
+    message: sanitizeMessage(message),
+    context: {
+      hostname: (() => { try { return require('os').hostname(); } catch { return ''; } })(),
+      pid: process.pid,
+      file: getFilePath(nome),
+      name: nome,
+      logType: padronizaType(enrichedType),
+      message: sanitizeMessage(message),
+      localTs: new Date().toISOString()
+    }
   };
+
   return _serialize(nome, () => {
     try {
       const arr = readJsonSafe(file, []);

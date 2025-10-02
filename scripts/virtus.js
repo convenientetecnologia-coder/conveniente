@@ -22,6 +22,9 @@ const utils = require('./utils.js');
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
 
+// Debounce de log "Browser morto, não é possível garantir page." — 1x/60s por perfil
+const virtusDeadLogTimes = {}; // { [nome]: timestamp }
+
 // ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
 function getPerfilManifest(nome) {
   const perfisArr = JSON.parse(fsRaw.readFileSync(path.join(__dirname, '../dados/perfis.json'), 'utf8'));
@@ -445,8 +448,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     ensurePagePromise = (async () => {
       if (!browser || (browser.isConnected && browser.isConnected() === false)) {
         const now = Date.now();
-        if (now - lastDeadLogAt > 8000) {
-          lastDeadLogAt = now;
+        if (!virtusDeadLogTimes[nome] || now - virtusDeadLogTimes[nome] > 60000) {
+          virtusDeadLogTimes[nome] = now;
           log(`[VIRTUS][${nome}] Browser morto, não é possível garantir page.`);
           if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
         }

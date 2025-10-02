@@ -1324,6 +1324,14 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
     let removed = 0;
     for (const p of targets) {
       try {
+        if (!fs.existsExists) {} // placeholder
+      } catch {}
+    }
+
+    // Ajuste: checagem correta de existência e remoção
+    removed = 0;
+    for (const p of targets) {
+      try {
         if (!fs.existsSync(p)) continue;
         // Proteção adicional contra alvos críticos
         const pNorm = path.normalize(p);
@@ -1357,100 +1365,182 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
 // PATCH DETECÇÃO DE BLOQUEIO TEMPORÁRIO — ROBUSTA, TODOS OS GÊNEROS/IDIOMAS/VARIAÇÕES
 async function detectMessengerTempBlock(page) {
   try {
-    const href = typeof page.url === 'function' ? (page.url() || '') : '';
-    const isMessengerCtx = /(^https?:\/\/)?(www\.)?messenger\.com/i.test(href);
-    const isFacebookCtx  = /(^https?:\/\/)?(www\.)?facebook\.com/i.test(href);
-    const isCreateOrSellerRoute = /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(href);
+    const v = await page.evaluate(() => {
+      try {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
-    const ctx = await page.evaluate(() => {
-      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-      const isVisible = (el) => {
+        const href = String((window && window.location && window.location.href) || '');
+
+        const isMessengerCtx = /(^https?:\/\/)?(www\.)?messenger\.com/i.test(href);
+        const isFacebookCtx  = /(^https?:\/\/)?(www\.)?facebook\.com/i.test(href);
+        const isCreateOrSellerRoute = /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(href);
+
+        const isVisible = (el) => {
+          try {
+            const st = window.getComputedStyle(el);
+            if (!st) return false;
+            if (st.visibility === 'hidden' || st.display === 'none') return false;
+            if (el.offsetParent === null) return false;
+            const r = el.getBoundingClientRect();
+            return r && r.width > 0 && r.height > 0;
+          } catch { return false; }
+        };
+
+        const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button,a')).filter(isVisible).slice(0, 3000);
+        const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
+        const joined = texts.join(' ');
+
+        // hasReloadBtn: tenta por aria-label e por conteúdo textual
+        let hasReloadBtn = !!document.querySelector(
+          '[aria-label*="recarregar"],[aria-label*="reload"],[aria-label*="recargar"],[aria-label*="atualizar"],[aria-label*="actualizar"],[aria-label*="tentar novamente"],[aria-label*="try again"]'
+        );
+        if (!hasReloadBtn) {
+          try {
+            const btns = Array.from(document.querySelectorAll('button,[role="button"],a'));
+            hasReloadBtn = btns.some(el => {
+              const t = norm((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''));
+              return /recarregar|recargar|reload|atualizar|actualizar|tentar\s+novamente|try\s+again/.test(t);
+            });
+          } catch {}
+        }
+
+        // Regex de frases fortes/variantes multi-idioma
+        const RX = {
+          // PT
+          pt_a1: /voce\s+esta\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,
+          pt_a2: /voce\s+foi\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,
+          pt_a3: /temporar\w*\s+bloquead[oa](?:\(?a\)?)?/,
+          pt_b1: /temporar\w*\s+restrit[oa]/,
+          pt_b2: /impedid[oa].{0,40}temporar\w*/,
+          pt_b3: /bloquead[oa].{0,40}enviar\s+mensagens/,
+          // EN
+          en_a1: /you(?:'|’)?re\s+temporar(?:ily)?\s+block/,
+          en_a2: /you(?:\s+are|\s*ve|\s*’ve)?\s+been\s+temporar(?:ily)?\s+block/,
+          en_a3: /temporar(?:ily)?\s+restricted/,
+          en_a4: /block(?:ed)?\s+from\s+sending\s+messages/,
+          en_a5: /we(?:'|’)?ve\s+temporar(?:ily)?\s+block/,
+          // ES
+          es_a1: /estas\s+temporalmente\s+bloquead[oa]/,
+          es_a2: /has\s+sido\s+bloquead[oa]\s+temporalmente/,
+          es_a3: /funcion\s+no\s+esta\s+disponible\s+temporalmente/
+        };
+
+        const someMatch = (arr, regs) => {
+          try { return arr.some(t => regs.some(rx => rx.test(t))); }
+          catch { return false; }
+        };
+
+        // Heurísticas de co-ocorrência
+        const coOccurInNode = texts.some(t => /bloquead[oa]/.test(t) && /temporar\w*/.test(t));
+        const coOccurJoined = /bloquead[oa].{0,80}temporar\w*/.test(joined) || /temporar\w*.{0,80}bloquead[oa]/.test(joined);
+
+        // Detector genérico
+        const genericBlock =
+          someMatch(texts, [
+            RX.pt_a1,RX.pt_a2,RX.pt_a3,
+            RX.pt_b1,RX.pt_b2,RX.pt_b3,
+            RX.en_a1,RX.en_a2,RX.en_a3,RX.en_a4,RX.en_a5,
+            RX.es_a1,RX.es_a2,RX.es_a3
+          ]) || coOccurInNode || coOccurJoined;
+
+        // Detector explícito Facebook Marketplace (create/seller/etc)
+        const explicitFbBlock = someMatch(texts, [
+          /voce\s+nao\s+pode\s+publicar\s+agora/,
+          /voce\s+nao\s+pode\s+listar\s+agora/,
+          /voce\s+nao\s+pode\s+enviar\s+mensagens/,
+          /voces?\s+nao\s+podem\s+publicar\s+agora/,
+          /voces?\s+nao\s+podem\s+listar\s+agora/,
+          /voce\s+esta\s+temporar\w*\s+impedid[oa]/,
+          /temporar\w*\s+impedid[oa]\s+de\s+realizar/,
+          /voces?\s+estao\s+temporar\w*\s+impedid[oa]s?/,
+          /you\s+can(?:'|’)?t\s+post\s+right\s+now/,
+          /you\s+can(?:'|’)?t\s+list\s+right\s+now/,
+          /you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+posting/,
+          /you(?:'|’)?re\s+temporar(?:ily)?\s+restricted\s+from\s+posting/
+        ]);
+
+        // strongEvidenceCount: frases fortes + co-ocorrências
+        const strongs = [
+          RX.pt_a1,RX.pt_a2,RX.pt_a3,
+          RX.pt_b1,RX.pt_b2,RX.pt_b3,
+          RX.en_a1,RX.en_a2,RX.en_a3,RX.en_a4,RX.en_a5,
+          RX.es_a1,RX.es_a2,RX.es_a3
+        ];
+        let strongEvidenceCount = 0;
+        for (const rx of strongs) {
+          if (texts.some(t => rx.test(t))) strongEvidenceCount++;
+        }
+        if (coOccurInNode) strongEvidenceCount++;
+        if (coOccurJoined) strongEvidenceCount++;
+
+        return {
+          texts,
+          joined,
+          hasReloadBtn,
+          genericBlock,
+          explicitFbBlock,
+          isMessengerCtx, isFacebookCtx, isCreateOrSellerRoute,
+          strongEvidenceCount
+        };
+      } catch (e) {
+        // fallback seguro
         try {
-          const st = window.getComputedStyle(el);
-          if (!st) return false;
-          if (st.visibility === 'hidden' || st.display === 'none') return false;
-          if (el.offsetParent === null) return false;
-          const r = el.getBoundingClientRect();
-          return r && r.width > 0 && r.height > 0;
-        } catch { return false; }
-      };
-      const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button')).filter(isVisible).slice(0, 2000);
-      const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
-      const joined = texts.join(' ');
-      const hasReloadBtn = !!document.querySelector(
-        '[aria-label*="recarregar"],[aria-label*="reload"],[aria-label*="recargar"],[aria-label*="atualizar"],[aria-label*="actualizar"]'
-      );
-      return { texts, joined, hasReloadBtn };
+          const href = String((window && window.location && window.location.href) || '');
+          return {
+            texts: [],
+            joined: '',
+            hasReloadBtn: false,
+            genericBlock: false,
+            explicitFbBlock: false,
+            isMessengerCtx: /messenger\.com/i.test(href),
+            isFacebookCtx: /facebook\.com/i.test(href),
+            isCreateOrSellerRoute: /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(href),
+            strongEvidenceCount: 0
+          };
+        } catch {
+          return {
+            texts: [],
+            joined: '',
+            hasReloadBtn: false,
+            genericBlock: false,
+            explicitFbBlock: false,
+            isMessengerCtx: false,
+            isFacebookCtx: false,
+            isCreateOrSellerRoute: false,
+            strongEvidenceCount: 0
+          };
+        }
+      }
     });
 
-    // Helpers
-    const someMatch = (arr, regs) => arr.some(t => regs.some(rx => rx.test(t)));
+    // Finaliza lógica de bloqueio e retorno fora do evaluate
+    let blocked = false;
+    let domain = null;
+    if (v.isMessengerCtx && v.genericBlock && (v.hasReloadBtn === true || (v.strongEvidenceCount || 0) >= 2)) {
+      blocked = true;
+      domain = 'messenger';
+    }
+    if (v.isFacebookCtx && v.isCreateOrSellerRoute && v.explicitFbBlock) {
+      blocked = true;
+      domain = 'facebook';
+    }
 
-    // Regex normalizados (NFD + lowercase) para todas as variações
-    const RX = {
-      // Português — bloqueado(a)/bloqueado(a) temporariamente (+ variações de “está/foi”, ordem, e com/sem “(a)”)
-      pt_a1: /voce\s+esta\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,    // você está bloqueado(a) temporariamente
-      pt_a2: /voce\s+foi\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,     // você foi bloqueado(a) temporariamente
-      pt_a3: /temporar\w*\s+bloquead[oa](?:\(?a\)?)?/,               // temporariamente bloqueado(a)
-      // Português — termos alternativos frequentes
-      pt_b1: /temporar\w*\s+restrit[oa]/,                            // temporariamente restrito(a)
-      pt_b2: /impedid[oa].{0,40}temporar\w*/,                       // impedido(a) … temporariamente
-      pt_b3: /bloquead[oa].{0,40}enviar\s+mensagens/,               // bloqueado(a) … enviar mensagens
-      // Inglês — clássicos e variações
-      en_a1: /you(?:'|’)?re\s+temporar(?:ily)?\s+block/,            // you're temporarily blocked
-      en_a2: /you(?:\s+are|\s*ve|\s*’ve)?\s+been\s+temporar(?:ily)?\s+block/, // you've/you have been temporarily blocked
-      en_a3: /temporar(?:ily)?\s+restricted/,                        // temporarily restricted
-      en_a4: /block(?:ed)?\s+from\s+sending\s+messages/,            // blocked from sending messages
-      en_a5: /we(?:'|’)?ve\s+temporar(?:ily)?\s+block/,             // we've temporarily blocked
-      // Espanhol — clássicos
-      es_a1: /estas\s+temporalmente\s+bloquead[oa]/,                // estás temporalmente bloqueado(a)
-      es_a2: /has\s+sido\s+bloquead[oa]\s+temporalmente/,           // has sido bloqueado(a) temporalmente
-      es_a3: /funcion\s+no\s+esta\s+disponible\s+temporalmente/     // función no está disponible temporalmente
+    return {
+      blocked,
+      domain,
+      hasReloadBtn: v.hasReloadBtn,
+      strongEvidenceCount: v.strongEvidenceCount,
+      joinedTexts: v.joined
     };
-
-    // Heurística: co-ocorrência em um mesmo nó (ou texto unido) de “bloquead” + “temporar”
-    const coOccurInNode = ctx.texts.some(t => /bloquead[oa]/.test(t) && /temporar\w*/.test(t));
-    const coOccurJoined = /bloquead[oa].{0,80}temporar\w*/.test(ctx.joined) || /temporar\w*.{0,80}bloquead[oa]/.test(ctx.joined);
-
-    // Detector genérico (multi-idioma e variações)
-    const genericBlock =
-      someMatch(ctx.texts, [
-        RX.pt_a1,RX.pt_a2,RX.pt_a3,
-        RX.pt_b1,RX.pt_b2,RX.pt_b3,
-        RX.en_a1,RX.en_a2,RX.en_a3,RX.en_a4,RX.en_a5,
-        RX.es_a1,RX.es_a2,RX.es_a3
-      ])
-      || coOccurInNode
-      || coOccurJoined;
-
-    // Detector explícito Marketplace (Facebook) — manter e ampliar o que já havia
-    const explicitFbBlock = someMatch(ctx.texts, [
-      /voce\s+nao\s+pode\s+publicar\s+agora/,
-      /voce\s+nao\s+pode\s+listar\s+agora/,
-      /voce\s+nao\s+pode\s+enviar\s+mensagens/,
-      /voces?\s+nao\s+podem\s+publicar\s+agora/,
-      /voces?\s+nao\s+podem\s+listar\s+agora/,
-      /voce\s+esta\s+temporar\w*\s+impedid[oa]/,
-      /temporar\w*\s+impedid[oa]\s+de\s+realizar/,
-      /voces?\s+estao\s+temporar\w*\s+impedid[oa]s?/,
-      /you\s+can(?:'|’)?t\s+post\s+right\s+now/,
-      /you\s+can(?:'|’)?t\s+list\s+right\s+now/,
-      /you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+posting/,
-      /you(?:'|’)?re\s+temporar(?:ily)?\s+restricted\s+from\s+posting/
-    ]);
-
-    if (genericBlock && isMessengerCtx) {
-      return { blocked: true, domain: 'messenger', hasReloadBtn: ctx.hasReloadBtn };
-    }
-    if (explicitFbBlock && isFacebookCtx && isCreateOrSellerRoute) {
-      return { blocked: true, domain: 'facebook', hasReloadBtn: ctx.hasReloadBtn };
-    }
-
-    // Caso contrário, jamais considerar bloqueado
-    return { blocked: false, domain: null, hasReloadBtn: ctx.hasReloadBtn };
-
   } catch {
-    return { blocked: false, domain: null };
+    // Retorno padrão com todos os campos obrigatórios
+    return {
+      blocked: false,
+      domain: null,
+      hasReloadBtn: false,
+      strongEvidenceCount: 0,
+      joinedTexts: ''
+    };
   }
 }
 

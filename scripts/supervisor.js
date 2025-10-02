@@ -14,6 +14,26 @@ const fs = require("fs");
 const path = require("path");
 const { getAvailableMB } = require('./utils.js'); // ADICIONADO CONFORME INSTRUÇÃO
 
+const pathStatusJson = path.join(__dirname, '..', 'dados', 'status.json');
+
+/**
+ * Checa se kill_guard_until está ativo no status para o perfil solicitado.
+ * Se ativo e timestamp > now, retorna true (bloqueará a abertura do slot).
+ */
+function killGuardActiveForPerfil(perfil) {
+  try {
+    if (!fs.existsSync(pathStatusJson)) return false;
+    const statusJson = JSON.parse(fs.readFileSync(pathStatusJson, 'utf8'));
+    if (!statusJson || !statusJson.perfis || !Array.isArray(statusJson.perfis)) return false;
+    const ent = statusJson.perfis.find(x => x && x.nome === perfil);
+    if (!ent) return false;
+    if (ent.killGuardUntil && typeof ent.killGuardUntil === 'number' && ent.killGuardUntil > Date.now()) {
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 // Configs
 const PORT = parseInt(process.env.SUPERVISOR_PORT || '9800', 10);
 // Quantidade reserva de RAM a manter livre (em MB, padrão: 2048)
@@ -144,6 +164,10 @@ function podeAbrirNovoSlot(perfil) {
 // Era /requestOpen: POST body {perfil}
 // AGORA: function requestOpen(perfil)
 function requestOpen(perfil) {
+  if (killGuardActiveForPerfil && killGuardActiveForPerfil(perfil)) {
+    pushEvent({type:"denied", reason:"kill_guard_until", perfil});
+    return { ok: false, reason: "kill_guard_until", msg: "Slot bloqueado por kill_guard_until (bloqueio anti-flapback)" };
+  }
   const resp = podeAbrirNovoSlot(perfil);
   // Logic for probe (como antes)
   if (!resp.ok && resp.reason === 'slots' && canProbe()) {
