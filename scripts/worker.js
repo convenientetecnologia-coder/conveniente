@@ -633,7 +633,13 @@ try {
 const dir = path.dirname(file);
 if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 const tmp = file + '.tmp';
-fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+const fd = fs.openSync(tmp, 'w');
+try {
+  fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+  fs.fsyncSync(fd); // <--- ADD esta linha
+} finally {
+  fs.closeSync(fd);
+}
 try { fs.unlinkSync(file); } catch {}
 try { fs.renameSync(tmp, file); }
 catch {
@@ -652,7 +658,7 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 }
 // === FIM: desired.json/status.json helpers ===
 
-// === Helpers de manifest + cooldown ===
+– // === Helpers de manifest + cooldown ===
 function manifestPathOf(nome) {
   const perfisArr = loadPerfisJson();
   const perfil = perfisArr.find(p => p && p.nome === nome);
@@ -864,29 +870,6 @@ if (_issuesAppendOrig) {
   };
 }
 
-// === BOOT DEFAULT ROBE COOLDOWN 24h (sem pauseReason) ===
-async function applyBootCooldown24h() {
-  const plus24 = 24 * 60 * 60 * 1000;
-  const now = Date.now();
-  const perfisArr = loadPerfisJson();
-  for (const p of perfisArr) {
-    if (!p || !p.nome) continue;
-    try {
-      await manifestStore.update(p.nome, (m) => {
-        m = m || {};
-        m.robeCooldownUntil = now + plus24;
-        m.robeCooldownRemainingMs = 0;
-        return m;
-      });
-    } catch {}
-  }
-  try { await issues.append('system', 'mil_action', 'boot_cooldown_24h_applied'); } catch {}
-  try { await snapshotStatusAndWrite(); } catch {}
-}
-
-// chama no boot
-applyBootCooldown24h().catch(()=>{});
-
 // ======= INÍCIO: TRAVA DE ATIVAÇÃO SIMULTÂNEA =========
 // ======= FIM: TRAVA DE ATIVAÇÃO SIMULTÂNEA ============
 
@@ -1032,18 +1015,6 @@ async function activateOnce(nome, source = '') {
         robeMeta[nome].closingReason = null;
         console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
-
-        // DEFAULT cooldown 24h sempre que abrir manualmente
-        try {
-          const now = Date.now();
-          const plus24 = 24 * 60 * 60 * 1000;
-          await manifestStore.update(nome, (m) => {
-            m = m || {};
-            m.robeCooldownUntil = now + plus24;
-            m.robeCooldownRemainingMs = 0;
-            return m;
-          });
-        } catch {}
 
         return { ok: true };
       } catch (e) {
@@ -3410,7 +3381,7 @@ async function nurseTick() {
           await appendIssueNurseDebounced(nome, `suspect_no_pages`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_pages');
           if (robeMeta[nome].noPagesStrikes >= 2 && (Date.now() - robeMeta[nome].lastNoPagesAt) >= 5000) {
             if (killGuardActive(nome)) {
-              await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until', 'guard_skip_nopages');
+              await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
               continue;
             }
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');

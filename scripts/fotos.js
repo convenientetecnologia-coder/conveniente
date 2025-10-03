@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto'); // <--- ADICIONADO
 
 // ------------------------ Configs e caminhos ------------------------
 const DADOS_DIR = path.join(__dirname, '..', 'dados');
@@ -20,6 +21,12 @@ function resolveFotosDir() {
   return path.join(desktopPath, 'fotos');
 }
 
+// ----------- SHA-256 Helper -----------
+function sha256File(abs) {
+  const buf = fs.readFileSync(abs);
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
 // ------------------------ Utils atômicos ------------------------
 function readJsonSafe(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -28,7 +35,13 @@ function writeJsonAtomic(file, obj) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+      fs.fsyncSync(fd); // <-- FSYNC aqui
+    } finally {
+      fs.closeSync(fd);
+    }
     try { fs.unlinkSync(file); } catch {}
     try { fs.renameSync(tmp, file); }
     catch {
@@ -96,19 +109,29 @@ function listAllPhotosSortedByMtimeAsc() {
   return enriched;
 }
 
-// Verifica se o arquivo atual parece ser a mesma “geração” que registramos
-function sameGeneration(rec, stat) {
-  if (!rec || !stat) return false;
-  if (typeof rec.size !== 'number' || typeof rec.mtimeMs !== 'number') return false;
-  // Exige match exato; se mudou mtimeMs ou size, consideramos “outra geração”
-  return rec.size === stat.size && rec.mtimeMs === stat.mtimeMs;
-}
+// ------------------------ SHA e META helpers ------------------------
 
-// Atualiza metadados de stat do registro
-function applyStatToRec(rec, stat) {
+// Atualiza metadados de stat do registro + SHA-256
+function applyStatToRec(rec, stat, absPath) {
   rec.size = stat.size;
   rec.mtimeMs = stat.mtimeMs;
   if (typeof rec.generation !== 'number') rec.generation = 1;
+
+  // Calcule SHA-256 assim que nova geração surge
+  try {
+    rec.sha256 = sha256File(absPath || '');
+  } catch {}
+}
+
+// Verifica se o arquivo atual parece ser a mesma “geração” que registramos (preferencialmente por hash)
+function sameGeneration(rec, stat, absPath) {
+  if (!rec || !stat) return false;
+  if (rec.sha256 && absPath) {
+    try { return rec.sha256 === sha256File(absPath); }
+    catch { return false; } // Se erro, treat as not the same
+  }
+  if (typeof rec.size !== 'number' || typeof rec.mtimeMs !== 'number') return false;
+  return rec.size === stat.size && rec.mtimeMs === stat.mtimeMs;
 }
 
 // ------------------------ API pública ------------------------
@@ -139,23 +162,36 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
       let rec = idx[name];
 
       if (!rec) {
-        rec = idx[name] = { postedBy: [], size: stat.size, mtimeMs: stat.mtimeMs, generation: 1 };
+        rec = idx[name] = { postedBy: [], reservedBy: {} };
+        applyStatToRec(rec, stat, abs);
         changed = true;
       } else {
-        // Se arquivo atual não bate com a geração registrada → trata como nova foto
-        if (!sameGeneration(rec, stat)) {
+        if (!sameGeneration(rec, stat, abs)) {
           rec.postedBy = [];
-          applyStatToRec(rec, stat);
+          rec.reservedBy = {};
+          applyStatToRec(rec, stat, abs);
           rec.deletePending = false;
           changed = true;
         }
       }
 
-      // Se esta conta já usou, pula para próxima
+      if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
+      if (!rec.reservedBy) rec.reservedBy = {};
+
+      // Se já postou, nunca retorna de novo
       if (rec.postedBy.includes(nomeConta)) continue;
 
-      // Foto disponível para esta conta
-      if (changed) saveIndex(idx);
+      // Se já reservado por esta conta, continue servindo esta foto
+      if (rec.reservedBy[nomeConta]) {
+        return { ok: true, file: name, absPath: abs };
+      }
+
+      // Se reservado por outra conta, pule
+      if (Object.keys(rec.reservedBy).length > 0) continue;
+
+      // Reserva agora para esta conta e flusha
+      rec.reservedBy[nomeConta] = { ts: Date.now() };
+      saveIndex(idx);
       return { ok: true, file: name, absPath: abs };
     }
 
@@ -171,6 +207,24 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
     if (removed || changed) saveIndex(idx);
 
     return { ok: false, error: 'no-photo-available' };
+  });
+}
+
+/**
+ * Libera a reserva de uma conta específica para um arquivo, caso haja erro ou abandono.
+ * @param {string} nomeConta
+ * @param {string} fileName
+ * @returns {Promise<{ok:true}>}
+ */
+async function releaseReservation(nomeConta, fileName) {
+  return _serialize(async () => {
+    let idx = loadIndex();
+    const rec = idx[fileName];
+    if (rec && rec.reservedBy && rec.reservedBy[nomeConta]) {
+      delete rec.reservedBy[nomeConta];
+      saveIndex(idx);
+    }
+    return { ok: true };
   });
 }
 
@@ -196,33 +250,30 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
 
     let rec = idx[fileName];
     if (!rec) {
-      // Se foto não estava no índice ainda, cria registro
-      rec = idx[fileName] = { postedBy: [] };
-      if (stat) applyStatToRec(rec, stat);
+      rec = idx[fileName] = { postedBy: [], reservedBy: {} };
+      if (stat) applyStatToRec(rec, stat, abs);
     } else {
-      // Se houver stat registrado e o arquivo mudou, trata como nova geração
-      if (stat && !sameGeneration(rec, stat)) {
+      if (stat && !sameGeneration(rec, stat, abs)) {
         rec.postedBy = [];
-        applyStatToRec(rec, stat);
+        rec.reservedBy = {};
+        applyStatToRec(rec, stat, abs);
         rec.deletePending = false;
       }
     }
 
-    // Garante postedBy
     if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
+    if (!rec.reservedBy) rec.reservedBy = {};
 
-    // Marca esta conta, se ainda não constar
-    if (!rec.postedBy.includes(nomeConta)) {
-      rec.postedBy.push(nomeConta);
-    }
+    // Remove reserva e marca postado
+    if (rec.reservedBy && rec.reservedBy[nomeConta]) delete rec.reservedBy[nomeConta];
+    if (!rec.postedBy.includes(nomeConta)) rec.postedBy.push(nomeConta);
 
-    // Critério de exclusão: se TODAS as workingNames constam em postedBy
+    // Critério de exclusão: workingNames
     const workingSet = new Set((workingNames || []).filter(Boolean));
     const allWorkedPosted = workingSet.size > 0
       ? [...workingSet].every(n => rec.postedBy.includes(n))
       : false;
 
-    // Se não tiver arquivo físico, apenas limpa o índice
     if (!exists) {
       delete idx[fileName];
       saveIndex(idx);
@@ -230,31 +281,27 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
     }
 
     if (allWorkedPosted) {
-      // Confirma que vamos excluir a MESMA geração
-      if (sameGeneration(rec, stat)) {
+      if (sameGeneration(rec, stat, abs)) {
         try {
-          fs.unlinkSync(abs); // exclusão definitiva (não vai para Lixeira)
+          fs.unlinkSync(abs);
           delete idx[fileName];
           saveIndex(idx);
           return { ok: true, deleted: true };
         } catch (e) {
-          // marca como pendente para GC
           rec.deletePending = true;
           rec.lastError = String(e && e.message || e);
           saveIndex(idx);
           return { ok: true, deleted: false };
         }
       } else {
-        // Geração mudou (arquivo substituído) → trata como nova
         rec.postedBy = [];
-        applyStatToRec(rec, stat);
+        rec.reservedBy = {};
+        applyStatToRec(rec, stat, abs);
         rec.deletePending = false;
         saveIndex(idx);
         return { ok: true, deleted: false };
       }
     }
-
-    // Ainda não pode excluir
     saveIndex(idx);
     return { ok: true, deleted: false };
   });
@@ -265,6 +312,7 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
  *   Remove entradas de índice cujos arquivos sumiram.
  *   Tenta excluir arquivos marcados com deletePending (se geração ainda combinar).
  *   Se a geração mudar para uma foto nova (mesmo nome), reseta postedBy para [].
+ *   Limpeza de reservas antigas (>3h)
  * @returns {Promise<{ok:true, removedIndex:number, deletedFiles:number, resetGens:number}>}
  */
 async function gcSweep() {
@@ -288,13 +336,24 @@ async function gcSweep() {
       }
 
       // Se a geração mudou (arquivo novo com o mesmo nome) → trata como nova
-      if (!sameGeneration(rec, stat)) {
+      if (!sameGeneration(rec, stat, abs)) {
         rec.postedBy = [];
-        applyStatToRec(rec, stat);
+        rec.reservedBy = {};
+        applyStatToRec(rec, stat, abs);
         if (rec.deletePending) rec.deletePending = false;
         resetGens++;
         changed = true;
         continue;
+      }
+
+      // Limpeza de reservas antigas (TTL 3h)
+      if (rec && rec.reservedBy) {
+        for (const n of Object.keys(rec.reservedBy)) {
+          if (Date.now() - rec.reservedBy[n].ts > 3*3600*1000) {
+            delete rec.reservedBy[n];
+            changed = true;
+          }
+        }
       }
 
       // Tenta remover os pendentes
@@ -331,6 +390,7 @@ module.exports = {
   resolveFotosDir,
   pickPhotoForAccount,
   markPostedAndMaybeDelete,
+  releaseReservation,
   gcSweep,
   getIndexSnapshot
 };

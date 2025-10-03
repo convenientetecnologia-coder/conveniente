@@ -35,7 +35,13 @@ function writeJsonAtomic(file, obj) {
     const dir = path.dirname(file);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+      fs.fsyncSync(fd); // obrigatoriedade militar: flush a disco agora!
+    } finally {
+      fs.closeSync(fd);
+    }
     try { fs.unlinkSync(file); } catch {}
     try { fs.renameSync(tmp, file); }
     catch {

@@ -567,6 +567,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
   let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
+  let fotoNome = null;
+  let fotoPath = null;
 
   // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
   const stepLogArr = [];
@@ -671,8 +673,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       const reason = pick.error || 'no-photo-available';
       throw new Error(`Sem foto disponível para esta conta (${reason}).`);
     }
-    const fotoPath = pick.absPath;
-    const fotoNome = pick.file;
+    fotoPath = pick.absPath;
+    fotoNome = pick.file;
 
     // Upload
     let inputFoto = await page.$('input[type="file"][accept*="image"]');
@@ -736,20 +738,16 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     try { await safeClosePage(page); } catch {}
     page = null;
 
-    // Registrar e possivelmente excluir a foto via fotos.js
-    try {
-      const res = await fotos.markPostedAndMaybeDelete(nome, fotoNome, workingNames);
-      if (res && res.ok) {
-        if (res.deleted) {
-          stepLogArr.push(`[${nome}] Foto "${fotoNome}" removida (todas as contas trabalhando já usaram).`);
-        } else {
-          stepLogArr.push(`[${nome}] Foto "${fotoNome}" registrada (ainda ativa para outras contas).`);
-        }
-      } else {
-        stepLogArr.push(`[${nome}] AVISO: falha ao registrar foto "${fotoNome}": ${(res && res.error) || 'desconhecido'}`);
+    // COMMIT no índice de fotos — somente após confirmação de publicação
+    if (publishedOk) {
+      // Descobrir todas as WORKINGNAMES do momento
+      const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
+      try {
+        await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
+      } catch (e) {
+        stepLogArr.push(`[${nome}] Falha ao commit foto reservada: ${e && e.message || e}`);
+        // Fail-safe: NUNCA tente usar de novo — não faz nada aqui (pois o índice já está locked no próprio fotos.js)
       }
-    } catch (e) {
-      stepLogArr.push(`[${nome}] AVISO: exceção ao registrar/excluir foto "${fotoNome}": ${e && e.message || e}`);
     }
 
     // IMPORTANTE: Grava ultimaPostagemRobe via manifestStore
@@ -784,6 +782,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try { await logIssue(nome, 'robe_error', `Erro técnico; cooldown padrão ${Math.ceil(pause/60000)}min: ${errMsg}`); } catch {}
     } catch {}
 
+    // Libera a reservation da foto (se houver)
+    try {
+      if (fotoNome) {
+        await fotos.releaseReservation(nome, fotoNome);
+      }
+    } catch {}
+
     return { ok: false, error: errMsg, log: stepLogArr };
 
   } finally {
@@ -810,6 +815,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     if (page) {
       try { await safeClosePage(page); console.log(`[ROBE] ${nome}: aba fechada no finally`); } catch {}
     }
+
+    // Sempre liberar a reservation da foto no finally
+    try {
+      if (fotoNome) {
+        await fotos.releaseReservation(nome, fotoNome);
+      }
+    } catch {}
+
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
     console.log(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'} | logs:`, stepLogArr);
   }
