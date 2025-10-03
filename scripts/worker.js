@@ -519,7 +519,7 @@ async function milLog(type, msg) {
 //   try { robeQueue.clear(); } catch {}
 //   const nomesAtivos = Array.from(controllers.keys());
 //   for (const nome of nomesAtivos) {
-//     try { await handlers.deactivate({ nome, reason: 'panic', policy: 'preserveDesired' }); } catch {}
+//     try { await handlers.deactivate({ nome, reason:'panic', policy: 'preserveDesired' }); } catch {}
 //   }
 //   try { await killStrayChromes(); } catch {}
 //   const cand = chooseCandidatesToOpen(Math.max(SELF_HEAL_CFG.SURVIVAL_MIN_ACTIVE, 2));
@@ -2616,7 +2616,9 @@ const handlers = {
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
         manifestStatus,
-        closingReason: robeMeta[nome]?.closingReason || null
+        closingReason: robeMeta[nome]?.closingReason || null,
+        openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
+        lastSwapAt: robeMeta[nome]?.lastSwapAt || null
       };
     });
     const robes = {};
@@ -2739,7 +2741,9 @@ return {
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
   reopenAt: robeMeta[nome]?.reopenAt || null,
   manifestStatus,
-  closingReason: robeMeta[nome]?.closingReason || null
+  closingReason: robeMeta[nome]?.closingReason || null,
+  openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
+  lastSwapAt: robeMeta[nome]?.lastSwapAt || null
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
   // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
@@ -3348,13 +3352,29 @@ async function nurseTick() {
           try {
             const r = await activateOnce(nome, 'nurse_auto');
             if (!r || !r.ok) {
-              if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
-                robeMeta[nome] = robeMeta[nome] || {};
-                robeMeta[nome].activationHeldUntil = Date.now() + 15000;
-                await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s');
+              const err = (r && r.error) || '';
+              if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
+                await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
+
+                // Tenta swap
+                const swapped = await trySwapOpen(nome);
+
+                if (!swapped) {
+                  // backoff progressivo: dobra até max 5min
+                  robeMeta[nome] = robeMeta[nome] || {};
+                  const prevBackoff = robeMeta[nome].openBackoffMs || 15000;
+                  const curBackoff = Math.min(300000, prevBackoff*2);
+                  robeMeta[nome].openBackoffMs = curBackoff;
+                  robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
+                  await issues.append(nome, 'mil_action', `open_backoff escalated to ${Math.floor(curBackoff/1000)}s`);
+                }
+                // Se swap foi bem-sucedido, não seta activationHeld, tentará na próxima ronda normal
               }
+            } else {
+              // Sucesso: zera backoff (se existia)
+              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 15000;
             }
-          } catch {}
+          } catch { }
         } finally {
           slotsInUse--;
         }
@@ -3592,6 +3612,46 @@ async function nurseTick() {
   } finally {
     _nurseTickRunning = false;
   }
+}
+
+// PASSO 1 — Adicionar função trySwapOpen(nomeTarget) logo após nurseTick
+async function trySwapOpen(target) {
+  // Tenta fechar navegador mais RAM-eater para abrir "target"
+  const aliveNames = Array.from(controllers.keys());
+  if (aliveNames.length <= 1) return false; // nunca swap se 1 só ativo
+
+  // Ordena vivos por RAM decrescente e pega quem tem mais RAM (mas ignora "target")
+  const candidates = aliveNames
+    .filter(n => n !== target)
+    .map(n => ({
+      n,
+      mb: (typeof robeMeta[n]?.ramMB === 'number') ? robeMeta[n].ramMB : -1,
+      emExecucao: robeMeta[n]?.emExecucao,
+      configurando: controllers.get(n)?.configurando
+    }))
+    .filter(c => !c.configurando && !c.emExecucao && c.mb >= (process.platform==='win32' ? 900 : 700))
+    .sort((a, b) => b.mb - a.mb);
+
+  for (const cand of candidates) {
+    if (killGuardActive(cand.n)) continue;
+    await issues.append(cand.n, 'mil_action', `swap_kill fechamento para abrir ${target} RAM=${cand.mb}MB`);
+    await handlers.deactivate({ nome: cand.n, reason: 'swap_for_open', policy: 'preserveDesired' });
+    setKillGuard(cand.n, 45000);
+    await new Promise(r=>setTimeout(r, 2000)); // settle RAM
+    
+    // Tenta abrir o target
+    const r = await activateOnce(target, 'nurse_swap');
+    if (r && r.ok) {
+      await issues.append(target, 'mil_action', `swap_open_success após fechar ${cand.n}`);
+      robeMeta[target] = robeMeta[target] || {};
+      robeMeta[target].lastSwapAt = Date.now();
+      return true;
+    }
+    // Swap não foi bem-sucedido, log e continue para o próximo possível
+    await issues.append(target, 'mil_action', `swap_open_failed após fechar ${cand.n}`);
+  }
+  await issues.append(target, 'mil_action', 'swap_open_failed_nenhum_sucesso');
+  return false;
 }
 
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);

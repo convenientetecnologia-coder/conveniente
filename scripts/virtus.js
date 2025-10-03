@@ -383,6 +383,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let lastRamCheck = 0;
 
   // trackers
+  const RELOAD_IDLE_SEC = parseInt(process.env.VIRTUS_RELOAD_IDLE_SEC || '7200', 10); // 2 horas
+  let lastReloadAt = 0;
   let ultimoAtendimento = agoraEpoch();
   let saveChain = Promise.resolve();
   let filaLoopBusy = false;
@@ -1127,9 +1129,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       if (limpaHistoricoVelho()) await salvaHistorico();
 
-      if ((agoraEpoch() - ultimoAtendimento) > 7200) {
+      const nowEpoch = agoraEpoch();
+      if ((nowEpoch - ultimoAtendimento) >= RELOAD_IDLE_SEC) {
         await reloadUltraRobusto();
-        try { await garantirMarketplace(p); } catch {}
+        lastReloadAt = nowEpoch;
+        ultimoAtendimento = agoraEpoch(); // Reinicia a janela de 2h imediatamente após reload!
+        if (issues) try {
+          await logIssue(nome, 'mil_action', `virtus_reload_idle2h after ${nowEpoch - ultimoAtendimento} sec idle`);
+        } catch {}
       }
 
       await atualizaFila();

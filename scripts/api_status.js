@@ -76,6 +76,38 @@ module.exports = (app, workerClient, fileStore) => {
           // Indica se perfil está "congelado" (para cinzar ou mostrar warning no painel)
           const isFrozen = robeFrozenUntil && robeFrozenUntil > Date.now();
 
+          // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+          // INÍCIO: Campos militares SWAP/BACKOFF/REOPEN/SWAP COOL DOWN/WHY NOT OPEN
+          // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+          const openBackoffMs = (
+            typeof perfil.openBackoffMs === 'number' ? perfil.openBackoffMs :
+            typeof robeMeta.openBackoffMs === 'number' ? robeMeta.openBackoffMs :
+            null
+          );
+          const lastSwapAt = (
+            typeof perfil.lastSwapAt === 'number' ? perfil.lastSwapAt :
+            typeof robeMeta.lastSwapAt === 'number' ? robeMeta.lastSwapAt :
+            null
+          );
+          const lastSwapPeer = (
+            typeof perfil.lastSwapPeer === 'string' ? perfil.lastSwapPeer :
+            typeof robeMeta.lastSwapPeer === 'string' ? robeMeta.lastSwapPeer :
+            null
+          );
+          const swapCooldown = (
+            typeof perfil.swapCooldown === 'number' ? perfil.swapCooldown :
+            typeof robeMeta.swapCooldown === 'number' ? robeMeta.swapCooldown :
+            null
+          );
+          const whyNotOpen = (
+            typeof perfil.whyNotOpen === 'string' ? perfil.whyNotOpen :
+            typeof robeMeta.whyNotOpen === 'string' ? robeMeta.whyNotOpen :
+            null
+          );
+          // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+          // FIM
+          // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
           return {
             nome,
             label,
@@ -108,6 +140,14 @@ module.exports = (app, workerClient, fileStore) => {
               : (rest && typeof rest.reopenAt === 'number' && rest.reopenAt > 0
                   ? rest.reopenAt
                   : (robeMeta.reopenAt || null)),
+            // >>>>>>>>>>>>>>>>>>>>>>>>
+            // EXPOSIÇÃO DOS CAMPOS SWAP/BACKOFF no payload (sempre presentes, nem que null):
+            openBackoffMs,
+            lastSwapAt,
+            lastSwapPeer,
+            swapCooldown,
+            whyNotOpen,
+            // <<<<<<<<<<<<<<<<<<<<<<<<
             // Inclui todos os campos militares úteis do robeMeta e Virtus se não conflitam
             ...Object.fromEntries(
               Object.entries(robeMeta).filter(([k]) =>

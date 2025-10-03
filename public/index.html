@@ -695,6 +695,45 @@
         // -- NOVO: Reabrirá em... --
         if (reopenAtPill) titleRow.append(reopenAtPill);
 
+        // ===================== NOVOS PILLS — STATUS MILITAR: BACKOFF/SWAP/HOLD/WHY-NOT-OPEN =====================
+        {
+          const now = Date.now();
+
+          // Pill — BACKOFF DE ABERTURA/SWAP
+          if (typeof p.openBackoffMs === "number" && (p.activationHeldUntil && p.activationHeldUntil > now)) {
+            const restante = Math.max(0, Math.floor((p.activationHeldUntil - now)/1000));
+            const backoffPill = buildPill(`Backoff de abertura (${tempoRestante(restante)})`, 'warn');
+            backoffPill.title = `Abertura em backoff. O sistema está aguardando antes de abrir para evitar swap/thrashing.\nopenBackoffMs: ${p.openBackoffMs} ms\nLiberará em: ${new Date(p.activationHeldUntil).toLocaleString()}`;
+            titleRow.append(backoffPill);
+          }
+
+          // Pill — SWAP cooldown
+          if (typeof p.swapCooldown === "number" && p.swapCooldown > 0) {
+            // tolerante: se vier em ms, converte para segundos
+            const scSec = Math.floor(p.swapCooldown > 100000 ? p.swapCooldown/1000 : p.swapCooldown);
+            const swapCdPill = buildPill(`Swap cooldown: ${tempoRestante(scSec)}`, 'warn');
+            swapCdPill.title = `Aguardando cooldown de swap expirar para nova tentativa.`;
+            titleRow.append(swapCdPill);
+          }
+
+          // Pill — Por que não abriu (whyNotOpen)
+          if (typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
+            const whyPill = buildPill(`Por que não abriu: ${p.whyNotOpen}`, 'bad');
+            whyPill.title = `Motivo registrado pelo sistema para não abrir o navegador.`;
+            titleRow.append(whyPill);
+          }
+
+          // Pill — Último swap (somente últimos 30min)
+          if (typeof p.lastSwapAt === "number" && now - p.lastSwapAt < 1800000) {
+            const peer = p.lastSwapPeer || '';
+            const dt = new Date(p.lastSwapAt).toLocaleTimeString();
+            const swapPill = buildPill(`Último swap: ${peer ? peer + ', ' : ''}${dt}`, 'info');
+            swapPill.title = `Última tentativa de swap${peer ? ` com ${peer}` : ''} em ${new Date(p.lastSwapAt).toLocaleString()}.`;
+            titleRow.append(swapPill);
+          }
+        }
+        // ===================== FIM NOVOS PILLS — STATUS MILITAR =====================
+
         // -------- FROZEN pill explícito (primeiro) ---------
         if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
 

@@ -96,7 +96,18 @@ const ISSUE_TYPES_SET = new Set([
   'nurse_restart',
   'admin_activate_request', 'admin_deactivate_request', 'admin_configure_request', 'admin_start_work_request',
   'admin_invoke_human_request', 'admin_robe_play_request', 'admin_robe24h_request', 'admin_human_resume_request',
-  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all'
+  'admin_rename_label', 'admin_rename_slug', 'admin_delete_perfil', 'admin_unfreeze', 'admin_unfreeze_all',
+
+  // TIPOS MILITARES SWAP/OPEN/RELOAD
+  'swap_kill',
+  'swap_open_success',
+  'swap_open_failed',
+  'swap_open_failed_nenhum_sucesso',
+  'open_backoff',
+  'virtus_reload_per_idle2h',
+  'virtus_reload_idle2h',
+  'virtus_reload_fired',
+  'virtus_reload_skip_held'
 ]);
 
 function padronizaType(type) {
@@ -116,6 +127,16 @@ function prefixType(type, message) {
 
   // Already has prefix
   if (t.startsWith('suspect_') || t.startsWith('action_')) {
+    return t;
+  }
+
+  // TIPOS MILITARES SWAP/OPEN/RELOAD — NÃO PREFIXAR, já estão militarizados
+  if (
+    t.startsWith('swap_') ||
+    t.startsWith('virtus_reload') ||
+    t === 'open_backoff'
+  ) {
+    // Não precisa prefixar, já está militarizado
     return t;
   }
 
