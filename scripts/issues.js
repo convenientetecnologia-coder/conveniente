@@ -77,6 +77,15 @@ function _serialize(nome, fn) {
   return next;
 }
 
+// Tipos especiais de issues (telemetria ultra-cirúrgica para controle de fotos):
+// - photo_pick: Uma foto foi selecionada para uma conta
+// - photo_attempt: Houve tentativa de postagem
+// - photo_posted: A foto foi marcada como usada/postada
+// - photo_ban: Foto banida para conta após tentativa falha ou erro
+// - photo_delete: Deleção física e lógica de uma foto
+// - photo_skip_banned: Foto pulada para conta devido a banimento persistente
+// - photo_gc: Evento relacionado à limpeza automática (GC) do index
+
 // Tipos padronizados de issues
 const ISSUE_TYPES_SET = new Set([
   'browser_disconnected',
@@ -110,7 +119,16 @@ const ISSUE_TYPES_SET = new Set([
   'virtus_reload_per_idle2h',
   'virtus_reload_idle2h',
   'virtus_reload_fired',
-  'virtus_reload_skip_held'
+  'virtus_reload_skip_held',
+
+  // USO DE FOTOS: logs cirúrgicos para garantir rastreio e auditoria
+  'photo_pick',
+  'photo_attempt',
+  'photo_posted',
+  'photo_ban',
+  'photo_delete',
+  'photo_skip_banned',
+  'photo_gc'
 ]);
 
 function padronizaType(type) {

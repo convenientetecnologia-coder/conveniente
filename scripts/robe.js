@@ -540,7 +540,7 @@ async function waitPublishedEvidence(page, titulo, {maxMs=15000}={}) {
 async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
   try {
     await page.goto('https://www.facebook.com/marketplace/you/selling', { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(800);
+    await sleep(800);
     // Busca pelo título
     const found = await page.evaluate((t) => {
       const norm = s => (s||'').toLowerCase();
@@ -645,7 +645,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           okNav = true;
         } catch (e) {
           navErr = e && e.message || String(e);
-          await page.waitForTimeout(800);
+          await sleep(800);
         }
       }
       if (!okNav) {
@@ -722,7 +722,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 20000 });
       publishedOk = ev1 || ev2;
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_evidence', ev1, ev2 });
-      if (!publishedOk) await page.waitForTimeout(1200);
+      if (!publishedOk) await sleep(1200);
     }
     if (!publishedOk) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_fail', err: pubErr });
@@ -759,6 +759,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // LOG: evento de sucesso (uma mensagem por account/turno já é suficiente)
     try { await logIssue(nome, 'robe_success', 'Publicação concluída com sucesso.'); } catch {}
 
+  // ATENÇÃO: MARCAR FOTO COMO USADA (SEM REUSAR JAMAIS NA MESMA CONTA), MESMO SE ERRO/TIMEOUT/BUG.
+  // GARANTE FAIL-CLOSED: NUNCA DUPLICA PARA A MESMA CONTA!
   } catch (e) {
     const errMsg = (e && e.message) ? e.message : String(e);
     stepLogArr.push(`[${nome}] ERRO: ${errMsg}`);
@@ -782,12 +784,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try { await logIssue(nome, 'robe_error', `Erro técnico; cooldown padrão ${Math.ceil(pause/60000)}min: ${errMsg}`); } catch {}
     } catch {}
 
-    // Libera a reservation da foto (se houver)
+    // P2 ULTRA ROBUSTO: MARCAR COMO USADA MESMO EM FALHA!!!
     try {
       if (fotoNome) {
-        await fotos.releaseReservation(nome, fotoNome);
+        const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
+        await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
       }
-    } catch {}
+    } catch (e) {
+      stepLogArr.push(`[${nome}] markPostedAndMaybeDelete no catch/erro: ${e && e.message || e}`);
+    }
 
     return { ok: false, error: errMsg, log: stepLogArr };
 
@@ -815,13 +820,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     if (page) {
       try { await safeClosePage(page); console.log(`[ROBE] ${nome}: aba fechada no finally`); } catch {}
     }
-
-    // Sempre liberar a reservation da foto no finally
-    try {
-      if (fotoNome) {
-        await fotos.releaseReservation(nome, fotoNome);
-      }
-    } catch {}
 
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
     console.log(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'} | logs:`, stepLogArr);

@@ -73,6 +73,7 @@ function loadIndex() {
   ensureIndex();
   const idx = readJsonSafe(INDEX_FILE, {});
   // Compat: se valor for array, converte para { postedBy: arr }
+  // --- PASSO 1: Certifique/normalize postedBy e reservedBy ---
   for (const k of Object.keys(idx)) {
     const v = idx[k];
     if (Array.isArray(v)) {
@@ -81,6 +82,7 @@ function loadIndex() {
       idx[k] = { postedBy: [] };
     } else {
       if (!Array.isArray(v.postedBy)) v.postedBy = [];
+      if (!v.reservedBy || typeof v.reservedBy !== 'object') v.reservedBy = {};
       // normaliza campos extra
       if (v.size != null && typeof v.size !== 'number') delete v.size;
       if (v.mtimeMs != null && typeof v.mtimeMs !== 'number') delete v.mtimeMs;
@@ -178,7 +180,8 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
       if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
       if (!rec.reservedBy) rec.reservedBy = {};
 
-      // Se já postou, nunca retorna de novo
+      // --- PASSO 2: Pular obrigatoriamente fotos já tentadas ---
+      // Se já postou (tentou) para esta conta, nunca retorna de novo
       if (rec.postedBy.includes(nomeConta)) continue;
 
       // Se já reservado por esta conta, continue servindo esta foto
@@ -229,6 +232,9 @@ async function releaseReservation(nomeConta, fileName) {
 }
 
 /**
+ * ATENÇÃO: ESTA FUNÇÃO DEVE SER CHAMADA APÓS TODA TENTATIVA DE POSTAGEM, INDEPENDENTE DE SUCESSO OU FALHA. 
+ * ELA GARANTE QUE A FOTO JAMAIS SERÁ SERVIDA DUAS VEZES PARA A MESMA CONTA.
+ *
  * Marca uma foto como postada por uma conta e tenta excluir se TODAS workingNames já postaram.
  *   Se o arquivo no disco não for a mesma “geração” registrada, zera postedBy (foto foi substituída → trata como nova).
  *   Remove o registro ao excluir a foto com sucesso.
@@ -264,8 +270,10 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
     if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
     if (!rec.reservedBy) rec.reservedBy = {};
 
-    // Remove reserva e marca postado
+    // --- PASSO 3: SEMPRE adicione ao postedBy, MESMO EM ERRO ---
+    // Remove reserva se houver
     if (rec.reservedBy && rec.reservedBy[nomeConta]) delete rec.reservedBy[nomeConta];
+    // GARANTIA DE MARCAÇÃO
     if (!rec.postedBy.includes(nomeConta)) rec.postedBy.push(nomeConta);
 
     // Critério de exclusão: workingNames
