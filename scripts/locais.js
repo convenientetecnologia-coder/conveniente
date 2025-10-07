@@ -4,6 +4,51 @@
 const fs = require('fs');
 const path = require('path');
 const utils = require('./utils.js');
+const os = require('os');
+
+// ===== [INÍCIO] Log de localizações ruins =====
+
+function getDesktopDir() {
+  const home = os.homedir();
+  const desks = [path.join(home, 'Desktop'), path.join(home, 'Área de Trabalho')];
+  for (const d of desks) {
+    if (fs.existsSync(d)) return d;
+  }
+  return home;
+}
+const LOCALIZACOES_RUINS_FILE = path.join(getDesktopDir(), 'localizacoes_ruins.json');
+
+function logBadLocation(cidade, location, reason) {
+  let arr = [];
+  try { arr = JSON.parse(fs.readFileSync(LOCALIZACOES_RUINS_FILE, "utf8")); } catch { arr = []; }
+  // dedup por cidade+location
+  const key = cidade + '|' + location;
+  let found = arr.find(x => (x.cidade + '|' + x.location) === key);
+  const now = new Date().toISOString();
+  if (found) {
+    found.reason = reason || found.reason;
+    found.at = now;
+  } else {
+    arr.push({ cidade, location, reason, at: now });
+  }
+  // write com fsync robusto
+  try {
+    const tmp = LOCALIZACOES_RUINS_FILE + '.tmp';
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(arr, null, 2), 'utf8');
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    try { fs.unlinkSync(LOCALIZACOES_RUINS_FILE); } catch {}
+    try { fs.renameSync(tmp, LOCALIZACOES_RUINS_FILE); }
+    catch {
+      fs.copyFileSync(tmp, LOCALIZACOES_RUINS_FILE);
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+  } catch {}
+}
+
+// ===== [FIM] Log de localizações ruins =====
 
 // Arquivos de dados
 const DADOS_DIR = path.join(__dirname, '..', 'dados');
@@ -26,12 +71,18 @@ function writeJsonAtomic(file, obj) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
-    try { fs.unlinkSync(file); } catch {}
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    try { fs.unlinkSync(file); } catch{}
     try { fs.renameSync(tmp, file); }
     catch {
       fs.copyFileSync(tmp, file);
-      try { fs.unlinkSync(tmp); } catch {}
+      try { fs.unlinkSync(tmp); } catch{}
     }
     return true;
   } catch { return false; }
@@ -242,6 +293,11 @@ async function reportInvalid(cidade, location, reason) {
 
     cycle[cityKey] = rec;
     saveCycle(cycle);
+
+    // === [NOVO]: log de localização ruim ===
+    logBadLocation(cidade, location, reason);
+    // === [FIM NOVO] ===
+
     return { ok: true };
   });
 }

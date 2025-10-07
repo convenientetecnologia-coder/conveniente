@@ -25,7 +25,22 @@ function readJsonSafe(file, fallback = []) {
 
 function writeJsonSafe(file, obj) {
   try {
-    fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+    const dir = path.dirname(file);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmp = file + '.tmp';
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    try { fs.unlinkSync(file); } catch {}
+    try { fs.renameSync(tmp, file); }
+    catch {
+      fs.copyFileSync(tmp, file);
+      try { fs.unlinkSync(tmp); } catch {}
+    }
     return true;
   } catch {
     return false;

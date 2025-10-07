@@ -376,11 +376,21 @@ async function preencherLocalizacao(page, cidade) {
   }
   if (!inp) throw new Error('Campo Localização não localizado.');
 
+  // Anti-loop: controle de sessões
+  const visited = new Set();
+  const allLocs = listLocalizacoesPorCidade(cidade); // lista bruta para medir ciclo
+
   // Tenta até 20 candidatos do ciclo
   for (let tent = 0; tent < 20; tent++) {
     const sug = await locais.nextLocationForCity(cidade);
     if (!sug.ok) throw new Error('Sem localizações disponíveis para esta cidade.');
     const cand = sug.location;
+
+    if (visited.has(cand)) {
+      try { await locais.reportInvalid(cidade, cand, 'repeat_in_session'); } catch {}
+      continue;
+    }
+    visited.add(cand);
 
     try { await inp.click({ clickCount: 3 }); } catch {}
     await sleep(jitter(100, 180));
@@ -398,16 +408,24 @@ async function preencherLocalizacao(page, cidade) {
       await sleep(jitter(350, 550));
 
       if (await isLocalizacaoValida(page)) {
+        // sucesso! consome localização e retorna
+        try { await locais.confirmUsed(cidade, cand); } catch {}
         return cand;
       }
     }
 
-    // Candidato não validou neste ciclo — marca inválido e tenta outro
-    await locais.reportInvalid(cidade, cand, 'not_valid_on_fb');
+    // NÃO validou; consome localização, marca como inválida e passa:
+    try { await locais.confirmUsed(cidade, cand); } catch {}
+    try { await locais.reportInvalid(cidade, cand, 'not_valid_on_fb'); } catch {}
     await sleep(120);
+
+    // Anti-loop: se tentamos todas localizações do ciclo, aborta!
+    if (visited.size >= allLocs.length) {
+      throw new Error('Sem localizações válidas para essa cidade!');
+    }
   }
 
-  throw new Error('Localização não ficou válida após múltiplas tentativas (ciclo consumido).');
+  throw new Error('Localização não ficou válida após múltiplas tentativas.');
 }
 
 // Fechamento seguro da aba (anti-trava)
@@ -569,6 +587,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let cooldownApplied = false; // controla se o cooldown já foi aplicado no catch
   let fotoNome = null;
   let fotoPath = null;
+  let cidadePerfil = null; // ADEQUAÇÃO: tornar visível no catch
+  let localUsada = null;   // ADEQUAÇÃO: tornar visível no catch
 
   // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
   const stepLogArr = [];
@@ -704,8 +724,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'condition_ok', value: 'Novo' });
 
     // LOCALIZAÇÃO
-    const cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
-    const localUsada = await preencherLocalizacao(page, cidadePerfil);
+    cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
+    localUsada = await preencherLocalizacao(page, cidadePerfil);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
 
     // —————— ALTERAÇÃO APLICADA: Rotina publicarEFechar5s no lugar do pós-publicação anterior ——————
@@ -793,6 +813,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     } catch (e) {
       stepLogArr.push(`[${nome}] markPostedAndMaybeDelete no catch/erro: ${e && e.message || e}`);
     }
+
+    // ADEQUAÇÃO: "tentou ⇒ consumiu" para localização mesmo em erro
+    try {
+      if (localUsada) {
+        await locais.confirmUsed(cidadePerfil, localUsada);
+      }
+    } catch {}
 
     return { ok: false, error: errMsg, log: stepLogArr };
 
