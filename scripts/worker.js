@@ -2529,6 +2529,27 @@ const handlers = {
   },
   // == FIM ALTERAÇÃO 3 ==
 
+  // INICIO DA INSTRUÇÃO (worker.js) - Handler robes-release-all
+  async ['robes-release-all']() {
+    // Limpa pauseReason de todos os perfis em robeMeta + no manifest (remover robePauseReason)
+    const perfisArr = loadPerfisJson();
+    for (const p of perfisArr) {
+      try {
+        robeMeta[p.nome] = robeMeta[p.nome] || {};
+        delete robeMeta[p.nome].pauseReason;
+        delete robeMeta[p.nome].lastRobeBlockAt;
+        await manifestStore.update(p.nome, m => {
+          m = m || {};
+          if (m.robePauseReason) delete m.robePauseReason;
+          return m;
+        });
+      } catch {}
+    }
+    await snapshotStatusAndWrite();
+    return { ok: true };
+  },
+  // FIM DA INSTRUÇÃO (worker.js) - Handler robes-release-all
+
   async ['get-status']() {
     const perfisArr = loadPerfisJson();
     const perfis = perfisArr.map(p => {
@@ -2585,6 +2606,7 @@ const handlers = {
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
+        killGuardUntil: robeMeta[nome]?.killGuardUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
         manifestStatus,
         closingReason: robeMeta[nome]?.closingReason || null,
@@ -2710,6 +2732,7 @@ return {
   unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
+  killGuardUntil: robeMeta[nome]?.killGuardUntil || null,
   reopenAt: robeMeta[nome]?.reopenAt || null,
   manifestStatus,
   closingReason: robeMeta[nome]?.closingReason || null,

@@ -178,6 +178,26 @@ async function patchPage(nome, page, coords) {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
 
+  // --- INJEÇÃO DO DISMISS AUTOMÁTICO DO OVERLAY "SUSPEITAMOS..." ---
+  try {
+    // Exponha como function para page
+    await page.exposeFunction('__dismissAutomationSuspect', () =>
+      dismissAutomationSuspect(page, nome).catch(()=>false)
+    );
+    // Injeta um scanner após DOMContentLoaded: tenta algumas vezes nas primeiras rodadas
+    await page.evaluateOnNewDocument(() => {
+      let rodadas = 0;
+      function tryDismiss(){
+        if (++rodadas > 8) return;
+        if (window.__dismissAutomationSuspect) {
+          window.__dismissAutomationSuspect().catch(()=>{});
+        }
+        setTimeout(tryDismiss, 900 + Math.floor(Math.random()*400));
+      }
+      window.addEventListener('DOMContentLoaded', tryDismiss);
+    });
+  } catch {} // nunca deixa travar
+
   // GUARDA: Virtus Messenger asset interception (apenas Messenger, nunca Marketplace Create)
   const url = typeof page.url === "function" ? page.url() : "";
   let interceptionConfigured = false;
@@ -1588,6 +1608,64 @@ async function detectMessengerTempBlock(page) {
   }
 }
 
+/**
+ * Dismiss automático do overlay "Suspeitamos que o comportamento da sua conta seja automatizado"
+ * Tenta encontrar o overlay e clicar no botão "Ignorar" (PT/EN, normalizado, aria-label ou innerText).
+ * Debounce por perfil/controlado externamente.
+ */
+async function dismissAutomationSuspect(page, nome) {
+  try {
+    // Evita erro em ausência de page/context
+    if (!page) return false;
+
+    const found = await page.evaluate(() => {
+      function norm(s) {
+        try {
+          return (s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g,'')
+            .toLowerCase();
+        } catch { return (s || '').toLowerCase(); }
+      }
+      // 1. Localiza textos desejados
+      const allTexts = Array.from(document.querySelectorAll('h1,h2,span,div'))
+        .slice(0, 2000)
+        .map(el => norm(el.innerText || el.textContent || ''));
+      const hasSuspect = allTexts.some(t =>
+        t.includes('suspeitamos que o comportamento da sua conta seja automatizada') ||
+        t.includes('suspeitamos que o comportamento da sua conta seja automatizado') ||
+        t.includes('we suspect') && t.includes('automated') ||
+        t.includes('suspeitamos do seu comportamento') ||
+        t.includes('comportamento automatizado')
+      );
+      if (!hasSuspect) return false;
+
+      // 2. Procura botão "Ignorar"
+      let btn = Array.from(document.querySelectorAll('[role="button"]'))
+        .find(el =>
+          norm(el.getAttribute('aria-label')||'').includes('gnorar') ||
+          norm(el.innerText||el.textContent||'').includes('gnorar') ||
+          norm(el.innerText||el.textContent||'').includes('ignore')
+        );
+      if (!btn) return false;
+      try { btn.scrollIntoView({behavior:'instant',block:'center'}); } catch{}
+      try { btn.dispatchEvent(new MouseEvent('mousemove',{bubbles:true})); } catch{}
+      try { btn.dispatchEvent(new MouseEvent('mousedown',{bubbles:true})); } catch{}
+      try { btn.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); } catch{}
+      try { btn.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); } catch{}
+      return true;
+    });
+    if (found) {
+      try { require('./issues.js').append && require('./issues.js').append(nome,'mil_action','dismiss_automation_suspect_clicked'); } catch{}
+      return true;
+    }
+  } catch(e) {
+    // Logging, mas silencioso por padrão
+    try { require('./issues.js').append && require('./issues.js').append(nome,'mil_action','dismiss_automation_suspect_ERROR '+(e&&e.message)); } catch{}
+  }
+  return false;
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1607,4 +1685,5 @@ module.exports = {
   attachHealthProbes, // NOVO!
   hardCleanProfileOnDisk,
   detectMessengerTempBlock, // NOVO: exportado para uso pelo worker
+  dismissAutomationSuspect,
 };

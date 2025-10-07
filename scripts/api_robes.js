@@ -52,6 +52,7 @@ module.exports = (app, workerClient, fileStore) => {
             man = man || {};
             man.robeCooldownUntil = Date.now();
             man.robeCooldownRemainingMs = 0;
+            if (man.robePauseReason) delete man.robePauseReason;
             return man;
           });
           total++;
@@ -63,6 +64,15 @@ module.exports = (app, workerClient, fileStore) => {
           if (fileStore.issues && typeof fileStore.issues.append === "function") {
             fileStore.issues.append({ type: 'robe_release_all', perfil: p.nome, ok: false, error: e && e.message || String(e), ts: Date.now() });
           }
+        }
+      }
+      // *** NOVO: chama o comando workerClient para limpar robeMeta.pauseReason e lastRobeBlockAt do lado do worker ***
+      try { 
+        await workerClient.sendWorkerCommand('robes-release-all', {}, { timeoutMs: 20000 }); 
+      } catch(e) {
+        // log, mas não bloqueia o fluxo
+        if (fileStore.issues && typeof fileStore.issues.append === "function") {
+          fileStore.issues.append({ type: 'robes_release_all_worker_sync_error', error: e && e.message || String(e), ts: Date.now() });
         }
       }
       if (failed > 0) {

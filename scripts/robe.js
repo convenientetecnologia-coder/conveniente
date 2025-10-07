@@ -119,6 +119,21 @@ async function clickItemByText(page, text, timeout = 5000) {
   return false;
 }
 
+// Detectar “Limite atingido” ao criar/publicar
+async function detectLimitReached(page) {
+  try {
+    const v = await page.evaluate(() => {
+      const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const arr = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000)
+        .map(el => norm(el.innerText||el.textContent||''));
+      const h2Limit = arr.some(t => /limite atingido/.test(t));
+      const msg = arr.some(t => t.includes('voce nao pode mais criar novos classificados') && t.includes('limite') && t.includes('frequencia'));
+      return h2Limit && msg;
+    });
+    return !!v;
+  } catch { return false; }
+}
+
 // Botão habilitado por texto
 async function findEnabledButton(page, label, timeout = 3000) {
   const start = Date.now();
@@ -210,8 +225,31 @@ async function preencherPreco(page) {
   if (!ok) throw new Error(`Preço não ficou "0" (value="${val}").`);
 }
 
-// Categoria: Móveis (timings otimizados)
+// Categoria: Móveis (multi-modelo: novo input/search com fallback legacy)
 async function selecionarCategoriaMoveis(page) {
+  // Primeiro tenta modelo novo (input/combobox)
+  const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
+  if (input) {
+    await input.click({ delay: 40 }).catch(()=>{});
+    await sleep(120);
+    await input.type('Móveis', { delay: 22 }).catch(()=>{});
+    await sleep(700);
+    // Tenta aguardar menu/dropdown; enter para selecionar primeiro, valida resultado.
+    await page.keyboard.press('Enter');
+    await sleep(320);
+    // Validação assertiva
+    const ok = await page.evaluate(() => {
+      const inp = document.querySelector('input[aria-label="Categoria"]');
+      function norm(s){return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();}
+      if (inp && (norm(inp.value).includes('moveis') || norm(inp.value).includes('móveis'))) return true;
+      const lab = Array.from(document.querySelectorAll('label')).find(l=> (l.textContent||'').includes('Categoria'));
+      if (lab && norm(lab.innerText||lab.textContent).includes('moveis')) return true;
+      return false;
+    });
+    if (ok) return;
+    throw new Error('Falha ao selecionar a categoria "Móveis" (modelo novo DREAM).');
+  }
+  // Fallback para modelo antigo (legacy)
   const combo = await findComboboxByLabel(page, 'Categoria', 7000);
   if (!combo) throw new Error('Combobox "Categoria" não localizado.');
   await combo.click();
@@ -662,6 +700,21 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         try {
           stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create', try: i+1 });
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          // Detecta “Limite atingido” imediatamente após navegar
+          if (await detectLimitReached(page)) {
+            await manifestStore.update(nome, m => {
+              m = m||{};
+              m.robeCooldownUntil=Date.now()+24*60*60*1000;
+              m.robeCooldownRemainingMs=0;
+              m.robePauseReason='limit_posting';
+              return m;
+            });
+            try { robeUpdateMeta && robeUpdateMeta(nome,{ pauseReason:'limit_posting', lastLimitAt: Date.now() }); } catch {}
+            try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada'); } catch {}
+            try { await safeClosePage(page); } catch {}
+            cooldownApplied = true;
+            return { ok:false, error:'limit_posting' };
+          }
           okNav = true;
         } catch (e) {
           navErr = e && e.message || String(e);
@@ -742,6 +795,25 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 20000 });
       publishedOk = ev1 || ev2;
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_evidence', ev1, ev2 });
+
+      // Detecção de “Limite atingido” pós-publish (após bloco de evidências)
+      if (await detectLimitReached(page)) {
+        await manifestStore.update(nome, m => {
+          m = m||{};
+          m.robeCooldownUntil=Date.now()+24*60*60*1000;
+          m.robeCooldownRemainingMs=0;
+          m.robePauseReason='limit_posting';
+          return m;
+        });
+        try { robeUpdateMeta && robeUpdateMeta(nome,{ pauseReason:'limit_posting', lastLimitAt: Date.now() }); } catch {}
+        try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (pós-publish)'); } catch {}
+        // "tentou ⇒ consumiu" para localização, mesmo em erro/early return
+        try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
+        try { await safeClosePage(page); } catch {}
+        cooldownApplied = true;
+        return { ok:false, error:'limit_posting' };
+      }
+
       if (!publishedOk) await sleep(1200);
     }
     if (!publishedOk) {

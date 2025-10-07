@@ -78,8 +78,33 @@ console.log('[BOOT] Garantindo arquivos base...');
 fileStore.ensureDesired();
 fileStore.ensurePerfisJson();
 
-// Política de reset: (descomente se desejar sempre “start fresh”)
-// fileStore.resetDesiredAllOffOnBoot();
+// Pausa automática de 24h em todos os perfis no boot, se ativado por env
+(async () => {
+  if (process.env.ROBE_PAUSE_24H_ON_BOOT === '1') {
+    const manifestStore = require('./scripts/manifestStore.js');
+    const perfis = fileStore.loadPerfisJson();
+    const plus24 = 24 * 60 * 60 * 1000;
+    let count = 0;
+    for (const p of perfis) {
+      try {
+        await manifestStore.update(p.nome, m => {
+          m = m || {};
+          m.robeCooldownUntil = Date.now() + plus24;
+          m.robeCooldownRemainingMs = 0;
+          m.robePauseReason = 'boot_hold';
+          return m;
+        });
+        count++;
+      } catch (e) {
+        console.warn('[BOOT][PAUSE24H] Falha ao pausar perfil:', p.nome, e && e.message || e);
+      }
+    }
+    try {
+      require('./scripts/issues.js').append('system', 'mil_action', `robe_pause_24h_on_boot applied to ${count}/${perfis.length} perfis`);
+    } catch {}
+    console.log('[BOOT] ROBE_PAUSE_24H_ON_BOOT aplicado em', count, 'perfis');
+  }
+})();
 
 console.log('[BOOT] Spawning worker (automação)...');
 workerClient.fork();

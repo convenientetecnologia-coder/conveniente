@@ -275,10 +275,9 @@ module.exports = (app, workerClient, fileStore) => {
         man = man || {};
         man.robeCooldownUntil = now + plus24; // worker em working
         man.robeCooldownRemainingMs = 0; // worker não working
+        man.robePauseReason = 'manual';    // <-- NOVO!
         return man;
       });
-      // Remover ou comentar a chamada ao patchDesired(nome, { robePause24h }) – não é mais necessária
-      // await fileStore.patchDesired(nome, { robePause24h: true });
       res.json({ ok: true });
     } catch (e) {
       await issues.append(nome, 'robe24h_failed', e && e.message || e);
