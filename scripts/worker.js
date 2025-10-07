@@ -1095,6 +1095,11 @@ async function normalizeCooldown(nome) {
     const now = Date.now();
     const ctrl = controllers.get(nome);
     const man = await manifestStore.read(nome).catch(()=>null);
+    // INSTRUÇÃO: Sincronize pauseReason do manifest para robeMeta
+    try {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].pauseReason = man.robePauseReason || null;
+    } catch {}
     if (!man) return 0;
     const until = Number(man.robeCooldownUntil || 0);
     const remaining = Number(man.robeCooldownRemainingMs || 0);
@@ -2408,6 +2413,7 @@ const handlers = {
         m = m || {};
         m.robeCooldownUntil = Date.now();
         m.robeCooldownRemainingMs = 0;
+        if (m.robePauseReason) delete m.robePauseReason;
         return m;
       });
       if (robeMeta[nome]) {

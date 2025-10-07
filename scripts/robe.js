@@ -119,6 +119,51 @@ async function clickItemByText(page, text, timeout = 5000) {
   return false;
 }
 
+// Função robusta para detectar overlay "Limite atingido" (multilíngue, polling, tolerante)
+async function detectLimitOverlay(page, { timeoutMs = 15000, intervalMs = 350, debug = (process.env.LIMIT_DEBUG==='1') } = {}) {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const start = Date.now();
+  let rounds = 0;
+
+  async function checkOnce() {
+    try {
+      const v = await page.evaluate(() => {
+        const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const nodes = Array.from(document.querySelectorAll('h1,h2,span,div,p,section')).slice(0, 2000);
+        const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
+        const joined = texts.join(' ');
+
+        // Sinais
+        const hasH2LimitPT = texts.some(t => /limite atingido/.test(t));
+        const ptBody = /voce nao pode (mais )?criar (novos )?(classificados|anuncios) (no momento|agora)/.test(joined) &&
+                       /(ha|há) um limite da frequencia|limite da frequencia|limitar a frequencia|limitação da frequencia/.test(joined);
+        const enBody = /you (can['’]t|cannot) create (any )?more (listings|ads) (at this time|now)/.test(joined) &&
+                       /there (are|is) (a )?limit(s)? to how often sellers can post/.test(joined);
+        const esBody = /no puedes crear (mas|más) (anuncios|clasificados) (en este momento|ahora)/.test(joined) &&
+                       /(hay|existe) (un|una) limite? en la frecuencia con que (los )?vendedores pueden publicar/.test(joined);
+
+        // forte se...
+        const strong = hasH2LimitPT || ptBody || enBody || esBody;
+
+        return { strong, hasH2LimitPT, ptBody, enBody, esBody, sample: texts.slice(0,50) };
+      });
+      return v || { strong:false };
+    } catch {
+      return { strong:false };
+    }
+  }
+  while ((Date.now() - start) < timeoutMs) {
+    rounds++;
+    const res = await checkOnce();
+    if (debug) {
+      try { require('./issues.js').append && require('./issues.js').append('system', 'mil_action', `limit_poll round=${rounds} res=${JSON.stringify({h2:res.hasH2LimitPT,pt:res.ptBody,en:res.enBody,es:res.esBody})}`); } catch {}
+    }
+    if (res.strong) return true;
+    await sleep(intervalMs);
+  }
+  return false;
+}
+
 // Detectar “Limite atingido” ao criar/publicar
 async function detectLimitReached(page) {
   try {
@@ -227,29 +272,32 @@ async function preencherPreco(page) {
 
 // Categoria: Móveis (multi-modelo: novo input/search com fallback legacy)
 async function selecionarCategoriaMoveis(page) {
-  // Primeiro tenta modelo novo (input/combobox)
+  // Novo DOM: input/combobox de busca
   const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
   if (input) {
     await input.click({ delay: 40 }).catch(()=>{});
     await sleep(120);
-    await input.type('Móveis', { delay: 22 }).catch(()=>{});
+    // No NOVO DOM: deve ser "Diversos"
+    const alvo = 'Diversos';
+    await input.type(alvo, { delay: 22 }).catch(()=>{});
     await sleep(700);
-    // Tenta aguardar menu/dropdown; enter para selecionar primeiro, valida resultado.
     await page.keyboard.press('Enter');
-    await sleep(320);
-    // Validação assertiva
-    const ok = await page.evaluate(() => {
+    await sleep(350);
+    // Validação assertiva do NOVO DOM (aceitou "Diversos"?)
+    const ok = await page.evaluate((alvoNorm) => {
+      const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const inp = document.querySelector('input[aria-label="Categoria"]');
-      function norm(s){return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();}
-      if (inp && (norm(inp.value).includes('moveis') || norm(inp.value).includes('móveis'))) return true;
+      if (inp && norm(inp.value).includes(alvoNorm)) return true;
+      // fallback: às vezes a seleção aparece em label/summary ao lado
       const lab = Array.from(document.querySelectorAll('label')).find(l=> (l.textContent||'').includes('Categoria'));
-      if (lab && norm(lab.innerText||lab.textContent).includes('moveis')) return true;
-      return false;
-    });
-    if (ok) return;
-    throw new Error('Falha ao selecionar a categoria "Móveis" (modelo novo DREAM).');
+      const txt = lab ? (lab.innerText||lab.textContent||'') : '';
+      return norm(txt).includes(alvoNorm);
+    }, 'diversos');
+    if (!ok) throw new Error('Falha ao selecionar a categoria "Diversos" no novo DOM.');
+    return;
   }
-  // Fallback para modelo antigo (legacy)
+
+  // Legacy DOM (combobox/tab-enter): “Móveis”
   const combo = await findComboboxByLabel(page, 'Categoria', 7000);
   if (!combo) throw new Error('Combobox "Categoria" não localizado.');
   await combo.click();
@@ -260,6 +308,7 @@ async function selecionarCategoriaMoveis(page) {
     await page.keyboard.press('Enter');
     await sleep(jitter(220, 360));
   } catch {}
+
   const ok1 = await page.evaluate(() => {
     const lab = Array.from(document.querySelectorAll('label[role="combobox"]'))
       .find(l => l.textContent && l.textContent.includes('Categoria'));
@@ -269,6 +318,7 @@ async function selecionarCategoriaMoveis(page) {
     return /Móveis/.test(box.innerText || '');
   });
   if (ok1) return;
+
   await combo.click();
   await sleep(jitter(180, 300));
   const clicked = await clickItemByText(page, 'Móveis', 2500);
@@ -642,6 +692,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Leitura do manifest via manifestStore (com lock)
     manifest = await manifestStore.read(nome);
 
+    // Limpa pauseReason residual antes do novo ciclo
+    try {
+      await manifestStore.update(nome, m => {
+        m = m || {};
+        if (m.robePauseReason) delete m.robePauseReason;
+        return m;
+      });
+    } catch {}
+
     // NOVO: Não congelar localmente — apenas detectar, logar e retornar para o worker decidir
     if (!manifest) {
       try { await logIssue(nome, 'robe_error', 'manifest ausente; flow deve congelar via worker'); } catch {}
@@ -701,15 +760,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create', try: i+1 });
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
           // Detecta “Limite atingido” imediatamente após navegar
-          if (await detectLimitReached(page)) {
+          if (await detectLimitOverlay(page, { timeoutMs: 15000, intervalMs: 350 })) {
             await manifestStore.update(nome, m => {
               m = m||{};
-              m.robeCooldownUntil=Date.now()+24*60*60*1000;
-              m.robeCooldownRemainingMs=0;
-              m.robePauseReason='limit_posting';
+              m.robeCooldownUntil = Date.now() + 24*60*60*1000;
+              m.robeCooldownRemainingMs = 0;
+              m.robePauseReason = 'limit_posting';
               return m;
             });
-            try { robeUpdateMeta && robeUpdateMeta(nome,{ pauseReason:'limit_posting', lastLimitAt: Date.now() }); } catch {}
             try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada'); } catch {}
             try { await safeClosePage(page); } catch {}
             cooldownApplied = true;
@@ -797,17 +855,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_evidence', ev1, ev2 });
 
       // Detecção de “Limite atingido” pós-publish (após bloco de evidências)
-      if (await detectLimitReached(page)) {
+      if (await detectLimitOverlay(page, { timeoutMs: 15000, intervalMs: 350 })) {
         await manifestStore.update(nome, m => {
           m = m||{};
-          m.robeCooldownUntil=Date.now()+24*60*60*1000;
-          m.robeCooldownRemainingMs=0;
-          m.robePauseReason='limit_posting';
+          m.robeCooldownUntil = Date.now() + 24*60*60*1000;
+          m.robeCooldownRemainingMs = 0;
+          m.robePauseReason = 'limit_posting';
           return m;
         });
-        try { robeUpdateMeta && robeUpdateMeta(nome,{ pauseReason:'limit_posting', lastLimitAt: Date.now() }); } catch {}
         try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (pós-publish)'); } catch {}
-        // "tentou ⇒ consumiu" para localização, mesmo em erro/early return
         try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
         try { await safeClosePage(page); } catch {}
         cooldownApplied = true;

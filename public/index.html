@@ -764,18 +764,16 @@
             titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
           }
         }
-        // Pill “Robe em pausa 24h (Limite atingido)” — nova regra
+        // Pill “Robe Limite atingido” (amarela) — aparece sempre que pauseReason === 'limit_posting'
         {
           const r = robes && robes[p.nome];
           if (
             !isFrozen &&
             p.manifestStatus === 'ok' &&
-            p.closingReason !== 'virtus_block' &&
-            r && r.cooldownSec > 80000 &&
-            r.pauseReason === 'limit_posting'
+            r && r.pauseReason === 'limit_posting'
           ) {
-            const pill = buildPill('Robe em pausa 24h (Limite atingido)', 'bad');
-            pill.title = "Foi detectado Limite atingido na conta, conforme overlay do Facebook (limite de postagens)\nO Robe está pausado por 24 horas, Virtus permanece online.";
+            const pill = buildPill('Robe: Limite atingido', 'warn');
+            pill.title = "Foi detectado Limite atingido (overlay do Facebook). O Robe está pausado até que a limitação suma ou você dê PLAY.\nVirtus permanece online.";
             titleRow.append(pill);
           }
         }
