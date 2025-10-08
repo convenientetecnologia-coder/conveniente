@@ -8,6 +8,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 
 const DATA_DIR = path.join(__dirname, '..', 'dados');
 const STREAM_FILE = path.join(DATA_DIR, 'event_stream.jsonl');   // Append-only log (JSON por linha)
@@ -29,14 +30,32 @@ async function pushEvent(evt) {
   });
 }
 
-// Lê eventos (bulk), por offset de linha/opcional count máximo
-function readEvents({from = 0, max = 1000} = {}) {
+// Lê eventos (bulk), por offset de linha/opcional count máximo usando stream e readline
+/**
+ * Lê eventos por faixa usando stream.
+ * @param {Object} opts
+ * @param {number} opts.from - Linha de início (offset)
+ * @param {number} opts.max - Quantidade máxima de eventos (default: 1000)
+ * @returns {Promise<Array>}
+ */
+async function readEvents({from = 0, max = 1000} = {}) {
   if (!fs.existsSync(STREAM_FILE)) return [];
-  const lines = fs.readFileSync(STREAM_FILE, 'utf8').split('\n').filter(Boolean);
-  return lines.slice(from, from + max).map((l, idx) => {
-    try { return { ...JSON.parse(l), offset: from + idx }; }
-    catch { return null; }
-  }).filter(Boolean);
+  const events = [];
+  let curLine = 0;
+  const rl = readline.createInterface({
+    input: fs.createReadStream(STREAM_FILE, {encoding:'utf8'})
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    if (curLine >= from && events.length < max) {
+      try { events.push({...JSON.parse(line), offset: curLine}); } 
+      catch {}
+    }
+    curLine++;
+    if (events.length >= max) break;
+  }
+  rl.close();
+  return events;
 }
 
 // Grava último offset acknowledged pelo consumidor (usado por Supervisor para persistir progresso)
@@ -54,10 +73,9 @@ function getAck() {
 }
 
 // Utilitário para consumir eventos novos não-acknowledged
-function getNewEvents(max=1000) {
+async function getNewEvents(max=1000) {
   const from = getAck();
-  const evts = readEvents({from, max});
-  return evts;
+  return await readEvents({from, max});
 }
 
 // Roda rotação (backup) se arquivo ficou muito grande (ex: >10MB) ou por admin

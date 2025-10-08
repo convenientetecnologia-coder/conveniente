@@ -27,6 +27,14 @@ const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
 // Debounce de log "Browser morto, não é possível garantir page." — 1x/60s por perfil
 const virtusDeadLogTimes = {}; // { [nome]: timestamp }
 
+// TTL periódica para virtusDeadLogTimes (limpeza de entradas >24h)
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of Object.entries(virtusDeadLogTimes)) {
+    if (now - v > 24 * 60 * 60 * 1000) delete virtusDeadLogTimes[k];
+  }
+}, 60 * 60 * 1000);
+
 // ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
 function getPerfilManifest(nome) {
   const perfisArr = JSON.parse(fsRaw.readFileSync(path.join(__dirname, '../dados/perfis.json'), 'utf8'));
@@ -448,6 +456,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const MAX_REPLY_DELAY_MS = 120_000;
 
   // cache em memória e timers
+  const RESP_CACHE_MAX = 5000;
+  function setResponded(id, ts) {
+    if (!respondedCache.has(id) && respondedCache.size >= RESP_CACHE_MAX) {
+      const first = respondedCache.keys().next().value;
+      if (first !== undefined) respondedCache.delete(first);
+    }
+    respondedCache.set(id, ts);
+  }
   const respondedCache = new Map();
 
   // MILITAR: Timers unificados
@@ -466,6 +482,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let filaLoopBusy = false;
   let recoverBackoffMs = 0;
   const failCounts = new Map();
+  // Limpeza/cap failCounts — nunca deve passar de 1000
+  function setFailCount(chatId, n) {
+    if (!failCounts.has(chatId) && failCounts.size >= 1000) {
+      const first = failCounts.keys().next().value;
+      if (first !== undefined) failCounts.delete(first);
+    }
+    failCounts.set(chatId, n);
+  }
 
   // Persistência segura no Windows
   async function salvaHistorico() {
@@ -509,7 +533,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     for (const id of Object.keys(historico)) {
       const ts = Number(historico[id]) || 0;
       if (ts && (agora - ts) < NO_REPEAT_WINDOW_SEC) {
-        respondedCache.set(id, ts);
+        setResponded(id, ts);
       }
     }
   }
@@ -526,6 +550,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         log(`Histórico limpo: ${id} removido (>24h)`);
       }
     });
+    // Garantir cap adicional do respondedCache
+    while (respondedCache.size > RESP_CACHE_MAX) {
+      const first = respondedCache.keys().next().value;
+      if (first !== undefined) respondedCache.delete(first);
+      mudanca = true;
+    }
     return mudanca;
   }
 
@@ -573,6 +603,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!browser || (browser.isConnected && browser.isConnected() === false)) return null;
         if (page && typeof page.isClosed === 'function' && page.isClosed()) return null;
 
+        try { page.removeAllListeners('dialog'); } catch {}
         try {
           page.on('dialog', async (dlg) => {
             try {
@@ -665,7 +696,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   function incFail(chatId) {
     const n = (failCounts.get(chatId) || 0) + 1;
-    failCounts.set(chatId, n);
+    setFailCount(chatId, n);
     return n;
   }
   function resetFail(chatId) {
@@ -787,7 +818,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // considera “committed”
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
-            respondedCache.set(chatId, tsNow);
+            setResponded(chatId, tsNow);
             await salvaHistorico();
             await pendingDel(nome, chatId);
           } else {
@@ -1052,7 +1083,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try { await pendingDel(nome, chatId); } catch {}
           const tsNow = agoraEpoch();
           historico[chatId] = tsNow;
-          respondedCache.set(chatId, tsNow);
+          setResponded(chatId, tsNow);
           ultimoAtendimento = tsNow;
           await salvaHistorico();
           try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
@@ -1074,7 +1105,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             try { await pendingDel(nome, chatId); } catch {}
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
-            respondedCache.set(chatId, tsNow);
+            setResponded(chatId, tsNow);
             ultimoAtendimento = tsNow;
             await salvaHistorico();
             try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
@@ -1095,7 +1126,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             try { await pendingDel(nome, chatId); } catch {}
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
-            respondedCache.set(chatId, tsNow);
+            setResponded(chatId, tsNow);
             ultimoAtendimento = tsNow;
             await salvaHistorico();
             try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
@@ -1140,7 +1171,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { await pendingDel(nome, chatId); } catch {}
         const tsNow = agoraEpoch();
         historico[chatId] = tsNow;
-        respondedCache.set(chatId, tsNow);
+        setResponded(chatId, tsNow);
         ultimoAtendimento = tsNow;
         await salvaHistorico();
 
@@ -1162,6 +1193,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } finally {
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
+      resetFail(chatId); // limpa failCounts quando fim do ciclo
       if (_chatLockAcquired) {
         try { chatLock.release(nome, chatId); } catch {}
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
@@ -1404,6 +1436,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         robeMeta[nome].numPages = pages.length;
       }
       // ========== Limpeza para evitar leaks ==========
+      delete virtusDeadLogTimes[nome];
+      try { respondedCache.clear(); } catch {}
+      try { fila = []; } catch {}
+      try { failCounts.clear(); } catch {}
+      try { historico = {}; } catch {}
     }
   };
 }

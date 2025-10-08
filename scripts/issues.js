@@ -72,7 +72,8 @@ const _locks = new Map();
 function _serialize(nome, fn) {
   const key = String(nome || '');
   const prev = _locks.get(key) || Promise.resolve();
-  const next = prev.then(() => Promise.resolve(fn()).catch(()=>{}));
+  const next = prev.then(() => Promise.resolve(fn()))
+                   .finally(() => { if (_locks.get(key) === next) _locks.delete(key); });
   _locks.set(key, next);
   return next;
 }

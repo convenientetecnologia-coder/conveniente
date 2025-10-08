@@ -789,6 +789,25 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 // Estado global do Robe (cooldown, fila, etc)
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
 
+// INICIO DA INSTRUÇÃO (worker.js)
+//
+// Objetivo: Sweeper global de memória para evitar crescimento indefinido dos estados efêmeros
+function memorySweep() {
+  try {
+    const nomesValidos = new Set(loadPerfisJson().map(p => p.nome));
+    // healthState (Map)
+    for (const [n] of healthState) if (!nomesValidos.has(n) && !controllers.has(n)) healthState.delete(n);
+    // profileFailures (Map)
+    for (const [n] of profileFailures) if (!nomesValidos.has(n) && !controllers.has(n)) profileFailures.delete(n);
+    // robeMeta (objeto)
+    for (const n of Object.keys(robeMeta)) {
+      if (!nomesValidos.has(n) && !controllers.has(n)) delete robeMeta[n];
+    }
+  } catch {}
+}
+setInterval(memorySweep, 10 * 60 * 1000);
+// FIM DA INSTRUÇÃO (worker.js)
+
 // Interlock global anti-flap per profile
 function killGuardActive(nome) {
   return robeMeta[nome]?.killGuardUntil && robeMeta[nome].killGuardUntil > Date.now();
@@ -1495,7 +1514,7 @@ async function ramCpuMonitorTick() {
     // Histórico curto
     const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
     hist.push({ t: Date.now(), mb: ramMB });
-    while (hist.length > 6) hist.shift();
+    while (hist.length > 8) hist.shift();
 
     // Resets de streaks RAM/CPU em leituras baixas (após atualizar históricos)
     if (typeof robeMeta[nome].cpuPercent === 'number' && robeMeta[nome].cpuPercent < 120) {
@@ -1552,7 +1571,7 @@ async function ramCpuMonitorTick() {
           // Atualiza leitura no hist somente se conseguimos nova amostra
           if (typeof ramMB2 === 'number') {
             hist.push({ t: Date.now(), mb: ramMB2 });
-            while (hist.length > 6) hist.shift();
+            while (hist.length > 8) hist.shift();
           }
           const last5 = hist.slice(-5);
           const allHigh2 = last5.every(h => h.mb >= RAM_KILL_MB_LOCAL);
@@ -2092,6 +2111,21 @@ try { freezeCooldownIfNotWorking(nome); } catch {}
 // Remove do mapa de controladores
 controllers.delete(nome);
 
+// INÍCIO DA INSTRUÇÃO: Limpeza extra ao desconectar/disconnect
+try { healthState.delete(nome); } catch {}
+try { profileFailures.delete(nome); } catch {}
+try {
+  if (robeMeta[nome]) {
+    delete robeMeta[nome].emExecucao;
+    delete robeMeta[nome].emFila;
+    delete robeMeta[nome].cpuHistory;
+    delete robeMeta[nome].ramHist;
+    delete robeMeta[nome].reloadAttemptsWindow;
+    delete robeMeta[nome].blockDetectWindow;
+  }
+} catch {}
+// FIM DA INSTRUÇÃO: Limpeza extra ao desconectar/disconnect
+
 // Log de morte/desconexão imediatamente após remover do controllers
 try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
 
@@ -2251,6 +2285,20 @@ const handlers = {
   } catch {}
   try { freezeCooldownIfNotWorking(nome); } catch {}
   controllers.delete(nome);
+
+  // INICIO DA INSTRUÇÃO (opcional, recomendado): Limpeza de efêmeros em robeMeta ao desativar
+  try {
+    if (robeMeta[nome]) {
+      delete robeMeta[nome].emExecucao;
+      delete robeMeta[nome].emFila;
+      delete robeMeta[nome].cpuHistory;
+      delete robeMeta[nome].ramHist;
+      delete robeMeta[nome].reloadAttemptsWindow;
+      delete robeMeta[nome].blockDetectWindow;
+    }
+  } catch {}
+  // FIM DA INSTRUÇÃO (opcional, recomendado)
+
   stopPruneLoop(nome);
   if (!preserve) {
     try {
@@ -2557,6 +2605,23 @@ const handlers = {
   // FIM DA INSTRUÇÃO (worker.js) - Handler robes-release-all
 
   async ['get-status']() {
+    // INICIO DA INSTRUÇÃO 5: cap arrays efêmeros antes de gerar status
+    try {
+      for (const n of Object.keys(robeMeta)) {
+        const m = robeMeta[n];
+        if (!m) continue;
+        if (!Array.isArray(m.cpuHistory)) m.cpuHistory = [];
+        while (m.cpuHistory.length > 8) m.cpuHistory.shift();
+        if (!Array.isArray(m.ramHist)) m.ramHist = [];
+        while (m.ramHist.length > 8) m.ramHist.shift();
+        if (!Array.isArray(m.reloadAttemptsWindow)) m.reloadAttemptsWindow = [];
+        while (m.reloadAttemptsWindow.length > 8) m.reloadAttemptsWindow.shift();
+        if (!Array.isArray(m.blockDetectWindow)) m.blockDetectWindow = [];
+        while (m.blockDetectWindow.length > 8) m.blockDetectWindow.shift();
+      }
+    } catch {}
+    // FIM DA INSTRUÇÃO 5
+
     const perfisArr = loadPerfisJson();
     const perfis = perfisArr.map(p => {
       const nome = p.nome;
@@ -2685,6 +2750,23 @@ const handlers = {
 async function snapshotStatusAndWrite() {
 _statusLock = _statusLock.then(async () => {
 try {
+// INICIO DA INSTRUÇÃO 5: cap arrays efêmeros antes de gerar snapshot
+try {
+  for (const n of Object.keys(robeMeta)) {
+    const m = robeMeta[n];
+    if (!m) continue;
+    if (!Array.isArray(m.cpuHistory)) m.cpuHistory = [];
+    while (m.cpuHistory.length > 8) m.cpuHistory.shift();
+    if (!Array.isArray(m.ramHist)) m.ramHist = [];
+    while (m.ramHist.length > 8) m.ramHist.shift();
+    if (!Array.isArray(m.reloadAttemptsWindow)) m.reloadAttemptsWindow = [];
+    while (m.reloadAttemptsWindow.length > 8) m.reloadAttemptsWindow.shift();
+    if (!Array.isArray(m.blockDetectWindow)) m.blockDetectWindow = [];
+    while (m.blockDetectWindow.length > 8) m.blockDetectWindow.shift();
+  }
+} catch {}
+// FIM DA INSTRUÇÃO 5
+
 const perfisArr = loadPerfisJson();
 const perfis = perfisArr.map(p => {
 const nome = p.nome;
@@ -3042,7 +3124,7 @@ return _statusLock;
 //         if (!ok2) { try { await issues.append('system','persist_failed', `${nome}|robePause24h_desired_write`); } catch {} }
 //       }
 //     } catch (e) {
-//       try { console.warn('[WORKER][reconcile] robePause24h err:', e && e.message || e); } catch {}
+//       try { console.warn('[WORKER][reconcile] robePause24h err:', e e e.message || e); } catch {}
 //     }
 
 //   }
@@ -3456,6 +3538,8 @@ async function nurseTick() {
         robeMeta[nome].blockDetectWindow.push(now2);
         // mantém só strikes na janela de 5s
         robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow.filter(ts => now2 - ts <= 5000);
+        // Cap a 8 entradas
+        while (robeMeta[nome].blockDetectWindow.length > 8) robeMeta[nome].blockDetectWindow.shift();
 
         if (robeMeta[nome].blockDetectWindow.length >= 2 && (!robeMeta[nome].blockHysteresisUntil || robeMeta[nome].blockHysteresisUntil < now2)) {
           // Confirme: se for 2 de 3 strikes, só aqui desativa
@@ -3527,6 +3611,9 @@ async function nurseTick() {
         robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => nowReload - ts < 60000);
 
         robeMeta[nome].reloadAttemptsWindow.push(nowReload);
+        // Cap a 8 entradas
+        while (robeMeta[nome].reloadAttemptsWindow.length > 8) robeMeta[nome].reloadAttemptsWindow.shift();
+
         if (robeMeta[nome].reloadAttemptsWindow.length > 3) {
           // Log e GRACE: não tente novo reload nos próximos 60s
           robeMeta[nome].reloadBlockedUntil = nowReload+60000;

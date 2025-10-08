@@ -23,8 +23,17 @@ function resolveFotosDir() {
 
 // ----------- SHA-256 Helper -----------
 function sha256File(abs) {
-  const buf = fs.readFileSync(abs);
-  return crypto.createHash('sha256').update(buf).digest('hex');
+  return new Promise((resolve, reject) => {
+    try {
+      const hash = crypto.createHash('sha256');
+      const rs = fs.createReadStream(abs);
+      rs.on('data', chunk => hash.update(chunk));
+      rs.on('end', () => resolve(hash.digest('hex')));
+      rs.on('error', reject);
+    } catch (e) {
+      reject(e);
+    }
+  });
 }
 
 // ------------------------ Utils atômicos ------------------------
@@ -114,14 +123,13 @@ function listAllPhotosSortedByMtimeAsc() {
 // ------------------------ SHA e META helpers ------------------------
 
 // Atualiza metadados de stat do registro + SHA-256
-function applyStatToRec(rec, stat, absPath) {
+async function applyStatToRec(rec, stat, absPath) {
   rec.size = stat.size;
   rec.mtimeMs = stat.mtimeMs;
   if (typeof rec.generation !== 'number') rec.generation = 1;
-
   // Calcule SHA-256 assim que nova geração surge
   try {
-    rec.sha256 = sha256File(absPath || '');
+    rec.sha256 = await sha256File(absPath || '');
   } catch {}
 }
 
@@ -129,7 +137,7 @@ function applyStatToRec(rec, stat, absPath) {
 function sameGeneration(rec, stat, absPath) {
   if (!rec || !stat) return false;
   if (rec.sha256 && absPath) {
-    try { return rec.sha256 === sha256File(absPath); }
+    try { return rec.sha256 === fs.existsSync(absPath) ? require('crypto').createHash('sha256').update(fs.readFileSync(absPath)).digest('hex') : ''; }
     catch { return false; } // Se erro, treat as not the same
   }
   if (typeof rec.size !== 'number' || typeof rec.mtimeMs !== 'number') return false;
@@ -165,13 +173,13 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
 
       if (!rec) {
         rec = idx[name] = { postedBy: [], reservedBy: {} };
-        applyStatToRec(rec, stat, abs);
+        await applyStatToRec(rec, stat, abs);
         changed = true;
       } else {
         if (!sameGeneration(rec, stat, abs)) {
           rec.postedBy = [];
           rec.reservedBy = {};
-          applyStatToRec(rec, stat, abs);
+          await applyStatToRec(rec, stat, abs);
           rec.deletePending = false;
           changed = true;
         }
@@ -257,12 +265,12 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
     let rec = idx[fileName];
     if (!rec) {
       rec = idx[fileName] = { postedBy: [], reservedBy: {} };
-      if (stat) applyStatToRec(rec, stat, abs);
+      if (stat) await applyStatToRec(rec, stat, abs);
     } else {
       if (stat && !sameGeneration(rec, stat, abs)) {
         rec.postedBy = [];
         rec.reservedBy = {};
-        applyStatToRec(rec, stat, abs);
+        await applyStatToRec(rec, stat, abs);
         rec.deletePending = false;
       }
     }
@@ -304,7 +312,7 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
       } else {
         rec.postedBy = [];
         rec.reservedBy = {};
-        applyStatToRec(rec, stat, abs);
+        await applyStatToRec(rec, stat, abs);
         rec.deletePending = false;
         saveIndex(idx);
         return { ok: true, deleted: false };
@@ -347,7 +355,7 @@ async function gcSweep() {
       if (!sameGeneration(rec, stat, abs)) {
         rec.postedBy = [];
         rec.reservedBy = {};
-        applyStatToRec(rec, stat, abs);
+        await applyStatToRec(rec, stat, abs);
         if (rec.deletePending) rec.deletePending = false;
         resetGens++;
         changed = true;

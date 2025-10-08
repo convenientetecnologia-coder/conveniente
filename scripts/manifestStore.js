@@ -45,7 +45,8 @@ function writeJsonAtomic(file, obj) {
 // TODO/FUTURE: Aqui pode-se limitar (por perfil) o número de jobs/Promises simultâneos na fila, caso sobrecarga percebida
 function withLock(nome, fn) {
   const prev = locks.get(nome) || Promise.resolve();
-  const job = prev.then(() => Promise.resolve(fn()).catch(()=>{}));
+  const job = prev.then(() => Promise.resolve(fn()).catch(()=>{}))
+                  .finally(() => { if (locks.get(nome) === job) locks.delete(nome); });
   locks.set(nome, job);
   return job;
 }
