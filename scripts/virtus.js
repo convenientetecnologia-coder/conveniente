@@ -86,27 +86,90 @@ function agoraEpoch() {
 
 const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_respondidos.json');
 
+// ======= ADIÇÃO: Pending Ledger Helpers & Heurística =======
+const PENDING_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_pending.json');
+
+async function readJson(file, fb={}) {
+  try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return fb; }
+}
+async function writeJsonAtomicFsync(file, obj){
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  const fd = await fs.open(tmp, 'w');
+  try {
+    await fd.writeFile(JSON.stringify(obj, null, 2), 'utf8');
+    await fd.sync();
+  } finally { await fd.close(); }
+  try { await fs.unlink(file); } catch {}
+  try { await fs.rename(tmp, file); }
+  catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp);} catch{} }
+}
+async function pendingAdd(perfil, chatId, attemptId) {
+  const file = PENDING_JSON_NAME(perfil);
+  const cur = await readJson(file, {});
+  cur[chatId] = { attemptId, startedAt: Date.now() };
+  await writeJsonAtomicFsync(file, cur);
+}
+async function pendingDel(perfil, chatId) {
+  const file = PENDING_JSON_NAME(perfil);
+  const cur = await readJson(file, {});
+  if (cur[chatId]) { delete cur[chatId]; await writeJsonAtomicFsync(file, cur); }
+}
+async function pendingList(perfil) {
+  const file = PENDING_JSON_NAME(perfil);
+  return await readJson(file, {});
+}
+// Heurística: detecta bubble "você enviou/you sent"
+async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
+  try {
+    return await page.evaluate((maxMs) => {
+      const norm = s => (s||'').toLowerCase();
+      const bubbles = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-50);
+      const me = bubbles.reverse().find(b => {
+        const txt = norm(b.innerText||b.textContent||'');
+        if (/(você|voce|you)\s*(enviou|sent)/.test(txt)) return true;
+        const style = getComputedStyle(b);
+        return style && (style.justifyContent==='flex-end' || style.textAlign==='right');
+      });
+      if (!me) return false;
+      // Se bubble fala em "agora", minutos, ou "há menos de 10min"
+      const t = (me.innerText||'').toLowerCase();
+      if (/agora|now/.test(t)) return true;
+      if (/\b\d+\s*(min|m|minuto)\b/.test(t)) return true;
+      if (/\b(\d+)\s*(h|hora)/.test(t)) {
+        const m = t.match(/\b(\d+)\s*(h|hora)/);
+        if (m && parseInt(m[1],10) <= 2) return true;
+      }
+      return false;
+    }, maxAgeMs);
+  } catch { return false; }
+}
+
 // Classificadores de tempo
 function isVelho24h(tempoLabel) {
   if (!tempoLabel) return false;
-  const t = tempoLabel.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-  if (/\b\d+\sd\b/.test(t)) return true;
-  if (/\b\d+\sdias?\b/.test(t)) return true;
-  if (/\b\d+\ssem\b/.test(t)) return true;
-  if (/\b\d+\sseman/.test(t)) return true;
-  if (/\b\d+\s*w\b/.test(t)) return true;
-  if (/week/.test(t)) return true;
+  const t = String(tempoLabel)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim();
+  if (/\b(ontem|yesterday)\b/.test(t)) return true;
+  if (/\b(\d+)\s*(seman|sem|weeks?|w)\b/.test(t)) return true;
+  const mDias = t.match(/\b(\d+)\s*(d|dias?)\b/);
+  if (mDias) { if (parseInt(mDias[1],10) >= 1) return true; }
+  const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
+  if (mH) { if (parseInt(mH[1],10) >= 24) return true; }
   return false;
 }
-
 function isChatRecente(tempoLabel) {
   if (!tempoLabel) return false;
-  const t = tempoLabel.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  const t = String(tempoLabel)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim();
   if (isVelho24h(t)) return false;
-  if (/\bagora\b/.test(t)) return true;
-  if (/\b\d+\s*(s|seg)\b/.test(t)) return true;
-  if (/\b\d+\s*(min|minute|minuto)\b/.test(t)) return true;
-  if (/\b\d+\s*(h|hora|hour)\b/.test(t)) return true;
+  if (/\b(agora|now)\b/.test(t)) return true;
+  if (/\b\d+\s*(s|seg|secs?|seconds?)\b/.test(t)) return true;
+  if (/\b\d+\s*(min|m|mins?|minutes?)\b/.test(t)) return true;
+  const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
+  if (mH) { if (parseInt(mH[1],10) < 24) return true; }
   return false;
 }
 
@@ -325,6 +388,19 @@ async function sendMessageSafe(p, campo, msg) {
     return txt.length === 0;
   }, { timeout: 7000 }, campo).catch(()=>{});
 
+  // 7.1) Pós-Enter: verificação de envio (bubble "você enviou/you sent"); reforça Enter se necessário
+  try {
+    const sentByMe = await p.evaluate(() => {
+      const norm = s => (s||'').toLowerCase();
+      const last = Array.from(document.querySelectorAll('div[role="row"],div[role="article"]')).slice(-10);
+      return last.some(el => /you\s+sent|v[ou]ce\s+enviou/i.test(norm(el.innerText||el.textContent||'')));
+    });
+    if (!sentByMe) {
+      // Tenta reforçar um Enter caso o Messenger não tenha enviado
+      await p.keyboard.press('Enter');
+    }
+  } catch {}
+
   // 8) Pós-verificação: se imagem placeholder quebrada ficou no composer
   try {
     const broken = await p.evaluate(() => {
@@ -397,14 +473,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try {
         await fs.mkdir(path.dirname(HIST_FILE), { recursive: true });
         const tmp = HIST_FILE + '.tmp';
-        await fs.writeFile(tmp, JSON.stringify(historico, null, 2));
-        try { await fs.unlink(HIST_FILE); } catch {}
+        const fd = await fs.open(tmp, 'w');
         try {
-          await fs.rename(tmp, HIST_FILE);
-        } catch {
-          await fs.copyFile(tmp, HIST_FILE);
-          try { await fs.unlink(tmp); } catch {}
-        }
+          await fd.writeFile(JSON.stringify(historico, null, 2), 'utf8');
+          await fd.sync();
+        } finally { await fd.close(); }
+        try { await fs.unlink(HIST_FILE); } catch {}
+        try { await fs.rename(tmp, HIST_FILE); }
+        catch { await fs.copyFile(tmp, HIST_FILE); try { await fs.unlink(tmp); } catch {} }
       } catch (e) {
         log('Erro ao salvar histórico:', e + '');
       }
@@ -414,6 +490,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function carregaHistorico() {
     try {
+      // Fallback .tmp órfão
+      const tmp = HIST_FILE + '.tmp';
+      try { await fs.access(HIST_FILE); }
+      catch {
+        if (await fs.access(tmp).then(()=>true).catch(()=>false)) {
+          try { await fs.rename(tmp, HIST_FILE); }
+          catch { await fs.copyFile(tmp, HIST_FILE); try { await fs.unlink(tmp);} catch{} }
+        }
+      }
       const txt = await fs.readFile(HIST_FILE, 'utf-8');
       historico = JSON.parse(txt);
     } catch {
@@ -683,10 +768,42 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
+  // Reconciliação de pendências
+  async function reconcilePendingsIfAny() {
+    try {
+      const pend = await pendingList(nome);
+      const keys = Object.keys(pend||{});
+      if (!keys.length) return;
+      const p = await ensurePage();
+      if (!p) return;
+      for (const chatId of keys) {
+        const rec = pend[chatId] || {};
+        const age = Date.now() - (rec.startedAt || 0);
+        if (age < 8*60*1000) continue; // deixa “aquecendo” 8min antes de reconciliar
+        try {
+          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil:'domcontentloaded', timeout: 20000 }).catch(()=>{});
+          const looksSent = await wasRecentlySentByMe(p, 10*60*1000);
+          if (looksSent) {
+            // considera “committed”
+            const tsNow = agoraEpoch();
+            historico[chatId] = tsNow;
+            respondedCache.set(chatId, tsNow);
+            await salvaHistorico();
+            await pendingDel(nome, chatId);
+          } else {
+            // rollback: libera para reenvio
+            await pendingDel(nome, chatId);
+          }
+        } catch { /* segue próximo */ }
+      }
+    } catch {}
+  }
+
   async function initHistoricoSePreciso() {
     try {
       await fs.access(HIST_FILE);
       await carregaHistorico();
+      await reconcilePendingsIfAny();
       log('Histórico existente carregado. Retomando pendentes <24h.');
       return;
     } catch {}
@@ -709,6 +826,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     for (const chat of recentes) historico[chat.id] = agora;
     await salvaHistorico();
     await carregaHistorico();
+    await reconcilePendingsIfAny();
     log(`[SNAPSHOT] Concluído. ${recentes.length} chats <24h marcados como respondidos no primeiro boot.`);
   }
 
@@ -852,6 +970,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Lock de disco POR chatId!
       if (!chatLock.acquire(nome, chatId)) {
         stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
+        // logging adicional de lock fail
+        stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
+        try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId}`); } catch {}
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
         return;
@@ -859,11 +980,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       _chatLockAcquired = true;
       stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
 
+      // Ledger: adiciona pending imediatamente após adquirir lock
+      const attemptId2 = stepLog.attemptId();
+      try { await pendingAdd(nome, chatId, attemptId2); } catch {}
+
       chatAtivo = chatId;
 
       try {
         p = await ensurePage();
         if (!p) {
+          try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
@@ -873,6 +999,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const tsPrev = respondedCache.get(chatId);
         if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
           log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
+          try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
@@ -883,6 +1010,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         if (!found) {
           log(`[WARN] Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`);
+          try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
@@ -913,6 +1041,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         if (!achou) {
           log(`[ERRO] Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`);
+          try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
@@ -920,6 +1049,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         if (await isChatBlocked(p)) {
           log(`[WARN] Chat ${chatId} bloqueado/indisponível. Marcando como respondido para evitar looping.`);
+          try { await pendingDel(nome, chatId); } catch {}
           const tsNow = agoraEpoch();
           historico[chatId] = tsNow;
           respondedCache.set(chatId, tsNow);
@@ -941,6 +1071,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           } catch {}
           if (await isChatBlocked(p)) {
             log(`[WARN] Chat ${chatId} bloqueado no fallback. Marcando como respondido para evitar looping.`);
+            try { await pendingDel(nome, chatId); } catch {}
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
             respondedCache.set(chatId, tsNow);
@@ -961,12 +1092,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           log(`[ERRO] Composer indisponível para chat ${chatId}. Tentativas: ${fails}`);
           if (fails >= 2) {
             log(`[WARN] ${chatId} falhou 2x. Marcando como respondido para não travar fila.`);
+            try { await pendingDel(nome, chatId); } catch {}
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
             respondedCache.set(chatId, tsNow);
             ultimoAtendimento = tsNow;
             await salvaHistorico();
             try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
+          } else {
+            try { await pendingDel(nome, chatId); } catch {}
           }
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -977,6 +1111,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
           log('[ERRO] atendimento.json vazio. Não será enviada resposta!');
+          try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
@@ -986,9 +1121,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (Array.isArray(msg)) msg = msg.join('\n');
         if (typeof msg !== 'string') msg = String(msg);
 
-        if (!running) { chatAtivo = null; return; }
-        if (!browser || browser.isConnected?.() === false) { chatAtivo = null; return; }
-        if (!p || p.isClosed?.()) { chatAtivo = null; return; }
+        if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+        if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+        if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
 
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
         try { await campo.focus(); } catch {}
@@ -1001,6 +1136,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
 
         log(`Mensagem enviada para chat ${chatId}`);
+        // Ledger: remove pending ANTES de gravar responded (commit)
+        try { await pendingDel(nome, chatId); } catch {}
         const tsNow = agoraEpoch();
         historico[chatId] = tsNow;
         respondedCache.set(chatId, tsNow);
@@ -1015,12 +1152,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } else {
           try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msgErr}`); } catch {}
         }
+        // Rollback pending em caso de erro
+        try { await pendingDel(nome, chatId); } catch {}
       }
 
       fila = fila.filter(id => id !== chatId);
       chatAtivo = null;
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
     } finally {
+      // Garantia: nunca deixar pending zumbi
+      try { await pendingDel(nome, chatId); } catch {}
       if (_chatLockAcquired) {
         try { chatLock.release(nome, chatId); } catch {}
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
