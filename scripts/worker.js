@@ -118,6 +118,8 @@ function isOkFromSnapshot(snap) {
 }
 // 4) Auto-curing principal
 async function tryFixPhantom(nome, page) {
+  const ctrlGuard = controllers.get(nome);
+  if (ctrlGuard && (ctrlGuard.humanControl === true || ctrlGuard.configurando === true)) return false;
   const ph = getPhantomState(nome);
   const now = Date.now();
   ph.actions10m = _prune(ph.actions10m, 10601000);
@@ -1216,6 +1218,8 @@ function getWorkingProfileNames() {
 // ========== INICIO ALTERAÇÃO PRUNING DE ABAS ==============
 async function closeExtraPages(browser, mainPage, nome) {
   try {
+    const ctrl = controllers.get(nome);
+    if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) return;
     // GUARD EXTREMO: nunca prune se emExecucao==true para esse perfil
     if (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true) {
       return; // NÃO FECHA ABAS DURANTE O ROBE DESTE PERFIL
@@ -1879,7 +1883,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //       }
 //     }
 //   } catch (e) {
-//     try { await issues.append('system', 'lean_keeper_error', e && e.message || String(e) ); } catch {}
+//     try { await issues.append('system', 'lean_keeper_error', e e e.message || e ); } catch {}
 //   } finally {
 //     _leanBusy = false;
 //   }
@@ -2346,6 +2350,8 @@ const handlers = {
       return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
     } finally {
       ctrl.configurando = false;
+      ctrl.humanControl = true;
+      stopPruneLoop(nome);
       await snapshotStatusAndWrite();
     }
   },
@@ -2409,6 +2415,16 @@ const handlers = {
 
     // 4. [Opcional] Marque flag em memória (tipo ctrl.humanControl = true), se quiser personalizar pill na UI ou botão (“Retomar Trabalho”)
     ctrl.humanControl = true;
+    stopPruneLoop(nome); // Garante que NENHUM prune corra durante humano
+
+    // (Opcional para robustez)
+    // Zere também desired.virtus para 'off' (se não quiser o robô voltar enquanto humano):
+    await (async () => {
+      const desired = readJsonFile(desiredPath, { perfis: {} });
+      desired.perfis = desired.perfis || {};
+      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
+      writeJsonAtomic(desiredPath, desired);
+    })();
 
     // Adicionado - garantir cooldown congelado ao entrar no modo humano:
     try { freezeCooldownIfNotWorking(nome); } catch {}
@@ -2423,6 +2439,10 @@ const handlers = {
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
+
+    let pages2 = [];
+    try { pages2 = await ctrl.browser.pages(); } catch {}
+    if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]); // Reabilita prune ao retornar ao robô
 
     let pages;
     try { pages = await ctrl.browser.pages(); } catch {}
@@ -3374,7 +3394,7 @@ async function detectMessengerTempBlock(page) {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const texts = Array.from(document.querySelectorAll('h1,h2,span,div'))
         .slice(0, 300)
-        .map(el => norm(el.innerText || el.textContent || ''))
+        .map(el => norm(el.innerText || el.content || el.textContent || ''))
         .filter(Boolean);
 
       const hasBlocked =
@@ -3404,6 +3424,9 @@ async function nurseTick() {
     for (const nome of Object.keys(desired.perfis || {})) {
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
+      if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
+        continue; // NUNCA navega, religia, nem prune enquanto em humano ou configurando
+      }
 
       // GUARD: nunca manter ativo durante frozen
       if (isFrozenNow(nome)) {
@@ -3692,7 +3715,7 @@ async function nurseTick() {
       if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
         try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
       }
-      if (want.virtus === 'on' && !ctrl.trabalhando && !ctrl.configurando) {
+      if (want.virtus === 'on' && !ctrl.trabalhando && !ctrl.configurando && !ctrl.humanControl) {
         try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
       }
     }
@@ -3856,6 +3879,7 @@ async function escalateToReopen(nome, reason='health_reopen') {
 
 async function healthTick() {
   for (const [nome, ctrl] of controllers) {
+    if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
     if (!ctrl || !ctrl.browser) continue;
     const st = getHealth(nome);
     const now = Date.now();
