@@ -1468,9 +1468,8 @@ async function ramCpuMonitorTick() {
           const last5 = hist.slice(-5);
           const allHigh = last5.every(h => h.p >= 150);
           if (allHigh) {
-            // GUARD: Nunca realizar kill durante configuração — ctrl.configurando
             const ctrl = controllers.get(nome);
-            if (ctrl && ctrl.configurando) return;
+            if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) return;
 
             // Interlock anti-flap
             if (killGuardActive(nome)) {
@@ -1595,9 +1594,8 @@ async function ramCpuMonitorTick() {
           }
         } catch {}
 
-        // GUARD: Nunca realizar kill durante configuração — ctrl.configurando
         const ctrl = controllers.get(nome);
-        if (ctrl && ctrl.configurando) continue;
+        if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) continue;
 
         // Interlock anti-flap
         if (killGuardActive(nome)) {
@@ -3737,9 +3735,10 @@ async function trySwapOpen(target) {
       n,
       mb: (typeof robeMeta[n]?.ramMB === 'number') ? robeMeta[n].ramMB : -1,
       emExecucao: robeMeta[n]?.emExecucao,
-      configurando: controllers.get(n)?.configurando
+      configurando: controllers.get(n)?.configurando,
+      humanControl: controllers.get(n)?.humanControl
     }))
-    .filter(c => !c.configurando && !c.emExecucao && c.mb >= (process.platform==='win32' ? 900 : 700))
+    .filter(c => !c.configurando && !c.emExecucao && !c.humanControl && c.mb >= (process.platform==='win32' ? 900 : 700))
     .sort((a, b) => b.mb - a.mb);
 
   for (const cand of candidates) {
