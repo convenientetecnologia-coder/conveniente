@@ -13,12 +13,40 @@
       color:var(--text);
     }
     header{
-      display:flex; align-items:center; justify-content:space-between;
-      padding:18px 22px;
-      border-bottom:1px solid var(--stroke);
-      background:rgba(3,8,20,.65);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      padding: 8px 22px;
+      background: rgba(3,8,20,.85);
       backdrop-filter: blur(6px);
-      position:sticky; top:0; z-index:5;
+      min-height: 38px;
+      display:flex; align-items:center; justify-content:space-between;
+    }
+    .toolbar-sticky {
+      position: sticky;
+      top: 46px; /* altura real do header (ajuste se mudar padding) */
+      z-index: 9;
+      background: #0e1420;
+      border-bottom: 1px solid var(--stroke);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 38px;
+      padding: 0 22px;
+      justify-content: flex-start;
+    }
+    .toolbar-sticky button,
+    .toolbar-sticky .btn,
+    .toolbar-sticky .add-btn {
+      margin: 0;
+      font-size: 13px;
+      padding: 7px 12px !important;
+      height: 30px;
+      min-width: 0;
+    }
+    .toolbar-sticky .filters {
+      margin-left: 18px;
+      gap: 6px;
     }
     .brand{
       display:flex; align-items:center; gap:12px; font-weight:800; letter-spacing:.2px; font-size:18px;
@@ -29,7 +57,7 @@
       display:inline-block;
       box-shadow:0 0 0 2px rgba(60,130,246,.25);
     }
-    .metrics{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .metrics{display:flex; gap:10px; align-items:center; flex-wrap:nowrap}
     .metric{
       display:flex; align-items:center; gap:8px;
       padding:6px 10px; border:1px solid var(--pill-border);
@@ -167,38 +195,40 @@
   <header>
     <div class="brand">
       <span class="logo"></span>
-      <div>Gerenciador de Contas — Conveniente Tecnologia</div>
+      <div>
+        <div style="line-height:1.05"><span>Conveniente</span><br><span style="font-weight:400">Tecnologia</span></div>
+      </div>
     </div>
-    <div class="metrics"> 
+    <div class="metrics">
       <div class="metric"><span>Total</span><b id="mTotal">0</b></div>
       <div class="metric"><span>Ativos</span><b id="mAtivos">0</b></div>
       <div class="metric"><span>Trabalhando</span><b id="mTrabalhando">0</b></div>
-      <div class="metric"><span>Fila Robe</span><b id="mFila">0</b></div>
-      <div class="metric"><span>RAM livre</span><b id="mRam">--</b></div>
+      <div class="metric"><span>Fila</span><b id="mFila">0</b></div>
+      <div class="metric"><span>RAM</span><b id="mRam">--</b></div>
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
     </div>
   </header>
-  <div class="wrap">
-    <div class="toolbar"> 
-      <button class="add-btn" id="addPerfilBtn">+ Nova Conta</button>
-      <div class="actions"> 
-        <button class="btn" id="citiesCountBtn">Cidades (Contagem)</button>
-        <button class="btn" id="startAllBtn">Abrir Todos e Iniciar 24h</button>
-        <button class="btn danger" id="stopAllBtn">Fechar todos</button>
-        <button class="btn" id="robe24AllBtn">Robe 24h (todos)</button>
-        <button class="btn" id="robeReleaseAllBtn">Liberar Robe (todos)</button>
-        <button class="btn" id="unfreezeAllBtn">Descongelar (todos)</button>
-        <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
-          <button class="btn" id="filterAll">Todas</button>
-          <button class="btn" id="filterActive">Ativas</button>
-          <button class="btn" id="filterInactive">Inativas</button>
-          <button class="btn" id="filterIssues">Com problema</button>
-        </div>
-      </div> 
+
+  <div class="toolbar toolbar-sticky">
+    <button class="add-btn" id="addPerfilBtn">+Nova Conta</button>
+    <button class="btn" id="citiesCountBtn">Cidades</button>
+    <button class="btn" id="startAllBtn">Abrir 24h</button>
+    <button class="btn danger" id="stopAllBtn">Fechar</button>
+    <button class="btn" id="robe24AllBtn">Robe 24h</button>
+    <button class="btn" id="robeReleaseAllBtn">Liberar</button>
+    <button class="btn" id="unfreezeAllBtn">Descongelar</button>
+    <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
+      <button class="btn" id="filterAll">Todas</button>
+      <button class="btn" id="filterActive">Ativas</button>
+      <button class="btn" id="filterInactive">Inativas</button>
+      <button class="btn" id="filterIssues">Com problema</button>
     </div>
+  </div>
+
+  <div class="wrap">
     <div id="listaPerfis" class="list"></div>
   </div>
   <script src="app.js"></script>
@@ -535,7 +565,11 @@
           b.id = 'globalWarn';
           b.style.cssText = 'margin:10px 0;padding:8px;border:1px solid #a66;background:#3a2222;color:#ffdede;border-radius:8px';
           b.innerText = 'Aviso: ' + warn;
-          document.querySelector('.wrap').insertBefore(b, document.querySelector('.toolbar'));
+          const wrapEl = document.querySelector('.wrap');
+          const listEl = document.getElementById('listaPerfis');
+          if (wrapEl && listEl) {
+            wrapEl.insertBefore(b, listEl);
+          }
         } else b.innerText = 'Aviso: ' + warn;
       } else {
         const b = document.getElementById('globalWarn');
@@ -1318,7 +1352,7 @@
       } catch (e) {
         alert('Falha na sequência: ' + (e && e.message || e));
       } finally {
-        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir Todos e Iniciar 24h'; }
+        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir 24h'; }
         setGlobalActionButtonsDisabled(false);
         startAllLock = false;
         reloadPerfis();
@@ -1437,7 +1471,7 @@
       } catch (e) {
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {
-        if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar todos'; }
+        if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar'; }
         setGlobalActionButtonsDisabled(false);
         stopAllLock = false;
         reloadPerfis();
@@ -1500,7 +1534,7 @@
         } catch (e) {
           alert('Erro ao descongelar todos: ' + (e && e.message || e));
         } finally {
-          btn.disabled = false; btn.textContent = 'Descongelar (todos)';
+          btn.disabled = false; btn.textContent = 'Descongelar';
         }
       };
     })();
