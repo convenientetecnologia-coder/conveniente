@@ -423,25 +423,20 @@ async function sendMessageSafe(p, campo, msg) {
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
 async function startVirtus(browser, nome, robeMeta = {}) {
-  // Epoch fence: protege navegação contra runner zumbi!
+  // Na primeira linha dentro de startVirtus, após argumentos:
   let requiredEpoch = 0;
-  if (robeMeta && robeMeta[nome] && typeof robeMeta[nome].virtusEpoch === 'number') {
-    requiredEpoch = robeMeta[nome].virtusEpoch;
-  }
-  // Caso venha via opts (chamado via startVirtus(..., opts)), priorize:
-  if (robeMeta && robeMeta[nome] && robeMeta[nome].epoch != null) {
-    requiredEpoch = robeMeta[nome].epoch;
-  }
   if (arguments.length >= 3 && arguments[2] && arguments[2].epoch != null) {
     requiredEpoch = arguments[2].epoch;
   }
-
-  // Mapa epoch por instância (garante para uso interno fences)
-  const VIRTUS_EPOCH_FENCE = {};
-  VIRTUS_EPOCH_FENCE[nome] = requiredEpoch;
-
+  // Broker fence: sempre leia do browser._fenceEpochMap
   function epochOk() {
-    return VIRTUS_EPOCH_FENCE[nome] === requiredEpoch;
+    try {
+      if (browser && browser._fenceEpochMap && typeof browser._fenceEpochMap[nome] !== "undefined") {
+        return browser._fenceEpochMap[nome] === requiredEpoch;
+      }
+      // Compat: se não definido, considera ok
+      return true;
+    } catch { return false; }
   }
 
   const attId = stepLog.attemptId();

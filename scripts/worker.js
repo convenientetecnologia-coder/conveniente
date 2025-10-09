@@ -2441,31 +2441,25 @@ const handlers = {
       }
     }
 
-    // 2. Pausa Virtus
-    ctrl.trabalhando = false;
-    if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-      try { await ctrl.virtus.stop(); } catch {}
-    }
-    ctrl.virtus = null;
-    await snapshotStatusAndWrite();
-
-    // 3. Browser oferece foco + página marketplace/you/selling
-    await browserHelper.invocarHumano(ctrl.browser, nome);
-
-    // 4. [Opcional] Marque flag em memória (tipo ctrl.humanControl = true), se quiser personalizar pill na UI ou botão (“Retomar Trabalho”)
+    // 2. ATENÇÃO: SETE AS FLAGS _ANTES_ DE TUDO!
     ctrl.humanControl = true;
+    ctrl.configurando = false;
     stopPruneLoop(nome); // Garante que NENHUM prune corra durante humano
-
-    // (Opcional para robustez)
-    // Zere também desired.virtus para 'off' (se não quiser o robô voltar enquanto humano):
-    await (async () => {
+    try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
       desired.perfis = desired.perfis || {};
       desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
       writeJsonAtomic(desiredPath, desired);
-    })();
+    } catch {}
+    await snapshotStatusAndWrite();
 
-    // Adicionado - garantir cooldown congelado ao entrar no modo humano:
+    // 3. Mata Virtus agressivamente + fence (pode ser logo após flags)
+    try { await stopVirtus(nome); } catch {}
+
+    // 4. Só então faça a navegação do humano:
+    await browserHelper.invocarHumano(ctrl.browser, nome);
+
+    // 5. (Opcional para robustez/nurse): freezer cooldown como já fazia
     try { freezeCooldownIfNotWorking(nome); } catch {}
 
     await snapshotStatusAndWrite();
