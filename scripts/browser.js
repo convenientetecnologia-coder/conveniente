@@ -1045,7 +1045,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     // LEITURA DE MANIFEST VIA userDataDir DEFINIDO EM perfis.json
     const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
     const perfil = perfisArr.find(p => p && p.nome === nome);
-    if (!perfil ou !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
+    if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
     const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
     manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     coords = utils.getCoords(manifest.cidade || '');
