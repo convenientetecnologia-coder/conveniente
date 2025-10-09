@@ -174,6 +174,115 @@
     }
     .filters{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px }
     .filters .btn.active{ background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff }
+
+    /* =================== INÍCIO UPGRADE HÍBRIDO — CARDS COM BOTÕES GRANDES E CIDADE VISÍVEL =================== */
+    /* Lista mais espaçada (cards confortáveis) */
+    .list{ gap:16px; }
+
+    /* Cards maiores e respiráveis */
+    .perfil{
+      padding:14px;
+      grid-template-columns: 250px 1fr 360px;
+      box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 6px 24px rgba(6,12,22,.25);
+    }
+
+    /* Colunas laterais em pilha (ações grandes) */
+    .leftCol{
+      flex-direction:column; align-items:stretch; gap:10px;
+    }
+    .rightCol{
+      flex-direction:column; align-items:stretch; gap:10px; justify-content:flex-start;
+      padding-left:10px; border-left:1px dashed var(--stroke);
+      flex-wrap:nowrap;
+    }
+
+    /* Centro mais espaçado e títulos grandes */
+    .centerCol{ gap:8px; }
+    .titleRow{ gap:12px; }
+    .accName{ font-size:18.5px; font-weight:900; letter-spacing:.3px; }
+
+    /* Cidade sempre visível (nunca só ícone) */
+    .titleRow span[aria-label^="Cidade:"],
+    .titleRow span[title^="Cidade:"]{
+      display:inline-flex; align-items:center; gap:8px;
+      font-size:15px; color:#d8e8ff; font-weight:700; opacity:.95;
+    }
+    .titleRow span[aria-label^="Cidade:"]::after,
+    .titleRow span[title^="Cidade:"]::after{
+      content: attr(title);
+      padding-left:4px;
+    }
+
+    /* Pills ligeiramente maiores para leitura clara */
+    .pill{ font-size:12.5px; padding:4px 10px; }
+
+    /* Botões grandes nas colunas dos cards (sempre com label visível) */
+    .perfil .leftCol .icon-btn,
+    .perfil .rightCol .icon-btn{
+      width:100%;
+      padding:12px 14px;
+      font-size:15px;
+      min-height:44px;
+      border-radius:10px;
+      justify-content:flex-start;
+      gap:10px;
+    }
+    .perfil .leftCol .icon-btn::after,
+    .perfil .rightCol .icon-btn::after{
+      content: attr(aria-label);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      color:inherit;
+      font-weight:800;
+      letter-spacing:.2px;
+    }
+
+    /* Mapeamentos de rótulos específicos exigidos */
+    .perfil .leftCol .icon-btn[aria-label="Iniciar Atendimento 24h"]::after{ content:"Iniciar Atendimento e Postagem 24Hrs"; }
+    .perfil .rightCol .icon-btn[aria-label="Ver Log da Conta"]::after{ content:"Arquivo"; }
+    .perfil .rightCol .icon-btn[aria-label^="Retomar"]::after{ content:"Retomar trabalho"; }
+
+    /* Estilos de ênfase por ação principal */
+    .perfil .leftCol .icon-btn[aria-label="Abrir navegador"],
+    .perfil .leftCol .icon-btn[aria-label="Iniciar Atendimento 24h"]{
+      background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff;
+      box-shadow:0 6px 18px rgba(31,107,225,.22);
+    }
+    .perfil .leftCol .icon-btn[aria-label="Abrir navegador"]:hover,
+    .perfil .leftCol .icon-btn[aria-label="Iniciar Atendimento 24h"]:hover{
+      filter:brightness(1.05);
+      box-shadow:0 8px 22px rgba(31,107,225,.30);
+    }
+    .perfil .leftCol .icon-btn[aria-label="Fechar navegador"]{
+      border-color:#5c2b2b; background:rgba(227,90,90,.12); color:#ffdede;
+    }
+
+    /* Ações do lado direito com ênfases */
+    .perfil .rightCol .icon-btn[aria-label="Resetar Perfil"]{
+      border-color:#cf8a2e; background: linear-gradient(90deg, #fbcb6c 0%, #d49a34 100%); color:#442d09;
+      font-weight:800; box-shadow:0 1px 7px #a4791e12; letter-spacing:.1px;
+    }
+    .perfil .rightCol .icon-btn[aria-label="Descongelar"]{
+      border-color:#cf8a2e; background:#2d230a; color:#f2d289;
+    }
+    .perfil .rightCol .icon-btn[aria-label="Invocar Humano"]{
+      border-color:#cf8a2e; background:rgba(240,180,41,.12); color:#f7e1a3;
+    }
+
+    /* Mantém botões micro da linha de status como ícones apenas (sem label auto) */
+    .perfil .titleRow .icon-btn.mini{
+      padding:4px 6px; min-height:28px; font-size:12px;
+    }
+    .perfil .titleRow .icon-btn.mini::after{ content:none; }
+
+    /* Responsivo: empilha colunas em telas estreitas mantendo clareza */
+    @media (max-width: 1080px){
+      .perfil{ grid-template-columns: 1fr; }
+      .leftCol{ padding-right:0; border-right:0; }
+      .rightCol{ border-left:0; padding-left:0; border-top:1px dashed var(--stroke); padding-top:10px; }
+    }
+    /* =================== FIM UPGRADE HÍBRIDO =================== */
   </style>
 </head>
 <body>
