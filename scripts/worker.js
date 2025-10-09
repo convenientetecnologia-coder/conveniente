@@ -366,7 +366,7 @@ let _statusLock = Promise.resolve();
 // async function onExitLightMode() {
 //   try { await reportAction('system', 'light_exit', 'exit_light_mode'); } catch {}
 //   try {
-//     for (const nome of Object.keys(robeMeta)) {
+//     for (const nome of Object.keys(obeMeta)) {
 //       if (!robeMeta[nome]) continue;
 //       delete robeMeta[nome].lightDropUntil;
 //       const held = robeMeta[nome].activationHeldUntil || 0;
@@ -2021,19 +2021,22 @@ async function robeTickGlobal() {
         // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
 
-        // Religa o Virtus se estava rodando antes
-        if (virtusWasRunning) {
-          try {
-            ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
-          } catch (e) {
-            console.warn('[WORKER] Falha ao religar Virtus após Robe para', nome, e && e.message || e);
-          }
-        }
         robeUpdateMeta(nome, { emExecucao: false });
 
-        // INÍCIO ALTERAÇÃO 1: snapshotStatusAndWrite após religar Virtus
         if (virtusWasRunning) {
-          ctrl.trabalhando = true;
+          if (!ctrl.humanControl && !ctrl.configurando) {
+            try {
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
+              ctrl.trabalhando = true;
+            } catch (e) {
+              console.warn('[WORKER] Falha ao religar Virtus após Robe para', nome, e && e.message || e);
+              ctrl.virtus = null;
+              ctrl.trabalhando = false;
+            }
+          } else {
+            ctrl.virtus = null;
+            ctrl.trabalhando = false;
+          }
           await snapshotStatusAndWrite();
         }
 
@@ -2339,6 +2342,18 @@ const handlers = {
       return { ok: false, error: 'Cookies não encontrados no manifest!' };
     }
     ctrl.configurando = true;
+
+    // Pare Virtus antes de configurar
+    try { await stopVirtus(nome); } catch {}
+
+    // Opcional recomendado: desired.virtus = 'off' para não religar por nurseTick depois
+    try {
+      const desired = readJsonFile(desiredPath, { perfis: {} });
+      desired.perfis = desired.perfis || {};
+      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
+      writeJsonAtomic(desiredPath, desired);
+    } catch {}
+
     try {
       await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
       // NÃO execute closeExtraPages/prune aqui!
@@ -2348,7 +2363,7 @@ const handlers = {
       return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
     } finally {
       ctrl.configurando = false;
-      ctrl.humanControl = true;
+      ctrl.humanControl = true;  // mantém modo humano após configurar
       stopPruneLoop(nome);
       await snapshotStatusAndWrite();
     }
@@ -2581,14 +2596,25 @@ const handlers = {
           // PRUNE DE ABAS antes de religar o Virtus
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
 
-          if (virtusWasRunning) {
-            try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
-              ctrl.trabalhando = true;
-            } catch (e) {}
-          }
           robeUpdateMeta(nome, { emExecucao: false });
-          await snapshotStatusAndWrite();
+
+          if (virtusWasRunning) {
+            if (!ctrl.humanControl && !ctrl.configurando) {
+              try {
+                ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
+                ctrl.trabalhando = true;
+              } catch (e) {
+                ctrl.virtus = null;
+                ctrl.trabalhando = false;
+              }
+            } else {
+              ctrl.virtus = null;
+              ctrl.trabalhando = false;
+            }
+            await snapshotStatusAndWrite();
+          } else {
+            await snapshotStatusAndWrite();
+          }
 
           // Log de término do Robe (robe-play)
           try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
@@ -3268,7 +3294,7 @@ async function registerFailure(nome, reason, classification) {
   const ALLOWED_FREEZE_REASONS = new Set(['manifest_missing','manifest_incomplete']);
   if (ALLOWED_FREEZE_REASONS.has(reason)) {
     await freezeProfileFor(nome, 12*60*60*1000, reason, 'system'); // 12h
-    await ensureFrozenShutdown(nome, 'allowed_freeze');
+    await ensureFrozenShutdown(nome, reason || 'frozen');
   }
   // Qualquer outro motivo: NUNCA congele; apenas log.
 }
