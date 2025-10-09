@@ -423,6 +423,27 @@ async function sendMessageSafe(p, campo, msg) {
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
 async function startVirtus(browser, nome, robeMeta = {}) {
+  // Epoch fence: protege navegação contra runner zumbi!
+  let requiredEpoch = 0;
+  if (robeMeta && robeMeta[nome] && typeof robeMeta[nome].virtusEpoch === 'number') {
+    requiredEpoch = robeMeta[nome].virtusEpoch;
+  }
+  // Caso venha via opts (chamado via startVirtus(..., opts)), priorize:
+  if (robeMeta && robeMeta[nome] && robeMeta[nome].epoch != null) {
+    requiredEpoch = robeMeta[nome].epoch;
+  }
+  if (arguments.length >= 3 && arguments[2] && arguments[2].epoch != null) {
+    requiredEpoch = arguments[2].epoch;
+  }
+
+  // Mapa epoch por instância (garante para uso interno fences)
+  const VIRTUS_EPOCH_FENCE = {};
+  VIRTUS_EPOCH_FENCE[nome] = requiredEpoch;
+
+  function epochOk() {
+    return VIRTUS_EPOCH_FENCE[nome] === requiredEpoch;
+  }
+
   const attId = stepLog.attemptId();
   stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'start' });
 
@@ -563,11 +584,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let lastDeadLogAt = 0;
 
   async function ensurePage() {
-    if (!running) return null;
+    if (!running || !epochOk()) return null;
     if (ensurePagePromise) {
       try { return await ensurePagePromise; } catch { return null; }
     }
     ensurePagePromise = (async () => {
+      if (!running || !epochOk()) return null;
       if (!browser || (browser.isConnected && browser.isConnected() === false)) {
         const now = Date.now();
         if (!virtusDeadLogTimes[nome] || now - virtusDeadLogTimes[nome] > 60000) {
@@ -586,12 +608,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         if (!page) {
+          if (!running || !epochOk()) return null;
           // cria nova aba
           const newP = await browser.newPage();
           try {
             const { manifest } = getPerfilManifest(nome);
             const coords = utils.getCoords(manifest.cidade || '');
+            if (!running || !epochOk()) return null;
             await patchPage(nome, newP, coords);
+            if (!running || !epochOk()) return null;
             await ensureMinimizedWindowForPage(newP);
           } catch (e) {
             log('ensurePage: falha patchPage/minimize na nova aba:', e + '');
@@ -599,7 +624,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try { newP.once && newP.once('close', () => { if (page === newP) page = null; }); } catch {}
           page = newP;
         }
-        if (!running) return null;
+        if (!running || !epochOk()) return null;
         if (!browser || (browser.isConnected && browser.isConnected() === false)) return null;
         if (page && typeof page.isClosed === 'function' && page.isClosed()) return null;
 
@@ -705,9 +730,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function coletaChatsMarketplaceRecentes() {
     try {
+      if (!running || !epochOk()) return [];
       const p = await ensurePage();
       if (!p) return [];
       try {
+        if (!running || !epochOk()) return [];
         await garantirMarketplace(p);
       } catch (err) {
         log('Não está no Marketplace ou erro ao garantir Marketplace:', err + '');
@@ -730,7 +757,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function reloadUltraRobusto() {
-    if (!running) return;
+    if (!running || !epochOk()) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -775,7 +802,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!p) { bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); return; }
       const client = await p.target().createCDPSession();
       try { await client.send('Network.clearBrowserCache'); } catch {}
+      if (!running || !epochOk()) return;
       try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
+      if (!running || !epochOk()) return;
       await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
       try { await ensureMinimizedWindowForPage(p); } catch {}
       await Promise.race([
@@ -790,7 +819,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'Scroll OK' : 'Scroll DEU RUIM'); }
       } catch {}
       // Reforce após 800ms
-      setTimeout(() => { scrollChatsToTop(p); }, 800);
+      setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
       lastScrollToTop = Date.now();
     } catch (e) {
       log('Erro no reload ultra robusto:', e + '');
@@ -801,6 +830,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   // Reconciliação de pendências
   async function reconcilePendingsIfAny() {
+    if (!running || !epochOk()) return;
     try {
       const pend = await pendingList(nome);
       const keys = Object.keys(pend||{});
@@ -812,6 +842,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const age = Date.now() - (rec.startedAt || 0);
         if (age < 8*60*1000) continue; // deixa “aquecendo” 8min antes de reconciliar
         try {
+          if (!running || !epochOk()) return;
           await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil:'domcontentloaded', timeout: 20000 }).catch(()=>{});
           const looksSent = await wasRecentlySentByMe(p, 10*60*1000);
           if (looksSent) {
@@ -831,6 +862,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function initHistoricoSePreciso() {
+    if (!running || !epochOk()) return;
     try {
       await fs.access(HIST_FILE);
       await carregaHistorico();
@@ -840,8 +872,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch {}
 
     log('[SNAPSHOT] Primeiro boot sem histórico. Marcando <24h atuais como respondidos.');
+    if (!running || !epochOk()) return;
     const p = await ensurePage();
     if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
+    if (!running || !epochOk()) return;
     await garantirMarketplace(p);
     try {
       await Promise.race([
@@ -947,6 +981,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const delay = randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
     log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
     filaChatTimer = setTimeout(async () => {
+      if (!running || !epochOk()) return;
       stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next, in: delay });
       filaChatTimer = null;
       await responderChat(next);
@@ -955,7 +990,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function responderChat(chatId) {
-    if (!running) return;
+    if (!running || !epochOk()) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -1025,6 +1060,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatAtivo = null;
           return;
         }
+        if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
         await garantirMarketplace(p);
 
         const tsPrev = respondedCache.get(chatId);
@@ -1097,6 +1133,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!campo) {
           log(`[WARN] Composer não encontrado. Fallback: goto direto e revalidar.`);
           try {
+            if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
             await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
             await sleep(800);
           } catch {}
@@ -1205,7 +1242,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // === BLOCO MODIFICADO ===
   // ========================
   async function filaManagerLoop() {
-    if (!running) return;
+    if (!running || !epochOk()) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -1304,6 +1341,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       const nowEpoch = agoraEpoch();
       if ((nowEpoch - ultimoAtendimento) >= RELOAD_IDLE_SEC) {
+        if (!running || !epochOk()) return;
         await reloadUltraRobusto();
         lastReloadAt = nowEpoch;
         ultimoAtendimento = agoraEpoch(); // Reinicia a janela de 2h imediatamente após reload!
@@ -1318,7 +1356,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       if (scrollInterval == null) {
         scrollInterval = setInterval(async () => {
-          if (!running) return;
+          if (!running || !epochOk()) return;
           try {
             const ok = await scrollChatsToTop(p);
             if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
@@ -1327,7 +1365,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           } catch {}
           // Reforço após 800ms para garantir Messenger reativo
-          setTimeout(() => { scrollChatsToTop(p); }, 800);
+          setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
         }, 30000);
       }
       try {
@@ -1337,7 +1375,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           lastScrollToTop = Date.now();
         }
         // Reforço após 800ms para garantir Messenger reativo
-        setTimeout(() => { scrollChatsToTop(p); }, 800);
+        setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
       } catch {}
 
       // ========== INÍCIO BLOCO ADICIONADO CONFORME INSTRUÇÃO ==========
@@ -1389,22 +1427,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     await sleep(2000);
     let ready = false;
     while (running && !ready) {
-      if (!running) return;
+      if (!running || !epochOk()) return;
       try {
+        if (!running || !epochOk()) return;
         const p = await ensurePage();
-        if (!running) return;
+        if (!running || !epochOk()) return;
         if (!p) { await sleep(2500); continue; }
         if (p.url() === 'about:blank' || !/messenger\.com\/marketplace/i.test(p.url())) {
           try {
+            if (!running || !epochOk()) return;
             await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
           } catch {
             bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue;
           }
         }
+        if (!running || !epochOk()) return;
         await garantirMarketplace(p, { timeoutMs: 25000 });
         try {
           const ok = await scrollChatsToTop(p);
-          setTimeout(() => { scrollChatsToTop(p); }, 800);
+          setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
         } catch {}
         ready = true;
         log('Aba zero da Virtus iniciada e garantida: Marketplace pronta.');
@@ -1414,7 +1455,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await sleep(2500);
       }
     }
-    if (!running) return;
+    if (!running || !epochOk()) return;
     await initHistoricoSePreciso();
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();

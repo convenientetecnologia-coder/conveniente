@@ -462,8 +462,8 @@ async function milLog(type, msg) {
 //     for (const nome of cand) {
 //       try {
 //         const r = await activateOnce(nome, 'heal_escalate');
-//         if (r && r.ok) healer.lastProgressAt = Date.now();
-//         else if (r && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
+//         if (r e r.ok) healer.lastProgressAt = Date.now();
+//         else if (r e /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(r.error||'')) {
 //           robeMeta[nome] = robeMeta[nome] || {};
 //           robeMeta[nome].activationHeldUntil = Date.now() + 60000;
 //           await reportAction(nome, 'mil_action', 'activation_hold_due_ram 60s (escalate)');
@@ -1811,7 +1811,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //             await issues.append(nome, 'maintenance_warn', 'hardCleanProfileOnDisk ausente em browser.js');
 //           }
 //         } catch (e) {
-//           try { await issues.append(nome, 'maintenance_error', `hardClean exception: ${e && e.message || e}`); } catch {}
+//           try { await issues.append(nome, 'maintenance_error', `hardClean exception: ${e e e.message || e}`); } catch {}
 //         }
 //         const r2 = await activateOnce(nome, 'lean_hard_reopen');
 //         if (!r2 || !r2.ok) {
@@ -1872,7 +1872,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 //               await _sleepRandom(300, 800);
 //             }
 //           } catch (e) {
-//             try { await issues.append('system', 'lean_swap_error', `open exception: ${e && e.message || e}`); } catch {}
+//             try { await issues.append('system', 'lean_swap_error', `open exception: ${e e e.message || e}`); } catch {}
 //             try { await activateOnce(closeNome, 'lean_swap_rollback'); } catch {}
 //           }
 //           await snapshotStatusAndWrite();
@@ -2024,12 +2024,12 @@ async function robeTickGlobal() {
         robeUpdateMeta(nome, { emExecucao: false });
 
         if (virtusWasRunning) {
-          if (!ctrl.humanControl && !ctrl.configurando) {
+          if (automationAllowed(ctrl)) {
             try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
+              // Sincronize epoch
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
             } catch (e) {
-              console.warn('[WORKER] Falha ao religar Virtus após Robe para', nome, e && e.message || e);
               ctrl.virtus = null;
               ctrl.trabalhando = false;
             }
@@ -2086,6 +2086,12 @@ await ctrl.virtus.stop().catch(()=>{});
 } catch {}
 ctrl.virtus = null;
 ctrl.trabalhando = false;
+// PATCH 3: Epoch fence increment + optional browser fence map
+ctrl.virtusEpoch = (ctrl.virtusEpoch || 0) + 1;
+if (ctrl.browser) {
+  ctrl.browser._fenceEpochMap = ctrl.browser._fenceEpochMap || {};
+  ctrl.browser._fenceEpochMap[nome] = ctrl.virtusEpoch;
+}
 try { freezeCooldownIfNotWorking(nome); } catch {}
 // INÍCIO ALTERAÇÃO 2
 await snapshotStatusAndWrite();
@@ -2182,6 +2188,55 @@ function resolveChromeUserDataRoot() {
   }
   const os = require('os');
   return path.join(os.homedir(), '.config', 'google-chrome');
+}
+
+// PATCH 1: helper automationAllowed(ctrl) — logo antes dos handlers
+function automationAllowed(ctrl) {
+  return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && !ctrl.trabalhando);
+}
+
+// PATCH 2: handler.start_work (definido fora do objeto handlers)
+async function start_work({ nome }) {
+  const ctrl = controllers.get(nome);
+  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
+    return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+
+  // BLOQUEIO: nunca permite start_work se humano/configurando
+  if (ctrl.humanControl || ctrl.configurando) {
+    await issues.append(nome, 'mil_action', 'start_work_denied (human/config mode)');
+    return { ok: false, error: 'profile_in_human_or_config' };
+  }
+  if (ctrl.trabalhando && ctrl.virtus) return { ok: true };
+  if (ctrl._virtusStarting) return { ok: true };
+
+  try {
+    ctrl._virtusStarting = true;
+    if (!automationAllowed(ctrl)) {
+      await issues.append(nome, 'mil_action', 'automation_not_allowed');
+      return { ok: false, error: 'automation_not_allowed' };
+    }
+    // Fence: sincronize epoch para Virtus runner anti-zumbi
+    ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+
+    ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
+    ctrl.trabalhando = true;
+
+    if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
+      await browserHelper.forceCloseExtras(ctrl.browser);
+    }
+
+    try {
+      await unfreezeCooldownIfWorking(nome);
+      await normalizeCooldown(nome);
+    } catch {}
+
+    await snapshotStatusAndWrite();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e && e.message || String(e) };
+  } finally {
+    ctrl._virtusStarting = false;
+  }
 }
 
 const handlers = {
@@ -2369,36 +2424,7 @@ const handlers = {
     }
   },
 
-  async start_work({ nome }) {
-  const ctrl = controllers.get(nome);
-  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-
-  // PATCH: não repetir trabalho se virtus já iniciando/ativo
-  if (ctrl.trabalhando && ctrl.virtus) return { ok: true }; // já trabalhando
-  if (ctrl._virtusStarting) return { ok: true };
-
-  try {
-    ctrl._virtusStarting = true;
-    ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
-    ctrl.trabalhando = true;
-    if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
-      await browserHelper.forceCloseExtras(ctrl.browser);
-    }
-
-    // PATCH 3 — Correção automática no start_work
-    try { 
-      await unfreezeCooldownIfWorking(nome);
-      await normalizeCooldown(nome);
-    } catch {}
-
-    await snapshotStatusAndWrite();
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e && e.message || String(e) };
-  } finally {
-    ctrl._virtusStarting = false;
-  }
-},
+  start_work,
 
   async invoke_human({ nome }) {
     const ctrl = controllers.get(nome);
@@ -2468,8 +2494,10 @@ const handlers = {
     }
 
     // Religando Virtus APÓS a minimização/navegação
-    ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
-    ctrl.trabalhando = true;
+    if (automationAllowed(ctrl)) {
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+      ctrl.trabalhando = true;
+    }
 
     try { unfreezeCooldownIfWorking(nome); } catch {}
 
@@ -2599,9 +2627,10 @@ const handlers = {
           robeUpdateMeta(nome, { emExecucao: false });
 
           if (virtusWasRunning) {
-            if (!ctrl.humanControl && !ctrl.configurando) {
+            if (automationAllowed(ctrl)) {
               try {
-                ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 });
+                // Sincronize epoch
+                ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
                 ctrl.trabalhando = true;
               } catch (e) {
                 ctrl.virtus = null;
@@ -3739,8 +3768,11 @@ async function nurseTick() {
       if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
         try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
       }
-      if (want.virtus === 'on' && !ctrl.trabalhando && !ctrl.configurando && !ctrl.humanControl) {
-        try { ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0 }); ctrl.trabalhando = true; } catch {}
+      if (want.virtus === 'on' && automationAllowed(ctrl)) {
+        try { 
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 }); 
+          ctrl.trabalhando = true; 
+        } catch {}
       }
     }
   } finally {
