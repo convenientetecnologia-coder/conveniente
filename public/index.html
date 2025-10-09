@@ -1545,6 +1545,44 @@
     // Chamada inicial das métricas:
     updateSysMetrics();
 
+    // Ajuste dinâmico e robusto do offset da toolbar sticky, sempre imediatamente abaixo do header
+    (function initStickyToolbarOffset(){
+      try {
+        const header = document.querySelector('header');
+        const toolbar = document.querySelector('.toolbar-sticky');
+        if (!header || !toolbar) return;
+
+        const apply = () => {
+          const h = Math.ceil(header.getBoundingClientRect().height || header.offsetHeight || 0);
+          if (!isNaN(h) && h > 0) toolbar.style.top = h + 'px';
+        };
+
+        // Aplica já no início
+        apply();
+
+        // Atualiza em redimensionamentos (desktop/mobile)
+        window.addEventListener('resize', apply);
+        window.addEventListener('orientationchange', apply);
+
+        // Observa mudanças de tamanho do header (quebras de linha das métricas, etc.)
+        if (window.ResizeObserver) {
+          const ro = new ResizeObserver(apply);
+          ro.observe(header);
+          // Guarda referência para evitar coleta prematura em alguns engines
+          window.__headerResizeObserver = ro;
+        }
+
+        // Observa mutações no conteúdo do header (troca de textos das métricas)
+        if (window.MutationObserver) {
+          const mo = new MutationObserver(apply);
+          mo.observe(header, { childList: true, subtree: true, characterData: true });
+          window.__headerMutationObserver = mo;
+        }
+      } catch (e) {
+        // Se algo falhar, o CSS top: 46px atua como fallback
+      }
+    })();
+
   </script>
 </body>
 </html>
