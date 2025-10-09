@@ -119,7 +119,7 @@ async function clickItemByText(page, text, timeout = 5000) {
   return false;
 }
 
-// Função robusta para detectar overlay "Limite atingido" (multilíngue, polling, tolerante)
+// Função robusta para detectar overlay "Limite atingido" e o novo bloqueio "você não pode criar classificados no momento" (multilíngue, headline/corpo autonome)
 async function detectLimitOverlay(page, { timeoutMs = 15000, intervalMs = 350, debug = (process.env.LIMIT_DEBUG==='1') } = {}) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const start = Date.now();
@@ -129,23 +129,37 @@ async function detectLimitOverlay(page, { timeoutMs = 15000, intervalMs = 350, d
     try {
       const v = await page.evaluate(() => {
         const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        const nodes = Array.from(document.querySelectorAll('h1,h2,span,div,p,section')).slice(0, 2000);
+        const nodes = Array.from(document.querySelectorAll('h1,h2,span,div,p,section')).slice(0, 3000);
         const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
         const joined = texts.join(' ');
 
-        // Sinais
-        const hasH2LimitPT = texts.some(t => /limite atingido/.test(t));
-        const ptBody = /voce nao pode (mais )?criar (novos )?(classificados|anuncios) (no momento|agora)/.test(joined) &&
-                       /(ha|há) um limite da frequencia|limite da frequencia|limitar a frequencia|limitação da frequencia/.test(joined);
-        const enBody = /you (can['’]t|cannot) create (any )?more (listings|ads) (at this time|now)/.test(joined) &&
-                       /there (are|is) (a )?limit(s)? to how often sellers can post/.test(joined);
-        const esBody = /no puedes crear (mas|más) (anuncios|clasificados) (en este momento|ahora)/.test(joined) &&
-                       /(hay|existe) (un|una) limite? en la frecuencia con que (los )?vendedores pueden publicar/.test(joined);
+        // Headline/H2 novo: "você não pode criar ... no momento/agora"
+        const h2Exact = texts.some(t =>
+          /voce\s+nao\s+pode\s+criar\s+(classificados|anuncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(t)
+        );
 
-        // forte se...
-        const strong = hasH2LimitPT || ptBody || enBody || esBody;
+        // Corpo PT: limites temporários para venda/classificados
+        const ptTempLimit = (
+          /ha\s+um\s+limite\s+temporar/.test(joined) &&
+          (/itens?\s+voce\s+pode\s+vender/.test(joined) || /no\s+marketplace/.test(joined))
+        );
+        // Corpo EN: temporarily limit how many items you can post/sell
+        const enTempLimit = (
+          /(there('|’)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(joined) &&
+          /(how\s+many\s+items\s+you\s+(can|may)\s+(list|sell)|marketplace)/.test(joined)
+        );
+        // Corpo ES: hay un limite temporal ...
+        const esTempLimit = (
+          /(hay|existe)\s+un\s+limite\s+tempor/.test(joined) &&
+          /(cuantos\s+articulos\s+puedes\s+(publicar|vender)|marketplace)/.test(joined)
+        );
 
-        return { strong, hasH2LimitPT, ptBody, enBody, esBody, sample: texts.slice(0,50) };
+        // Corpo PT: "você não pode criar ..."
+        const ptCantCreate = /voce\s+nao\s+pode\s+criar\s+(classificados|anuncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(joined);
+
+        const strong = h2Exact || ptCantCreate || ptTempLimit || enTempLimit || esTempLimit;
+
+        return { strong, h2Exact, ptCantCreate, ptTempLimit, enTempLimit, esTempLimit };
       });
       return v || { strong:false };
     } catch {
@@ -156,7 +170,7 @@ async function detectLimitOverlay(page, { timeoutMs = 15000, intervalMs = 350, d
     rounds++;
     const res = await checkOnce();
     if (debug) {
-      try { require('./issues.js').append && require('./issues.js').append('system', 'mil_action', `limit_poll round=${rounds} res=${JSON.stringify({h2:res.hasH2LimitPT,pt:res.ptBody,en:res.enBody,es:res.esBody})}`); } catch {}
+      try { require('./issues.js').append && require('./issues.js').append('system', 'mil_action', `limit_poll round=${rounds} res=${JSON.stringify(res)}`); } catch {}
     }
     if (res.strong) return true;
     await sleep(intervalMs);
@@ -761,6 +775,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
           // Detecta “Limite atingido” imediatamente após navegar
           if (await detectLimitOverlay(page, { timeoutMs: 15000, intervalMs: 350 })) {
+            try {
+              const snap = await page.evaluate(() => {
+                const h2 = document.querySelector('h2')?.innerText || '';
+                const body = Array.from(document.querySelectorAll('div,span,p')).slice(0,200)
+                  .map(el => (el.innerText || el.textContent || '')).filter(Boolean).slice(0,10).join(' | ');
+                return { h2, body };
+              }).catch(()=>({h2:'',body:''}));
+              await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
+            } catch {}
             await manifestStore.update(nome, m => {
               m = m||{};
               m.robeCooldownUntil = Date.now() + 24*60*60*1000;
@@ -856,6 +879,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
       // Detecção de “Limite atingido” pós-publish (após bloco de evidências)
       if (await detectLimitOverlay(page, { timeoutMs: 15000, intervalMs: 350 })) {
+        try {
+          const snap = await page.evaluate(() => {
+            const h2 = document.querySelector('h2')?.innerText || '';
+            const body = Array.from(document.querySelectorAll('div,span,p')).slice(0,200)
+              .map(el => (el.innerText || el.textContent || '')).filter(Boolean).slice(0,10).join(' | ');
+            return { h2, body };
+          }).catch(()=>({h2:'',body:''}));
+          await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
+        } catch {}
         await manifestStore.update(nome, m => {
           m = m||{};
           m.robeCooldownUntil = Date.now() + 24*60*60*1000;

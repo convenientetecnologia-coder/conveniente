@@ -1045,7 +1045,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     // LEITURA DE MANIFEST VIA userDataDir DEFINIDO EM perfis.json
     const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
     const perfil = perfisArr.find(p => p && p.nome === nome);
-    if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
+    if (!perfil ou !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
     const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
     manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     coords = utils.getCoords(manifest.cidade || '');
@@ -1520,7 +1520,10 @@ async function detectMessengerTempBlock(page) {
           /you\s+can(?:'|’)?t\s+post\s+right\s+now/,
           /you\s+can(?:'|’)?t\s+list\s+right\s+now/,
           /you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+posting/,
-          /you(?:'|’)?re\s+temporar(?:ily)?\s+restricted\s+from\s+posting/
+          /you(?:'|’)?re\s+temporar(?:ily)?\s+restricted\s+from\s+posting/,
+
+          // ADICIONE ESTA LINHA ABAIXO:
+          /voce\s+nao\s+pode\s+criar\s+(classificados|anuncios|listagens?|itens?)\s+(no\s+momento|agora)/
         ]);
 
         // strongEvidenceCount: frases fortes + co-ocorrências
