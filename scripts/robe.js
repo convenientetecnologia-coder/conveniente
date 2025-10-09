@@ -80,6 +80,10 @@ async function waitSentinelLimitOverlay(page, timeoutMs = 10000) {
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
+// PATCH MILITAR — Constantes de limit_posting
+const LIMIT_POSTING_REASON = 'limit_posting';
+const LIMIT_POSTING_MS = 24 * 60 * 60 * 1000;
+
 // Adicionar helper local para logar issues (assíncrono e silencioso)
 async function logIssue(nome, type, message) {
   try {
@@ -770,6 +774,7 @@ async function publishAndWatch(page, titulo, { watchOverlayMs = 12000 } = {}) {
  * - Minimização suave apenas desta aba (após anti-detect).
  */
 async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
+  let limitPostingHit = false;
   let page = null;
   let published = false;
   let sawBeforeUnloadDialog = false;
@@ -888,10 +893,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
             stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
             try { await safeClosePage(page); } catch {}
             cooldownApplied = true;
+            // PATCH MILITAR — sinaliza flag e retorna com limitPosting:true
+            limitPostingHit = true;
             stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'goto_create' });
             stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
             stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-            return { ok:false, error:'limit_posting' };
+            return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
           }
           okNav = true;
         } catch (e) {
@@ -988,10 +995,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         try { await safeClosePage(page); } catch {}
         cooldownApplied = true;
+        // PATCH MILITAR — sinaliza flag e retorna com limitPosting:true
+        limitPostingHit = true;
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'publish_race' });
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        return { ok:false, error:'limit_posting' };
+        return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
       }
       if (pubRes && pubRes.ok && pubRes.reason === 'published') {
         published = true;
@@ -1030,10 +1039,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         try { await safeClosePage(page); } catch {}
         cooldownApplied = true;
+        // PATCH MILITAR — sinaliza flag e retorna com limitPosting:true
+        limitPostingHit = true;
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'late_fallback' });
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        return { ok:false, error:'limit_posting' };
+        return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
       }
       await sleep(1200);
     }
@@ -1086,6 +1097,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Registra issue (silencioso)
     try { await logIssue(nome, issueType, errMsg); } catch {}
 
+    // PATCH MILITAR — Se houve limit_posting neste ciclo, retorna imediatamente sem aplicar cooldown curto.
+    if (limitPostingHit) return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
+
     // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
     try {
       const pause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
@@ -1120,7 +1134,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
     // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
     try {
-      if (!abortedByCooldown && !cooldownApplied) {
+      if (!abortedByCooldown && !cooldownApplied && !limitPostingHit) {
         const pause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
         await manifestStore.update(nome, m => {
           m.robeCooldownUntil = Date.now() + pause;

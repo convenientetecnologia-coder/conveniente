@@ -13,6 +13,14 @@ const fotos        = require('./fotos.js'); // gestor central de fotos
 const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 
+// Bloqueio universal: Detecta se o pauseReason=limit_posting e o cooldown está ativo
+async function isLimitPostingActive(nome) {
+  try {
+    const man = await manifestStore.read(nome).catch(()=>null);
+    return !!(man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now());
+  } catch { return false; }
+}
+
 // Detecta bloqueio do Marketplace em QUALQUER aba da conta (quando o robe está rodando)
 // Usada pelo nurseTick como fallback hypersafe
 async function detectFbLimitInAnyPage(ctrl) {
@@ -2012,6 +2020,15 @@ async function robeTickGlobal() {
         }
         // ==== EOF COOL/PRUNED ERRORS ====
 
+        if (res && (res.limitPosting === true || res.error === 'limit_posting')) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].limitPostingThisRun = Date.now(); // é só in-mem/ciclo
+          robeMeta[nome].pauseReason = 'limit_posting'; // reforço
+          robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome) });
+          await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h');
+          return; // ABORTA ciclo, NUNCA avança para sucesso, publish, idle, logs.
+        }
+
         if (res && res.ok) {
           try {
             await manifestStore.update(nome, (m) => {
@@ -2037,6 +2054,12 @@ async function robeTickGlobal() {
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
+        if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
+          await issues.append(nome, 'mil_action', 'robe_end_limit_posting (cleanup only)');
+          // Remova a flag agora ou mantenha até o tick seguinte, se quiser auditar multi-logs (opcional).
+          // NÃO religue Virtus, nem altere estado final.
+          return;
+        }
         // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
 
@@ -2216,6 +2239,12 @@ function automationAllowed(ctrl) {
 
 // PATCH 2: handler.start_work (definido fora do objeto handlers)
 async function start_work({ nome }) {
+  const man = await manifestStore.read(nome).catch(()=>null);
+  if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
+    await issues.append(nome, 'mil_action', 'start_work_denied_by_limit_posting');
+    return { ok: false, error: 'blocked_by_limit_posting' };
+  }
+
   const ctrl = controllers.get(nome);
   if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
     return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
@@ -2522,6 +2551,13 @@ const handlers = {
   async ['robe-play']({ nome }) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
+      await issues.append(nome, 'mil_action', 'robe_play_denied_by_limit_posting');
+      return { ok: false, error: 'blocked_by_limit_posting' };
+    }
+
     // P0.3: recusa se frozen
     if (isFrozenNow(nome)) {
       return { ok: false, error: 'account_frozen' }
@@ -2674,6 +2710,11 @@ const handlers = {
     // Limpa pauseReason de todos os perfis em robeMeta + no manifest (remover robePauseReason)
     const perfisArr = loadPerfisJson();
     for (const p of perfisArr) {
+      const man = await manifestStore.read(p.nome).catch(()=>null);
+      if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
+        await issues.append(p.nome, 'mil_action', 'release_all_skip_limit_posting_active');
+        continue; // Não toca no perfil, nem zera pausa
+      }
       try {
         robeMeta[p.nome] = robeMeta[p.nome] || {};
         delete robeMeta[p.nome].pauseReason;
@@ -4277,7 +4318,7 @@ process.on('message', async (msg) => {
   if (!msg || !msg.type || !msg.msgId) return;
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
-    sendReply(msg.msgId, { ok: false, error: 'Comando desconhecido' });
+    sendReply(msgId, { ok: false, error: 'Comando desconhecido' });
     return;
   }
   try {

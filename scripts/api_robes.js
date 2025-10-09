@@ -47,6 +47,22 @@ module.exports = (app, workerClient, fileStore) => {
       let total = 0, failed = 0, fails = [];
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
+
+        // Verifica se está sob penalidade limit_posting ativa (não pode liberar)
+        let manCur = null;
+        try {
+          manCur = await manifestStore.read(p.nome).catch(()=>null);
+        } catch {}
+        if (manCur && manCur.robePauseReason === 'limit_posting' && (manCur.robeCooldownUntil||0) > Date.now()) {
+          // NÃO liberar, NÃO alterar, pular este perfil
+          if (!fails) fails = [];
+          fails.push(p.nome);
+          if (fileStore.issues && typeof fileStore.issues.append === "function") {
+            fileStore.issues.append({ type: 'release_all_skip_limit_posting_active', perfil: p.nome, ts: Date.now() });
+          }
+          continue;
+        }
+
         try {
           await manifestStore.update(p.nome, man => {
             man = man || {};
@@ -75,8 +91,8 @@ module.exports = (app, workerClient, fileStore) => {
           fileStore.issues.append({ type: 'robes_release_all_worker_sync_error', error: e && e.message || String(e), ts: Date.now() });
         }
       }
-      if (failed > 0) {
-        res.json({ ok: false, error: `Failure in ${failed} perfil(s)`, fails });
+      if (failed > 0 || (fails && fails.length)) {
+        res.json({ ok: false, error: `Failure in ${failed} perfil(s) or skipped limit_posting: ${fails && fails.length ? fails.join(', ') : ''}`, fails });
       } else {
         res.json({ ok: true, total });
       }
