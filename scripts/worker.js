@@ -3672,6 +3672,15 @@ async function nurseTick() {
             });
           }
         } catch {}
+        // PATCH MILITAR: PRESERVAR limit_posting — não sobrescrever com fb_block
+        const man = await manifestStore.read(nome).catch(()=>null);
+        const alreadyLimitPosting = !!(man && man.robePauseReason === 'limit_posting');
+        if (alreadyLimitPosting) {
+          await issues.append(nome, 'mil_action', 'nurse_detect_facebook_block_but_preserve_reason=limit_posting');
+          await snapshotStatusAndWrite();
+          continue; // NÃO sobrescreve, pill correta; não aplica fb_block
+        }
+        // Só se NÃO era limit_posting, aplica fb_block:
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].pauseReason = 'fb_block';
         robeMeta[nome].lastRobeBlockAt = Date.now();
@@ -3702,6 +3711,14 @@ async function nurseTick() {
             });
           }
         } catch {}
+        // PATCH MILITAR MULTI-ABA: PRESERVAR limit_posting — não sobrescrever com fb_block
+        const man = await manifestStore.read(nome).catch(()=>null);
+        const alreadyLimitPosting = !!(man && man.robePauseReason === 'limit_posting');
+        if (alreadyLimitPosting) {
+          await issues.append(nome, 'mil_action', 'nurse_multipage_block_preserve_reason=limit_posting');
+          await snapshotStatusAndWrite();
+          continue; // não sobrescreve!
+        }
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].pauseReason = 'fb_block';
         robeMeta[nome].lastRobeBlockAt = Date.now();

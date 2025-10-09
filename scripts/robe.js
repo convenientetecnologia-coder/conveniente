@@ -872,6 +872,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
               }).catch(()=>({h2:'',body:''}));
               await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
             } catch {}
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'goto_create' });
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
             await manifestStore.update(nome, m => {
               m = m||{};
               m.robeCooldownUntil = Date.now() + 24*60*60*1000;
@@ -880,8 +883,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
               return m;
             });
             try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada'); } catch {}
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'goto_create' });
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
             try { await safeClosePage(page); } catch {}
             cooldownApplied = true;
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'goto_create' });
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
             return { ok:false, error:'limit_posting' };
           }
           okNav = true;
@@ -962,6 +971,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           const snap = pubRes.overlay || {};
           await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
         } catch {}
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'publish_race' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         await manifestStore.update(nome, m => { m = m||{}; m.robeCooldownUntil = Date.now() + 24*60*60*1000; m.robeCooldownRemainingMs = 0; m.robePauseReason = 'limit_posting'; return m; });
         try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (race pós-Publicar)'); } catch {}
         try {
@@ -971,8 +983,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           }
         } catch {}
         try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'publish_race' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         try { await safeClosePage(page); } catch {}
         cooldownApplied = true;
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'publish_race' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         return { ok:false, error:'limit_posting' };
       }
       if (pubRes && pubRes.ok && pubRes.reason === 'published') {
@@ -995,6 +1013,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           }).catch(()=>({h2:'',body:''}));
           await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
         } catch {}
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'late_fallback' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         await manifestStore.update(nome, m => { m = m||{}; m.robeCooldownUntil = Date.now() + 24*60*60*1000; m.robeCooldownRemainingMs = 0; m.robePauseReason = 'limit_posting'; return m; });
         try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (fallback tardio)'); } catch {}
         try {
@@ -1004,8 +1025,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           }
         } catch {}
         try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'late_fallback' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         try { await safeClosePage(page); } catch {}
         cooldownApplied = true;
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'late_fallback' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
         return { ok:false, error:'limit_posting' };
       }
       await sleep(1200);
