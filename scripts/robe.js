@@ -13,6 +13,69 @@ const stepLog = require('./stepLog.js');
 let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
 
+// Sentinela para overlays/modais tardios do Facebook (Marketplace Create)
+// Injeta MutationObserver e variáveis globais para sinalizar o popup
+async function attachLimitOverlaySentinel(page) {
+  try {
+    await page.exposeFunction('__robeFlagLimitOverlay', (payload) => {
+      try {
+        window.__ROBE_LIMIT_OVERLAY = Object.assign(window.__ROBE_LIMIT_OVERLAY || {}, payload || {});
+      } catch {}
+    });
+  } catch {}
+
+  await page.evaluateOnNewDocument(() => {
+    try {
+      window.__ROBE_LIMIT_OVERLAY = { found: false, h2: '', body: '', ts: 0 };
+      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const testTexts = (root) => {
+        try {
+          const texts = Array.from(root.querySelectorAll('h1,h2,span,div,p'))
+            .slice(0, 3000).map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
+          const h2 = texts.find(t =>
+            /voce\s+nao\s+pode\s+criar\s+(classificados|anuncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(t) ||
+            /you\s+can(?:'|’)?t\s+post\s+right\s+now/.test(t) ||
+            /you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+posting/.test(t)
+          );
+          const bodyHit =
+            texts.some(t => /ha\s+um\s+limite\s+temporar/.test(t) && /(vender|marketplace|itens?)/.test(t)) ||
+            texts.some(t => /(there('|’)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(t));
+          const hasDialog = !!document.querySelector('[role="dialog"],[role="alertdialog"],div[aria-modal="true"],div[class*="backdrop"],div[class*="overlay"]');
+          if ((h2 || bodyHit) && hasDialog) {
+            const h2Text = (() => {
+              const el = document.querySelector('h2,h1');
+              return el ? (el.innerText || el.textContent || '') : '';
+            })();
+            const body = texts.slice(0,50).join(' | ').slice(0, 400);
+            window.__ROBE_LIMIT_OVERLAY.found = true;
+            window.__ROBE_LIMIT_OVERLAY.h2 = h2Text;
+            window.__ROBE_LIMIT_OVERLAY.body = body;
+            window.__ROBE_LIMIT_OVERLAY.ts = Date.now();
+          }
+        } catch {}
+      };
+      document.addEventListener('DOMContentLoaded', () => { try { testTexts(document); } catch {} });
+      const mo = new MutationObserver(muts => {
+        try { for (const m of muts) for (const n of m.addedNodes || []) if (n && n.nodeType === 1) testTexts(n); } catch {}
+      });
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+      window.__ROBE_LIMIT_OBS = mo;
+    } catch {}
+  });
+}
+
+async function waitSentinelLimitOverlay(page, timeoutMs = 10000) {
+  try {
+    const ok = await page.waitForFunction(() => {
+      return !!(window.__ROBE_LIMIT_OVERLAY && window.__ROBE_LIMIT_OVERLAY.found === true);
+    }, { timeout: timeoutMs });
+    if (ok) {
+      return await page.evaluate(() => window.__ROBE_LIMIT_OVERLAY || { found:false });
+    }
+  } catch {}
+  return null;
+}
+
 // Helpers básicos
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
@@ -672,6 +735,31 @@ async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
   } catch { return false; }
 }
 
+// SUBSTITUI publicarEFechar5s! NÃO remova publish/verify/etc, só troque a chamada!
+async function publishAndWatch(page, titulo, { watchOverlayMs = 12000 } = {}) {
+  await attachLimitOverlaySentinel(page); // Arme a sentinela ANTES do clique!
+  // Clique, como em publicarEFechar5s, mas NÃO feche/navegue!
+  let clicked = false;
+  for (let i = 0; i < 12; i++) {
+    const btnPub = await findEnabledButton(page, 'Publicar', 600);
+    if (btnPub) { try { await btnPub.click({ delay: 60 }); } catch {} clicked = true; break; }
+    const btnAv = await findEnabledButton(page, 'Avançar', 600);
+    if (btnAv) { try { await btnAv.click({ delay: 60 }); } catch {} await sleep(350); continue; }
+    await sleep(220);
+  }
+  if (!clicked) return { ok: false, reason: 'no_publish_button' };
+  // RACE OVERLAY vs PUB
+  const overlayP = waitSentinelLimitOverlay(page, watchOverlayMs).then(v => ({ overlay: v })).catch(() => ({ overlay: null }));
+  const evidenceP = waitPublishedEvidence(page, titulo, { maxMs: Math.max(8000, Math.floor(watchOverlayMs * 0.8)) }).then(ok => ({ published: !!ok })).catch(() => ({ published: false }));
+  const first = await Promise.race([overlayP, evidenceP]);
+  if (first.overlay && first.overlay.found) { return { ok: false, reason: 'limit_overlay', overlay: first.overlay }; }
+  if (first.published) { return { ok: true, reason: 'published' }; }
+  // Late fallback
+  const late = await waitSentinelLimitOverlay(page, 2500);
+  if (late && late.found) { return { ok: false, reason: 'limit_overlay', overlay: late }; }
+  return { ok: false, reason: 'indeterminate' };
+}
+
 /**
  * Start Robe — rápido e robusto:
  * - Fast-lane readiness (3.5s) + fallback curto.
@@ -864,40 +952,19 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // —————— ALTERAÇÃO APLICADA: Rotina publicarEFechar5s no lugar do pós-publicação anterior ——————
 
-    // PATCH — PUBLICAÇÃO COMPROVADA (EVIDENCE + 2 TENTATIVAS)
-    let publishedOk = false, pubErr = null;
-    for (let i=0;i<2 && !publishedOk;i++) {
-      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try', try: i+1 });
-      const okPub = await publicarEFechar5s(page);
-      if (!okPub) { pubErr = 'publish_click_fail'; continue; }
-      // Heurística 1: detector in-page
-      const ev1 = await waitPublishedEvidence(page, titulo, { maxMs: 12000 });
-      // Heurística 2: seller listing contendo título
-      const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 20000 });
-      publishedOk = ev1 || ev2;
-      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_evidence', ev1, ev2 });
-
-      // Detecção de “Limite atingido” pós-publish (após bloco de evidências)
-      if (await detectLimitOverlay(page, { timeoutMs: 15000, intervalMs: 350 })) {
+    // SUBSTITUIÇÃO MILITAR: PUBLICAÇÃO × OVERLAY-BLOCK (RACE)
+    published = false; let pubRes;
+    for (let i = 0; i < 2 && !published; i++) {
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
+      pubRes = await publishAndWatch(page, titulo, { watchOverlayMs: 12000 });
+      if (pubRes && pubRes.reason === 'limit_overlay') {
         try {
-          const snap = await page.evaluate(() => {
-            const h2 = document.querySelector('h2')?.innerText || '';
-            const body = Array.from(document.querySelectorAll('div,span,p')).slice(0,200)
-              .map(el => (el.innerText || el.textContent || '')).filter(Boolean).slice(0,10).join(' | ');
-            return { h2, body };
-          }).catch(()=>({h2:'',body:''}));
+          const snap = pubRes.overlay || {};
           await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
         } catch {}
-        await manifestStore.update(nome, m => {
-          m = m||{};
-          m.robeCooldownUntil = Date.now() + 24*60*60*1000;
-          m.robeCooldownRemainingMs = 0;
-          m.robePauseReason = 'limit_posting';
-          return m;
-        });
-        try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (pós-publish)'); } catch {}
+        await manifestStore.update(nome, m => { m = m||{}; m.robeCooldownUntil = Date.now() + 24*60*60*1000; m.robeCooldownRemainingMs = 0; m.robePauseReason = 'limit_posting'; return m; });
+        try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (race pós-Publicar)'); } catch {}
         try {
-          // CONSUMIR A FOTO PARA ESTA CONTA MESMO EM FALHA
           if (fotoNome) {
             const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
             await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
@@ -908,14 +975,46 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         cooldownApplied = true;
         return { ok:false, error:'limit_posting' };
       }
-
-      if (!publishedOk) await sleep(1200);
+      if (pubRes && pubRes.ok && pubRes.reason === 'published') {
+        published = true;
+        break;
+      }
+      // Inconclusivo: aborde evidências de publicado, fallback SELLING só depois da janela!
+      const ev1 = await waitPublishedEvidence(page, titulo, { maxMs: 8000 });
+      if (ev1) { published = true; break; }
+      const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 15000 });
+      if (ev2) { published = true; break; }
+      const late2 = await detectLimitOverlay(page, { timeoutMs: 5000, intervalMs: 300 });
+      if (late2) {
+        try {
+          const snap = await page.evaluate(() => {
+            const h2 = document.querySelector('h2')?.innerText || '';
+            const body = Array.from(document.querySelectorAll('div,span,p')).slice(0,200)
+              .map(el => (el.innerText || el.textContent || '')).filter(Boolean).slice(0,10).join(' | ');
+            return { h2, body };
+          }).catch(()=>({h2:'',body:''}));
+          await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
+        } catch {}
+        await manifestStore.update(nome, m => { m = m||{}; m.robeCooldownUntil = Date.now() + 24*60*60*1000; m.robeCooldownRemainingMs = 0; m.robePauseReason = 'limit_posting'; return m; });
+        try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (fallback tardio)'); } catch {}
+        try {
+          if (fotoNome) {
+            const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
+            await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
+          }
+        } catch {}
+        try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
+        try { await safeClosePage(page); } catch {}
+        cooldownApplied = true;
+        return { ok:false, error:'limit_posting' };
+      }
+      await sleep(1200);
     }
-    if (!publishedOk) {
-      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_fail', err: pubErr });
+    if (!published) {
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_fail_final' });
       throw new Error('publish_not_confirmed');
     }
-    published = true;
+
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
 
     // Confirmar localização usada (após publicar — mantém)
@@ -926,7 +1025,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     page = null;
 
     // COMMIT no índice de fotos — somente após confirmação de publicação
-    if (publishedOk) {
+    if (published) {
       // Descobrir todas as WORKINGNAMES do momento
       const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
       try {

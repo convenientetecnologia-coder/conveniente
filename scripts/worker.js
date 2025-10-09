@@ -13,6 +13,25 @@ const fotos        = require('./fotos.js'); // gestor central de fotos
 const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 
+// Detecta bloqueio do Marketplace em QUALQUER aba da conta (quando o robe está rodando)
+// Usada pelo nurseTick como fallback hypersafe
+async function detectFbLimitInAnyPage(ctrl) {
+  try {
+    if (!ctrl || !ctrl.browser || typeof ctrl.browser.pages !== 'function') return false;
+    const pages = await ctrl.browser.pages();
+    for (const p of pages) {
+      try {
+        const url = p.url ? p.url() : '';
+        if (/facebook\.com\/marketplace\/(create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(url)) {
+          const det = await require('./browser.js').detectMessengerTempBlock(p);
+          if (det && det.blocked && det.domain === 'facebook') return true;
+        }
+      } catch {}
+    }
+  } catch {}
+  return false;
+}
+
 // NOVO: Import RAM/CPU cross-platform
 const pidusage = require('pidusage');
 const psList = require('ps-list');
@@ -3659,6 +3678,37 @@ async function nurseTick() {
         await snapshotStatusAndWrite();
         continue;
       }
+
+      // --- INICIO PATCH VARREDURA MULTI-TAB ENQUANTO ROBO ATIVO ---
+      let anyFbBlocked = false;
+      try {
+        if (robeMeta[nome] && robeMeta[nome].emExecucao === true && ctrl && ctrl.browser) {
+          anyFbBlocked = await detectFbLimitInAnyPage(ctrl);
+        }
+      } catch {}
+      if (anyFbBlocked) {
+        try { await issues.append(nome, 'block_detected', 'domain=facebook multi-page=true'); } catch {}
+        const nowf = Date.now();
+        const plus24 = 24 * 60 * 60 * 1000;
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - nowf) : 0;
+          if (!man || curLeft < 80*60*1000) {
+            await manifestStore.update(nome, m => {
+              m = m || {};
+              m.robeCooldownUntil = nowf + plus24;
+              m.robeCooldownRemainingMs = 0;
+              return m;
+            });
+          }
+        } catch {}
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].pauseReason = 'fb_block';
+        robeMeta[nome].lastRobeBlockAt = Date.now();
+        await snapshotStatusAndWrite();
+        continue;
+      }
+      // --- FIM PATCH VARREDURA MULTI-TAB ---
 
       // NÃO competir com recovery stateful (redundante, mas mantém)
       const hs2 = getHealth && getHealth(nome);
