@@ -313,7 +313,7 @@ const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10); // alvo de p
 //   });
 //   scored.sort((a,b) => a.ram - b.ram || a.last - b.last);
 //   const keepN = Math.max(LIGHT_BUDGET_CFG.MIN_KEEP, cap);
-//   const keep = scored.slice(0, keepN).map(x=>x.n);
+//   const keep = scored.slice(keepN).map(x=>x.n);
 //   const drop = scored.slice(keepN).map(x=>x.n);
 
 //   lightPlan.keep = new Set(keep);
@@ -2024,7 +2024,7 @@ async function robeTickGlobal() {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].limitPostingThisRun = Date.now(); // é só in-mem/ciclo
           robeMeta[nome].pauseReason = 'limit_posting'; // reforço
-          robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome) });
+          robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h');
           return; // ABORTA ciclo, NUNCA avança para sucesso, publish, idle, logs.
         }
@@ -2645,6 +2645,15 @@ const handlers = {
           }
           // ==== EOF COOL/PRUNED ERRORS ====
 
+          if (res && (res.limitPosting === true || res.error === 'limit_posting')) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].limitPostingThisRun = Date.now();
+            robeMeta[nome].pauseReason = 'limit_posting';
+            robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
+            await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h (robe-play)');
+            return; // ciclo abortado, não religar virtus
+          }
+
           if (res && res.ok) {
             try {
               await manifestStore.update(nome, (m) => {
@@ -2670,6 +2679,10 @@ const handlers = {
         } catch (e) {
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
         } finally {
+          if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
+            await issues.append(nome, 'mil_action', 'robe_end_limit_posting (cleanup only, robe-play)');
+            return;
+          }
           // PRUNE DE ABAS antes de religar o Virtus
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
 

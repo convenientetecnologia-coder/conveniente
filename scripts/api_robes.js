@@ -48,14 +48,13 @@ module.exports = (app, workerClient, fileStore) => {
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
 
-        // Verifica se está sob penalidade limit_posting ativa (não pode liberar)
+        // Checagem militar
         let manCur = null;
         try {
-          manCur = await manifestStore.read(p.nome).catch(()=>null);
+          manCur = await manifestStore.read(p.nome).catch(() => null);
         } catch {}
-        if (manCur && manCur.robePauseReason === 'limit_posting' && (manCur.robeCooldownUntil||0) > Date.now()) {
-          // NÃO liberar, NÃO alterar, pular este perfil
-          if (!fails) fails = [];
+        if (manCur && manCur.robePauseReason === 'limit_posting' && (manCur.robeCooldownUntil || 0) > Date.now()) {
+          // NÃO liberar nem alterar a pausa nessa conta, logar e pular
           fails.push(p.nome);
           if (fileStore.issues && typeof fileStore.issues.append === "function") {
             fileStore.issues.append({ type: 'release_all_skip_limit_posting_active', perfil: p.nome, ts: Date.now() });
