@@ -10,6 +10,27 @@ const crypto = require('crypto'); // <--- ADICIONADO
 const DADOS_DIR = path.join(__dirname, '..', 'dados');
 const INDEX_FILE = path.join(DADOS_DIR, 'fotos_postadas.json');
 
+// BLOCO DE LOCK INTERPROCESSO
+const INDEX_LOCK_FILE = INDEX_FILE + '.lock';
+
+async function acquireIndexLock(retries = 200, delayMs = 15) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const fd = fs.openSync(INDEX_LOCK_FILE, 'wx');
+      return fd;
+    } catch {}
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  throw new Error('index_lock_timeout');
+}
+function releaseIndexLock(fd) {
+  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
+  try { fs.unlinkSync(INDEX_LOCK_FILE); } catch {}
+}
+
+function canonName(s) { return String(s || '').trim().toLowerCase(); }
+function canonNames(arr) { return Array.from(new Set((arr || []).map(canonName))).filter(Boolean); }
+
 // Diretório de fotos: usa env FOTOS_DIR se existir; senão Desktop/Área de Trabalho/fotos
 function resolveFotosDir() {
   if (process.env.FOTOS_DIR && fs.existsSync(process.env.FOTOS_DIR)) {
@@ -136,9 +157,13 @@ async function applyStatToRec(rec, stat, absPath) {
 // Verifica se o arquivo atual parece ser a mesma “geração” que registramos (preferencialmente por hash)
 function sameGeneration(rec, stat, absPath) {
   if (!rec || !stat) return false;
-  if (rec.sha256 && absPath) {
-    try { return rec.sha256 === fs.existsSync(absPath) ? require('crypto').createHash('sha256').update(fs.readFileSync(absPath)).digest('hex') : ''; }
-    catch { return false; } // Se erro, treat as not the same
+  try {
+    if (rec.sha256 && absPath && fs.existsSync(absPath)) {
+      const cur = require('crypto').createHash('sha256').update(fs.readFileSync(absPath)).digest('hex');
+      return rec.sha256 === cur;
+    }
+  } catch {
+    return false;
   }
   if (typeof rec.size !== 'number' || typeof rec.mtimeMs !== 'number') return false;
   return rec.size === stat.size && rec.mtimeMs === stat.mtimeMs;
@@ -159,65 +184,74 @@ function sameGeneration(rec, stat, absPath) {
  * @returns {Promise<{ok:true,file:string,absPath:string}|{ok:false,error:string}>}
  */
 async function pickPhotoForAccount(nomeConta, workingNames = []) {
+  nomeConta = canonName(nomeConta);
+  workingNames = canonNames(workingNames);
+
   return _serialize(async () => {
-    const dir = resolveFotosDir();
-    if (!fs.existsSync(dir)) return { ok: false, error: 'fotos_dir_missing' };
-    let idx = loadIndex();
+    const lockFd = await acquireIndexLock();
+    try {
+      const dir = resolveFotosDir();
+      if (!fs.existsSync(dir)) return { ok: false, error: 'fotos_dir_missing' };
+      let idx = loadIndex();
 
-    const all = listAllPhotosSortedByMtimeAsc();
-    let changed = false;
+      const all = listAllPhotosSortedByMtimeAsc();
+      let changed = false;
 
-    for (const item of all) {
-      const { name, abs, stat } = item;
-      let rec = idx[name];
+      for (const item of all) {
+        const { name, abs, stat } = item;
+        let rec = idx[name];
 
-      if (!rec) {
-        rec = idx[name] = { postedBy: [], reservedBy: {} };
-        await applyStatToRec(rec, stat, abs);
-        changed = true;
-      } else {
-        if (!sameGeneration(rec, stat, abs)) {
-          rec.postedBy = [];
-          rec.reservedBy = {};
+        if (!rec) {
+          rec = idx[name] = { postedBy: [], reservedBy: {} };
           await applyStatToRec(rec, stat, abs);
-          rec.deletePending = false;
           changed = true;
+        } else {
+          if (!sameGeneration(rec, stat, abs)) {
+            rec.postedBy = [];
+            rec.reservedBy = {};
+            await applyStatToRec(rec, stat, abs);
+            rec.deletePending = false;
+            changed = true;
+          }
         }
-      }
 
-      if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
-      if (!rec.reservedBy) rec.reservedBy = {};
+        if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
+        if (!rec.reservedBy || typeof rec.reservedBy !== 'object') rec.reservedBy = {};
 
-      // --- PASSO 2: Pular obrigatoriamente fotos já tentadas ---
-      // Se já postou (tentou) para esta conta, nunca retorna de novo
-      if (rec.postedBy.includes(nomeConta)) continue;
+        // NUNCA servir para a mesma conta se já consta (tentativa ou sucesso)
+        if (rec.postedBy.map(canonName).includes(nomeConta)) continue;
 
-      // Se já reservado por esta conta, continue servindo esta foto
-      if (rec.reservedBy[nomeConta]) {
+        // Se já reservado por esta conta: continue servindo esta foto (idempotente)
+        if (rec.reservedBy[nomeConta]) {
+          return { ok: true, file: name, absPath: abs };
+        }
+
+        // Se reservado por outra conta, pule
+        if (Object.keys(rec.reservedBy).length > 0) continue;
+
+        // Reserva AGORA e COMMITA a tentativa (postedBy) — crash-safe
+        rec.reservedBy[nomeConta] = { ts: Date.now() };
+        if (!rec.postedBy.map(canonName).includes(nomeConta)) rec.postedBy.push(nomeConta);
+        saveIndex(idx);
+
         return { ok: true, file: name, absPath: abs };
       }
 
-      // Se reservado por outra conta, pule
-      if (Object.keys(rec.reservedBy).length > 0) continue;
-
-      // Reserva agora para esta conta e flusha
-      rec.reservedBy[nomeConta] = { ts: Date.now() };
-      saveIndex(idx);
-      return { ok: true, file: name, absPath: abs };
-    }
-
-    // Limpa entradas do índice que não existem mais no disco
-    let removed = false;
-    for (const key of Object.keys(idx)) {
-      const abs = path.join(dir, key);
-      if (!fs.existsSync(abs)) {
-        delete idx[key];
-        removed = true;
+      // Limpa entradas do índice que não existem mais no disco
+      let removed = false;
+      for (const key of Object.keys(idx)) {
+        const abs = path.join(dir, key);
+        if (!fs.existsSync(abs)) {
+          delete idx[key];
+          removed = true;
+        }
       }
-    }
-    if (removed || changed) saveIndex(idx);
+      if (removed || changed) saveIndex(idx);
 
-    return { ok: false, error: 'no-photo-available' };
+      return { ok: false, error: 'no-photo-available' };
+    } finally {
+      releaseIndexLock(lockFd);
+    }
   });
 }
 
@@ -228,14 +262,20 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
  * @returns {Promise<{ok:true}>}
  */
 async function releaseReservation(nomeConta, fileName) {
+  nomeConta = canonName(nomeConta);
   return _serialize(async () => {
-    let idx = loadIndex();
-    const rec = idx[fileName];
-    if (rec && rec.reservedBy && rec.reservedBy[nomeConta]) {
-      delete rec.reservedBy[nomeConta];
-      saveIndex(idx);
+    const lockFd = await acquireIndexLock();
+    try {
+      let idx = loadIndex();
+      const rec = idx[fileName];
+      if (rec && rec.reservedBy && rec.reservedBy[nomeConta]) {
+        delete rec.reservedBy[nomeConta];
+        saveIndex(idx);
+      }
+      return { ok: true };
+    } finally {
+      releaseIndexLock(lockFd);
     }
-    return { ok: true };
   });
 }
 
@@ -254,72 +294,77 @@ async function releaseReservation(nomeConta, fileName) {
  * @returns {Promise<{ok:true,deleted:boolean}|{ok:false,error:string}>}
  */
 async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) {
+  nomeConta = canonName(nomeConta);
+  workingNames = canonNames(workingNames);
+
   return _serialize(async () => {
-    const dir = resolveFotosDir();
-    let idx = loadIndex();
+    const lockFd = await acquireIndexLock();
+    try {
+      const dir = resolveFotosDir();
+      let idx = loadIndex();
 
-    const abs = path.join(dir, fileName);
-    const exists = fs.existsSync(abs);
-    const stat = exists ? (() => { try { return fs.statSync(abs); } catch { return null; } })() : null;
+      const abs = path.join(dir, fileName);
+      const exists = fs.existsSync(abs);
+      const stat = exists ? (() => { try { return fs.statSync(abs); } catch { return null; } })() : null;
 
-    let rec = idx[fileName];
-    if (!rec) {
-      rec = idx[fileName] = { postedBy: [], reservedBy: {} };
-      if (stat) await applyStatToRec(rec, stat, abs);
-    } else {
-      if (stat && !sameGeneration(rec, stat, abs)) {
-        rec.postedBy = [];
-        rec.reservedBy = {};
-        await applyStatToRec(rec, stat, abs);
-        rec.deletePending = false;
+      let rec = idx[fileName];
+      if (!rec) {
+        rec = idx[fileName] = { postedBy: [], reservedBy: {} };
+        if (stat) await applyStatToRec(rec, stat, abs);
+      } else {
+        if (stat && !sameGeneration(rec, stat, abs)) {
+          rec.postedBy = [];
+          rec.reservedBy = {};
+          await applyStatToRec(rec, stat, abs);
+          rec.deletePending = false;
+        }
       }
-    }
 
-    if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
-    if (!rec.reservedBy) rec.reservedBy = {};
+      if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
+      if (!rec.reservedBy || typeof rec.reservedBy !== 'object') rec.reservedBy = {};
 
-    // --- PASSO 3: SEMPRE adicione ao postedBy, MESMO EM ERRO ---
-    // Remove reserva se houver
-    if (rec.reservedBy && rec.reservedBy[nomeConta]) delete rec.reservedBy[nomeConta];
-    // GARANTIA DE MARCAÇÃO
-    if (!rec.postedBy.includes(nomeConta)) rec.postedBy.push(nomeConta);
+      // Remove reserva (se houver) e garante postedBy (idempotente)
+      if (rec.reservedBy[nomeConta]) delete rec.reservedBy[nomeConta];
+      if (!rec.postedBy.map(canonName).includes(nomeConta)) rec.postedBy.push(nomeConta);
 
-    // Critério de exclusão: workingNames
-    const workingSet = new Set((workingNames || []).filter(Boolean));
-    const allWorkedPosted = workingSet.size > 0
-      ? [...workingSet].every(n => rec.postedBy.includes(n))
-      : false;
+      const workingSet = new Set(workingNames);
+      const allWorkedPosted = workingSet.size > 0
+        ? [...workingSet].every(n => rec.postedBy.map(canonName).includes(canonName(n)))
+        : false;
 
-    if (!exists) {
-      delete idx[fileName];
-      saveIndex(idx);
-      return { ok: true, deleted: true };
-    }
+      if (!exists) {
+        delete idx[fileName];
+        saveIndex(idx);
+        return { ok: true, deleted: true };
+      }
 
-    if (allWorkedPosted) {
-      if (sameGeneration(rec, stat, abs)) {
-        try {
-          fs.unlinkSync(abs);
-          delete idx[fileName];
-          saveIndex(idx);
-          return { ok: true, deleted: true };
-        } catch (e) {
-          rec.deletePending = true;
-          rec.lastError = String(e && e.message || e);
+      if (allWorkedPosted) {
+        if (sameGeneration(rec, stat, abs)) {
+          try {
+            fs.unlinkSync(abs);
+            delete idx[fileName];
+            saveIndex(idx);
+            return { ok: true, deleted: true };
+          } catch (e) {
+            rec.deletePending = true;
+            rec.lastError = String(e && e.message || e);
+            saveIndex(idx);
+            return { ok: true, deleted: false };
+          }
+        } else {
+          rec.postedBy = [];
+          rec.reservedBy = {};
+          await applyStatToRec(rec, stat, abs);
+          rec.deletePending = false;
           saveIndex(idx);
           return { ok: true, deleted: false };
         }
-      } else {
-        rec.postedBy = [];
-        rec.reservedBy = {};
-        await applyStatToRec(rec, stat, abs);
-        rec.deletePending = false;
-        saveIndex(idx);
-        return { ok: true, deleted: false };
       }
+      saveIndex(idx);
+      return { ok: true, deleted: false };
+    } finally {
+      releaseIndexLock(lockFd);
     }
-    saveIndex(idx);
-    return { ok: true, deleted: false };
   });
 }
 
@@ -333,62 +378,62 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
  */
 async function gcSweep() {
   return _serialize(async () => {
-    const dir = resolveFotosDir();
-    let idx = loadIndex();
-    let removedIndex = 0, deletedFiles = 0, resetGens = 0;
-    let changed = false;
+    const lockFd = await acquireIndexLock();
+    try {
+      const dir = resolveFotosDir();
+      let idx = loadIndex();
+      let removedIndex = 0, deletedFiles = 0, resetGens = 0;
+      let changed = false;
 
-    for (const [name, rec] of Object.entries(idx)) {
-      const abs = path.join(dir, name);
-      const exists = fs.existsSync(abs);
-      const stat = exists ? (() => { try { return fs.statSync(abs); } catch { return null; } })() : null;
+      for (const [name, rec] of Object.entries(idx)) {
+        const abs = path.join(dir, name);
+        const exists = fs.existsSync(abs);
+        const stat = exists ? (() => { try { return fs.statSync(abs); } catch { return null; } })() : null;
 
-      if (!exists || !stat) {
-        // arquivo não existe -> remove índice
-        delete idx[name];
-        removedIndex++;
-        changed = true;
-        continue;
-      }
+        if (!exists || !stat) {
+          delete idx[name];
+          removedIndex++;
+          changed = true;
+          continue;
+        }
 
-      // Se a geração mudou (arquivo novo com o mesmo nome) → trata como nova
-      if (!sameGeneration(rec, stat, abs)) {
-        rec.postedBy = [];
-        rec.reservedBy = {};
-        await applyStatToRec(rec, stat, abs);
-        if (rec.deletePending) rec.deletePending = false;
-        resetGens++;
-        changed = true;
-        continue;
-      }
+        if (!sameGeneration(rec, stat, abs)) {
+          rec.postedBy = [];
+          rec.reservedBy = {};
+          await applyStatToRec(rec, stat, abs);
+          if (rec.deletePending) rec.deletePending = false;
+          resetGens++;
+          changed = true;
+          continue;
+        }
 
-      // Limpeza de reservas antigas (TTL 3h)
-      if (rec && rec.reservedBy) {
-        for (const n of Object.keys(rec.reservedBy)) {
-          if (Date.now() - rec.reservedBy[n].ts > 3*3600*1000) {
-            delete rec.reservedBy[n];
+        if (rec && rec.reservedBy) {
+          for (const n of Object.keys(rec.reservedBy)) {
+            if (Date.now() - rec.reservedBy[n].ts > 3*3600*1000) {
+              delete rec.reservedBy[n];
+              changed = true;
+            }
+          }
+        }
+
+        if (rec.deletePending) {
+          try {
+            fs.unlinkSync(abs);
+            delete idx[name];
+            deletedFiles++;
+            changed = true;
+          } catch (e) {
+            rec.lastError = String(e && e.message || e);
             changed = true;
           }
         }
       }
 
-      // Tenta remover os pendentes
-      if (rec.deletePending) {
-        try {
-          fs.unlinkSync(abs);
-          delete idx[name];
-          deletedFiles++;
-          changed = true;
-        } catch (e) {
-          // mantém pendente; GC tentará depois
-          rec.lastError = String(e && e.message || e);
-          changed = true;
-        }
-      }
+      if (changed) saveIndex(idx);
+      return { ok: true, removedIndex, deletedFiles, resetGens };
+    } finally {
+      releaseIndexLock(lockFd);
     }
-
-    if (changed) saveIndex(idx);
-    return { ok: true, removedIndex, deletedFiles, resetGens };
   });
 }
 

@@ -864,6 +864,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           return m;
         });
         try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (pós-publish)'); } catch {}
+        try {
+          // CONSUMIR A FOTO PARA ESTA CONTA MESMO EM FALHA
+          if (fotoNome) {
+            const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
+            await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
+          }
+        } catch {}
         try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
         try { await safeClosePage(page); } catch {}
         cooldownApplied = true;
