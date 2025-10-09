@@ -2,14 +2,8 @@
 module.exports = (app, workerClient, fileStore) => {
   const manifestStore = require('./manifestStore.js');
 
-  // Locks para ações massivas
-  let robePause24hAllLock = false;
-  let robeReleaseAllLock = false;
-
   // Robe 24h (TODOS os perfis) — pausa por 24h cada um
   app.post('/api/robes/pause-24h-all', async (req, res) => {
-    if (robePause24hAllLock) return res.json({ ok: false, error: 'Ação já em andamento.' });
-    robePause24hAllLock = true;
     try {
       const perfisArr = fileStore.loadPerfisJson();
       let total = 0, failed = 0, fails = [];
@@ -43,15 +37,11 @@ module.exports = (app, workerClient, fileStore) => {
       }
     } catch (e) {
       res.json({ ok: false, error: e && e.message || String(e) });
-    } finally {
-      robePause24hAllLock = false;
     }
   });
 
   // Robe Release/Play global — libera todos Robe
   app.post('/api/robes/release-all', async (req, res) => {
-    if (robeReleaseAllLock) return res.json({ ok: false, error: 'Ação já em andamento.' });
-    robeReleaseAllLock = true;
     try {
       const perfisArr = fileStore.loadPerfisJson();
       let total = 0, failed = 0, fails = [];
@@ -92,8 +82,6 @@ module.exports = (app, workerClient, fileStore) => {
       }
     } catch (e) {
       res.json({ ok: false, error: e && e.message || String(e) });
-    } finally {
-      robeReleaseAllLock = false;
     }
   });
 };

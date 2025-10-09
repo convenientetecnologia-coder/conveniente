@@ -14,46 +14,38 @@
     }
     header{
       display:flex; align-items:center; justify-content:space-between;
-      padding:8px 12px;
+      padding:18px 22px;
       border-bottom:1px solid var(--stroke);
       background:rgba(3,8,20,.65);
       backdrop-filter: blur(6px);
-      position:sticky; top:0; z-index:10;
-      white-space:nowrap;
+      position:sticky; top:0; z-index:5;
     }
     .brand{
-      display:flex; align-items:center; gap:10px; font-weight:800; letter-spacing:.2px; font-size:16px;
+      display:flex; align-items:center; gap:12px; font-weight:800; letter-spacing:.2px; font-size:18px;
     }
     .brand .logo{
-      width:22px; height:22px; border-radius:6px;
+      width:26px; height:26px; border-radius:6px;
       background:linear-gradient(135deg,#3c82f6,#1f6be1);
       display:inline-block;
       box-shadow:0 0 0 2px rgba(60,130,246,.25);
     }
-    .metrics{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+    .metrics{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
     .metric{
-      display:flex; align-items:center; gap:6px;
-      padding:4px 8px; border:1px solid var(--pill-border);
+      display:flex; align-items:center; gap:8px;
+      padding:6px 10px; border:1px solid var(--pill-border);
       border-radius:8px; background:var(--pill); font-size:12px; color:var(--muted)
     }
     .metric b{color:var(--text); font-size:13px}
-    .wrap{ max-width:1100px; margin:12px auto; padding:0 16px; }
-    /* Toolbar sticky/fixed com ícones apenas */
-    .toolbar{
-      position: sticky; top:46px; z-index:9;
-      display:flex; align-items:center; gap:10px;
-      padding:8px 12px; margin-bottom:12px;
-      background:rgba(3,8,20,.65);
-      backdrop-filter: blur(6px);
-      border-bottom:1px solid var(--stroke);
-    }
-    .toolbar .actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+    .wrap{ max-width:1100px; margin:22px auto; padding:0 16px; }
+    /* Toolbar refinada: ações à direita, quebra suave */
+    .toolbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px }
+    .toolbar .actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-left:auto }
     /* Ponto de notificação no botão "Arquivo" quando existir issues */
     .notif-dot{
       display:inline-block; width:8px; height:8px; border-radius:50%;
       background: var(--bad);
       margin-left:6px;
-      box-shadow: 0 0 0 2px var(--btn);
+      box-shadow: 0 0 0 2px var(--btn); /* borda para destacar no botão */
     }
 
     .add-btn{
@@ -82,7 +74,7 @@
       border-color: #434d5b;
     }
     .leftCol{
-      display:flex; align-items:center; gap:8px;
+      display:flex; align-items:center; gap:10px;
       padding-right:10px; border-right:1px dashed var(--stroke);
     }
     .toggle{
@@ -135,11 +127,6 @@
     }
     .icon-btn:hover{ background:var(--btn-hover) }
     .icon{ width:15px; height:15px; display:inline-block }
-    .badge{
-      display:inline-flex; align-items:center; justify-content:center;
-      min-width:14px; height:14px; padding:0 3px; border-radius:999px;
-      background:#2a3954; color:#d8e8ff; font-size:10px; line-height:1; font-weight:800;
-    }
 
     /* Spinner para botões em estado de carregamento */
     .spinner{
@@ -174,154 +161,43 @@
     }
     .filters{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px }
     .filters .btn.active{ background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff }
-
-    /* =================== INÍCIO UPGRADE HÍBRIDO — CARDS COM BOTÕES GRANDES E CIDADE VISÍVEL =================== */
-    /* Lista mais espaçada (cards confortáveis) */
-    .list{ gap:16px; }
-
-    /* Cards maiores e respiráveis */
-    .perfil{
-      padding:14px;
-      grid-template-columns: 250px 1fr 360px;
-      box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 6px 24px rgba(6,12,22,.25);
-    }
-
-    /* Colunas laterais em pilha (ações grandes) */
-    .leftCol{
-      flex-direction:column; align-items:stretch; gap:10px;
-    }
-    .rightCol{
-      flex-direction:column; align-items:stretch; gap:10px; justify-content:flex-start;
-      padding-left:10px; border-left:1px dashed var(--stroke);
-      flex-wrap:nowrap;
-    }
-
-    /* Centro mais espaçado e títulos grandes */
-    .centerCol{ gap:8px; }
-    .titleRow{ gap:12px; }
-    .accName{ font-size:18.5px; font-weight:900; letter-spacing:.3px; }
-
-    /* Cidade sempre visível (nunca só ícone) */
-    .titleRow span[aria-label^="Cidade:"],
-    .titleRow span[title^="Cidade:"]{
-      display:inline-flex; align-items:center; gap:8px;
-      font-size:15px; color:#d8e8ff; font-weight:700; opacity:.95;
-    }
-    .titleRow span[aria-label^="Cidade:"]::after,
-    .titleRow span[title^="Cidade:"]::after{
-      content: attr(title);
-      padding-left:4px;
-    }
-
-    /* Pills ligeiramente maiores para leitura clara */
-    .pill{ font-size:12.5px; padding:4px 10px; }
-
-    /* Botões grandes nas colunas dos cards (sempre com label visível) */
-    .perfil .leftCol .icon-btn,
-    .perfil .rightCol .icon-btn{
-      width:100%;
-      padding:12px 14px;
-      font-size:15px;
-      min-height:44px;
-      border-radius:10px;
-      justify-content:flex-start;
-      gap:10px;
-    }
-    .perfil .leftCol .icon-btn::after,
-    .perfil .rightCol .icon-btn::after{
-      content: attr(aria-label);
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-      color:inherit;
-      font-weight:800;
-      letter-spacing:.2px;
-    }
-
-    /* Mapeamentos de rótulos específicos exigidos */
-    .perfil .leftCol .icon-btn[aria-label="Iniciar Atendimento 24h"]::after{ content:"Iniciar Atendimento e Postagem 24Hrs"; }
-    .perfil .rightCol .icon-btn[aria-label="Ver Log da Conta"]::after{ content:"Arquivo"; }
-    .perfil .rightCol .icon-btn[aria-label^="Retomar"]::after{ content:"Retomar trabalho"; }
-
-    /* Estilos de ênfase por ação principal */
-    .perfil .leftCol .icon-btn[aria-label="Abrir navegador"],
-    .perfil .leftCol .icon-btn[aria-label="Iniciar Atendimento 24h"]{
-      background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff;
-      box-shadow:0 6px 18px rgba(31,107,225,.22);
-    }
-    .perfil .leftCol .icon-btn[aria-label="Abrir navegador"]:hover,
-    .perfil .leftCol .icon-btn[aria-label="Iniciar Atendimento 24h"]:hover{
-      filter:brightness(1.05);
-      box-shadow:0 8px 22px rgba(31,107,225,.30);
-    }
-    .perfil .leftCol .icon-btn[aria-label="Fechar navegador"]{
-      border-color:#5c2b2b; background:rgba(227,90,90,.12); color:#ffdede;
-    }
-
-    /* Ações do lado direito com ênfases */
-    .perfil .rightCol .icon-btn[aria-label="Resetar Perfil"]{
-      border-color:#cf8a2e; background: linear-gradient(90deg, #fbcb6c 0%, #d49a34 100%); color:#442d09;
-      font-weight:800; box-shadow:0 1px 7px #a4791e12; letter-spacing:.1px;
-    }
-    .perfil .rightCol .icon-btn[aria-label="Descongelar"]{
-      border-color:#cf8a2e; background:#2d230a; color:#f2d289;
-    }
-    .perfil .rightCol .icon-btn[aria-label="Invocar Humano"]{
-      border-color:#cf8a2e; background:rgba(240,180,41,.12); color:#f7e1a3;
-    }
-
-    /* Mantém botões micro da linha de status como ícones apenas (sem label auto) */
-    .perfil .titleRow .icon-btn.mini{
-      padding:4px 6px; min-height:28px; font-size:12px;
-    }
-    .perfil .titleRow .icon-btn.mini::after{ content:none; }
-
-    /* Responsivo: empilha colunas em telas estreitas mantendo clareza */
-    @media (max-width: 1080px){
-      .perfil{ grid-template-columns: 1fr; }
-      .leftCol{ padding-right:0; border-right:0; }
-      .rightCol{ border-left:0; padding-left:0; border-top:1px dashed var(--stroke); padding-top:10px; }
-    }
-    /* =================== FIM UPGRADE HÍBRIDO =================== */
   </style>
 </head>
 <body>
   <header>
     <div class="brand">
       <span class="logo"></span>
-      <div>Gerenciador — Conveniente Tecnologia</div>
+      <div>Gerenciador de Contas — Conveniente Tecnologia</div>
     </div>
     <div class="metrics"> 
-      <div class="metric" title="Total"><b id="mTotal">0</b></div>
-      <div class="metric" title="Ativos"><b id="mAtivos">0</b></div>
-      <div class="metric" title="Trabalhando"><b id="mTrabalhando">0</b></div>
-      <div class="metric" title="Fila Robe"><b id="mFila">0</b></div>
-      <div class="metric" title="RAM livre"><b id="mRam">--</b></div>
-      <div class="metric" title="CPU"><b id="mCpu">--</b></div>
-      <div class="metric" title="Fotos"><b id="mFotos">0</b></div>
-      <div class="metric" title="Modo"><b id="mModo">--</b></div>
-      <div class="metric" id="mRamPanel" style="display:none" title="RAM: total/máx/altos/cooldown/congelados">
-        <b id="mRamTotal">--</b> / <b id="mRamMax">--</b> / <b id="mRamMilit">0</b> / <b id="mPCooldown">0</b> / <b id="mPFrozen">0</b>
-      </div>
+      <div class="metric"><span>Total</span><b id="mTotal">0</b></div>
+      <div class="metric"><span>Ativos</span><b id="mAtivos">0</b></div>
+      <div class="metric"><span>Trabalhando</span><b id="mTrabalhando">0</b></div>
+      <div class="metric"><span>Fila Robe</span><b id="mFila">0</b></div>
+      <div class="metric"><span>RAM livre</span><b id="mRam">--</b></div>
+      <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
+      <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
+      <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
+      <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
     </div>
   </header>
   <div class="wrap">
     <div class="toolbar"> 
-      <div class="actions">
-        <button id="fabNewAccount" class="icon-btn" title="Nova Conta" aria-label="Nova Conta">+</button>
-        <button id="citiesCountBtn" class="icon-btn" title="Cidades (ver contagem)" aria-label="Cidades"><span role="img" aria-hidden="true">🏙️</span></button>
-        <button id="startAllBtn" class="icon-btn" title="Abrir/Iniciar 24h (sequencial)" aria-label="Abrir Todos"><span role="img" aria-hidden="true">▶️</span><span class="badge">24</span></button>
-        <button id="stopAllBtn" class="icon-btn" title="Fechar Todos" aria-label="Fechar Todos">⏹️</button>
-        <button id="robe24AllBtn" class="icon-btn" title="Pausar Robe 24h (todos)" aria-label="Robe 24h">⏲️</button>
-        <button id="robeReleaseAllBtn" class="icon-btn" title="Liberar Robe (todos)" aria-label="Liberar Robe"><span role="img" aria-hidden="true">▶️</span><span class="badge">R</span></button>
-        <button id="unfreezeAllBtn" class="icon-btn" title="Descongelar Todos" aria-label="Descongelar">🚫❄️</button>
-      </div>
-      <div class="filters" style="margin-left:auto">
-        <button class="btn" id="filterAll" title="Todas" aria-label="Todas">Todas</button>
-        <button class="btn" id="filterActive" title="Ativas" aria-label="Ativas">Ativas</button>
-        <button class="btn" id="filterInactive" title="Inativas" aria-label="Inativas">Inativas</button>
-        <button class="btn" id="filterIssues" title="Com problema" aria-label="Com problema">Com problema</button>
-      </div>
+      <button class="add-btn" id="addPerfilBtn">+ Nova Conta</button>
+      <div class="actions"> 
+        <button class="btn" id="citiesCountBtn">Cidades (Contagem)</button>
+        <button class="btn" id="startAllBtn">Abrir Todos e Iniciar 24h</button>
+        <button class="btn danger" id="stopAllBtn">Fechar todos</button>
+        <button class="btn" id="robe24AllBtn">Robe 24h (todos)</button>
+        <button class="btn" id="robeReleaseAllBtn">Liberar Robe (todos)</button>
+        <button class="btn" id="unfreezeAllBtn">Descongelar (todos)</button>
+        <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
+          <button class="btn" id="filterAll">Todas</button>
+          <button class="btn" id="filterActive">Ativas</button>
+          <button class="btn" id="filterInactive">Inativas</button>
+          <button class="btn" id="filterIssues">Com problema</button>
+        </div>
+      </div> 
     </div>
     <div id="listaPerfis" class="list"></div>
   </div>
@@ -756,34 +632,34 @@
         // LEFT: toggle
         const left = document.createElement('div'); left.className='leftCol';
         const toggle = document.createElement('button');
-        toggle.className = 'icon-btn mini';
-        toggle.title = p.active ? 'Fechar navegador' : 'Abrir navegador';
-        toggle.setAttribute('aria-label', toggle.title);
-        toggle.innerHTML = p.active ? '⏹️' : '▶️';
+        toggle.className = 'toggle ' + (p.active ? 'close':'open');
+        toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
         toggle.onclick = () => toggleBrowserUI(p, toggle);
         if (isFrozen) toggle.disabled = true;
         if (activationHeldPill) {
           toggle.disabled = true;
           toggle.title = 'Ativação em espera pelo sistema militar RAM/CPU';
-          toggle.setAttribute('aria-label','Ativação em espera pelo sistema militar RAM/CPU');
         }
         left.append(toggle);
 
-        // Start 24h como ícone com badge "24"
+        // NOVO: start 24h logo abaixo do toggle (com loading)
         const btnStartLeft = document.createElement('button');
-        btnStartLeft.className = 'icon-btn mini';
-        btnStartLeft.title = 'Iniciar Atendimento 24h';
-        btnStartLeft.setAttribute('aria-label','Iniciar Atendimento 24h');
-        btnStartLeft.innerHTML = `<span role="img" aria-hidden="true">▶️</span><span class="badge">24</span>`;
+        btnStartLeft.className = 'btn';
+        btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
         btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
         if (isFrozen) btnStartLeft.disabled = true;
         left.append(btnStartLeft);
 
         // ------------------- RAM VISUAL (ADICIONADO) -------------------
+        // Militar: null-aware, badge neutra se RAM/CPU desconhecida
+        // RAM por conta (campo .ramMB): mostra RAM: NNN MB, warn (>700MB pill vermelho), warn amarelo >500MB, badge neutra se null
         const ramPill = buildRamPill(p.ramMB); // RAM por conta
-        const cpuPill = buildCpuPill(p.cpuPercent); // CPU por conta (null-aware)
+
+        // Exibir CPU percent (com null-aware)
+        const cpuPill = buildCpuPill(p.cpuPercent);
 
         // ------------------- FROZEN/CONGELADO (ADICIONADO) -------------------
+        // Militar: frozenUntil/COOLDOWN badge lógica
         const frozenPill = buildFrozenPill(p);
 
         // -----------------------------------------------------
@@ -795,31 +671,28 @@
         nameEl.textContent = `[${idxStr}] ${display}`; // <- enumerado
         titleRow.append(nameEl);
 
-        // Ícone de cidade ao lado do nome (sem texto fixo)
-        if (p.cidade) {
-          const cid = document.createElement('span');
-          cid.textContent = '🏙️';
-          cid.title = `Cidade: ${p.cidade}`;
-          cid.setAttribute('aria-label', `Cidade: ${p.cidade}`);
-          titleRow.append(cid);
-        }
-
-        // Pills
+        // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
         titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
 
+        // -------- RAM e CPU pill explícito ---------
         if (ramPill) titleRow.append(ramPill); // RAM por conta
         if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
 
+        // -------- NOVO: Pill "Gordo" (>=600MB) — suprimido --------
         const gordoPill = buildGordoPill(p);
         if (gordoPill) titleRow.append(gordoPill);
 
+        // -------- NOVO: Última manutenção e Δ última — suprimidos --------
         const lastMaintPill = buildLastMaintenancePill(p.lastMaintenanceAt);
         if (lastMaintPill) titleRow.append(lastMaintPill);
         const lastDeltaPill = buildLastDeltaPill(p.lastDeltaMB);
         if (lastDeltaPill) titleRow.append(lastDeltaPill);
 
+        // -- NOVO: Ativação em espera/hold --
         if (activationHeldPill) titleRow.append(activationHeldPill);
+
+        // -- NOVO: Reabrirá em... --
         if (reopenAtPill) titleRow.append(reopenAtPill);
 
         // ===================== NOVOS PILLS — STATUS MILITAR: BACKOFF/SWAP/HOLD/WHY-NOT-OPEN =====================
@@ -836,6 +709,7 @@
 
           // Pill — SWAP cooldown
           if (typeof p.swapCooldown === "number" && p.swapCooldown > 0) {
+            // tolerante: se vier em ms, converte para segundos
             const scSec = Math.floor(p.swapCooldown > 100000 ? p.swapCooldown/1000 : p.swapCooldown);
             const swapCdPill = buildPill(`Swap cooldown: ${tempoRestante(scSec)}`, 'warn');
             swapCdPill.title = `Aguardando cooldown de swap expirar para nova tentativa.`;
@@ -860,8 +734,10 @@
         }
         // ===================== FIM NOVOS PILLS — STATUS MILITAR =====================
 
-        if (frozenPill) titleRow.append(frozenPill); // ROBO frozen
+        // -------- FROZEN pill explícito (primeiro) ---------
+        if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
 
+        // -------- NOVO: Pill para manifestStatus --------
         if (p.manifestStatus === 'incomplete') {
           titleRow.append(buildPill('Manifesto incompleto', 'warn'));
         }
@@ -869,10 +745,12 @@
           titleRow.append(buildPill('Manifesto ausente', 'bad'));
         }
 
+        // Pill "Bloqueio temporário Messenger"
         if (typeof p.closingReason === 'string' && p.closingReason === 'virtus_block') {
           titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
         }
 
+        // Pill “Robe em pausa 24h (FB bloqueado)” — só aparece se houve bloqueio real recente (pauseReason==='fb_block' + cooldown>22h + lastRobeBlockAt<25h)
         {
           const r = robes && robes[p.nome];
           if (
@@ -886,6 +764,7 @@
             titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
           }
         }
+        // Pill “Robe Limite atingido” (amarela) — aparece sempre que pauseReason === 'limit_posting'
         {
           const r = robes && robes[p.nome];
           if (
@@ -899,62 +778,62 @@
           }
         }
 
+        // ------- COOLDOWN (ADICIONAL) -------
         if (robeCooldownSec > 0) {
-          titleRow.append(buildCooldownPill(robeCooldownSec));
+          titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil
         } else {
           if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
           else if (inQueue) titleRow.append(buildPill('Robe: Aguardando fila', 'info'));
           else titleRow.append(buildPill('Robe: Pronto', 'good'));
         }
 
+        // ------- Estado do robe ------
         if (robeStatus && robeStatus.estado) {
           titleRow.append(buildRobeEstadoPill(robeStatus.estado));
         }
 
+        // Opcional: Adicione pill/status visual "Modo Humano"
         if (p.humanControl) {
           titleRow.append(buildPill('Modo Humano', 'warn'));
         }
 
+        // ------------- ABAS/NUMPAGES PILL -------------
+        // Militar: Se campo não for null, badge “Abas: N” para contas com N > 1 (alerta, cor de warning). Se null/undefined, simplesmente não exibir.
         const abasPill = buildAbasPill(p.numPages);
         if (abasPill) titleRow.append(abasPill);
 
-        // Robe Play (ícone único)
+        // Após montar as pills do Robe…
         const btnPlay = document.createElement('button');
         btnPlay.className='icon-btn mini';
-        btnPlay.title='Robe Play (postar agora)';
-        btnPlay.setAttribute('aria-label','Robe Play (postar agora)');
-        btnPlay.innerHTML = `▶️`;
+        btnPlay.title='Forçar postagem agora (Robe Play)';
+        btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
         btnPlay.onclick = () => robePlayUI(p, btnPlay);
         if (isFrozen) btnPlay.disabled = true;
         titleRow.append(btnPlay);
 
-        // Robe 24h (ícone ⏲️)
+        // Novo botão: Robe 24h (por conta)
         const btnRobe24 = document.createElement('button');
         btnRobe24.className = 'icon-btn mini';
         btnRobe24.title='Pausar Robe por 24h';
-        btnRobe24.setAttribute('aria-label','Pausar Robe por 24h');
-        btnRobe24.innerHTML = `⏲️`;
+        btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
         btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
         if (isFrozen) btnRobe24.disabled = true;
         titleRow.append(btnRobe24);
 
         const subRow = document.createElement('div'); subRow.className='subRow';
-        // cidade removida do centro; subRow fica sem texto fixo
+        subRow.textContent = p.cidade ? ('Cidade: ' + p.cidade) : '';
         center.append(titleRow, subRow);
 
-        // RIGHT: actions (ícones)
+        // RIGHT: actions (ajustado conforme instruções)
         const right = document.createElement('div'); right.className='rightCol';
 
-        // Injetar Cookies (🍪)
+        // ===================== ALTERAÇÃO SOLICITADA — INÍCIO ======================
         const btnCookies = document.createElement('button');
-        btnCookies.className='icon-btn mini';
+        btnCookies.className='btn';
+        btnCookies.textContent='Injetar Cookies';
         btnCookies.title='Injetar cookies salvos neste perfil';
-        btnCookies.setAttribute('aria-label','Injetar cookies');
-        btnCookies.innerHTML='🍪';
         btnCookies.onclick = async (ev) => {
-          // loading silencioso (sem texto)
-          if (!btnCookies.dataset.idleHtml) btnCookies.dataset.idleHtml = btnCookies.innerHTML;
-          btnCookies.disabled = true; btnCookies.classList.add('loading'); btnCookies.innerHTML = `<span class="spinner"></span>`;
+          setBtnLoading(btnCookies, true, 'Injetando...');
           try {
             const res = await window.electronAPI.configure(p.nome);
             if (!res || !res.ok) {
@@ -965,64 +844,61 @@
           } catch (e) {
             alert('Falha ao injetar cookies: ' + (e && e.message || e));
           } finally {
-            btnCookies.disabled = false; btnCookies.classList.remove('loading'); btnCookies.innerHTML = btnCookies.dataset.idleHtml;
+            setBtnLoading(btnCookies, false);
             reloadPerfis();
           }
         };
         if (isFrozen) btnCookies.disabled = true;
+        // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
 
-        // Configurar (⚙️)
         const btnCfg = document.createElement('button');
-        btnCfg.className='icon-btn mini';
+        btnCfg.className='icon-btn';
         btnCfg.title='Configurações da Conta';
-        btnCfg.setAttribute('aria-label','Configurações da Conta');
-        btnCfg.innerHTML = `⚙️`;
+        btnCfg.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm0-6 2.2 1.6 2.6-.6 1.1 2.5 2.6.6-.2 2.7 2 1.8-2 1.8.2 2.7-2.6.6-1.1 2.5-2.6-.6L12 22l-2.2-1.6-2.6.6-1.1-2.5-2.6-.6.2-2.7-2-1.8 2-1.8-.2-2.7 2.6-.6 1.1-2.5 2.6.6L12 2.5Z"/></svg><span>Configurar</span>`;
         btnCfg.onclick = () => showConfigPerfilModal({ perfil: p, onClose: reloadPerfis });
         if (isFrozen) btnCfg.disabled = true;
 
-        // Arquivo/Log (📄) + dot se issues
+        // Botão Arquivo/Log por conta - alterado para ponto se issuesCount > 0
         const btnLog = document.createElement('button');
-        btnLog.className='icon-btn mini';
+        btnLog.className='icon-btn';
         btnLog.title='Ver Log da Conta';
-        btnLog.setAttribute('aria-label','Ver Log da Conta');
-        btnLog.innerHTML = `📄${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
+        btnLog.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm9 0v5h5"/></svg><span>Arquivo</span>${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
         btnLog.onclick = () => showIssuesModal(p.nome);
         if (isFrozen) btnLog.disabled = true;
 
-        // Human/Resume
+        // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
         if (p.humanControl) {
-          // Retomar (⏵)
+          // Botão “Retomar Trabalho”
           const btnResume = document.createElement('button');
-          btnResume.className='icon-btn mini';
+          btnResume.className='icon-btn';
           btnResume.title='Retomar atendimento e automação';
-          btnResume.setAttribute('aria-label','Retomar atendimento e automação');
-          btnResume.innerHTML = `⏵`;
+          btnResume.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`;
           btnResume.onclick = async () => {
-            // loading silencioso
-            if (!btnResume.dataset.idleHtml) btnResume.dataset.idleHtml = btnResume.innerHTML;
-            btnResume.disabled = true; btnResume.classList.add('loading'); btnResume.innerHTML = `<span class="spinner"></span>`;
+            btnResume.disabled = true;
+            btnResume.innerText = 'Resumindo...';
             try {
               await window.electronAPI.resumeHuman(p.nome);
               await new Promise(r=>setTimeout(r,800));
               reloadPerfis();
             } catch(e){ alert('Falha ao retomar trabalho: '+(e&&e.message||e)); }
-            finally{ btnResume.disabled=false; btnResume.classList.remove('loading'); btnResume.innerHTML=btnResume.dataset.idleHtml; }
+            finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
           };
           if (isFrozen) btnResume.disabled = true;
           right.append(btnCookies, btnResume, btnCfg, btnLog);
         } else {
-          // Invocar Humano (🙋)
+          // Botão “Invocar Humano” padrão
           const btnHuman = document.createElement('button');
-          btnHuman.className='icon-btn mini';
+          btnHuman.className='icon-btn';
           btnHuman.title='Invocar Humano';
-          btnHuman.setAttribute('aria-label','Invocar Humano');
-          btnHuman.innerHTML = `🙋`;
+          btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
           btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
           if (isFrozen) btnHuman.disabled = true;
           right.append(btnCookies, btnHuman, btnCfg, btnLog);
         }
+        // ===========================================================
 
-        // Resetar Perfil (🔄) — quando permitido
+        // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
+        // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
         let estadoCritico = false;
         let podeResetar = false;
         let robeEstadoVal = (robeStatus && typeof robeStatus.estado === 'string' ? robeStatus.estado : '');
@@ -1030,17 +906,15 @@
         if (ramMBval !== null && ramMBval >= 700) estadoCritico = true;
         if (/erro|grave|backoff|fail/i.test(robeEstadoVal)) estadoCritico = true;
         if (estadoCritico && !isFrozen && !p.resetando && !p.resetEmCurso && !p.humanControl && !p.trabalhando) {
+          // Somente se navegador não está ativo ou perfil não está resetando/congelado
           podeResetar = !p.active;
         }
         if (estadoCritico && podeResetar) {
           const btnResetMil = document.createElement('button');
-          btnResetMil.className = 'icon-btn mini';
-          btnResetMil.title = 'Resetar Perfil';
-          btnResetMil.setAttribute('aria-label','Resetar Perfil');
-          btnResetMil.innerHTML = `🔄`;
+          btnResetMil.className = 'btn reset-memmil';
+          btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
           btnResetMil.onclick = async () => {
-            if (!btnResetMil.dataset.idleHtml) btnResetMil.dataset.idleHtml = btnResetMil.innerHTML;
-            btnResetMil.disabled = true; btnResetMil.classList.add('loading'); btnResetMil.innerHTML = `<span class="spinner"></span>`;
+            btnResetMil.disabled = true; btnResetMil.innerHTML = `<span class="spinner"></span> Resetando...`;
             try {
               await window.electronAPI.deactivate(p.nome);
               await new Promise(r=>setTimeout(r,1100));
@@ -1050,22 +924,22 @@
             } catch(e) {
               alert('Falha ao resetar perfil: '+(e&&e.message||e));
             } finally {
-              btnResetMil.disabled = false; btnResetMil.classList.remove('loading'); btnResetMil.innerHTML = btnResetMil.dataset.idleHtml;
+              btnResetMil.disabled = false; btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
             }
           };
           right.append(btnResetMil);
         }
+        // ----------------------------------------------------------------------------------
 
-        // Descongelar (se congelado) 🚫❄️
+        // Botão "Descongelar" por perfil congelado
         if (isFrozen) {
           const btnUnfreeze = document.createElement('button');
-          btnUnfreeze.className = 'icon-btn mini';
-          btnUnfreeze.title = 'Descongelar';
-          btnUnfreeze.setAttribute('aria-label','Descongelar');
-          btnUnfreeze.innerHTML = '🚫❄️';
+          btnUnfreeze.className = 'btn';
+          btnUnfreeze.textContent = 'Descongelar';
+          btnUnfreeze.title = 'Remover congelamento (permite retorno à operação)';
           btnUnfreeze.onclick = async () => {
-            if (!btnUnfreeze.dataset.idleHtml) btnUnfreeze.dataset.idleHtml = btnUnfreeze.innerHTML;
-            btnUnfreeze.disabled = true; btnUnfreeze.classList.add('loading'); btnUnfreeze.innerHTML = `<span class="spinner"></span>`;
+            btnUnfreeze.disabled = true;
+            btnUnfreeze.textContent = 'Descongelando...';
             try {
               const r = await fetch(`/api/perfis/${encodeURIComponent(p.nome)}/unfreeze`, { method: 'POST' }).then(r=>r.json());
               if (!r || !r.ok) alert('Falha ao descongelar: ' + ((r && r.error) || ''));
@@ -1074,7 +948,8 @@
             } catch (e) {
               alert('Erro ao descongelar: ' + (e && e.message || e));
             } finally {
-              btnUnfreeze.disabled = false; btnUnfreeze.classList.remove('loading'); btnUnfreeze.innerHTML = btnUnfreeze.dataset.idleHtml;
+              btnUnfreeze.disabled = false;
+              btnUnfreeze.textContent = 'Descongelar';
             }
           };
           right.appendChild(btnUnfreeze);
@@ -1087,7 +962,7 @@
     }
 
     // Nova Conta (chama o modal; o modal faz a criação com loading)
-    document.getElementById('fabNewAccount').onclick = async () => {
+    document.getElementById('addPerfilBtn').onclick = async () => {
       let cidades = [];
       try { cidades = await window.electronAPI.listarCidades(); } catch { cidades = ['São Paulo','Rio de Janeiro']; }
       showCriarContaModal({ cidades });
@@ -1157,7 +1032,7 @@
     // Robe: UI helpers
     async function robePlayUI(p, btn){
       try {
-        setBtnLoading(btn, true, '');
+        setBtnLoading(btn, true, 'Liberando...');
         await window.electronAPI.robePlay(p.nome);
         await new Promise(r=>setTimeout(r,400));
         reloadPerfis();
@@ -1166,7 +1041,7 @@
     }
     async function robePause24hUI(p, btn){
       try {
-        setBtnLoading(btn, true, '');
+        setBtnLoading(btn, true, 'Pausando 24h...');
         await window.electronAPI.robePause24h(p.nome);
         await new Promise(r=>setTimeout(r,400));
         reloadPerfis();
@@ -1178,7 +1053,7 @@
     async function toggleBrowserUI(p, btn){
       try {
         const wantOpen = !p.active;
-        setBtnLoading(btn, true, '');
+        setBtnLoading(btn, true, wantOpen ? 'Abrindo...' : 'Fechando...');
         const fn = wantOpen ? window.electronAPI.activate : window.electronAPI.deactivate;
         await fn(p.nome);
         // Espera refletir
@@ -1301,15 +1176,14 @@
 
           // Apenas aviso visual; NUNCA desabilitar o botão
           try {
-            const addBtn = document.getElementById('fabNewAccount');
+            const addBtn = document.getElementById('addPerfilBtn');
             if (addBtn && m.mem && typeof m.mem.freeMB === 'number') {
               const minMB = m.mem.minFreeRequiredMB || 1536;
               const low = m.mem.freeMB < minMB;
-              addBtn.disabled = false;
-              addBtn.title = low ? `Pouca memória livre (${m.mem.freeMB} MB). Sugestão: feche apps para melhorar desempenho.` : 'Nova Conta';
+              addBtn.disabled = false; // nunca desabilita
+              addBtn.title = low ? `Pouca memória livre (${m.mem.freeMB} MB). Sugestão: feche apps para melhorar desempenho.` : '';
               addBtn.style.opacity = low ? '0.9' : '';
               addBtn.style.cursor  = '';
-              addBtn.setAttribute('aria-label', addBtn.title);
             }
           } catch {}
         }
@@ -1401,7 +1275,7 @@
       startAllLock = true;
       setGlobalActionButtonsDisabled(true);
       const startBtn = document.getElementById('startAllBtn');
-      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; }
+      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
       try {
         const st = await window.electronAPI.getStatus();
         const perfis = st?.perfis || [];
@@ -1444,7 +1318,7 @@
       } catch (e) {
         alert('Falha na sequência: ' + (e && e.message || e));
       } finally {
-        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; }
+        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir Todos e Iniciar 24h'; }
         setGlobalActionButtonsDisabled(false);
         startAllLock = false;
         reloadPerfis();
@@ -1466,7 +1340,7 @@
     // 4.2) Invocar Humano robusto com loading e espera do Robe
     async function invocarHumanoUI(p, btn) {
       try {
-        setBtnLoading(btn, true, '');
+        setBtnLoading(btn, true, 'Verificando...');
         // Garante navegador ativo (com confirmação)
         let st = await window.electronAPI.getStatus();
         let cur = (st.perfis || []).find(x => x.nome === p.nome);
@@ -1484,11 +1358,11 @@
         st = await window.electronAPI.getStatus();
         const emExec = !!(st && st.robes && st.robes[p.nome] && st.robes[p.nome].emExecucao);
         if (emExec) {
-          setBtnLoading(btn, true, '');
+          setBtnLoading(btn, true, 'Aguardando Robe concluir...');
           await waitRobeFinish(p.nome);
         }
 
-        setBtnLoading(btn, true, '');
+        setBtnLoading(btn, true, 'Invocando Humano...');
         await window.electronAPI.invokeHuman(p.nome);
         await new Promise(r=>setTimeout(r,800));
         reloadPerfis();
@@ -1502,7 +1376,7 @@
     // 4.3) Start Work robusto com loading (move para a coluna ESQUERDA)
     async function startWorkUI(p, btn) {
       try {
-        setBtnLoading(btn, true, '');
+        setBtnLoading(btn, true, 'Iniciando...');
         // Garante navegador ativo
         let st = await window.electronAPI.getStatus();
         let cur = (st.perfis || []).find(x => x.nome === p.nome);
@@ -1537,7 +1411,7 @@
       stopAllLock = true;
       setGlobalActionButtonsDisabled(true);
       const stopBtn = document.getElementById('stopAllBtn');
-      if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; }
+      if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
       try {
         const st = await window.electronAPI.getStatus();
         const perfis = st?.perfis || [];
@@ -1563,7 +1437,7 @@
       } catch (e) {
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {
-        if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; }
+        if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar todos'; }
         setGlobalActionButtonsDisabled(false);
         stopAllLock = false;
         reloadPerfis();
@@ -1590,22 +1464,22 @@
       if (btn24) {
         btn24.onclick = async () => {
           if (isMassActionRunning()) { alertMassActionRunning(); return; }
-          const idleAria = btn24.getAttribute('aria-label') || 'Robe 24h';
-          btn24.disabled = true; btn24.style.opacity='0.7'; btn24.setAttribute('aria-label','Pausando 24h...');
+          if (!btn24.dataset.idleTxt) btn24.dataset.idleTxt = btn24.textContent;
+          btn24.disabled = true; btn24.style.opacity='0.7'; btn24.textContent='Pausando 24h...';
           try { await window.electronAPI.robesPause24hAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
           catch(e){ alert('Falha ao pausar 24h todos: ' + (e&&e.message||e)); }
-          finally { btn24.disabled=false; btn24.style.opacity=''; btn24.setAttribute('aria-label', idleAria); }
+          finally { btn24.disabled=false; btn24.style.opacity=''; btn24.textContent=btn24.dataset.idleTxt; }
         };
       }
       const btnRel = document.getElementById('robeReleaseAllBtn');
       if (btnRel) {
         btnRel.onclick = async () => {
           if (isMassActionRunning()) { alertMassActionRunning(); return; }
-          const idleAria = btnRel.getAttribute('aria-label') || 'Liberar Robe';
-          btnRel.disabled = true; btnRel.style.opacity='0.7'; btnRel.setAttribute('aria-label','Liberando Robe...');
+          if (!btnRel.dataset.idleTxt) btnRel.dataset.idleTxt = btnRel.textContent;
+          btnRel.disabled = true; btnRel.style.opacity='0.7'; btnRel.textContent='Liberando...';
           try { await window.electronAPI.robesReleaseAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
           catch(e){ alert('Falha ao liberar Robe: ' + (e&&e.message||e)); }
-          finally { btnRel.disabled=false; btnRel.style.opacity=''; btnRel.setAttribute('aria-label', idleAria); }
+          finally { btnRel.disabled=false; btnRel.style.opacity=''; btnRel.textContent=btnRel.dataset.idleTxt; }
         };
       }
     })();
@@ -1617,8 +1491,7 @@
       btn.onclick = async () => {
         if (isMassActionRunning()) { alertMassActionRunning(); return; }
         if (!confirm('Descongelar todos os perfis agora?')) return;
-        const idleAria = btn.getAttribute('aria-label') || 'Descongelar';
-        btn.disabled = true; btn.setAttribute('aria-label','Descongelando...'); btn.style.opacity='0.7';
+        btn.disabled = true; btn.textContent = 'Descongelando...';
         try {
           const r = await fetch('/api/perfis/unfreeze-all', { method: 'POST' }).then(r=>r.json());
           if (!r || !r.ok) alert('Falha ao descongelar todos: ' + ((r && r.error) || ''));
@@ -1627,7 +1500,7 @@
         } catch (e) {
           alert('Erro ao descongelar todos: ' + (e && e.message || e));
         } finally {
-          btn.disabled = false; btn.style.opacity=''; btn.setAttribute('aria-label', idleAria);
+          btn.disabled = false; btn.textContent = 'Descongelar (todos)';
         }
       };
     })();
