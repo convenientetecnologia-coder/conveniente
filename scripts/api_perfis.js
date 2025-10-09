@@ -24,6 +24,16 @@ function resolveChromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
+// ---------- BEGIN: MASS ACTIONS LOCKS ----------
+const massActionLocks = {
+  openAll: null,
+  closeAll: null,
+  robe24hAll: null,
+  liberarRobeAll: null,
+  unfreezeAll: null
+};
+// ---------- END: MASS ACTIONS LOCKS ----------
+
 module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
@@ -313,13 +323,144 @@ module.exports = (app, workerClient, fileStore) => {
     res.json(resp);
   });
 
-  // Descongelar todos os perfis
+  // ----------------- BEGIN MASS ACTIONS ENDPOINTS WITH LOCKS -----------------
+
+  // Abrir todos os perfis
+  app.post('/api/perfis/open-all', async (req, res) => {
+    const op = String(req.headers['x-operator'] || 'unknown');
+    if (massActionLocks.openAll) {
+      return massActionLocks.openAll.then
+        ? res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' })
+        : res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' });
+    }
+    await issues.append('system', 'admin_open_all', `by=${op}`);
+    const promise = workerClient.sendWorkerCommand('open-all', {}, { timeoutMs: 120000 })
+      .then(resp => {
+        massActionLocks.openAll = null;
+        return resp;
+      })
+      .catch(e => {
+        massActionLocks.openAll = null;
+        throw e;
+      });
+    massActionLocks.openAll = promise;
+    try {
+      const resp = await promise;
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // Fechar todos os perfis
+  app.post('/api/perfis/close-all', async (req, res) => {
+    const op = String(req.headers['x-operator'] || 'unknown');
+    if (massActionLocks.closeAll) {
+      return massActionLocks.closeAll.then
+        ? res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' })
+        : res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' });
+    }
+    await issues.append('system', 'admin_close_all', `by=${op}`);
+    const promise = workerClient.sendWorkerCommand('close-all', {}, { timeoutMs: 120000 })
+      .then(resp => {
+        massActionLocks.closeAll = null;
+        return resp;
+      })
+      .catch(e => {
+        massActionLocks.closeAll = null;
+        throw e;
+      });
+    massActionLocks.closeAll = promise;
+    try {
+      const resp = await promise;
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // Robe24h todos os perfis
+  app.post('/api/perfis/robe24h-all', async (req, res) => {
+    const op = String(req.headers['x-operator'] || 'unknown');
+    if (massActionLocks.robe24hAll) {
+      return massActionLocks.robe24hAll.then
+        ? res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' })
+        : res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' });
+    }
+    await issues.append('system', 'admin_robe24h_all', `by=${op}`);
+    const promise = workerClient.sendWorkerCommand('robe24h-all', {}, { timeoutMs: 120000 })
+      .then(resp => {
+        massActionLocks.robe24hAll = null;
+        return resp;
+      })
+      .catch(e => {
+        massActionLocks.robe24hAll = null;
+        throw e;
+      });
+    massActionLocks.robe24hAll = promise;
+    try {
+      const resp = await promise;
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // Liberar robe todos
+  app.post('/api/perfis/liberar-robe-all', async (req, res) => {
+    const op = String(req.headers['x-operator'] || 'unknown');
+    if (massActionLocks.liberarRobeAll) {
+      return massActionLocks.liberarRobeAll.then
+        ? res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' })
+        : res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' });
+    }
+    await issues.append('system', 'admin_liberar_robe_all', `by=${op}`);
+    const promise = workerClient.sendWorkerCommand('liberar-robe-all', {}, { timeoutMs: 120000 })
+      .then(resp => {
+        massActionLocks.liberarRobeAll = null;
+        return resp;
+      })
+      .catch(e => {
+        massActionLocks.liberarRobeAll = null;
+        throw e;
+      });
+    massActionLocks.liberarRobeAll = promise;
+    try {
+      const resp = await promise;
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // Descongelar todos os perfis (já existia, agora recebe lock)
   app.post('/api/perfis/unfreeze-all', async (req, res) => {
     const op = String(req.headers['x-operator'] || 'unknown');
+    if (massActionLocks.unfreezeAll) {
+      return massActionLocks.unfreezeAll.then
+        ? res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' })
+        : res.json({ ok: false, error: 'Ação em andamento, tente novamente ao concluir' });
+    }
     await issues.append('system', 'admin_unfreeze_all', `by=${op}`);
-    const resp = await workerClient.sendWorkerCommand('unfreeze-all', {}, { timeoutMs: 20000 });
-    res.json(resp);
+    const promise = workerClient.sendWorkerCommand('unfreeze-all', {}, { timeoutMs: 20000 })
+      .then(resp => {
+        massActionLocks.unfreezeAll = null;
+        return resp;
+      })
+      .catch(e => {
+        massActionLocks.unfreezeAll = null;
+        throw e;
+      });
+    massActionLocks.unfreezeAll = promise;
+    try {
+      const resp = await promise;
+      res.json(resp);
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
   });
+
+  // ----------------- END MASS ACTIONS ENDPOINTS WITH LOCKS -----------------
 
   // Alterar label do perfil (só label)
   app.patch('/api/perfis/:nome/label', async (req, res) => {

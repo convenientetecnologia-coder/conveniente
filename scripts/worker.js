@@ -338,6 +338,10 @@ function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOL
 // ===== LOCKS ATÔMICOS (status e manifest) =====
 let _statusLock = Promise.resolve();
 
+// Locks simples para mass-actions globais
+let robesReleaseAllLock = false;
+let unfreezeAllLock = false;
+
 // ===== FIM LOCKS ATÔMICOS =====
 
 // HOOKS de Modo LEVE/FULL (próximo aos patches militares - AUTO_CFG)
@@ -2652,22 +2656,28 @@ const handlers = {
 
   // INICIO DA INSTRUÇÃO (worker.js) - Handler robes-release-all
   async ['robes-release-all']() {
-    // Limpa pauseReason de todos os perfis em robeMeta + no manifest (remover robePauseReason)
-    const perfisArr = loadPerfisJson();
-    for (const p of perfisArr) {
-      try {
-        robeMeta[p.nome] = robeMeta[p.nome] || {};
-        delete robeMeta[p.nome].pauseReason;
-        delete robeMeta[p.nome].lastRobeBlockAt;
-        await manifestStore.update(p.nome, m => {
-          m = m || {};
-          if (m.robePauseReason) delete m.robePauseReason;
-          return m;
-        });
-      } catch {}
+    if (robesReleaseAllLock) return { ok: false, error: 'Ação já em andamento' };
+    robesReleaseAllLock = true;
+    try {
+      // Limpa pauseReason de todos os perfis em robeMeta + no manifest (remover robePauseReason)
+      const perfisArr = loadPerfisJson();
+      for (const p of perfisArr) {
+        try {
+          robeMeta[p.nome] = robeMeta[p.nome] || {};
+          delete robeMeta[p.nome].pauseReason;
+          delete robeMeta[p.nome].lastRobeBlockAt;
+          await manifestStore.update(p.nome, m => {
+            m = m || {};
+            if (m.robePauseReason) delete m.robePauseReason;
+            return m;
+          });
+        } catch {}
+      }
+      await snapshotStatusAndWrite();
+      return { ok: true };
+    } finally {
+      robesReleaseAllLock = false;
     }
-    await snapshotStatusAndWrite();
-    return { ok: true };
   },
   // FIM DA INSTRUÇÃO (worker.js) - Handler robes-release-all
 
@@ -2802,14 +2812,20 @@ const handlers = {
   },
 
   async ['unfreeze-all']() {
+    if (unfreezeAllLock) return { ok: false, error: 'Ação já em andamento' };
+    unfreezeAllLock = true;
     try {
-      const perfisArr = loadPerfisJson();
-      for (const p of perfisArr) {
-        if (!p || !p.nome) continue;
-        try { await unfreezeProfile(p.nome, 'admin_all'); } catch {}
-      }
-      return { ok: true };
-    } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
+      try {
+        const perfisArr = loadPerfisJson();
+        for (const p of perfisArr) {
+          if (!p || !p.nome) continue;
+          try { await unfreezeProfile(p.nome, 'admin_all'); } catch {}
+        }
+        return { ok: true };
+      } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
+    } finally {
+      unfreezeAllLock = false;
+    }
   }
 };
 

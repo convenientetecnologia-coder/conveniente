@@ -94,6 +94,15 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
   let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
   if (perfilNome) perfilNome = String(perfilNome);
 
+  // ===== ALTERAÇÃO ANTI-FLOOD/LOCK COERÊNCIA INÍCIO =====
+  // Comandos da nova barra global: nova conta, abrir/fechar todos, robe 24h, liberar robe, unfreeze (Toolbar sticky/fixed)
+  // Individual: @@PROFILE_OP_LOCK@@::<perfilNome>
+  // Global (sem perfil): id único por ação ('startAllLock', 'stopAllLock', etc) ou type puro
+  //
+  // Atenção: os botões/IDs globais do novo front são (garantir lock atômico/coerente):
+  //   - startAllBtn, stopAllBtn, robe24AllBtn, robeReleaseAllBtn, unfreezeAllBtn
+  // Actions protegidas: nova conta, abrir/fechar todos, robe 24h, liberar robe, unfreeze
+
   if (
     ['open','activate','startWork'].includes(type)
   ) {
@@ -101,9 +110,14 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
     opKey = `@@PROFILE_OP_LOCK@@::${perfilNome}`;
   } else if (type === 'get-status') {
     opKey = 'get-status';
+  } else if (['startAll', 'stopAll', 'robe24All', 'robeReleaseAll', 'unfreezeAll', 'criarConta'].includes(type)) {
+    // Chaves de lock únicas para comandos globais de mass-action conforme instrução
+    opKey = `${type}Lock`;
   } else {
+    // fallback: por type (pro default e retrocompatibilidade)
     opKey = `${type}`;
   }
+  // ===== ALTERAÇÃO ANTI-FLOOD/LOCK COERÊNCIA FIM =====
 
   // 2. Lock por opKey — se já existe, retorna a mesma promise (não reenvia)
   if (inflightOp.has(opKey)) {

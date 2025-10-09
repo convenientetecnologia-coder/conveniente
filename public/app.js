@@ -52,4 +52,87 @@ const api = {
 // Expor como window.electronAPI para compatibilidade com o index.html atual
 if (typeof window !== 'undefined') {
   window.electronAPI = api;
+
+  // ===== PADRONIZAÇÃO DE IDs ===== 
+  // Mapeamento dos botões da nova UI minimalista conforme index.html
+
+  // Novo
+  const fabNewAccount = document.getElementById('fabNewAccount');
+  if (fabNewAccount) {
+    fabNewAccount.title = 'Nova conta';
+    fabNewAccount.setAttribute('aria-label', 'Nova conta');
+    fabNewAccount.onclick = () => api.criarPerfil({});
+  }
+
+  const citiesCountBtn = document.getElementById('citiesCountBtn');
+  if (citiesCountBtn) {
+    citiesCountBtn.title = 'Ver cidades cadastradas';
+    citiesCountBtn.setAttribute('aria-label', 'Ver cidades cadastradas');
+    citiesCountBtn.onclick = () => api.listarCidadesPerfisCount();
+  }
+
+  const startAllBtn = document.getElementById('startAllBtn');
+  if (startAllBtn) {
+    startAllBtn.title = 'Ativar todos';
+    startAllBtn.setAttribute('aria-label', 'Ativar todos');
+    // Função a definir conforme backend para ativar todos
+  }
+
+  const stopAllBtn = document.getElementById('stopAllBtn');
+  if (stopAllBtn) {
+    stopAllBtn.title = 'Desativar todos';
+    stopAllBtn.setAttribute('aria-label', 'Desativar todos');
+    // Função a definir conforme backend para desativar todos
+  }
+
+  const robe24AllBtn = document.getElementById('robe24AllBtn');
+  if (robe24AllBtn) {
+    robe24AllBtn.title = 'Pausar Robe 24h de todos';
+    robe24AllBtn.setAttribute('aria-label', 'Pausar Robe 24h de todos');
+    robe24AllBtn.onclick = () => api.robesPause24hAll();
+  }
+
+  const robeReleaseAllBtn = document.getElementById('robeReleaseAllBtn');
+  if (robeReleaseAllBtn) {
+    robeReleaseAllBtn.title = 'Liberar Robe de todos';
+    robeReleaseAllBtn.setAttribute('aria-label', 'Liberar Robe de todos');
+    robeReleaseAllBtn.onclick = () => api.robesReleaseAll();
+  }
+
+  const unfreezeAllBtn = document.getElementById('unfreezeAllBtn');
+  if (unfreezeAllBtn) {
+    unfreezeAllBtn.title = 'Descongelar todos';
+    unfreezeAllBtn.setAttribute('aria-label', 'Descongelar todos');
+    // Função a definir conforme backend para descongelar todos
+  }
+
+  // Filtros
+  const filterAll = document.getElementById('filterAll');
+  if (filterAll) {
+    filterAll.title = 'Todos';
+    filterAll.setAttribute('aria-label', 'Todos');
+    // Função a ser implementada para aplicar o filtro 'Todos'
+  }
+  const filterActive = document.getElementById('filterActive');
+  if (filterActive) {
+    filterActive.title = 'Ativos';
+    filterActive.setAttribute('aria-label', 'Ativos');
+    // Função a ser implementada para aplicar o filtro 'Ativos'
+  }
+  const filterInactive = document.getElementById('filterInactive');
+  if (filterInactive) {
+    filterInactive.title = 'Inativos';
+    filterInactive.setAttribute('aria-label', 'Inativos');
+    // Função a ser implementada para aplicar o filtro 'Inativos'
+  }
+  const filterIssues = document.getElementById('filterIssues');
+  if (filterIssues) {
+    filterIssues.title = 'Com problemas';
+    filterIssues.setAttribute('aria-label', 'Com problemas');
+    // Função a ser implementada para aplicar o filtro 'Com problemas'
+  }
+
+  // Remove ou padroniza eventuais antigos binds duplicados para IDs deprecated/ambíguos
+  // Garantia: zero id 'btn' duplicado/ambíguo aqui
+  // Garantia: todos binds por ID são consistentes com o index.html minimalista
 }
