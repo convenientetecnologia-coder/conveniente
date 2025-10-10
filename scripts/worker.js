@@ -413,6 +413,8 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 }
 // === FIM: desired.json/status.json helpers ===
 
+
+
 // === Helpers de manifest + cooldown ===
 function manifestPathOf(nome) {
   const perfisArr = loadPerfisJson();
@@ -1550,9 +1552,21 @@ async function robeTickGlobal() {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
-          await issues.append(nome, 'mil_action', 'robe_end_limit_posting (cleanup only)');
-          // Remova a flag agora ou mantenha até o tick seguinte, se quiser auditar multi-logs (opcional).
-          // NÃO religue Virtus, nem altere estado final.
+          await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
+          delete robeMeta[nome].limitPostingThisRun;
+          try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+          robeUpdateMeta(nome, { emExecucao: false });
+          if (virtusWasRunning && automationAllowed(ctrl)) {
+            try {
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+              ctrl.trabalhando = true;
+              await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
+            } catch {
+              ctrl.virtus = null;
+              ctrl.trabalhando = false;
+            }
+          }
+          await snapshotStatusAndWrite();
           return;
         }
         // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
@@ -2197,7 +2211,21 @@ const handlers = {
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
         } finally {
           if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
-            await issues.append(nome, 'mil_action', 'robe_end_limit_posting (cleanup only, robe-play)');
+            await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
+            delete robeMeta[nome].limitPostingThisRun;
+            try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+            robeUpdateMeta(nome, { emExecucao: false });
+            if (virtusWasRunning && automationAllowed(ctrl)) {
+              try {
+                ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+                ctrl.trabalhando = true;
+                await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
+              } catch {
+                ctrl.virtus = null;
+                ctrl.trabalhando = false;
+              }
+            }
+            await snapshotStatusAndWrite();
             return;
           }
           // PRUNE DE ABAS antes de religar o Virtus
@@ -2376,6 +2404,13 @@ const handlers = {
       if (pauseActive) {
         robes[nome].estado = 'paused_limit';
       }
+      // PATCH 1: Forçar transmissão de limit_posting no get-status
+      const man = await manifestStore.read(nome).catch(()=>null);
+      if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
+        robes[nome].pauseReason = 'limit_posting';
+        robes[nome].estado = 'paused_limit';
+        await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
+      }
     }
     const robeQueueList = robeQueue.queueList();
     // PATCH autoMode/sys: incluir autoMode e sys
@@ -2547,6 +2582,8 @@ const pauseActive = await (async () => {
 })();
 if (pauseActive) {
   robes[nome].estado = 'paused_limit';
+  robes[nome].pauseReason = 'limit_posting';
+  await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
 }
 }
 const robeQueueList = robeQueue.queueList();
@@ -3010,9 +3047,9 @@ async function nurseTick() {
         } catch {}
         // PATCH MILITAR: PRESERVAR limit_posting — não sobrescrever com fb_block
         const man = await manifestStore.read(nome).catch(()=>null);
-        const alreadyLimitPosting = !!(man && man.robePauseReason === 'limit_posting');
-        if (alreadyLimitPosting) {
-          await issues.append(nome, 'mil_action', 'nurse_detect_facebook_block_but_preserve_reason=limit_posting');
+        if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
+          await issues.append(nome, 'mil_action', 'preserve_limit_posting_on_fb_block');
+          await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
           await snapshotStatusAndWrite();
           continue; // NÃO sobrescreve, pill correta; não aplica fb_block
         }
@@ -3049,9 +3086,9 @@ async function nurseTick() {
         } catch {}
         // PATCH MILITAR MULTI-ABA: PRESERVAR limit_posting — não sobrescrever com fb_block
         const man = await manifestStore.read(nome).catch(()=>null);
-        const alreadyLimitPosting = !!(man && man.robePauseReason === 'limit_posting');
-        if (alreadyLimitPosting) {
-          await issues.append(nome, 'mil_action', 'nurse_multipage_block_preserve_reason=limit_posting');
+        if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
+          await issues.append(nome, 'mil_action', 'preserve_limit_posting_on_fb_block');
+          await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
           await snapshotStatusAndWrite();
           continue; // não sobrescreve!
         }
@@ -3390,9 +3427,9 @@ async function healthTick() {
         const now = Date.now();
         const plus24 = 24 * 60 * 60 * 1000;
         try {
-          const man = await manifestStore.read(nome).catch(()=>null);
-          const curLeft = man && man.robeCooldownUntil ? (man.robeCooldownUntil - now) : 0;
-          if (!man || curLeft < 80*60*1000) {
+          const man0 = await manifestStore.read(nome).catch(()=>null);
+          const curLeft = man0 && man0.robeCooldownUntil ? (man0.robeCooldownUntil - now) : 0;
+          if (!man0 || curLeft < 80*60*1000) {
             await manifestStore.update(nome, m => {
               m = m || {};
               m.robeCooldownUntil = now + plus24;
@@ -3401,6 +3438,14 @@ async function healthTick() {
             });
           }
         } catch {}
+        const man = await manifestStore.read(nome).catch(()=>null);
+        if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
+          await issues.append(nome, 'mil_action', 'health_detect_facebook_block_preserve_reason=limit_posting');
+          await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
+          await snapshotStatusAndWrite();
+          continue;
+        }
+        // Só se NÃO era limit_posting, aplica fb_block:
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].pauseReason = 'fb_block';
         robeMeta[nome].lastRobeBlockAt = Date.now();

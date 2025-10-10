@@ -95,6 +95,10 @@ function throwAbortLimitPosting() {
 
 async function applyLimitPostingAndAbort({ page, nome, attId, where, overlaySnapshot }) {
   // Snapshot do manifest antes
+  // Logging stack trace no evento critical (limit_posting)
+  const stack = (new Error('limit_posting')).stack;
+  try { if (issues && typeof issues.append === 'function') { await issues.append(nome, 'mil_action', 'limit_posting_apply ' + (stack||'')); } } catch {}
+
   const manBefore = await manifestStore.read(nome).catch(()=>null);
 
   stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where });
@@ -867,11 +871,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Leitura do manifest via manifestStore (com lock)
     manifest = await manifestStore.read(nome);
 
-    // Limpa pauseReason residual antes do novo ciclo
+    // Limpa pauseReason residual antes do novo ciclo (SÓ se cooldown zerou e NÃO for 'limit_posting')
     try {
       await manifestStore.update(nome, m => {
         m = m || {};
-        if (m.robePauseReason) delete m.robePauseReason;
+        const now = Date.now();
+        const left = Math.max(0, (m.robeCooldownUntil||0) - now);
+        if (left <= 0 && m.robePauseReason && m.robePauseReason !== 'limit_posting') {
+          delete m.robePauseReason;
+        }
         return m;
       });
     } catch {}
