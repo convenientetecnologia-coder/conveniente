@@ -94,10 +94,27 @@ function throwAbortLimitPosting() {
 }
 
 async function applyLimitPostingAndAbort({ page, nome, attId, where, overlaySnapshot }) {
-  // StepLogs militares
+  // Snapshot do manifest antes
+  const manBefore = await manifestStore.read(nome).catch(()=>null);
+
   stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where });
-  stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: LIMIT_POSTING_REASON });
-  stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: LIMIT_POSTING_REASON, pageClosed: true });
+
+  // Log detalhado do overlay (h2/body/ts)
+  try {
+    if (overlaySnapshot && (overlaySnapshot.h2 || overlaySnapshot.body)) {
+      stepLog.appendJSONL(nome, 'robe', {
+        attempt: attId,
+        step: 'limit_overlay_snapshot',
+        h2: String(overlaySnapshot.h2 || '').slice(0, 200),
+        body: String(overlaySnapshot.body || '').slice(0, 400),
+        ts: overlaySnapshot.ts || Date.now()
+      });
+      if (issues && typeof issues.append === 'function') {
+        await issues.append(nome, 'mil_action',
+          `limit_post_overlay where=${where} h2="${String(overlaySnapshot.h2||'').slice(0,120)}" body="${String(overlaySnapshot.body||'').slice(0,180)}"`);
+      }
+    }
+  } catch {}
 
   // Pause hard 24h
   await manifestStore.update(nome, m => {
@@ -108,7 +125,27 @@ async function applyLimitPostingAndAbort({ page, nome, attId, where, overlaySnap
     return m;
   });
 
-  try { await logIssue(nome, 'robe_error', 'limit_posting_detected: pausa 24h aplicada'); } catch {}
+  // Log old/new mudanças no manifest
+  try {
+    const manAfter = await manifestStore.read(nome).catch(()=>null);
+    const oldUntil = (manBefore && manBefore.robeCooldownUntil) || 0;
+    const oldReason = (manBefore && manBefore.robePauseReason) || '';
+    const newUntil = (manAfter && manAfter.robeCooldownUntil) || 0;
+    const newReason = (manAfter && manAfter.robePauseReason) || '';
+    stepLog.appendJSONL(nome, 'robe', {
+      attempt: attId,
+      step: 'pause_24h_applied',
+      oldUntil, newUntil, oldReason, newReason
+    });
+    if (issues && typeof issues.append === 'function') {
+      await issues.append(nome, 'mil_action',
+        `limit_posting_manifest_update old_until=${oldUntil} new_until=${newUntil} old_reason=${oldReason} new_reason=${newReason}`);
+    }
+  } catch {}
+
+  // Logs e fechamento
+  stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: LIMIT_POSTING_REASON, pageClosed: true });
+  try { await issues.append(nome, 'robe_error', 'limit_posting_detected: pausa 24h aplicada'); } catch {}
   try { await safeClosePage(page); } catch {}
 
   throwAbortLimitPosting();
@@ -213,6 +250,7 @@ async function clickItemByText(page, text, timeout = 5000) {
     }
     await sleep(120);
   }
+  0
   return false;
 }
 

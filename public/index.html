@@ -1598,7 +1598,7 @@
           window.__headerResizeObserver = ro;
         }
 
-        // Observa mutações no conteúdo do header (troca de textos das métricas)
+        // Observa mutações no conteúdo do header (troca de textos das métrricas)
         if (window.MutationObserver) {
           const mo = new MutationObserver(apply);
           mo.observe(header, { childList: true, subtree: true, characterData: true });

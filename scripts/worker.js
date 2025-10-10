@@ -692,6 +692,13 @@ async function activateOnce(nome, source = '') {
       return { ok:false, error:"kill_guard_until" };
     }
 
+    // BLOQUEIO por limit_posting antes de pedir slot ao supervisor
+    const manGatePre = await manifestStore.read(nome).catch(()=>null);
+    if (manGatePre && manGatePre.robePauseReason === 'limit_posting' && (manGatePre.robeCooldownUntil || 0) > Date.now()) {
+      await reportAction(nome, 'mil_action', 'activate_denied_by_limit_posting');
+      return { ok: false, error: 'blocked_by_limit_posting' };
+    }
+
     // SÓ AGORA peça slot ao supervisor
     const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
@@ -1416,6 +1423,7 @@ async function robeTickGlobal() {
     const exec = robeQueue.isActive(nome);
     const manGate = await manifestStore.read(nome).catch(()=>null);
     if (manGate && manGate.robePauseReason === 'limit_posting' && (manGate.robeCooldownUntil || 0) > Date.now()) {
+      try { await issues.append(nome, 'mil_action', 'skip_robe_enqueue_due_limit_posting_active'); } catch {}
       return null;
     }
     return (cooldown === 0 && (!inFila) && (!exec)) ? nome : null;
@@ -1940,6 +1948,13 @@ const handlers = {
   start_work,
 
   async invoke_human({ nome }) {
+    // BLOQUEIO por limit_posting em invoke_human
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
+      await issues.append(nome, 'mil_action', 'invoke_human_denied_by_limit_posting');
+      return { ok: false, error: 'blocked_by_limit_posting' };
+    }
+
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
@@ -1981,6 +1996,13 @@ const handlers = {
   },
 
   async ['human-resume']({ nome }) {
+    // BLOQUEIO por limit_posting em human-resume
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
+      await issues.append(nome, 'mil_action', 'human_resume_denied_by_limit_posting');
+      return { ok: false, error: 'blocked_by_limit_posting' };
+    }
+
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
