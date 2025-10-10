@@ -1488,11 +1488,20 @@ async function robeTickGlobal() {
         try {
           res = await robeHelper.startRobe(ctrl.browser, nome, robePauseMs, workingNow);
         } catch (e) {
-          // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
+          // PATCH: aborta o ciclo se LIMIT_POSTING é detectado (sentinela)
+          if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].limitPostingThisRun = Date.now();
+            robeMeta[nome].pauseReason = 'limit_posting';
+            robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
+            try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robeTickGlobal)'); } catch {}
+            return; // ABORTA ciclo imediatamente — nada de finally! 
+          }
+          // Outro erro técnico: mantém ciclo igual antes
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { console.warn('[WORKER][robeTickGlobal] Robe error:', e && e.message || e); } catch {}
-          return; // não crasha fila global
+          return;
         }
         // ==== EOF COOL/PRUNED ERRORS ====
 
@@ -2117,11 +2126,19 @@ const handlers = {
           try {
             res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
           } catch (e) {
-            // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
+            // PATCH: aborta o ciclo se LIMIT_POSTING é detectado (sentinela)
+            if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
+              robeMeta[nome] = robeMeta[nome] || {};
+              robeMeta[nome].limitPostingThisRun = Date.now();
+              robeMeta[nome].pauseReason = 'limit_posting';
+              robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
+              try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robe-play)'); } catch {}
+              return;
+            }
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
             robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
             try { console.warn('[WORKER][robe-play] Robe error:', e && e.message || e); } catch {}
-            return; // não crasha fila global
+            return;
           }
           // ==== EOF COOL/PRUNED ERRORS ====
 
