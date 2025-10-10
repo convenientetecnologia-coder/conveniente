@@ -912,8 +912,36 @@ async function normalizeCooldown(nome) {
     }
     // Só um existe
     const finalMs = leftUntil > 0 ? leftUntil : leftRem;
+    try {
+      if (finalMs === 0) {
+        await releaseLimitPostingIfExpired(nome);
+      }
+    } catch {}
     return Math.max(0, Math.floor(finalMs/1000));
   } catch { return 0; }
+}
+
+// 2.A — Função utilitária: limit_posting_release ao expirar cooldown
+async function releaseLimitPostingIfExpired(nome) {
+  try {
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (!man) return false;
+    const now = Date.now();
+    const hasLimitPosting = (man.robePauseReason === 'limit_posting');
+    const stillOn = (Number(man.robeCooldownUntil||0) > now) || (Number(man.robeCooldownRemainingMs||0) > 0);
+    if (hasLimitPosting && !stillOn) {
+      await manifestStore.update(nome, m => {
+        m = m || {};
+        if (m.robePauseReason === 'limit_posting') delete m.robePauseReason;
+        return m;
+      });
+      robeMeta[nome] = robeMeta[nome] || {};
+      delete robeMeta[nome].pauseReason;
+      try { await issues.append(nome, 'mil_action', 'limit_posting_release'); } catch {}
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 function robeCooldownLeft(nome) {
@@ -1497,11 +1525,7 @@ async function robeTickGlobal() {
             robeMeta[nome].pauseReason = 'limit_posting';
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
             try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robeTickGlobal)'); } catch {}
-            // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
-            if (ctrl && ctrl.browser && ctrl.mainPage) {
-              try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
-              ctrl.mainPage = null;
-            }
+            // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
             return;
           }
           // Outro erro técnico: mantém ciclo igual antes
@@ -1518,11 +1542,7 @@ async function robeTickGlobal() {
           robeMeta[nome].pauseReason = 'limit_posting'; // reforço
           robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h');
-          // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
-          if (ctrl && ctrl.browser && ctrl.mainPage) {
-            try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
-            ctrl.mainPage = null;
-          }
+          // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
           return;
         }
 
@@ -2157,11 +2177,7 @@ const handlers = {
               robeMeta[nome].pauseReason = 'limit_posting';
               robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
               try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robe-play)'); } catch {}
-              // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
-              if (ctrl && ctrl.browser && ctrl.mainPage) {
-                try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
-                ctrl.mainPage = null;
-              }
+              // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
               return;
             }
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
@@ -2177,11 +2193,7 @@ const handlers = {
             robeMeta[nome].pauseReason = 'limit_posting';
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
             await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h (robe-play)');
-            // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
-            if (ctrl && ctrl.browser && ctrl.mainPage) {
-              try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
-              ctrl.mainPage = null;
-            }
+            // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
             return; // ciclo abortado, não religar virtus
           }
 
@@ -2566,6 +2578,12 @@ robes[nome] = {
   // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
   // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
+// 2.C — Liberação automática: limit_posting_release ao expirar cooldown
+try {
+  if (robes[nome].cooldownSec === 0) {
+    await releaseLimitPostingIfExpired(nome);
+  }
+} catch {}
 // (Opcional Higiene) – limpeza defensiva pós-cooldown
 if (robes[nome].cooldownSec === 0 && robeMeta[nome] && robeMeta[nome].pauseReason === 'fb_block') {
   const ts = robeMeta[nome].lastRobeBlockAt || 0;
