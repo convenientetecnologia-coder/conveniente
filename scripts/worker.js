@@ -413,6 +413,7 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 }
 // === FIM: desired.json/status.json helpers ===
 
+–
 // === Helpers de manifest + cooldown ===
 function manifestPathOf(nome) {
   const perfisArr = loadPerfisJson();
@@ -1488,14 +1489,19 @@ async function robeTickGlobal() {
         try {
           res = await robeHelper.startRobe(ctrl.browser, nome, robePauseMs, workingNow);
         } catch (e) {
-          // PATCH: aborta o ciclo se LIMIT_POSTING é detectado (sentinela)
+          // PATCH: Se bloqueio LIMIT_POSTING, pause só o Robe e feche a aba criada
           if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].limitPostingThisRun = Date.now();
             robeMeta[nome].pauseReason = 'limit_posting';
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
             try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robeTickGlobal)'); } catch {}
-            return; // ABORTA ciclo imediatamente — nada de finally! 
+            // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
+            if (ctrl && ctrl.browser && ctrl.mainPage) {
+              try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
+              ctrl.mainPage = null;
+            }
+            return;
           }
           // Outro erro técnico: mantém ciclo igual antes
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
@@ -1511,7 +1517,12 @@ async function robeTickGlobal() {
           robeMeta[nome].pauseReason = 'limit_posting'; // reforço
           robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h');
-          return; // ABORTA ciclo, NUNCA avança para sucesso, publish, idle, logs.
+          // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
+          if (ctrl && ctrl.browser && ctrl.mainPage) {
+            try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
+            ctrl.mainPage = null;
+          }
+          return;
         }
 
         if (res && res.ok) {
@@ -2126,13 +2137,18 @@ const handlers = {
           try {
             res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
           } catch (e) {
-            // PATCH: aborta o ciclo se LIMIT_POSTING é detectado (sentinela)
+            // PATCH: Se bloqueio LIMIT_POSTING, pause só o Robe e feche a aba criada
             if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
               robeMeta[nome] = robeMeta[nome] || {};
               robeMeta[nome].limitPostingThisRun = Date.now();
               robeMeta[nome].pauseReason = 'limit_posting';
               robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
               try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robe-play)'); } catch {}
+              // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
+              if (ctrl && ctrl.browser && ctrl.mainPage) {
+                try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
+                ctrl.mainPage = null;
+              }
               return;
             }
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
@@ -2148,6 +2164,11 @@ const handlers = {
             robeMeta[nome].pauseReason = 'limit_posting';
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
             await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h (robe-play)');
+            // FECHAR SÓ A ABA DE POSTAGEM DO ROBE (se existir)
+            if (ctrl && ctrl.browser && ctrl.mainPage) {
+              try { await ctrl.mainPage.close({ runBeforeUnload: false }); } catch {}
+              ctrl.mainPage = null;
+            }
             return; // ciclo abortado, não religar virtus
           }
 
