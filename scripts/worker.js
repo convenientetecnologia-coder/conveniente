@@ -413,7 +413,6 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 }
 // === FIM: desired.json/status.json helpers ===
 
--
 // === Helpers de manifest + cooldown ===
 function manifestPathOf(nome) {
   const perfisArr = loadPerfisJson();
