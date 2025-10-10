@@ -84,6 +84,36 @@ const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 const LIMIT_POSTING_REASON = 'limit_posting';
 const LIMIT_POSTING_MS = 24 * 60 * 60 * 1000;
 
+// Guards ABSOLUTOS para abortar fluxo pós-limit
+const ABORT_LIMIT_POSTING = 'LIMIT_POSTING_ABORT';
+
+function throwAbortLimitPosting() {
+  const e = new Error(ABORT_LIMIT_POSTING);
+  e.LIMIT_POSTING = true;
+  throw e;
+}
+
+async function applyLimitPostingAndAbort({ page, nome, attId, where, overlaySnapshot }) {
+  // StepLogs militares
+  stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where });
+  stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: LIMIT_POSTING_REASON });
+  stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: LIMIT_POSTING_REASON, pageClosed: true });
+
+  // Pause hard 24h
+  await manifestStore.update(nome, m => {
+    m = m || {};
+    m.robeCooldownUntil = Date.now() + LIMIT_POSTING_MS;
+    m.robeCooldownRemainingMs = 0;
+    m.robePauseReason = LIMIT_POSTING_REASON;
+    return m;
+  });
+
+  try { await logIssue(nome, 'robe_error', 'limit_posting_detected: pausa 24h aplicada'); } catch {}
+  try { await safeClosePage(page); } catch {}
+
+  throwAbortLimitPosting();
+}
+
 // Adicionar helper local para logar issues (assíncrono e silencioso)
 async function logIssue(nome, type, message) {
   try {
@@ -868,37 +898,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
           // Detecta “Limite atingido” imediatamente após navegar
           if (await detectLimitOverlay(page, { timeoutMs: 15000, intervalMs: 350 })) {
-            try {
-              const snap = await page.evaluate(() => {
-                const h2 = document.querySelector('h2')?.innerText || '';
-                const body = Array.from(document.querySelectorAll('div,span,p')).slice(0,200)
-                  .map(el => (el.innerText || el.textContent || '')).filter(Boolean).slice(0,10).join(' | ');
-                return { h2, body };
-              }).catch(()=>({h2:'',body:''}));
-              await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
-            } catch {}
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'goto_create' });
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-            await manifestStore.update(nome, m => {
-              m = m||{};
-              m.robeCooldownUntil = Date.now() + 24*60*60*1000;
-              m.robeCooldownRemainingMs = 0;
-              m.robePauseReason = 'limit_posting';
-              return m;
-            });
-            try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada'); } catch {}
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'goto_create' });
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-            try { await safeClosePage(page); } catch {}
-            cooldownApplied = true;
-            // PATCH MILITAR — sinaliza flag e retorna com limitPosting:true
-            limitPostingHit = true;
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'goto_create' });
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-            return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
+            await applyLimitPostingAndAbort({ page, nome, attId, where: 'goto_create' });
           }
           okNav = true;
         } catch (e) {
@@ -974,33 +974,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
       pubRes = await publishAndWatch(page, titulo, { watchOverlayMs: 12000 });
       if (pubRes && pubRes.reason === 'limit_overlay') {
-        try {
-          const snap = pubRes.overlay || {};
-          await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
-        } catch {}
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'publish_race' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        await manifestStore.update(nome, m => { m = m||{}; m.robeCooldownUntil = Date.now() + 24*60*60*1000; m.robeCooldownRemainingMs = 0; m.robePauseReason = 'limit_posting'; return m; });
-        try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (race pós-Publicar)'); } catch {}
-        try {
-          if (fotoNome) {
-            const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
-            await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
-          }
-        } catch {}
-        try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'publish_race' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        try { await safeClosePage(page); } catch {}
-        cooldownApplied = true;
-        // PATCH MILITAR — sinaliza flag e retorna com limitPosting:true
-        limitPostingHit = true;
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'publish_race' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
+        await applyLimitPostingAndAbort({ page, nome, attId, where: 'publish_race', overlaySnapshot: pubRes.overlay });
       }
       if (pubRes && pubRes.ok && pubRes.reason === 'published') {
         published = true;
@@ -1013,38 +987,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       if (ev2) { published = true; break; }
       const late2 = await detectLimitOverlay(page, { timeoutMs: 5000, intervalMs: 300 });
       if (late2) {
-        try {
-          const snap = await page.evaluate(() => {
-            const h2 = document.querySelector('h2')?.innerText || '';
-            const body = Array.from(document.querySelectorAll('div,span,p')).slice(0,200)
-              .map(el => (el.innerText || el.textContent || '')).filter(Boolean).slice(0,10).join(' | ');
-            return { h2, body };
-          }).catch(()=>({h2:'',body:''}));
-          await logIssue(nome, 'mil_action', `limit_overlay_detected h2="${(snap.h2||'').slice(0,140)}" body="${(snap.body||'').slice(0,200)}"`);
-        } catch {}
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'late_fallback' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        await manifestStore.update(nome, m => { m = m||{}; m.robeCooldownUntil = Date.now() + 24*60*60*1000; m.robeCooldownRemainingMs = 0; m.robePauseReason = 'limit_posting'; return m; });
-        try { await logIssue(nome,'robe_error','limit_posting_detected: pausa 24h aplicada (fallback tardio)'); } catch {}
-        try {
-          if (fotoNome) {
-            const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
-            await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
-          }
-        } catch {}
-        try { if (localUsada) { await locais.confirmUsed(cidadePerfil, localUsada); } } catch {}
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'late_fallback' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        try { await safeClosePage(page); } catch {}
-        cooldownApplied = true;
-        // PATCH MILITAR — sinaliza flag e retorna com limitPosting:true
-        limitPostingHit = true;
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_overlay_detected', where: 'late_fallback' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'pause_24h_applied', reason: 'limit_posting' });
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'abort_flow', reason: 'limit_posting', pageClosed: true });
-        return { ok:false, error:LIMIT_POSTING_REASON, limitPosting:true };
+        await applyLimitPostingAndAbort({ page, nome, attId, where: 'late_fallback' });
       }
       await sleep(1200);
     }
@@ -1086,6 +1029,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   // ATENÇÃO: MARCAR FOTO COMO USADA (SEM REUSAR JAMAIS NA MESMA CONTA), MESMO SE ERRO/TIMEOUT/BUG.
   // GARANTE FAIL-CLOSED: NUNCA DUPLICA PARA A MESMA CONTA!
   } catch (e) {
+    if (e && e.LIMIT_POSTING === true) {
+      limitPostingHit = true;
+      // Nada mais além de já ter pausado/logado/fechado
+      return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
+    }
+
     const errMsg = (e && e.message) ? e.message : String(e);
     stepLogArr.push(`[${nome}] ERRO: ${errMsg}`);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'error', err: (e && e.message) || String(e) });
@@ -1131,6 +1080,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     return { ok: false, error: errMsg, log: stepLogArr };
 
   } finally {
+    // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting
+    if (limitPostingHit) {
+      try { if (page) await safeClosePage(page); } catch {}
+      return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
+    }
+
     // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
     // Exceção: abortedByCooldown => não alterar (cooldown já estava ativo).
     try {

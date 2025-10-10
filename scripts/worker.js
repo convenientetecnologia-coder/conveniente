@@ -21,6 +21,11 @@ async function isLimitPostingActive(nome) {
   } catch { return false; }
 }
 
+// Helper para normalizar retorno do Robe
+function isLimitPostingRes(res) {
+  return !!(res && (res.limitPosting === true || res.error === 'limit_posting' || res.HALT === true));
+}
+
 // Detecta bloqueio do Marketplace em QUALQUER aba da conta (quando o robe está rodando)
 // Usada pelo nurseTick como fallback hypersafe
 async function detectFbLimitInAnyPage(ctrl) {
@@ -1943,6 +1948,10 @@ async function robeTickGlobal() {
     const cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
     const exec = robeQueue.isActive(nome);
+    const manGate = await manifestStore.read(nome).catch(()=>null);
+    if (manGate && manGate.robePauseReason === 'limit_posting' && (manGate.robeCooldownUntil || 0) > Date.now()) {
+      return null;
+    }
     return (cooldown === 0 && (!inFila) && (!exec)) ? nome : null;
   }));
   const prontos = prontosArr.filter(Boolean);
@@ -2020,7 +2029,7 @@ async function robeTickGlobal() {
         }
         // ==== EOF COOL/PRUNED ERRORS ====
 
-        if (res && (res.limitPosting === true || res.error === 'limit_posting')) {
+        if (isLimitPostingRes(res)) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].limitPostingThisRun = Date.now(); // é só in-mem/ciclo
           robeMeta[nome].pauseReason = 'limit_posting'; // reforço
@@ -2645,7 +2654,7 @@ const handlers = {
           }
           // ==== EOF COOL/PRUNED ERRORS ====
 
-          if (res && (res.limitPosting === true || res.error === 'limit_posting')) {
+          if (isLimitPostingRes(res)) {
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].limitPostingThisRun = Date.now();
             robeMeta[nome].pauseReason = 'limit_posting';
@@ -2850,6 +2859,15 @@ const handlers = {
         pauseReason: robeMeta[nome]?.pauseReason || null,
         lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
       };
+      const pauseActive = await (async () => {
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          return !!(man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now());
+        } catch { return false; }
+      })();
+      if (pauseActive) {
+        robes[nome].estado = 'paused_limit';
+      }
     }
     const robeQueueList = robeQueue.queueList();
     // PATCH autoMode/sys: incluir autoMode e sys
@@ -3012,6 +3030,15 @@ if (robes[nome].cooldownSec === 0 && robeMeta[nome] && robeMeta[nome].pauseReaso
     delete robeMeta[nome].pauseReason;
     delete robeMeta[nome].lastRobeBlockAt;
   }
+}
+const pauseActive = await (async () => {
+  try {
+    const man = await manifestStore.read(nome).catch(()=>null);
+    return !!(man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now());
+  } catch { return false; }
+})();
+if (pauseActive) {
+  robes[nome].estado = 'paused_limit';
 }
 }
 const robeQueueList = robeQueue.queueList();
