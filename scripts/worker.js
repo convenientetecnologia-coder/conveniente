@@ -569,7 +569,7 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
 // INICIO DA INSTRUÇÃO (scripts/worker.js)
 
-    Adicione (após robeMeta);
+    //Adicione (após robeMeta);
 
 const renewMeta = {};
 let renovacaoGlobalAtiva = false;
