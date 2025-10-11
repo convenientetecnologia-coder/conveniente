@@ -1,4 +1,4 @@
-\\ renovador.js
+// renovador.js
 
 'use strict';
 
@@ -55,7 +55,7 @@ const matches = await page.evaluate(() => {
 try {
 const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 const txt = norm(document && document.body && document.body.innerText || '');
-const rx = /anunciado\s+em\s+(\d{1,2})/(\d{1,2})/g;
+const rx = /anunciado\s+em\s+(\d{1,2})\/(\d{1,2})/g;
 const out = [];
 let m;
 while ((m = rx.exec(txt)) !== null) {
@@ -267,7 +267,7 @@ const renewWaitMs = Number(opts.renewWaitMs || 70000);
 const maxScrollLoops = Number(opts.maxScrollLoops || 40);
 
 stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'start', diasLimite, waitListMs, renewWaitMs, maxScrollLoops });
-try { issues && issues.append(nome, 'mil_action', renovador_start attempt=${attempt}); } catch {}
+try { issues && issues.append(nome, 'mil_action', `renovador_start attempt=${attempt}`); } catch {}
 
 let page = null;
 let renewedCount = null;

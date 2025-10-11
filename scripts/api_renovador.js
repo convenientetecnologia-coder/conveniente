@@ -1,4 +1,4 @@
-\\ api_renovador.js
+// api_renovador.js
 
 'use strict';
 
