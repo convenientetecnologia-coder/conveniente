@@ -1324,6 +1324,7 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
           ? (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'User Data') : path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data'))
           : path.join(os.homedir(), '.config', 'google-chrome');
         const guess = path.join(chromeRoot, 'Conveniente', String(nome));
+        if (fs.existsExists && typeof fs.existsExists === 'function') {} // placeholder compat
         if (fs.existsSync(guess)) userDataDir = guess;
       } catch {}
     }
@@ -1669,6 +1670,141 @@ async function dismissAutomationSuspect(page, nome) {
   return false;
 }
 
+// ======= NOVOS HELPERS DOM ROBUSTOS (inseridos conforme instrução) =======
+
+function normalizeText(s) {
+  return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toLowerCase();
+}
+
+async function waitForText(page, text, { timeoutMs=15000 }={}) {
+  const want = normalizeText(text);
+  const t0 = Date.now();
+  while ((Date.now()-t0) < timeoutMs) {
+    try {
+      const body = await page.evaluate(() => document && document.body && document.body.innerText || '');
+      if (normalizeText(body).includes(want)) return true;
+    } catch {}
+    await new Promise(r => setTimeout(r, 350));
+  }
+  return false;
+}
+
+async function clickByInnerText(page, { text, tag='*', timeoutMs=10000 }) {
+  const want = normalizeText(text);
+  const t0 = Date.now();
+  while ((Date.now()-t0) < timeoutMs) {
+    const els = await page.$$(tag);
+    for (const el of els) {
+      try {
+        const itxt = await page.evaluate(e => (e.innerText||e.textContent||''), el);
+        if (normalizeText(itxt) === want) {
+          await page.evaluate(e => { e.scrollIntoView({behavior:'auto',block:'center'}) }, el);
+          await el.click({ delay: 50 });
+          return true;
+        }
+      } catch {}
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return false;
+}
+
+async function clickByAriaLabel(page, { label, timeoutMs=10000 }) {
+  const want = normalizeText(label);
+  const t0 = Date.now();
+  while ((Date.now()-t0) < timeoutMs) {
+    const els = await page.$$('[aria-label]');
+    for (const el of els) {
+      try {
+        const al = await page.evaluate(e => e.getAttribute('aria-label')||'', el);
+        if (normalizeText(al) === want) {
+          await page.evaluate(e => { e.scrollIntoView({behavior:'auto',block:'center'}) }, el);
+          await el.click({ delay: 50 });
+          return true;
+        }
+      } catch {}
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return false;
+}
+
+async function clickMenuItemByText(page, txt, { timeoutMs=10000 } = {}) {
+  const want = normalizeText(txt);
+  const t0 = Date.now();
+  while ((Date.now()-t0) < timeoutMs) {
+    const items = await page.$$('[role="menuitem"],[role="option"],[role="button"]');
+    for (const el of items) {
+      try {
+        const itxt = await page.evaluate(e => (e.innerText||e.textContent||''), el);
+        if (normalizeText(itxt).includes(want)) {
+          await page.evaluate(e => { e.scrollIntoView({behavior:'auto',block:'center'}) }, el);
+          await el.click({ delay: 60 });
+          return true;
+        }
+      } catch {}
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  return false;
+}
+
+async function waitVisibleAndEnabledBySpan(page, spanText, { timeoutMs=15000 }={}) {
+  const want = normalizeText(spanText);
+  const t0 = Date.now();
+  while ((Date.now()-t0) < timeoutMs) {
+    const spans = await page.$$('span');
+    for (const sp of spans) {
+      try {
+        const stxt = await page.evaluate(e => e.innerText||e.textContent||'', sp);
+        if (normalizeText(stxt).includes(want)) {
+          // ancestor role=button
+          const host = await page.evaluateHandle(el => {
+            let p = el;
+            for(let i=0;i<8&&p;p=p.parentElement,i++)
+              if (p.getAttribute && (p.getAttribute('role')==='button' || p.tagName==='BUTTON')) return p;
+            return null;
+          }, sp);
+          if (host) {
+            const [visible, enabled] = await page.evaluate(el =>
+              [el && el.offsetParent != null, el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('tabindex') !== '-1' && !el.disabled], host);
+            if (visible && enabled) return host;
+          }
+        }
+      } catch {}
+    }
+    await new Promise(r => setTimeout(r, 150));
+  }
+  return null;
+}
+
+async function scrollToTop(page) {
+  await page.evaluate(() => window.scrollTo(0,0));
+  await new Promise(r => setTimeout(r,500));
+}
+
+async function scrollToBottomIncremental(page, { maxLoops=50, minDelta=200, idleLoopsToStop=3 } = {}) {
+  let lastHeight = -1, idleLoops = 0;
+  for (let i=0;i<maxLoops;i++) {
+    const h = await page.evaluate(() => document.body.scrollHeight);
+    if (h - lastHeight < minDelta) idleLoops++; else idleLoops=0;
+    if (idleLoops >= idleLoopsToStop) break;
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight*0.8));
+    lastHeight = h;
+    await new Promise(r => setTimeout(r, 400));
+  }
+}
+
+async function getInnerText(page, sel) {
+  try { return await page.$eval(sel, el => el.innerText || el.textContent || ''); }
+  catch { return ''; }
+}
+
+async function getBodyText(page) {
+  try { return await page.evaluate(() => document.body && document.body.innerText || ''); }
+  catch { return ''; }
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1689,4 +1825,15 @@ module.exports = {
   hardCleanProfileOnDisk,
   detectMessengerTempBlock, // NOVO: exportado para uso pelo worker
   dismissAutomationSuspect,
+  // NOVOS helpers DOM robustos:
+  normalizeText,
+  waitForText,
+  clickByInnerText,
+  clickByAriaLabel,
+  clickMenuItemByText,
+  waitVisibleAndEnabledBySpan,
+  scrollToTop,
+  scrollToBottomIncremental,
+  getInnerText,
+  getBodyText,
 };

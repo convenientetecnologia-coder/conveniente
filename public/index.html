@@ -224,6 +224,7 @@
     <button class="btn" id="robe24AllBtn">Robe 24h</button>
     <button class="btn" id="robeReleaseAllBtn">Liberar Robe</button>
     <button class="btn" id="unfreezeAllBtn">Descongelar</button>
+    <button class="btn" id="renovarGlobalBtn">Renovar Classificados (Global)</button>
     <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
       <button class="btn" id="filterAll">Todas</button>
       <button class="btn" id="filterActive">Ativas</button>
@@ -580,6 +581,23 @@
         if (b) b.remove();
       }
 
+      // [OPCIONAL] Exibe banner global enquanto renovador global está ativo
+      if (st && st.renovador && st.renovador.renovacaoGlobalAtiva) {
+        // Exibe banner visual fixo impedindo ações dos botões
+        let banner = document.getElementById('renovadorBanner');
+        if (!banner) {
+          banner = document.createElement('div');
+          banner.id = 'renovadorBanner';
+          banner.style = 'margin:10px 0; padding:8px; border:1px solid #337; background:#113; color:#ff0; border-radius:8px; text-align:center; font-weight:700;';
+          banner.textContent = 'Renovação Global em execução — ações temporariamente bloqueadas.';
+          const wrap = document.querySelector('.wrap');
+          if (wrap) wrap.prepend(banner);
+        }
+      } else {
+        let banner = document.getElementById('renovadorBanner');
+        if (banner) banner.remove();
+      }
+
       const perfis = st?.perfis || [];
       const robes  = st?.robes  || {};
       const robeQueue = st?.robeQueue || [];
@@ -934,6 +952,29 @@
           right.append(btnCookies, btnHuman, btnCfg, btnLog);
         }
         // ----------------------------------------------------------------------------------
+
+        // Botão “Renovar” individual por conta — após btnLog
+        const btnRenovar = document.createElement('button');
+        btnRenovar.className = 'btn';
+        btnRenovar.textContent = 'Renovar';
+        btnRenovar.title = 'Renovar classificados desta conta';
+        btnRenovar.onclick = async () => {
+          setBtnLoading(btnRenovar, true, 'Renovando...');
+          try {
+            const resp = await window.electronAPI.renovarIndividual(p.nome);
+            if (!resp || !resp.ok) {
+              alert('Falha ao renovar: ' + ((resp && resp.error) || 'Erro desconhecido'));
+            }
+            reloadPerfis();
+          } finally {
+            setBtnLoading(btnRenovar, false);
+          }
+        };
+        // Desabilita se a renovação global está ativa
+        if (st && st.renovador && st.renovador.renovacaoGlobalAtiva) {
+          btnRenovar.disabled = true;
+        }
+        right.appendChild(btnRenovar);
 
         // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
         // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
@@ -1540,6 +1581,20 @@
         } finally {
           btn.disabled = false; btn.textContent = 'Descongelar';
         }
+      };
+    })();
+
+    // Bind do botão “Renovar Classificados (Global)”
+    (function bindRenovarGlobalBtn(){
+      const btn = document.getElementById('renovarGlobalBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        btn.disabled = true; btn.textContent='Renovando...';
+        try {
+          const r = await window.electronAPI.renovarGlobal();
+          if (!r || !r.ok) alert('Falha na renovação global: '+ ((r && r.error)||''));
+        } finally { btn.disabled=false; btn.textContent='Renovar Classificados (Global)'; reloadPerfis(); }
       };
     })();
 

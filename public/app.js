@@ -47,6 +47,17 @@ const api = {
   },
   resumeHuman:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/human-resume`, { method: 'POST' }).then(r => r.json()),
   // Adicione abaixo endpoints de auditoria/search para localizacoes_ruins quando implementar
+
+  // ---- RENOVADOR ----
+  renovarIndividual: (nome) =>
+    fetch(`/api/perfis/${encodeURIComponent(nome)}/renovar`, { method: 'POST' }).then(r => r.json()),
+
+  renovarGlobal: () =>
+    fetch('/api/renovador/global', { method: 'POST' }).then(r => r.json()),
+
+  getRenovadorStatus: () =>
+    fetch('/api/renovador/status').then(r => r.json()),
+
 };
 
 // Expor como window.electronAPI para compatibilidade com o index.html atual
