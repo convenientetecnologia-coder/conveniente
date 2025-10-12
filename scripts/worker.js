@@ -283,7 +283,7 @@ const AUTO_CFG = {
 };
 
 // APÓS o bloco do AUTO_CFG, adicione:
-const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10);   // mínimo RAM livre para abrir navegador
+const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10); // mínimo RAM que deve sobrar pós-abertura (desativado)
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10); // alvo de perfis vivos para SWAP quando abaixo
 
@@ -2544,6 +2544,7 @@ const handlers = {
         renewMeta[nome].renovadorEmExecucao = true;
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].suspendRobe = true; // Bloqueia o robeTickGlobal para este perfil
+        await issues.append(nome, 'mil_action', 'renovador_flags_set (renovadorEmExecucao=1, suspendRobe=1)');
         // FIM INSTRUÇÃO 1 (pausa Virtus + bloqueio robe)
         rm.renovadorEmExecucao = true; rm.estado='start'; snapshotStatusAndWrite();
         wd = setTimeout(watchdog, 8*60*1000);
@@ -2553,21 +2554,24 @@ const handlers = {
           const pages = await ctrl.browser.pages();
           page0 = pages && pages[0] ? pages[0] : null;
         } catch {}
-        let res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:120000, renewWaitMs:120000, useMainPage: false });
+        let res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:120000, renewWaitMs:120000, useMainPage: true });
         rm.estado = res && res.ok ? 'ok' : 'erro';
         rm.lastRunAt = Date.now();
         rm.lastCount = (res && res.renewedCount) || 0;
         await issues.append(nome, res && res.ok ? 'mil_action' : 'renovador_error', `renovador_run result ok=${!!(res&&res.ok)} count=${rm.lastCount}`);
+        if (!(res && res.ok)) { try { await snapshotStatusAndWrite(); } catch {} }
         resolve(res && res.ok ? { ok:true, renewedCount: rm.lastCount } : { ok:false, error: (res && res.error)||'renovador_fail' });
       } catch(e) {
         try { await issues.append(nome, 'renovador_error', e && e.message || String(e)); } catch {}
         rm.estado='erro'; rm.lastRunAt=Date.now();
+        try { await snapshotStatusAndWrite(); } catch {}
         resolve({ ok:false, error: e && e.message || String(e) });
       } finally {
         if (wd) { try { clearTimeout(wd); } catch{} }
         rm.renovadorEmExecucao = false;
-        // INSTRUÇÃO 1: Finalização — destrava robe e retoma Virtus se aplicável
         if (robeMeta[nome]) delete robeMeta[nome].suspendRobe;
+        await issues.append(nome, 'mil_action', 'renovador_flags_cleared (renovadorEmExecucao=0, suspendRobe=0)');
+        // INSTRUÇÃO 1: Finalização — destrava robe e retoma Virtus se aplicável
         if (virtusWasRunning && automationAllowed(ctrl)) {
           try {
             ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
@@ -2609,10 +2613,11 @@ async ['renovador_global']() {
           }
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].suspendRobe = true;
+          await issues.append(nome, 'mil_action', 'renovador_flags_set (global)');
           // FIM BLOQUEIO
 
           if (!ctrl || !ctrl.browser) throw new Error('browser_inativo');
-          const res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000, useMainPage: false });
+          const res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000, useMainPage: true });
           rm.estado = res && res.ok ? 'ok' : 'erro';
           rm.lastRunAt = Date.now();
           rm.lastCount = (res && res.renewedCount) || 0;
@@ -2631,7 +2636,9 @@ async ['renovador_global']() {
               ctrl.virtus = null; ctrl.trabalhando = false;
             }
           }
-          rm.renovadorEmExecucao=false; snapshotStatusAndWrite();
+          rm.renovadorEmExecucao=false;
+          await issues.append(nome, 'mil_action', 'renovador_flags_cleared (global)');
+          snapshotStatusAndWrite();
         }
       });
     }

@@ -364,13 +364,36 @@ async function startRenovacao(browser, nome, opts = {}) {
   let renewedCount = null;
 
   // --- INÍCIO ALTERAÇÃO para suporte à aba 0/mainPage (opts.useMainPage)
-  const useMainPage = !!opts.useMainPage;
+
+  // PATCH: useMainPage default TRUE  
+  // const useMainPage = !!opts.useMainPage;
+  const useMainPage = (opts.useMainPage !== false); // default true
+
+  // Robustez militar ABA ZERO
   let toClose = true;
   if (useMainPage) {
-    const pages = await browser.pages().catch(()=>[]);
-    page = pages && pages[0] ? pages[0] : null;
-    if (!page) { page = await browser.newPage(); toClose = true; } else { toClose = false; }
+    const pagesNow = await browser.pages().catch(()=>[]);
+    if (pagesNow && pagesNow[0] && typeof pagesNow[0].isClosed === 'function' && pagesNow[0].isClosed()) {
+      // ABA 0 EXISTE, MAS ESTÁ FECHADA
+      if (issues) await issues.append(nome, 'mil_action', 'renovador_main_closed_new_tab (aba0 fechada, nova aba aberta)');
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'new_tab_due_main_closed' });
+      page = await browser.newPage();
+      toClose = true;
+    } else if (pagesNow && pagesNow[0]) {
+      // ABA 0 VIVA
+      page = pagesNow[0];
+      toClose = false;
+    } else {
+      // ABA 0 NÃO EXISTE
+      if (issues) await issues.append(nome, 'mil_action', 'renovador_new_tab_due_to_missing_main (nenhuma aba, nova aberta)');
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'new_tab_due_main_missing' });
+      page = await browser.newPage();
+      toClose = true;
+    }
   } else {
+    // useMainPage = false explicitamente
+    if (issues) await issues.append(nome, 'mil_action', 'renovador_forced_new_tab (useMainPage=false)');
+    stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'new_tab_forced' });
     page = await browser.newPage();
     toClose = true;
   }
