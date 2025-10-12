@@ -89,89 +89,179 @@ async function waitUrlContains(page, substr, timeoutMs) {
   return false;
 }
 
-// **************** ALTERADO (patch ultra-cirúrgico) ****************
-async function ensureOnSelling(browser, page, nome, attempt) {
-  const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
-  const SELLING_URL_ALT = 'https://m.facebook.com/marketplace/you/selling';
+// **************** ALTERADO - PATCH MILITAR diagnósticador ****************
 
-  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_start' });
-  console.log(`[RENOVADOR][${nome}][NAVIGATE] you/selling: tentando mainPage`);
+async function dumpPageDiag(page, nome, label) {
+  try {
+    const ua = await page.evaluate(() => navigator.userAgent).catch(()=> '');
+    const url = (typeof page.url === 'function') ? page.url() : '';
+    const title = await page.title().catch(()=> '');
+    const body = await page.evaluate(() => (document && document.body && document.body.innerText || '')).catch(()=> '');
+    const head400 = (body || '').slice(0, 400).replace(/\s+/g, ' ').trim();
 
-  async function gotoAndWait(p, url, label) {
-    try {
+    // Coleta de storage (sem vazar tokens inteiros)
+    const stor = await page.evaluate(() => {
+      const redact = v => {
+        const s = String(v==null?'':v);
+        return s.length > 32 ? (s.slice(0,16)+'...('+s.length+'c)') : s;
+      };
+      const ls = {};
+      try { for (let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); ls[k]=redact(localStorage.getItem(k)); } } catch{}
+      const ss = {};
+      try { for (let i=0;i<sessionStorage.length;i++){ const k=sessionStorage.key(i); ss[k]=redact(sessionStorage.getItem(k)); } } catch{}
+      return { ls, ss };
+    }).catch(()=>({ls:{},ss:{}}));
+
+    const loggedHeu = await page.evaluate(() => {
       try {
-        const cdp = await p.target().createCDPSession();
-        await cdp.send('Page.stopLoading').catch(()=>{});
-      } catch {}
-      await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-    } catch {}
-    const okUrl = await waitUrlContains(p, '/marketplace/you/selling', 12000);
-    if (okUrl) {
-      await ensureFocusAndInteractable(p);
-      await waitForText(p, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
-      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', via: label });
-      try { issues && issues.append(nome, 'mil_action', `goto_selling_ok(${label})`); } catch {}
-      console.log(`[RENOVADOR][${nome}][NAVIGATE] Sucesso: ${label}`);
-      return true;
-    }
-    return false;
-  }
+        const hasTop = !!document.querySelector('div[role="banner"],[aria-label*="Facebook"][role="navigation"]');
+        const hasAccount = !!document.querySelector('a[href*="profile"],[aria-label*="Conta"],[aria-label*="Account"]');
+        return { hasTop, hasAccount };
+      } catch { return { hasTop:false, hasAccount:false }; }
+    }).catch(()=>({hasTop:false,hasAccount:false}));
 
-  for (let i = 0; i < 3; i++) {
-    console.log(`[RENOVADOR][${nome}][NAVIGATE] main try #${i+1}`);
-    const ok = await gotoAndWait(page, SELLING_URL, `main_try_${i+1}`);
-    if (ok) return { ok: true, page, usedNewTab: false };
-    try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(()=>{}); } catch {}
-    await sleep(400);
-    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
-    await sleep(300);
-  }
-
-  // Fechar main/travada e criar nova aba
-  console.log(`[RENOVADOR][${nome}][FALLBACK] Criando nova aba para navegação e fechando mainPage (zumbi/travada)`);
-  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_hard_fallback_newtab_start' });
-  try { issues && issues.append(nome, 'mil_action', 'goto_selling_hard_fallback_newtab_start'); } catch {}
-
-  try {
-    try { await page.close({ runBeforeUnload: false }); console.log(`[RENOVADOR][${nome}][FALLBACK] mainPage fechada`); } catch {}
+    const msg = `[RENOVADOR][DIAG][${nome}] ${label}
+URL: ${url}
+TITLE: ${title}
+BODY(400): ${head400}
+UA: ${ua}
+localStorage: ${Object.keys(stor.ls||{}).join(',')}
+sessionStorage: ${Object.keys(stor.ss||{}).join(',')}
+loggedHeu: ${JSON.stringify(loggedHeu)}
+`;
+    console.log(msg);
+    try { issues && issues.append(nome,'mil_action', msg); } catch {}
   } catch {}
-  let np = null;
+}
+function attachNavTracer(page, nome, tag) {
+  const onResp = async (res) => {
+    try {
+      const url = res.url();
+      if (!/facebook.com/i.test(url)) return;
+      const st = res.status();
+      if (st >= 300 || st < 200) {
+        console.log(`[RENOVADOR][TRACE][${nome}] ${tag} ${st} ${url}`);
+        try { issues && issues.append(nome, 'mil_action', `[trace:${tag}] ${st} ${url}`); } catch {}
+      }
+    } catch {}
+  };
+  const onFail = (req) => {
+    try {
+      console.log(`[RENOVADOR][TRACE][${nome}] ${tag} requestfailed ${req.failure() && req.failure().errorText} ${req.url()}`);
+      issues && issues.append(nome, 'mil_action', `[trace:${tag}] requestfailed ${req.failure() && req.failure().errorText} ${req.url()}`);
+    } catch {}
+  };
+  const onCons = (msg) => {
+    try {
+      if (msg && msg.type && msg.type()==='error') {
+        issues && issues.append(nome,'mil_action',`[trace:${tag}] console.error ${msg.text()}`);
+      }
+    } catch {}
+  };
+  const onPageErr = (err) => {
+    try { issues && issues.append(nome,'mil_action',`[trace:${tag}] pageerror ${err && err.message}`); } catch {}
+  };
+  page.on('response', onResp);
+  page.on('requestfailed', onFail);
+  page.on('console', onCons);
+  page.on('pageerror', onPageErr);
+  return () => {
+    try { page.off('response', onResp); } catch{}
+    try { page.off('requestfailed', onFail); } catch{}
+    try { page.off('console', onCons); } catch{}
+    try { page.off('pageerror', onPageErr); } catch{}
+  };
+}
+function looksLikeSellingDOMText(textNorm) {
+  if (!textNorm) return false;
+  return (
+    textNorm.includes('gerenciar classificados') ||
+    textNorm.includes('seus classificados') ||
+    textNorm.includes('painel do vendedor') ||
+    textNorm.includes('your listings') ||
+    textNorm.includes('manage listings') ||
+    textNorm.includes('seller dashboard')
+  );
+}
+function detectBlockingPage(textNorm, url) {
+  const u = String(url||'').toLowerCase();
+  if (/checkpoint|recover|twofactor|login/i.test(u)) return 'checkpoint_or_login';
+  if (/onboarding|commerce_manager|resale|verification|account_quality/i.test(u)) return 'marketplace_onboarding_or_quality';
+  if (textNorm.includes('voce nao tem acesso ao marketplace') || textNorm.includes("you don't have access to marketplace")) return 'marketplace_denied';
+  if (textNorm.includes('temporariamente bloqueado') || textNorm.includes('temporarily blocked')) return 'temporarily_blocked';
+  return null;
+}
+async function ensureOnSelling(browser, page, nome, attempt) {
+  const SELL = 'https://www.facebook.com/marketplace/you/selling';
+  const SELL_M = 'https://m.facebook.com/marketplace/you/selling';
+  const successByUrl = (u) => /marketplace\/you\/selling\b/i.test(String(u||''));
+  const successByDom = async (p) => {
+    const t = await p.evaluate(() => (document && document.body && document.body.innerText || '')).catch(()=> '');
+    const n = (t || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    return looksLikeSellingDOMText(n);
+  };
+  async function gotoTry(p, url, label) {
+    const detach = attachNavTracer(p, nome, label);
+    try {
+      await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+      const okUrl = successByUrl(p.url());
+      const okDom = okUrl ? true : await successByDom(p);
+      if (okUrl || okDom) {
+        await dumpPageDiag(p, nome, `${label}: success`);
+        return { ok: true };
+      }
+      const txt = await p.evaluate(()=> (document && document.body && document.body.innerText)||'').catch(()=> '');
+      const norm = (txt||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const why = detectBlockingPage(norm, p.url());
+      await dumpPageDiag(p, nome, `${label}: not-selling (why=${why||'unknown'})`);
+      if (why) return { ok:false, why };
+      return { ok: false };
+    } finally { detach(); }
+  }
+  // 3 tentativas na mainPage
+  for (let i=0;i<3;i++) {
+    const lab = `main_try_${i+1}`;
+    console.log(`[RENOVADOR][${nome}][NAVIGATE] ${lab}`);
+    let r = await gotoTry(page, SELL, lab);
+    if (r.ok) return { ok:true, page, usedNewTab:false };
+    r = await gotoTry(page, SELL_M, `${lab}_m`);
+    if (r.ok) return { ok:true, page, usedNewTab:false };
+    await dumpPageDiag(page, nome, `${lab}_fail`);
+    await page.goto('https://www.facebook.com/', { waitUntil:'domcontentloaded', timeout: 25000 }).catch(()=>{});
+    await page.reload({ waitUntil:'domcontentloaded', timeout:15000 }).catch(()=>{});
+  }
+  // fallback: fecha main e cria nova aba
+  console.log(`[RENOVADOR][${nome}][FALLBACK] new tab + close mainPage`);
+  try { await page.close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
+  const np = await browser.newPage();
   try {
-    np = await browser.newPage();
-    try {
-      const coords = utils.getCoords && utils.getCoords('') || null;
-      await patchPage(nome, np, coords);
-    } catch {}
-    await ensureFocusAndInteractable(np);
-
-    if (await gotoAndWait(np, SELLING_URL, 'new_tab_main')) {
-      return { ok: true, page: np, usedNewTab: true };
-    }
-    if (await gotoAndWait(np, SELLING_URL_ALT, 'new_tab_alt')) {
-      return { ok: true, page: np, usedNewTab: true };
-    }
-
-    try {
-      const cdp = await np.target().createCDPSession();
-      await cdp.send('Page.stopLoading').catch(()=>{});
-      await cdp.send('Page.navigate', { url: SELLING_URL }).catch(()=>{});
-    } catch {}
-    const finalOk = await waitUrlContains(np, '/marketplace/you/selling', 12000);
-    if (finalOk) {
-      await ensureFocusAndInteractable(np);
-      await waitForText(np, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
-      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', via: 'new_tab_cdp' });
-      try { issues && issues.append(nome, 'mil_action', 'goto_selling_ok(new_tab_cdp)'); } catch {}
-      console.log(`[RENOVADOR][${nome}][FALLBACK] Sucesso: nova aba`);
-      return { ok: true, page: np, usedNewTab: true };
-    }
-  } catch (e) {}
-
-  try { if (np) await np.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_fail' });
-  try { issues && issues.append(nome, 'misc', 'goto_selling_failed'); } catch {}
-  console.log(`[RENOVADOR][${nome}][NAVIGATE] Falhou mesmo com nova aba`);
-  return { ok: false, page, usedNewTab: false };
+    const coords = utils.getCoords && utils.getCoords('') || null;
+    await patchPage(nome, np, coords);
+  } catch {}
+  await ensureFocusAndInteractable(np);
+  let r = await gotoTry(np, SELL, 'new_tab_main');
+  if (r.ok) return { ok:true, page:np, usedNewTab:true };
+  r = await gotoTry(np, SELL_M, 'new_tab_m');
+  if (r.ok) return { ok:true, page:np, usedNewTab:true };
+  // CDP final
+  try {
+    const cdp = await np.target().createCDPSession();
+    await cdp.send('Page.stopLoading').catch(()=>{});
+    await cdp.send('Page.navigate', { url: SELL }).catch(()=>{});
+    await np.waitForNavigation({ waitUntil:'domcontentloaded', timeout:15000 }).catch(()=>{});
+  } catch {}
+  const okFinal = successByUrl(np.url()) || await successByDom(np);
+  if (okFinal) {
+    await dumpPageDiag(np, nome, 'new_tab_cdp: success');
+    return { ok:true, page:np, usedNewTab:true };
+  }
+  await dumpPageDiag(np, nome, 'goto_selling_failed_final');
+  // Classifica motivo
+  const body = await np.evaluate(()=> (document && document.body && document.body.innerText)||'').catch(()=> '');
+  const norm = (body||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  const why = detectBlockingPage(norm, np.url());
+  try { issues && issues.append(nome,'renovador_error', `goto_selling_failed (why=${why||'unknown'}) url=${np.url()}`); } catch {}
+  return { ok:false, page:np, usedNewTab:true, why: why||'unknown' };
 }
 // ******************************************************************
 
