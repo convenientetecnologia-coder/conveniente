@@ -130,8 +130,8 @@ async function clickGerenciar(page, nome, attempt) {
       return false;
     }
   }
-  // <---- ALTERAÇÃO: foco após clique em Gerenciar ----->
-  await ensureFocusAndInteractable(page);
+  // <---- ALTERAÇÃO: foco após clique em Gerenciar com params ----->
+  await ensureFocusAndInteractable(page, { clickBody: false, pressEscape: false });
   // <--------------------------------------------------->
   // Aguarde aparecer elementos da barra de gerenciamento: "Selecionar tudo" ou "Ações"
   // <---- ALTERAÇÃO: toolbarReady robusto ----------->
@@ -148,10 +148,32 @@ async function clickGerenciar(page, nome, attempt) {
   })();
   await ensureFocusAndInteractable(page);
   // <----------------------------------------------->
+  // NOVO BLOCO: Diagnóstico adicional e snapshot
   if (!toolbarReady) {
+    try {
+      const diag = await page.evaluate(() => {
+        const pick = (sel, max=8) => Array.from(document.querySelectorAll(sel)).slice(0, max).map(el => (el.outerHTML || '').slice(0, 600));
+        return { headers: pick('h1,h2,h3'), links: pick('a'), buttons: pick('div[role="button"],button') };
+      });
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'manage_ui_not_ready_diag', diag });
+    } catch {}
     stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'manage_ui_not_ready' });
     return false;
   }
+
+  // NOVO BLOCO: Snapshot pós-toolbarReady
+  try {
+    const snap = await page.evaluate(() => {
+      const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      return {
+        url: location.href,
+        title: document.title,
+        hasPainelVendedor: norm(document.body && document.body.innerText || '').includes('painel do vendedor')
+      };
+    });
+    stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'post_gerenciar_state', snap });
+  } catch {}
+
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'click_gerenciar_ok' });
   return true;
 }
@@ -183,27 +205,52 @@ async function scrollAndAssess(page, nome, attempt, diasLimite, maxScrollLoops) 
 // Selecionar tudo -- CRÍTICO
 async function selectAllItems(page, nome, attempt) {
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'select_all_start' });
-  // Subir ao topo para garantir que os botões fiquem acessíveis
   try { await scrollToTop(page); } catch {}
-  // Clique em "Selecionar tudo"
-  // Use aria-label primeiro, depois texto
-  // <------- Alteração CRÍTICA: garantir foco antes de critical click
+
   await ensureFocusAndInteractable(page);
-  // ---------------------------------------------->
-  const okAria = await clickByAriaLabel(page, { label: 'Selecionar tudo', timeoutMs: 10000 }).catch(()=>false);
-  let ok = okAria;
-  if (!ok) {
-    // <------- Alteração CRÍTICA: garantir foco antes de critical click
-    await ensureFocusAndInteractable(page);
-    // ---------------------------------------------->
-    ok = await clickByInnerText(page, { text: 'Selecionar tudo', tag: '*', timeoutMs: 10000 }).catch(()=>false);
+
+  // 1) Preferir localizar o host do botão via span (tolerante a contadores e includes)
+  let host = await waitVisibleAndEnabledBySpan(page, 'Selecionar tudo', { timeoutMs: 12000 }).catch(()=>null);
+  if (!host) {
+    // Tentativa com sinônimo frequente
+    host = await waitVisibleAndEnabledBySpan(page, 'Selecionar todos', { timeoutMs: 6000 }).catch(()=>null);
   }
-  if (!ok) {
-    stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'select_all_fail' });
-    return false;
+
+  if (host) {
+    try { await host.click({ delay: 60 }); } catch {}
+  } else {
+    // 2) Fallback: aria-label que contenha "Selecionar" e "tudo"
+    const clicked = await page.evaluate(() => {
+      const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const btns = Array.from(document.querySelectorAll('[aria-label],[role="button"],button,div[role="button"]'));
+      const cand = btns.find(el => {
+        const al = norm(el.getAttribute && el.getAttribute('aria-label') || '');
+        return al.includes('selecionar') && al.includes('tudo');
+      });
+      if (cand) { cand.click(); return true; }
+      return false;
+    });
+    if (!clicked) {
+      // Diagnóstico: snapshot dos botões/labels próximos
+      try {
+        const diag = await page.evaluate(() => {
+          const pick = (sel, max=6) => Array.from(document.querySelectorAll(sel)).slice(0, max).map(el => (el.outerHTML || '').slice(0, 500));
+          return {
+            buttons: pick('div[role="button"],button'),
+            spans: pick('span'),
+            aria: pick('[aria-label]')
+          };
+        });
+        stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'select_all_diag', diag });
+      } catch {}
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'select_all_fail' });
+      return false;
+    }
   }
+
   await sleep(600);
-  // Verifica se "Ações" ficou habilitado
+
+  // 3) Verifica se “Ações” ficou habilitado
   const btnActions = await waitVisibleAndEnabledBySpan(page, 'Ações', { timeoutMs: 12000 }).catch(()=>null);
   if (!btnActions) {
     stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'actions_button_disabled' });
@@ -227,8 +274,8 @@ async function openActionsAndClickRenew(page, nome, attempt) {
   try { await btnActions.click({ delay: 60 }); } catch {}
   await sleep(400);
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'menu_click_renovar_start' });
-  // <------- Alteração CRÍTICA: garantir foco antes de critical click
-  await ensureFocusAndInteractable(page);
+  // <------- Alteração CRÍTICA: garantir foco antes de critical click (segunda chamada - modificado)
+  await ensureFocusAndInteractable(page, { clickBody: false, pressEscape: false });
   // ---------------------------------------------->
   const clicked = await clickMenuItemByText(page, 'Renovar no Marketplace', { timeoutMs: 15000 }).catch(()=>false);
   if (!clicked) {

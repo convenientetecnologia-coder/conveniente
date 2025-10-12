@@ -1807,9 +1807,9 @@ async function getBodyText(page) {
 
 // ==================== INSERIDOS CONFORME AUDITORIA: HELPERS ROBUSTOS ====================
 
-async function ensureFocusAndInteractable(page, { clickBody = true } = {}) {
+async function ensureFocusAndInteractable(page, { clickBody = true, pressEscape = true } = {}) {
   try { await page.bringToFront(); } catch {}
-  try { await page.keyboard.press('Escape'); } catch {}
+  try { if (pressEscape) await page.keyboard.press('Escape'); } catch {}
   try {
     await page.evaluate(() => {
       try { window.focus(); } catch {}
