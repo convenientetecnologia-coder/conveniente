@@ -366,10 +366,8 @@ async function startRenovacao(browser, nome, opts = {}) {
   // --- INÍCIO ALTERAÇÃO para suporte à aba 0/mainPage (opts.useMainPage)
 
   // PATCH: useMainPage default TRUE  
-  // const useMainPage = !!opts.useMainPage;
   const useMainPage = (opts.useMainPage !== false); // default true
 
-  // Robustez militar ABA ZERO
   let toClose = true;
   if (useMainPage) {
     const pagesNow = await browser.pages().catch(()=>[]);

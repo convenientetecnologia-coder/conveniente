@@ -852,6 +852,10 @@
         if (p.humanControl) {
           titleRow.append(buildPill('Modo Humano', 'warn'));
         }
+        // NOVO: Pill "RENOVANDO"
+        if (p.renovadorEmExecucao) {
+          titleRow.append(buildPill('RENOVANDO', 'info'));
+        }
 
         // ------------- ABAS/NUMPAGES PILL -------------
         // Militar: Se campo não for null, badge “Abas: N” para contas com N > 1 (alerta, cor de warning). Se null/undefined, simplesmente não exibir.

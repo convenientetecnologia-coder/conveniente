@@ -2531,24 +2531,39 @@ const handlers = {
   return await new Promise((resolve) => {
     renewQueue.enqueue(nome, async () => {
       const ctrl = controllers.get(nome);
-      let virtusWasRunning = false;
+      const rm = renewMeta[nome] || (renewMeta[nome]={});
+      let virtusWasRunning = !!(ctrl && ctrl.virtus);
+
       try {
-        // INICIO DA INSTRUÇÃO 1: Pausa Virtus e bloqueio do Robe
-        if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-          try { await ctrl.virtus.stop(); } catch {}
-          ctrl.virtus = null;
-          ctrl.trabalhando = false;
-          virtusWasRunning = true;
-        }
+        // 1) Remova qualquer job do Robe já enfileirado para garantir atomicidade
+        try { robeQueue.skip && robeQueue.skip(nome); } catch {}
+
+        // 2) Seta as flags PRIMEIRO (blindagem de races de nurseTick/robeTick)
         renewMeta[nome] = renewMeta[nome] || {};
         renewMeta[nome].renovadorEmExecucao = true;
+
         robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].suspendRobe = true; // Bloqueia o robeTickGlobal para este perfil
-        await issues.append(nome, 'mil_action', 'renovador_flags_set (renovadorEmExecucao=1, suspendRobe=1)');
-        // FIM INSTRUÇÃO 1 (pausa Virtus + bloqueio robe)
-        rm.renovadorEmExecucao = true; rm.estado='start'; snapshotStatusAndWrite();
+        robeMeta[nome].suspendRobe = true;
+
+        await issues.append(nome, 'mil_action', 'renovador_flags_set (primeiro) + robeQueue.skip');
+        await snapshotStatusAndWrite();
+
+        // 3) Para Virtus com fence robusto (SEM racings)
+        if (ctrl && ctrl.virtus) {
+          await issues.append(nome, 'mil_action', 'virtus_stop_for_renovador');
+          await stopVirtus(nome);
+          virtusWasRunning = true;
+        }
+
+        rm.renovadorEmExecucao = true;
+        rm.estado='start';
+        await snapshotStatusAndWrite();
+
+        // Existing watchdog startup...
         wd = setTimeout(watchdog, 8*60*1000);
-        // Ao chamar renovador individual, use useMainPage:true
+
+        // ...o restante permanece igual:
+        // Ao chamar renovador individual, use useMainPage: true!
         let page0 = null;
         try {
           const pages = await ctrl.browser.pages();
@@ -2571,7 +2586,7 @@ const handlers = {
         rm.renovadorEmExecucao = false;
         if (robeMeta[nome]) delete robeMeta[nome].suspendRobe;
         await issues.append(nome, 'mil_action', 'renovador_flags_cleared (renovadorEmExecucao=0, suspendRobe=0)');
-        // INSTRUÇÃO 1: Finalização — destrava robe e retoma Virtus se aplicável
+        // Retoma Virtus APENAS se estava ativo antes e é permitido
         if (virtusWasRunning && automationAllowed(ctrl)) {
           try {
             ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
