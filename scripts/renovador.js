@@ -89,31 +89,34 @@ async function waitUrlContains(page, substr, timeoutMs) {
   return false;
 }
 
+// **************** ALTERADO (patch ultra-cirúrgico) ****************
 async function ensureOnSelling(page, nome, attempt) {
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_start' });
   const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
-  try {
-    await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-  } catch {}
-  const okUrl = await waitUrlContains(page, '/marketplace/you/selling', 15000);
-  if (!okUrl) {
-    // fallback: esperar por texto no corpo
-    const okTxt = await waitForText(page, 'gerenciar classificados', { timeoutMs: 10000 }).catch(()=>false);
-    if (!okTxt) {
-      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_fail' });
-      return false;
+
+  // 3 tentativas: goto SELLING -> se falhar -> goto facebook.com -> goto SELLING -> reload -> goto SELLING
+  for (let i = 0; i < 3; i++) {
+    try {
+      await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    } catch {}
+    const okUrl = await waitUrlContains(page, '/marketplace/you/selling', 12000);
+    if (okUrl) {
+      await ensureFocusAndInteractable(page);
+      await waitForText(page, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', try: i+1 });
+      return true;
     }
+    // fallback 1: força home do Facebook e retorna
+    try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(()=>{}); } catch {}
+    await sleep(400);
+    // fallback 2: reload e nova ida
+    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
+    await sleep(300);
   }
-  // <---- ALTERAÇÃO: garantir foco e logging após navegação SELLING ---->
-  await ensureFocusAndInteractable(page);
-  const okText = await waitForText(page, 'seus classificados', { timeoutMs: 15000 }).catch(()=>false);
-  if (!okText) {
-    stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'selling_header_missing' });
-  }
-  // <------------------------------------------------------------->
-  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok' });
-  return true;
+  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_fail' });
+  return false;
 }
+// ******************************************************************
 
 async function clickGerenciar(page, nome, attempt) {
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'click_gerenciar_start' });
@@ -300,8 +303,11 @@ async function clickRenewAndWaitBack(page, nome, attempt, renewWaitMs) {
 async function startRenovacao(browser, nome, opts = {}) {
   const attempt = stepLog.attemptId();
   const diasLimite = Number(opts.diasLimite || 46);
-  const waitListMs = Number(opts.waitListMs || 70000);
-  const renewWaitMs = Number(opts.renewWaitMs || 70000);
+
+  // **************** ALTERADO (patch ultra-cirúrgico) ****************
+  const waitListMs = Number(opts.waitListMs || 120000);
+  const renewWaitMs = Number(opts.renewWaitMs || 120000);
+  // ******************************************************************
   const maxScrollLoops = Number(opts.maxScrollLoops || 40);
 
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'start', diasLimite, waitListMs, renewWaitMs, maxScrollLoops });

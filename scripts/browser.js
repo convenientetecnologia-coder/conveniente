@@ -1901,14 +1901,23 @@ async function scrollMarketplaceManageIncremental(page, { maxLoops = 80, idleLoo
         const body = norm(document.body && document.body.innerText || '');
         const rx = /anunciado\s+em\s+(\d{1,2})\/(\d{1,2})/g;
         let m, days = [];
-        const now = new Date(); const y = now.getFullYear();
-        function mk(d, mo) { const dt = new Date(y, parseInt(mo)-1, parseInt(d), 0, 0, 0, 0); return dt; }
+        const today = new Date();
+        const y = today.getFullYear();
+        function mk(d, mo) {
+          const dt = new Date(y, parseInt(mo)-1, parseInt(d), 0,0,0,0);
+          // CROSS-YEAR PATCH: se a data ficou “no futuro”, assume ANO ANTERIOR
+          const todayMid = new Date(); todayMid.setHours(0,0,0,0);
+          if (dt.getTime() > todayMid.getTime() + 86400000) {
+            dt.setFullYear(y - 1);
+          }
+          return dt;
+        }
         function todayMid(){
           const d = new Date(); d.setHours(0,0,0,0); return d;
         }
         while ((m = rx.exec(body)) !== null) {
-          const d = mk(m[1], m[2]);
-          const diffMs = todayMid().getTime() - d.getTime();
+          const dt = mk(m[1], m[2]);
+          const diffMs = todayMid().getTime() - dt.getTime();
           const k = Math.floor(diffMs / 86400000);
           days.push(k);
         }

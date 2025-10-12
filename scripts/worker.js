@@ -2451,8 +2451,6 @@ const handlers = {
         frozenReason: robeMeta[nome]?.frozenReason || null,
         frozenAt: robeMeta[nome]?.frozenAt || null,
         frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
-        internalFailCountWindow: fail.internal,
-        externalFailCountWindow: fail.external,
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         pauseReason: robeMeta[nome]?.pauseReason || null,
@@ -2555,7 +2553,7 @@ const handlers = {
           const pages = await ctrl.browser.pages();
           page0 = pages && pages[0] ? pages[0] : null;
         } catch {}
-        let res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000, useMainPage: true });
+        let res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:120000, renewWaitMs:120000, useMainPage: false });
         rm.estado = res && res.ok ? 'ok' : 'erro';
         rm.lastRunAt = Date.now();
         rm.lastCount = (res && res.renewedCount) || 0;
@@ -3580,6 +3578,11 @@ async function recoveryStep(nome, page, step) {
   return false;
 }
 async function escalateToReopen(nome, reason='health_reopen') {
+  // NUNCA reabra/feche durante renovação
+  if (renewMeta[nome] && renewMeta[nome].renovadorEmExecucao === true) {
+    await appendIssueNurseDebounced(nome, 'mil_action', 'health_escalate_suppressed_renovador', 'health_escalate_suppressed_renovador');
+    return;
+  }
   const ctrl = controllers.get(nome);
   try { await issues.append(nome, 'mil_action', `health_escalate:${reason}`); } catch {}
   if (killGuardActive(nome)) {
@@ -3597,6 +3600,11 @@ async function healthTick() {
   for (const [nome, ctrl] of controllers) {
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
     if (!ctrl || !ctrl.browser) continue;
+    // HARD-GUARD: não mexer em nada se Renovador estiver ativo
+    if (renewMeta[nome] && renewMeta[nome].renovadorEmExecucao === true) {
+      await appendIssueNurseDebounced(nome, 'mil_action', 'health_skip_renovador_active', 'health_skip_renovador_active');
+      continue;
+    }
     const st = getHealth(nome);
     const now = Date.now();
     let pages = [];
