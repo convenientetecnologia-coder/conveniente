@@ -15,7 +15,8 @@ const {
   getInnerText,
   getBodyText,
   ensureFocusAndInteractable,                  // NOVO
-  scrollMarketplaceManageIncremental           // NOVO
+  scrollMarketplaceManageIncremental,          // NOVO
+  invocarHumano                               // <<< ADICIONADO conforme instrução
 } = require('./browser.js');
 const utils = require('./utils.js');
 const stepLog = require('./stepLog.js');
@@ -555,17 +556,52 @@ async function startRenovacao(browser, nome, opts = {}) {
     await ensureFocusAndInteractable(page);
     stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'focus_ready' });
     // <--------------------------------------------------------------->
-    // Ir para Selling
-    // ******************* ALTERAÇÃO TROCA DE ensureOnSelling ***********************
-    const sellingRes = await ensureOnSelling(browser, page, nome, attempt);
-    if (!sellingRes || !sellingRes.ok || !sellingRes.page) {
-      try { issues && issues.append(nome, 'renovador_error', 'goto_selling_failed'); } catch {}
-      console.log(`[RENOVADOR][${nome}][NAVIGATE] goto_selling_failed`);
-      return { ok: false, error: 'goto_selling_failed' };
+
+    // ===================== PATCH CENTRAL: NAVEGAR COMO O HUMANO =====================
+    try {
+      console.log(`[RENOVADOR][${nome}][HUMAN_EQUIV] calling invocarHumano(...)`);
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'human_equiv_invocar_start' });
+      await invocarHumano(browser, nome);
+      await sleep(600);
+      // Reconciliar page com a mainPage real, pois o próprio humano pode reabrir a main (SPA).
+      const p2 = await browser.pages().catch(()=>[]);
+      if (p2 && p2[0]) page = p2[0];
+      const urlAfter = (typeof page.url === 'function') ? page.url() : '';
+      const titleAfter = await page.title().catch(()=> '');
+      console.log(`[RENOVADOR][${nome}][HUMAN_EQUIV] after goto url=${urlAfter} title="${titleAfter}"`);
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'human_equiv_invocar_done', url: urlAfter, title: titleAfter });
+    } catch (e) {
+      console.log(`[RENOVADOR][${nome}][HUMAN_EQUIV] invocarHumano ERROR: ${(e && e.message) || e}`);
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'human_equiv_invocar_error', err: (e && e.message) || String(e) });
     }
-    page = sellingRes.page;
-    if (sellingRes.usedNewTab === true) toClose = true;
-    // ***************************************************************************
+    
+    // Se por algum motivo não estamos em /marketplace/you/selling, tenta um goto direto (como no humano)
+    let curUrl = (typeof page.url === 'function') ? page.url() : '';
+    if (!/facebook\.com\/marketplace\/you\/selling/i.test(curUrl)) {
+      try {
+        console.log(`[RENOVADOR][${nome}][HUMAN_EQUIV] direct_goto_retry to Selling`);
+        await page.goto('https://www.facebook.com/marketplace/you/selling', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+        await sleep(500);
+        curUrl = (typeof page.url === 'function') ? page.url() : '';
+        const curTitle = await page.title().catch(()=> '');
+        stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'human_equiv_direct_retry', url: curUrl, title: curTitle });
+      } catch {}
+    }
+    
+    if (!/facebook\.com\/marketplace\/you\/selling/i.test(curUrl)) {
+      const sellingRes = await ensureOnSelling(browser, page, nome, attempt);
+      if (!sellingRes || !sellingRes.ok || !sellingRes.page) {
+        try { issues && issues.append(nome, 'renovador_error', 'goto_selling_failed'); } catch {}
+        console.log(`[RENOVADOR][${nome}][NAVIGATE] goto_selling_failed`);
+        return { ok: false, error: 'goto_selling_failed' };
+      }
+      page = sellingRes.page;
+      if (sellingRes.usedNewTab === true) toClose = true;
+    } else {
+      // Estamos na mainPage em Selling: não fechar no finally
+      toClose = false;
+    }
+    // ===================== FIM PATCH CENTRAL =====================
 
     // Clicar em Gerenciar classificados
     const okGerenciar = await clickGerenciar(page, nome, attempt);
