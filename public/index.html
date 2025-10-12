@@ -129,6 +129,7 @@
     .pill.warn .dot{ background:var(--warn) }
     .pill.bad  .dot{ background:var(--bad)  }
     .pill.info .dot{ background:var(--brand) }
+    .pill.warn { font-weight: 800; }
     .pill.ramWarn   { border-color: #cf8a2e; background: #31210e; color: #f6cc87; }
     .pill.ramBad    { border-color: #e35a5a; background: #360f0f; color: #f1b3b3; font-weight:700; }
     .pill.frozen    { border-color:#BBB; background:#272f3c; color:#fff; font-weight:700;}
@@ -852,9 +853,9 @@
         if (p.humanControl) {
           titleRow.append(buildPill('Modo Humano', 'warn'));
         }
-        // NOVO: Pill "RENOVANDO"
+        // NOVO: Pill "RENOVANDO" — AGORA AMARELO (destaque máximo)
         if (p.renovadorEmExecucao) {
-          titleRow.append(buildPill('RENOVANDO', 'info'));
+          titleRow.append(buildPill('RENOVANDO', 'warn'));
         }
 
         // ------------- ABAS/NUMPAGES PILL -------------
@@ -1166,7 +1167,7 @@
     // Logs por conta (arquivo)
     function showIssuesModal(nome){
       const overlay = document.createElement('div'); overlay.className='modal-ov';
-      const box = document.createElement('div'); box.className='modal-box'; box.style.maxWidth='720px';
+      const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth='720px';
       box.innerHTML = `
         <h2>Logs — ${nome}</h2>
         <div style="margin:6px 0; display:none">

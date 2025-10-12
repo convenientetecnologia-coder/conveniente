@@ -2596,6 +2596,10 @@ const handlers = {
           }
         }
         await snapshotStatusAndWrite();
+        // Microtask para garantir snapshot no rés-do-finalmente — pill/painel
+        try {
+          await Promise.resolve().then(() => snapshotStatusAndWrite());
+        } catch {}
       }
     });
   });
@@ -2668,7 +2672,11 @@ async ['renovador_global']() {
     return { ok:false, error: e && e.message || String(e) };
   } finally {
     if (wd) { try { clearTimeout(wd);}catch{} }
-    renovacaoGlobalAtiva = false; await snapshotStatusAndWrite();
+    renovacaoGlobalAtiva = false;
+    await snapshotStatusAndWrite();
+    try {
+      await Promise.resolve().then(() => snapshotStatusAndWrite());
+    } catch {}
   }
 }
 };

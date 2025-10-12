@@ -90,31 +90,81 @@ async function waitUrlContains(page, substr, timeoutMs) {
 }
 
 // **************** ALTERADO (patch ultra-cirúrgico) ****************
-async function ensureOnSelling(page, nome, attempt) {
-  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_start' });
+async function ensureOnSelling(browser, page, nome, attempt) {
   const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
+  const SELLING_URL_ALT = 'https://m.facebook.com/marketplace/you/selling';
 
-  // 3 tentativas: goto SELLING -> se falhar -> goto facebook.com -> goto SELLING -> reload -> goto SELLING
-  for (let i = 0; i < 3; i++) {
+  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_start' });
+
+  async function gotoAndWait(p, url, label) {
     try {
-      await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+      try {
+        const cdp = await p.target().createCDPSession();
+        await cdp.send('Page.stopLoading').catch(()=>{});
+      } catch {}
+      await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     } catch {}
-    const okUrl = await waitUrlContains(page, '/marketplace/you/selling', 12000);
+    const okUrl = await waitUrlContains(p, '/marketplace/you/selling', 12000);
     if (okUrl) {
-      await ensureFocusAndInteractable(page);
-      await waitForText(page, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
-      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', try: i+1 });
+      await ensureFocusAndInteractable(p);
+      await waitForText(p, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', via: label });
+      try { issues && issues.append(nome, 'mil_action', `goto_selling_ok(${label})`); } catch {}
       return true;
     }
-    // fallback 1: força home do Facebook e retorna
+    return false;
+  }
+
+  // Tentativa na própria page (main)
+  for (let i = 0; i < 3; i++) {
+    const ok = await gotoAndWait(page, SELLING_URL, `main_try_${i+1}`);
+    if (ok) return { ok: true, page, usedNewTab: false };
+    // Fallback main: home + reload + tentar novamente
     try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(()=>{}); } catch {}
     await sleep(400);
-    // fallback 2: reload e nova ida
     try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
     await sleep(300);
   }
+
+  // HARD FALLBACK — Nova aba dedicada para o Renovador
+  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_hard_fallback_newtab_start' });
+  try { issues && issues.append(nome, 'mil_action', 'goto_selling_hard_fallback_newtab_start'); } catch {}
+
+  let np = null;
+  try {
+    np = await browser.newPage();
+    try {
+      const coords = utils.getCoords && utils.getCoords('') || null;
+      await patchPage(nome, np, coords);
+    } catch {}
+    await ensureFocusAndInteractable(np);
+
+    if (await gotoAndWait(np, SELLING_URL, 'new_tab_main')) {
+      return { ok: true, page: np, usedNewTab: true };
+    }
+    if (await gotoAndWait(np, SELLING_URL_ALT, 'new_tab_alt')) {
+      return { ok: true, page: np, usedNewTab: true };
+    }
+
+    try {
+      const cdp = await np.target().createCDPSession();
+      await cdp.send('Page.stopLoading').catch(()=>{});
+      await cdp.send('Page.navigate', { url: SELLING_URL }).catch(()=>{});
+    } catch {}
+    const finalOk = await waitUrlContains(np, '/marketplace/you/selling', 12000);
+    if (finalOk) {
+      await ensureFocusAndInteractable(np);
+      await waitForText(np, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
+      stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', via: 'new_tab_cdp' });
+      try { issues && issues.append(nome, 'mil_action', 'goto_selling_ok(new_tab_cdp)'); } catch {}
+      return { ok: true, page: np, usedNewTab: true };
+    }
+  } catch (e) {}
+
+  try { if (np) await np.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_fail' });
-  return false;
+  try { issues && issues.append(nome, 'misc', 'goto_selling_failed'); } catch {}
+  return { ok: false, page, usedNewTab: false };
 }
 // ******************************************************************
 
@@ -409,11 +459,15 @@ async function startRenovacao(browser, nome, opts = {}) {
     stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'focus_ready' });
     // <--------------------------------------------------------------->
     // Ir para Selling
-    const okSelling = await ensureOnSelling(page, nome, attempt);
-    if (!okSelling) {
+    // ******************* ALTERAÇÃO TROCA DE ensureOnSelling ***********************
+    const sellingRes = await ensureOnSelling(browser, page, nome, attempt);
+    if (!sellingRes || !sellingRes.ok || !sellingRes.page) {
       try { issues && issues.append(nome, 'renovador_error', 'goto_selling_failed'); } catch {}
       return { ok: false, error: 'goto_selling_failed' };
     }
+    page = sellingRes.page;
+    if (sellingRes.usedNewTab === true) toClose = true;
+    // ***************************************************************************
 
     // Clicar em Gerenciar classificados
     const okGerenciar = await clickGerenciar(page, nome, attempt);
