@@ -962,8 +962,18 @@
           setBtnLoading(btnRenovar, true, 'Renovando...');
           try {
             const resp = await window.electronAPI.renovarIndividual(p.nome);
+            const errorMap = {
+              'wait_list_timeout': 'Nenhum classificado elegível foi encontrado ou a lista não carregou a tempo. Verifique se há anúncios com 46 dias ou mais.',
+              'no_eligible': 'Nenhum classificado elegível (>=46 dias) foi encontrado para renovar.',
+              'menu_renew_click_failed': 'Não foi possível abrir o menu de renovação. Tente novamente.',
+              'gerenciar_click_failed': 'Não foi possível abrir “Gerenciar classificados”. Recarregue a página e tente novamente.',
+              'select_all_failed': 'Não foi possível selecionar os itens. Tente novamente.',
+              'renew_click_or_back_timeout': 'A confirmação de renovação não concluiu a tempo. Verifique a conexão e tente novamente.',
+              'browser_inativo': 'O navegador desta conta está fechado. Abra-o e tente novamente.'
+            };
             if (!resp || !resp.ok) {
-              alert('Falha ao renovar: ' + ((resp && resp.error) || 'Erro desconhecido'));
+              const msg = (resp && resp.error && errorMap[resp.error]) || ('Falha ao renovar: ' + ((resp && resp.error) || 'Erro desconhecido'));
+              alert(msg);
             }
             reloadPerfis();
           } finally {

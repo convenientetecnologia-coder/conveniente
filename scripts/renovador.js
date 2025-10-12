@@ -272,9 +272,20 @@ try { issues && issues.append(nome, 'mil_action', `renovador_start attempt=${att
 let page = null;
 let renewedCount = null;
 
+// --- INÍCIO ALTERAÇÃO para suporte à aba 0/mainPage (opts.useMainPage)
+const useMainPage = !!opts.useMainPage;
+let toClose = true;
+if (useMainPage) {
+  const pages = await browser.pages().catch(()=>[]);
+  page = pages && pages[0] ? pages[0] : null;
+  if (!page) { page = await browser.newPage(); toClose = true; } else { toClose = false; }
+} else {
+  page = await browser.newPage();
+  toClose = true;
+}
+// --- FIM ALTERAÇÃO
+
 try {
-// Nova aba isolada
-page = await browser.newPage();
 // Patch de page
 try {
 const coords = utils.getCoords && utils.getCoords('') || null;
@@ -296,6 +307,15 @@ if (!okGerenciar) {
 
 // Rolar ao final e avaliar datas
 const assess = await scrollAndAssess(page, nome, attempt, diasLimite, maxScrollLoops);
+
+// --- INÍCIO ALTERAÇÃO: Gate por elegíveis
+if (!assess.reached) {
+  stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'no_eligible', daysMin: assess.daysMin, daysMax: assess.daysMax });
+  try { issues && issues.append(nome, 'mil_action', 'renovador_no_eligible'); } catch {}
+  return { ok: false, error: 'no_eligible', renewedCount: 0 };
+}
+// --- FIM ALTERAÇÃO
+
 // Subir
 try { await scrollToTop(page); } catch {}
 
@@ -338,7 +358,9 @@ stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'error', err: msg });
 try { issues && issues.append(nome, 'renovador_error', msg); } catch {}
 return { ok: false, error: msg };
 } finally {
-try { if (page) await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+// --- INÍCIO ALTERAÇÃO: Fechar aba só se não for a mainPage/aba 0
+if (page && toClose) { try { await page.close({ runBeforeUnload: false }); } catch {} }
+// --- FIM ALTERAÇÃO
 }
 }
 

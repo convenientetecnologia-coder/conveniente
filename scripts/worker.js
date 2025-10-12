@@ -1478,6 +1478,16 @@ async function robeTickGlobal() {
       return null; // GUARD: bloqueado até cooldown após RAM spike
     }
     const ctrl = controllers.get(nome);
+    // INICIO DA INSTRUÇÃO 2: Guard no robeTickGlobal para renovador/suspendRobe
+    if (renewMeta[nome] && renewMeta[nome].renovadorEmExecucao === true) {
+      try { await issues.append(nome, 'mil_action', 'robe_skip_due_renovador'); } catch {}
+      return null;
+    }
+    if (robeMeta[nome] && robeMeta[nome].suspendRobe === true) {
+      try { await issues.append(nome, 'mil_action', 'robe_skip_due_suspendRobe'); } catch {}
+      return null;
+    }
+    // FIM DA INSTRUÇÃO 2
     if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null; // impede fila em modo humano
     const cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
@@ -2522,10 +2532,30 @@ const handlers = {
   const watchdog = () => { issues.append(nome,'mil_action','renovador_watchdog_timeout').catch(()=>{}); rm.renovadorEmExecucao=false; snapshotStatusAndWrite(); };
   return await new Promise((resolve) => {
     renewQueue.enqueue(nome, async () => {
+      const ctrl = controllers.get(nome);
+      let virtusWasRunning = false;
       try {
+        // INICIO DA INSTRUÇÃO 1: Pausa Virtus e bloqueio do Robe
+        if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+          try { await ctrl.virtus.stop(); } catch {}
+          ctrl.virtus = null;
+          ctrl.trabalhando = false;
+          virtusWasRunning = true;
+        }
+        renewMeta[nome] = renewMeta[nome] || {};
+        renewMeta[nome].renovadorEmExecucao = true;
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].suspendRobe = true; // Bloqueia o robeTickGlobal para este perfil
+        // FIM INSTRUÇÃO 1 (pausa Virtus + bloqueio robe)
         rm.renovadorEmExecucao = true; rm.estado='start'; snapshotStatusAndWrite();
         wd = setTimeout(watchdog, 8*60*1000);
-        let res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000 });
+        // Ao chamar renovador individual, use useMainPage:true
+        let page0 = null;
+        try {
+          const pages = await ctrl.browser.pages();
+          page0 = pages && pages[0] ? pages[0] : null;
+        } catch {}
+        let res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000, useMainPage: true });
         rm.estado = res && res.ok ? 'ok' : 'erro';
         rm.lastRunAt = Date.now();
         rm.lastCount = (res && res.renewedCount) || 0;
@@ -2538,7 +2568,17 @@ const handlers = {
       } finally {
         if (wd) { try { clearTimeout(wd); } catch{} }
         rm.renovadorEmExecucao = false;
-        snapshotStatusAndWrite();
+        // INSTRUÇÃO 1: Finalização — destrava robe e retoma Virtus se aplicável
+        if (robeMeta[nome]) delete robeMeta[nome].suspendRobe;
+        if (virtusWasRunning && automationAllowed(ctrl)) {
+          try {
+            ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+            ctrl.trabalhando = true;
+          } catch {
+            ctrl.virtus = null; ctrl.trabalhando = false;
+          }
+        }
+        await snapshotStatusAndWrite();
       }
     });
   });
@@ -2558,11 +2598,23 @@ async ['renovador_global']() {
     for (const nome of perfs) {
       renewQueue.enqueue(nome, async ()=> {
         const rm = renewMeta[nome] || (renewMeta[nome]={});
+        const ctrl = controllers.get(nome);
+        let virtusWasRunning = false;
         rm.renovadorEmExecucao = true; rm.estado='start'; snapshotStatusAndWrite();
         try {
-          const ctrl = controllers.get(nome);
+          // INÍCIO DA INSTRUÇÃO 3: Pausa Virtus e bloqueio do Robe no global
+          if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+            try { await ctrl.virtus.stop(); } catch {}
+            ctrl.virtus = null;
+            ctrl.trabalhando = false;
+            virtusWasRunning = true;
+          }
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].suspendRobe = true;
+          // FIM BLOQUEIO
+
           if (!ctrl || !ctrl.browser) throw new Error('browser_inativo');
-          const res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000 });
+          const res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000, useMainPage: false });
           rm.estado = res && res.ok ? 'ok' : 'erro';
           rm.lastRunAt = Date.now();
           rm.lastCount = (res && res.renewedCount) || 0;
@@ -2571,6 +2623,16 @@ async ['renovador_global']() {
           rm.estado='erro'; rm.lastRunAt=Date.now();
           await issues.append(nome,'renovador_error', e && e.message || String(e));
         } finally {
+          // INSTRUÇÃO 3: retoma Virtus e destrava robe ao final
+          if (robeMeta[nome]) delete robeMeta[nome].suspendRobe;
+          if (virtusWasRunning && automationAllowed(ctrl)) {
+            try {
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+              ctrl.trabalhando = true;
+            } catch {
+              ctrl.virtus = null; ctrl.trabalhando = false;
+            }
+          }
           rm.renovadorEmExecucao=false; snapshotStatusAndWrite();
         }
       });
