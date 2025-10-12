@@ -1805,6 +1805,129 @@ async function getBodyText(page) {
   catch { return ''; }
 }
 
+// ==================== INSERIDOS CONFORME AUDITORIA: HELPERS ROBUSTOS ====================
+
+async function ensureFocusAndInteractable(page, { clickBody = true } = {}) {
+  try { await page.bringToFront(); } catch {}
+  try { await page.keyboard.press('Escape'); } catch {}
+  try {
+    await page.evaluate(() => {
+      try { window.focus(); } catch {}
+      try { document && document.body && document.body.focus && document.body.focus(); } catch {}
+    });
+  } catch {}
+  if (clickBody) {
+    try {
+      const box = await page.viewport();
+      const x = Math.max(10, Math.floor((box && box.width ? box.width/2 : 300)));
+      const y = Math.max(60, Math.floor((box && box.height ? Math.min(box.height-60, 400) : 200)));
+      await page.mouse.click(x, y, { delay: 20 });
+    } catch {}
+  }
+  await new Promise(r => setTimeout(r, 200));
+  return true;
+}
+
+async function findMarketplaceManageScroller(page) {
+  const sel = await page.evaluate(() => {
+    function isScrollable(el) {
+      try {
+        if (!el) return false;
+        const sh = el.scrollHeight || 0;
+        const ch = el.clientHeight || 0;
+        return sh > (ch + 30);
+      } catch { return false; }
+    }
+    function hasClassifiedsInside(el) {
+      try {
+        if (!el) return false;
+        if (el.querySelector('input[aria-label="Selecionar classificado"]')) return true;
+        if (el.querySelector('div[aria-label][role="button"]')) return true;
+        return false;
+      } catch { return false; }
+    }
+    const candidates = [];
+    let grid = document.querySelector('div[role="grid"]') || document.querySelector('div[role="rowgroup"]');
+    if (grid && isScrollable(grid) && hasClassifiedsInside(grid)) candidates.push(grid);
+    const allDivs = Array.from(document.querySelectorAll('div'));
+    for (const d of allDivs) {
+      if (!candidates.includes(d) && isScrollable(d) && hasClassifiedsInside(d)) candidates.push(d);
+    }
+    let best = null, bestScore = -1;
+    for (const el of candidates) {
+      const sh = el.scrollHeight || 0, ch = el.clientHeight || 0;
+      const score = sh - ch;
+      if (score > bestScore) { best = el; bestScore = score; }
+    }
+    if (!best) return { found:false, idx:-1 };
+    const nodes = Array.from(document.querySelectorAll('div'));
+    const idx = nodes.indexOf(best);
+    return { found:true, idx };
+  });
+  if (!sel || !sel.found || sel.idx < 0) return null;
+
+  const handle = await page.evaluateHandle((i) => {
+    const nodes = Array.from(document.querySelectorAll('div'));
+    return nodes[i] || null;
+  }, sel.idx);
+  return handle.asElement ? handle.asElement() : null;
+}
+
+async function scrollMarketplaceManageIncremental(page, { maxLoops = 80, idleLoopsToStop = 4, settleMs = 500 } = {}) {
+  let lastHeight = 0, idle = 0, totalCards = 0, reachedEligible = false;
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  const scroller = await findMarketplaceManageScroller(page);
+  if (!scroller) {
+    // fallback: scroll body como antes
+    for (let i = 0; i < Math.max(10, Math.floor(maxLoops/2)); i++) {
+      await page.evaluate(() => window.scrollBy(0, Math.max(300, window.innerHeight*0.8)));
+      await sleep(settleMs);
+    }
+    return { exhausted: true, totalCards: 0, reachedEligible: false };
+  }
+  for (let loop = 0; loop < maxLoops; loop++) {
+    await page.evaluate(el => el.scrollBy(0, el.clientHeight * 0.8), scroller);
+    await sleep(settleMs);
+    const cur = await page.evaluate(el => el.scrollTop + el.clientHeight, scroller).catch(()=>0);
+    const max = await page.evaluate(el => el.scrollHeight, scroller).catch(()=>0);
+    const cardsNow = await page.evaluate(() => {
+      const labs = Array.from(document.querySelectorAll('input[aria-label="Selecionar classificado"]'));
+      return labs.length || Array.from(document.querySelectorAll('div[role="button"][aria-label]')).length;
+    });
+    if (typeof cardsNow === 'number' && cardsNow > totalCards) totalCards = cardsNow;
+    const hasEligible = await page.evaluate(() => {
+      try {
+        const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const body = norm(document.body && document.body.innerText || '');
+        const rx = /anunciado\s+em\s+(\d{1,2})\/(\d{1,2})/g;
+        let m, days = [];
+        const now = new Date(); const y = now.getFullYear();
+        function mk(d, mo) { const dt = new Date(y, parseInt(mo)-1, parseInt(d), 0, 0, 0, 0); return dt; }
+        function todayMid(){
+          const d = new Date(); d.setHours(0,0,0,0); return d;
+        }
+        while ((m = rx.exec(body)) !== null) {
+          const d = mk(m[1], m[2]);
+          const diffMs = todayMid().getTime() - d.getTime();
+          const k = Math.floor(diffMs / 86400000);
+          days.push(k);
+        }
+        return days.some(k => k >= 46);
+      } catch { return false; }
+    });
+    if (hasEligible) reachedEligible = true;
+    const h = max;
+    if (Math.abs(h - lastHeight) < 80) idle++; else idle = 0;
+    lastHeight = h;
+    const hasSkeletons = await page.evaluate(() => !!document.querySelector('div[role="status"][data-visualcompletion="loading-state"]')).catch(()=>false);
+    if (hasSkeletons) idle = 0;
+    if (idle >= idleLoopsToStop) break;
+    if (cur >= max - 5) idle++;
+  }
+  const exhausted = true;
+  return { exhausted, totalCards, reachedEligible };
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1836,4 +1959,7 @@ module.exports = {
   scrollToBottomIncremental,
   getInnerText,
   getBodyText,
+  ensureFocusAndInteractable,
+  findMarketplaceManageScroller,
+  scrollMarketplaceManageIncremental,
 };
