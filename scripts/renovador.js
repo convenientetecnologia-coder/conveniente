@@ -95,6 +95,7 @@ async function ensureOnSelling(browser, page, nome, attempt) {
   const SELLING_URL_ALT = 'https://m.facebook.com/marketplace/you/selling';
 
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_start' });
+  console.log(`[RENOVADOR][${nome}][NAVIGATE] you/selling: tentando mainPage`);
 
   async function gotoAndWait(p, url, label) {
     try {
@@ -110,26 +111,30 @@ async function ensureOnSelling(browser, page, nome, attempt) {
       await waitForText(p, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
       stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', via: label });
       try { issues && issues.append(nome, 'mil_action', `goto_selling_ok(${label})`); } catch {}
+      console.log(`[RENOVADOR][${nome}][NAVIGATE] Sucesso: ${label}`);
       return true;
     }
     return false;
   }
 
-  // Tentativa na própria page (main)
   for (let i = 0; i < 3; i++) {
+    console.log(`[RENOVADOR][${nome}][NAVIGATE] main try #${i+1}`);
     const ok = await gotoAndWait(page, SELLING_URL, `main_try_${i+1}`);
     if (ok) return { ok: true, page, usedNewTab: false };
-    // Fallback main: home + reload + tentar novamente
     try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(()=>{}); } catch {}
     await sleep(400);
     try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
     await sleep(300);
   }
 
-  // HARD FALLBACK — Nova aba dedicada para o Renovador
+  // Fechar main/travada e criar nova aba
+  console.log(`[RENOVADOR][${nome}][FALLBACK] Criando nova aba para navegação e fechando mainPage (zumbi/travada)`);
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_hard_fallback_newtab_start' });
   try { issues && issues.append(nome, 'mil_action', 'goto_selling_hard_fallback_newtab_start'); } catch {}
 
+  try {
+    try { await page.close({ runBeforeUnload: false }); console.log(`[RENOVADOR][${nome}][FALLBACK] mainPage fechada`); } catch {}
+  } catch {}
   let np = null;
   try {
     np = await browser.newPage();
@@ -157,6 +162,7 @@ async function ensureOnSelling(browser, page, nome, attempt) {
       await waitForText(np, 'seus classificados', { timeoutMs: 15000 }).catch(()=>{});
       stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_ok', via: 'new_tab_cdp' });
       try { issues && issues.append(nome, 'mil_action', 'goto_selling_ok(new_tab_cdp)'); } catch {}
+      console.log(`[RENOVADOR][${nome}][FALLBACK] Sucesso: nova aba`);
       return { ok: true, page: np, usedNewTab: true };
     }
   } catch (e) {}
@@ -164,6 +170,7 @@ async function ensureOnSelling(browser, page, nome, attempt) {
   try { if (np) await np.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
   stepLog.appendJSONL(nome, 'renovador', { attempt, step: 'goto_selling_fail' });
   try { issues && issues.append(nome, 'misc', 'goto_selling_failed'); } catch {}
+  console.log(`[RENOVADOR][${nome}][NAVIGATE] Falhou mesmo com nova aba`);
   return { ok: false, page, usedNewTab: false };
 }
 // ******************************************************************
@@ -463,6 +470,7 @@ async function startRenovacao(browser, nome, opts = {}) {
     const sellingRes = await ensureOnSelling(browser, page, nome, attempt);
     if (!sellingRes || !sellingRes.ok || !sellingRes.page) {
       try { issues && issues.append(nome, 'renovador_error', 'goto_selling_failed'); } catch {}
+      console.log(`[RENOVADOR][${nome}][NAVIGATE] goto_selling_failed`);
       return { ok: false, error: 'goto_selling_failed' };
     }
     page = sellingRes.page;
@@ -541,7 +549,10 @@ async function startRenovacao(browser, nome, opts = {}) {
     return { ok: false, error: msg };
   } finally {
     // --- INÍCIO ALTERAÇÃO: Fechar aba só se não for a mainPage/aba 0
-    if (page && toClose) { try { await page.close({ runBeforeUnload: false }); } catch {} }
+    if (page && toClose) {
+      console.log(`[RENOVADOR][${nome}][FINALLY] Fechando aba auxiliar`);
+      try { await page.close({ runBeforeUnload: false }); } catch {}
+    }
     // --- FIM ALTERAÇÃO
   }
 }
