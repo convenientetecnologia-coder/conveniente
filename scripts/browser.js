@@ -1435,8 +1435,7 @@ async function detectMessengerTempBlock(page) {
   try {
     const v = await page.evaluate(() => {
       try {
-        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
         const href = String((window && window.location && window.location.href) || '');
 
         const isMessengerCtx = /(^https?:\/\/)?(www\.)?messenger\.com/i.test(href);
@@ -1454,157 +1453,63 @@ async function detectMessengerTempBlock(page) {
           } catch { return false; }
         };
 
-        const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button,a')).filter(isVisible).slice(0, 3000);
+        const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button,a')).filter(isVisible).slice(0, 1200);
         const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
-        const joined = texts.join(' ');
+        const headlines = Array.from(document.querySelectorAll('h1,h2')).map(el => norm(el.innerText || el.textContent || ''));
 
-        // hasReloadBtn: tenta por aria-label e por conteúdo textual
+        function textHitsLimit(t) {
+          if (!t) return false;
+          if (/limite\s+atingido/.test(t) || /limit\s+reached/.test(t) || /limite\s+alcanzado/.test(t)) return true;
+          if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
+          if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+          if (/voce\s+n(?:a|ã)o\s+pode.*(publicar|criar).*(classificados|an[úu]ncios|listagens?|itens?)/.test(t)) return true;
+          if (/no\s+puedes\s+(publicar|crear).*(anuncios?|articulos?|publicaciones?)/.test(t)) return true;
+          if (/(temporar(?:y|io)|temporariamente|temporalmente)\s+(limit|limite)/.test(t) &&
+              /(items?|listings?|classificados|anuncios?)/.test(t)) return true;
+          return false;
+        }
+
+        const headerHit = headlines.some(textHitsLimit);
+        const bodyHit = texts.some(textHitsLimit);
+
         let hasReloadBtn = !!document.querySelector(
           '[aria-label*="recarregar"],[aria-label*="reload"],[aria-label*="recargar"],[aria-label*="atualizar"],[aria-label*="actualizar"],[aria-label*="tentar novamente"],[aria-label*="try again"]'
         );
-        if (!hasReloadBtn) {
-          try {
-            const btns = Array.from(document.querySelectorAll('button,[role="button"],a'));
-            hasReloadBtn = btns.some(el => {
-              const t = norm((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || ''));
-              return /recarregar|recargar|reload|atualizar|actualizar|tentar\s+novamente|try\s+again/.test(t);
-            });
-          } catch {}
-        }
 
-        // Regex de frases fortes/variantes multi-idioma
-        const RX = {
-          // PT
-          pt_a1: /voce\s+esta\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,
-          pt_a2: /voce\s+foi\s+bloquead[oa](?:\(?a\)?)?\s+temporar/,
-          pt_a3: /temporar\w*\s+bloquead[oa](?:\(?a\)?)?/,
-          pt_b1: /temporar\w*\s+restrit[oa]/,
-          pt_b2: /impedid[oa].{0,40}temporar\w*/,
-          pt_b3: /bloquead[oa].{0,40}enviar\s+mensagens/,
-          // EN
-          en_a1: /you(?:'|’)?re\s+temporar(?:ily)?\s+block/,
-          en_a2: /you(?:\s+are|\s*ve|\s*’ve)?\s+been\s+temporar(?:ily)?\s+block/,
-          en_a3: /temporar(?:ily)?\s+restricted/,
-          en_a4: /block(?:ed)?\s+from\s+sending\s+messages/,
-          en_a5: /we(?:'|’)?ve\s+temporar(?:ily)?\s+block/,
-          // ES
-          es_a1: /estas\s+temporalmente\s+bloquead[oa]/,
-          es_a2: /has\s+sido\s+bloquead[oa]\s+temporalmente/,
-          es_a3: /funcion\s+no\s+esta\s+disponible\s+temporalmente/
-        };
-
-        const someMatch = (arr, regs) => {
-          try { return arr.some(t => regs.some(rx => rx.test(t))); }
-          catch { return false; }
-        };
-
-        // Heurísticas de co-ocorrência
-        const coOccurInNode = texts.some(t => /bloquead[oa]/.test(t) && /temporar\w*/.test(t));
-        const coOccurJoined = /bloquead[oa].{0,80}temporar\w*/.test(joined) || /temporar\w*.{0,80}bloquead[oa]/.test(joined);
-
-        // Detector genérico
-        const genericBlock =
-          someMatch(texts, [
-            RX.pt_a1,RX.pt_a2,RX.pt_a3,
-            RX.pt_b1,RX.pt_b2,RX.pt_b3,
-            RX.en_a1,RX.en_a2,RX.en_a3,RX.en_a4,RX.en_a5,
-            RX.es_a1,RX.es_a2,RX.es_a3
-          ]) || coOccurInNode || coOccurJoined;
-
-        // Detector explícito Facebook Marketplace (create/seller/etc)
-        const explicitFbBlock = someMatch(texts, [
-          /voce\s+nao\s+pode\s+publicar\s+agora/,
-          /voce\s+nao\s+pode\s+listar\s+agora/,
-          /voce\s+nao\s+pode\s+enviar\s+mensagens/,
-          /voces?\s+nao\s+podem\s+publicar\s+agora/,
-          /voces?\s+nao\s+podem\s+listar\s+agora/,
-          /voce\s+esta\s+temporar\w*\s+impedid[oa]/,
-          /temporar\w*\s+impedid[oa]\s+de\s+realizar/,
-          /voces?\s+estao\s+temporar\w*\s+impedid[oa]s?/,
-          /you\s+can(?:'|’)?t\s+post\s+right\s+now/,
-          /you\s+can(?:'|’)?t\s+list\s+right\s+now/,
-          /you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+posting/,
-          /you(?:'|’)?re\s+temporar(?:ily)?\s+restricted\s+from\s+posting/,
-
-          // ADICIONE ESTA LINHA ABAIXO:
-          /voce\s+nao\s+pode\s+criar\s+(classificados|anuncios|listagens?|itens?)\s+(no\s+momento|agora)/
-        ]);
-
-        // strongEvidenceCount: frases fortes + co-ocorrências
-        const strongs = [
-          RX.pt_a1,RX.pt_a2,RX.pt_a3,
-          RX.pt_b1,RX.pt_b2,RX.pt_b3,
-          RX.en_a1,RX.en_a2,RX.en_a3,RX.en_a4,RX.en_a5,
-          RX.es_a1,RX.es_a2,RX.es_a3
-        ];
-        let strongEvidenceCount = 0;
-        for (const rx of strongs) {
-          if (texts.some(t => rx.test(t))) strongEvidenceCount++;
-        }
-        if (coOccurInNode) strongEvidenceCount++;
-        if (coOccurJoined) strongEvidenceCount++;
+        const blockedMessenger = isMessengerCtx && (headerHit || bodyHit);
+        const blockedFacebookCreate = isFacebookCtx && isCreateOrSellerRoute && (headerHit || bodyHit);
 
         return {
-          texts,
-          joined,
-          hasReloadBtn,
-          genericBlock,
-          explicitFbBlock,
+          blockedMessenger,
+          blockedFacebookCreate,
           isMessengerCtx, isFacebookCtx, isCreateOrSellerRoute,
-          strongEvidenceCount
+          hasReloadBtn,
+          strongEvidenceCount: (headerHit ? 1 : 0) + (bodyHit ? 1 : 0)
         };
       } catch (e) {
-        // fallback seguro
-        try {
-          const href = String((window && window.location && window.location.href) || '');
-          return {
-            texts: [],
-            joined: '',
-            hasReloadBtn: false,
-            genericBlock: false,
-            explicitFbBlock: false,
-            isMessengerCtx: /messenger\.com/i.test(href),
-            isFacebookCtx: /facebook\.com/i.test(href),
-            isCreateOrSellerRoute: /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(href),
-            strongEvidenceCount: 0
-          };
-        } catch {
-          return {
-            texts: [],
-            joined: '',
-            hasReloadBtn: false,
-            genericBlock: false,
-            explicitFbBlock: false,
-            isMessengerCtx: false,
-            isFacebookCtx: false,
-            isCreateOrSellerRoute: false,
-            strongEvidenceCount: 0
-          };
-        }
+        return {
+          blockedMessenger: false,
+          blockedFacebookCreate: false,
+          isMessengerCtx: false, isFacebookCtx: false, isCreateOrSellerRoute: false,
+          hasReloadBtn: false,
+          strongEvidenceCount: 0
+        };
       }
     });
 
-    // Finaliza lógica de bloqueio e retorno fora do evaluate
     let blocked = false;
     let domain = null;
-    if (v.isMessengerCtx && v.genericBlock && (v.hasReloadBtn === true || (v.strongEvidenceCount || 0) >= 2)) {
-      blocked = true;
-      domain = 'messenger';
-    }
-    if (v.isFacebookCtx && v.isCreateOrSellerRoute && v.explicitFbBlock) {
-      blocked = true;
-      domain = 'facebook';
-    }
+    if (v.blockedMessenger) { blocked = true; domain = 'messenger'; }
+    else if (v.blockedFacebookCreate) { blocked = true; domain = 'facebook'; }
 
     return {
       blocked,
       domain,
       hasReloadBtn: v.hasReloadBtn,
       strongEvidenceCount: v.strongEvidenceCount,
-      joinedTexts: v.joined
+      joinedTexts: '' // opcional
     };
   } catch {
-    // Retorno padrão com todos os campos obrigatórios
     return {
       blocked: false,
       domain: null,

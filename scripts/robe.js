@@ -27,101 +27,61 @@ async function attachLimitOverlaySentinel(page) {
 
   await page.evaluateOnNewDocument(() => {
     try {
-      window.__ROBE_LIMIT_OVERLAY = { found: false, h2: '', body: '', ts: 0 };
+      window.__ROBE_LIMIT_OVERLAY = { found: false, h2: '', body: '', ts: 0, where: '' };
 
       const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-      const hit = (raw) => {
+      function textHitsLimit(raw) {
         const t = norm(raw || '');
-        // PT
-        if ((/voce\s+nao\s+pode\s+(criar|publicar)\s+(classificados|an[uú]ncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(t)) ||
-            (/limite\s+(atingido|de\s*frequ[eê]ncia)/.test(t) && /(classificados|an[uú]ncios|listagens?|itens?|marketplace)/.test(t))) {
-          return true;
-        }
-        // EN
-        if ((/you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+(posting|creating\s+listings?)/.test(t)) ||
-            (/you\s+can(?:'|’)?t\s+(post|create\s+(new\s*)?listings?)\s+right\s+now/.test(t)) ||
-            (/temporar(?:y)?\s+limit/.test(t) && /(items?|listings?|marketplace)/.test(t))) {
-          return true;
-        }
-        // ES
-        if ((/no\s+puedes\s+crear\s+(an[uú]ncios|publicaciones|art[ií]culos|anuncios)/.test(t) && /(momento|ahora)/.test(t)) ||
-            (/(has|ha[s]?|se)\s+alcanzado\s+el\s+l[ií]mite/.test(t))) {
-          return true;
-        }
+        if (!t) return false;
+        if (/limite\s+atingido/.test(t) || /limit\s+reached/.test(t) || /limite\s+alcanzado/.test(t)) return true;
+        if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
+        if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+        if (/voce\s+n(?:a|ã)o\s+pode.*(publicar|criar).*(classificados|an[úu]ncios|listagens?|itens?)/.test(t)) return true;
+        if (/no\s+puedes\s+(publicar|crear).*(anuncios?|articulos?|publicaciones?)/.test(t)) return true;
+        if (/(temporar(?:y|io)|temporariamente|temporalmente)\s+(limit|limite)/.test(t) &&
+            /(items?|listings?|classificados|anuncios?)/.test(t)) return true;
         return false;
-      };
-
-      function setOverlay(where, headEl, rootEl) {
-        try {
-          const h2 = headEl ? (headEl.innerText || headEl.textContent || '') : '';
-          const body = (rootEl ? (rootEl.innerText || rootEl.textContent || '') : (document.body.innerText || document.body.textContent || '')).slice(0, 400);
-          window.__ROBE_LIMIT_OVERLAY.found = true;
-          window.__ROBE_LIMIT_OVERLAY.where = where;
-          window.__ROBE_LIMIT_OVERLAY.h2 = h2;
-          window.__ROBE_LIMIT_OVERLAY.body = body;
-          window.__ROBE_LIMIT_OVERLAY.ts = Date.now();
-        } catch {}
       }
 
-      const scan = () => {
-        try {
-          if (window.__ROBE_LIMIT_OVERLAY && window.__ROBE_LIMIT_OVERLAY.found === true) return;
-          const dialog = document.querySelector('[role="dialog"],[role="alertdialog"],div[aria-modal="true"]');
+      function snapshot(root) {
+        const h = (root && root.querySelector('h1,h2')) || document.querySelector('h1,h2');
+        const h2Txt = h ? (h.innerText || h.textContent || '') : '';
+        const body = (root ? (root.innerText || root.textContent || '') : (document.body.innerText || document.body.textContent || '')) || '';
+        return { h2: h2Txt, body: body.slice(0, 800) };
+      }
 
-          // 1) H1/H2 direto (barato)
-          const roots = dialog ? [dialog] : [document];
-          for (const root of roots) {
-            const h = root.querySelector('h1,h2');
-            if (h && hit(h.innerText || h.textContent || '')) {
-              setOverlay(dialog ? 'dialog' : 'global', h, dialog || document.body);
-              return;
-            }
+      function setFound(where, root) {
+        const s = snapshot(root || document);
+        window.__ROBE_LIMIT_OVERLAY = { found: true, where, h2: s.h2, body: s.body, ts: Date.now() };
+      }
+
+      function scan() {
+        if (window.__ROBE_LIMIT_OVERLAY && window.__ROBE_LIMIT_OVERLAY.found) return;
+
+        const dialog = document.querySelector('[role="dialog"],[role="alertdialog"],div[aria-modal="true"]');
+        const roots = dialog ? [dialog] : [document];
+
+        for (const R of roots) {
+          // Headline quick-win
+          const headlines = R.querySelectorAll('h1,h2');
+          for (const h of headlines) {
+            const tx = h.innerText || h.textContent || '';
+            if (textHitsLimit(tx)) return setFound(dialog ? 'dialog_h' : 'global_h', R);
           }
-
-          // 2) Fallback enxuto: poucos nós
-          const cands = Array.from((dialog || document).querySelectorAll('h1,h2,strong,span,p,div')).slice(0, 80);
-          for (const el of cands) {
+          // Fallback: poucos elementos
+          const nodes = Array.from(R.querySelectorAll('h1,h2,span,div,p,section,button')).slice(0, 600);
+          for (const el of nodes) {
             const tx = el.innerText || el.textContent || '';
-            if (hit(tx)) {
-              const head = el.closest('h1,h2');
-              setOverlay(dialog ? 'dialog' : 'global', head, dialog || document.body);
-              return;
-            }
+            if (textHitsLimit(tx)) return setFound(dialog ? 'dialog_any' : 'global_any', R);
           }
-        } catch {}
-      };
+        }
+      }
 
-      document.addEventListener('DOMContentLoaded', () => { try { scan(); } catch {} });
-
-      const mo = new MutationObserver(muts => {
-        try {
-          for (const m of muts) {
-            for (const n of m.addedNodes || []) {
-              if (!n || n.nodeType !== 1) continue;
-
-              // Se um dialog/alertdialog surgir, faz scan leve
-              if (n.matches && n.matches('[role="dialog"],[role="alertdialog"],div[aria-modal="true"]')) {
-                scan();
-                if (window.__ROBE_LIMIT_OVERLAY && window.__ROBE_LIMIT_OVERLAY.found) return;
-              }
-
-              // Checagem super barata: até 2 cabeçalhos no nó inserido
-              const heads = n.querySelectorAll ? n.querySelectorAll('h1,h2') : [];
-              const lim = Math.min(heads.length, 2);
-              for (let i = 0; i < lim; i++) {
-                const h = heads[i];
-                const tx = h.innerText || h.textContent || '';
-                if (hit(tx)) {
-                  scan();
-                  return;
-                }
-              }
-            }
-          }
-        } catch {}
-      });
+      document.addEventListener('DOMContentLoaded', scan);
+      const mo = new MutationObserver(scan);
       mo.observe(document.documentElement, { childList: true, subtree: true });
       window.__ROBE_LIMIT_OBS = mo;
+      setTimeout(scan, 0); // Força scan rápido inicial
     } catch {}
   });
 }
@@ -142,63 +102,40 @@ async function waitSentinelLimitOverlay(page, timeoutMs = 10000) {
 async function fastDetectPostingLimit(page, { timeoutMs = 1800 } = {}) {
   try {
     const handle = await page.waitForFunction(() => {
-      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-      const hit = (raw) => {
+      const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      function textHitsLimit(raw) {
         const t = norm(raw || '');
-        // PT
-        if ((/voce\s+nao\s+pode\s+(criar|publicar)\s+(classificados|an[uú]ncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(t)) ||
-            (/limite\s+(atingido|de\s*frequ[eê]ncia)/.test(t) && /(classificados|an[uú]ncios|listagens?|itens?|marketplace)/.test(t))) {
-          return true;
-        }
-        // EN
-        if ((/you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+(posting|creating\s+listings?)/.test(t)) ||
-            (/you\s+can(?:'|’)?t\s+(post|create\s+(new\s*)?listings?)\s+right\s+now/.test(t)) ||
-            (/temporar(?:y)?\s+limit/.test(t) && /(items?|listings?|marketplace)/.test(t))) {
-          return true;
-        }
-        // ES
-        if ((/no\s+puedes\s+crear\s+(an[uú]ncios|publicaciones|art[ií]culos|anuncios)/.test(t) && /(momento|ahora)/.test(t)) ||
-            (/(has|ha[s]?|se)\s+alcanzado\s+el\s+l[ií]mite/.test(t))) {
-          return true;
-        }
+        if (!t) return false;
+        if (/limite\s+atingido/.test(t) || /limit\s+reached/.test(t) || /limite\s+alcanzado/.test(t)) return true;
+        if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
+        if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+        if (/voce\s+n(?:a|ã)o\s+pode.*(publicar|criar).*(classificados|an[úu]ncios|listagens?|itens?)/.test(t)) return true;
+        if (/no\s+puedes\s+(publicar|crear).*(anuncios?|articulos?|publicaciones?)/.test(t)) return true;
+        if (/(temporar(?:y|io)|temporariamente|temporalmente)\s+(limit|limite)/.test(t) &&
+            /(items?|listings?|classificados|anuncios?)/.test(t)) return true;
         return false;
-      };
+      }
 
       const dialog = document.querySelector('[role="dialog"],[role="alertdialog"],div[aria-modal="true"]');
+      const checkRoot = (R) => {
+        const heads = Array.from(R.querySelectorAll('h1,h2'));
+        if (heads.some(h => textHitsLimit(h.innerText || h.textContent || ''))) return true;
+        const nodes = Array.from(R.querySelectorAll('h1,h2,span,div,p,section,button')).slice(0, 600);
+        return nodes.some(el => textHitsLimit(el.innerText || el.textContent || ''));
+      };
 
-      // 1) Tenta o H1/H2 do dialog primeiro (mais barato)
-      const roots = dialog ? [dialog] : [document];
-      for (const root of roots) {
-        const h = root.querySelector('h1,h2');
-        if (h && hit(h.innerText || h.textContent || '')) {
-          return {
-            found: true,
-            where: dialog ? 'dialog' : 'global',
-            h2: h.innerText || h.textContent || '',
-            body: (dialog ? (dialog.innerText || dialog.textContent || '') : (document.body.innerText || document.body.textContent || '')).slice(0, 400),
-            ts: Date.now()
-          };
-        }
-      }
+      const ok = checkRoot(dialog || document);
+      if (!ok) return false;
 
-      // 2) Fallback rápido: poucas tags, poucos nós
-      const cands = Array.from((dialog || document).querySelectorAll('h1,h2,strong,span,p,div')).slice(0, 80);
-      for (const el of cands) {
-        const tx = el.innerText || el.textContent || '';
-        if (hit(tx)) {
-          const head = el.closest('h1,h2');
-          return {
-            found: true,
-            where: dialog ? 'dialog' : 'global',
-            h2: head ? (head.innerText || head.textContent || '') : '',
-            body: (dialog ? (dialog.innerText || dialog.textContent || '') : (document.body.innerText || document.body.textContent || '')).slice(0, 400),
-            ts: Date.now()
-          };
-        }
-      }
-
-      return false;
-    }, { timeout: timeoutMs, polling: 'raf' });
+      const h = document.querySelector('h1,h2');
+      return {
+        found: true,
+        where: dialog ? 'dialog' : 'global',
+        h2: h ? (h.innerText || h.textContent || '') : '',
+        body: (dialog ? (dialog.innerText || dialog.textContent || '') : (document.body.innerText || document.body.textContent || '')).slice(0, 800),
+        ts: Date.now()
+      };
+    }, { timeout: timeoutMs, polling: 'mutation' });
 
     if (!handle) return null;
     const v = await handle.jsonValue().catch(() => null);
@@ -960,7 +897,31 @@ async function publishAndWatch(page, titulo, { watchOverlayMs = 12000 } = {}) {
   // RACE OVERLAY vs PUB
   const overlayP = waitSentinelLimitOverlay(page, watchOverlayMs).then(v => ({ overlay: v })).catch(() => ({ overlay: null }));
   const evidenceP = waitPublishedEvidence(page, titulo, { maxMs: Math.max(8000, Math.floor(watchOverlayMs * 0.8)) }).then(ok => ({ published: !!ok })).catch(() => ({ published: false }));
-  const first = await Promise.race([overlayP, evidenceP]);
+  // Quick-win: header “Limite atingido/Limit reached/You can’t post right now” durante a janela
+  const quickHeaderP = (async () => {
+    try {
+      const okH = await page.waitForFunction(() => {
+        const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        return Array.from(document.querySelectorAll('h1,h2')).some(el => {
+          const t = norm(el.innerText || el.textContent || '');
+          return /limite\s+atingido|limit\s+reached|you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t);
+        });
+      }, { timeout: watchOverlayMs, polling: 'mutation' }).catch(() => null);
+      if (!okH) return {};
+      const snap = await page.evaluate(() => {
+        const h = document.querySelector('h1,h2');
+        return {
+          found: true,
+          where: 'quick_header',
+          h2: h ? (h.innerText || h.textContent || '') : '',
+          body: (document.body.innerText || document.body.textContent || '').slice(0, 800),
+          ts: Date.now()
+        };
+      });
+      return { overlay: snap };
+    } catch { return {}; }
+  })();
+  const first = await Promise.race([overlayP, evidenceP, quickHeaderP]);
   if (first.overlay && first.overlay.found) { return { ok: false, reason: 'limit_overlay', overlay: first.overlay }; }
   if (first.published) { return { ok: true, reason: 'published' }; }
   // Late fallback
