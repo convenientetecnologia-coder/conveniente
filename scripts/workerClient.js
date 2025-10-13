@@ -5,9 +5,19 @@ const path = require('path');
 // ========== FLOOD/REENTRADA/FILA PROTECTION ADDED ==========
 // Proteção: Evita flood de comandos “open”/“activate”/“startWork”. Garantido que só 1 em andamento por perfil ou globalmente.
 const inflightOp = new Map(); // Key: type+name ou type (se global)
-const pLimit = require('p-limit').default;
-const limitCount = 6; // 6 comandos simultâneos permitidos globais (ajuste conforme desejado)
+
+// const pLimit = require('p-limit').default;
+// const limitCount = 6; // 6 comandos simultâneos permitidos globais (ajuste conforme desejado)
+// const globalCommandPool = pLimit(limitCount);
+
+const _pLimit = require('p-limit');
+const pLimit = typeof _pLimit === 'function' ? _pLimit : (_pLimit && _pLimit.default ? _pLimit.default : null);
+if (!pLimit) {
+  throw new Error('[workerClient] p-limit import failed. Instale p-limit >=3 e use Node compatível.');
+}
+const limitCount = 6;
 const globalCommandPool = pLimit(limitCount);
+
 // DEBUG
 function debugLogCommand(type, payload, poolStatus, extra = '') {
   if (

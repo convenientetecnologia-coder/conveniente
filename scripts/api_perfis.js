@@ -227,30 +227,10 @@ module.exports = (app, workerClient, fileStore) => {
     // Garante ativação do browser e início do Virtus imediatamente
     const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 }).catch(()=>null);
     if (!r1 || r1.ok !== true) {
-      // PATCH — se falhar, segure activationHeldUntil 60s
-      try {
-        const statusPath = fileStore.statusPath || path.join(__dirname, '../dados/status.json');
-        const st = fs.existsSync(statusPath) ? JSON.parse(fs.readFileSync(statusPath, 'utf8')) : null;
-        if (st && Array.isArray(st.perfis)) {
-          const ent = st.perfis.find(p => p && p.nome === nome);
-          if (ent) ent.activationHeldUntil = Date.now() + 60000;
-          fileStore.writeJsonAtomic && fileStore.writeJsonAtomic(statusPath, st);
-        }
-      } catch {}
       return res.json({ ok: false, error: (r1 && r1.error) || 'activate_failed' });
     }
     const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 }).catch(()=>null);
     if (!r2 || r2.ok !== true) {
-      // PATCH — se falhar, segure activationHeldUntil 60s
-      try {
-        const statusPath = fileStore.statusPath || path.join(__dirname, '../dados/status.json');
-        const st = fs.existsSync(statusPath) ? JSON.parse(fs.readFileSync(statusPath, 'utf8')) : null;
-        if (st && Array.isArray(st.perfis)) {
-          const ent = st.perfis.find(p => p && p.nome === nome);
-          if (ent) ent.activationHeldUntil = Date.now() + 60000;
-          fileStore.writeJsonAtomic && fileStore.writeJsonAtomic(statusPath, st);
-        }
-      } catch {}
       return res.json({ ok: false, error: (r2 && r2.error) || 'start_work_failed' });
     }
     return res.json({ ok: true });
