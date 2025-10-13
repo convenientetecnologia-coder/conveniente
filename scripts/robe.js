@@ -28,36 +28,97 @@ async function attachLimitOverlaySentinel(page) {
   await page.evaluateOnNewDocument(() => {
     try {
       window.__ROBE_LIMIT_OVERLAY = { found: false, h2: '', body: '', ts: 0 };
+
       const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-      const testTexts = (root) => {
+      const hit = (raw) => {
+        const t = norm(raw || '');
+        // PT
+        if ((/voce\s+nao\s+pode\s+(criar|publicar)\s+(classificados|an[uú]ncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(t)) ||
+            (/limite\s+(atingido|de\s*frequ[eê]ncia)/.test(t) && /(classificados|an[uú]ncios|listagens?|itens?|marketplace)/.test(t))) {
+          return true;
+        }
+        // EN
+        if ((/you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+(posting|creating\s+listings?)/.test(t)) ||
+            (/you\s+can(?:'|’)?t\s+(post|create\s+(new\s*)?listings?)\s+right\s+now/.test(t)) ||
+            (/temporar(?:y)?\s+limit/.test(t) && /(items?|listings?|marketplace)/.test(t))) {
+          return true;
+        }
+        // ES
+        if ((/no\s+puedes\s+crear\s+(an[uú]ncios|publicaciones|art[ií]culos|anuncios)/.test(t) && /(momento|ahora)/.test(t)) ||
+            (/(has|ha[s]?|se)\s+alcanzado\s+el\s+l[ií]mite/.test(t))) {
+          return true;
+        }
+        return false;
+      };
+
+      function setOverlay(where, headEl, rootEl) {
         try {
-          const texts = Array.from(root.querySelectorAll('h1,h2,span,div,p'))
-            .slice(0, 3000).map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
-          const h2 = texts.find(t =>
-            /voce\s+nao\s+pode\s+criar\s+(classificados|anuncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(t) ||
-            /you\s+can(?:'|’)?t\s+post\s+right\s+now/.test(t) ||
-            /you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+posting/.test(t)
-          );
-          const bodyHit =
-            texts.some(t => /ha\s+um\s+limite\s+temporar/.test(t) && /(vender|marketplace|itens?)/.test(t)) ||
-            texts.some(t => /(there('|’)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(t));
-          const hasDialog = !!document.querySelector('[role="dialog"],[role="alertdialog"],div[aria-modal="true"],div[class*="backdrop"],div[class*="overlay"]');
-          if ((h2 || bodyHit) && hasDialog) {
-            const h2Text = (() => {
-              const el = document.querySelector('h2,h1');
-              return el ? (el.innerText || el.textContent || '') : '';
-            })();
-            const body = texts.slice(0,50).join(' | ').slice(0, 400);
-            window.__ROBE_LIMIT_OVERLAY.found = true;
-            window.__ROBE_LIMIT_OVERLAY.h2 = h2Text;
-            window.__ROBE_LIMIT_OVERLAY.body = body;
-            window.__ROBE_LIMIT_OVERLAY.ts = Date.now();
+          const h2 = headEl ? (headEl.innerText || headEl.textContent || '') : '';
+          const body = (rootEl ? (rootEl.innerText || rootEl.textContent || '') : (document.body.innerText || document.body.textContent || '')).slice(0, 400);
+          window.__ROBE_LIMIT_OVERLAY.found = true;
+          window.__ROBE_LIMIT_OVERLAY.where = where;
+          window.__ROBE_LIMIT_OVERLAY.h2 = h2;
+          window.__ROBE_LIMIT_OVERLAY.body = body;
+          window.__ROBE_LIMIT_OVERLAY.ts = Date.now();
+        } catch {}
+      }
+
+      const scan = () => {
+        try {
+          if (window.__ROBE_LIMIT_OVERLAY && window.__ROBE_LIMIT_OVERLAY.found === true) return;
+          const dialog = document.querySelector('[role="dialog"],[role="alertdialog"],div[aria-modal="true"]');
+
+          // 1) H1/H2 direto (barato)
+          const roots = dialog ? [dialog] : [document];
+          for (const root of roots) {
+            const h = root.querySelector('h1,h2');
+            if (h && hit(h.innerText || h.textContent || '')) {
+              setOverlay(dialog ? 'dialog' : 'global', h, dialog || document.body);
+              return;
+            }
+          }
+
+          // 2) Fallback enxuto: poucos nós
+          const cands = Array.from((dialog || document).querySelectorAll('h1,h2,strong,span,p,div')).slice(0, 80);
+          for (const el of cands) {
+            const tx = el.innerText || el.textContent || '';
+            if (hit(tx)) {
+              const head = el.closest('h1,h2');
+              setOverlay(dialog ? 'dialog' : 'global', head, dialog || document.body);
+              return;
+            }
           }
         } catch {}
       };
-      document.addEventListener('DOMContentLoaded', () => { try { testTexts(document); } catch {} });
+
+      document.addEventListener('DOMContentLoaded', () => { try { scan(); } catch {} });
+
       const mo = new MutationObserver(muts => {
-        try { for (const m of muts) for (const n of m.addedNodes || []) if (n && n.nodeType === 1) testTexts(n); } catch {}
+        try {
+          for (const m of muts) {
+            for (const n of m.addedNodes || []) {
+              if (!n || n.nodeType !== 1) continue;
+
+              // Se um dialog/alertdialog surgir, faz scan leve
+              if (n.matches && n.matches('[role="dialog"],[role="alertdialog"],div[aria-modal="true"]')) {
+                scan();
+                if (window.__ROBE_LIMIT_OVERLAY && window.__ROBE_LIMIT_OVERLAY.found) return;
+              }
+
+              // Checagem super barata: até 2 cabeçalhos no nó inserido
+              const heads = n.querySelectorAll ? n.querySelectorAll('h1,h2') : [];
+              const lim = Math.min(heads.length, 2);
+              for (let i = 0; i < lim; i++) {
+                const h = heads[i];
+                const tx = h.innerText || h.textContent || '';
+                if (hit(tx)) {
+                  scan();
+                  return;
+                }
+              }
+            }
+          }
+        } catch {}
       });
       mo.observe(document.documentElement, { childList: true, subtree: true });
       window.__ROBE_LIMIT_OBS = mo;
@@ -75,6 +136,76 @@ async function waitSentinelLimitOverlay(page, timeoutMs = 10000) {
     }
   } catch {}
   return null;
+}
+
+// FAST-PROBE: detecção ultra-rápida (1.8s) de overlay/limite na página de criação
+async function fastDetectPostingLimit(page, { timeoutMs = 1800 } = {}) {
+  try {
+    const handle = await page.waitForFunction(() => {
+      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const hit = (raw) => {
+        const t = norm(raw || '');
+        // PT
+        if ((/voce\s+nao\s+pode\s+(criar|publicar)\s+(classificados|an[uú]ncios|listagens?|itens?)\s+(no\s+momento|agora)/.test(t)) ||
+            (/limite\s+(atingido|de\s*frequ[eê]ncia)/.test(t) && /(classificados|an[uú]ncios|listagens?|itens?|marketplace)/.test(t))) {
+          return true;
+        }
+        // EN
+        if ((/you(?:'|’)?re\s+temporar(?:ily)?\s+blocked\s+from\s+(posting|creating\s+listings?)/.test(t)) ||
+            (/you\s+can(?:'|’)?t\s+(post|create\s+(new\s*)?listings?)\s+right\s+now/.test(t)) ||
+            (/temporar(?:y)?\s+limit/.test(t) && /(items?|listings?|marketplace)/.test(t))) {
+          return true;
+        }
+        // ES
+        if ((/no\s+puedes\s+crear\s+(an[uú]ncios|publicaciones|art[ií]culos|anuncios)/.test(t) && /(momento|ahora)/.test(t)) ||
+            (/(has|ha[s]?|se)\s+alcanzado\s+el\s+l[ií]mite/.test(t))) {
+          return true;
+        }
+        return false;
+      };
+
+      const dialog = document.querySelector('[role="dialog"],[role="alertdialog"],div[aria-modal="true"]');
+
+      // 1) Tenta o H1/H2 do dialog primeiro (mais barato)
+      const roots = dialog ? [dialog] : [document];
+      for (const root of roots) {
+        const h = root.querySelector('h1,h2');
+        if (h && hit(h.innerText || h.textContent || '')) {
+          return {
+            found: true,
+            where: dialog ? 'dialog' : 'global',
+            h2: h.innerText || h.textContent || '',
+            body: (dialog ? (dialog.innerText || dialog.textContent || '') : (document.body.innerText || document.body.textContent || '')).slice(0, 400),
+            ts: Date.now()
+          };
+        }
+      }
+
+      // 2) Fallback rápido: poucas tags, poucos nós
+      const cands = Array.from((dialog || document).querySelectorAll('h1,h2,strong,span,p,div')).slice(0, 80);
+      for (const el of cands) {
+        const tx = el.innerText || el.textContent || '';
+        if (hit(tx)) {
+          const head = el.closest('h1,h2');
+          return {
+            found: true,
+            where: dialog ? 'dialog' : 'global',
+            h2: head ? (head.innerText || head.textContent || '') : '',
+            body: (dialog ? (dialog.innerText || dialog.textContent || '') : (document.body.innerText || document.body.textContent || '')).slice(0, 400),
+            ts: Date.now()
+          };
+        }
+      }
+
+      return false;
+    }, { timeout: timeoutMs, polling: 'raf' });
+
+    if (!handle) return null;
+    const v = await handle.jsonValue().catch(() => null);
+    return v && v.found ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 // Helpers básicos
@@ -919,14 +1050,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // ALTERAÇÃO AQUI: patchPage recebe nome (string), não manifest
     await patchPage(nome, page, coords);
     stepLogArr.push(`[${nome}] Nova aba criada para Robe`);
+    await attachLimitOverlaySentinel(page).catch(() => {}); // Sentinela leve armada
 
     // --- PATCH INICIO ---
-    // Checagem precoce de bloqueio de limite de postagem
-    // Detecção ANTES de preencher qualquer campo!
-    const earlyLimitDetected = await detectLimitOverlay(page, { timeoutMs: 3500, intervalMs: 300 });
-    if (earlyLimitDetected) {
-      logger.warn('[ROBE] Limite de postagem DETECTADO ao abrir "Criar item" — abortando Robe e aplicando pausa 24h', { nome, attId });
-      await applyLimitPostingAndAbort({ page, nome, attId, where: 'early_detect_create' });
+    // Checagem precoce de bloqueio de limite de postagem (fast-probe leve; sem penalizar hot path)
+    const earlyPreNavProbe = await fastDetectPostingLimit(page, { timeoutMs: 40 });
+    if (earlyPreNavProbe && earlyPreNavProbe.found) {
+      logger.warn('[ROBE] Limite de postagem DETECTADO (pre-nav) — abortando Robe e aplicando pausa 24h', { nome, attId });
+      await applyLimitPostingAndAbort({ page, nome, attId, where: 'early_detect_pre_nav_fast_probe', overlaySnapshot: earlyPreNavProbe });
       return; // Saída antecipada, não tenta publicar nem executar etapas seguintes!
     }
     // --- PATCH FIM ---
@@ -956,10 +1087,15 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         try {
           stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create', try: i+1 });
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-          // Detecta “Limite atingido” imediatamente após navegar
-          if (await detectLimitOverlay(page, { timeoutMs: 15000, intervalMs: 350 })) {
-            await applyLimitPostingAndAbort({ page, nome, attId, where: 'goto_create' });
+
+          // FAST-PROBE imediatamente após o goto (1.8s máx)
+          const earlyFast = await fastDetectPostingLimit(page, { timeoutMs: 1800 });
+          if (earlyFast && earlyFast.found) {
+            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_detect_fast_create', where: 'after_goto', h2: String(earlyFast.h2||'').slice(0,200) });
+            await applyLimitPostingAndAbort({ page, nome, attId, where: 'create_fast_probe', overlaySnapshot: earlyFast });
+            return;
           }
+
           okNav = true;
         } catch (e) {
           navErr = e && e.message || String(e);
@@ -986,13 +1122,23 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     await sleep(jitter(100, 220));
     stepLogArr.push(`[${nome}] Tela de criar item pronta (fast-lane)`);
 
-    // Checagem adicional após fast-lane/readiness
-    const readyLimitDetected = await detectLimitOverlay(page, { timeoutMs: 2000, intervalMs: 300 });
-    if (readyLimitDetected) {
-      logger.warn('[ROBE] Limite de postagem DETECTADO após readiness (preenchimento) — abortando Robe e aplicando pausa 24h', { nome, attId });
-      await applyLimitPostingAndAbort({ page, nome, attId, where: 'after_ready_detect' });
-      return; // Saída antecipada!
+    // FAST-PROBE após readiness (1s)
+    const readyProbe = await fastDetectPostingLimit(page, { timeoutMs: 1000 });
+    if (readyProbe && readyProbe.found) {
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_detect_fast_ready', where: 'after_ready', h2: String(readyProbe.h2||'').slice(0,200) });
+      await applyLimitPostingAndAbort({ page, nome, attId, where: 'after_ready_fast_probe', overlaySnapshot: readyProbe });
+      return;
     }
+
+    // Watcher background (opcional) — sem await — protege contra overlays AJAX/racing durante o preenchimento
+    (async () => {
+      const late = await waitSentinelLimitOverlay(page, 45000);
+      if (late && late.found) {
+        try {
+          await applyLimitPostingAndAbort({ page, nome, attId, where: 'background_watch', overlaySnapshot: late });
+        } catch {}
+      }
+    })().catch(()=>{});
 
     // FOTO — via fotos.js
     const pick = await fotos.pickPhotoForAccount(nome, workingNames);
@@ -1054,9 +1200,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       if (ev1) { published = true; break; }
       const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 15000 });
       if (ev2) { published = true; break; }
-      const late2 = await detectLimitOverlay(page, { timeoutMs: 5000, intervalMs: 300 });
-      if (late2) {
-        await applyLimitPostingAndAbort({ page, nome, attId, where: 'late_fallback' });
+      const late2Probe = await fastDetectPostingLimit(page, { timeoutMs: 1200 });
+      if (late2Probe && late2Probe.found) {
+        await applyLimitPostingAndAbort({ page, nome, attId, where: 'late_fallback_fast_probe', overlaySnapshot: late2Probe });
       }
       await sleep(1200);
     }
