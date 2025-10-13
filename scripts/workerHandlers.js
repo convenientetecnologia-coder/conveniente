@@ -1,4 +1,4 @@
-\\ workerHandlers.js
+// workerHandlers.js
 
 'use strict';
 const core = require('./workerCore.js');
