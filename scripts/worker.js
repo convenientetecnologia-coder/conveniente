@@ -1446,7 +1446,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 
 // --------------- ROBE/TICK
 async function robeTickGlobal() {
-  logger.info('[WORKER][robeTickGlobal] Tick fila global', { hora: new Date().toLocaleString() });
+  //logger.info('[WORKER][robeTickGlobal] Tick fila global', { hora: new Date().toLocaleString() });
 
   const perfisArr = loadPerfisJson();
   // PATCH 2 — Usar normalizeCooldown em vez de robeCooldownLeft (pré-filtragem com Promise.all)
@@ -3660,7 +3660,7 @@ process.on('disconnect', () => gracefulShutdown('disconnect'));
 
 process.on('message', async (msg) => {
   if (!msg || !msg.type || !msg.msgId) return;
-  logger.info('[WORKER][MESSAGE] received', { type: msg.type, hasMsgId: !!msg.msgId });
+  //logger.info('[WORKER][MESSAGE] received', { type: msg.type, hasMsgId: !!msg.msgId });
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
     logger.warn('Comando desconhecido recebido', { type: msg.type, hasMsgId: !!msg.msgId });
