@@ -6,6 +6,19 @@ const log = require('./logger.js');
 const handlers = require('./workerHandlers.js');
 const core = require('./workerCore.js');
 
+// Blindagem de exceções globais (conforme instrução)
+process.on('unhandledRejection', (reason) => {
+  try {
+    log.error('[WORKER][unhandledRejection]', (reason && reason.stack) || reason);
+  } catch {}
+});
+
+process.on('uncaughtException', (err) => {
+  try {
+    log.error('[WORKER][uncaughtException]', (err && err.stack) || err);
+  } catch {}
+});
+
 function sendReply(msgId, data) {
   if (process && process.send) process.send({ replyTo: msgId, data });
 }

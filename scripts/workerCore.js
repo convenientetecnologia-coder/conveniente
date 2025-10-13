@@ -1411,7 +1411,9 @@ async function ramCpuMonitorTick() {
   await snapshotStatusAndWrite();
 
   // Agenda próxima rodada (3–4s)
-  ramMonitorInterval = setTimeout(ramCpuMonitorTick, 3500 + Math.floor(Math.random()*1000));
+  ramMonitorInterval = setTimeout(() => {
+  Promise.resolve(ramCpuMonitorTick()).catch(e => log.warn('[TIMER][ramCpuMonitorTick-next]', e && e.message || e));
+}, 3500 + Math.floor(Math.random()*1000));
 }
 
 function normalizePath(x) { return String(x||'').replace(/\\/g,'/'); }
@@ -2958,29 +2960,287 @@ function initTimers() {
   _timersInitialized = true;
 
   // memorySweep
-  _intervals.push(setInterval(memorySweep, 10 * 60 * 1000));
+  _intervals.push(setInterval(() => {
+    Promise.resolve(memorySweep()).catch(e => log.warn('[TIMER][memorySweep]', e && e.message || e));
+  }, 10 * 60 * 1000));
 
   // RAM/CPU monitor
-  _timeouts.push(setTimeout(ramCpuMonitorTick, 5000));
+  _timeouts.push(setTimeout(() => {
+    Promise.resolve(ramCpuMonitorTick()).catch(e => log.warn('[TIMER][ramCpuMonitorTick]', e && e.message || e));
+  }, 5000));
 
   // Robe global tick
-  _intervals.push(setInterval(robeTickGlobal, 7000));
-  _timeouts.push(setTimeout(robeTickGlobal, 3500));
+  _intervals.push(setInterval(() => {
+    Promise.resolve(robeTickGlobal()).catch(e => log.warn('[TIMER][robeTickGlobal]', e && e.message || e));
+  }, 7000));
+  _timeouts.push(setTimeout(() => {
+    Promise.resolve(robeTickGlobal()).catch(e => log.warn('[TIMER][robeTickGlobal]', e && e.message || e));
+  }, 3500));
 
   // Fotos GC
-  _intervals.push(setInterval(fotosGcTick, 90_000));
-  _timeouts.push(setTimeout(fotosGcTick, 8000));
+  _intervals.push(setInterval(() => {
+    Promise.resolve(fotosGcTick()).catch(e => log.warn('[TIMER][fotosGcTick]', e && e.message || e));
+  }, 90_000));
+  _timeouts.push(setTimeout(() => {
+    Promise.resolve(fotosGcTick()).catch(e => log.warn('[TIMER][fotosGcTick]', e && e.message || e));
+  }, 8000));
 
   // Nurse
-  _intervals.push(setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS));
-  _timeouts.push(setTimeout(() => { nurseTick().catch(()=>{}); }, 2000));
+  _intervals.push(setInterval(() => {
+    Promise.resolve(nurseTick()).catch(e => log.warn('[TIMER][nurseTick]', e && e.message || e));
+  }, NURSE_CFG.INTERVAL_MS));
+  _timeouts.push(setTimeout(() => {
+    Promise.resolve(nurseTick()).catch(e => log.warn('[TIMER][nurseTick]', e && e.message || e));
+  }, 2000));
 
   // Health
-  _intervals.push(setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS));
-  _timeouts.push(setTimeout(() => { healthTick().catch(()=>{}); }, 2500));
+  _intervals.push(setInterval(() => {
+    Promise.resolve(healthTick()).catch(e => log.warn('[TIMER][healthTick]', e && e.message || e));
+  }, HEALTH_CFG.TICK_MS));
+  _timeouts.push(setTimeout(() => {
+    Promise.resolve(healthTick()).catch(e => log.warn('[TIMER][healthTick]', e && e.message || e));
+  }, 2500));
 
   // Watchdog
-  _intervals.push(setInterval(() => { watchdogTick().catch(()=>{}); }, 10 * 60 * 1000));
+  _intervals.push(setInterval(() => {
+    Promise.resolve(watchdogTick()).catch(e => log.warn('[TIMER][watchdogTick]', e && e.message || e));
+  }, 10 * 60 * 1000));
+}
+
+// ========== NOVOS HANDLERS/CORE (mínimos) ==========
+async function configure({ nome } = {}) {
+  if (!nome) return { ok: false, error: 'nome_required' };
+  if (isFrozenNow(nome)) return { ok: false, error: 'account_is_frozen' };
+  let ctrl = controllers.get(nome);
+  if (!ctrl) {
+    const r = await activateOnce(nome, 'configure');
+    if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'activate_failed' };
+    ctrl = controllers.get(nome);
+  }
+  try { await stopVirtus(nome); } catch {}
+  ctrl.configurando = true;
+  ctrl.humanControl = false;
+  await snapshotStatusAndWrite();
+  return { ok: true };
+}
+
+async function start_work({ nome } = {}) {
+  if (!nome) return { ok: false, error: 'nome_required' };
+  if (isFrozenNow(nome)) return { ok: false, error: 'account_is_frozen' };
+  let ctrl = controllers.get(nome);
+  if (!ctrl) {
+    const r = await activateOnce(nome, 'start_work');
+    if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'activate_failed' };
+    ctrl = controllers.get(nome);
+  }
+  // Sair de modos especiais
+  ctrl.configurando = false;
+  ctrl.humanControl = false;
+  // Iniciar Virtus se não estiver rodando
+  if (!ctrl.virtus && ctrl.browser) {
+    try {
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+      ctrl.trabalhando = true;
+    } catch (e) {
+      ctrl.virtus = null;
+      ctrl.trabalhando = false;
+      return { ok: false, error: e && e.message || 'virtus_start_failed' };
+    }
+  } else {
+    ctrl.trabalhando = true;
+  }
+  try { await unfreezeCooldownIfWorking(nome); } catch {}
+  await snapshotStatusAndWrite();
+  return { ok: true };
+}
+// Alias compatível
+const startWork = start_work;
+
+async function invokeHuman({ nome } = {}) {
+  if (!nome) return { ok: false, error: 'nome_required' };
+  // Abre se necessário
+  let ctrl = controllers.get(nome);
+  if (!ctrl) {
+    const r = await activateOnce(nome, 'invokeHuman');
+    if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'activate_failed' };
+    ctrl = controllers.get(nome);
+  }
+  // Para automações e marca humano
+  try { await stopVirtus(nome); } catch {}
+  try { robeQueue.skip && robeQueue.skip(nome); } catch {}
+  if (robeMeta[nome]) {
+    delete robeMeta[nome].emExecucao;
+    delete robeMeta[nome].emFila;
+  }
+  ctrl.humanControl = true;
+  ctrl.configurando = false;
+  ctrl.trabalhando = false;
+  await snapshotStatusAndWrite();
+  return { ok: true };
+}
+
+async function humanResume({ nome } = {}) {
+  if (!nome) return { ok: false, error: 'nome_required' };
+  const ctrl = controllers.get(nome);
+  if (!ctrl) return { ok: false, error: 'not_active' };
+  ctrl.humanControl = false;
+  // Decide iniciar Virtus conforme desired
+  const desired = readJsonFile(desiredPath, { perfis: {} });
+  const wantVirtus = (desired.perfis && desired.perfis[nome] && desired.perfis[nome].virtus) || 'on';
+  if (wantVirtus === 'on') {
+    try {
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+      ctrl.trabalhando = true;
+    } catch {
+      ctrl.virtus = null;
+      ctrl.trabalhando = false;
+    }
+  } else {
+    ctrl.trabalhando = false;
+  }
+  await snapshotStatusAndWrite();
+  return { ok: true };
+}
+
+async function robePlay({ nome } = {}) {
+  if (!nome) return { ok: false, error: 'nome_required' };
+  if (isFrozenNow(nome)) return { ok: false, error: 'account_is_frozen' };
+  if (await isLimitPostingActive(nome)) return { ok: false, error: 'limit_posting_active' };
+  const ctrl = controllers.get(nome);
+  if (!ctrl || !ctrl.browser) return { ok: false, error: 'not_active' };
+  if (!ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) {
+    return { ok: false, error: 'not_in_work_mode' };
+  }
+  // Zera cooldown para permitir enfileirar imediatamente
+  try {
+    await manifestStore.update(nome, m => {
+      m = m || {};
+      m.robeCooldownUntil = 0;
+      m.robeCooldownRemainingMs = 0;
+      return m;
+    });
+  } catch {}
+  // Dispara um tick do Robe (assíncrono)
+  try { await robeTickGlobal(); } catch {}
+  await snapshotStatusAndWrite();
+  return { ok: true };
+}
+
+async function robesReleaseAll() {
+  const perfisArr = loadPerfisJson();
+  const released = [];
+  for (const p of perfisArr) {
+    const nome = p && p.nome;
+    if (!nome) continue;
+    try {
+      if (robeQueue.inQueue && robeQueue.inQueue(nome)) {
+        try { robeQueue.skip(nome); } catch {}
+        released.push(nome);
+      }
+      if (robeMeta[nome]) {
+        delete robeMeta[nome].emFila;
+        delete robeMeta[nome].emExecucao;
+      }
+    } catch {}
+  }
+  await snapshotStatusAndWrite();
+  return { ok: true, released };
+}
+
+async function unfreeze({ nome, setBy } = {}) {
+  if (!nome) return { ok: false, error: 'nome_required' };
+  await unfreezeProfile(nome, setBy || 'admin');
+  return { ok: true };
+}
+
+async function unfreezeAll() {
+  const perfisArr = loadPerfisJson();
+  let count = 0;
+  for (const p of perfisArr) {
+    const nome = p && p.nome;
+    if (!nome) continue;
+    if (isFrozenNow(nome)) {
+      await unfreezeProfile(nome, 'admin_all');
+      count++;
+    }
+  }
+  return { ok: true, count };
+}
+
+// ========== FIM NOVOS HANDLERS/CORE ==========
+
+// ===== getStatus (fallback robusto) =====
+async function getStatus() {
+  try {
+    const st = readJsonFile(statusPath, null);
+    if (st && Array.isArray(st.perfis)) {
+      return st;
+    }
+  } catch {}
+
+  // Fallback básico se status.json não existir ou estiver vazio
+  const perfisArr = loadPerfisJson();
+  const perfis = perfisArr.map(p => {
+    const nome = p.nome;
+    const ctrl = controllers.get(nome);
+    return {
+      nome,
+      label: p.label || null,
+      cidade: p.cidade,
+      uaPresetId: p.uaPresetId,
+      active: !!ctrl,
+      trabalhando: !!(ctrl && ctrl.trabalhando),
+      configurando: !!(ctrl && ctrl.configurando),
+      humanControl: !!(ctrl && ctrl.humanControl),
+      issuesCount: (() => {
+        try {
+          if (issues && typeof issues.countErrors === 'function') {
+            const r = issues.countErrors(nome);
+            return Number(r && r.count) || 0;
+          }
+        } catch {}
+        return 0;
+      })(),
+      ramMB: (typeof (robeMeta[nome] && robeMeta[nome].ramMB) === 'number') ? robeMeta[nome].ramMB : null,
+      cpuPercent: (typeof (robeMeta[nome] && robeMeta[nome].cpuPercent) === 'number') ? robeMeta[nome].cpuPercent : null,
+      numPages: (typeof (robeMeta[nome] && robeMeta[nome].numPages) === 'number') ? robeMeta[nome].numPages : null,
+      robeFrozenUntil: (robeMeta[nome] && robeMeta[nome].frozenUntil) || null,
+      frozenReason: (robeMeta[nome] && robeMeta[nome].frozenReason) || null,
+      frozenAt: (robeMeta[nome] && robeMeta[nome].frozenAt) || null,
+      frozenSetBy: (robeMeta[nome] && robeMeta[nome].frozenSetBy) || null,
+      activationHeldUntil: (robeMeta[nome] && robeMeta[nome].activationHeldUntil) || null,
+      reopenAt: (robeMeta[nome] && robeMeta[nome].reopenAt) || null,
+      openBackoffMs: (robeMeta[nome] && robeMeta[nome].openBackoffMs) || null,
+      lastSwapAt: (robeMeta[nome] && robeMeta[nome].lastSwapAt) || null,
+      whyNotOpen: (robeMeta[nome] && robeMeta[nome].whyNotOpen) || null,
+      swapCooldown: (robeMeta[nome] && robeMeta[nome].swapCooldown) || null,
+      manifestStatus: (() => {
+        try { return ensureManifestValid(nome) ? 'ok' : 'missing'; } catch { return 'missing'; }
+      })()
+    };
+  });
+
+  const robes = {};
+  for (const p of perfisArr) {
+    const nome = p.nome;
+    robes[nome] = {
+      cooldownSec: 0,
+      estado: (robeMeta[nome] && robeMeta[nome].estado) || '',
+      emFila: !!(robeMeta[nome] && robeMeta[nome].emFila),
+      emExecucao: !!(robeMeta[nome] && robeMeta[nome].emExecucao),
+      pauseReason: (robeMeta[nome] && robeMeta[nome].pauseReason) || null,
+      lastRobeBlockAt: (robeMeta[nome] && robeMeta[nome].lastRobeBlockAt) || null
+    };
+  }
+
+  const os = require('os');
+  const sys = {
+    freeMB: Math.round(os.freemem() / (1024 * 1024)),
+    totalMB: Math.round(os.totalmem() / (1024 * 1024)),
+    cores: (os.cpus() || []).length
+  };
+
+  return { perfis, robes, robeQueue: robeQueue.queueList(), autoMode, sys, ts: Date.now() };
 }
 
 // EXPORTS
@@ -3074,6 +3334,18 @@ module.exports = {
   detectFbLimitInAnyPage,
   milLog,
   reportAction,
+
+  // novos handlers/core
+  getStatus,
+  configure,
+  start_work,
+  startWork,
+  invokeHuman,
+  humanResume,
+  robePlay,
+  robesReleaseAll,
+  unfreeze,
+  unfreezeAll,
 
   // timers
   initTimers

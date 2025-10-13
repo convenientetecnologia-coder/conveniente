@@ -50,7 +50,7 @@ function startWatchdog() {
       }
 
       const r = await module.exports.sendWorkerCommand('get-status', {}, { timeoutMs: 12000 }).catch(() => null);
-      if (r && r.perfis) {
+      if (r) {
         _wd.failCount = 0;
         _wd.lastOkAt = Date.now();
         return;
