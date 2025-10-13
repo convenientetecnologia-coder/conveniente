@@ -132,7 +132,7 @@ return { ok: false, error: 'Core não expôs robesReleaseAll' };
 return await core.robesReleaseAll();
 },
 
-async 'get-status' {
+'get-status': async function() {
 if (typeof core.getStatus !== 'function') {
 return { ok: false, error: 'Core não expôs getStatus' };
 }
