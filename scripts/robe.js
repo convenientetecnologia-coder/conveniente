@@ -1011,9 +1011,29 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // ALTERAÇÃO AQUI: patchPage recebe nome (string), não manifest
     await patchPage(nome, page, coords);
     stepLogArr.push(`[${nome}] Nova aba criada para Robe`);
+
+    // PASSO 1 — Detector ultra-específico antes de qualquer attach/fastDetect/overlay:
+    // GUARDA ULTRA-RÁPIDO: Detecta <span>Limite atingido</span> e ABORTA na hora
+    await page.waitForSelector('body', { timeout: 5000 });
+    const bloqueioLimite = await page.evaluate(() => {
+      function normalize(str) {
+        return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+      }
+      return Array.from(document.querySelectorAll('span')).some(span =>
+        normalize(span.innerText || span.textContent) === 'limite atingido' &&
+        window.getComputedStyle(span).visibility !== 'hidden' &&
+        window.getComputedStyle(span).display !== 'none'
+      );
+    });
+    if (bloqueioLimite) {
+      logger.warn('[ROBE] Limite atingido detectado — pausando 24h', { nome, attId });
+      await applyLimitPostingAndAbort({ page, nome, attId, where: 'span_limite_atingido' });
+      return;
+    }
+
     await attachLimitOverlaySentinel(page).catch(() => {}); // Sentinela leve armada
 
-    // --- PATCH INICIO ---
+    /* --- PATCH INICIO (DESATIVADO PELO NOVO DETECTOR ULTRA-ESPECÍFICO) ---
     // Checagem precoce de bloqueio de limite de postagem (fast-probe leve; sem penalizar hot path)
     const earlyPreNavProbe = await fastDetectPostingLimit(page, { timeoutMs: 40 });
     if (earlyPreNavProbe && earlyPreNavProbe.found) {
@@ -1021,7 +1041,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       await applyLimitPostingAndAbort({ page, nome, attId, where: 'early_detect_pre_nav_fast_probe', overlaySnapshot: earlyPreNavProbe });
       return; // Saída antecipada, não tenta publicar nem executar etapas seguintes!
     }
-    // --- PATCH FIM ---
+    --- PATCH FIM --- */
 
     // Captura possíveis diálogos
     page.on('dialog', async dlg => {
@@ -1049,13 +1069,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create', try: i+1 });
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-          // FAST-PROBE imediatamente após o goto (1.8s máx)
+          /* FAST-PROBE imediatamente após o goto (DESATIVADO PELO NOVO DETECTOR)
           const earlyFast = await fastDetectPostingLimit(page, { timeoutMs: 1800 });
           if (earlyFast && earlyFast.found) {
             stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_detect_fast_create', where: 'after_goto', h2: String(earlyFast.h2||'').slice(0,200) });
             await applyLimitPostingAndAbort({ page, nome, attId, where: 'create_fast_probe', overlaySnapshot: earlyFast });
             return;
           }
+          */
 
           okNav = true;
         } catch (e) {
@@ -1083,13 +1104,31 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     await sleep(jitter(100, 220));
     stepLogArr.push(`[${nome}] Tela de criar item pronta (fast-lane)`);
 
-    // FAST-PROBE após readiness (1s)
+    // PASSO 2 — Segunda checagem (racing severo) logo após readiness:
+    const bloqueioLimite2 = await page.evaluate(() => {
+      function normalize(str) {
+        return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+      }
+      return Array.from(document.querySelectorAll('span')).some(span =>
+        normalize(span.innerText || span.textContent) === 'limite atingido' &&
+        window.getComputedStyle(span).visibility !== 'hidden' &&
+        window.getComputedStyle(span).display !== 'none'
+      );
+    });
+    if (bloqueioLimite2) {
+      logger.warn('[ROBE] Limite atingido detectado (ready) — pausando 24h', { nome, attId });
+      await applyLimitPostingAndAbort({ page, nome, attId, where: 'span_limite_atingido_ready' });
+      return;
+    }
+
+    /* FAST-PROBE após readiness (DESATIVADO PELO NOVO DETECTOR)
     const readyProbe = await fastDetectPostingLimit(page, { timeoutMs: 1000 });
     if (readyProbe && readyProbe.found) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_detect_fast_ready', where: 'after_ready', h2: String(readyProbe.h2||'').slice(0,200) });
       await applyLimitPostingAndAbort({ page, nome, attId, where: 'after_ready_fast_probe', overlaySnapshot: readyProbe });
       return;
     }
+    */
 
     // Watcher background (opcional) — sem await — protege contra overlays AJAX/racing durante o preenchimento
     (async () => {
