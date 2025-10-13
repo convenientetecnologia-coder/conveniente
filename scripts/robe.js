@@ -884,7 +884,6 @@ async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
 // SUBSTITUI publicarEFechar5s! NÃO remova publish/verify/etc, só troque a chamada!
 async function publishAndWatch(page, titulo, { watchOverlayMs = 12000 } = {}) {
   await attachLimitOverlaySentinel(page); // Arme a sentinela ANTES do clique!
-  // Clique, como em publicarEFechar5s, mas NÃO feche/navegue!
   let clicked = false;
   for (let i = 0; i < 12; i++) {
     const btnPub = await findEnabledButton(page, 'Publicar', 600);
@@ -894,10 +893,14 @@ async function publishAndWatch(page, titulo, { watchOverlayMs = 12000 } = {}) {
     await sleep(220);
   }
   if (!clicked) return { ok: false, reason: 'no_publish_button' };
-  // RACE OVERLAY vs PUB
+
+  // RACE: overlay sentinel, evidência de publicação, quick-header, ou tela de Seller rapidamente
   const overlayP = waitSentinelLimitOverlay(page, watchOverlayMs).then(v => ({ overlay: v })).catch(() => ({ overlay: null }));
-  const evidenceP = waitPublishedEvidence(page, titulo, { maxMs: Math.max(8000, Math.floor(watchOverlayMs * 0.8)) }).then(ok => ({ published: !!ok })).catch(() => ({ published: false }));
-  // Quick-win: header “Limite atingido/Limit reached/You can’t post right now” durante a janela
+
+  // DICA aplicada: evidenceP curto (2s)
+  const evidenceP = waitPublishedEvidence(page, titulo, { maxMs: 2000 }).then(ok => ({ published: !!ok })).catch(() => ({ published: false }));
+
+  // QUICK-HEADER (mantido)
   const quickHeaderP = (async () => {
     try {
       const okH = await page.waitForFunction(() => {
@@ -921,12 +924,78 @@ async function publishAndWatch(page, titulo, { watchOverlayMs = 12000 } = {}) {
       return { overlay: snap };
     } catch { return {}; }
   })();
-  const first = await Promise.race([overlayP, evidenceP, quickHeaderP]);
+
+  // PATCH NOVO: isSellerDashboardP corre em paralelo usando mutação curta
+  const isSellerDashboardP = (async () => {
+    try {
+      // O dashboard está pronto quando título/h1/h2 == "Venda" ou tem "Seus classificados"/"Painel do vendedor" 
+      return await page.waitForFunction(() => {
+        function norm(s) { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        // Seller dashboard: /marketplace/you/selling, dashboard, "Painel do vendedor", "Seus classificados", "Venda", "Criar novo classificado"
+        if (
+          window.location.pathname === '/marketplace/you/selling' ||
+          window.location.pathname === '/marketplace/profile' ||
+          window.location.pathname === '/marketplace/you/dashboard' ||
+          /seller(_announcement)?_center/.test(window.location.pathname)
+        ) return true;
+        // Seller dashboard/botões/links
+        const gotSeller = Array.from(document.querySelectorAll('a, span, h1, h2')).some(el => {
+          const t = norm(el.innerText || el.textContent || '');
+          return (
+            t === 'painel do vendedor' ||
+            t === 'seus classificados' ||
+            t === 'venda' ||
+            t === 'tudo' ||
+            t === 'avisos' ||
+            t === 'insights' ||
+            t === 'perfil do marketplace' ||
+            t === 'criar novo classificado'
+          );
+        });
+        return gotSeller;
+      }, { timeout: 3200, polling: 'mutation' }).then(() => ({ seller: true })).catch(() => ({ seller: false }));
+    } catch { return { seller: false }; }
+  })();
+
+  // RACE vendedor: se vender dashboard, publica na hora
+  const first = await Promise.race([overlayP, evidenceP, isSellerDashboardP, quickHeaderP]);
+
+  // Atalho: se detectou dashboard seller, encerre ciclo imediato!
+  if (first.seller) {
+    logger.info('[ROBE] Publicação detectada via Seller Dashboard — finalizando ciclo Robe', {});
+    return { ok: true, reason: 'published_seller_dashboard' };
+  }
   if (first.overlay && first.overlay.found) { return { ok: false, reason: 'limit_overlay', overlay: first.overlay }; }
   if (first.published) { return { ok: true, reason: 'published' }; }
-  // Late fallback
-  const late = await waitSentinelLimitOverlay(page, 2500);
+
+  // Fallback — late check
+  const late = await waitSentinelLimitOverlay(page, 1800);
   if (late && late.found) { return { ok: false, reason: 'limit_overlay', overlay: late }; }
+
+  // PATCH fallback: se seller dashboard no final do timeout, feche mesmo assim
+  try {
+    const lastSellerPanel = await page.evaluate(() => {
+      function norm(s) { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+      return Array.from(document.querySelectorAll('a, span, h1, h2')).some(el => {
+        const t = norm(el.innerText || el.textContent || '');
+        return (
+          t === 'painel do vendedor' ||
+          t === 'seus classificados' ||
+          t === 'venda' ||
+          t === 'tudo' ||
+          t === 'avisos' ||
+          t === 'insights' ||
+          t === 'perfil do marketplace' ||
+          t === 'criar novo classificado'
+        );
+      });
+    });
+    if (lastSellerPanel) {
+      logger.info('[ROBE] Fallback Seller Dashboard — finalizando ciclo Robe', {});
+      return { ok: true, reason: 'published_seller_dashboard_fallback' };
+    }
+  } catch {}
+
   return { ok: false, reason: 'indeterminate' };
 }
 
@@ -1191,8 +1260,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       if (pubRes && pubRes.reason === 'limit_overlay') {
         await applyLimitPostingAndAbort({ page, nome, attId, where: 'publish_race', overlaySnapshot: pubRes.overlay });
       }
-      if (pubRes && pubRes.ok && pubRes.reason === 'published') {
+      // ENCERRAMENTO IMEDIATO: se ok (published OU seller dashboard), feche a aba e siga sem sleeps
+      if (pubRes && pubRes.ok) {
         published = true;
+        try { await safeClosePage(page); } catch {}
+        page = null;
         break;
       }
       // Inconclusivo: aborde evidências de publicado, fallback SELLING só depois da janela!
