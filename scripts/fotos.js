@@ -385,13 +385,6 @@ async function gcSweep() {
       let removedIndex = 0, deletedFiles = 0, resetGens = 0;
       let changed = false;
 
-      // BLOCO REMOVIDO (conforme instrução)
-      // for (const p of targets) {
-      //   try {
-      //     if (!fs.existsExists) {} // placeholder
-      //   } catch {}
-      // }
-
       for (const [name, rec] of Object.entries(idx)) {
         const abs = path.join(dir, name);
         const exists = fs.existsSync(abs);

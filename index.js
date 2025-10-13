@@ -4,7 +4,6 @@ const path = require('path');
 const cors = require('cors');
 // const bodyParser = require('body-parser'); // Não é necessário, pois estamos usando express.json/express.urlencoded
 const open = require('open'); // <-- adicione/mova isso aqui!
-const log = require('./scripts/logger.js'); // <-- logger adicionado aqui!
 
 // Helpers/pontes
 const workerClient = require('./scripts/workerClient.js');
@@ -75,7 +74,7 @@ require('./scripts/api_sys.js')(app, workerClient, fileStore);
 require('./scripts/api_issues.js')(app, workerClient, fileStore);
 // Se usar api_static.js/adicional, inclua aqui: require('./scripts/api_static.js')(app);
 
-log.info('[BOOT] Garantindo arquivos base...');
+console.log('[BOOT] Garantindo arquivos base...');
 fileStore.ensureDesired();
 fileStore.ensurePerfisJson();
 
@@ -97,17 +96,17 @@ fileStore.ensurePerfisJson();
         });
         count++;
       } catch (e) {
-        log.warn('[BOOT][PAUSE24H] Falha ao pausar perfil:', p.nome, e && e.message || e);
+        console.warn('[BOOT][PAUSE24H] Falha ao pausar perfil:', p.nome, e && e.message || e);
       }
     }
     try {
       require('./scripts/issues.js').append('system', 'mil_action', `robe_pause_24h_on_boot applied to ${count}/${perfis.length} perfis`);
     } catch {}
-    log.info('[BOOT] ROBE_PAUSE_24H_ON_BOOT aplicado em', count, 'perfis');
+    console.log('[BOOT] ROBE_PAUSE_24H_ON_BOOT aplicado em', count, 'perfis');
   }
 })();
 
-log.info('[BOOT] Spawning worker (automação)...');
+console.log('[BOOT] Spawning worker (automação)...');
 workerClient.fork();
 
 // Health check endpoint (opcional)
@@ -115,14 +114,14 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // Start server
 app.listen(PORT, () => {
-  log.info(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
-  log.info('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
+  console.log(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
+  console.log('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
   // Logging claro: status da proteção e do modo de abertura do painel
 
   if (process.env.OPEN_CHROMIUM_ON_START == '1') {
-    log.info('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
+    console.log('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
   } else {
-    log.info('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
+    console.log('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
   }
 });
 
@@ -165,7 +164,7 @@ if (process.env.OPEN_CHROMIUM_ON_START == '1') {
       }
       // IMPORTANTE: não abrir no Chrome e nem no browser padrão.
       if (!opened) {
-        log.warn('[WARN] Não foi possível abrir automaticamente no Chromium. Abra manualmente:', painelUrl);
+        console.log('[WARN] Não foi possível abrir automaticamente no Chromium. Abra manualmente:', painelUrl);
       }
     })();
   }, 1200); // Delay de 1.2s para garantir o servidor up antes do browser abrir
@@ -173,7 +172,7 @@ if (process.env.OPEN_CHROMIUM_ON_START == '1') {
 
 // Graceful shutdown — encerra worker e faz cleanup
 process.on('SIGINT', async () => {
-  log.info('[STOP] SIGINT recebido. Encerrando...');
+  console.log('[STOP] SIGINT recebido. Encerrando...');
   try {
     // Descomente se quiser resetar contas ao sair
     // fileStore.resetDesiredAllOffOnBoot();
@@ -183,7 +182,7 @@ process.on('SIGINT', async () => {
 });
 
 process.on('SIGTERM', async () => {
-  log.info('[STOP] SIGTERM recebido. Encerrando...');
+  console.log('[STOP] SIGTERM recebido. Encerrando...');
   try {
     // Descomente se quiser resetar contas ao sair
     // fileStore.resetDesiredAllOffOnBoot();
