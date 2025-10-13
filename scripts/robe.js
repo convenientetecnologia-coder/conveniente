@@ -920,6 +920,17 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     await patchPage(nome, page, coords);
     stepLogArr.push(`[${nome}] Nova aba criada para Robe`);
 
+    // --- PATCH INICIO ---
+    // Checagem precoce de bloqueio de limite de postagem
+    // Detecção ANTES de preencher qualquer campo!
+    const earlyLimitDetected = await detectLimitOverlay(page, { timeoutMs: 3500, intervalMs: 300 });
+    if (earlyLimitDetected) {
+      logger.warn('[ROBE] Limite de postagem DETECTADO ao abrir "Criar item" — abortando Robe e aplicando pausa 24h', { nome, attId });
+      await applyLimitPostingAndAbort({ page, nome, attId, where: 'early_detect_create' });
+      return; // Saída antecipada, não tenta publicar nem executar etapas seguintes!
+    }
+    // --- PATCH FIM ---
+
     // Captura possíveis diálogos
     page.on('dialog', async dlg => {
       try {
@@ -974,6 +985,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Micro settle (2 frames + 100–220 ms); substituído por sleep apenas (alteração)
     await sleep(jitter(100, 220));
     stepLogArr.push(`[${nome}] Tela de criar item pronta (fast-lane)`);
+
+    // Checagem adicional após fast-lane/readiness
+    const readyLimitDetected = await detectLimitOverlay(page, { timeoutMs: 2000, intervalMs: 300 });
+    if (readyLimitDetected) {
+      logger.warn('[ROBE] Limite de postagem DETECTADO após readiness (preenchimento) — abortando Robe e aplicando pausa 24h', { nome, attId });
+      await applyLimitPostingAndAbort({ page, nome, attId, where: 'after_ready_detect' });
+      return; // Saída antecipada!
+    }
 
     // FOTO — via fotos.js
     const pick = await fotos.pickPhotoForAccount(nome, workingNames);
