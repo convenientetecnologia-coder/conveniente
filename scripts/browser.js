@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const utils = require('./utils.js');
+const logger = require('./logger.js');
 
 puppeteer.use(StealthPlugin());
 
@@ -68,15 +69,15 @@ async function injectCookies(page, cookies) {
       return obj;
     }).filter(c => c.name && c.value && c.domain && c.path);
     if (process.env.BROWSER_DEBUG === '1') {
-      console.log('[COOKIES] PARA INJETAR FINAL:', filtered);
+      logger.debug('[COOKIES] PARA INJETAR FINAL:', { cookies: filtered });
     }
     await page.setCookie(...filtered);
     if (process.env.BROWSER_DEBUG === '1') {
-      console.log('[COOKIES] setCookie OK');
+      logger.debug('[COOKIES] setCookie OK');
     }
   } catch (e) {
     if (process.env.BROWSER_DEBUG === '1') {
-      console.warn('[browser.js] Erro ao injetar cookies:', e && e.message);
+      logger.warn('[browser.js] Erro ao injetar cookies: ' + (e && e.message));
     }
   }
 }
@@ -130,7 +131,7 @@ async function patchPage(nome, page, coords) {
       });
     } catch(e) {
       if (process.env.BROWSER_DEBUG === '1') {
-        console.warn('[patchPage] Falha ao setar UA-CH:', e && e.message);
+        logger.warn('[patchPage] Falha ao setar UA-CH: ' + (e && e.message));
       }
     }
   }
@@ -353,7 +354,7 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
 
       if (nomePerfil && openingMap[nomePerfil] === true) {
         if (process.env.BROWSER_DEBUG === '1') {
-          console.log(`[BROWSER] SKIP KILL, nome em opening: ${nomePerfil}`);
+          logger.debug(`[BROWSER] SKIP KILL, nome em opening: ${nomePerfil}`);
         }
         return; // Proteção: não mata processos deste perfil enquanto está em abertura
       }
@@ -388,7 +389,7 @@ function printChromeLog(chromeLogFile, label = 'CHROME LOG') {
     if (!chromeLogFile || !fs.existsSync(chromeLogFile)) return;
     const txt = fs.readFileSync(chromeLogFile, 'utf8');
     const lines = txt.split(/\r?\n/).filter(Boolean).slice(0, 80).join('\n');
-    console.log(`[BROWSER][${label}] (primeiras linhas) >>>\n${lines}\n<<< [fim do log]`);
+    logger.info(`[BROWSER][${label}] (primeiras linhas) >>>\n${lines}\n<<< [fim do log]`);
   } catch {}
 }
 
@@ -477,7 +478,7 @@ function ensureChromeProfilePreferences(userDataDir) {
     ls.exited_cleanly = true;
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
-    try { if (process.env.BROWSER_DEBUG === '1') { console.warn('[BROWSER][prefs] falha ao normalizar preferências:', e && e.message || e); } } catch {}
+    try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferências: ' + ((e && e.message) || e)); } } catch {}
   }
 }
 
@@ -498,10 +499,12 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
     const proc = browser.process && browser.process();
     if (proc && proc.pid) {
       if (process.env.BROWSER_DEBUG === '1') {
-        console.log(`[BROWSER][PID] ${proc.pid}`);
+        logger.debug(`[BROWSER][PID] ${proc.pid}`);
       }
     }
-  } catch {}
+  } catch (e) {
+    logger.warn('[BROWSER][PRUNE] erro ao obter PID do processo', { nome, error: (e && e.message) || e });
+  }
 
   // Proteção ULTRA CONSCIENTE
   try {
@@ -515,11 +518,13 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
     ) {
       // Militar: prune adiado devido Robe emExecucao/skipPruneUntil
       if (process.env.BROWSER_DEBUG === '1') {
-        console.log(`[BROWSER][PRUNE][SKIP] Militar: prune adiado devido Robe emExecucao/skipPruneUntil para perfil ${nome}`);
+        logger.debug(`[BROWSER][PRUNE][SKIP] Militar: prune adiado devido Robe emExecucao/skipPruneUntil para perfil ${nome}`);
       }
       return;
     }
-  } catch {}
+  } catch (e) {
+    logger.warn('[BROWSER][PRUNE] erro ao avaliar proteção ULTRA CONSCIENTE', { nome, error: (e && e.message) || e });
+  }
 
   let numPagesAfter = 0;
 
@@ -534,22 +539,25 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
         pageInfos.push(u || 'about:blank');
       }
       if (pages.length <= 1) {
-        if (iterations === 1 && process.env.BROWSER_DEBUG === '1') console.log(`[BROWSER][PRUNE] pages=${pages.length} urls=${JSON.stringify(pageInfos)}`);
+        if (iterations === 1 && process.env.BROWSER_DEBUG === '1') logger.debug(`[BROWSER][PRUNE] pages=${pages.length} urls=${JSON.stringify(pageInfos)}`);
         break;
       }
       if (process.env.BROWSER_DEBUG === '1') {
-        console.log(`[BROWSER][PRUNE] detected ${pages.length} pages, closing extras... urls=${JSON.stringify(pageInfos)}`);
+        logger.debug(`[BROWSER][PRUNE] detected ${pages.length} pages, closing extras... urls=${JSON.stringify(pageInfos)}`);
       }
       // Mantém a mainPage; fecha as demais
       for (const p of pages) {
         if (p === mainPage) continue;
         try {
           await p.close({ runBeforeUnload: false }).catch(()=>{});
-        } catch {}
+        } catch (e) {
+          logger.warn('[BROWSER][PRUNE] erro ao fechar página extra', { nome, error: (e && e.message) || e });
+        }
       }
       // Pequena pausa e revalida
       await sleep(intervalMs);
     } catch (e) {
+      logger.warn('[BROWSER][PRUNE] erro durante varredura/fechamento de páginas', { nome, error: (e && e.message) || e });
       break;
     }
   }
@@ -561,7 +569,9 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
       robeMeta[nome].numPages = numPagesAfter;
       // Militar: numPages atualizado para painel
     }
-  } catch {}
+  } catch (e) {
+    logger.warn('[BROWSER][PRUNE] erro ao atualizar robeMeta.numPages', { nome, error: (e && e.message) || e });
+  }
 
   return;
 }
@@ -634,7 +644,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     ensureChromeProfilePreferences(userDataDir);
 
     try { fs.accessSync(userDataDir, fs.constants.W_OK); } catch (e) {
-      console.error('[BROWSER][DEBUG] ERRO NO userDataDir:', userDataDir, e && e.stack || e);
+      logger.error('[BROWSER][DEBUG] ERRO NO userDataDir:', { userDataDir }, e);
       throw new Error('UserDataDir sem permissão de escrita: ' + userDataDir);
     }
 
@@ -643,7 +653,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { cleanupUserDataLocks(userDataDir); } catch {}
 
     if (process.env.BROWSER_DEBUG === '1') {
-      console.log('[BROWSER][DEBUG] userDataDir:', userDataDir);
+      logger.debug('[BROWSER][DEBUG] userDataDir: ' + userDataDir);
     }
 
     const chromeLogFile = path.join(userDataDir, 'chrome_launch.log');
@@ -676,7 +686,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       const cleaned = tokens.map(t => t.replace(/^"(.*)"$/, '$1')).filter(Boolean);
       if (cleaned.length) {
         if (process.env.BROWSER_DEBUG === '1') {
-          console.log('[BROWSER][DEBUG] CHROME_EXTRA_ARGS:', cleaned);
+          logger.debug('[BROWSER][DEBUG] CHROME_EXTRA_ARGS: ' + JSON.stringify(cleaned));
         }
         launchArgs.push(...cleaned);
       }
@@ -694,7 +704,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     async function tryLaunch(args, tag) {
       try {
         if (process.env.BROWSER_DEBUG === '1') {
-          console.log(`>> [BROWSER][STEP] Puppeteer about to launch (${tag}).`);
+          logger.debug(`>> [BROWSER][STEP] Puppeteer about to launch (${tag}).`);
         }
         const b = await puppeteer.launch({
           headless: isHeadless ? true : false,
@@ -706,15 +716,15 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         });
         if (process.env.BROWSER_DEBUG === '1') {
           const spawnargs = b.process && b.process() ? b.process().spawnargs : null;
-          console.log('[BROWSER][DEBUG] spawnargs:', spawnargs);
+          logger.debug('[BROWSER][DEBUG] spawnargs: ' + JSON.stringify(spawnargs));
         }
         return b;
       } catch (e) {
         if (process.env.BROWSER_DEBUG === '1') {
-          console.error(`[BROWSER][CRASH][${tag}]`, e && e.stack || e);
+          logger.error(`[BROWSER][CRASH][${tag}]`, {}, e);
           printChromeLog(chromeLogFile, tag);
         } else {
-          console.error(`[BROWSER][CRASH][${tag}]`, e && e.message || e);
+          logger.error(`[BROWSER][CRASH][${tag}]`, {}, e);
         }
         return null;
       }
@@ -750,9 +760,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // 1) Garantir pages()
     let pages;
     try {
-      if (process.env.BROWSER_DEBUG === '1') console.log('>> [BROWSER][STEP] browser.pages() about to call');
+      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] browser.pages() about to call');
       pages = await browser.pages();
-      if (process.env.BROWSER_DEBUG === '1') console.log('>> [BROWSER][STEP] browser.pages() returned:', pages && pages.length);
+      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] browser.pages() returned: ' + (pages && pages.length));
     } catch (e) {
       await safeCloseBrowser(browser);
       throw e;
@@ -771,9 +781,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         windowId,
         bounds: { windowState: 'maximized' }
       });
-      if (process.env.BROWSER_DEBUG === '1') console.log('>> [BROWSER][STEP] Janela maximizada [OK]');
+      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Janela maximizada [OK]');
     } catch (e) {
-      if (process.env.BROWSER_DEBUG === '1') console.warn('[BROWSER] Falha ao maximizar (seguindo normal):', e && e.message);
+      logger.warn('[BROWSER] Falha ao maximizar (seguindo normal): ' + ((e && e.message) || e));
     }
 
     // 2. PATCH: Configuração defaultTimeout, defaultNavigationTimeout e interceptação beforeunload para TODAS as new pages!
@@ -819,9 +829,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       for (const o of origins) {
         await context.overridePermissions(o, ['geolocation']);
       }
-      if (process.env.BROWSER_DEBUG === '1') console.log('>> [BROWSER][STEP] Permissão GEO concedida [OK]');
+      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Permissão GEO concedida [OK]');
     } catch (e) {
-      if (process.env.BROWSER_DEBUG === '1') console.warn('[BROWSER][Permissão GEO] Falha ao conceder geolocalização:', e && e.message);
+      logger.warn('[BROWSER][Permissão GEO] Falha ao conceder geolocalização: ' + ((e && e.message) || e));
     }
 
     // 4) Espera por pelo menos 1 page pronta
@@ -877,13 +887,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     return browser;
   } catch (err) {
     try { await safeCloseBrowser(browser); } catch {}
-    console.error('========================================================');
-    if (process.env.BROWSER_DEBUG === '1') {
-      console.error('[BROWSER][ERRO FATAL ao abrir Puppeteer/browser]:', err && err.stack || err);
-    } else {
-      console.error('[BROWSER][ERRO FATAL ao abrir Puppeteer/browser]:', err && err.message || err);
-    }
-    console.error('========================================================');
+    logger.error('[BROWSER][ERRO FATAL ao abrir Puppeteer/browser]', {}, err);
     throw err;
   }
 }
@@ -932,7 +936,7 @@ async function clickByXPath(page, xps, { waitNav = true, timeoutNav = 15000, log
         return true;
       }
     } catch (e) {
-      try { if (process.env.BROWSER_DEBUG === '1') { console.log(`${logPrefix} clickByXPath err:`, e && e.message || e); } } catch {}
+      try { if (process.env.BROWSER_DEBUG === '1') { logger.debug(`${logPrefix} clickByXPath err: ` + ((e && e.message) || e)); } } catch {}
     }
   }
   return false;
@@ -943,7 +947,7 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
     const url = page.url() || '';
     if (!/messenger.com\/login\/nonce/i.test(url)) return true;
 
-    try { if (process.env.BROWSER_DEBUG === '1') { console.log(`${logPrefix} detectado em ${url}`); } } catch {}
+    try { if (process.env.BROWSER_DEBUG === '1') { logger.debug(`${logPrefix} detectado em ${url}`); } } catch {}
 
     // Botão “Recarregar página”
     const recarregar = await waitAny(page, [
@@ -1001,7 +1005,7 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
       ]);
       return true;
     } catch (e) {
-      try { if (process.env.BROWSER_DEBUG === '1') { console.log(`${logPrefix} click via CSS falhou:`, e && e.message || e); } } catch {}
+      try { if (process.env.BROWSER_DEBUG === '1') { logger.debug(`${logPrefix} click via CSS falhou: ` + ((e && e.message) || e)); } } catch {}
     }
   }
 
@@ -1020,17 +1024,17 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
 // ===============
 async function configureProfile(browser, nome, cookiesOverride = null) {
   if (process.env.CONFIGURE_DEBUG === '1') {
-    console.log('[CONFIG] Iniciando configureProfile para', nome);
+    logger.debug('[CONFIG] Iniciando configureProfile para ' + nome);
   }
 
   let pages;
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 1A: Antes de pegar pages (await browser.pages())');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 1A: Antes de pegar pages (await browser.pages())');
     pages = await browser.pages();
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 1B: Depois de pegar pages (await browser.pages())');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 1B: Depois de pegar pages (await browser.pages())');
   } catch (e) {
     if (process.env.CONFIGURE_DEBUG === '1') {
-      console.error('[CONFIG][ERRO][CHECKPOINT 1][browser.pages()]:', e && e.stack ? e.stack : e);
+      logger.debug('[CONFIG][ERRO][CHECKPOINT 1][browser.pages()]: ' + ((e && e.stack) ? e.stack : e));
     }
     throw e;
   }
@@ -1040,7 +1044,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
 
   let page, manifest, coords;
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 2A: Antes de patchPage');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 2A: Antes de patchPage');
     page = pages[0];
     // LEITURA DE MANIFEST VIA userDataDir DEFINIDO EM perfis.json
     const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
@@ -1050,10 +1054,10 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     coords = utils.getCoords(manifest.cidade || '');
     await patchPage(nome, page, coords);
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 2B: Depois de patchPage');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 2B: Depois de patchPage');
   } catch (e) {
     if (process.env.CONFIGURE_DEBUG === '1') {
-      console.error('[CONFIG][ERRO][CHECKPOINT 2][patchPage]:', e && e.stack ? e.stack : e);
+      logger.debug('[CONFIG][ERRO][CHECKPOINT 2][patchPage]: ' + ((e && e.stack) ? e.stack : e));
     }
     throw e;
   }
@@ -1064,10 +1068,10 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   // ================================================================
 
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 8A: Antes de page.goto("https://facebook.com/")');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 8A: Antes de page.goto("https://facebook.com/")');
     await pages[0].goto('https://facebook.com/', { waitUntil: 'domcontentloaded' }).catch((e) => {
       if (process.env.CONFIGURE_DEBUG === '1') {
-        console.warn('[CONFIG][ERRO][CHECKPOINT 8][goto facebook.com.catch]:', e && e.stack ? e.stack : e);
+        logger.debug('[CONFIG][ERRO][CHECKPOINT 8][goto facebook.com.catch]: ' + ((e && e.stack) ? e.stack : e));
       }
     });
 
@@ -1075,105 +1079,105 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
       const title = await pages[0].title();
       const url = pages[0].url();
       if (process.env.CONFIGURE_DEBUG === '1') {
-        console.log(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
+        logger.debug(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
       }
     } catch(logerr) {
       if (process.env.CONFIGURE_DEBUG === '1') {
-        console.log('[STATE] Erro ao obter título/URL após goto facebook.com:', logerr && logerr.stack ? logerr.stack : logerr);
+        logger.debug('[STATE] Erro ao obter título/URL após goto facebook.com: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
       }
     }
 
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 8B: Depois de page.goto("https://facebook.com/")');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 8B: Depois de page.goto("https://facebook.com/")');
   } catch(e) {
     if (process.env.CONFIGURE_DEBUG === '1') {
-      console.error('[CONFIG][ERRO][CHECKPOINT 8][page.goto facebook.com]:', e && e.stack ? e.stack : e);
+      logger.debug('[CONFIG][ERRO][CHECKPOINT 8][page.goto facebook.com]: ' + ((e && e.stack) ? e.stack : e));
     }
     throw e;
   }
 
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 9A: Antes do delay após logar/principal (6s) ===');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 9A: Antes do delay após logar/principal (6s) ===');
     await new Promise(r => setTimeout(r, 6000));
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 9B: Depois do delay após logar/principal (6s) ===');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 9B: Depois do delay após logar/principal (6s) ===');
   } catch(e) {
     if (process.env.CONFIGURE_DEBUG === '1') {
-      console.error('[CONFIG][ERRO][CHECKPOINT 9][Delay de 6s após logar/principal]:', e && e.stack ? e.stack : e);
+      logger.debug('[CONFIG][ERRO][CHECKPOINT 9][Delay de 6s após logar/principal]: ' + ((e && e.stack) ? e.stack : e));
     }
     throw e;
   }
 
   const openedPages = [];
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10A: Antes de abrir abas auxiliares ===');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10A: Antes de abrir abas auxiliares ===');
     openedPages[0] = pages[0];
 
     // Aba 1 — criar item
     try {
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.1A: Antes de newPage (marketplace)');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.1A: Antes de newPage (marketplace)');
       openedPages[1] = await browser.newPage();
       await patchPage(nome, openedPages[1], coords);
       await new Promise(r => setTimeout(r, 1000));
       await openedPages[1].goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded' }).catch((e) => {
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.warn('[CONFIG][ERRO][CHECKPOINT 10.1][goto marketplace.catch]:', e && e.stack ? e.stack : e);
+          logger.debug('[CONFIG][ERRO][CHECKPOINT 10.1][goto marketplace.catch]: ' + ((e && e.stack) ? e.stack : e));
         }
       });
       try {
         const title = await openedPages[1].title();
         const url = await openedPages[1].url();
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.log(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
+          logger.debug(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
         }
       } catch(logerr) {
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.log('[STATE] Erro ao obter título/URL após goto marketplace:', logerr && logerr.stack ? logerr.stack : logerr);
+          logger.debug('[STATE] Erro ao obter título/URL após goto marketplace: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
         }
       }
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.1D: goto marketplace OK');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.1D: goto marketplace OK');
       await new Promise(r => setTimeout(r, 6000));
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.1E: Delay após marketplace OK');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.1E: Delay após marketplace OK');
     } catch(e) {
       if (process.env.CONFIGURE_DEBUG === '1') {
-        console.error('[CONFIG][ERRO][CHECKPOINT 10.1][Aba Marketplace]:', e && e.stack ? e.stack : e);
+        logger.debug('[CONFIG][ERRO][CHECKPOINT 10.1][Aba Marketplace]: ' + ((e && e.stack) ? e.stack : e));
       }
     }
 
     // Aba 2 — idioma
     try {
       await new Promise(r => setTimeout(r, 1000));
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.2A: Antes de newPage (idioma)');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.2A: Antes de newPage (idioma)');
       openedPages[2] = await browser.newPage();
       await patchPage(nome, openedPages[2], coords);
       await new Promise(r => setTimeout(r, 1000));
       await openedPages[2].goto('https://www.facebook.com/settings/?tab=language', { waitUntil: 'domcontentloaded' }).catch((e) => {
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.warn('[CONFIG][ERRO][CHECKPOINT 10.2][goto idioma.catch]:', e && e.stack ? e.stack : e);
+          logger.debug('[CONFIG][ERRO][CHECKPOINT 10.2][goto idioma.catch]: ' + ((e && e.stack) ? e.stack : e));
         }
       });
       try {
         const title = await openedPages[2].title();
         const url = await openedPages[2].url();
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.log(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
+          logger.debug(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
         }
       } catch(logerr) {
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.log('[STATE] Erro ao obter título/URL após goto idioma:', logerr && logerr.stack ? logerr.stack : logerr);
+          logger.debug('[STATE] Erro ao obter título/URL após goto idioma: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
         }
       }
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.2D: goto idioma OK');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.2D: goto idioma OK');
       await new Promise(r => setTimeout(r, 6000));
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.2E: Delay após idioma OK');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.2E: Delay após idioma OK');
     } catch(e) {
       if (process.env.CONFIGURE_DEBUG === '1') {
-        console.error('[CONFIG][ERRO][CHECKPOINT 10.2][Aba Idioma]:', e && e.stack ? e.stack : e);
+        logger.debug('[CONFIG][ERRO][CHECKPOINT 10.2][Aba Idioma]: ' + ((e && e.stack) ? e.stack : e));
       }
     }
 
     // Aba 3 — MESSENGER: PATCH UNIVERSAL COOKIES
     try {
       await new Promise(r => setTimeout(r, 1000));
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.3A: Antes de newPage (messenger)');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.3A: Antes de newPage (messenger)');
       openedPages[3] = await browser.newPage();
       await patchPage(nome, openedPages[3], coords);
       await new Promise(r => setTimeout(r, 1000));
@@ -1189,7 +1193,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
         await sleep(800);
       } catch {
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.log('[CONFIG][Messenger] reload inicial falhou, seguindo...');
+          logger.debug('[CONFIG][Messenger] reload inicial falhou, seguindo...');
         }
       }
 
@@ -1210,35 +1214,35 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
         const title = await openedPages[3].title();
         const url = await openedPages[3].url();
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.log(`[STATE] Messenger Após fluxo: "${title}" | URL: ${url}`);
+          logger.debug(`[STATE] Messenger Após fluxo: "${title}" | URL: ${url}`);
         }
       } catch(logerr) {
         if (process.env.CONFIGURE_DEBUG === '1') {
-          console.log('[STATE] Erro ao obter título/URL após fluxo messenger:', logerr && logerr.stack ? logerr.stack : logerr);
+          logger.debug('[STATE] Erro ao obter título/URL após fluxo messenger: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
         }
       }
-      if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10.3Z: Fluxo Messenger finalizado (robusto)');
+      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.3Z: Fluxo Messenger finalizado (robusto)');
 
       await new Promise(r => setTimeout(r, 4000)); // settle curto
     } catch(e) {
       if (process.env.CONFIGURE_DEBUG === '1') {
-        console.error('[CONFIG][ERRO][CHECKPOINT 10.3][Aba Messenger robusta]:', e && e.stack ? e.stack : e);
+        logger.debug('[CONFIG][ERRO][CHECKPOINT 10.3][Aba Messenger robusta]: ' + ((e && e.stack) ? e.stack : e));
       }
     }
     // FIM ABA MESSENGER PATCH UNIVERSAL COOKIES
 
-    if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 10B: Depois de abrir abas auxiliares ===');
+    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10B: Depois de abrir abas auxiliares ===');
   } catch(e) {
     if (process.env.CONFIGURE_DEBUG === '1') {
-      console.error('[CONFIG][ERRO][CHECKPOINT 10][Abrindo abas auxiliares]:', e && e.stack ? e.stack : e);
+      logger.debug('[CONFIG][ERRO][CHECKPOINT 10][Abrindo abas auxiliares]: ' + ((e && e.stack) ? e.stack : e));
     }
     throw e;
   }
 
   // (REMOVIDO BLOCO DE PRUNING APÓS CONFIGURATION CONFORME INSTRUÇÃO)
 
-  if (process.env.CONFIGURE_DEBUG === '1') console.log('=== CHECKPOINT 14: Todas abas abertas/logadas, firmadas e curadas. Configuração concluída!');
-  if (process.env.CONFIGURE_DEBUG === '1') console.log('[CONFIG] configureProfile FINALIZADO em', nome);
+  if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 14: Todas abas abertas/logadas, firmadas e curadas. Configuração concluída!');
+  if (process.env.CONFIGURE_DEBUG === '1') logger.debug('[CONFIG] configureProfile FINALIZADO em ' + nome);
 }
 
 // ===============
@@ -1261,7 +1265,7 @@ async function invocarHumano(browser, nome) {
     // Garante focus de novo pós-navegação (opcional: repetir)
     await bringWindowToFront(page);
   } catch (e) {
-    try { if (process.env.BROWSER_DEBUG === '1') { console.warn('[BROWSER][invocarHumano] erro:', e && e.message || e); } } catch {}
+    try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][invocarHumano] erro: ' + ((e && e.message) || e)); } } catch {}
   }
 }
 
@@ -1412,16 +1416,16 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
           else fs.rmdirSync(p, { recursive: true }); // fallback
           removed++;
         } catch (e) {
-          console.warn('[BROWSER][hardClean] falha ao remover', p, e && e.message ? e.message : e);
+          logger.warn('[BROWSER][hardClean] falha ao remover ' + p + ' ' + ((e && e.message) ? e.message : e));
         }
       } catch (e) {
-        console.warn('[BROWSER][hardClean] erro ao acessar', p, e && e.message ? e.message : e);
+        logger.warn('[BROWSER][hardClean] erro ao acessar ' + p + ' ' + ((e && e.message) ? e.message : e));
       }
     }
 
     return { ok: true, removed };
   } catch (e) {
-    try { console.warn('[BROWSER][hardClean] erro inesperado:', e && e.message ? e.message : e); } catch {}
+    try { logger.warn('[BROWSER][hardClean] erro inesperado: ' + ((e && e.message) ? e.message : e)); } catch {}
     return { ok: true, removed: 0 };
   }
 }

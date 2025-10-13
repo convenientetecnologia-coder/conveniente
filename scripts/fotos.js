@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto'); // <--- ADICIONADO
+const logger = require('./logger.js'); // <--- ADICIONADO
 
 // ------------------------ Configs e caminhos ------------------------
 const DADOS_DIR = path.join(__dirname, '..', 'dados');
@@ -151,7 +152,9 @@ async function applyStatToRec(rec, stat, absPath) {
   // Calcule SHA-256 assim que nova geração surge
   try {
     rec.sha256 = await sha256File(absPath || '');
-  } catch {}
+  } catch (e) {
+    logger.warn('[FOTOS][applyStatToRec] Falha ao calcular sha256', { arquivo: absPath, error: e && e.message || e });
+  }
 }
 
 // Verifica se o arquivo atual parece ser a mesma “geração” que registramos (preferencialmente por hash)
@@ -162,7 +165,8 @@ function sameGeneration(rec, stat, absPath) {
       const cur = require('crypto').createHash('sha256').update(fs.readFileSync(absPath)).digest('hex');
       return rec.sha256 === cur;
     }
-  } catch {
+  } catch (e) {
+    logger.warn('[FOTOS][sameGeneration] Erro ao comparar SHA256', { arquivo: absPath, error: e && e.message || e });
     return false;
   }
   if (typeof rec.size !== 'number' || typeof rec.mtimeMs !== 'number') return false;
@@ -203,13 +207,21 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
 
         if (!rec) {
           rec = idx[name] = { postedBy: [], reservedBy: {} };
-          await applyStatToRec(rec, stat, abs);
+          try {
+            await applyStatToRec(rec, stat, abs);
+          } catch (e) {
+            logger.warn('[FOTOS][pickPhotoForAccount] Erro ao aplicar stat em novo arquivo', { arquivo: abs, error: e && e.message || e });
+          }
           changed = true;
         } else {
           if (!sameGeneration(rec, stat, abs)) {
             rec.postedBy = [];
             rec.reservedBy = {};
-            await applyStatToRec(rec, stat, abs);
+            try {
+              await applyStatToRec(rec, stat, abs);
+            } catch (e) {
+              logger.warn('[FOTOS][pickPhotoForAccount] Erro ao aplicar stat em troca de geração', { arquivo: abs, error: e && e.message || e });
+            }
             rec.deletePending = false;
             changed = true;
           }
@@ -249,6 +261,9 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
       if (removed || changed) saveIndex(idx);
 
       return { ok: false, error: 'no-photo-available' };
+    } catch (e) {
+      logger.error('[FOTOS][pickPhotoForAccount] Erro inesperado', { error: e && e.message || e, stack: e && e.stack });
+      return { ok: false, error: 'internal-error' };
     } finally {
       releaseIndexLock(lockFd);
     }
@@ -272,6 +287,9 @@ async function releaseReservation(nomeConta, fileName) {
         delete rec.reservedBy[nomeConta];
         saveIndex(idx);
       }
+      return { ok: true };
+    } catch (e) {
+      logger.warn('[FOTOS][releaseReservation] Erro ao liberar reserva', { arquivo: fileName, conta: nomeConta, error: e && e.message || e });
       return { ok: true };
     } finally {
       releaseIndexLock(lockFd);
@@ -310,12 +328,22 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
       let rec = idx[fileName];
       if (!rec) {
         rec = idx[fileName] = { postedBy: [], reservedBy: {} };
-        if (stat) await applyStatToRec(rec, stat, abs);
+        if (stat) {
+          try {
+            await applyStatToRec(rec, stat, abs);
+          } catch (e) {
+            logger.warn('[FOTOS][markPostedAndMaybeDelete] Erro ao aplicar stat (novo rec)', { arquivo: abs, error: e && e.message || e });
+          }
+        }
       } else {
         if (stat && !sameGeneration(rec, stat, abs)) {
           rec.postedBy = [];
           rec.reservedBy = {};
-          await applyStatToRec(rec, stat, abs);
+          try {
+            await applyStatToRec(rec, stat, abs);
+          } catch (e) {
+            logger.warn('[FOTOS][markPostedAndMaybeDelete] Erro ao aplicar stat (nova geração)', { arquivo: abs, error: e && e.message || e });
+          }
           rec.deletePending = false;
         }
       }
@@ -349,12 +377,17 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
             rec.deletePending = true;
             rec.lastError = String(e && e.message || e);
             saveIndex(idx);
+            logger.warn('[FOTOS][markPostedAndMaybeDelete] Falha ao remover arquivo', { arquivo: abs, error: e && e.message || e });
             return { ok: true, deleted: false };
           }
         } else {
           rec.postedBy = [];
           rec.reservedBy = {};
-          await applyStatToRec(rec, stat, abs);
+          try {
+            await applyStatToRec(rec, stat, abs);
+          } catch (e) {
+            logger.warn('[FOTOS][markPostedAndMaybeDelete] Erro ao aplicar stat ao resetar geração', { arquivo: abs, error: e && e.message || e });
+          }
           rec.deletePending = false;
           saveIndex(idx);
           return { ok: true, deleted: false };
@@ -362,6 +395,9 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
       }
       saveIndex(idx);
       return { ok: true, deleted: false };
+    } catch (e) {
+      logger.error('[FOTOS][markPostedAndMaybeDelete] Erro inesperado', { arquivo: fileName, error: e && e.message || e, stack: e && e.stack });
+      return { ok: false, error: 'internal-error' };
     } finally {
       releaseIndexLock(lockFd);
     }
@@ -400,7 +436,11 @@ async function gcSweep() {
         if (!sameGeneration(rec, stat, abs)) {
           rec.postedBy = [];
           rec.reservedBy = {};
-          await applyStatToRec(rec, stat, abs);
+          try {
+            await applyStatToRec(rec, stat, abs);
+          } catch (e) {
+            logger.warn('[FOTOS][gcSweep] Erro ao aplicar stat (nova geração)', { arquivo: abs, error: e && e.message || e });
+          }
           if (rec.deletePending) rec.deletePending = false;
           resetGens++;
           changed = true;
@@ -424,13 +464,21 @@ async function gcSweep() {
             changed = true;
           } catch (e) {
             rec.lastError = String(e && e.message || e);
+            logger.warn('[FOTOS][GC] Falha ao remover arquivo', { arquivo: abs, error: e && e.message || e });
             changed = true;
           }
         }
       }
 
+      if (removedIndex > 0 || deletedFiles > 0 || resetGens > 0) {
+        logger.info('[FOTOS][GC]', { removedIndex, deletedFiles, resetGens });
+      }
+
       if (changed) saveIndex(idx);
       return { ok: true, removedIndex, deletedFiles, resetGens };
+    } catch (e) {
+      logger.error('[FOTOS][gcSweep] Erro inesperado', { error: e && e.message || e, stack: e && e.stack });
+      return { ok: false, error: 'internal-error' };
     } finally {
       releaseIndexLock(lockFd);
     }
@@ -442,8 +490,13 @@ async function gcSweep() {
  */
 async function getIndexSnapshot() {
   return _serialize(async () => {
-    const idx = loadIndex();
-    return { ok: true, index: idx, fotosDir: resolveFotosDir(), indexPath: INDEX_FILE };
+    try {
+      const idx = loadIndex();
+      return { ok: true, index: idx, fotosDir: resolveFotosDir(), indexPath: INDEX_FILE };
+    } catch (e) {
+      logger.error('[FOTOS][getIndexSnapshot] Erro ao obter snapshot', { error: e && e.message || e, stack: e && e.stack });
+      return { ok: false, error: 'internal-error' };
+    }
   });
 }
 

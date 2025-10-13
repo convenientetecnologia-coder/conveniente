@@ -8,6 +8,7 @@ const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
 const manifestStore = require('./manifestStore.js');
 const stepLog = require('./stepLog.js');
+const logger = require('./logger.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -88,12 +89,13 @@ const LIMIT_POSTING_MS = 24 * 60 * 60 * 1000;
 const ABORT_LIMIT_POSTING = 'LIMIT_POSTING_ABORT';
 
 function throwAbortLimitPosting() {
-  const e = new Error(ABORT_LIMITING);
+  const e = new Error(ABORT_LIMIT_POSTING);
   e.LIMIT_POSTING = true;
   throw e;
 }
 
 async function applyLimitPostingAndAbort({ page, nome, attId, where, overlaySnapshot }) {
+  logger.warn('[ROBE] Limit posting detectado - aplicando pausa 24h', { nome, attId, where, overlay: overlaySnapshot || null });
   // Snapshot do manifest antes
   // Logging stack trace no evento critical (limit_posting)
   const stack = (new Error('limit_posting')).stack;
@@ -863,7 +865,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   const attId = stepLog.attemptId();
   stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'start', robePauseMs });
 
-  console.log(`[ROBE][startRobe] INÍCIO para ${nome}, pauseMS=${robePauseMs}, horário=${new Date().toLocaleString()}`);
+  logger.info(`[ROBE][startRobe] INÍCIO`, { nome, robePauseMs, horario: new Date().toLocaleString() });
 
   let perfilPath, manifest;
 
@@ -904,6 +906,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         const ate = new Date(manifest.robeCooldownUntil).toLocaleString();
         stepLogArr.push(`[${nome}] Cooldown ainda ativo por ${Math.ceil(leftMs/1000)}s (até ${ate}). Abortando sem atualizar pause.`);
         abortedByCooldown = true;
+        logger.warn(`[ROBE] Cooldown ativo; abortando`, { nome, leftMs, until: ate });
         // NÃO criar mensagens para “abortedByCooldown”
         return { ok: false, error: `cooldown_until_${ate}`, log: stepLogArr };
       }
@@ -949,6 +952,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           okNav = true;
         } catch (e) {
           navErr = e && e.message || String(e);
+          logger.warn('[ROBE] Falha ao navegar para página de criação', { nome, try: i+1, error: navErr }, e);
           await sleep(800);
         }
       }
@@ -1039,6 +1043,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
     if (!published) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_fail_final' });
+      logger.warn('[ROBE] Publicação não confirmada', { nome, titulo });
       throw new Error('publish_not_confirmed');
     }
 
@@ -1075,6 +1080,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   // ATENÇÃO: MARCAR FOTO COMO USADA (SEM REUSAR JAMAIS NA MESMA CONTA), MESMO SE ERRO/TIMEOUT/BUG.
   // GARANTE FAIL-CLOSED: NUNCA DUPLICA PARA A MESMA CONTA!
   } catch (e) {
+    logger.error('Erro em fluxo Robe', { nome }, e);
     if (e && e.LIMIT_POSTING === true) {
       limitPostingHit = true;
       // Nada mais além de já ter pausado/logado/fechado
@@ -1153,11 +1159,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     } catch {}
 
     if (page) {
-      try { await safeClosePage(page); console.log(`[ROBE] ${nome}: aba fechada no finally`); } catch {}
+      try { await safeClosePage(page); logger.info(`[ROBE] Aba fechada no finalmente`, { nome }); } catch {}
     }
 
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'end', success: !!published });
-    console.log(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'} | logs:`, stepLogArr);
+    logger.info(`[ROBE][startRobe] FIM: ${published ? 'success' : 'fail'}`, { nome, published, logs: stepLogArr });
   }
 
   return { ok: published, log: stepLogArr };

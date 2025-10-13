@@ -1,9 +1,12 @@
 // scripts/api_robes.js
 module.exports = (app, workerClient, fileStore) => {
   const manifestStore = require('./manifestStore.js');
+  const logger = require('./logger.js');
+  const issues = require('./issues.js');
 
   // Robe 24h (TODOS os perfis) — pausa por 24h cada um
   app.post('/api/robes/pause-24h-all', async (req, res) => {
+    logger.info('[ROTA POST /api/robes/pause-24h-all] chamada');
     try {
       const perfisArr = fileStore.loadPerfisJson();
       let total = 0, failed = 0, fails = [];
@@ -20,28 +23,32 @@ module.exports = (app, workerClient, fileStore) => {
             return man;
           });
           total++;
-          if (fileStore.issues && typeof fileStore.issues.append === "function") {
-            fileStore.issues.append({ type: 'robe_pause_24h', perfil: p.nome, ok: true, ts: Date.now() });
+          if (issues && typeof issues.append === "function") {
+            issues.append('system', 'robe_pause_24h', `perfil=${p.nome} ok=true`);
           }
         } catch(e) {
           failed++; fails.push(p.nome);
-          if (fileStore.issues && typeof fileStore.issues.append === "function") {
-            fileStore.issues.append({ type: 'robe_pause_24h', perfil: p.nome, ok: false, error: e && e.message || String(e), ts: Date.now() });
+          if (issues && typeof issues.append === "function") {
+            issues.append('system', 'robe_pause_24h', `perfil=${p.nome} ok=false error=${e && e.message || String(e)}`);
           }
         }
       }
       if (failed > 0) {
+        logger.warn('Falha em /api/robes/pause-24h-all', { failed, fails });
         res.json({ ok: false, error: `Failure in ${failed} perfil(s)`, fails });
       } else {
+        logger.info('Robe 24h todos aplicados', { total });
         res.json({ ok: true, total });
       }
     } catch (e) {
+      logger.error('Erro em /api/robes/pause-24h-all', {}, e);
       res.json({ ok: false, error: e && e.message || String(e) });
     }
   });
 
   // Robe Release/Play global — libera todos Robe
   app.post('/api/robes/release-all', async (req, res) => {
+    logger.info('[ROTA POST /api/robes/release-all] chamada');
     try {
       const perfisArr = fileStore.loadPerfisJson();
       let total = 0, failed = 0, fails = [];
@@ -55,8 +62,8 @@ module.exports = (app, workerClient, fileStore) => {
         } catch {}
         if (manCur && manCur.robePauseReason === 'limit_posting' && (manCur.robeCooldownUntil || 0) > Date.now()) {
           fails.push(p.nome);
-          if (fileStore.issues && typeof fileStore.issues.append === "function") {
-            fileStore.issues.append({ type: 'release_all_skip_limit_posting_active', perfil: p.nome, ts: Date.now() });
+          if (issues && typeof issues.append === "function") {
+            issues.append('system', 'release_all_skip_limit_posting_active', `perfil=${p.nome}`);
           }
           continue; // profile NÃO é liberado, nem alterado
         }
@@ -70,13 +77,13 @@ module.exports = (app, workerClient, fileStore) => {
             return man;
           });
           total++;
-          if (fileStore.issues && typeof fileStore.issues.append === "function") {
-            fileStore.issues.append({ type: 'robe_release_all', perfil: p.nome, ok: true, ts: Date.now() });
+          if (issues && typeof issues.append === "function") {
+            issues.append('system', 'robe_release_all', `perfil=${p.nome} ok=true`);
           }
         } catch(e) {
           failed++; fails.push(p.nome);
-          if (fileStore.issues && typeof fileStore.issues.append === "function") {
-            fileStore.issues.append({ type: 'robe_release_all', perfil: p.nome, ok: false, error: e && e.message || String(e), ts: Date.now() });
+          if (issues && typeof issues.append === "function") {
+            issues.append('system', 'robe_release_all', `perfil=${p.nome} ok=false error=${e && e.message || String(e)}`);
           }
         }
       }
@@ -85,16 +92,19 @@ module.exports = (app, workerClient, fileStore) => {
         await workerClient.sendWorkerCommand('robes-release-all', {}, { timeoutMs: 20000 }); 
       } catch(e) {
         // log, mas não bloqueia o fluxo
-        if (fileStore.issues && typeof fileStore.issues.append === "function") {
-          fileStore.issues.append({ type: 'robes_release_all_worker_sync_error', error: e && e.message || String(e), ts: Date.now() });
+        if (issues && typeof issues.append === "function") {
+          issues.append('system', 'robes_release_all_worker_sync_error', `error=${e && e.message || String(e)}`);
         }
       }
       if (failed > 0 || (fails && fails.length)) {
+        logger.warn('Falha em /api/robes/release-all', { failed, fails });
         res.json({ ok: false, error: `Failure in ${failed} perfil(s) or skipped limit_posting: ${fails && fails.length ? fails.join(', ') : ''}`, fails });
       } else {
+        logger.info('Robe release all executado', { total });
         res.json({ ok: true, total });
       }
     } catch (e) {
+      logger.error('Erro em /api/robes/release-all', {}, e);
       res.json({ ok: false, error: e && e.message || String(e) });
     }
   });

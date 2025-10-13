@@ -1,6 +1,7 @@
 // scripts/worker.js
 const path = require('path');
 const fs = require('fs');
+const logger = require('./logger.js');
 
 // IMPORTS dos helpers
 const browserHelper = require('./browser.js');
@@ -357,18 +358,18 @@ async function killStrayChromes() {
 
 // ====== BOOT ENV LOG ======
 try {
-console.log('[WORKER][BOOT]', {
-  pid: process.pid,
-  execPath: process.execPath,
-  versions: process.versions,
-  npm_node_execpath: process.env.npm_node_execpath || '',
-  ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE || '',
-  platform: process.platform,
-  arch: process.arch,
-  cwd: process.cwd()
-});
+  logger.info('[WORKER][BOOT]', {
+    pid: process.pid,
+    execPath: process.execPath,
+    versions: process.versions,
+    npm_node_execpath: process.env.npm_node_execpath || '',
+    ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE || '',
+    platform: process.platform,
+    arch: process.arch,
+    cwd: process.cwd()
+  });
 } catch (e) {
-try { console.log('[WORKER][BOOT] log error', e && e.message || e); } catch {}
+  try { logger.warn('[WORKER][BOOT] log error', { error: e && e.message || e }); } catch {}
 }
 
 // Caminhos principais
@@ -591,7 +592,7 @@ try {
     }
   }
 } catch (err) {
-  try { console.warn('[BOOT] Erro ao repopular frozenUntil dos manifests:', err && err.message || err); } catch {}
+  try { logger.warn('[BOOT] Erro ao repopular frozenUntil dos manifests', { error: err && err.message || err }); } catch {}
 }
 
 // Wrapper para enriquecer automaticamente os logs de issues.append (contexto completo)
@@ -725,8 +726,9 @@ async function activateOnce(nome, source = '') {
     }
 
     const job = (async () => {
+      logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
-        console.log('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
+        logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
         const manifest = ensureManifestValid(nome);
         if (!manifest) {
           // Não foi possível auto-curar (manifest + perfis.json quebrado)
@@ -794,7 +796,8 @@ async function activateOnce(nome, source = '') {
         // INSTRUÇÃO 4: Limpa closingReason ao abrir e autenticar com sucesso
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].closingReason = null;
-        console.log('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
+        logger.info('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
+        logger.info('[WORKER][activateOnce] concluído', { nome, source });
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
 
         return { ok: true };
@@ -823,7 +826,7 @@ async function activateOnce(nome, source = '') {
           try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s (activateOnce)'); } catch {}
         }
         // FIM DA INSTRUÇÃO 9
-        console.warn('[WORKER][activateOnce] fail nome=' + nome + ' source=' + source + ':', e && e.message || e);
+        logger.error('[WORKER][activateOnce] fail', { nome, source, err: e && e.message }, e);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
         return { ok: false, error: e && e.message || String(e) };
       } finally {
@@ -1030,13 +1033,13 @@ async function closeExtraPages(browser, mainPage, nome) {
       try { await page.close({ runBeforeUnload: false }); closed++; } catch {}
     }
     if (closed > 0) {
-      console.log('[PRUNER] Fechou', closed, 'abas extras.');
+      logger.info('[PRUNER] Fechou abas extras', { nome, closed });
     } else if (process.env.PRUNE_DEBUG === '1') {
-      console.debug('[PRUNER] Nada a fechar.');
+      logger.info('[PRUNER] Nada a fechar', { nome });
     }
   } catch (e) {
     if (process.env.PRUNE_DEBUG === '1') {
-      console.warn('[PRUNER] Erro prune:', e && e.message || e);
+      logger.warn('[PRUNER] Erro prune', { nome, error: e && e.message || e });
     }
   }
 }
@@ -1051,7 +1054,7 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
       await closeExtraPages(browser, mainPage, nome);
     } catch (e) {
       if (process.env.PRUNE_DEBUG === '1') {
-        console.warn('[PRUNER] Erro prune:', e && e.message || e);
+        logger.warn('[PRUNER] Erro prune', { nome, error: e && e.message || e });
       }
     }
   }, 2*60*1000);
@@ -1167,7 +1170,7 @@ async function ramCpuMonitorTick() {
 
     // Exemplo de debug: flag por env p/ troubleshooting de problemas de monitoramento
     if (process.env.METRICS_DEBUG === '1') {
-      console.log('[METRICS] pidsByNome:', Object.keys(pidsByNome), 'Example command:', Object.values(pidsMeta)[0]?.cmd || '');
+      logger.info('[METRICS] pidsByNome', { nomes: Object.keys(pidsByNome), exampleCommand: Object.values(pidsMeta)[0]?.cmd || '' });
     }
 
     // para cada nome: query pidusage para RAM/CPU dos seus PIDs
@@ -1262,9 +1265,11 @@ async function ramCpuMonitorTick() {
             // Interlock anti-flap
             if (killGuardActive(nome)) {
               await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+              logger.info('[BREAKER][CPU] guard_skip', { nome });
               return;
             }
 
+            logger.warn('[BREAKER][CPU] acionado', { nome, last5: last5.map(h => h.p) });
             await handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'});
             setKillGuard(nome);
             await reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
@@ -1287,6 +1292,7 @@ async function ramCpuMonitorTick() {
     // Histerese: não agir se recente kill RAM
     if (robeMeta[nome]?.ramKillHysteresisUntil && robeMeta[nome].ramKillHysteresisUntil > now) {
       await issues.append(nome, 'ram_hysteresis_skip', `skip_until=${robeMeta[nome].ramKillHysteresisUntil}`);
+      logger.info('[BREAKER][RAM] hysteresis_skip', { nome, until: robeMeta[nome].ramKillHysteresisUntil });
       continue;
     }
 
@@ -1321,6 +1327,7 @@ async function ramCpuMonitorTick() {
     if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < RAM_KILL_MB_LOCAL) {
       if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
         try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
+        logger.warn('[BREAKER][RAM] warning_high_usage', { nome, ramMB, warnThreshold: AUTO_CFG.RAM_WARN_MB });
         robeMeta[nome].lastWarn = Date.now();
       }
     }
@@ -1378,6 +1385,7 @@ async function ramCpuMonitorTick() {
 
           if (!(allHigh2 || slopeOK2)) {
             await issues.append(nome, 'ram_double_sample_clear', `skip=${ramMB2!=null?ramMB2:'n/a'}MB`);
+            logger.info('[BREAKER][RAM] double_sample_clear', { nome, sampleMB: ramMB2 });
             continue;
           }
         } catch {}
@@ -1388,9 +1396,11 @@ async function ramCpuMonitorTick() {
         // Interlock anti-flap
         if (killGuardActive(nome)) {
           await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
+          logger.info('[BREAKER][RAM] guard_skip', { nome });
           continue;
         }
 
+        logger.warn('[BREAKER][RAM] acionado', { nome, ramMB, allHigh, slopeOK });
         await handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' });
         setKillGuard(nome);
         await reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK}) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
@@ -1436,7 +1446,7 @@ setTimeout(ramCpuMonitorTick, 5000);
 
 // --------------- ROBE/TICK
 async function robeTickGlobal() {
-  console.log('[WORKER][robeTickGlobal] Tick fila global, hora:', new Date().toLocaleString());
+  logger.info('[WORKER][robeTickGlobal] Tick fila global', { hora: new Date().toLocaleString() });
 
   const perfisArr = loadPerfisJson();
   // PATCH 2 — Usar normalizeCooldown em vez de robeCooldownLeft (pré-filtragem com Promise.all)
@@ -1464,7 +1474,7 @@ async function robeTickGlobal() {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser) continue;
 
-    console.log(`[WORKER][robeTickGlobal] Enfileirando ${nome}? cooldown=${await normalizeCooldown(nome)}s inQueue=${robeQueue.inQueue(nome)}, isActive=${robeQueue.isActive(nome)}`);
+    logger.info('[WORKER][robeTickGlobal] Enfileirando', { nome, cooldown: await normalizeCooldown(nome), inQueue: robeQueue.inQueue(nome), isActive: robeQueue.isActive(nome) });
 
     robeQueue.enqueue(nome, async () => {
 
@@ -1483,7 +1493,7 @@ async function robeTickGlobal() {
       }
 
       // Log de início do Robe
-      try { console.log(`[WORKER][robeTickGlobal] Robe start: ${nome}`); } catch {}
+      try { logger.info('[WORKER][robeTickGlobal] Robe start', { nome }); } catch {}
       try { await reportAction(nome, 'robe_start', 'Iniciando Robe via fila global'); } catch {}
 
       let mainPage = null;
@@ -1531,7 +1541,7 @@ async function robeTickGlobal() {
           // Outro erro técnico: mantém ciclo igual antes
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
-          try { console.warn('[WORKER][robeTickGlobal] Robe error:', e && e.message || e); } catch {}
+          try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
           return;
         }
         // ==== EOF COOL/PRUNED ERRORS ====
@@ -1561,7 +1571,7 @@ async function robeTickGlobal() {
             ultimaPostagem: Date.now()
           });
           try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso'); } catch {}
-          try { console.log(`[WORKER][robeTickGlobal] Robe success: ${nome}`); } catch {}
+          try { logger.info('[WORKER][robeTickGlobal] Robe success', { nome }); } catch {}
         } else {
           robeUpdateMeta(nome, {
             estado: 'idle',
@@ -1613,7 +1623,7 @@ async function robeTickGlobal() {
 
         // Log de término do Robe
         try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado'); } catch {}
-        try { console.log(`[WORKER][robeTickGlobal] Robe end: ${nome}`); } catch {}
+        try { logger.info('[WORKER][robeTickGlobal] Robe end', { nome }); } catch {}
       }
     });
 
@@ -1637,10 +1647,10 @@ async function fotosGcTick() {
   try {
     const res = await fotos.gcSweep();
     if (res && (res.deletedFiles || res.removedIndex || res.resetGens)) {
-      console.log(`[FOTOS][GC] deletedFiles=${res.deletedFiles} removedIndex=${res.removedIndex} resetGens=${res.resetGens}`);
+      logger.info('[FOTOS][GC] resultado', { deletedFiles: res.deletedFiles, removedIndex: res.removedIndex, resetGens: res.resetGens });
     }
   } catch (e) {
-    console.warn('[FOTOS][GC] erro:', e && e.message || e);
+    logger.warn('[FOTOS][GC] erro', { error: e && e.message || e });
   }
 }
 setInterval(fotosGcTick, 90_000);
@@ -1675,7 +1685,7 @@ function attachBrowserLifecycle(nome, browser) {
 // Dispara quando o usuário fecha o Chrome no "X" (ou o processo cai)
 browser.once('disconnected', async () => {
 try {
-console.log(`[WORKER][BROWSER] disconnected: ${nome}`);
+logger.info('[WORKER][BROWSER] disconnected', { nome });
 // Cancela Robe em fila (se estiver)
 try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 
@@ -1741,7 +1751,7 @@ try {
 // Atualiza status.json imediato
 try { await snapshotStatusAndWrite(); } catch {}
 } catch (e) {
-  try { console.warn('[WORKER][BROWSER] disconnect handler err:', e && e.message || e); } catch {}
+  try { logger.warn('[WORKER][BROWSER] disconnect handler err', { error: e && e.message || e }); } catch {}
 }
 });  // <-- Fecha o browser.once('disconnected', async () => { ... })
 }     // <-- Fecha a função attachBrowserLifecycle(nome, browser)
@@ -1768,9 +1778,11 @@ function automationAllowed(ctrl) {
 
 // PATCH 2: handler.start_work (definido fora do objeto handlers)
 async function start_work({ nome }) {
+  logger.info('[HANDLER] start_work chamada', { nome });
   const man = await manifestStore.read(nome).catch(()=>null);
   if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
     await issues.append(nome, 'mil_action', 'start_work_denied_by_limit_posting');
+    logger.warn('[HANDLER] start_work denied_by_limit_posting', { nome });
     return { ok: false, error: 'blocked_by_limit_posting' };
   }
 
@@ -1781,15 +1793,23 @@ async function start_work({ nome }) {
   // BLOQUEIO: nunca permite start_work se humano/configurando
   if (ctrl.humanControl || ctrl.configurando) {
     await issues.append(nome, 'mil_action', 'start_work_denied (human/config mode)');
+    logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
     return { ok: false, error: 'profile_in_human_or_config' };
   }
-  if (ctrl.trabalhando && ctrl.virtus) return { ok: true };
-  if (ctrl._virtusStarting) return { ok: true };
+  if (ctrl.trabalhando && ctrl.virtus) {
+    logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
+    return { ok: true };
+  }
+  if (ctrl._virtusStarting) {
+    logger.info('[HANDLER] start_work ok (_virtusStarting)', { nome });
+    return { ok: true };
+  }
 
   try {
     ctrl._virtusStarting = true;
     if (!automationAllowed(ctrl)) {
       await issues.append(nome, 'mil_action', 'automation_not_allowed');
+      logger.warn('[HANDLER] automation_not_allowed em start_work', { nome });
       return { ok: false, error: 'automation_not_allowed' };
     }
     // Fence: sincronize epoch para Virtus runner anti-zumbi
@@ -1808,8 +1828,10 @@ async function start_work({ nome }) {
     } catch {}
 
     await snapshotStatusAndWrite();
+    logger.info('[HANDLER] start_work ok', { nome });
     return { ok: true };
   } catch (e) {
+    logger.error('[HANDLER] start_work erro', { nome, error: e && e.message }, e);
     return { ok: false, error: e && e.message || String(e) };
   } finally {
     ctrl._virtusStarting = false;
@@ -1818,6 +1840,7 @@ async function start_work({ nome }) {
 
 const handlers = {
   async ['criar-perfil']({ cidade, cookies }) {
+    logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
     if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
     if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
@@ -1862,14 +1885,19 @@ const handlers = {
       });
     } catch {}
 
+    logger.info('[HANDLER] criar-perfil ok', { nome });
     return { ok: true, perfil: perfilObj };
   },
 
   async activate({ nome }) {
-    return await activateOnce(nome, 'message');
+    logger.info('[HANDLER] activate chamada', { nome });
+    const r = await activateOnce(nome, 'message');
+    logger.info('[HANDLER] activate resultado', { nome, ok: !!(r && r.ok), error: r && r.error });
+    return r;
   },
 
   async deactivate({ nome, reason, policy }) {
+  logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
   const preserve = (policy === 'preserveDesired');
   let reopenDelayMs = 0;
   if (preserve) {
@@ -1898,6 +1926,7 @@ const handlers = {
       }
     }
     await snapshotStatusAndWrite();
+    logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
     return { ok: true };
   }
   try {
@@ -1955,10 +1984,12 @@ const handlers = {
     }
   }
   await snapshotStatusAndWrite();
+  logger.info('[HANDLER] deactivate concluído', { nome, reason, policy });
   return { ok: true };
 },
 
   async configure({ nome }) {
+    logger.info('[HANDLER] configure chamada', { nome });
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     const perfisArr = loadPerfisJson();
@@ -1986,9 +2017,11 @@ const handlers = {
     try {
       await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
       // NÃO execute closeExtraPages/prune aqui!
+      logger.info('[HANDLER] configure ok', { nome });
       return { ok: true };
     } catch (e) {
       try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
+      logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
       return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
     } finally {
       ctrl.configurando = false;
@@ -2001,10 +2034,12 @@ const handlers = {
   start_work,
 
   async invoke_human({ nome }) {
+    logger.info('[HANDLER] invoke_human chamada', { nome });
     // BLOQUEIO por limit_posting em invoke_human
     const man = await manifestStore.read(nome).catch(()=>null);
     if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
       await issues.append(nome, 'mil_action', 'invoke_human_denied_by_limit_posting');
+      logger.warn('[HANDLER] invoke_human denied_by_limit_posting', { nome });
       return { ok: false, error: 'blocked_by_limit_posting' };
     }
 
@@ -2045,14 +2080,17 @@ const handlers = {
 
     await snapshotStatusAndWrite();
 
+    logger.info('[HANDLER] invoke_human ok', { nome });
     return { ok: true };
   },
 
   async ['human-resume']({ nome }) {
+    logger.info('[HANDLER] human-resume chamada', { nome });
     // BLOQUEIO por limit_posting em human-resume
     const man = await manifestStore.read(nome).catch(()=>null);
     if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
       await issues.append(nome, 'mil_action', 'human_resume_denied_by_limit_posting');
+      logger.warn('[HANDLER] human-resume denied_by_limit_posting', { nome });
       return { ok: false, error: 'blocked_by_limit_posting' };
     }
 
@@ -2084,17 +2122,20 @@ const handlers = {
     try { unfreezeCooldownIfWorking(nome); } catch {}
 
     await snapshotStatusAndWrite();
+    logger.info('[HANDLER] human-resume ok', { nome });
     return { ok:true };
   },
 
   // == ALTERAÇÃO 3: Handler robe-play substituído ==
   async ['robe-play']({ nome }) {
+    logger.info('[HANDLER] robe-play chamada', { nome });
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     const man = await manifestStore.read(nome).catch(()=>null);
     if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
       await issues.append(nome, 'mil_action', 'robe_play_denied_by_limit_posting');
+      logger.warn('[HANDLER] robe-play denied_by_limit_posting', { nome });
       return { ok: false, error: 'blocked_by_limit_posting' };
     }
 
@@ -2139,7 +2180,7 @@ const handlers = {
         }
 
         // Log de início do Robe (robe-play)
-        try { console.log(`[WORKER][robe-play] Robe start: ${nome}`); } catch {}
+        try { logger.info('[WORKER][robe-play] Robe start', { nome }); } catch {}
         try { await reportAction(nome, 'robe_start', 'Iniciando Robe via robe-play'); } catch {}
 
         let mainPage = null;
@@ -2182,7 +2223,7 @@ const handlers = {
             }
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
             robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
-            try { console.warn('[WORKER][robe-play] Robe error:', e && e.message || e); } catch {}
+            try { logger.warn('[WORKER][robe-play] Robe error', { nome, error: e && e.message || e }); } catch {}
             return;
           }
           // ==== EOF COOL/PRUNED ERRORS ====
@@ -2212,7 +2253,7 @@ const handlers = {
               ultimaPostagem: Date.now()
             });
             try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso (robe-play)'); } catch {}
-            try { console.log(`[WORKER][robe-play] Robe success: ${nome}`); } catch {}
+            try { logger.info('[WORKER][robe-play] Robe success', { nome }); } catch {}
           } else {
             robeUpdateMeta(nome, {
               estado: 'idle',
@@ -2266,17 +2307,19 @@ const handlers = {
 
           // Log de término do Robe (robe-play)
           try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
-          try { console.log(`[WORKER][robe-play] Robe end: ${nome}`); } catch {}
+          try { logger.info('[WORKER][robe-play] Robe end', { nome }); } catch {}
         }
       });
       await snapshotStatusAndWrite();
     }
+    logger.info('[HANDLER] robe-play ok', { nome });
     return { ok: true };
   },
   // == FIM ALTERAÇÃO 3 ==
 
   // INICIO DA INSTRUÇÃO (worker.js) - Handler robes-release-all
   async ['robes-release-all']() {
+    logger.info('[HANDLER] robes-release-all chamada');
     // Limpa pauseReason de todos os perfis em robeMeta + no manifest (remover robePauseReason)
     const perfisArr = loadPerfisJson();
     for (const p of perfisArr) {
@@ -2297,6 +2340,7 @@ const handlers = {
       } catch {}
     }
     await snapshotStatusAndWrite();
+    logger.info('[HANDLER] robes-release-all ok');
     return { ok: true };
   },
   // FIM DA INSTRUÇÃO (worker.js) - Handler robes-release-all
@@ -2618,7 +2662,7 @@ const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: 
 const ok = writeJsonAtomic(statusPath, statusObj);
 if (!ok) { try { await issues.append('system','persist_failed', 'status_write'); } catch {} }
 } catch (e) {
-try { console.warn('[WORKER][statusWrite] erro:', e && e.message || e); } catch {}
+try { logger.warn('[WORKER][statusWrite] erro', { error: e && e.message || e }); } catch {}
 }
 });
 try { supervisorClient.sendTelemetria({ type: 'hb', alive: controllers.size }); } catch {}
@@ -2929,12 +2973,16 @@ async function nurseTick() {
                   robeMeta[nome].openBackoffMs = curBackoff;
                   robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
                   await issues.append(nome, 'mil_action', `open_backoff escalated to ${Math.floor(curBackoff/1000)}s`);
+                  logger.warn('[SWAP] open_backoff escalated', { nome, backoffMs: curBackoff, reason: err });
+                } else {
+                  logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
                 // Se swap foi bem-sucedido, não seta activationHeld, tentará na próxima ronda normal
               }
             } else {
               // Sucesso: zera backoff (se existia)
               if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 15000;
+              logger.info('[NURSE] activateOnce ok', { nome });
             }
           } catch { }
         } finally {
@@ -3214,7 +3262,7 @@ async function nurseTick() {
 
       // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
       if (ctrl && ctrl.configurando) {
-        console.log(`[NURSE][SKIP PRUNE] Perfil ${nome} está configurando, prune ignorado.`);
+        logger.info('[NURSE][SKIP PRUNE] Perfil em configuração, prune ignorado', { nome });
         continue;
       }
       if (!(robeMeta[nome] && robeMeta[nome].emExecucao)) {
@@ -3254,6 +3302,7 @@ async function trySwapOpen(target) {
   for (const cand of candidates) {
     if (killGuardActive(cand.n)) continue;
     await issues.append(cand.n, 'mil_action', `swap_kill fechamento para abrir ${target} RAM=${cand.mb}MB`);
+    logger.info('[SWAP] swap_kill', { fechar: cand.n, abrir: target, ramMB: cand.mb });
     await handlers.deactivate({ nome: cand.n, reason: 'swap_for_open', policy: 'preserveDesired' });
     setKillGuard(cand.n, 45000);
     await new Promise(r=>setTimeout(r, 2000)); // settle RAM
@@ -3264,12 +3313,15 @@ async function trySwapOpen(target) {
       await issues.append(target, 'mil_action', `swap_open_success após fechar ${cand.n}`);
       robeMeta[target] = robeMeta[target] || {};
       robeMeta[target].lastSwapAt = Date.now();
+      logger.info('[SWAP] swap_open_success', { target, fechado: cand.n });
       return true;
     }
     // Swap não foi bem-sucedido, log e continue para o próximo possível
     await issues.append(target, 'mil_action', `swap_open_failed após fechar ${cand.n}`);
+    logger.warn('[SWAP] swap_open_failed', { target, fechado: cand.n });
   }
   await issues.append(target, 'mil_action', 'swap_open_failed_nenhum_sucesso');
+  logger.warn('[SWAP] swap_open_failed_nenhum_sucesso', { target });
   return false;
 }
 
@@ -3575,7 +3627,7 @@ async function gracefulShutdown(reason) {
   if (_shuttingDown) return;
   _shuttingDown = true;
   try {
-    console.log('[WORKER] gracefulShutdown start: reason=' + reason);
+    logger.info('[WORKER] gracefulShutdown start', { reason });
     try { robeQueue.clear(); } catch {}
     // Para o Virtus de todas as contas
     for (const [nome, ctrl] of controllers) {
@@ -3597,7 +3649,7 @@ async function gracefulShutdown(reason) {
     for (const nome of _pruners.keys()) stopPruneLoop(nome);
     if (ramMonitorInterval) try { clearTimeout(ramMonitorInterval); } catch{}
   } catch (e) {
-    try { console.warn('[WORKER] gracefulShutdown exception:', e && e.message || e); } catch {}
+    try { logger.error('[WORKER] gracefulShutdown exception', { reason, error: e && e.message || e }, e); } catch {}
   } finally {
     setTimeout(() => process.exit(0), 500);
   }
@@ -3608,22 +3660,25 @@ process.on('disconnect', () => gracefulShutdown('disconnect'));
 
 process.on('message', async (msg) => {
   if (!msg || !msg.type || !msg.msgId) return;
+  logger.info('[WORKER][MESSAGE] received', { type: msg.type, hasMsgId: !!msg.msgId });
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
-    sendReply(msgId, { ok: false, error: 'Comando desconhecido' });
+    logger.warn('Comando desconhecido recebido', { type: msg.type, hasMsgId: !!msg.msgId });
+    sendReply(msg.msgId, { ok: false, error: 'Comando desconhecido' });
     return;
   }
   try {
     const resp = await fn(msg.payload || {});
     sendReply(msg.msgId, resp);
   } catch (e) {
+    logger.error('[WORKER][MESSAGE] handler error', { type: msg.type, error: e && e.message || e }, e);
     sendReply(msg.msgId, { ok: false, error: e && e.message || String(e) });
   }
 });
 
 process.on('uncaughtException', (e) => {
-  try { console.error('uncaught:', e && e.message); } catch {}
+  try { logger.error('uncaught', { error: e && e.message || e }, e); } catch {}
 });
 process.on('unhandledRejection', (e) => {
-  try { console.error('unhandled:', e && e.message); } catch {}
+  try { logger.error('unhandled', { error: (e && e.message) || e }, e); } catch {}
 });

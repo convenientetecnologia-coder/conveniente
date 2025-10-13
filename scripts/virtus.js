@@ -19,6 +19,7 @@ const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
 const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
+const logger = require('./logger.js');
 
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
@@ -83,7 +84,7 @@ let mensagensAtendimento = [];
       mensagensAtendimento = [];
     }
   } catch (e) {
-    console.error('[VIRTUS] ERRO ao carregar atendimento.json:', e);
+    logger.error('[VIRTUS] ERRO ao carregar atendimento.json', {}, e);
     mensagensAtendimento = [];
   }
 })();
@@ -200,7 +201,6 @@ async function coletaChatsMarketplaceTodos(page) {
         try {
           const s = String(href || '');
           const pos = s.indexOf('/marketplace/t/');
-          if (pos < 0) return null;
           const rest = s.slice(pos + '/marketplace/t/'.length);
           const id = rest.split(/[/?#]/)[0];
           return id && /^\d+$/.test(id) ? id : null;
@@ -239,7 +239,7 @@ async function coletaChatsMarketplaceTodos(page) {
     });
     return items;
   } catch (err) {
-    if (VIRTUS_DETAILED_DEBUG) { console.log('[VIRTUS] Erro em coletaChatsMarketplaceTodos:', err + ''); }
+    if (VIRTUS_DETAILED_DEBUG) { logger.debug('[VIRTUS] Erro em coletaChatsMarketplaceTodos', { err: String(err) }); }
     return [];
   }
 }
@@ -324,7 +324,7 @@ async function scrollChatsToTop(page) {
 // ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
 
 // ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
-async function sendMessageSafe(p, campo, msg) {
+async function sendMessageSafe(p, campo, msg, nome) {
   // 1) Garantir foco e limpar o composer
   try { await campo.focus(); } catch {}
   try {
@@ -450,14 +450,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
   } catch {}
   if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-    const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
+    const log = (...args) => logger.info(args.join(' '), { nome });
     log(`[VIRTUS][${nome}] virtus_skip_frozen — perfil congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
     if (issues) try { await logIssue(nome, 'virtus_skip_frozen', `perfil congelado até ${new Date(manifestFrozenUntil).toISOString()}`); } catch {}
     return { stop: async () => {} }; // Virtus runner no-op
   }
   // ========== FIM BLOCO FREEZER INSTRUÇÃO 1 ==========
 
-  const log = (...args) => console.log(`[VIRTUS][${nome}]`, ...args);
+  const log = (...args) => logger.info(args.join(' '), { nome });
 
   let running = true;
   let page = null;
@@ -522,9 +522,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { await fs.rename(tmp, HIST_FILE); }
         catch { await fs.copyFile(tmp, HIST_FILE); try { await fs.unlink(tmp); } catch {} }
       } catch (e) {
-        log('Erro ao salvar histórico:', e + '');
+        logger.error('Erro ao salvar histórico Virtus', { nome }, e);
       }
-    }).catch(err => log('Erro em cadeia de salvamento:', err + ''));
+    }).catch(err => logger.error('Erro em cadeia de salvamento Virtus', { nome }, err));
     return saveChain;
   }
 
@@ -589,7 +589,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const now = Date.now();
         if (!virtusDeadLogTimes[nome] || now - virtusDeadLogTimes[nome] > 60000) {
           virtusDeadLogTimes[nome] = now;
-          log(`[VIRTUS][${nome}] Browser morto, não é possível garantir page.`);
+          logger.warn('Browser morto, não é possível garantir page', { nome });
           if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
         }
         return null;
@@ -614,7 +614,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (!running || !epochOk()) return null;
             await ensureMinimizedWindowForPage(newP);
           } catch (e) {
-            log('ensurePage: falha patchPage/minimize na nova aba:', e + '');
+            logger.warn('ensurePage: falha patchPage/minimize na nova aba', { nome }, e);
           }
           try { newP.once && newP.once('close', () => { if (page === newP) page = null; }); } catch {}
           page = newP;
@@ -641,7 +641,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         return page;
       } catch (e) {
-        log('ensurePage falhou:', e + '');
+        logger.error('ensurePage falhou', { nome }, e);
         return null;
       }
     })();
@@ -732,7 +732,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!running || !epochOk()) return [];
         await garantirMarketplace(p);
       } catch (err) {
-        log('Não está no Marketplace ou erro ao garantir Marketplace:', err + '');
+        logger.warn('Não está no Marketplace ou erro ao garantir Marketplace', { nome }, err);
         await sleep(5000);
         return [];
       }
@@ -746,7 +746,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const filtrados = todos.filter(c => c.id && isChatRecente(c.tempo));
       return filtrados;
     } catch (err) {
-      log('Erro ao coletar chats:', err + '');
+      logger.error('Erro ao coletar chats', { nome }, err);
       return [];
     }
   }
@@ -764,14 +764,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
     // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
 
     // === INÍCIO GUARD DE VIDA ===
     if (!browser || browser.isConnected?.() === false) {
-      log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
+      logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
       if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
@@ -782,7 +782,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // Fim guard de vida browser
     let p = await ensurePage();
     if (!p || (p.isClosed && p.isClosed())) {
-      log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
+      logger.error(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`, { nome });
       if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
@@ -792,7 +792,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     // === FIM GUARD DE VIDA ===
     try {
-      log('Reload ultra robusto (2h sem responder).');
+      logger.info('Reload ultra robusto (2h sem responder).', { nome });
       p = await ensurePage();
       if (!p) { bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); return; }
       const client = await p.target().createCDPSession();
@@ -807,7 +807,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         p.waitForSelector('div[role="row"] span', { timeout: 15000 })
       ]).catch(()=>{});
       resetRecoverBackoff();
-      log('Reload ultra robusto concluído.');
+      logger.info('Reload ultra robusto concluído.', { nome });
       // Chama scrollChatsToTop após reload ultra robusto
       try {
         const ok = await scrollChatsToTop(p);
@@ -817,7 +817,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
       lastScrollToTop = Date.now();
     } catch (e) {
-      log('Erro no reload ultra robusto:', e + '');
+      logger.error('Erro no reload ultra robusto', { nome }, e);
       bumpRecoverBackoff();
       if (recoverBackoffMs) await sleep(recoverBackoffMs);
     }
@@ -997,7 +997,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
     // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
@@ -1007,7 +1007,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
       if (!browser || browser.isConnected?.() === false) {
-        log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
+        logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
         if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
         running = false;
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
@@ -1017,7 +1017,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       let p = await ensurePage();
       if (!p || (p.isClosed && p.isClosed())) {
-        log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
+        logger.error(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`, { nome });
         if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
         running = false;
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
@@ -1071,7 +1071,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         let found = await p.$(anchorSel);
 
         if (!found) {
-          log(`[WARN] Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`);
+          logger.warn(`Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`, { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -1102,7 +1102,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           attempts++;
         }
         if (!achou) {
-          log(`[ERRO] Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`);
+          logger.error(`Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -1110,7 +1110,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         if (await isChatBlocked(p)) {
-          log(`[WARN] Chat ${chatId} bloqueado/indisponível. Marcando como respondido para evitar looping.`);
+          logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           const tsNow = agoraEpoch();
           historico[chatId] = tsNow;
@@ -1126,14 +1126,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let campo = await waitForComposer(p, 10000);
         if (!campo) {
-          log(`[WARN] Composer não encontrado. Fallback: goto direto e revalidar.`);
+          logger.warn('Composer não encontrado. Fallback: goto direto e revalidar.', { nome, chatId });
           try {
             if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
             await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
             await sleep(800);
           } catch {}
           if (await isChatBlocked(p)) {
-            log(`[WARN] Chat ${chatId} bloqueado no fallback. Marcando como respondido para evitar looping.`);
+            logger.warn('Chat bloqueado no fallback, marcado respondido', { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
@@ -1152,9 +1152,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!campo) {
           const fails = incFail(chatId);
           stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'composer_missing', chatId, failCount: fails });
-          log(`[ERRO] Composer indisponível para chat ${chatId}. Tentativas: ${fails}`);
+          logger.error(`Composer indisponível para chat ${chatId}. Tentativas: ${fails}`, { nome, chatId });
           if (fails >= 2) {
-            log(`[WARN] ${chatId} falhou 2x. Marcando como respondido para não travar fila.`);
+            logger.warn(`${chatId} falhou 2x. Marcando como respondido para não travar fila.`, { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
@@ -1173,7 +1173,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         resetFail(chatId);
 
         if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
-          log('[ERRO] atendimento.json vazio. Não será enviada resposta!');
+          logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -1194,7 +1194,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!isFocused) { try { await campo.focus(); } catch {} }
 
         // -------- SUBSTITUIR PELO USO sendMessageSafe --------
-        await sendMessageSafe(p, campo, msg);
+        await sendMessageSafe(p, campo, msg, nome);
         // -----------------------------------------------------
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
 
@@ -1215,6 +1215,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } else {
           try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msgErr}`); } catch {}
         }
+        logger.error('Erro ao responder chat', { nome, chatId }, err);
         // Rollback pending em caso de erro
         try { await pendingDel(nome, chatId); } catch {}
       }
@@ -1249,14 +1250,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
     // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
 
     // === INÍCIO GUARD DE VIDA NO FILAMANAGERLOOP ===
     if (!browser || browser.isConnected?.() === false) {
-      log(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`);
+      logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
       if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
@@ -1271,7 +1272,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     try {
       const p = await ensurePage();
       if (!p || (p.isClosed && p.isClosed())) {
-        log(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`);
+        logger.error(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`, { nome });
         if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
         running = false;
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
@@ -1286,7 +1287,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       lastRamCheck = Date.now();
       if (ramMB > 700) {
         await logIssue(nome, "chrome_memory_spike", `RAM acima de 700MB (${ramMB} MB). shutdown temporário`);
-        log(`[GUARD][RAM] RAM acima de 700MB (${ramMB} MB), shutdown/restart`);
+        logger.warn('[GUARD][RAM] RAM acima de 700MB, shutdown/restart', { nome, ramMB });
         running = false;
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
         if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
@@ -1328,7 +1329,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           setTimeout(()=>{}, 1);
         });
       } catch (err) {
-        if (VIRTUS_DETAILED_DEBUG) { try { console.log('[KEEPALIVE][EXCEPTION]', err && err.message); } catch{} }
+        if (VIRTUS_DETAILED_DEBUG) { try { logger.debug('[KEEPALIVE][EXCEPTION]', { nome, message: err && err.message }); } catch{} }
       }
       // --- FIM BLOCO KEEPALIVE ---
 
@@ -1414,7 +1415,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      log(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
+      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
     // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
@@ -1443,10 +1444,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
         } catch {}
         ready = true;
-        log('Aba zero da Virtus iniciada e garantida: Marketplace pronta.');
+        logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
       } catch (err) {
         if (!running) return;
-        log('Falha ao garantir aba zero no startup Virtus:', err + '');
+        logger.error('Falha ao garantir aba zero no startup Virtus', { nome }, err);
         await sleep(2500);
       }
     }

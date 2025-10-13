@@ -1,11 +1,13 @@
 // scripts/workerClient.js
 const { fork } = require('child_process');
 const path = require('path');
+const logger = require('./logger.js');
 
 // ========== FLOOD/REENTRADA/FILA PROTECTION ADDED ==========
 // Proteção: Evita flood de comandos “open”/“activate”/“startWork”. Garantido que só 1 em andamento por perfil ou globalmente.
 const inflightOp = new Map(); // Key: type+name ou type (se global)
-const pLimit = require('p-limit').default;
+const pLimitImport = require('p-limit');
+const pLimit = pLimitImport.default || pLimitImport;
 const limitCount = 6; // 6 comandos simultâneos permitidos globais (ajuste conforme desejado)
 const globalCommandPool = pLimit(limitCount);
 // DEBUG
@@ -18,7 +20,7 @@ function debugLogCommand(type, payload, poolStatus, extra = '') {
     let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
     let now = (new Date()).toISOString();
     try {
-      console.debug(`[WORKER][CMD-DEBUG] [${now}] type=${type}, perfil="${perfilNome}", pool=${poolStatus} ${extra}`);
+      logger.debug(`[WORKER][CMD-DEBUG] [${now}] type=${type}, perfil="${perfilNome}", pool=${poolStatus} ${extra}`);
     } catch {}
   }
 }
@@ -48,7 +50,7 @@ function startWatchdog() {
     } catch {}
     _wd.failCount++;
     if (_wd.failCount >= 8 && (Date.now() - _wd.lastOkAt) > 30000) {
-      try { console.warn('[WATCHDOG] worker nonresponsive — restarting'); } catch {}
+      try { logger.warn('[WATCHDOG] worker nonresponsive — restarting'); } catch {}
       try { workerChild && workerChild.kill && workerChild.kill('SIGKILL'); } catch {}
       _wd.failCount = 0;
       _wd.lastOkAt = 0;
@@ -69,15 +71,15 @@ function forkWorker() {
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.ELECTRON_NO_ATTACH_CONSOLE;
   const forkOpts = { stdio: ['inherit', 'inherit', 'inherit', 'ipc'], execPath: nodeExecPath, env };
-  console.log(`[WORKER][FORK] execPath="${nodeExecPath}"`);
+  logger.info(`[WORKER][FORK] execPath="${nodeExecPath}"`);
   workerChild = fork(workerPath, [], forkOpts);
 
   workerChild.on('error', (err) => {
-    console.error('[WORKER] erro no fork:', err && err.message || err);
+    logger.error('[WORKER] erro no fork', { error: err && err.message || err }, err);
   });
 
   workerChild.on('exit', (code, signal) => {
-    console.warn(`[WORKER] morto, respawn em 2s (code=${code}, signal=${signal}), PID=${workerChild && workerChild.pid}`);
+    logger.warn(`[WORKER] morto, respawn em 2s (code=${code}, signal=${signal}), PID=${workerChild && workerChild.pid}`);
     workerChild = null;
     if (isQuitting) return;
     setTimeout(forkWorker, 2000);
@@ -185,7 +187,7 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
         done = true;
         try { childAtSend && childAtSend.off && childAtSend.off('message', handler); } catch {}
         inflightOp.delete(opKey);
-        console.warn(`[WORKER][TIMEOUT] Timeout aguardando resposta do worker para msgId=${msgId} (PID=${childAtSend && childAtSend.pid})`);
+        logger.warn(`[WORKER][TIMEOUT] Timeout aguardando resposta do worker`, { msgId, pid: childAtSend && childAtSend.pid });
         resolve({ ok: false, error: 'Timeout aguardando resposta do worker.' });
       }, timeoutMs);
     });

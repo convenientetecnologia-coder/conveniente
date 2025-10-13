@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
+const logger = require('./logger.js');
 
 function slugify(str) {
   return String(str || '')
@@ -191,7 +192,7 @@ function normalizeCookies(cookiesInput) {
         else if (cookie.name === 'sb' || cookie.name === 'datr') cookie.value = '0';
         else cookie.value = 'default';
         if (process.env.DEBUG_COOKIES === '1') {
-          console.warn(`[normalizeCookies][PATCH] cookie "${cookie.name}" sem value, ajustado para "${cookie.value}"`);
+          logger.warn(`[normalizeCookies][PATCH] cookie "${cookie.name}" sem value, ajustado para "${cookie.value}"`);
         }
       }
 
@@ -216,20 +217,20 @@ function normalizeCookies(cookiesInput) {
     for (const nomeEss of ESSENCIAIS) {
       if (!foundEssenciais.has(nomeEss)) {
         if (process.env.DEBUG_COOKIES === '1') {
-          console.warn(`[normalizeCookies][WARNING] Cookie essencial ausente ou estranho: ${nomeEss}`);
+          logger.warn(`[normalizeCookies][WARNING] Cookie essencial ausente ou estranho: ${nomeEss}`);
         }
       }
     }
 
     // DICA/robustez: log final do array retornado
     if (process.env.DEBUG_COOKIES === '1') {
-      console.log('[normalizeCookies][FINAL]', arr);
+      logger.debug('[normalizeCookies][FINAL]', { cookies: arr });
     }
 
     // Final: retorna array ultra-limpo dos ESSENCIAIS normalizados
     return arr;
   } catch(e) {
-    console.log('[normalizeCookies][ERROR]', e && e.message);
+    logger.error('[normalizeCookies][ERROR]', {}, e);
     return [];
   }
 }
