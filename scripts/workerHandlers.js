@@ -125,7 +125,7 @@ return { ok: false, error: 'Core não expôs robePlay' };
 return await core.robePlay({ nome });
 },
 
-async 'robes-release-all' {
+a'robes-release-all': async function() {
 if (typeof core.robesReleaseAll !== 'function') {
 return { ok: false, error: 'Core não expôs robesReleaseAll' };
 }
