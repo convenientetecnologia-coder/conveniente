@@ -5,41 +5,20 @@ const path = require('path');
 // ========== FLOOD/REENTRADA/FILA PROTECTION ADDED ==========
 // Proteção: Evita flood de comandos “open”/“activate”/“startWork”. Garantido que só 1 em andamento por perfil ou globalmente.
 const inflightOp = new Map(); // Key: type+name ou type (se global)
-const PROFILE_OP_TYPES = new Set([
-  'open','activate','start_work','startWork','configure','invoke_human','robe-play','renovador_run'
-]);
-const GLOBAL_OP_TYPES = new Set([
-  'renovador_global'
-]);
 const pLimit = require('p-limit').default;
 const limitCount = 6; // 6 comandos simultâneos permitidos globais (ajuste conforme desejado)
 const globalCommandPool = pLimit(limitCount);
 // DEBUG
 function debugLogCommand(type, payload, poolStatus, extra = '') {
-  let opKey = null;
-  let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
-  if (perfilNome) perfilNome = String(perfilNome);
-
-  if (PROFILE_OP_TYPES.has(type) && perfilNome) {
-    opKey = `@@PROFILE_OP_LOCK@@::${perfilNome}`;
-  } else if (GLOBAL_OP_TYPES.has(type)) {
-    opKey = `@@GLOBAL_OP_LOCK@@::${type}`;
-  } else if (type === 'get-status') {
-    opKey = 'get-status';
-  } else {
-    opKey = `${type}`;
-  }
-
   if (
     type === 'open' ||
     type === 'activate' ||
     type === 'startWork'
-    || PROFILE_OP_TYPES.has(type)
-    || GLOBAL_OP_TYPES.has(type)
   ) {
+    let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
     let now = (new Date()).toISOString();
     try {
-      console.debug(`[WORKER][CMD-DEBUG] [${now}] type=${type}, opKey="${opKey}", pool=${poolStatus} ${extra}`);
+      console.debug(`[WORKER][CMD-DEBUG] [${now}] type=${type}, perfil="${perfilNome}", pool=${poolStatus} ${extra}`);
     } catch {}
   }
 }
@@ -115,10 +94,11 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
   let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
   if (perfilNome) perfilNome = String(perfilNome);
 
-  if (PROFILE_OP_TYPES.has(type) && perfilNome) {
+  if (
+    ['open','activate','startWork'].includes(type)
+  ) {
+    // *** TODOS os comandos que envolvem ativação do mesmo perfil compartilham lock ***
     opKey = `@@PROFILE_OP_LOCK@@::${perfilNome}`;
-  } else if (GLOBAL_OP_TYPES.has(type)) {
-    opKey = `@@GLOBAL_OP_LOCK@@::${type}`;
   } else if (type === 'get-status') {
     opKey = 'get-status';
   } else {

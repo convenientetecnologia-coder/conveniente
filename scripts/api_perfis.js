@@ -339,15 +339,6 @@ module.exports = (app, workerClient, fileStore) => {
     res.json(resp);
   });
 
-  // Renovar classificados (individual)
-  app.post('/api/perfis/:nome/renovar', async (req, res) => {
-    const nome = req.params.nome;
-    try { assertPerfilExists(fileStore, nome); } catch(e) { return res.json({ok:false,error:e.message}); }
-    await issues.append(nome,'admin_renovador_run_request','UI');
-    const r = await workerClient.sendWorkerCommand('renovador_run', { nome }, { timeoutMs: 600000 }).catch(()=>null);
-    res.json(r || { ok:false, error:'worker_timeout' });
-  });
-
   // Alterar label do perfil (só label)
   app.patch('/api/perfis/:nome/label', async (req, res) => {
     try {

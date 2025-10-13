@@ -72,7 +72,6 @@ require('./scripts/api_robes.js')(app, workerClient, fileStore);
 require('./scripts/api_cidades.js')(app, workerClient, fileStore);
 require('./scripts/api_sys.js')(app, workerClient, fileStore);
 require('./scripts/api_issues.js')(app, workerClient, fileStore);
-require('./scripts/api_renovador.js')(app, workerClient, fileStore); // <---- Adicione aqui
 // Se usar api_static.js/adicional, inclua aqui: require('./scripts/api_static.js')(app);
 
 console.log('[BOOT] Garantindo arquivos base...');

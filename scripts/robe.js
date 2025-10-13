@@ -88,7 +88,7 @@ const LIMIT_POSTING_MS = 24 * 60 * 60 * 1000;
 const ABORT_LIMIT_POSTING = 'LIMIT_POSTING_ABORT';
 
 function throwAbortLimitPosting() {
-  const e = new Error(ABORT_LIMIT_POSTING);
+  const e = new Error(ABORT_LIMITING);
   e.LIMIT_POSTING = true;
   throw e;
 }

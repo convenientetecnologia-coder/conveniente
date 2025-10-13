@@ -7,30 +7,6 @@ const browserHelper = require('./browser.js');
 const virtusHelper = require('./virtus.js');
 const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
-const renewQueue = new (class {
-  constructor(){ this.fila=[]; this.executando=null; this._run=false; }
-  enqueue(nome, cb) {
-    if(this.inQueue(nome)||this.isActive(nome)) return false;
-    this.fila.push({nome,cb}); this.tick(); return true;}
-  inQueue(n){return this.fila.some(e=>e.nome===n);}
-  isActive(n){return this.executando && this.executando.nome===n;}
-  clear(){this.fila=[]; this.executando=null;}
-  tick(){
-    if(this._run) return; this._run=true;
-    setImmediate(async()=>{
-      try{
-        if(!this.executando && this.fila.length>0){
-          const next=this.fila.shift();
-          this.executando = { nome: next.nome, startedAt: Date.now() };
-          try{ await Promise.resolve(next.cb()); }
-          catch(e){ try{ console.warn('[RENEW-QUEUE] erro cb', e&&e.message);}catch{} }
-          this.executando=null; this._run=false; this.tick(); return;
-        }
-      } finally{ this._run=false; }
-    });
-  }
-})();
-
 const utils        = require('./utils.js');
 const fotos        = require('./fotos.js'); // gestor central de fotos
 
@@ -283,7 +259,7 @@ const AUTO_CFG = {
 };
 
 // APÓS o bloco do AUTO_CFG, adicione:
-const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '3072', 10);   // mínimo RAM livre para abrir navegador
+const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10);   // mínimo RAM livre para abrir navegador
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10); // mínimo RAM que deve sobrar pós-abertura (desativado)
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10); // alvo de perfis vivos para SWAP quando abaixo
 
@@ -567,12 +543,6 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 
 // Estado global do Robe (cooldown, fila, etc)
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
-// INICIO DA INSTRUÇÃO (scripts/worker.js)
-
-    //Adicione (após robeMeta);
-
-const renewMeta = {};
-let renovacaoGlobalAtiva = false;
 
 // INICIO DA INSTRUÇÃO (worker.js)
 //
@@ -1042,7 +1012,6 @@ async function closeExtraPages(browser, mainPage, nome) {
     if (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true) {
       return; // NÃO FECHA ABAS DURANTE O ROBE DESTE PERFIL
     }
-    if (nome && renewMeta[nome]?.renovadorEmExecucao === true) return;
 
     const pages = await browser.pages();
     let closed = 0;
@@ -1478,16 +1447,6 @@ async function robeTickGlobal() {
       return null; // GUARD: bloqueado até cooldown após RAM spike
     }
     const ctrl = controllers.get(nome);
-    // INICIO DA INSTRUÇÃO 2: Guard no robeTickGlobal para renovador/suspendRobe
-    if (renewMeta[nome] && renewMeta[nome].renovadorEmExecucao === true) {
-      try { await issues.append(nome, 'mil_action', 'robe_skip_due_renovador'); } catch {}
-      return null;
-    }
-    if (robeMeta[nome] && robeMeta[nome].suspendRobe === true) {
-      try { await issues.append(nome, 'mil_action', 'robe_skip_due_suspendRobe'); } catch {}
-      return null;
-    }
-    // FIM DA INSTRUÇÃO 2
     if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null; // impede fila em modo humano
     const cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
@@ -1809,7 +1768,6 @@ function automationAllowed(ctrl) {
 
 // PATCH 2: handler.start_work (definido fora do objeto handlers)
 async function start_work({ nome }) {
-  if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
   const man = await manifestStore.read(nome).catch(()=>null);
   if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
     await issues.append(nome, 'mil_action', 'start_work_denied_by_limit_posting');
@@ -1908,12 +1866,10 @@ const handlers = {
   },
 
   async activate({ nome }) {
-    if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
     return await activateOnce(nome, 'message');
   },
 
   async deactivate({ nome, reason, policy }) {
-  if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
   const preserve = (policy === 'preserveDesired');
   let reopenDelayMs = 0;
   if (preserve) {
@@ -2003,7 +1959,6 @@ const handlers = {
 },
 
   async configure({ nome }) {
-    if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
     const perfisArr = loadPerfisJson();
@@ -2046,7 +2001,6 @@ const handlers = {
   start_work,
 
   async invoke_human({ nome }) {
-    if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
     // BLOQUEIO por limit_posting em invoke_human
     const man = await manifestStore.read(nome).catch(()=>null);
     if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
@@ -2135,7 +2089,6 @@ const handlers = {
 
   // == ALTERAÇÃO 3: Handler robe-play substituído ==
   async ['robe-play']({ nome }) {
-    if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
@@ -2416,6 +2369,8 @@ const handlers = {
         frozenReason: robeMeta[nome]?.frozenReason || null,
         frozenAt: robeMeta[nome]?.frozenAt || null,
         frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
+        internalFailCountWindow: fail.internal,
+        externalFailCountWindow: fail.external,
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
@@ -2424,11 +2379,7 @@ const handlers = {
         manifestStatus,
         closingReason: robeMeta[nome]?.closingReason || null,
         openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
-        lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
-        renovadorEmExecucao: !!(renewMeta[nome] && renewMeta[nome].renovadorEmExecucao),
-        renovadorLastRunAt: (renewMeta[nome] && renewMeta[nome].lastRunAt) || null,
-        renovadorLastCount: (renewMeta[nome] && renewMeta[nome].lastCount) || null,
-        renovadorEstado: (renewMeta[nome] && renewMeta[nome].estado) || ''
+        lastSwapAt: robeMeta[nome]?.lastSwapAt || null
       };
     });
     const robes = {};
@@ -2449,6 +2400,8 @@ const handlers = {
         frozenReason: robeMeta[nome]?.frozenReason || null,
         frozenAt: robeMeta[nome]?.frozenAt || null,
         frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
+        internalFailCountWindow: fail.internal,
+        externalFailCountWindow: fail.external,
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         pauseReason: robeMeta[nome]?.pauseReason || null,
@@ -2484,15 +2437,7 @@ const handlers = {
       robes,
       robeQueue: robeQueueList,
       autoMode,
-      sys,
-      renovador: {
-        renovacaoGlobalAtiva,
-        renewQueue: {
-          active: !!(renewQueue && renewQueue.executando),
-          current: (renewQueue && renewQueue.executando && renewQueue.executando.nome) || null,
-          queue: renewQueue && Array.isArray(renewQueue.fila) ? renewQueue.fila.map(e=>e.nome) : []
-        }
-      }
+      sys
     };
   },
 
@@ -2511,194 +2456,7 @@ const handlers = {
       }
       return { ok: true };
     } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
-  },
-
-  async ['renovador_run']({ nome }) {
-  if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
-  const ctrl = controllers.get(nome);
-  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-    console.log(`[RENOVADOR][${nome}][CALL] browser_inativo`);
-    return { ok:false, error:'browser_inativo' };
   }
-  if (robeMeta[nome]?.emExecucao) {
-    console.log(`[RENOVADOR][${nome}][CALL] aguardando Robe encerrar...`);
-    const t0 = Date.now();
-    while (robeMeta[nome]?.emExecucao && (Date.now()-t0) < 120000) {
-      await new Promise(r=>setTimeout(r, 500));
-    }
-    if (robeMeta[nome]?.emExecucao) {
-      console.log(`[RENOVADOR][${nome}][CALL] robe_em_execucao (timeout 2min)`);
-      return { ok:false, error:'robe_em_execucao' };
-    }
-  }
-  const rm = renewMeta[nome] || (renewMeta[nome] = {});
-  if (rm.renovadorEmExecucao) {
-    console.log(`[RENOVADOR][${nome}][CALL] já em execução (noop)`);
-    return { ok:true, already:true };
-  }
-  let wd = null;
-  const watchdog = () => {
-    try { issues.append(nome,'mil_action','renovador_watchdog_timeout'); } catch {}
-    rm.renovadorEmExecucao = false;
-    snapshotStatusAndWrite();
-    console.log(`[RENOVADOR][${nome}][WATCHDOG] timeout — flags limpas, snapshot`);
-  };
-
-  return await new Promise((resolve) => {
-    renewQueue.enqueue(nome, async () => {
-      const ctrl = controllers.get(nome);
-      let virtusWasRunning = !!(ctrl && ctrl.virtus);
-      try {
-        // 1) Remover job Robe da fila e SINALIZAR FLAGS ANTES DE TUDO
-        try { robeQueue.skip && robeQueue.skip(nome); } catch {}
-        renewMeta[nome] = renewMeta[nome] || {};
-        renewMeta[nome].renovadorEmExecucao = true;
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].suspendRobe = true;
-        console.log(`[RENOVADOR][${nome}][START] Flags set: renovadorEmExecucao=1, suspendRobe=1 (robeQueue.skip)`);
-        try { await issues.append(nome, 'mil_action', 'renovador_flags_set (primeiro) + robeQueue.skip'); } catch {}
-        await snapshotStatusAndWrite();
-
-        // 2) Para Virtus com fence robusto
-        if (ctrl && ctrl.virtus) {
-          console.log(`[RENOVADOR][${nome}][VIRTUS] stopping...`);
-          try { await stopVirtus(nome); } catch {}
-          virtusWasRunning = true;
-          console.log(`[RENOVADOR][${nome}][VIRTUS] stopped`);
-        }
-
-        // 3) Dispara o watchdog
-        wd = setTimeout(watchdog, 8 * 60 * 1000);
-
-        // 4) Executa renovador — navegação via mainPage/fallback militar
-        console.log(`[RENOVADOR][${nome}][RUN] calling startRenovacao (useMainPage=true)`);
-        let res = await require('./renovador.js').startRenovacao(
-          ctrl.browser,
-          nome,
-          { diasLimite:46, waitListMs:120000, renewWaitMs:120000, useMainPage: true }
-        );
-
-        renewMeta[nome].estado = res && res.ok ? 'ok' : 'erro';
-        renewMeta[nome].lastRunAt = Date.now();
-        renewMeta[nome].lastCount = (res && res.renewedCount) || 0;
-
-        if (res && res.ok) {
-          console.log(`[RENOVADOR][${nome}][RESULT] OK renewedCount=${renewMeta[nome].lastCount}`);
-          try { await issues.append(nome, 'mil_action', `renovador_run result ok=true count=${renewMeta[nome].lastCount}`); } catch {}
-          resolve({ ok: true, renewedCount: renewMeta[nome].lastCount });
-        } else {
-          const err = (res && res.error) || 'renovador_fail';
-          console.log(`[RENOVADOR][${nome}][RESULT] FAIL error=${err}`);
-          try { await issues.append(nome, 'renovador_error', err); } catch {}
-          resolve({ ok: false, error: err });
-        }
-
-      } catch (e) {
-        const msg = e && e.message || String(e);
-        console.log(`[RENOVADOR][${nome}][ERROR] ${msg}`);
-        try { await issues.append(nome, 'renovador_error', msg); } catch {}
-        renewMeta[nome].estado = 'erro';
-        renewMeta[nome].lastRunAt = Date.now();
-        resolve({ ok:false, error: msg });
-      } finally {
-        if (wd) { try { clearTimeout(wd); } catch{} }
-        // 5) Limpa flags e restaura Virtus se estava ligado antes
-        renewMeta[nome].renovadorEmExecucao = false;
-        if (robeMeta[nome]) delete robeMeta[nome].suspendRobe;
-        try { await issues.append(nome, 'mil_action', 'renovador_flags_cleared (renovadorEmExecucao=0, suspendRobe=0)'); } catch {}
-        if (virtusWasRunning && automationAllowed(ctrl)) {
-          try {
-            console.log(`[RENOVADOR][${nome}][RESTORE] restarting Virtus`);
-            ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
-            ctrl.trabalhando = true;
-            console.log(`[RENOVADOR][${nome}][RESTORE] Virtus restaurado`);
-          } catch {
-            ctrl.virtus = null; ctrl.trabalhando = false;
-            console.log(`[RENOVADOR][${nome}][RESTORE] Falha ao religar Virtus`);
-          }
-        }
-        await snapshotStatusAndWrite();
-        try { await Promise.resolve().then(() => snapshotStatusAndWrite()); } catch {}
-        console.log(`[RENOVADOR][${nome}][FINALLY] Flags cleared, snapshot finalizado`);
-      }
-    });
-  });
-},
-async ['renovador_global']() {
-  if (renovacaoGlobalAtiva) return { ok:false, error:'renovacao_global_ativa' };
-  renovacaoGlobalAtiva = true; await snapshotStatusAndWrite();
-  let wd=null;
-  const wdFn = ()=>{ issues.append('system','mil_action','renovador_global_timeout').catch(()=>{}); renovacaoGlobalAtiva=false; snapshotStatusAndWrite();};
-  wd = setTimeout(wdFn, 90*60*1000);
-  try {
-    const t0 = Date.now();
-    let waited=0; 
-    while (robeQueue.activeCount && robeQueue.activeCount()>0 && waited < 120000) { await new Promise(r=>setTimeout(r,500)); waited+=500; }
-    if (waited>=120000 && robeQueue.clear) { try { robeQueue.clear(); } catch{} await issues.append('system','mil_action','renovador_global_robe_clear'); }
-    const perfs = loadPerfisJson().map(p=>p.nome).filter(n=>controllers.has(n));
-    for (const nome of perfs) {
-      renewQueue.enqueue(nome, async ()=> {
-        const rm = renewMeta[nome] || (renewMeta[nome]={});
-        const ctrl = controllers.get(nome);
-        let virtusWasRunning = false;
-        rm.renovadorEmExecucao = true; rm.estado='start'; snapshotStatusAndWrite();
-        try {
-          // INÍCIO DA INSTRUÇÃO 3: Pausa Virtus e bloqueio do Robe no global
-          if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-            try { await ctrl.virtus.stop(); } catch {}
-            ctrl.virtus = null;
-            ctrl.trabalhando = false;
-            virtusWasRunning = true;
-          }
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].suspendRobe = true;
-          await issues.append(nome, 'mil_action', 'renovador_flags_set (global)');
-          // FIM BLOQUEIO
-
-          if (!ctrl || !ctrl.browser) throw new Error('browser_inativo');
-          const res = await require('./renovador.js').startRenovacao(ctrl.browser, nome, { diasLimite:46, waitListMs:70000, renewWaitMs:70000, useMainPage: true });
-          rm.estado = res && res.ok ? 'ok' : 'erro';
-          rm.lastRunAt = Date.now();
-          rm.lastCount = (res && res.renewedCount) || 0;
-          await issues.append(nome, res && res.ok ? 'mil_action' : 'renovador_error', `renovador_global result ok=${!!(res&&res.ok)} count=${rm.lastCount}`);
-        } catch(e) {
-          rm.estado='erro'; rm.lastRunAt=Date.now();
-          await issues.append(nome,'renovador_error', e && e.message || String(e));
-        } finally {
-          // INSTRUÇÃO 3: retoma Virtus e destrava robe ao final
-          if (robeMeta[nome]) delete robeMeta[nome].suspendRobe;
-          if (virtusWasRunning && automationAllowed(ctrl)) {
-            try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
-              ctrl.trabalhando = true;
-            } catch {
-              ctrl.virtus = null; ctrl.trabalhando = false;
-            }
-          }
-          rm.renovadorEmExecucao=false;
-          await issues.append(nome, 'mil_action', 'renovador_flags_cleared (global)');
-          snapshotStatusAndWrite();
-        }
-      });
-    }
-    // Esperar a fila acabar
-    const tStart = Date.now();
-    while ((renewQueue.executando || (renewQueue.fila && renewQueue.fila.length>0)) && (Date.now()-tStart)<(80*60*1000)) {
-      await new Promise(r=>setTimeout(r,1000));
-    }
-    return { ok:true, total: perfs.length };
-  } catch(e) {
-    await issues.append('system','renovador_error', e && e.message || String(e));
-    return { ok:false, error: e && e.message || String(e) };
-  } finally {
-    if (wd) { try { clearTimeout(wd);}catch{} }
-    renovacaoGlobalAtiva = false;
-    await snapshotStatusAndWrite();
-    try {
-      await Promise.resolve().then(() => snapshotStatusAndWrite());
-    } catch {}
-  }
-}
 };
 
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
@@ -2780,11 +2538,7 @@ return {
   manifestStatus,
   closingReason: robeMeta[nome]?.closingReason || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
-  lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
-  renovadorEmExecucao: !!(renewMeta[nome] && renewMeta[nome].renovadorEmExecucao),
-  renovadorLastRunAt: (renewMeta[nome] && renewMeta[nome].lastRunAt) || null,
-  renovadorLastCount: (renewMeta[nome] && renewMeta[nome].lastCount) || null,
-  renovadorEstado: (renewMeta[nome] && renewMeta[nome].estado) || ''
+  lastSwapAt: robeMeta[nome]?.lastSwapAt || null
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
   // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
@@ -2858,14 +2612,7 @@ const sys = {
   cores: (os.cpus()||[]).length,
   cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
 };
-const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now(), renovador: {
-  renovacaoGlobalAtiva,
-  renewQueue: {
-    active: !!(renewQueue && renewQueue.executando),
-    current: (renewQueue && renewQueue.executando && renewQueue.executando.nome) || null,
-    queue: renewQueue && Array.isArray(renewQueue.fila) ? renewQueue.fila.map(e=>e.nome) : []
-  }
-} };
+const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
 // Não inclui mais robeRam obsoleto, pois RAM por perfil já está em perfis/robes.
 // Unificado cross-platform.
 const ok = writeJsonAtomic(statusPath, statusObj);
@@ -3134,8 +2881,6 @@ async function nurseTick() {
     for (const nome of Object.keys(desired.perfis || {})) {
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
-      const rm = renewMeta[nome] || {};
-      if (rm.renovadorEmExecucao === true) continue;
       if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
         continue; // NUNCA navega, religia, nem prune enquanto em humano ou configurando
       }
@@ -3628,11 +3373,6 @@ async function recoveryStep(nome, page, step) {
   return false;
 }
 async function escalateToReopen(nome, reason='health_reopen') {
-  // NUNCA reabra/feche durante renovação
-  if (renewMeta[nome] && renewMeta[nome].renovadorEmExecucao === true) {
-    await appendIssueNurseDebounced(nome, 'mil_action', 'health_escalate_suppressed_renovador', 'health_escalate_suppressed_renovador');
-    return;
-  }
   const ctrl = controllers.get(nome);
   try { await issues.append(nome, 'mil_action', `health_escalate:${reason}`); } catch {}
   if (killGuardActive(nome)) {
@@ -3650,11 +3390,6 @@ async function healthTick() {
   for (const [nome, ctrl] of controllers) {
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
     if (!ctrl || !ctrl.browser) continue;
-    // HARD-GUARD: não mexer em nada se Renovador estiver ativo
-    if (renewMeta[nome] && renewMeta[nome].renovadorEmExecucao === true) {
-      await appendIssueNurseDebounced(nome, 'mil_action', 'health_skip_renovador_active', 'health_skip_renovador_active');
-      continue;
-    }
     const st = getHealth(nome);
     const now = Date.now();
     let pages = [];
@@ -3875,8 +3610,7 @@ process.on('message', async (msg) => {
   if (!msg || !msg.type || !msg.msgId) return;
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
-    try { await issues.append('system','mil_action','unknown_command:'+String(msg && msg.type || '')); } catch {}
-    sendReply(msg.msgId, { ok: false, error: 'Comando desconhecido' });
+    sendReply(msgId, { ok: false, error: 'Comando desconhecido' });
     return;
   }
   try {
@@ -3893,15 +3627,3 @@ process.on('uncaughtException', (e) => {
 process.on('unhandledRejection', (e) => {
   try { console.error('unhandled:', e && e.message); } catch {}
 });
-
-// Scheduler da rotina diária do renovador
-const renewSched = { lastRunDay: null };
-setInterval(async () => { 
-  if (renovacaoGlobalAtiva) return;
-  const now = new Date(); const hh=now.getHours(), mm=now.getMinutes();
-  const dayKey = now.toISOString().slice(0,10);
-  if (hh===1 && mm<15 && renewSched.lastRunDay !== dayKey) {
-    await handlers['renovador_global']({});
-    renewSched.lastRunDay = dayKey;
-  }
-}, 30000);

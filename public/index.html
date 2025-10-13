@@ -129,7 +129,6 @@
     .pill.warn .dot{ background:var(--warn) }
     .pill.bad  .dot{ background:var(--bad)  }
     .pill.info .dot{ background:var(--brand) }
-    .pill.warn { font-weight: 800; }
     .pill.ramWarn   { border-color: #cf8a2e; background: #31210e; color: #f6cc87; }
     .pill.ramBad    { border-color: #e35a5a; background: #360f0f; color: #f1b3b3; font-weight:700; }
     .pill.frozen    { border-color:#BBB; background:#272f3c; color:#fff; font-weight:700;}
@@ -225,7 +224,6 @@
     <button class="btn" id="robe24AllBtn">Robe 24h</button>
     <button class="btn" id="robeReleaseAllBtn">Liberar Robe</button>
     <button class="btn" id="unfreezeAllBtn">Descongelar</button>
-    <button class="btn" id="renovarGlobalBtn">Renovar Classificados (Global)</button>
     <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
       <button class="btn" id="filterAll">Todas</button>
       <button class="btn" id="filterActive">Ativas</button>
@@ -582,23 +580,6 @@
         if (b) b.remove();
       }
 
-      // [OPCIONAL] Exibe banner global enquanto renovador global está ativo
-      if (st && st.renovador && st.renovador.renovacaoGlobalAtiva) {
-        // Exibe banner visual fixo impedindo ações dos botões
-        let banner = document.getElementById('renovadorBanner');
-        if (!banner) {
-          banner = document.createElement('div');
-          banner.id = 'renovadorBanner';
-          banner.style = 'margin:10px 0; padding:8px; border:1px solid #337; background:#113; color:#ff0; border-radius:8px; text-align:center; font-weight:700;';
-          banner.textContent = 'Renovação Global em execução — ações temporariamente bloqueadas.';
-          const wrap = document.querySelector('.wrap');
-          if (wrap) wrap.prepend(banner);
-        }
-      } else {
-        let banner = document.getElementById('renovadorBanner');
-        if (banner) banner.remove();
-      }
-
       const perfis = st?.perfis || [];
       const robes  = st?.robes  || {};
       const robeQueue = st?.robeQueue || [];
@@ -853,10 +834,6 @@
         if (p.humanControl) {
           titleRow.append(buildPill('Modo Humano', 'warn'));
         }
-        // NOVO: Pill "RENOVANDO" — AGORA AMARELO (destaque máximo)
-        if (p.renovadorEmExecucao) {
-          titleRow.append(buildPill('RENOVANDO', 'warn'));
-        }
 
         // ------------- ABAS/NUMPAGES PILL -------------
         // Militar: Se campo não for null, badge “Abas: N” para contas com N > 1 (alerta, cor de warning). Se null/undefined, simplesmente não exibir.
@@ -957,39 +934,6 @@
           right.append(btnCookies, btnHuman, btnCfg, btnLog);
         }
         // ----------------------------------------------------------------------------------
-
-        // Botão “Renovar” individual por conta — após btnLog
-        const btnRenovar = document.createElement('button');
-        btnRenovar.className = 'btn';
-        btnRenovar.textContent = 'Renovar';
-        btnRenovar.title = 'Renovar classificados desta conta';
-        btnRenovar.onclick = async () => {
-          setBtnLoading(btnRenovar, true, 'Renovando...');
-          try {
-            const resp = await window.electronAPI.renovarIndividual(p.nome);
-            const errorMap = {
-              'wait_list_timeout': 'Nenhum classificado elegível foi encontrado ou a lista não carregou a tempo. Verifique se há anúncios com 46 dias ou mais.',
-              'no_eligible': 'Nenhum classificado elegível (>=46 dias) foi encontrado para renovar.',
-              'menu_renew_click_failed': 'Não foi possível abrir o menu de renovação. Tente novamente.',
-              'gerenciar_click_failed': 'Não foi possível abrir “Gerenciar classificados”. Recarregue a página e tente novamente.',
-              'select_all_failed': 'Não foi possível selecionar os itens. Tente novamente.',
-              'renew_click_or_back_timeout': 'A confirmação de renovação não concluiu a tempo. Verifique a conexão e tente novamente.',
-              'browser_inativo': 'O navegador desta conta está fechado. Abra-o e tente novamente.'
-            };
-            if (!resp || !resp.ok) {
-              const msg = (resp && resp.error && errorMap[resp.error]) || ('Falha ao renovar: ' + ((resp && resp.error) || 'Erro desconhecido'));
-              alert(msg);
-            }
-            reloadPerfis();
-          } finally {
-            setBtnLoading(btnRenovar, false);
-          }
-        };
-        // Desabilita se a renovação global está ativa
-        if (st && st.renovador && st.renovador.renovacaoGlobalAtiva) {
-          btnRenovar.disabled = true;
-        }
-        right.appendChild(btnRenovar);
 
         // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
         // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
@@ -1167,7 +1111,7 @@
     // Logs por conta (arquivo)
     function showIssuesModal(nome){
       const overlay = document.createElement('div'); overlay.className='modal-ov';
-      const box = document.createElement('div'); box.className = 'modal-box'; box.style.maxWidth='720px';
+      const box = document.createElement('div'); box.className='modal-box'; box.style.maxWidth='720px';
       box.innerHTML = `
         <h2>Logs — ${nome}</h2>
         <div style="margin:6px 0; display:none">
@@ -1596,20 +1540,6 @@
         } finally {
           btn.disabled = false; btn.textContent = 'Descongelar';
         }
-      };
-    })();
-
-    // Bind do botão “Renovar Classificados (Global)”
-    (function bindRenovarGlobalBtn(){
-      const btn = document.getElementById('renovarGlobalBtn');
-      if (!btn) return;
-      btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
-        btn.disabled = true; btn.textContent='Renovando...';
-        try {
-          const r = await window.electronAPI.renovarGlobal();
-          if (!r || !r.ok) alert('Falha na renovação global: '+ ((r && r.error)||''));
-        } finally { btn.disabled=false; btn.textContent='Renovar Classificados (Global)'; reloadPerfis(); }
       };
     })();
 

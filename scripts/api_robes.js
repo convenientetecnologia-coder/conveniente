@@ -20,10 +20,14 @@ module.exports = (app, workerClient, fileStore) => {
             return man;
           });
           total++;
-          try { require('./issues.js').append(p.nome, 'robe_pause_24h', 'Pause 24h via API'); } catch{}
+          if (fileStore.issues && typeof fileStore.issues.append === "function") {
+            fileStore.issues.append({ type: 'robe_pause_24h', perfil: p.nome, ok: true, ts: Date.now() });
+          }
         } catch(e) {
           failed++; fails.push(p.nome);
-          try { require('./issues.js').append(p.nome, 'robe_pause_24h', (e && e.message) || String(e)); } catch{}
+          if (fileStore.issues && typeof fileStore.issues.append === "function") {
+            fileStore.issues.append({ type: 'robe_pause_24h', perfil: p.nome, ok: false, error: e && e.message || String(e), ts: Date.now() });
+          }
         }
       }
       if (failed > 0) {
@@ -51,7 +55,9 @@ module.exports = (app, workerClient, fileStore) => {
         } catch {}
         if (manCur && manCur.robePauseReason === 'limit_posting' && (manCur.robeCooldownUntil || 0) > Date.now()) {
           fails.push(p.nome);
-          try { require('./issues.js').append(p.nome, 'release_all_skip_limit_posting_active', 'Skipping release due to limit_posting active'); } catch{}
+          if (fileStore.issues && typeof fileStore.issues.append === "function") {
+            fileStore.issues.append({ type: 'release_all_skip_limit_posting_active', perfil: p.nome, ts: Date.now() });
+          }
           continue; // profile NÃO é liberado, nem alterado
         }
 
@@ -64,10 +70,14 @@ module.exports = (app, workerClient, fileStore) => {
             return man;
           });
           total++;
-          try { require('./issues.js').append(p.nome, 'robe_release_all', 'Release all via API'); } catch{}
+          if (fileStore.issues && typeof fileStore.issues.append === "function") {
+            fileStore.issues.append({ type: 'robe_release_all', perfil: p.nome, ok: true, ts: Date.now() });
+          }
         } catch(e) {
           failed++; fails.push(p.nome);
-          try { require('./issues.js').append(p.nome, 'robe_release_all', (e && e.message) || String(e)); } catch{}
+          if (fileStore.issues && typeof fileStore.issues.append === "function") {
+            fileStore.issues.append({ type: 'robe_release_all', perfil: p.nome, ok: false, error: e && e.message || String(e), ts: Date.now() });
+          }
         }
       }
       // *** NOVO: chama o comando workerClient para limpar robeMeta.pauseReason e lastRobeBlockAt do lado do worker ***
@@ -75,7 +85,9 @@ module.exports = (app, workerClient, fileStore) => {
         await workerClient.sendWorkerCommand('robes-release-all', {}, { timeoutMs: 20000 }); 
       } catch(e) {
         // log, mas não bloqueia o fluxo
-        try { require('./issues.js').append('global', 'robes_release_all_worker_sync_error', (e && e.message) || String(e)); } catch{}
+        if (fileStore.issues && typeof fileStore.issues.append === "function") {
+          fileStore.issues.append({ type: 'robes_release_all_worker_sync_error', error: e && e.message || String(e), ts: Date.now() });
+        }
       }
       if (failed > 0 || (fails && fails.length)) {
         res.json({ ok: false, error: `Failure in ${failed} perfil(s) or skipped limit_posting: ${fails && fails.length ? fails.join(', ') : ''}`, fails });
