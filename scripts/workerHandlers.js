@@ -146,7 +146,7 @@ return { ok: false, error: 'Core não expôs unfreeze' };
 return await core.unfreeze({ nome, setBy });
 },
 
-async 'unfreeze-all' {
+'unfreeze-all': async function() {
 if (typeof core.unfreezeAll !== 'function') {
 return { ok: false, error: 'Core não expôs unfreezeAll' };
 }
