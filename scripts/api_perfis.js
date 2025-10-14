@@ -168,25 +168,7 @@ module.exports = (app, workerClient, fileStore) => {
     }
 
     // BLOQUEIO de ativação por limit_posting
-    const manifestStore = require('./manifestStore.js');
-    try {
-      const man = await manifestStore.read(nome).catch(()=>null);
-      if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
-        const remainingMs = (man.robeCooldownUntil - Date.now());
-        const h = Math.floor(remainingMs/3600000);
-        const m = Math.floor((remainingMs%3600000)/60000);
-        logger.warn('Ativação bloqueada devido a limit_posting', { nome, cooldownMs: remainingMs });
-        await issues.append(nome, 'mil_action', `activate_denied_by_limit_posting ${h}h${m}m restantes`);
-        return res.json({
-          ok: false,
-          code: 'blocked_by_limit_posting',
-          error: `Bloqueado por limite de postagem. Tente novamente em ${h}h ${m}m.`,
-          cooldownMs: remainingMs
-        });
-      }
-    } catch (e) {
-      logger.error('Erro ao checar bloqueio por limit_posting', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);
-    }
+    // --- PATCH CIRÚRGICO: BLOCO REMOVIDO CONFORME INSTRUÇÃO ---
 
     try { await fileStore.patchDesired(nome, { active: true }); } catch (e) {
       logger.error('Erro ao patchDesired para ativação', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);

@@ -695,12 +695,8 @@ async function activateOnce(nome, source = '') {
       return { ok:false, error:"kill_guard_until" };
     }
 
-    // BLOQUEIO por limit_posting antes de pedir slot ao supervisor
-    const manGatePre = await manifestStore.read(nome).catch(()=>null);
-    if (manGatePre && manGatePre.robePauseReason === 'limit_posting' && (manGatePre.robeCooldownUntil || 0) > Date.now()) {
-      await reportAction(nome, 'mil_action', 'activate_denied_by_limit_posting');
-      return { ok: false, error: 'blocked_by_limit_posting' };
-    }
+    // [PATCH-GPT5] Não bloquear ativação por limit_posting — Virtus deve poder operar mesmo durante pausa do Robe.
+    // Mantemos o gate de supervisor/slots/RAM, mas permitimos abrir o navegador mesmo com pauseReason='limit_posting'.
 
     // SÓ AGORA peça slot ao supervisor
     const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
@@ -1779,12 +1775,6 @@ function automationAllowed(ctrl) {
 // PATCH 2: handler.start_work (definido fora do objeto handlers)
 async function start_work({ nome }) {
   logger.info('[HANDLER] start_work chamada', { nome });
-  const man = await manifestStore.read(nome).catch(()=>null);
-  if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
-    await issues.append(nome, 'mil_action', 'start_work_denied_by_limit_posting');
-    logger.warn('[HANDLER] start_work denied_by_limit_posting', { nome });
-    return { ok: false, error: 'blocked_by_limit_posting' };
-  }
 
   const ctrl = controllers.get(nome);
   if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
@@ -2035,13 +2025,6 @@ const handlers = {
 
   async invoke_human({ nome }) {
     logger.info('[HANDLER] invoke_human chamada', { nome });
-    // BLOQUEIO por limit_posting em invoke_human
-    const man = await manifestStore.read(nome).catch(()=>null);
-    if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
-      await issues.append(nome, 'mil_action', 'invoke_human_denied_by_limit_posting');
-      logger.warn('[HANDLER] invoke_human denied_by_limit_posting', { nome });
-      return { ok: false, error: 'blocked_by_limit_posting' };
-    }
 
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
@@ -2086,13 +2069,6 @@ const handlers = {
 
   async ['human-resume']({ nome }) {
     logger.info('[HANDLER] human-resume chamada', { nome });
-    // BLOQUEIO por limit_posting em human-resume
-    const man = await manifestStore.read(nome).catch(()=>null);
-    if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
-      await issues.append(nome, 'mil_action', 'human_resume_denied_by_limit_posting');
-      logger.warn('[HANDLER] human-resume denied_by_limit_posting', { nome });
-      return { ok: false, error: 'blocked_by_limit_posting' };
-    }
 
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
@@ -2131,13 +2107,6 @@ const handlers = {
     logger.info('[HANDLER] robe-play chamada', { nome });
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-
-    const man = await manifestStore.read(nome).catch(()=>null);
-    if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now()) {
-      await issues.append(nome, 'mil_action', 'robe_play_denied_by_limit_posting');
-      logger.warn('[HANDLER] robe-play denied_by_limit_posting', { nome });
-      return { ok: false, error: 'blocked_by_limit_posting' };
-    }
 
     // P0.3: recusa se frozen
     if (isFrozenNow(nome)) {
@@ -2323,11 +2292,6 @@ const handlers = {
     // Limpa pauseReason de todos os perfis em robeMeta + no manifest (remover robePauseReason)
     const perfisArr = loadPerfisJson();
     for (const p of perfisArr) {
-      const man = await manifestStore.read(p.nome).catch(()=>null);
-      if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
-        await issues.append(p.nome, 'mil_action', 'release_all_skip_limit_posting_active');
-        continue; // Não toca no perfil, nem zera pausa
-      }
       try {
         robeMeta[p.nome] = robeMeta[p.nome] || {};
         delete robeMeta[p.nome].pauseReason;

@@ -55,18 +55,8 @@ module.exports = (app, workerClient, fileStore) => {
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
 
-        // Checagem militar: não permite liberar se estiver em penalidade limit_posting ativa
-        let manCur = null;
-        try {
-          manCur = await manifestStore.read(p.nome).catch(() => null);
-        } catch {}
-        if (manCur && manCur.robePauseReason === 'limit_posting' && (manCur.robeCooldownUntil || 0) > Date.now()) {
-          fails.push(p.nome);
-          if (issues && typeof issues.append === "function") {
-            issues.append('system', 'release_all_skip_limit_posting_active', `perfil=${p.nome}`);
-          }
-          continue; // profile NÃO é liberado, nem alterado
-        }
+        // --- Patch cirúrgico: REMOVE checagem e bloqueio "limit_posting" ---
+        // O bloco que limitava a liberação global de perfis em penalidade limit_posting foi removido aqui.
 
         try {
           await manifestStore.update(p.nome, man => {
