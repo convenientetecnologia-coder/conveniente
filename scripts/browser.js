@@ -1505,6 +1505,17 @@ async function detectMessengerTempBlock(page) {
     if (v.blockedMessenger) { blocked = true; domain = 'messenger'; }
     else if (v.blockedFacebookCreate) { blocked = true; domain = 'facebook'; }
 
+    // Se não bloqueou e é FB/Messenger, tenta fallback deep
+    if (!blocked && (v.isFacebookCtx || v.isMessengerCtx)) {
+      try {
+        const deep = await detectLimitOverlayDeep(page, { alsoCheckFrames: true });
+        if (deep && deep.blocked) {
+          blocked = true;
+          domain = v.isMessengerCtx ? 'messenger' : 'facebook';
+        }
+      } catch {}
+    }
+
     return {
       blocked,
       domain,
@@ -1581,6 +1592,115 @@ async function dismissAutomationSuspect(page, nome) {
   return false;
 }
 
+// [ADD] Deep pattern — multilíngue (PT/EN/ES) para bloqueio/limite de criação/posta/lista
+function textHitsLimitNormalized(t) {
+  if (!t) return false;
+  t = String(t).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+
+  if (/voce\s+nao\s+pode\s+(criar|publicar).*(classificados|anuncios|listagens?|itens?).*(no\s+momento|agora)/.test(t)) return true;
+  if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
+  if (/no\s+es\s+posible\s+(crear|publicar).*(anuncios?|art[ií]culos?|listados?|publicaciones?).*(en\s+este\s+momento|ahora)/.test(t)) return true;
+  if (/(temporar(?:y|io)|temporariamente|temporalmente)\s+(limit|limite)/.test(t) && /(items?|listings?|classificados|anuncios?)/.test(t)) return true;
+  if (/limite\s+atingido/.test(t) || /limit\s+reached/.test(t) || /limite\s+alcanzado/.test(t)) return true;
+  if (/(ha|h[áa])\s+um\s+limite\s+tempor/.test(t) && /(itens?|vender|publicar|marketplace)/.test(t)) return true;
+  if (/(there('|’)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(t) && /(how\s+many\s+items\s+you\s+(can|may)\s+(list|sell)|marketplace)/.test(t)) return true;
+  if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+  if (/voce\s+esta\s+bloqueado\s+temporariamente/.test(t)) return true;
+  return false;
+}
+
+// [ADD] Scanner profundo: percorre document + todos os shadowRoots e tenta detectar overlay LIMIT
+function deepScanLimitOverlayInDocument() {
+  function norm(s) { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); } catch { return (s||'').toLowerCase(); } }
+  function getAllRoots(doc) {
+    const roots = [doc];
+    const walker = doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT);
+    let n = walker.currentNode;
+    while (n) {
+      if (n.shadowRoot) roots.push(n.shadowRoot);
+      n = walker.nextNode();
+    }
+    return roots;
+  }
+  function visible(el) {
+    try {
+      const st = el.ownerDocument.defaultView.getComputedStyle(el);
+      if (!st) return false;
+      if (st.visibility === 'hidden' || st.display === 'none') return false;
+      const r = el.getBoundingClientRect();
+      return (r && r.width >= 0 && r.height >= 0);
+    } catch { return true; }
+  }
+  function scanRoot(R) {
+    const nodes = Array.from(R.querySelectorAll('h1,h2,h3,section,div,span,p,button,a,[role="dialog"],[aria-modal="true"]')).slice(0, 3000);
+    let hits = 0, snippet = '', where = '';
+    const heads = Array.from(R.querySelectorAll('h1,h2')).slice(0, 50);
+    for (const h of heads) {
+      const t = norm(h.innerText || h.textContent || '');
+      if (textHitsLimitNormalized(t)) {
+        hits++;
+        where = where || 'headline';
+        snippet = snippet || (h.innerText || h.textContent || '').slice(0, 200);
+        break;
+      }
+    }
+    if (!hits) {
+      for (const el of nodes) {
+        const t = norm(el.innerText || el.textContent || '');
+        if (!t) continue;
+        if (textHitsLimitNormalized(t)) {
+          hits++
+          if (!snippet) snippet = (el.innerText || el.textContent || '').slice(0, 200);
+          if (!where) {
+            if (el.getAttribute && (el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true')) where = 'dialog_any';
+            else where = (visible(el) ? 'global_any_visible' : 'global_any_hidden');
+          }
+          if (hits >= 2) break;
+        }
+      }
+    }
+    return hits ? { found: true, where, snippet, strongEvidenceCount: hits } : null;
+  }
+
+  const doc = document;
+  const roots = getAllRoots(doc);
+  const portal = doc.querySelector('#facebook, #mount_0_0, [id^="mount_"], [id^="portal"]');
+  if (portal && portal.shadowRoot) roots.push(portal.shadowRoot);
+
+  for (const R of roots) {
+    const res = scanRoot(R);
+    if (res) return res;
+  }
+  try {
+    const txt = norm(doc.body ? (doc.body.innerText || doc.body.textContent || '') : '');
+    if (textHitsLimitNormalized(txt)) {
+      return { found: true, where: 'body_fallback', snippet: (doc.body.innerText || '').slice(0, 200), strongEvidenceCount: 1 };
+    }
+  } catch {}
+  return { found: false, where: '', snippet: '', strongEvidenceCount: 0 };
+}
+
+// [ADD] API: detecta overlay LIMIT profundamente no main frame e, opcionalmente, nos frames same-origin também
+async function detectLimitOverlayDeep(page, { alsoCheckFrames = true } = {}) {
+  try {
+    const main = await page.evaluate(() => deepScanLimitOverlayInDocument()).catch(()=>({found:false}));
+    if (main && main.found) return { blocked: true, domain: 'facebook', hasReloadBtn: false, strongEvidenceCount: main.strongEvidenceCount, joinedTexts: main.snippet, where: main.where };
+
+    if (alsoCheckFrames && page.mainFrame && page.mainFrame().childFrames) {
+      const frames = page.mainFrame().childFrames();
+      for (const fr of frames) {
+        try {
+          const res = await fr.evaluate(() => deepScanLimitOverlayInDocument());
+          if (res && res.found) {
+            return { blocked: true, domain: 'facebook', hasReloadBtn: false, strongEvidenceCount: res.strongEvidenceCount, joinedTexts: res.snippet, where: res.where };
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return { blocked: false, domain: null, hasReloadBtn: false, strongEvidenceCount: 0, joinedTexts: '', where: '' };
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1600,5 +1720,7 @@ module.exports = {
   attachHealthProbes, // NOVO!
   hardCleanProfileOnDisk,
   detectMessengerTempBlock, // NOVO: exportado para uso pelo worker
+  detectLimitOverlayDeep,      // <----- NOVO
   dismissAutomationSuspect,
+  textHitsLimitNormalized      // <----- NOVO (opcional, caso queira reusar)
 };
