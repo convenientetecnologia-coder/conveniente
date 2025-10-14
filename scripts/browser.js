@@ -1873,5 +1873,8 @@ module.exports = {
   detectLimitOverlayDeep,      // <----- NOVO
   detectLimitOverlayEverywhere,
   dismissAutomationSuspect,
-  textHitsLimitNormalized      // <----- NOVO (opcional, caso queira reusar)
+  textHitsLimitNormalized,     // <----- NOVO (opcional, caso queira reusar)
+  // ======= ADICIONE ESTES DOIS:
+  resolveNonceIfPresent,
+  clickContinuarComo
 };

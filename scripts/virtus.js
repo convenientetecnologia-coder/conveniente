@@ -250,8 +250,18 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
   let url = '';
   try { url = page.url() || ''; } catch {}
   if (!/messenger.com\/marketplace/i.test(url)) {
-    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(()=>{});
+    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); } catch {}
   }
+  // Cura fluxos de nonce/continuar
+  try {
+    const browserJs = require('./browser.js');
+    if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
+      await browserJs.resolveNonceIfPresent(page).catch(()=>{});
+    }
+    if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
+      await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
+    }
+  } catch {}
   // Espera robusta por UI
   const ok = await Promise.race([
     page.waitForFunction(() => {
@@ -325,91 +335,140 @@ async function scrollChatsToTop(page) {
 
 // ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
 async function sendMessageSafe(p, campo, msg, nome) {
-  // 1) Garantir foco e limpar o composer
-  try { await campo.focus(); } catch {}
+  // 0) Reobtenha o composer se campo for ausente ou suspeito
   try {
-    await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
-    await p.keyboard.press('A');
-    await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
-    await p.keyboard.press('Backspace');
-  } catch {}
-
-  // 2) Tentativa: colar via clipboard (inserção “atômica”)
-  let pasted = false;
-  try {
-    const ok = await p.evaluate(async (txt) => {
-      try { await navigator.clipboard.writeText(txt); return true; }
-      catch { return false; }
-    }, msg);
-    if (ok) {
-      await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
-      await p.keyboard.press('V');
-      await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
-      pasted = true;
-    }
-  } catch {}
-
-  // 3) Fallback: digitação
-  if (!pasted) {
-    await campo.type(msg, { delay: randomBetween(6,14) });
-  }
-
-  // 4) Verificação do composer: precisa constar exatamente o texto
-  const match = await p.evaluate((el) => {
-    const getText = (n) => (n.innerText || n.textContent || '').replace(/\r/g,'');
-    const text = getText(el).replace(/\u00a0/g,' ').trim();
-    return text;
-  }, campo).catch(() => '');
-
-  // 5) Se não bate (corte/preview interferiu), limpa e re-insere uma única vez com execCommand
-  if (match !== msg.trim()) {
-    try {
-      await campo.focus();
-      await p.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
-      await p.keyboard.press('A');
-      await p.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
-      await p.keyboard.press('Backspace');
-    } catch {}
-    await p.evaluate((el, txt) => {
-      el.focus();
-      try { document.execCommand('insertText', false, txt); } catch {
-        const e = new InputEvent('beforeinput', { inputType: 'insertText', data: txt, bubbles: true, cancelable: true });
-        el.dispatchEvent(e);
-        el.textContent = txt;
+    if (!campo || (await campo.evaluate(el => !el.isConnected).catch(()=>true))) {
+      const sels = [
+        'div[contenteditable="true"][role="textbox"]',
+        'div[contenteditable="true"][aria-label]',
+        'div[contenteditable="true"]',
+        'div[role="combobox"][contenteditable="true"]',
+        'div[aria-label="Mensagem"]',
+        'div[aria-label*="mensagem"]'
+      ];
+      for (const sel of sels) {
+        const h = await p.$(sel).catch(()=>null);
+        if (h) {
+          const ok = await h.evaluate(el => {
+            const st = window.getComputedStyle(el);
+            return el.isConnected && st && st.visibility !== 'hidden' && st.display !== 'none' && el.offsetParent !== null;
+          }).catch(()=>false);
+          if (ok) { campo = h; break; }
+        }
       }
-    }, campo, msg);
-    // revalida
-    const m2 = await p.evaluate((el) => (el.innerText || el.textContent || '').replace(/\u00a0/g,' ').trim(), campo).catch(()=>'');
-
-    if (m2 !== msg.trim()) {
-      try { await logIssue(nome, 'virtus_send_failed', `composer mismatch [expect=${msg.length}, got=${m2.length}]`); } catch {}
-      throw new Error('composer_text_mismatch');
-    }
-  }
-
-  // 6) Envia
-  await campo.press('Enter');
-
-  // 7) Aguarda composer esvaziar (sinal básico de envio) – 7s
-  await p.waitForFunction((el) => {
-    const txt = (el.innerText || el.textContent || '').trim();
-    return txt.length === 0;
-  }, { timeout: 7000 }, campo).catch(()=>{});
-
-  // 7.1) Pós-Enter: verificação de envio (bubble "você enviou/you sent"); reforça Enter se necessário
-  try {
-    const sentByMe = await p.evaluate(() => {
-      const norm = s => (s||'').toLowerCase();
-      const last = Array.from(document.querySelectorAll('div[role="row"],div[role="article"]')).slice(-10);
-      return last.some(el => /you\s+sent|v[ou]ce\s+enviou/i.test(norm(el.innerText||el.textContent||'')));
-    });
-    if (!sentByMe) {
-      // Tenta reforçar um Enter caso o Messenger não tenha enviado
-      await p.keyboard.press('Enter');
     }
   } catch {}
+  if (!campo) throw new Error('composer_missing');
 
-  // 8) Pós-verificação: se imagem placeholder quebrada ficou no composer
+  // Helpers de normalização
+  function norm(s) {
+    return String(s || '')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/\u00a0/g,' ')
+      .replace(/\r/g,'')
+      .replace(/[ \t]+/g,' ')
+      .trim();
+  }
+  const msgNorm = norm(msg);
+
+  // 1) Foco e limpeza dentro do MESMO mundo do elemento
+  await campo.focus().catch(()=>{});
+  await campo.evaluate(el => {
+    try {
+      // Select-all seguro no mesmo mundo
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('delete');
+    } catch {}
+    el.innerHTML = '';
+  }).catch(()=>{});
+
+  // 2) Inserção preferindo keyboard.insertText (mais estável no Messenger)
+  let inserted = false;
+  try {
+    await p.keyboard.insertText(msg);
+    inserted = true;
+  } catch {}
+  if (!inserted) {
+    // fallback: digitação "humana"
+    try { await campo.type(msg, { delay: randomBetween(6,14) }); inserted = true; } catch {}
+  }
+  if (!inserted) {
+    // última tentativa: execCommand no mesmo mundo
+    await campo.evaluate((el, text) => {
+      try { el.focus(); document.execCommand('insertText', false, text); }
+      catch {
+        const e = new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true });
+        el.dispatchEvent(e);
+        el.textContent = text;
+      }
+    }, msg);
+  }
+
+  // 3) Verificação flexível do composer (no mesmo mundo do elemento)
+  const composerText = await campo.evaluate(el => (el.innerText || el.textContent || '')).catch(()=> '');
+  const compNorm = norm(composerText);
+  if (compNorm !== msgNorm) {
+    // Tente mais 1 vez limpar e inserir por execCommand
+    await campo.evaluate((el, text) => {
+      try {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('delete');
+      } catch {}
+      try { document.execCommand('insertText', false, text); }
+      catch {
+        const e = new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true });
+        el.dispatchEvent(e);
+        el.textContent = text;
+      }
+    }, msg);
+  }
+
+  // 4) Envio
+  await p.keyboard.press('Enter');
+  // Aguarda composer esvaziar OU um bubble novo “You sent/Você enviou” aparecer – o que vier primeiro
+  const sent = await Promise.race([
+    (async () => {
+      try {
+        return await p.waitForFunction(() => {
+          const norm = s => String(s||'').toLowerCase();
+          // Últimas bolhas
+          const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
+          return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
+        }, { timeout: 7000 }).then(()=>true).catch(()=>false);
+      } catch { return false; }
+    })(),
+    (async () => {
+      try {
+        return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: 7000 }, campo)
+          .then(()=>true).catch(()=>false);
+      } catch { return false; }
+    })()
+  ]);
+
+  // 5) Se evidência de envio não apareceu, reforça Enter uma vez e reavalia
+  if (!sent) {
+    try { await p.keyboard.press('Enter'); } catch {}
+    try {
+      const confirmAgain = await p.waitForFunction(() => {
+        const norm = s => String(s||'').toLowerCase();
+        const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
+        return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
+      }, { timeout: 5000 }).then(()=>true).catch(()=>false);
+      if (!confirmAgain) {
+        await logIssue(nome, 'virtus_send_failed', 'no_bubble_confirmed_after_enter');
+      }
+    } catch {}
+  }
+
+  // 6) Higiene: se imagens quebradas ficaram no composer
   try {
     const broken = await p.evaluate(() => {
       const imgs = Array.from(document.querySelectorAll('div[role="textbox"] img'));
@@ -937,7 +996,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const agora = agoraEpoch();
 
     chatsNovos.forEach(c => {
-      const ts = respondedCache.get(c.id);
+      const ts = respondedCache.get(c.id) || Number(historico[c.id] || 0);
       const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
       if (!jaRespondido && !fila.includes(c.id)) {
         fila.push(c.id);
@@ -948,7 +1007,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     const filaAnt = fila.slice(0);
     fila = fila.filter(id => {
-      const ts = respondedCache.get(id);
+      const ts = respondedCache.get(id) || Number(historico[id] || 0);
       return !(ts && (agora - ts) < NO_REPEAT_WINDOW_SEC);
     });
     filaAnt.forEach(id => {
@@ -1058,7 +1117,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
         await garantirMarketplace(p);
 
-        const tsPrev = respondedCache.get(chatId);
+        const tsPrev = respondedCache.get(chatId) || Number(historico[chatId] || 0);
         if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
           log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
           try { await pendingDel(nome, chatId); } catch {}
@@ -1068,6 +1127,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+        await scrollChatsToTop(p).catch(()=>{});
+        await sleep(300);
         let found = await p.$(anchorSel);
 
         if (!found) {
@@ -1112,11 +1173,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (await isChatBlocked(p)) {
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
-          const tsNow = agoraEpoch();
-          historico[chatId] = tsNow;
-          setResponded(chatId, tsNow);
-          ultimoAtendimento = tsNow;
-          await salvaHistorico();
           try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -1135,11 +1191,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (await isChatBlocked(p)) {
             logger.warn('Chat bloqueado no fallback, marcado respondido', { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
-            const tsNow = agoraEpoch();
-            historico[chatId] = tsNow;
-            setResponded(chatId, tsNow);
-            ultimoAtendimento = tsNow;
-            await salvaHistorico();
             try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
             fila = fila.filter(id => id !== chatId);
             chatAtivo = null;
@@ -1156,12 +1207,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (fails >= 2) {
             logger.warn(`${chatId} falhou 2x. Marcando como respondido para não travar fila.`, { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
-            const tsNow = agoraEpoch();
-            historico[chatId] = tsNow;
-            setResponded(chatId, tsNow);
-            ultimoAtendimento = tsNow;
-            await salvaHistorico();
             try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
+            resetFail(chatId);
           } else {
             try { await pendingDel(nome, chatId); } catch {}
           }
