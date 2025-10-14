@@ -993,20 +993,72 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     return { ok: false, reason: 'no_publish_button' };
   }
 
+  // Logging array para rounds de dwell (forense)
+  const dwellDebugRounds = [];
+
   const dwellMs = PUBLISH_DWELL_MS;
   const t0 = Date.now();
   stepLog.appendJSONL('system', 'robe', { step: 'publish_click', at: t0 });
 
   // 4) Watcher de overlay dentro da dwell window (sentinela + deep + frames)
-  const overlayHit = await detectLimitOverlayEverywhere(page, dwellMs);
+  const dwellEndsAt = Date.now() + dwellMs;
+  let overlayHit = null;
+  let roundNum = 0;
+
+  while (Date.now() < dwellEndsAt && !overlayHit) {
+    roundNum++;
+    try {
+      // Deep overlay scan — logs internos do browser.js pegam path/attrs/etc.
+      overlayHit = await detectLimitOverlayEverywhere(page, 0);
+
+      // Em cada ciclo, cole snapshot forense do DOM / dialogs / attrs
+      const domSnapshot = await page.evaluate(() => {
+        try {
+          // Array of dialogs/roots in dom
+          const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).map(el => ({
+            id: el.id || null,
+            class: el.className || null,
+            ariaLabel: el.getAttribute('aria-label') || null,
+            innerText: el.innerText ? el.innerText.slice(0,300) : null,
+            outerHTML: el.outerHTML ? el.outerHTML.slice(0,300) : null,
+          }));
+          // Partial body snippet
+          const bodyTxt = document.body && document.body.innerText ? document.body.innerText.slice(0,300) : '';
+          // Also h2/h1
+          const heads = Array.from(document.querySelectorAll('h1,h2')).map(h => (h.innerText || '').slice(0,100));
+          return {dialogs, bodyTxt, heads};
+        } catch (e) { return {dialogs:[], bodyTxt:'', heads:[]}; }
+      }).catch(()=>({dialogs:[], bodyTxt:'', heads:[]}));
+
+      // Log forense da rodada — chama só stepLog (não issues!)
+      stepLog.appendJSONL(nome, 'robe', {
+        step: 'dwell_debug_cycle',
+        dwellRound: roundNum,
+        overlayFound: overlayHit && overlayHit.blocked,
+        overlayWhere: overlayHit && overlayHit.where,
+        overlayTexts: overlayHit && overlayHit.joinedTexts,
+        domSnapshot
+      });
+
+      if (overlayHit && overlayHit.blocked) break;
+    } catch (e) {
+      stepLog.appendJSONL(nome, 'robe', {step:'dwell_debug_exception', dwellRound: roundNum, err: e && e.message || e});
+    }
+    // Aguarda próximo ciclo (150ms)
+    await sleep(150);
+  }
+
   // Se overlay foi detectado em QUALQUER ponto da dwell, aborta instantaneamente
   if (overlayHit && overlayHit.blocked) {
     stepLog.appendJSONL('system', 'robe', { step: 'publish_fail_overlay_during_dwell', overlayWhere: overlayHit.where || '', ms: (Date.now() - t0) });
     gql.cleanup();
     return { ok: false, reason: 'limit_overlay', overlay: { found: true, where: overlayHit.where || 'everywhere', h2: overlayHit.joinedTexts || '' } };
   }
-  // Se não bateu overlay, aguarda dwell encerrar
-  await new Promise(r=>setTimeout(r, dwellMs));
+
+  // 3. Aguarde até acabar o dwell (se overlay não encontrado)
+  if (!overlayHit || !overlayHit.blocked) {
+    await sleep(Math.max(0, dwellEndsAt - Date.now()));
+  }
 
   // 5) Paralelamente, observe rota (sinal de “rumo ao painel”), mas sem aceitar sucesso ainda
   const routeHintP = waitForSellerRouteStable(page, { timeoutMs: PUBLISH_SUCCESS_ROUTE_MS })

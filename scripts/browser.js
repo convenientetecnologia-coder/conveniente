@@ -1558,7 +1558,7 @@ async function dismissAutomationSuspect(page, nome) {
         .slice(0, 2000)
         .map(el => norm(el.innerText || el.textContent || ''));
       const hasSuspect = allTexts.some(t =>
-        t.includes('suspeitamos que o comportamento da sua conta seja automatizada') ||
+        t.includes('suspeitamos que o comportamento da sua conta seja automatizado') ||
         t.includes('suspeitamos que o comportamento da sua conta seja automatizado') ||
         t.includes('we suspect') && t.includes('automated') ||
         t.includes('suspeitamos do seu comportamento') ||
@@ -1655,6 +1655,36 @@ function deepScanLimitOverlayInDocument() {
       const tt = textsOf(d, doc);
       if (tt.some(txt => textHitsLimitNormalized(norm(txt)))) {
         const snippet = (tt.find(txt => textHitsLimitNormalized(norm(txt))) || '').slice(0,200);
+        // LOGS DEBUG FORTE — após encontrar dialog
+        if (typeof window !== "undefined") {
+          try {
+            const hits = 2;
+            const where = 'dialog';
+            const el = d;
+            const debugPayload = {
+              step: 'deepScan_limit_overlay_debug',
+              found: hits > 0,
+              where: where,
+              snippet,
+              tags: el ? (
+                {
+                  id: el.id || '',
+                  class: el.className || '',
+                  ariaLabel: el.getAttribute ? el.getAttribute('aria-label') : '',
+                  ariaLabelled: el.getAttribute ? el.getAttribute('aria-labelledby') : '',
+                  title: el.getAttribute ? el.getAttribute('title') : '',
+                }
+              ) : {},
+              strongEvidenceCount: hits,
+            };
+            if (window.__robeSetLimitOverlay) {
+              window.__robeSetLimitOverlay(debugPayload);
+            }
+            if (typeof console !== "undefined") {
+              console.log('DEBUG_robo_deepScanLimitOverlayInDocument', debugPayload);
+            }
+          } catch {}
+        }
         return { found:true, where:'dialog', snippet, strongEvidenceCount: 2 };
       }
     }
@@ -1663,7 +1693,38 @@ function deepScanLimitOverlayInDocument() {
     for (const h of heads) {
       const ht = norm(h.innerText || h.textContent || '');
       if (textHitsLimitNormalized(ht)) {
-        return { found:true, where:'headline', snippet: (h.innerText||h.textContent||'').slice(0,200), strongEvidenceCount: 1 };
+        const snippet = (h.innerText||h.textContent||'').slice(0,200);
+        // LOGS DEBUG FORTE — após encontrar headline
+        if (typeof window !== "undefined") {
+          try {
+            const hits = 1;
+            const where = 'headline';
+            const el = h;
+            const debugPayload = {
+              step: 'deepScan_limit_overlay_debug',
+              found: hits > 0,
+              where: where,
+              snippet,
+              tags: el ? (
+                {
+                  id: el.id || '',
+                  class: el.className || '',
+                  ariaLabel: el.getAttribute ? el.getAttribute('aria-label') : '',
+                  ariaLabelled: el.getAttribute ? el.getAttribute('aria-labelledby') : '',
+                  title: el.getAttribute ? el.getAttribute('title') : '',
+                }
+              ) : {},
+              strongEvidenceCount: hits,
+            };
+            if (window.__robeSetLimitOverlay) {
+              window.__robeSetLimitOverlay(debugPayload);
+            }
+            if (typeof console !== "undefined") {
+              console.log('DEBUG_robo_deepScanLimitOverlayInDocument', debugPayload);
+            }
+          } catch {}
+        }
+        return { found:true, where:'headline', snippet: snippet, strongEvidenceCount: 1 };
       }
     }
 
@@ -1672,6 +1733,35 @@ function deepScanLimitOverlayInDocument() {
       const tt = textsOf(el, doc);
       if (tt.some(txt => textHitsLimitNormalized(norm(txt)))) {
         const snippet = (tt.find(txt => textHitsLimitNormalized(norm(txt))) || '').slice(0,200);
+        // LOGS DEBUG FORTE — após encontrar qualquer candidato
+        if (typeof window !== "undefined") {
+          try {
+            const hits = 1;
+            const where = 'global_any';
+            const debugPayload = {
+              step: 'deepScan_limit_overlay_debug',
+              found: hits > 0,
+              where: where,
+              snippet,
+              tags: el ? (
+                {
+                  id: el.id || '',
+                  class: el.className || '',
+                  ariaLabel: el.getAttribute ? el.getAttribute('aria-label') : '',
+                  ariaLabelled: el.getAttribute ? el.getAttribute('aria-labelledby') : '',
+                  title: el.getAttribute ? el.getAttribute('title') : '',
+                }
+              ) : {},
+              strongEvidenceCount: hits,
+            };
+            if (window.__robeSetLimitOverlay) {
+              window.__robeSetLimitOverlay(debugPayload);
+            }
+            if (typeof console !== "undefined") {
+              console.log('DEBUG_robo_deepScanLimitOverlayInDocument', debugPayload);
+            }
+          } catch {}
+        }
         return { found:true, where:'global_any', snippet, strongEvidenceCount: 1 };
       }
     }
@@ -1731,6 +1821,30 @@ async function detectLimitOverlayEverywhere(page, msWindow = 0) {
     const deep = await detectLimitOverlayDeep(page, { alsoCheckFrames:true });
     if (deep && deep.blocked) return deep;
     if (!msWindow) break;
+
+    // LOG/PRINT em cada ciclo do loop — DEBUG DOM forense
+    try {
+      const debugDom = await page.evaluate(() => {
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).map(el => ({
+          id: el.id || null,
+          class: el.className || null,
+          ariaLabel: el.getAttribute('aria-label') || null,
+          ariaLabelled: el.getAttribute('aria-labelledby') || null,
+          innerText: el.innerText ? el.innerText.slice(0,200) : null,
+          outerHTML: el.outerHTML ? el.outerHTML.slice(0,200) : null,
+        }));
+        const allH2 = Array.from(document.querySelectorAll('h2')).map(h2 => h2.innerText || h2.textContent || '');
+        if (typeof console !== 'undefined') {
+          console.log('DEBUG_robo_dialogs: ', dialogs, allH2);
+        }
+        return {dialogs, allH2};
+      }).catch(()=>({dialogs:[], allH2:[]}));
+      
+      try {
+        require('./stepLog.js').appendJSONL && require('./stepLog.js').appendJSONL('system', 'debug_browser_deep_scan', debugDom);
+      } catch {}
+    } catch {}
+
     await new Promise(r=>setTimeout(r, 150));
   } while (Date.now() < until);
 
