@@ -1010,6 +1010,8 @@ async function closeExtraPages(browser, mainPage, nome) {
   try {
     const ctrl = controllers.get(nome);
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) return;
+    // NOVO: nunca prune durante envio
+    if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) return;
     // GUARD EXTREMO: nunca prune se emExecucao==true para esse perfil
     if (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true) {
       return; // NÃO FECHA ABAS DURANTE O ROBE DESTE PERFIL
@@ -2895,6 +2897,10 @@ async function nurseTick() {
       if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
         continue; // NUNCA navega, religia, nem prune enquanto em humano ou configurando
       }
+      if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
+        await appendIssueNurseDebounced(nome, 'mil_action', 'send_lock_skip', 'send_lock_skip');
+        continue; // NÃO navega/reload/prune enquanto envio ativo
+      }
 
       // GUARD: nunca manter ativo durante frozen
       if (isFrozenNow(nome)) {
@@ -3415,6 +3421,9 @@ async function healthTick() {
   for (const [nome, ctrl] of controllers) {
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
     if (!ctrl || !ctrl.browser) continue;
+    if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
+      continue; // Pula toda a lógica se envio em andamento
+    }
     const st = getHealth(nome);
     const now = Date.now();
     let pages = [];

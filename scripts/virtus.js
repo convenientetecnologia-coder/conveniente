@@ -24,6 +24,33 @@ const logger = require('./logger.js');
 // Variável global de lock
 let VIRTUS_INPUT_LOCK = false;
 
+// Helpers globais de send-lock/contexto
+function getBrowserFromPage(p) { try { return typeof p.browser === 'function' ? p.browser() : null; } catch { return null; } }
+async function acquireSendGuard(p, chatId) { try { const b = getBrowserFromPage(p); if (b) b._sendLock = { active: true, owner: 'virtus', chatId, since: Date.now() }; } catch {} }
+function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b && b._sendLock && b._sendLock.owner === 'virtus') b._sendLock.active = false; } catch {} }
+async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
+  const t0 = Date.now();
+  while (true) {
+    const ok = await p.evaluate((id) => {
+      try { return (location && typeof location.pathname === 'string') ? location.pathname.includes('/marketplace/t/' + id) : false; }
+      catch { return false; }
+    }, chatId).catch(() => false);
+    if (ok) return true;
+    if (!timeoutMs || (Date.now() - t0) >= timeoutMs) return false;
+    await sleep(120);
+  }
+}
+async function clearComposerIfAny(p, campo) {
+  try {
+    if (!campo) return;
+    const ctrlKey = (process.platform === 'darwin') ? 'Meta' : 'Control';
+    try { await campo.click({ delay: 20 }); } catch {}
+    try { await p.keyboard.down(ctrlKey); await p.keyboard.press('KeyA'); await p.keyboard.up(ctrlKey); } catch {}
+    try { await p.keyboard.press('Backspace'); } catch {}
+    try { await p.keyboard.press('Delete'); } catch {}
+  } catch {}
+}
+
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
@@ -287,6 +314,10 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
  */
 async function scrollChatsToTop(page) {
   if (VIRTUS_INPUT_LOCK) return false;
+  try {
+    const b = getBrowserFromPage(page);
+    if (b && b._sendLock && b._sendLock.active) return false;
+  } catch {}
   if (!page) return false;
   try {
     const res = await page.evaluate(() => {
@@ -338,7 +369,7 @@ async function scrollChatsToTop(page) {
 // ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
 
 // ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
-async function sendMessageSafe(p, campo, msg, nome) {
+async function sendMessageSafe(p, campo, msg, nome, chatId) {
   // 0) Reobtenha o composer se campo for ausente ou suspeito
   try {
     if (!campo || (await campo.evaluate(el => !el.isConnected).catch(()=>true))) {
@@ -364,6 +395,12 @@ async function sendMessageSafe(p, campo, msg, nome) {
   } catch {}
   if (!campo) throw new Error('composer_missing');
 
+  // Verificar contexto antes de digitar
+  if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
+    await logIssue(nome, 'mil_action', `virtus_context_abort: before_type (chat ${chatId})`);
+    return;
+  }
+
   const ctrlKey = (process.platform === 'darwin') ? 'Meta' : 'Control';
 
   VIRTUS_INPUT_LOCK = true;
@@ -387,6 +424,13 @@ async function sendMessageSafe(p, campo, msg, nome) {
 
     // Digita uma única vez (sem execCommand/insertText)
     await p.keyboard.type(String(msg || ''), { delay: 0 });
+
+    // Revalidar contexto antes do Enter
+    if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
+      await clearComposerIfAny(p, campo);
+      await logIssue(nome, 'mil_action', `virtus_context_abort: before_enter (chat ${chatId})`);
+      return;
+    }
 
     // Envia (um único Enter)
     await p.keyboard.press('Enter');
@@ -812,7 +856,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'Scroll OK' : 'Scroll DEU RUIM'); }
       } catch {}
       // Reforce após 800ms
-      setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
+      setTimeout(() => {
+        if (!running || !epochOk()) return;
+        try {
+          const b = getBrowserFromPage(p);
+          if (b && b._sendLock && b._sendLock.active) return;
+        } catch {}
+        scrollChatsToTop(p);
+      }, 800);
       lastScrollToTop = Date.now();
     } catch (e) {
       logger.error('Erro no reload ultra robusto', { nome }, e);
@@ -1109,6 +1160,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
+        // Ativa send-guard imediatamente após confirmar navegação correta
+        await acquireSendGuard(p, chatId);
+
         if (await isChatBlocked(p)) {
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
@@ -1116,6 +1170,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           resetFail(chatId);
+          return;
+        }
+
+        // Checagem de contexto antes de aguardar o composer
+        if (!(await assertOnChat(p, chatId, { timeoutMs: 1200 }))) {
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          await logIssue(nome, 'mil_action', `virtus_context_abort: url divergiu antes do envio (chat ${chatId})`);
           return;
         }
 
@@ -1180,7 +1243,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!isFocused) { try { await campo.focus(); } catch {} }
 
         // -------- SUBSTITUIR PELO USO sendMessageSafe --------
-        await sendMessageSafe(p, campo, msg, nome);
+        await sendMessageSafe(p, campo, msg, nome, chatId);
         // -----------------------------------------------------
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
 
@@ -1213,6 +1276,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
+      try { releaseSendGuard(p); } catch {}
       if (_chatLockAcquired) {
         try { chatLock.release(nome, chatId); } catch {}
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
@@ -1345,7 +1409,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           } catch {}
           // Reforço após 800ms para garantir Messenger reativo
-          setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
+          setTimeout(() => {
+            if (!running || !epochOk()) return;
+            try {
+              const b = getBrowserFromPage(p);
+              if (b && b._sendLock && b._sendLock.active) return;
+            } catch {}
+            scrollChatsToTop(p);
+          }, 800);
         }, 30000);
       }
       try {
@@ -1355,7 +1426,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           lastScrollToTop = Date.now();
         }
         // Reforço após 800ms para garantir Messenger reativo
-        setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
+        setTimeout(() => {
+          if (!running || !epochOk()) return;
+          try {
+            const b = getBrowserFromPage(p);
+            if (b && b._sendLock && b._sendLock.active) return;
+          } catch {}
+          scrollChatsToTop(p);
+        }, 800);
       } catch {}
 
       // ========== INÍCIO BLOCO ADICIONADO CONFORME INSTRUÇÃO ==========
@@ -1425,7 +1503,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await garantirMarketplace(p, { timeoutMs: 25000 });
         try {
           const ok = await scrollChatsToTop(p);
-          setTimeout(() => { if (!running || !epochOk()) return; scrollChatsToTop(p); }, 800);
+          setTimeout(() => {
+            if (!running || !epochOk()) return;
+            try {
+              const b = getBrowserFromPage(p);
+              if (b && b._sendLock && b._sendLock.active) return;
+            } catch {}
+            scrollChatsToTop(p);
+          }, 800);
         } catch {}
         ready = true;
         logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
