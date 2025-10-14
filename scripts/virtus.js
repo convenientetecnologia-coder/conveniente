@@ -21,6 +21,9 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 
+// Variável global de lock
+let VIRTUS_INPUT_LOCK = false;
+
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
@@ -283,6 +286,7 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
  * Executa direto via page.evaluate no Messenger.
  */
 async function scrollChatsToTop(page) {
+  if (VIRTUS_INPUT_LOCK) return false;
   if (!page) return false;
   try {
     const res = await page.evaluate(() => {
@@ -360,124 +364,59 @@ async function sendMessageSafe(p, campo, msg, nome) {
   } catch {}
   if (!campo) throw new Error('composer_missing');
 
-  // Helpers de normalização
-  function norm(s) {
-    return String(s || '')
-      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .replace(/\u00a0/g,' ')
-      .replace(/\r/g,'')
-      .replace(/[ \t]+/g,' ')
-      .trim();
-  }
-  const msgNorm = norm(msg);
+  const ctrlKey = (process.platform === 'darwin') ? 'Meta' : 'Control';
 
-  // 1) Foco e limpeza dentro do MESMO mundo do elemento
-  await campo.focus().catch(()=>{});
-  await campo.evaluate(el => {
-    try {
-      // Select-all seguro no mesmo mundo
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      document.execCommand('delete');
-    } catch {}
-    el.innerHTML = '';
-  }).catch(()=>{});
-
-  // 2) Inserção preferindo keyboard.insertText (mais estável no Messenger)
-  let inserted = false;
+  VIRTUS_INPUT_LOCK = true;
   try {
-    await p.keyboard.insertText(msg);
-    inserted = true;
-  } catch {}
-  if (!inserted) {
-    // fallback: digitação "humana"
-    try { await campo.type(msg, { delay: randomBetween(6,14) }); inserted = true; } catch {}
-  }
-  if (!inserted) {
-    // última tentativa: execCommand no mesmo mundo
-    await campo.evaluate((el, text) => {
-      try { el.focus(); document.execCommand('insertText', false, text); }
-      catch {
-        const e = new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true });
-        el.dispatchEvent(e);
-        el.textContent = text;
-      }
-    }, msg);
-  }
-
-  // 3) Verificação flexível do composer (no mesmo mundo do elemento)
-  const composerText = await campo.evaluate(el => (el.innerText || el.textContent || '')).catch(()=> '');
-  const compNorm = norm(composerText);
-  if (compNorm !== msgNorm) {
-    // Tente mais 1 vez limpar e inserir por execCommand
-    await campo.evaluate((el, text) => {
-      try {
-        const sel = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        sel.removeAllRanges();
-        sel.addRange(range);
-        document.execCommand('delete');
-      } catch {}
-      try { document.execCommand('insertText', false, text); }
-      catch {
-        const e = new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true });
-        el.dispatchEvent(e);
-        el.textContent = text;
-      }
-    }, msg);
-  }
-
-  // 4) Envio
-  await p.keyboard.press('Enter');
-  // Aguarda composer esvaziar OU um bubble novo “You sent/Você enviou” aparecer – o que vier primeiro
-  const sent = await Promise.race([
-    (async () => {
-      try {
-        return await p.waitForFunction(() => {
-          const norm = s => String(s||'').toLowerCase();
-          // Últimas bolhas
-          const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
-          return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
-        }, { timeout: 7000 }).then(()=>true).catch(()=>false);
-      } catch { return false; }
-    })(),
-    (async () => {
-      try {
-        return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: 7000 }, campo)
-          .then(()=>true).catch(()=>false);
-      } catch { return false; }
-    })()
-  ]);
-
-  // 5) Se evidência de envio não apareceu, reforça Enter uma vez e reavalia
-  if (!sent) {
-    try { await p.keyboard.press('Enter'); } catch {}
+    // Foco real no composer
+    await campo.click({ delay: 20 }).catch(()=>{});
+    // Limpeza: Select All + Backspace/Delete
     try {
-      const confirmAgain = await p.waitForFunction(() => {
-        const norm = s => String(s||'').toLowerCase();
-        const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
-        return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
-      }, { timeout: 5000 }).then(()=>true).catch(()=>false);
-      if (!confirmAgain) {
-        await logIssue(nome, 'virtus_send_failed', 'no_bubble_confirmed_after_enter');
-      }
+      await p.keyboard.down(ctrlKey);
+      await p.keyboard.press('KeyA');
+      await p.keyboard.up(ctrlKey);
     } catch {}
-  }
+    try { await p.keyboard.press('Backspace'); } catch {}
+    try { await p.keyboard.press('Delete'); } catch {}
+    // Aguarda esvaziar (tolerante)
+    await p.waitForFunction(
+      el => ((el.innerText || el.textContent || '').trim().length === 0),
+      { timeout: 1200 },
+      campo
+    ).catch(()=>{});
 
-  // 6) Higiene: se imagens quebradas ficaram no composer
-  try {
-    const broken = await p.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('div[role="textbox"] img'));
-      return imgs.some(img => img.naturalWidth === 0 || img.naturalHeight === 0);
-    });
-    if (broken) {
-      await logIssue(nome, 'virtus_send_failed', 'composer contains broken image placeholder post-send');
+    // Digita uma única vez (sem execCommand/insertText)
+    await p.keyboard.type(String(msg || ''), { delay: 0 });
+
+    // Envia (um único Enter)
+    await p.keyboard.press('Enter');
+
+    // Aguarda confirmação: bolha “Você enviou” ou composer vazio
+    const sent = await Promise.race([
+      (async () => {
+        try {
+          return await p.waitForFunction(() => {
+            const norm = s => String(s||'').toLowerCase();
+            const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
+            return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
+          }, { timeout: 7000 }).then(()=>true).catch(()=>false);
+        } catch { return false; }
+      })(),
+      (async () => {
+        try {
+          return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: 7000 }, campo)
+            .then(()=>true).catch(()=>false);
+        } catch { return false; }
+      })()
+    ]);
+
+    if (!sent) {
+      await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout (no re-enter)');
     }
-  } catch {}
+
+  } finally {
+    VIRTUS_INPUT_LOCK = false;
+  }
 }
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
@@ -1363,22 +1302,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       */
       // === BLOCO REMOVIDO CONFORME INSTRUÇÃO ===
 
-      // --- BLOCO KEEPALIVE: JS para acordar navegador/Messenger (anti-freeze/anti-throttle) ---
-      try {
-        await p.evaluate(() => {
-          window.dispatchEvent(new Event('focus'));
-          document.dispatchEvent(new MouseEvent('mousemove', {bubbles:true}));
-          document.dispatchEvent(new Event('visibilitychange'));
-          if (window && document && document.body) {
-            const evt = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Control', code: 'ControlLeft' });
-            document.body.dispatchEvent(evt);
-          }
-          setTimeout(()=>{}, 1);
-        });
-      } catch (err) {
-        if (VIRTUS_DETAILED_DEBUG) { try { logger.debug('[KEEPALIVE][EXCEPTION]', { nome, message: err && err.message }); } catch{} }
+      // Não dispare keepalive durante inserção de mensagem
+      if (!VIRTUS_INPUT_LOCK) {
+        try {
+          await p.evaluate(() => {
+            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new MouseEvent('mousemove', {bubbles:true}));
+            document.dispatchEvent(new Event('visibilitychange'));
+            if (window && document && document.body) {
+              const evt = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Control', code: 'ControlLeft' });
+              document.body.dispatchEvent(evt);
+            }
+          });
+        } catch {}
       }
-      // --- FIM BLOCO KEEPALIVE ---
 
       if (limpaHistoricoVelho()) await salvaHistorico();
 

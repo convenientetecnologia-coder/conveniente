@@ -825,7 +825,7 @@ async function activateOnce(nome, source = '') {
           try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s (activateOnce)'); } catch {}
         }
         // FIM DA INSTRUÇÃO 9
-        logger.error('[WORKER][activateOnce] fail', { nome, source, err: e && e.message }, e);
+        logger.error('[WORKER][activateOnce] fail', { nome, source, err: e && e.message || e }, e);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
         return { ok: false, error: e && e.message || String(e) };
       } finally {
@@ -3326,7 +3326,7 @@ async function wirePageObservers(nome, page) {
     }
   });
   page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('requestfailed', () => { GetHealth(nome).lastNetEventAt = Date.now(); });
+  page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 }
