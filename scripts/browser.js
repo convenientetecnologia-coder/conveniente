@@ -1592,95 +1592,108 @@ async function dismissAutomationSuspect(page, nome) {
   return false;
 }
 
-// [ADD] Deep pattern — multilíngue (PT/EN/ES) para bloqueio/limite de criação/posta/lista
+// [ADD/UPDATE] Deep pattern — multilíngue (PT/EN/ES) para bloqueio/limite de criação/posta/lista
 function textHitsLimitNormalized(t) {
   if (!t) return false;
   t = String(t).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
   if (/voce\s+nao\s+pode\s+(criar|publicar).*(classificados|anuncios|listagens?|itens?).*(no\s+momento|agora)/.test(t)) return true;
-  if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
-  if (/no\s+es\s+posible\s+(crear|publicar).*(anuncios?|art[ií]culos?|listados?|publicaciones?).*(en\s+este\s+momento|ahora)/.test(t)) return true;
-  if (/(temporar(?:y|io)|temporariamente|temporalmente)\s+(limit|limite)/.test(t) && /(items?|listings?|classificados|anuncios?)/.test(t)) return true;
-  if (/limite\s+atingido/.test(t) || /limit\s+reached/.test(t) || /limite\s+alcanzado/.test(t)) return true;
   if (/(ha|h[áa])\s+um\s+limite\s+tempor/.test(t) && /(itens?|vender|publicar|marketplace)/.test(t)) return true;
-  if (/(there('|’)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(t) && /(how\s+many\s+items\s+you\s+(can|may)\s+(list|sell)|marketplace)/.test(t)) return true;
-  if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+  if (/limite\s+atingido/.test(t)) return true;
   if (/voce\s+esta\s+bloqueado\s+temporariamente/.test(t)) return true;
+
+  if (/you\s+can(?:'|’)?t\s+(post|create|list).*right\s+now/.test(t)) return true;
+  if (/(there(?:'|’)?s|there\s+is)\s+a\s+temporar(?:y)?\s+limit/.test(t) && /(how\s+many\s+items\s+you\s+(can|may)\s+(list|sell)|marketplace)/.test(t)) return true;
+  if (/you(?:'|’)?re\s+temporar(?:ily)?\s+(blocked|restricted).*(post|create|list)/.test(t)) return true;
+
+  if (/no\s+es\s+posible\s+(crear|publicar).*(anuncios?|art[ií]culos?|listados?|publicaciones?).*(en\s+este\s+momento|ahora)/.test(t)) return true;
+  if (/limite\s+alcanzado/.test(t)) return true;
+  if (/(hay|existe)\s+un\s+limite\s+tempor/.test(t) && /(art[ií]culos?|publicar|vender|marketplace)/.test(t)) return true;
+
   return false;
 }
 
-// [ADD] Scanner profundo: percorre document + todos os shadowRoots e tenta detectar overlay LIMIT
 function deepScanLimitOverlayInDocument() {
   function norm(s) { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); } catch { return (s||'').toLowerCase(); } }
   function getAllRoots(doc) {
     const roots = [doc];
-    const walker = doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT);
-    let n = walker.currentNode;
-    while (n) {
-      if (n.shadowRoot) roots.push(n.shadowRoot);
-      n = walker.nextNode();
-    }
+    try {
+      const walker = doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT);
+      for (let n = walker.currentNode; n; n = walker.nextNode()) {
+        if (n.shadowRoot) roots.push(n.shadowRoot);
+      }
+    } catch {}
+    try {
+      const extras = doc.querySelectorAll('#facebook, #mount_0_0, [id^="mount_"], [id^="portal"], [role="dialog"]');
+      extras.forEach(el => { if (el && el.shadowRoot) roots.push(el.shadowRoot); });
+    } catch {}
     return roots;
   }
-  function visible(el) {
+  function textsOf(el, doc) {
+    const out = [];
+    try { out.push(el.innerText || ''); } catch {}
+    try { out.push(el.textContent || ''); } catch {}
+    try { out.push(el.getAttribute && el.getAttribute('aria-label') || ''); } catch {}
     try {
-      const st = el.ownerDocument.defaultView.getComputedStyle(el);
-      if (!st) return false;
-      if (st.visibility === 'hidden' || st.display === 'none') return false;
-      const r = el.getBoundingClientRect();
-      return (r && r.width >= 0 && r.height >= 0);
-    } catch { return true; }
+      const lb = el.getAttribute && el.getAttribute('aria-labelledby');
+      if (lb && doc) {
+        const ids = lb.split(/\s+/).filter(Boolean);
+        ids.forEach(id => {
+          const lab = doc.getElementById(id);
+          if (lab) out.push(lab.innerText || lab.textContent || '');
+        });
+      }
+    } catch {}
+    try { out.push(el.getAttribute && el.getAttribute('title') || ''); } catch {}
+    return out.filter(Boolean);
   }
   function scanRoot(R) {
-    const nodes = Array.from(R.querySelectorAll('h1,h2,h3,section,div,span,p,button,a,[role="dialog"],[aria-modal="true"]')).slice(0, 3000);
-    let hits = 0, snippet = '', where = '';
-    const heads = Array.from(R.querySelectorAll('h1,h2')).slice(0, 50);
+    const doc = R.ownerDocument || (R.defaultView && R.defaultView.document) || document;
+
+    const dialogs = Array.from((R.querySelectorAll ? R.querySelectorAll('[role="dialog"],[aria-modal="true"]') : []));
+    for (const d of dialogs) {
+      const tt = textsOf(d, doc);
+      if (tt.some(txt => textHitsLimitNormalized(norm(txt)))) {
+        const snippet = (tt.find(txt => textHitsLimitNormalized(norm(txt))) || '').slice(0,200);
+        return { found:true, where:'dialog', snippet, strongEvidenceCount: 2 };
+      }
+    }
+
+    const heads = Array.from((R.querySelectorAll ? R.querySelectorAll('h1,h2') : []));
     for (const h of heads) {
-      const t = norm(h.innerText || h.textContent || '');
-      if (textHitsLimitNormalized(t)) {
-        hits++;
-        where = where || 'headline';
-        snippet = snippet || (h.innerText || h.textContent || '').slice(0, 200);
-        break;
+      const ht = norm(h.innerText || h.textContent || '');
+      if (textHitsLimitNormalized(ht)) {
+        return { found:true, where:'headline', snippet: (h.innerText||h.textContent||'').slice(0,200), strongEvidenceCount: 1 };
       }
     }
-    if (!hits) {
-      for (const el of nodes) {
-        const t = norm(el.innerText || el.textContent || '');
-        if (!t) continue;
-        if (textHitsLimitNormalized(t)) {
-          hits++
-          if (!snippet) snippet = (el.innerText || el.textContent || '').slice(0, 200);
-          if (!where) {
-            if (el.getAttribute && (el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true')) where = 'dialog_any';
-            else where = (visible(el) ? 'global_any_visible' : 'global_any_hidden');
-          }
-          if (hits >= 2) break;
-        }
+
+    const nodes = Array.from((R.querySelectorAll ? R.querySelectorAll('h1,h2,h3,section,div,span,p,button,a,[role="dialog"],[aria-modal="true"]') : []));
+    for (const el of nodes) {
+      const tt = textsOf(el, doc);
+      if (tt.some(txt => textHitsLimitNormalized(norm(txt)))) {
+        const snippet = (tt.find(txt => textHitsLimitNormalized(norm(txt))) || '').slice(0,200);
+        return { found:true, where:'global_any', snippet, strongEvidenceCount: 1 };
       }
     }
-    return hits ? { found: true, where, snippet, strongEvidenceCount: hits } : null;
+    return { found:false, where:'', snippet:'', strongEvidenceCount: 0 };
   }
 
   const doc = document;
   const roots = getAllRoots(doc);
-  const portal = doc.querySelector('#facebook, #mount_0_0, [id^="mount_"], [id^="portal"]');
-  if (portal && portal.shadowRoot) roots.push(portal.shadowRoot);
-
   for (const R of roots) {
-    const res = scanRoot(R);
-    if (res) return res;
+    const r = scanRoot(R);
+    if (r && r.found) return r;
   }
   try {
-    const txt = norm(doc.body ? (doc.body.innerText || doc.body.textContent || '') : '');
-    if (textHitsLimitNormalized(txt)) {
-      return { found: true, where: 'body_fallback', snippet: (doc.body.innerText || '').slice(0, 200), strongEvidenceCount: 1 };
+    const bodyTxt = (doc.body && (doc.body.innerText || doc.body.textContent)) || '';
+    if (textHitsLimitNormalized(norm(bodyTxt))) {
+      return { found:true, where:'body_fallback', snippet: bodyTxt.slice(0,200), strongEvidenceCount: 1 };
     }
   } catch {}
-  return { found: false, where: '', snippet: '', strongEvidenceCount: 0 };
+
+  return { found:false, where:'', snippet:'', strongEvidenceCount: 0 };
 }
 
-// [ADD] API: detecta overlay LIMIT profundamente no main frame e, opcionalmente, nos frames same-origin também
 async function detectLimitOverlayDeep(page, { alsoCheckFrames = true } = {}) {
   try {
     const main = await page.evaluate(() => deepScanLimitOverlayInDocument()).catch(()=>({found:false}));
@@ -1699,6 +1712,29 @@ async function detectLimitOverlayDeep(page, { alsoCheckFrames = true } = {}) {
     }
   } catch {}
   return { blocked: false, domain: null, hasReloadBtn: false, strongEvidenceCount: 0, joinedTexts: '', where: '' };
+}
+
+async function detectLimitOverlayEverywhere(page, msWindow = 0) {
+  const until = Date.now() + (msWindow || 0);
+  do {
+    try {
+      const s = await page.evaluate(() => {
+        const a = (window && window._ROBE_LIMIT_OVERLAY) || null;
+        const b = (window.top && window.top._ROBE_LIMIT_OVERLAY) || null;
+        const pick = (a && a.found) ? a : (b && b.found ? b : null);
+        return pick ? { found:true, where: pick.where || '', snippet: (pick.h2||pick.body||''), ts: pick.ts||Date.now() } : null;
+      }).catch(()=>null);
+      if (s && s.found) {
+        return { blocked:true, where: s.where||'sentinel', joinedTexts: s.snippet||'', strongEvidenceCount: 2 };
+      }
+    } catch {}
+    const deep = await detectLimitOverlayDeep(page, { alsoCheckFrames:true });
+    if (deep && deep.blocked) return deep;
+    if (!msWindow) break;
+    await new Promise(r=>setTimeout(r, 150));
+  } while (Date.now() < until);
+
+  return { blocked:false };
 }
 
 module.exports = {
@@ -1721,6 +1757,7 @@ module.exports = {
   hardCleanProfileOnDisk,
   detectMessengerTempBlock, // NOVO: exportado para uso pelo worker
   detectLimitOverlayDeep,      // <----- NOVO
+  detectLimitOverlayEverywhere,
   dismissAutomationSuspect,
   textHitsLimitNormalized      // <----- NOVO (opcional, caso queira reusar)
 };

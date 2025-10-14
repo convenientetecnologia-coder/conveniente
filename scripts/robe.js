@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { patchPage/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
-const { detectLimitOverlayDeep } = require('./browser.js');
+const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 const utils = require('./utils.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
@@ -997,33 +997,21 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   const t0 = Date.now();
   stepLog.appendJSONL('system', 'robe', { step: 'publish_click', at: t0 });
 
-  // 4) Inicie overlay watcher restrito ao dwell de 8s (nada de aceitar sucesso antes disso)
-  const overlayDuringDwellP = waitSentinelLimitOverlay(page, dwellMs)
-    .then(v => v && v.found ? v : null)
-    .catch(() => null);
+  // 4) Watcher de overlay dentro da dwell window (sentinela + deep + frames)
+  const overlayHit = await detectLimitOverlayEverywhere(page, dwellMs);
+  // Se overlay foi detectado em QUALQUER ponto da dwell, aborta instantaneamente
+  if (overlayHit && overlayHit.blocked) {
+    stepLog.appendJSONL('system', 'robe', { step: 'publish_fail_overlay_during_dwell', overlayWhere: overlayHit.where || '', ms: (Date.now() - t0) });
+    gql.cleanup();
+    return { ok: false, reason: 'limit_overlay', overlay: { found: true, where: overlayHit.where || 'everywhere', h2: overlayHit.joinedTexts || '' } };
+  }
+  // Se não bateu overlay, aguarda dwell encerrar
+  await new Promise(r=>setTimeout(r, dwellMs));
 
   // 5) Paralelamente, observe rota (sinal de “rumo ao painel”), mas sem aceitar sucesso ainda
   const routeHintP = waitForSellerRouteStable(page, { timeoutMs: PUBLISH_SUCCESS_ROUTE_MS })
     .then(ok => !!ok)
     .catch(() => false);
-
-  // 6) Espere a janela de 8s OU o overlay — overlay dentro da janela => aborta
-  const dwell = new Promise(res => setTimeout(res, dwellMs));
-  const first = await Promise.race([
-    overlayDuringDwellP.then(ov => ov ? { type: 'overlay', data: ov } : null),
-    dwell.then(() => ({ type: 'dwell_done' }))
-  ]);
-
-  if (first && first.type === 'overlay' && first.data) {
-    stepLog.appendJSONL('system', 'robe', {
-      step: 'publish_fail_overlay_during_dwell',
-      overlayWhere: first.data.where || '',
-      h2: String(first.data.h2 || '').slice(0, 200),
-      ms: (Date.now() - t0)
-    });
-    gql.cleanup();
-    return { ok: false, reason: 'limit_overlay', overlay: first.data };
-  }
 
   // 7) Dwell de 8s concluído sem overlay — SÓ AGORA valide sucesso:
   // 7.1) DOM final/rota estável ou seller dashboard visível?
@@ -1049,14 +1037,11 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   }
 
   // 8) Nem rota, nem evidência pós-dwell — último check de overlay (curto) e falha/indefinido
-  const lateOverlay = await waitSentinelLimitOverlay(page, 1800).catch(() => null);
-  if (lateOverlay && lateOverlay.found) {
-    stepLog.appendJSONL('system', 'robe', {
-      step: 'publish_fail_late_overlay_after_dwell',
-      overlayWhere: lateOverlay.where || ''
-    });
+  const lateOverlay = await detectLimitOverlayEverywhere(page, 1800);
+  if (lateOverlay && lateOverlay.blocked) {
+    stepLog.appendJSONL('system', 'robe', { step: 'publish_fail_late_overlay_after_dwell', overlayWhere: lateOverlay.where || '' });
     gql.cleanup();
-    return { ok: false, reason: 'limit_overlay', overlay: lateOverlay };
+    return { ok: false, reason: 'limit_overlay', overlay: { found: true, where: lateOverlay.where || 'late', h2: lateOverlay.joinedTexts || '' } };
   }
 
   // Logging forense em “indeterminate”
@@ -1071,6 +1056,17 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     if (issues && typeof issues.append === 'function') {
       await issues.append(nome || 'system', 'mil_action', 'publish_indeterminate');
     }
+  } catch {}
+
+  // Adicione logging forense caso publish fique indeterminate (DOM dump + screenshot)
+  try {
+    const html = await page.content().catch(()=> '');
+    stepLog.appendJSONL(nome || 'system', 'robe', {
+      step: 'publish_indeterminate_dom_dump',
+      url: (page.url && page.url()) || '',
+      htmlSnippet: (html || '').slice(0, 50000)
+    });
+    try { await page.screenshot({ path: path.join(__dirname, '..', 'dados', 'perfis', nome, `publish_indeterminate_${Date.now()}.png`) }).catch(()=>{}); } catch {}
   } catch {}
 
   gql.cleanup();

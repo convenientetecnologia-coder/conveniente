@@ -2,6 +2,7 @@
 const path = require('path');
 const fs = require('fs');
 const logger = require('./logger.js');
+const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 // IMPORTS dos helpers
 const browserHelper = require('./browser.js');
@@ -37,6 +38,8 @@ async function detectFbLimitInAnyPage(ctrl) {
       try {
         const url = p.url ? p.url() : '';
         if (/facebook\.com\/marketplace\/(create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(url)) {
+          const deep = await detectLimitOverlayDeep(p, { alsoCheckFrames: true });
+          if (deep && deep.blocked) return true;
           const det = await require('./browser.js').detectMessengerTempBlock(p);
           if (det && det.blocked && det.domain === 'facebook') return true;
         }
@@ -3015,8 +3018,14 @@ async function nurseTick() {
           det = await browserHelper.detectMessengerTempBlock(p0);
           det.domain = 'messenger';
         } else if (robeRunning || isCreateOrSellerRoute) {
-          det = await browserHelper.detectMessengerTempBlock(p0);
-          det.domain = det.domain || 'facebook';
+          // Preferir detector profundo para overlays/bloqueios no Facebook
+          const deep = await detectLimitOverlayDeep(p0, { alsoCheckFrames: true }).catch(()=>null);
+          if (deep && deep.blocked) {
+            det = { blocked: true, domain: 'facebook' };
+          } else {
+            det = await browserHelper.detectMessengerTempBlock(p0);
+            det.domain = det.domain || 'facebook';
+          }
         }
       } catch {}
 
@@ -3317,7 +3326,7 @@ async function wirePageObservers(nome, page) {
     }
   });
   page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
+  page.on('requestfailed', () => { GetHealth(nome).lastNetEventAt = Date.now(); });
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 }
