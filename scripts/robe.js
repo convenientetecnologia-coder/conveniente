@@ -891,7 +891,7 @@ async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
 const PUBLISH_OVERLAY_WATCH_MS   = parseInt(process.env.PUBLISH_OVERLAY_WATCH_MS   || '20000', 10); // 20s
 const PUBLISH_SUCCESS_ROUTE_MS   = parseInt(process.env.PUBLISH_SUCCESS_ROUTE_MS   || '15000', 10); // 15s
 const PUBLISH_TOTAL_TIMEOUT_MS   = parseInt(process.env.PUBLISH_TOTAL_TIMEOUT_MS   || '25000', 10); // 25s
-const PUBLISH_DWELL_MS           = parseInt(process.env.PUBLISH_DWELL_MS           || '1500',  10); // 1.5s
+const PUBLISH_DWELL_MS = 8000; // 8 segundos inegociáveis para quarentena anti-falso-positivo
 
 // Helpers novos para rota estável e watcher GraphQL
 async function waitForSellerRouteStable(page, { timeoutMs = PUBLISH_SUCCESS_ROUTE_MS, stableMs = 600 } = {}) {
@@ -941,12 +941,13 @@ function setupGraphqlPublishWatcher(page) {
 
 // SUBSTITUI publicarEFechar5s! NÃO remova publish/verify/etc, só troque a chamada!
 async function publishAndWatch(page, titulo, { watchOverlayMs = PUBLISH_OVERLAY_WATCH_MS } = {}) {
-  await attachLimitOverlaySentinel(page); // arme sentinela ANTES do clique
+  // 1) Arme sentinela de overlay ANTES de clicar em Publicar
+  await attachLimitOverlaySentinel(page);
 
-  // Setup network watcher de GraphQL
+  // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
 
-  // Clique controlado: Avançar -> Publicar (nunca multi-cliques)
+  // 3) Clique controlado em "Publicar" (1 único clique)
   let clicked = false;
   for (let i = 0; i < 12; i++) {
     const btnPub = await findEnabledButton(page, 'Publicar', 600);
@@ -968,70 +969,74 @@ async function publishAndWatch(page, titulo, { watchOverlayMs = PUBLISH_OVERLAY_
     return { ok: false, reason: 'no_publish_button' };
   }
 
+  const dwellMs = PUBLISH_DWELL_MS;
   const t0 = Date.now();
   stepLog.appendJSONL('system', 'robe', { step: 'publish_click', at: t0 });
 
-  // Promessas de evento
-  const overlayP = waitSentinelLimitOverlay(page, watchOverlayMs)
-    .then(v => ({ type: 'overlay', data: v }))
-    .catch(() => ({ type: 'overlay', data: null }));
+  // 4) Inicie overlay watcher restrito ao dwell de 8s (nada de aceitar sucesso antes disso)
+  const overlayDuringDwellP = waitSentinelLimitOverlay(page, dwellMs)
+    .then(v => v && v.found ? v : null)
+    .catch(() => null);
 
-  const routeP = waitForSellerRouteStable(page, { timeoutMs: PUBLISH_SUCCESS_ROUTE_MS })
-    .then(ok => ok ? { type: 'route' } : { type: 'none' })
-    .catch(() => ({ type: 'none' }));
+  // 5) Paralelamente, observe rota (sinal de “rumo ao painel”), mas sem aceitar sucesso ainda
+  const routeHintP = waitForSellerRouteStable(page, { timeoutMs: PUBLISH_SUCCESS_ROUTE_MS })
+    .then(ok => !!ok)
+    .catch(() => false);
 
-  const gqlP = gql.promise
-    .then(() => ({ type: 'graphql' }))
-    .catch(() => ({ type: 'none' }));
-
-  const evidenceP = waitPublishedEvidence(page, titulo, { maxMs: PUBLISH_SUCCESS_ROUTE_MS })
-    .then(ok => ok ? { type: 'evidence' } : { type: 'none' })
-    .catch(() => ({ type: 'none' }));
-
-  // Race overlay vs sinais de sucesso
-  // 1) tenta overlay primeiro (qualquer momento)
+  // 6) Espere a janela de 8s OU o overlay — overlay dentro da janela => aborta
+  const dwell = new Promise(res => setTimeout(res, dwellMs));
   const first = await Promise.race([
-    overlayP,                             // Overlay detectado primeiro => FALHA
-    Promise.race([gqlP, routeP, evidenceP]) // Qualquer sucesso entra aqui
+    overlayDuringDwellP.then(ov => ov ? { type: 'overlay', data: ov } : null),
+    dwell.then(() => ({ type: 'dwell_done' }))
   ]);
 
-  // Se overlay veio primeiro
-  if (first && first.type === 'overlay' && first.data && first.data.found) {
+  if (first && first.type === 'overlay' && first.data) {
     stepLog.appendJSONL('system', 'robe', {
-      step: 'publish_fail_overlay_first',
+      step: 'publish_fail_overlay_during_dwell',
       overlayWhere: first.data.where || '',
-      h2: String(first.data.h2 || '').slice(0, 200)
+      h2: String(first.data.h2 || '').slice(0, 200),
+      ms: (Date.now() - t0)
     });
     gql.cleanup();
     return { ok: false, reason: 'limit_overlay', overlay: first.data };
   }
 
-  // Se não houve sucesso ainda, tente aguardar mais — overlay ainda pode disparar
-  if (!first || first.type === 'none') {
-    // Última tentativa de overlay tardio em janela curta
-    const late = await waitSentinelLimitOverlay(page, 1800);
-    if (late && late.found) {
-      gql.cleanup();
-      return { ok: false, reason: 'limit_overlay', overlay: late };
-    }
-    gql.cleanup();
-    return { ok: false, reason: 'indeterminate' };
+  // 7) Dwell de 8s concluído sem overlay — SÓ AGORA valide sucesso:
+  // 7.1) DOM final/rota estável ou seller dashboard visível?
+  let routeOk = false;
+  try {
+    routeOk = (await routeHintP) || (await isSellerListOrDashboard(page));
+  } catch { routeOk = false; }
+
+  // 7.2) Caso a rota/DOM não estejam estáveis, valide por evidência textual pós-dwell
+  let evidenceOk = false;
+  if (!routeOk) {
+    evidenceOk = await waitPublishedEvidence(page, titulo, { maxMs: 2500 }).catch(() => false);
   }
 
-  // Temos um sucesso: proteger por quarentena curta contra overlay tardio
-  const trigger = first.type; // 'graphql' | 'route' | 'evidence'
-  stepLog.appendJSONL('system', 'robe', { step: 'publish_success_trigger', trigger, ms: (Date.now() - t0) });
+  if (routeOk || evidenceOk) {
+    stepLog.appendJSONL('system', 'robe', {
+      step: 'publish_success_after_dwell',
+      trigger: routeOk ? 'route' : 'evidence_post_dwell',
+      ms: (Date.now() - t0)
+    });
+    gql.cleanup();
+    return { ok: true, reason: routeOk ? 'published_route' : 'published_evidence_after_dwell' };
+  }
 
-  // Quarentena de 1.5s – overlay tardio invalida sucesso
-  const lateOverlay = await waitSentinelLimitOverlay(page, PUBLISH_DWELL_MS);
+  // 8) Nem rota, nem evidência pós-dwell — último check de overlay (curto) e falha/indefinido
+  const lateOverlay = await waitSentinelLimitOverlay(page, 1800).catch(() => null);
   if (lateOverlay && lateOverlay.found) {
-    stepLog.appendJSONL('system', 'robe', { step: 'publish_fail_overlay_quarantine', overlayWhere: lateOverlay.where || '' });
+    stepLog.appendJSONL('system', 'robe', {
+      step: 'publish_fail_late_overlay_after_dwell',
+      overlayWhere: lateOverlay.where || ''
+    });
     gql.cleanup();
     return { ok: false, reason: 'limit_overlay', overlay: lateOverlay };
   }
 
   gql.cleanup();
-  return { ok: true, reason: `published_${trigger}` };
+  return { ok: false, reason: 'indeterminate' };
 }
 
 /**
