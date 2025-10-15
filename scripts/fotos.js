@@ -17,6 +17,15 @@ const INDEX_LOCK_FILE = INDEX_FILE + '.lock';
 async function acquireIndexLock(retries = 200, delayMs = 15) {
   for (let i = 0; i < retries; i++) {
     try {
+      // [item 6]: Verifica stale lock antes de tentar abrir
+      if (fs.existsSync(INDEX_LOCK_FILE)) {
+        try {
+          const st = fs.statSync(INDEX_LOCK_FILE);
+          if (Date.now() - st.mtimeMs > 60 * 1000) {
+            fs.unlinkSync(INDEX_LOCK_FILE);
+          }
+        } catch {}
+      }
       const fd = fs.openSync(INDEX_LOCK_FILE, 'wx');
       return fd;
     } catch {}
@@ -121,6 +130,30 @@ function loadIndex() {
       if (v.generation != null && typeof v.generation !== 'number') delete v.generation;
     }
   }
+
+  // [item 2]: SHA256 obrigatório para todas gerações
+  const dir = resolveFotosDir();
+  let shaWrites = false;
+  for (const name of Object.keys(idx)) {
+    const rec = idx[name];
+    if (!rec.sha256) {
+      try {
+        const abs = path.join(dir, name);
+        if (fs.existsSync(abs)) {
+          const stat = fs.statSync(abs);
+          rec.sha256 = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
+          // também atualize size/mtimeMs (re-normalização)
+          rec.size = stat.size;
+          rec.mtimeMs = stat.mtimeMs;
+          shaWrites = true;
+        }
+      } catch (e) {
+        logger.warn('[FOTOS][loadIndex/sha256] Erro ao criar SHA256 para', name);
+      }
+    }
+  }
+  if (shaWrites) writeJsonAtomic(INDEX_FILE, idx);
+
   return idx;
 }
 function saveIndex(idx) {
@@ -198,6 +231,33 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
       if (!fs.existsSync(dir)) return { ok: false, error: 'fotos_dir_missing' };
       let idx = loadIndex();
 
+      // [item 1] Antes de começar: Varra TODOS os arquivos do índice e, se houver uma reserva deste nomeConta em qualquer rec, devolva imediatamente (idempotência total)
+      {
+        let toRemove = [];
+        for (const [k, rec] of Object.entries(idx)) {
+          if (rec && rec.reservedBy && rec.reservedBy[nomeConta]) {
+            // Verifique se o arquivo ainda existe:
+            const abs = path.join(dir, k);
+            if (fs.existsSync(abs)) {
+              return { ok: true, file: k, absPath: abs };
+            } else {
+              // O arquivo não existe mais, limpe a reserva e continue
+              delete rec.reservedBy[nomeConta];
+              toRemove.push(k);
+            }
+          }
+        }
+        // remove registros sumidos se houver
+        let removed = false;
+        for (const key of toRemove) {
+          if (!fs.existsSync(path.join(dir, key))) {
+            delete idx[key];
+            removed = true;
+          }
+        }
+        if (removed) saveIndex(idx);
+      }
+
       const all = listAllPhotosSortedByMtimeAsc();
       let changed = false;
 
@@ -230,18 +290,19 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
         if (!rec.reservedBy || typeof rec.reservedBy !== 'object') rec.reservedBy = {};
 
-        // NUNCA servir para a mesma conta se já consta (tentativa ou sucesso)
-        if (rec.postedBy.map(canonName).includes(nomeConta)) continue;
-
-        // Se já reservado por esta conta: continue servindo esta foto (idempotente)
+        // ------------- ALTERAÇÃO NA ORDEM DAS CHECAGENS (item 1) -----------
+        // 1. Se já reservado por esta conta: continue servindo esta foto (idempotente)
         if (rec.reservedBy[nomeConta]) {
           return { ok: true, file: name, absPath: abs };
         }
 
-        // Se reservado por outra conta, pule
+        // 2. Depois: Se já postada por esta conta, pule
+        if (rec.postedBy.map(canonName).includes(nomeConta)) continue;
+
+        // 3. Depois: Se reservado por OUTRA conta, pule
         if (Object.keys(rec.reservedBy).length > 0) continue;
 
-        // Reserva AGORA e COMMITA a tentativa (postedBy) — crash-safe
+        // Reserva AGORA e COMMITA a tentativa (postedBy é marcado junto sempre!)
         rec.reservedBy[nomeConta] = { ts: Date.now() };
         if (!rec.postedBy.map(canonName).includes(nomeConta)) rec.postedBy.push(nomeConta);
         saveIndex(idx);
@@ -355,10 +416,16 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
       if (rec.reservedBy[nomeConta]) delete rec.reservedBy[nomeConta];
       if (!rec.postedBy.map(canonName).includes(nomeConta)) rec.postedBy.push(nomeConta);
 
-      const workingSet = new Set(workingNames);
-      const allWorkedPosted = workingSet.size > 0
-        ? [...workingSet].every(n => rec.postedBy.map(canonName).includes(canonName(n)))
-        : false;
+      // [item 3] Acumulação requiredFor para todas gerações
+      if (!Array.isArray(rec.requiredFor)) rec.requiredFor = [];
+      let rqSet = new Set(rec.requiredFor.map(canonName));
+      for (const n of workingNames) rqSet.add(canonName(n));
+      rec.requiredFor = Array.from(rqSet);
+
+      // [item 4]: critério de deleção depende APENAS de allRequiredPosted
+      const reqSet = new Set(rec.requiredFor.map(canonName));
+      const postedSet = new Set(rec.postedBy.map(canonName));
+      let allRequiredPosted = reqSet.size > 0 && Array.from(reqSet).every(x => postedSet.has(x));
 
       if (!exists) {
         delete idx[fileName];
@@ -366,7 +433,7 @@ async function markPostedAndMaybeDelete(nomeConta, fileName, workingNames = []) 
         return { ok: true, deleted: true };
       }
 
-      if (allWorkedPosted) {
+      if (allRequiredPosted) {
         if (sameGeneration(rec, stat, abs)) {
           try {
             fs.unlinkSync(abs);
@@ -447,9 +514,10 @@ async function gcSweep() {
           continue;
         }
 
+        // [item 5] Limpeza de reservas antigas (>20min)
         if (rec && rec.reservedBy) {
           for (const n of Object.keys(rec.reservedBy)) {
-            if (Date.now() - rec.reservedBy[n].ts > 3*3600*1000) {
+            if (Date.now() - rec.reservedBy[n].ts > 20 * 60 * 1000) {
               delete rec.reservedBy[n];
               changed = true;
             }

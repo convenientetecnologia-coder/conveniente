@@ -1432,13 +1432,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // COMMIT no índice de fotos — somente após confirmação de publicação
     if (published) {
-      // Descobrir todas as WORKINGNAMES do momento
-      const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
       try {
-        await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
+        if (fotoNome) {
+          const allWorkingProfiles = Array.isArray(workingNames) ? workingNames.slice() : [];
+          await fotos.markPostedAndMaybeDelete(nome, fotoNome, allWorkingProfiles);
+        }
       } catch (e) {
-        stepLogArr.push(`[${nome}] Falha ao commit foto reservada: ${e && e.message || e}`);
-        // Fail-safe: NUNCA tente usar de novo — não faz nada aqui (pois o índice já está locked no próprio fotos.js)
+        stepLogArr.push(`[${nome}] markPostedAndMaybeDelete no catch/erro: ${e && e.message || e}`);
       }
     }
 
