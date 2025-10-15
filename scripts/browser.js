@@ -598,7 +598,9 @@ function installOneTabGuard(browser, nome, {
     async function enforceHardCap() {
       try {
         const pages = await browser.pages();
-        const lim = (allow && allow()) ? maxPagesWhenAllow : 1;
+        let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
+        if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
+        const lim = (allow && allow()) ? limOpt : 1;
         if (Array.isArray(pages) && pages.length > lim) {
           // Mantenha a primeira (main) e feche todas as demais
           for (let i = pages.length - 1; i >= 1; i--) {

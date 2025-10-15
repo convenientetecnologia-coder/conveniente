@@ -796,7 +796,10 @@ async function activateOnce(nome, source = '') {
                   const c = controllers.get(nome);
                   return !!(c && (c.configurando === true || (robeMeta[nome] && robeMeta[nome].emExecucao === true)));
                 },
-                maxPagesWhenAllow: 2,
+                maxPagesWhenAllow: () => {
+                  const rm = robeMeta[nome] || {};
+                  return rm.emExecucao === true ? 3 : 2;
+                },
                 onNumPages: (n) => {
                   robeMeta[nome] = robeMeta[nome] || {};
                   robeMeta[nome].numPages = n;

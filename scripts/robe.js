@@ -790,6 +790,33 @@ async function safeClosePage(page) {
   try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
 }
 
+// —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
+async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let p = null;
+    try {
+      p = await browser.newPage();
+      await ensureXPathPolyfill(p);
+      await patchPage(nome, p, coords);
+      stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
+      await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      return p; // sucesso
+    } catch (e) {
+      lastError = e;
+      const msg = (e && e.message) ? e.message : String(e);
+      try { await safeClosePage(p); } catch {}
+      if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
+        await new Promise(r => setTimeout(r, 300));
+        continue; // retry
+      }
+      throw e;
+    }
+  }
+  stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create_fail', err: (lastError && lastError.message) || String(lastError) });
+  throw new Error('nav_create_timeout');
+}
+
 // —————— NOVO: Rotina publicação e fechamento 5s como solicitado ——————
 // *** SUBSTITUÍDA PELO NOVO FLUXO ABAIXO ***
 
@@ -1200,11 +1227,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     // Nova aba + patchPage (sem minimizar/off-screen)
-    page = await browser.newPage();
-    await ensureXPathPolyfill(page);
     const coords = utils.getCoords(manifest.cidade || '');
-    // ALTERAÇÃO AQUI: patchPage recebe nome (string), não manifest
-    await patchPage(nome, page, coords);
+    page = await openCreateItemPageRobust(browser, nome, coords, attId);
     stepLogArr.push(`[${nome}] Nova aba criada para Robe`);
 
     // PASSO 1 — Detector ultra-específico antes de qualquer attach/fastDetect/overlay:
@@ -1254,37 +1278,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // Interceptação de recursos — NUNCA bloquear assets nem usar setRequestInterception
     // Marketplace create/posting: NÃO bloquear NENHUM asset. Mantém patchPage limpo.
-
-    // Navegação rápida + readiness rápido
-    {
-      const url = 'https://www.facebook.com/marketplace/create/item';
-      let okNav = false, navErr = null;
-      for (let i=0;i<2 && !okNav;i++) {
-        try {
-          stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create', try: i+1 });
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-
-          /* FAST-PROBE imediatamente após o goto (DESATIVADO PELO NOVO DETECTOR)
-          const earlyFast = await fastDetectPostingLimit(page, { timeoutMs: 1800 });
-          if (earlyFast && earlyFast.found) {
-            stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'limit_detect_fast_create', where: 'after_goto', h2: String(earlyFast.h2||'').slice(0,200) });
-            await applyLimitPostingAndAbort({ page, nome, attId, where: 'create_fast_probe', overlaySnapshot: earlyFast });
-            return;
-          }
-          */
-
-          okNav = true;
-        } catch (e) {
-          navErr = e && e.message || String(e);
-          logger.warn('[ROBE] Falha ao navegar para página de criação', { nome, try: i+1, error: navErr }, e);
-          await sleep(800);
-        }
-      }
-      if (!okNav) {
-        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'goto_create_fail', err: navErr });
-        throw new Error('nav_create_timeout');
-      }
-    }
 
     // Fast-lane readiness (3.5s). Se não ficar pronto, fallback com seletor (8s).
     const readyFast = await waitForCreateItemReady(page, { timeout: 3500 });
