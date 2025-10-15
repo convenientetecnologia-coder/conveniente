@@ -1050,8 +1050,6 @@ async function closeExtraPages(browser, mainPage, nome) {
     }
     if (closed > 0) {
       logger.info('[PRUNER] Fechou abas extras', { nome, closed });
-    } else {
-      logger.info('[PRUNER] Nenhuma aba extra a fechar', { nome });
     }
   } catch (e) {
     if (process.env.PRUNE_DEBUG === '1') {
@@ -1775,7 +1773,6 @@ try { await snapshotStatusAndWrite(); } catch {}
 // == FIM função ciclo de vida browser ==
 
 // ========== HANDLERS ==========
-// *** SOMENTE SUPERVISOR DEVE CHAMAR ESSE HANELER DIRETAMENTE ***
 function resolveChromeUserDataRoot() {
   if (process.platform === 'win32') {
     const la = process.env.LOCALAPPDATA;
@@ -2927,6 +2924,16 @@ async function nurseTick() {
     for (const nome of Object.keys(desired.perfis || {})) {
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
+
+      // INSTRUÇÃO CIRÚRGICA: Guard emExecucao no nurseTick (logo após pegar ctrl)
+      {
+        const rm = robeMeta[nome] || {};
+        if (rm.emExecucao === true) {
+          await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_robe_running', 'nurse_skip_robe_running');
+          continue;
+        }
+      }
+
       if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
         continue; // NUNCA navega, religia, nem prune enquanto em humano ou configurando
       }
@@ -3206,7 +3213,7 @@ async function nurseTick() {
           // Log e GRACE: não tente novo reload nos próximos 60s
           robeMeta[nome].reloadBlockedUntil = nowReload+60000;
           await reportAction(nome, 'mil_action', 
-            `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${(p0.url&&p0.url())||''}`
+            `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${((p0.url&&p0.url())||'')}`
           );
           continue; // Não tenta nem reload nem kill — só sai do loop até a próxima rodada.
         }
@@ -3452,7 +3459,10 @@ async function escalateToReopen(nome, reason='health_reopen') {
 
 async function healthTick() {
   for (const [nome, ctrl] of controllers) {
+    // INSTRUÇÃO CIRÚRGICA: Guard emExecucao no healthTick (logo no início do loop)
+    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
+
     if (!ctrl || !ctrl.browser) continue;
     if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
       continue; // Pula toda a lógica se envio em andamento
