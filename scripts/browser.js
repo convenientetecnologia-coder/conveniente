@@ -578,6 +578,67 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
 
 // END -- PRUNING PATCH
 
+// ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
+function installOneTabGuard(browser, nome, {
+  allow = () => false,              // função externa que diz se “mais de 1 aba” é permitido
+  maxPagesWhenAllow = 2,            // máximo permitido quando allow() é true (Robe/config)
+  onNumPages = null,                // callback para atualizar robeMeta[nome].numPages
+  log = (m,ctx)=>{ try{require('./logger.js').info(m,ctx);}catch{} }
+} = {}) {
+  try {
+    if (!browser || browser._oneTabGuardInstalled) return;
+    browser._oneTabGuardInstalled = true;
+
+    async function reportNum() {
+      try {
+        const pages = await browser.pages();
+        if (onNumPages) onNumPages(Array.isArray(pages) ? pages.length : 0);
+      } catch {}
+    }
+    async function enforceHardCap() {
+      try {
+        const pages = await browser.pages();
+        const lim = (allow && allow()) ? maxPagesWhenAllow : 1;
+        if (Array.isArray(pages) && pages.length > lim) {
+          // Mantenha a primeira (main) e feche todas as demais
+          for (let i = pages.length - 1; i >= 1; i--) {
+            if (pages.length <= lim) break;
+            const p = pages[i];
+            try { await p.close({ runBeforeUnload: false }).catch(()=>{}); }
+            catch {}
+          }
+          const cur = await browser.pages();
+          log('[PRUNER][HARD] Guard fechou abas extras', { nome, final: (cur && cur.length) || 0, lim });
+        }
+      } catch (e) {
+        if (process.env.PRUNE_DEBUG === '1') {
+          log('[PRUNER][HARD] erro enforce', { nome, error: (e && e.message) || String(e) });
+        }
+      } finally {
+        await reportNum();
+      }
+    }
+
+    browser.on('targetcreated', async (t) => {
+      try {
+        if (t && t.type && t.type() !== 'page') return;
+      } catch {}
+      await enforceHardCap();
+    });
+
+    browser.on('targetdestroyed', async (t) => {
+      try {
+        if (t && t.type && t.type() !== 'page') return;
+      } catch {}
+      await reportNum();
+    });
+
+    // Varredura inicial
+    setTimeout(enforceHardCap, 400);
+
+  } catch {}
+}
+
 // ====== FIND CHROME STABLE ======
 // Tenta Chrome Stable por CHROME_PATH/CHROMIUM_PATH variáveis de ambiente, depois paths padrão de OS.
 function findChromeStable() {
@@ -1241,6 +1302,24 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
 
   // (REMOVIDO BLOCO DE PRUNING APÓS CONFIGURATION CONFORME INSTRUÇÃO)
 
+  // FECHAMENTO OBRIGATÓRIO DAS ABAS AUXILIARES pós-configuração/injeção de cookies
+  try {
+    const all = await browser.pages();
+    const main = (all && all[0]) || null;
+    for (const p of (all || [])) {
+      if (main && p === main) continue;
+      try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+    }
+  } catch {}
+
+  // Confirmar estado final de abas
+  try {
+    const all2 = await browser.pages();
+    if (process.env.PRUNE_DEBUG === '1') {
+      require('./logger.js').info('[CONFIG][PRUNE] Fechadas abas auxiliares pós-configure', { nome, pages: (all2 && all2.length) || 0 });
+    }
+  } catch {}
+
   if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 14: Todas abas abertas/logadas, firmadas e curadas. Configuração concluída!');
   if (process.env.CONFIGURE_DEBUG === '1') logger.debug('[CONFIG] configureProfile FINALIZADO em ' + nome);
 }
@@ -1453,7 +1532,7 @@ async function detectMessengerTempBlock(page) {
           } catch { return false; }
         };
 
-        const nodes = Array.from(document.querySelectorAll('h1,h2,h3,span,div,section,p,button,a')).filter(isVisible).slice(0, 1200);
+        const nodes = Array.from(document.querySelectorAll('h1,h2,span,div,section,p,button,a')).filter(isVisible).slice(0, 1200);
         const texts = nodes.map(el => norm(el.innerText || el.textContent || '')).filter(Boolean);
         const headlines = Array.from(document.querySelectorAll('h1,h2')).map(el => norm(el.innerText || el.textContent || ''));
 
@@ -1876,5 +1955,6 @@ module.exports = {
   textHitsLimitNormalized,     // <----- NOVO (opcional, caso queira reusar)
   // ======= ADICIONE ESTES DOIS:
   resolveNonceIfPresent,
-  clickContinuarComo
+  clickContinuarComo,
+  installOneTabGuard
 };

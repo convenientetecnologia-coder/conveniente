@@ -644,6 +644,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             page = null;
           }
         }
+        // SANITY FORCE PRUNE: jamais deixe múltiplas abas no Virtus
+        try {
+          const allPages = await browser.pages();
+          if (Array.isArray(allPages) && allPages.length > 1) {
+            for (let i = allPages.length - 1; i >= 1; i--) {
+              try { await allPages[i].close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
+            }
+            // Atualiza numPages se algum worker monitora
+            try {
+              // Opcional: se robeMeta/worker sincroniza, surfate aqui
+              // (Aqui não tem robeMeta disponível, mantenha só no browser/worker)
+            } catch {}
+          }
+        } catch {}
         if (!page) {
           if (!running || !epochOk()) return null;
           // cria nova aba

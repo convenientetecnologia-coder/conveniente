@@ -789,6 +789,21 @@ async function activateOnce(nome, source = '') {
               try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
             }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
+            try {
+              // Hard guard: só 1 aba salva exceções (Robe/config)
+              browserHelper.installOneTabGuard(ctrl.browser, nome, {
+                allow: () => {
+                  const c = controllers.get(nome);
+                  return !!(c && (c.configurando === true || (robeMeta[nome] && robeMeta[nome].emExecucao === true)));
+                },
+                maxPagesWhenAllow: 2,
+                onNumPages: (n) => {
+                  robeMeta[nome] = robeMeta[nome] || {};
+                  robeMeta[nome].numPages = n;
+                  snapshotStatusAndWrite().catch(()=>{});
+                }
+              });
+            } catch {}
           }
         } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
@@ -1035,8 +1050,8 @@ async function closeExtraPages(browser, mainPage, nome) {
     }
     if (closed > 0) {
       logger.info('[PRUNER] Fechou abas extras', { nome, closed });
-    } else if (process.env.PRUNE_DEBUG === '1') {
-      logger.info('[PRUNER] Nada a fechar', { nome });
+    } else {
+      logger.info('[PRUNER] Nenhuma aba extra a fechar', { nome });
     }
   } catch (e) {
     if (process.env.PRUNE_DEBUG === '1') {
@@ -1812,6 +1827,13 @@ async function start_work({ nome }) {
 
     ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
     ctrl.trabalhando = true;
+    try {
+      await browserHelper.forceCloseExtras(ctrl.browser);
+      const ps = await ctrl.browser.pages();
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].numPages = (ps && ps.length) || 0;
+      await snapshotStatusAndWrite();
+    } catch {}
 
     if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
       await browserHelper.forceCloseExtras(ctrl.browser);
@@ -2019,8 +2041,11 @@ const handlers = {
       logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
       return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
     } finally {
+      // 1) Sai do modo configurando e fecha ABAS EXTRAS AGORA (obrigatório)
       ctrl.configurando = false;
-      ctrl.humanControl = true;  // mantém modo humano após configurar
+      try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
+      // 2) Entra em humano (fluxo já existente)
+      ctrl.humanControl = true;
       stopPruneLoop(nome);
       await snapshotStatusAndWrite();
     }
@@ -2061,6 +2086,7 @@ const handlers = {
     try { await stopVirtus(nome); } catch {}
 
     // 4. Só então faça a navegação do humano:
+    try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
     await browserHelper.invocarHumano(ctrl.browser, nome);
 
     // 5. (Opcional para robustez/nurse): freezer cooldown como já fazia
@@ -2083,6 +2109,13 @@ const handlers = {
     let pages2 = [];
     try { pages2 = await ctrl.browser.pages(); } catch {}
     if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]); // Reabilita prune ao retornar ao robô
+    try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
+    try {
+      const ps = await ctrl.browser.pages();
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].numPages = (ps && ps.length) || 0;
+      await snapshotStatusAndWrite();
+    } catch {}
 
     let pages;
     try { pages = await ctrl.browser.pages(); } catch {}
@@ -2950,7 +2983,7 @@ async function nurseTick() {
                 } else {
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
-                // Se swap foi bem-sucedido, não seta activationHeld, tentará na próxima ronda normal
+                // Se swap foi bem-sucedido, não seta activationHeld, tentará na próxima rodada normal
               }
             } else {
               // Sucesso: zera backoff (se existia)
