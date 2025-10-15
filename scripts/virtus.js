@@ -233,7 +233,7 @@ async function coletaChatsMarketplaceTodos(page) {
           const pos = s.indexOf('/marketplace/t/');
           const rest = s.slice(pos + '/marketplace/t/'.length);
           const id = rest.split(/[/?#]/)[0];
-          return id &amp;&amp; /^\d+$/.test(id) ? id : null;
+          return id && /^\d+$/.test(id) ? id : null;
         } catch { return null; }
       }
       function _extraiTempo(row) {
