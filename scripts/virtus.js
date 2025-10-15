@@ -220,7 +220,7 @@ function extraiIdDoHref(href) {
     if (pos < 0) return null;
     const rest = s.slice(pos + '/marketplace/t/'.length);
     const id = rest.split(/[/?#]/)[0];
-    return id && /^\d+$/.test(id) ? id : null;
+    return id &amp;&amp; /^\d+$/.test(id) ? id : null;
   } catch { return null; }
 }
 
@@ -233,7 +233,7 @@ async function coletaChatsMarketplaceTodos(page) {
           const pos = s.indexOf('/marketplace/t/');
           const rest = s.slice(pos + '/marketplace/t/'.length);
           const id = rest.split(/[/?#]/)[0];
-          return id && /^\d+$/.test(id) ? id : null;
+          return id &amp;&amp; /^\d+$/.test(id) ? id : null;
         } catch { return null; }
       }
       function _extraiTempo(row) {
@@ -644,18 +644,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             page = null;
           }
         }
-        // SANITY FORCE PRUNE: jamais deixe múltiplas abas no Virtus
+        // HARD GUARD: nunca feche abas durante o ciclo do Robe desta conta
         try {
-          const allPages = await browser.pages();
-          if (Array.isArray(allPages) && allPages.length > 1) {
-            for (let i = allPages.length - 1; i >= 1; i--) {
-              try { await allPages[i].close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
+          if (browser && browser._robeActiveFor === nome) {
+            // Em ciclo de postagem — não tocar em abas
+          } else {
+            const allPages = await browser.pages();
+            if (Array.isArray(allPages) && allPages.length > 1) {
+              for (let i = allPages.length - 1; i >= 1; i--) {
+                let u = '';
+                try { u = await allPages[i].url(); } catch {}
+                if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // NUNCA fechar create item
+                try { await allPages[i].close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
+              }
             }
-            // Atualiza numPages se algum worker monitora
-            try {
-              // Opcional: se robeMeta/worker sincroniza, surfate aqui
-              // (Aqui não tem robeMeta disponível, mantenha só no browser/worker)
-            } catch {}
           }
         } catch {}
         if (!page) {

@@ -1030,6 +1030,7 @@ async function closeExtraPages(browser, mainPage, nome) {
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) return;
     // NOVO: nunca prune durante envio
     if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) return;
+    if (browser && browser._robeActiveFor === nome) return; // Nunca prune se Robe ativo
     // GUARD EXTREMO: nunca prune se emExecucao==true para esse perfil
     if (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true) {
       return; // NÃO FECHA ABAS DURANTE O ROBE DESTE PERFIL
@@ -1501,11 +1502,14 @@ async function robeTickGlobal() {
       let virtusWasRunning = false;
       const ctrl = controllers.get(nome);
       const workingNow = getWorkingProfileNames();
+      // Sinaliza explicitamente, para que o Virtus/guard saibam: este browser está em ciclo de Robe/POSTAGEM.
+      if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
 
       // GUARD: browser precisa estar vivo
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         robeUpdateMeta(nome, { estado: 'erro' });
         try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (guard)'); } catch {}
+        try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         return;
       }
 
@@ -1552,6 +1556,7 @@ async function robeTickGlobal() {
             robeMeta[nome].pauseReason = 'limit_posting';
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
             try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robeTickGlobal)'); } catch {}
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
             return;
           }
@@ -1559,6 +1564,7 @@ async function robeTickGlobal() {
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
+          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           return;
         }
         // ==== EOF COOL/PRUNED ERRORS ====
@@ -1569,6 +1575,7 @@ async function robeTickGlobal() {
           robeMeta[nome].pauseReason = 'limit_posting'; // reforço
           robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h');
+          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
           return;
         }
@@ -1598,6 +1605,7 @@ async function robeTickGlobal() {
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
       } finally {
+        try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
           await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
           delete robeMeta[nome].limitPostingThisRun;
@@ -2178,11 +2186,13 @@ const handlers = {
         let virtusWasRunning = false;
         const ctrl = controllers.get(nome);
         const workingNow = getWorkingProfileNames();
+        if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
 
         // GUARD: browser precisa estar vivo
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
           robeUpdateMeta(nome, { estado: 'erro' });
           try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (robe-play guard)'); } catch {}
+          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           return;
         }
 
@@ -2225,12 +2235,14 @@ const handlers = {
               robeMeta[nome].pauseReason = 'limit_posting';
               robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
               try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robe-play)'); } catch {}
+              try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
               // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
               return;
             }
             await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
             robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
             try { logger.warn('[WORKER][robe-play] Robe error', { nome, error: e && e.message || e }); } catch {}
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             return;
           }
           // ==== EOF COOL/PRUNED ERRORS ====
@@ -2241,6 +2253,7 @@ const handlers = {
             robeMeta[nome].pauseReason = 'limit_posting';
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
             await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h (robe-play)');
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
             return; // ciclo abortado, não religar virtus
           }
@@ -2270,6 +2283,7 @@ const handlers = {
         } catch (e) {
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
         } finally {
+          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
             await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
             delete robeMeta[nome].limitPostingThisRun;

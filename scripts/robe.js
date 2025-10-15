@@ -437,26 +437,34 @@ async function findEnabledButton(page, label, timeout = 3000) {
   const start = Date.now();
   const xp = `//span[normalize-space()="${label}"]`;
   while (Date.now() - start < timeout) {
-    const spans = await page.$x(xp);
-    for (const sp of spans) {
-      const btn = await page.evaluateHandle(el => {
-        let p = el;
-        for (let i = 0; i < 5 && p; i++) {
-          if (p.getAttribute && (p.getAttribute('role') === 'button' || p.tagName === 'BUTTON')) return p;
-          p = p.parentElement;
-        }
-        return el;
-      }, sp);
-      const enabled = await page.evaluate(el => {
-        const st = window.getComputedStyle(el);
-        const ariaDisabled = el.getAttribute('aria-disabled');
-        const tabIndex = el.getAttribute('tabindex');
-        const visible = st && st.visibility !== 'hidden' && st.display !== 'none' && el.offsetParent !== null;
-        const disabledAttr = (ariaDisabled === 'true') || (tabIndex === '-1');
-        const disabledProp = (el.disabled === true);
-        return visible && !disabledAttr && !disabledProp;
-      }, btn);
-      if (enabled) return btn;
+    try {
+      const spans = await page.$x(xp);
+      for (const sp of spans) {
+        const btn = await page.evaluateHandle(el => {
+          let p = el;
+          for (let i = 0; i < 5 && p; i++) {
+            if (p.getAttribute && (p.getAttribute('role') === 'button' || p.tagName === 'BUTTON')) return p;
+            p = p.parentElement;
+          }
+          return el;
+        }, sp);
+        const enabled = await page.evaluate(el => {
+          const st = window.getComputedStyle(el);
+          const ariaDisabled = el.getAttribute('aria-disabled');
+          const tabIndex = el.getAttribute('tabindex');
+          const visible = st && st.visibility !== 'hidden' && st.display !== 'none' && el.offsetParent !== null;
+          const disabledAttr = (ariaDisabled === 'true') || (tabIndex === '-1');
+          const disabledProp = (el.disabled === true);
+          return visible && !disabledAttr && !disabledProp;
+        }, btn).catch(() => false);
+        if (enabled) return btn;
+      }
+    } catch (e) {
+      // Reage a context lost / navigation / close
+      if (/Execution context was destroyed|Cannot find context|Session closed/i.test(String(e && e.message || e))) {
+        try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
+        // reloop
+      }
     }
     await sleep(150);
   }
@@ -992,8 +1000,19 @@ function setupGraphqlPublishWatcher(page) {
 
 // SUBSTITUI publicarEFechar5s! NÃO remova publish/verify/etc, só troque a chamada!
 async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OVERLAY_WATCH_MS } = {}) {
+  if (typeof page.isClosed === 'function' && page.isClosed()) {
+    return { ok: false, reason: 'page_closed_early' };
+  }
   // 1) Arme sentinela de overlay ANTES de clicar em Publicar
-  await attachLimitOverlaySentinel(page);
+  try {
+    if (!page.isClosed || !page.isClosed()) {
+      await attachLimitOverlaySentinel(page);
+    } else {
+      return { ok: false, reason: 'page_closed_early' };
+    }
+  } catch (e) {
+    return { ok: false, reason: 'page_session_closed' };
+  }
 
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
@@ -1337,10 +1356,25 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     fotoPath = pick.absPath;
     fotoNome = pick.file;
 
-    // Upload
-    let inputFoto = await page.$('input[type="file"][accept*="image"]');
-    if (!inputFoto) inputFoto = await page.$('input[type="file"]');
-    if (!inputFoto) throw new Error('Campo para upload de foto não localizado.');
+    // Upload - procurar no documento e em frames
+    let inputFoto = await page.$('input[type="file"][accept*="image"], input[type="file"]');
+    if (!inputFoto) {
+      for (const fr of page.frames()) {
+        try {
+          inputFoto = await fr.$('input[type="file"][accept*="image"], input[type="file"]');
+          if (inputFoto) break;
+        } catch {}
+      }
+    }
+    if (!inputFoto) {
+      // Antes de falhar, última checagem de bloqueio
+      const late = await detectLimitOverlayEverywhere(page, 1500).catch(()=>null);
+      if (late && late.blocked) {
+        await applyLimitPostingAndAbort({ page, nome, attId, where: 'no_file_input_overlay', overlaySnapshot: late });
+        return; // aborta por limit_posting como deve
+      }
+      throw new Error('Campo para upload de foto não localizado (frames varridos).');
+    }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
     await sleep(jitter(250, 450));

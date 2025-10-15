@@ -493,6 +493,7 @@ function ensureChromeProfilePreferences(userDataDir) {
  * Após prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
+  if (browser && browser._robeActiveFor === nome) return;
   const t0 = Date.now();
   let iterations = 0;
   try {
@@ -596,6 +597,7 @@ function installOneTabGuard(browser, nome, {
       } catch {}
     }
     async function enforceHardCap() {
+      if (browser && browser._robeActiveFor === nome) return; // Nunca prune se Robe ativo para este perfil
       try {
         const pages = await browser.pages();
         let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
@@ -606,6 +608,9 @@ function installOneTabGuard(browser, nome, {
           for (let i = pages.length - 1; i >= 1; i--) {
             if (pages.length <= lim) break;
             const p = pages[i];
+            let u = '';
+            try { u = await p.url().catch(()=>''); } catch {}
+            if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // Nunca fechar create item
             try { await p.close({ runBeforeUnload: false }).catch(()=>{}); }
             catch {}
           }
@@ -931,6 +936,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         if (pages && pages.length > 1) {
           const mainPage = pages[0];
           for (const p of pages.slice(1)) {
+            let u = '';
+            try { u = await p.url(); } catch {}
+            if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
             if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
           }
         }
