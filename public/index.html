@@ -1313,50 +1313,87 @@
       startAllLock = true;
       setGlobalActionButtonsDisabled(true);
       const startBtn = document.getElementById('startAllBtn');
-      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
+      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Abrindo e iniciando automação...'; }
       try {
-        const st = await window.electronAPI.getStatus();
-        const perfis = st?.perfis || [];
-        // Ordem: como exibido
-        for (let i = 0; i < perfis.length; i++) {
-          const p = perfis[i];
-          // Re-checa status a cada iteração (robusto)
+        // 1. Snapshot inicial
+        let st = await window.electronAPI.getStatus();
+        const perfis = (st && st.perfis) || [];
+        const alvo = perfis.map(p => p.nome);
+
+        // 2. Abertura de todos navegadores
+        for (const nome of alvo) {
           try {
-            await ensureResourcesOk({ minFreeMB: 3072 }); // ALTERAÇÃO: SEMPRE usa 3GB militar
-
-            // Ativar navegador se necessário
-            if (!p.active) {
-              await window.electronAPI.activate(p.nome);
-              // Espera ficar ativo
-              await waitUntil(async () => {
-                const st2 = await window.electronAPI.getStatus();
-                const cur = (st2.perfis || []).find(x => x.nome === p.nome);
-                return cur && cur.active;
-              }, { timeoutMs: 60000, intervalMs: 400 });
-              // Pausa pequena entre aberturas
-              await sleep(1500);
-            }
-
-            // Start work (Virtus/24h)
-            await window.electronAPI.startWork(p.nome);
-            // Aguarda “trabalhando” refletir (tolerante)
-            await waitUntil(async () => {
-              const st3 = await window.electronAPI.getStatus();
-              const cur = (st3.perfis || []).find(x => x.nome === p.nome);
-              return cur && cur.trabalhando;
-            }, { timeoutMs: 30000, intervalMs: 400 });
-
-            // Resgata status atualizado para próximo ciclo
-            const stNext = await window.electronAPI.getStatus();
-            perfis.splice(0, perfis.length, ...(stNext.perfis || []));
+            const cur = (st.perfis||[]).find(x => x.nome === nome);
+            if (cur && cur.active) continue; // já está aberto
+            await window.electronAPI.activate(nome);
           } catch (e) {
-            console.warn('[StartAll] Falha em', p && p.nome, e && e.message || e);
+            console.warn('[OpenAll] Falha ativando', nome, e && e.message || e);
           }
+          await sleep(500);
+          st = await window.electronAPI.getStatus();
         }
+
+        // 3. Espera convergência razoável: aberto, held, frozen ou reopenAt (mesma lógica)
+        const ok = await waitUntil(async () => {
+          const s2 = await window.electronAPI.getStatus();
+          const arr = (s2 && s2.perfis) || [];
+          let allDecididos = true;
+          for (const nome of alvo) {
+            const p = arr.find(x => x.nome === nome);
+            if (!p) continue;
+            if (p.active) continue;
+            const held = (p.activationHeldUntil && p.activationHeldUntil > Date.now());
+            const frozen = (p.robeFrozenUntil && p.robeFrozenUntil > Date.now());
+            const reopen = (p.reopenAt && p.reopenAt > Date.now());
+            if (!(held || frozen || reopen)) { allDecididos = false; break; }
+          }
+          return allDecididos;
+        }, { timeoutMs: 120000, intervalMs: 800 });
+
+        // 4. Inicia automação (startWork) para todos abertos
+        st = await window.electronAPI.getStatus();
+        const arr = (st && st.perfis) || [];
+        let startCount = 0, workingCount = 0;
+        for (const p of arr) {
+          if (!p.active) continue; // só quem abriu de fato
+          try {
+            await window.electronAPI.startWork(p.nome);
+            startCount++;
+            // (opcional – aguardar working se quiser feedback mais preciso)
+            await waitUntil(async () => {
+              const s2 = await window.electronAPI.getStatus();
+              const cur = (s2.perfis||[]).find(x => x.nome === p.nome);
+              return !!cur && !!cur.trabalhando;
+            }, { timeoutMs: 20000, intervalMs: 400 });
+            workingCount++;
+          } catch (e) {
+            console.warn('[StartAll] Falha em start_work', p && p.nome, e && e.message || e);
+          }
+          await sleep(300);
+        }
+
+        // 5. Sumário final
+        st = await window.electronAPI.getStatus();
+        const total = alvo.length;
+        const abertos = arr.filter(p => p.active).length;
+        const trab = arr.filter(p => p.trabalhando).length;
+        const held = arr.filter(p => !p.active && p.activationHeldUntil && p.activationHeldUntil > Date.now()).map(p => p.nome);
+        const frozen = arr.filter(p => !p.active && p.robeFrozenUntil && p.robeFrozenUntil > Date.now()).map(p => p.nome);
+        const reopen = arr.filter(p => !p.active && p.reopenAt && p.reopenAt > Date.now()).map(p => p.nome);
+        alert(
+`Abertura + automação concluída.
+
+Perfis: ${total}
+Navegadores abertos: ${abertos}
+Perfis trabalhando: ${trab}
+Em hold (activationHeldUntil): ${held.length ? held.join(', ') : 'nenhum'}
+Congelados: ${frozen.length ? frozen.join(', ') : 'nenhum'}
+Reabrirá depois (reopenAt): ${reopen.length ? reopen.join(', ') : 'nenhum'}${ok ? '' : '\n(Observação: nem todos convergiram no tempo-limite de 120s)'}`);
+
       } catch (e) {
-        alert('Falha na sequência: ' + (e && e.message || e));
+        alert('Falha na abertura/automação massiva: ' + (e && e.message || e));
       } finally {
-        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir 24h'; }
+        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir Todos 24h'; }
         setGlobalActionButtonsDisabled(false);
         startAllLock = false;
         reloadPerfis();
