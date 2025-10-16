@@ -593,6 +593,270 @@ async function clickPublishAndWaitState(page, nome, {
 }
 // ===================== FIM PATCH MILITAR ======================
 
+// NOVOS HELPERS (PATCH DINÂMICO AVANÇAR/PUBLICAR)
+function normLabel(s) {
+  try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); }
+  catch { return String(s||'').trim().toLowerCase(); }
+}
+function canonicalLabel(tNorm) {
+  if (tNorm === 'avançar' || tNorm === 'avancar') return 'avancar';
+  if (tNorm === 'publicar') return 'publicar';
+  return tNorm;
+}
+
+async function elementIsVisibleAndClickable(el) {
+  try {
+    const st = window.getComputedStyle(el);
+    if (!st || st.visibility === 'hidden' || st.display === 'none') return false;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width < 20 || r.height < 16) return false;
+    const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
+    const tabIndex = el.getAttribute('tabindex');
+    const disabledProp = el.disabled === true;
+    if (ariaDisabled || disabledProp || tabIndex === '-1') return false;
+    const hasSpinner = !!(el.querySelector('svg[aria-label*="carregando"], [aria-busy="true"], div[role="progressbar"], svg[role="progressbar"]'));
+    if (hasSpinner) return false;
+    return true;
+  } catch { return false; }
+}
+
+async function getButtonsSnapshot(page) {
+  return await page.evaluate(() => {
+    const out = [];
+    const N = (s) => { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return (s||'').trim().toLowerCase(); } };
+    const isWanted = (t) => t === 'avancar' || t === 'avançar' || t === 'publicar';
+    const candidates = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+    for (let i = 0; i < candidates.length; i++) {
+      const el = candidates[i];
+      const text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
+      const tNorm = N(text);
+      if (!isWanted(tNorm)) continue;
+      const st = window.getComputedStyle(el);
+      const visible = !!(st && st.visibility !== 'hidden' && st.display !== 'none');
+      const r = el.getBoundingClientRect();
+      const sizeOk = !!(r && r.width >= 20 && r.height >= 16);
+      const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
+      const tabIndex = el.getAttribute('tabindex') || '';
+      const disabledProp = el.disabled === true;
+      const hasSpinner = !!(el.querySelector('svg[aria-label*="carregando"], [aria-busy="true"], div[role="progressbar"], svg[role="progressbar"]'));
+      const enabled = visible && sizeOk && !ariaDisabled && !disabledProp && tabIndex !== '-1' && !hasSpinner;
+      out.push({
+        label: tNorm,
+        labelCanon: (tNorm === 'avançar' || tNorm === 'avancar') ? 'avancar' : tNorm,
+        visible, sizeOk, ariaDisabled, tabIndex, disabledProp, hasSpinner, enabled,
+        rect: { x: r?.x||0, y: r?.y||0, w: r?.width||0, h: r?.height||0 },
+        domIndex: i,
+        outerHTML: (el.outerHTML || '').slice(0, 1000)
+      });
+    }
+    return out;
+  });
+}
+
+async function forensicElementScreenshot(page, nome, elHandle, filename) {
+  try {
+    const dir = path.join(__dirname, '..', 'dados', 'perfis', String(nome||'system'));
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, filename);
+    const box = await elHandle.boundingBox().catch(()=>null);
+    if (box && box.width > 0 && box.height > 0) {
+      const pad = 8;
+      await page.screenshot({
+        path: file,
+        clip: {
+          x: Math.max(0, box.x - pad),
+          y: Math.max(0, box.y - pad),
+          width: box.width + pad*2,
+          height: box.height + pad*2
+        }
+      }).catch(()=>{});
+    } else {
+      await page.screenshot({ path: file, fullPage: false }).catch(()=>{});
+    }
+    return file;
+  } catch { return null; }
+}
+
+async function resolveButtonHandle(page, labelCanon) {
+  const N = normLabel;
+  const wanted = labelCanon;
+  const handles = await page.evaluateHandle((wanted) => {
+    const N = (s) => { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return (s||'').trim().toLowerCase(); } };
+    const list = [];
+    const all = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+    for (const el of all) {
+      const text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
+      const t = N(text);
+      if (t === wanted || (wanted==='avancar' && (t==='avancar'||t==='avançar'))) {
+        list.push(el);
+      }
+    }
+    return list;
+  }, labelCanon);
+  const props = await handles.getProperties().catch(()=>null);
+  if (!props) return null;
+  for (const h of props.values()) {
+    const el = h.asElement ? h.asElement() : null;
+    if (!el) continue;
+    const ok = await page.evaluate(elementIsVisibleAndClickable, el).catch(()=>false);
+    if (ok) return el;
+    try { await h.dispose(); } catch {}
+  }
+  try { await handles.dispose(); } catch {}
+  return null;
+}
+
+async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000 } = {}) {
+  const end = Date.now() + timeoutMs;
+  const lab = clickedLabelCanon;
+  while (Date.now() < end) {
+    try {
+      const state = await page.evaluate((lab) => {
+        const N = (s) => { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return (s||'').trim().toLowerCase(); } };
+        const matches = (t) => (lab==='avancar' ? (t==='avancar'||t==='avançar') : t===lab);
+        const btns = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+        let hasAny = false, anyEnabled=false, anyDisabled=false, anySpinner=false;
+        for (const el of btns) {
+          const t = N(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
+          if (!matches(t)) continue;
+          hasAny = true;
+          const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
+          const tabIndex = el.getAttribute('tabindex') || '';
+          const disabledProp = el.disabled === true;
+          const st = window.getComputedStyle(el);
+          const vis = !!(st && st.visibility !== 'hidden' && st.display !== 'none');
+          const r = el.getBoundingClientRect();
+          const sizeOk = !!(r && r.width >= 20 && r.height >= 16);
+          const hasSp = !!(el.querySelector('svg[aria-label*="carregando"], [aria-busy="true"], div[role="progressbar"], svg[role="progressbar"]'));
+          const enabled = vis && sizeOk && !ariaDisabled && !disabledProp && tabIndex !== '-1' && !hasSp;
+          if (enabled) anyEnabled = true;
+          if (ariaDisabled || disabledProp || tabIndex === '-1') anyDisabled = true;
+          if (hasSp) anySpinner = true;
+        }
+        const route = location.pathname + location.search;
+        const routeSelling = /marketplace\/(you\/selling|profile|you\/dashboard)/.test(location.pathname);
+        const stepChanged = /[?&]step=/.test(location.search);
+        return {
+          hasAny, anyEnabled, anyDisabled, anySpinner,
+          route, stepChanged, routeSelling,
+          effect: (!hasAny || anyDisabled || anySpinner || routeSelling || stepChanged)
+        };
+      }, lab);
+
+      if (state && state.effect) {
+        return { ok: true, state };
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 150));
+  }
+  return { ok: false, timeout: true };
+}
+
+async function runDynamicButtonFlow(page, nome, {
+  maxPhases = 4,
+  perPhaseTimeoutMs = 10000,
+  scanIntervalMs = 150,
+  maxClicksPerLabel = 3
+} = {}, gqlWatcher = null) {
+  const clicksByLabel = { publicar: 0, avancar: 0 };
+  const sequence = [];
+  let lastCommitSeen = false;
+  const t0 = Date.now();
+
+  for (let phase = 1; phase <= maxPhases; phase++) {
+    if (await isSellerListOrDashboard(page).catch(()=>false)) {
+      stepLog.appendJSONL(nome,'robe',{step:'btn_flow_early_success_route', phase});
+      break;
+    }
+    const startedPhaseAt = Date.now();
+    let clickedLabel = null;
+    phase_loop:
+    while ((Date.now() - startedPhaseAt) < perPhaseTimeoutMs) {
+      const snapshot = await getButtonsSnapshot(page).catch(()=>[]);
+      const anyEnabled = (snapshot||[]).some(b => b.enabled);
+      const enabledInDomOrder = (snapshot||[]).filter(b => b.enabled).sort((a,b)=>a.domIndex-b.domIndex);
+
+      stepLog.appendJSONL(nome,'robe',{
+        step: 'btn_flow_phase_state',
+        phase,
+        buttons: snapshot||[],
+        anyEnabled,
+        ts: Date.now()
+      });
+
+      if (enabledInDomOrder.length === 0) {
+        await new Promise(r => setTimeout(r, scanIntervalMs));
+        if (await isSellerListOrDashboard(page).catch(()=>false)) break phase_loop;
+        continue;
+      }
+
+      const chosen = enabledInDomOrder[0];
+      const labelCanon = chosen.labelCanon;
+
+      if ((clicksByLabel[labelCanon] || 0) >= maxClicksPerLabel) {
+        stepLog.appendJSONL(nome,'robe',{step:'btn_flow_max_clicks_reached', phase, label: labelCanon});
+        const other = enabledInDomOrder.find(b => b.labelCanon !== labelCanon);
+        if (other && (clicksByLabel[other.labelCanon]||0) < maxClicksPerLabel) {
+          const otherHandle = await resolveButtonHandle(page, other.labelCanon);
+          if (otherHandle) {
+            const fileBefore = `click_${other.labelCanon}_fase${phase}_before.png`;
+            await forensicElementScreenshot(page, nome, otherHandle, fileBefore);
+            await otherHandle.click({delay: 60}).catch(()=>{});
+            clicksByLabel[other.labelCanon] = (clicksByLabel[other.labelCanon]||0) + 1;
+            sequence.push(other.labelCanon);
+            stepLog.appendJSONL(nome,'robe',{step:'btn_flow_click', phase, label: other.labelCanon, file: fileBefore});
+            const w = await waitButtonEffect(page, other.labelCanon, { timeoutMs: 8000 });
+            stepLog.appendJSONL(nome,'robe',{step:'btn_flow_effect', phase, label: other.labelCanon, effect: w});
+            const fileAfter = `click_${other.labelCanon}_fase${phase}_after.png`;
+            await forensicScreenshot(page, nome, fileAfter.replace('.png',''));
+            if (gqlWatcher && typeof gqlWatcher.promise === 'object') {
+              const raced = await Promise.race([
+                gqlWatcher.promise.catch(()=>false),
+                new Promise(r=>setTimeout(()=>r(false), 200))
+              ]);
+              if (raced) lastCommitSeen = true;
+            }
+            break phase_loop;
+          }
+        }
+        await new Promise(r => setTimeout(r, scanIntervalMs));
+        continue;
+      }
+
+      const handle = await resolveButtonHandle(page, labelCanon);
+      if (!handle) {
+        await new Promise(r => setTimeout(r, scanIntervalMs));
+        continue;
+      }
+      const fileBefore = `click_${labelCanon}_fase${phase}_before.png`;
+      await forensicElementScreenshot(page, nome, handle, fileBefore);
+      await handle.focus().catch(()=>{});
+      await handle.click({ delay: 60 }).catch(()=>{});
+      clicksByLabel[labelCanon] = (clicksByLabel[labelCanon]||0) + 1;
+      sequence.push(labelCanon);
+      clickedLabel = labelCanon;
+
+      stepLog.appendJSONL(nome,'robe',{step:'btn_flow_click', phase, label: labelCanon, file: fileBefore});
+      const w = await waitButtonEffect(page, labelCanon, { timeoutMs: 8000 });
+      stepLog.appendJSONL(nome,'robe',{step:'btn_flow_effect', phase, label: labelCanon, effect: w});
+      const fileAfter = `click_${labelCanon}_fase${phase}_after.png`;
+      await forensicScreenshot(page, nome, fileAfter.replace('.png',''));
+      if (gqlWatcher && typeof gqlWatcher.promise === 'object') {
+        const raced = await Promise.race([
+          gqlWatcher.promise.catch(()=>false),
+          new Promise(r=>setTimeout(()=>r(false), 200))
+        ]);
+        if (raced) lastCommitSeen = true;
+      }
+      break phase_loop;
+    }
+  }
+  return {
+    sequence, clicksByLabel, lastCommitSeen,
+    elapsedMs: Date.now() - t0
+  };
+}
+
 // Fonte de localizações (JSON)
 function listLocalizacoesPorCidade(cidade) {
   try {
@@ -1069,6 +1333,7 @@ async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
 }
 
 // Constantes de thresholds para publicação (PUBLISH_*)
+// Ajustáveis via .env
 const PUBLISH_OVERLAY_WATCH_MS   = parseInt(process.env.PUBLISH_OVERLAY_WATCH_MS   || '20000', 10); // 20s
 const PUBLISH_SUCCESS_ROUTE_MS   = parseInt(process.env.PUBLISH_SUCCESS_ROUTE_MS   || '15000', 10); // 15s
 const PUBLISH_TOTAL_TIMEOUT_MS   = parseInt(process.env.PUBLISH_TOTAL_TIMEOUT_MS   || '25000', 10); // 25s
@@ -1139,17 +1404,29 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
 
-  // 2. TROQUE O BLOCO DE PUBLISH DO publishAndWatch POR:
-  // CLIQUE "Publicar" seguro (NUNCA DUPLICA)
-  const publishRes = await clickPublishAndWaitState(page, nome);
-  if (!publishRes.clicked || !publishRes.confirmed) {
-    // Loga e aborta
-    await forensicScreenshot(page, nome, 'publish_never_confirmed');
-    stepLog.appendJSONL(nome, 'robe', { step: 'publish_click_failed', reason: publishRes.reason });
-    gql.cleanup();
+  // 2. TROQUE O BLOCO CRÍTICO DE publishAndWatch PARA USO DO LAÇO DINÂMICO:
+  stepLog.appendJSONL(nome,'robe',{step:'btn_flow_start'});
+  const flowRes = await runDynamicButtonFlow(page, nome, {
+    maxPhases: 4,
+    perPhaseTimeoutMs: 10000,
+    scanIntervalMs: 150,
+    maxClicksPerLabel: 3
+  }, gql);
+
+  stepLog.appendJSONL(nome,'robe',{
+    step: 'btn_flow_end',
+    sequence: flowRes.sequence,
+    clicksByLabel: flowRes.clicksByLabel,
+    gqlCommitSeen: flowRes.lastCommitSeen,
+    elapsedMs: flowRes.elapsedMs
+  });
+
+  if (!flowRes.sequence.length && !flowRes.lastCommitSeen) {
+    await forensicScreenshot(page, nome, 'btn_flow_no_sequence');
+    stepLog.appendJSONL(nome,'robe',{step:'publish_click_failed', reason: 'no_buttons_clicked'});
+    gql.cleanup && gql.cleanup();
     return { ok: false, reason: 'publish_click_failed' };
   }
-  stepLog.appendJSONL(nome, 'robe', { step: 'publish_click_confirmed' });
 
   // Logging array para rounds de dwell (forense)
   const dwellDebugRounds = [];
