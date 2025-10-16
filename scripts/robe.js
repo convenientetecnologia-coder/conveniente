@@ -708,133 +708,46 @@ async function elementIsVisibleAndClickable(el, wantedCanon=null) {
 }
 async function getButtonsSnapshot(page) {
   return await page.evaluate(() => {
-    function __robeComputeButtonMetaLocal(el, wantedCanon) {
-      function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
-      function BTN_labelCanonFromText(txt) {
-        const t = N(txt);
-        if (!t) return null;
-        // publicar em pt/en e variantes
-        if (
-          t === "publicar" ||
-          t.startsWith("publicar") ||
-          t.includes("postar") ||
-          t === "post" ||
-          t.startsWith("post ") ||
-          t.includes("publish")
-        ) return "publicar";
-        // avancar, continuar, próximo em pt/en
-        if (
-          t === "avancar" ||
-          t === "avançar" ||
-          t.startsWith("avancar") ||
-          t.startsWith("avançar") ||
-          t.includes("próximo") ||
-          t.includes("proximo") ||
-          t.includes("continuar") ||
-          t.includes("continue") ||
-          t === "next"
-        ) return "avancar";
-        return null;
-      }
-      function BTN_isTargetLabel(txt, wantedCanon) {
-        const canon = BTN_labelCanonFromText(txt);
-        if (!wantedCanon) return canon === "publicar" || canon === "avancar";
-        return canon === wantedCanon;
-      }
-      function findWizardRoot(){
-        const mains = Array.from(document.querySelectorAll('[role="main"]'));
-        const hasCreateSignals = (el) => {
-          const txt = (el.innerText||'').toLowerCase();
-          if (/(prévia|previa|detalhes|para vender|anunciar em mais locais|os itens do marketplace são públicos)/i.test(txt)) return true;
-          if (el.querySelector('input[aria-label="Título"],input[aria-label="Localização"],label[role="combobox"] span')) return true;
-          return false;
-        };
-        for (const m of mains) if (hasCreateSignals(m)) return m;
-        const dlg = Array.from(document.querySelectorAll('[role="dialog"]'))
-          .find(d => /marketplace|criar|anunciar/i.test((d.getAttribute('aria-label')||d.innerText||'').toLowerCase()));
-        return dlg || document.body;
-      }
-      const root = findWizardRoot();
+    function N(s) {
+      try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase(); }
+      catch { return String(s||'').trim().toLowerCase(); }
+    }
+    const elements = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+    function labelCanon(aria, txt) {
+      if (
+        aria.includes('publicar') || aria.includes('postar') || aria.includes('publish') ||
+        txt.includes('publicar') || txt.includes('postar') || txt.includes('publish')
+      ) return 'publicar';
+      if (
+        aria.includes('avancar') || aria.includes('avançar') || aria.includes('próximo') ||
+        aria.includes('continuar') || aria.includes('next') || aria.includes('continue') ||
+        txt.includes('avancar') || txt.includes('avançar') || txt.includes('próximo') ||
+        txt.includes('continuar') || txt.includes('next') || txt.includes('continue') || txt.includes('proximo')
+      ) return 'avancar';
+      return '';
+    }
+    function isEnabled(el) {
       const st = window.getComputedStyle(el);
+      if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
       const r = el.getBoundingClientRect();
-      const text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
-      const t = N(text);
-      const visible = !!(st && st.visibility!=='hidden' && st.display!=='none' && r && r.width>=20 && r.height>=16);
-      const ariaDisabled = el.getAttribute('aria-disabled')==='true';
-      const tabIndex = el.getAttribute('tabindex') || '';
-      const disabledProp = el.disabled===true;
-      const hasSpinner = !!el.querySelector('svg[role="progressbar"], div[role="progressbar"], [aria-busy="true"], svg[aria-label*="carregando"]');
-      const inDialog = !!el.closest('[role="dialog"]');
-      const inNav = !!el.closest('[role="navigation"],[role="banner"],header');
-      const inRoot = !!(root && root.contains(el));
-      const fixed = st.position==='fixed';
-      const peNone = st.pointerEvents==='none';
-      const inViewport = r && r.width>0 && r.height>0 && (r.bottom>0) && (r.right>0) && (r.top<window.innerHeight) && (r.left<window.innerWidth);
-      let occluded = true;
-      if (inViewport) {
-        const cx = Math.min(window.innerWidth-1, Math.max(1, Math.floor(r.left + r.width/2)));
-        const cy = Math.min(window.innerHeight-1, Math.max(1, Math.floor(r.top + r.height/2)));
-        const top = document.elementFromPoint(cx, cy);
-        occluded = !!(top && top!==el && !el.contains(top));
-      }
-      const rootIsDialog = !!(root && root.getAttribute && root.getAttribute('role') === 'dialog');
-      const inWizardDialog = inDialog && rootIsDialog && root && root.contains(el);
-      const allowedDialogGate = (!inDialog) || inWizardDialog;
-      const allowedFixedGate = (st.position !== 'fixed') || inWizardDialog || inRoot;
-      const enabled =
-        BTN_isTargetLabel(text, wantedCanon) &&
-        visible &&
-        !ariaDisabled && !disabledProp && tabIndex!=='-1' &&
-        !hasSpinner && !peNone &&
-        allowedDialogGate &&
-        !inNav &&
-        inRoot &&
-        allowedFixedGate &&
-        inViewport &&
-        !occluded;
-      const z = parseInt(st.zIndex||'0',10)||0;
+      if (!r || r.width < 10 || r.height < 10) return false;
+      if (el.getAttribute('aria-disabled') === 'true') return false;
+      if (el.disabled === true) return false;
+      if (el.getAttribute('tabindex') === '-1') return false;
+      return true;
+    }
+    return elements.map((el, i) => {
+      const ariaLabel = N(el.getAttribute('aria-label') || '');
+      const txt = N(el.innerText || el.textContent || '');
+      const canon = labelCanon(ariaLabel, txt);
       return {
-        t, labelCanon: BTN_labelCanonFromText(text),
-        visible, ariaDisabled, tabIndex, disabledProp, hasSpinner,
-        inDialog, inNav, inRoot, position: st.position, pointerEvents: st.pointerEvents,
-        inViewport, occluded, z,
-        rect: { x: r?.x||0, y: r?.y||0, w: r?.width||0, h: r?.height||0 },
-        enabled,
+        label: txt,
+        labelCanon: canon,
+        enabled: isEnabled(el),
+        domIndex: i,
         outerHTML: (el.outerHTML||'').slice(0,700)
       };
-    }
-    const out = [];
-    const all = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
-    for (let i=0;i<all.length;i++){
-      const el = all[i];
-      try {
-        const meta = __robeComputeButtonMetaLocal(el, null);
-        if (meta && (meta.labelCanon === 'publicar' || meta.labelCanon === 'avancar')) {
-          out.push({
-            label: meta.t,
-            labelCanon: meta.labelCanon,
-            enabled: meta.enabled,
-            visible: meta.visible,
-            ariaDisabled: meta.ariaDisabled,
-            tabIndex: meta.tabIndex,
-            disabledProp: meta.disabledProp,
-            hasSpinner: meta.hasSpinner,
-            inDialog: meta.inDialog,
-            inNav: meta.inNav,
-            inRoot: meta.inRoot,
-            position: meta.position,
-            pointerEvents: meta.pointerEvents,
-            inViewport: meta.inViewport,
-            occluded: meta.occluded,
-            z: meta.z,
-            rect: meta.rect,
-            outerHTML: meta.outerHTML,
-            domIndex: i
-          });
-        }
-      } catch {}
-    }
-    return out;
+    }).filter(btn => btn.enabled && btn.labelCanon);
   });
 }
 async function forensicElementScreenshot(page, nome, elHandle, filename) {
@@ -862,64 +775,43 @@ async function forensicElementScreenshot(page, nome, elHandle, filename) {
 }
 async function resolveButtonHandle(page, labelCanon) {
   const arrHandle = await page.evaluateHandle((wanted) => {
-    function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
-    const sel = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
-    function matchesWanted(txt, wanted) {
-      const t = N(txt);
-      if (wanted === 'avancar') return (t==='avancar'||t==='avançar'||t.startsWith('avancar')||t.startsWith('avançar')||t.includes('próximo')||t.includes('proximo')||t.includes('continuar')||t.includes('continue')||t==='next');
-      if (wanted === 'publicar') return (t==='publicar'||t.startsWith('publicar')||t.includes('postar')||t==='post'||t.startsWith('post ')||t.includes('publish'));
+    function N(s){ try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
+    function matches(el) {
+      const aria = N(el.getAttribute('aria-label')||'');
+      const txt = N(el.innerText||el.textContent||'');
+      if (wanted === 'avancar')
+        return aria.includes('avancar') || aria.includes('avançar') || aria.includes('próximo') || aria.includes('continuar') || aria.includes('next') || aria.includes('continue') ||
+               txt.includes('avancar') || txt.includes('avançar') || txt.includes('próximo') || txt.includes('continuar') || txt.includes('next') || txt.includes('continue') || txt.includes('proximo');
+      if (wanted === 'publicar')
+        return aria.includes('publicar') || aria.includes('postar') || aria.includes('publish') ||
+               txt.includes('publicar') || txt.includes('postar') || txt.includes('publish');
       return false;
     }
-
-    return sel.filter(el => {
-      const raw = el.getAttribute('aria-label') || el.innerText || el.textContent || '';
-      return matchesWanted(raw, wanted);
-    });
+    return Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]')).filter(matches);
   }, labelCanon);
-  const props = await arrHandle.getProperties().catch(()=>null);
-  if (!props) return null;
-  const scored = [];
+  const props = await arrHandle.getProperties();
   for (const h of props.values()) {
     const el = h.asElement ? h.asElement() : null;
     if (!el) continue;
-    const meta = await elementIsVisibleAndClickable(el, labelCanon);
-    if (!meta) continue;
-    let score = 0;
-    if (meta.inRoot) score += 100;
-    if (meta.inDialog || meta.inNav) score -= 1000;
-    if (meta.position === 'fixed') score -= 300;
-    if (!meta.inViewport) score -= 80;
-    if (meta.occluded) score -= 120;
-    if (meta.visible) score += 20;
-    if (!meta.ariaDisabled && !meta.disabledProp && meta.tabIndex !== '-1') score += 10;
-    if (labelCanon === 'publicar') score += 5;
-    try { score += Math.min(60, Math.max(0, meta.rect.y)); } catch {}
-    scored.push({ el, meta, score });
+    // ponto central:
+    const box = await el.boundingBox().catch(()=>null);
+    if (box && box.width > 0 && box.height > 0) {
+      try { await el.focus(); } catch {}
+      return el;
+    }
   }
   try { await arrHandle.dispose(); } catch {}
-  if (!scored.length) return null;
-  scored.sort((a,b)=>b.score - a.score);
-  const best = scored[0];
-  if (!best.meta.enabled) return null;
-  // Scroll somente se necessário e seguro (não dialog/fixed)
-  if (!best.meta.inViewport && !best.meta.inDialog && best.meta.position!=='fixed') {
-    try {
-      await page.evaluate((node) => node.scrollIntoView({behavior:'instant', block:'center', inline:'center'}), best.el);
-    } catch {}
-  }
-  const meta2 = await elementIsVisibleAndClickable(best.el, labelCanon);
-  if (!meta2 || !meta2.enabled) return null;
-  return best.el;
+  return null;
 }
 async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000, hrefBefore = null } = {}) {
   const href0 = hrefBefore || await page.evaluate(() => location.href).catch(()=>null);
   try {
     const ok = await page.waitForFunction((lab, href0) => {
       function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
-      const matches = (tt) => {
-        const t = (tt||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
-        if (lab==='avancar') return (t==='avancar'||t==='avançar'||t.startsWith('avancar')||t.startsWith('avançar')||t.includes('próximo')||t.includes('proximo')||t.includes('continuar')||t.includes('continue')||t==='next');
-        if (lab==='publicar') return (t==='publicar'||t.startsWith('publicar')||t.includes('postar')||t==='post'||t.startsWith('post ')||t.includes('publish'));
+      const matches = (txt) => {
+        const t = (txt||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+        if (lab==='publicar') return t.includes('publicar')||t.includes('postar')||t.includes('publish');
+        if (lab==='avancar') return t.includes('avancar')||t.includes('avançar')||t.includes('próximo')||t.includes('continuar')||t.includes('next')||t.includes('continue')||t.includes('proximo');
         return false;
       };
       const btns = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
