@@ -936,7 +936,7 @@ async function runDynamicButtonFlow(page, nome, {
         const cx = box.x + box.width/2, cy = box.y + box.height/2;
         await page.mouse.move(cx, cy);
         await page.mouse.down();
-        await sleep30);
+        await sleep(30);
         await page.mouse.up();
       } else {
         await handle.click({ delay: 60 }).catch(()=>{});
