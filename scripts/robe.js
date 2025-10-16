@@ -433,88 +433,36 @@ async function detectLimitReached(page) {
 }
 
 // Botão habilitado por texto
-async function findEnabledButton(page, label, timeout = 3000) {
+async function findEnabledButton(page, label, timeout = 700) {
   const start = Date.now();
   const xp = `//span[normalize-space()="${label}"]`;
   while (Date.now() - start < timeout) {
-    try {
-      const spans = await page.$x(xp);
-      for (const sp of spans) {
-        const btn = await page.evaluateHandle(el => {
-          let p = el;
-          for (let i = 0; i < 5 && p; i++) {
-            if (p.getAttribute && (p.getAttribute('role') === 'button' || p.tagName === 'BUTTON')) return p;
-            p = p.parentElement;
-          }
-          return el;
-        }, sp);
-        const enabled = await page.evaluate(el => {
-          const st = window.getComputedStyle(el);
-          const ariaDisabled = el.getAttribute('aria-disabled');
-          const tabIndex = el.getAttribute('tabindex');
-          const visible = st && st.visibility !== 'hidden' && st.display !== 'none' && el.offsetParent !== null;
-          const disabledAttr = (ariaDisabled === 'true') || (tabIndex === '-1');
-          const disabledProp = (el.disabled === true);
-          return visible && !disabledAttr && !disabledProp;
-        }, btn).catch(() => false);
-        if (enabled) return btn;
-      }
-    } catch (e) {
-      // Reage a context lost / navigation / close
-      if (/Execution context was destroyed|Cannot find context|Session closed/i.test(String(e && e.message || e))) {
-        try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
-        // reloop
+    const spans = await page.$x(xp);
+    for (const sp of spans) {
+      let btn = sp;
+      // Sobe até host BUTTON ou role=button em no máximo 5 níveis
+      for (let up = 0; up < 5 && btn; up++) {
+        // Testa host BUTTON
+        const tagOk = await btn.evaluate(el => el.tagName.toUpperCase() === 'BUTTON');
+        const roleOk = await btn.evaluate(el => el.getAttribute && el.getAttribute('role') === 'button');
+        if (tagOk || roleOk) {
+          // Verifica disponível/habilitado
+          const enabled = await btn.evaluate(el => {
+            const st = window.getComputedStyle(el);
+            if (!st) return false;
+            if (st.display === 'none' || st.visibility === 'hidden' || !el.offsetParent) return false;
+            if (el.getAttribute('aria-disabled') === 'true') return false;
+            if (el.disabled === true) return false;
+            if (el.getAttribute('tabindex') === '-1') return false;
+            return true;
+          });
+          if (enabled) return btn;
+        }
+        btn = await btn.evaluateHandle(el => el.parentElement);
+        btn = btn.asElement();
       }
     }
-    await sleep(150);
-  }
-  return null;
-}
-
-// ===================== PATCH MILITAR: Clique Publicar aguardando cinza/spinner ======================
-async function robustFindEnabledButton(page, labels = [], timeoutMs = 2000) {
-  const started = Date.now();
-  function norm(s){ try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').toLowerCase().trim(); } }
-  const wanted = (labels||[]).map(norm);
-  while ((Date.now() - started) < timeoutMs) {
-    try {
-      const el = await page.evaluateHandle((wanted) => {
-        function norm(s){ try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').toLowerCase().trim(); } }
-        function isVisible(el){
-          const st = window.getComputedStyle(el);
-          if (!st) return false;
-          if (st.visibility === 'hidden' || st.display === 'none') return false;
-          const r = el.getBoundingClientRect();
-          return r && r.width > 20 && r.height > 16;
-        }
-        const all = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"]'));
-        for (const el of all) {
-          if (!isVisible(el)) continue;
-          const label = norm(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
-          if (!label) continue;
-          if (wanted.some(w => label.includes(w))) return el;
-        }
-        // fallback por spans
-        const spans = Array.from(document.querySelectorAll('span')).filter(s => {
-          const t = norm(s.innerText || s.textContent || '');
-          return t && wanted.some(w => t.includes(w));
-        });
-        for (const sp of spans) {
-          let p = sp;
-          let steps=0;
-          while (p && steps < 5) {
-            if ((p.tagName === 'BUTTON') || (p.getAttribute && p.getAttribute('role') === 'button')) {
-              if (isVisible(p)) return p;
-            }
-            p = p.parentElement; steps++;
-          }
-        }
-        return null;
-      }, wanted);
-      const btn = await el.asElement();
-      if (btn) return btn;
-    } catch {}
-    await new Promise(r => setTimeout(r, 120));
+    await sleep(120);
   }
   return null;
 }
@@ -527,6 +475,66 @@ async function forensicScreenshot(page, nome, label) {
     await page.screenshot({ path: file, fullPage: false }).catch(()=>{});
     return file;
   } catch { return null; }
+}
+
+// Helpers de clique exato e fluxo de botão (Avançar/Publicar)
+async function clickExactCenter(page, handle) {
+  try { await handle.focus?.(); } catch {}
+  const box = await handle.boundingBox().catch(()=>null);
+  if (box && box.width > 0 && box.height > 0) {
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await sleep(20);
+    await page.mouse.up();
+  } else {
+    await handle.click({ delay: 60 }).catch(()=>{});
+  }
+}
+
+async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400 } = {}) {
+  const sequence = [];
+  let publishClicked = false;
+  let publishTries = 0;
+  for (let step = 1; step <= maxSteps; step++) {
+    // PUBLICAR — tenta até publishMaxRetries
+    const btnPub = await findEnabledButton(page, 'Publicar', 700);
+    if (btnPub) {
+      publishTries++;
+      await clickExactCenter(page, btnPub);
+      sequence.push('publicar');
+      const stateChange = await page.waitForFunction((label) => {
+        const norm = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+        const buttons = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+        for (const el of buttons) {
+          const t = (el.innerText || el.textContent || '').trim();
+          if (norm(t) === norm(label)) {
+            const disabled = el.getAttribute('aria-disabled')==='true' || el.disabled || el.getAttribute('tabindex')==='-1';
+            const spinner = !!el.querySelector('svg[role="progressbar"], [role="progressbar"], [aria-busy="true"], svg[aria-label*="carregando"]');
+            if (disabled || spinner) return true;
+          }
+        }
+        const exists = buttons.some(el => norm((el.innerText||el.textContent||'').trim()) === norm(label));
+        return !exists;
+      }, { timeout: 12000 }, 'Publicar').catch(()=>false);
+
+      if (stateChange) { publishClicked = true; break; }
+      if (publishTries >= publishMaxRetries) break;
+      await sleep(320);
+      continue;
+    }
+    // AVANÇAR
+    const btnAv = await findEnabledButton(page, 'Avançar', 700);
+    if (btnAv) {
+      await clickExactCenter(page, btnAv);
+      sequence.push('avancar');
+      await sleep(waitAfterAdvanceMs);
+      continue;
+    }
+    await sleep(150);
+  }
+  return { sequence, publishClicked };
 }
 
 // --- O PATCH PRINCIPAL: clique só uma vez, espera o botão PUBLICAR ficar cinza/desabilitado/spinner ---
@@ -701,108 +709,7 @@ function __robeComputeButtonMeta(el, wantedCanon) {
     outerHTML: (el.outerHTML||'').slice(0,700)
   };
 }
-async function elementIsVisibleAndClickable(el, wantedCanon=null) {
-  try {
-    return await el.executionContext().evaluate(__robeComputeButtonMeta, el, wantedCanon);
-  } catch { return { enabled:false }; }
-}
-async function getButtonsSnapshot(page) {
-  return await page.evaluate(() => {
-    function N(s) {
-      try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase(); }
-      catch { return String(s||'').trim().toLowerCase(); }
-    }
-    const elements = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
-    function labelCanon(aria, txt) {
-      if (
-        aria.includes('publicar') || aria.includes('postar') || aria.includes('publish') ||
-        txt.includes('publicar') || txt.includes('postar') || txt.includes('publish')
-      ) return 'publicar';
-      if (
-        aria.includes('avancar') || aria.includes('avançar') || aria.includes('próximo') ||
-        aria.includes('continuar') || aria.includes('next') || aria.includes('continue') ||
-        txt.includes('avancar') || txt.includes('avançar') || txt.includes('próximo') ||
-        txt.includes('continuar') || txt.includes('next') || txt.includes('continue') || txt.includes('proximo')
-      ) return 'avancar';
-      return '';
-    }
-    function isEnabled(el) {
-      const st = window.getComputedStyle(el);
-      if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
-      const r = el.getBoundingClientRect();
-      if (!r || r.width < 10 || r.height < 10) return false;
-      if (el.getAttribute('aria-disabled') === 'true') return false;
-      if (el.disabled === true) return false;
-      if (el.getAttribute('tabindex') === '-1') return false;
-      return true;
-    }
-    return elements.map((el, i) => {
-      const ariaLabel = N(el.getAttribute('aria-label') || '');
-      const txt = N(el.innerText || el.textContent || '');
-      const canon = labelCanon(ariaLabel, txt);
-      return {
-        label: txt,
-        labelCanon: canon,
-        enabled: isEnabled(el),
-        domIndex: i,
-        outerHTML: (el.outerHTML||'').slice(0,700)
-      };
-    }).filter(btn => btn.enabled && btn.labelCanon);
-  });
-}
-async function forensicElementScreenshot(page, nome, elHandle, filename) {
-  try {
-    const dir = path.join(__dirname, '..', 'dados', 'perfis', String(nome||'system'));
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, filename);
-    const box = await elHandle.boundingBox().catch(()=>null);
-    if (box && box.width > 0 && box.height > 0) {
-      const pad = 8;
-      await page.screenshot({
-        path: file,
-        clip: {
-          x: Math.max(0, box.x - pad),
-          y: Math.max(0, box.y - pad),
-          width: box.width + pad*2,
-          height: box.height + pad*2
-        }
-      }).catch(()=>{});
-    } else {
-      await page.screenshot({ path: file, fullPage: false }).catch(()=>{});
-    }
-    return file;
-  } catch { return null; }
-}
-async function resolveButtonHandle(page, labelCanon) {
-  const arrHandle = await page.evaluateHandle((wanted) => {
-    function N(s){ try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
-    function matches(el) {
-      const aria = N(el.getAttribute('aria-label')||'');
-      const txt = N(el.innerText||el.textContent||'');
-      if (wanted === 'avancar')
-        return aria.includes('avancar') || aria.includes('avançar') || aria.includes('próximo') || aria.includes('continuar') || aria.includes('next') || aria.includes('continue') ||
-               txt.includes('avancar') || txt.includes('avançar') || txt.includes('próximo') || txt.includes('continuar') || txt.includes('next') || txt.includes('continue') || txt.includes('proximo');
-      if (wanted === 'publicar')
-        return aria.includes('publicar') || aria.includes('postar') || aria.includes('publish') ||
-               txt.includes('publicar') || txt.includes('postar') || txt.includes('publish');
-      return false;
-    }
-    return Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]')).filter(matches);
-  }, labelCanon);
-  const props = await arrHandle.getProperties();
-  for (const h of props.values()) {
-    const el = h.asElement ? h.asElement() : null;
-    if (!el) continue;
-    // ponto central:
-    const box = await el.boundingBox().catch(()=>null);
-    if (box && box.width > 0 && box.height > 0) {
-      try { await el.focus(); } catch {}
-      return el;
-    }
-  }
-  try { await arrHandle.dispose(); } catch {}
-  return null;
-}
+
 async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000, hrefBefore = null } = {}) {
   const href0 = hrefBefore || await page.evaluate(() => location.href).catch(()=>null);
   try {
@@ -835,135 +742,6 @@ async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000, hre
   } catch {
     return { ok:false, timeout:true };
   }
-}
-
-async function runDynamicButtonFlow(page, nome, {
-  maxPhases = 4,
-  perPhaseTimeoutMs = 10000,
-  scanIntervalMs = 150,
-  maxClicksPerLabel = 3
-} = {}, gqlWatcher = null) {
-  const clicksByLabel = { publicar: 0, avancar: 0 };
-  const sequence = [];
-  let lastCommitSeen = false;
-  const t0 = Date.now();
-
-  for (let phase = 1; phase <= maxPhases; phase++) {
-    if (await isSellerListOrDashboard(page).catch(()=>false)) {
-      stepLog.appendJSONL(nome,'robe',{step:'btn_flow_early_success_route', phase});
-      break;
-    }
-    const startedPhaseAt = Date.now();
-    let clickedLabel = null;
-    phase_loop:
-    while ((Date.now() - startedPhaseAt) < perPhaseTimeoutMs) {
-      const snapshot = await getButtonsSnapshot(page).catch(()=>[]);
-      const anyEnabled = (snapshot||[]).some(b => b.enabled);
-      const enabledInDomOrder = (snapshot||[]).filter(b => b.enabled).sort((a,b)=>a.domIndex-b.domIndex);
-
-      stepLog.appendJSONL(nome,'robe',{
-        step: 'btn_flow_phase_state',
-        phase,
-        buttons: snapshot||[],
-        anyEnabled,
-        ts: Date.now()
-      });
-
-      if (enabledInDomOrder.length === 0) {
-        await new Promise(r => setTimeout(r, scanIntervalMs));
-        if (await isSellerListOrDashboard(page).catch(()=>false)) break phase_loop;
-        continue;
-      }
-
-      const chosen = enabledInDomOrder[0];
-      const labelCanon = chosen.labelCanon;
-
-      if ((clicksByLabel[labelCanon] || 0) >= maxClicksPerLabel) {
-        stepLog.appendJSONL(nome,'robe',{step:'btn_flow_max_clicks_reached', phase, label: labelCanon});
-        const other = enabledInDomOrder.find(b => b.labelCanon !== labelCanon);
-        if (other && (clicksByLabel[other.labelCanon]||0) < maxClicksPerLabel) {
-          const otherHandle = await resolveButtonHandle(page, other.labelCanon);
-          if (otherHandle) {
-            const fileBefore = `click_${other.labelCanon}_fase${phase}_before.png`;
-            await forensicElementScreenshot(page, nome, otherHandle, fileBefore);
-            // clique sempre central!
-            const hrefBefore = await page.evaluate(()=>location.href).catch(()=>null);
-            const box = await otherHandle.boundingBox().catch(()=>null);
-            try { await otherHandle.focus().catch(()=>{}); } catch {}
-            if (box && box.width>0 && box.height>0) {
-              const cx = box.x + box.width/2, cy = box.y + box.height/2;
-              await page.mouse.move(cx, cy);
-              await page.mouse.down();
-              await sleep(30);
-              await page.mouse.up();
-            } else {
-              await otherHandle.click({ delay: 60 }).catch(()=>{});
-            }
-            clicksByLabel[other.labelCanon] = (clicksByLabel[other.labelCanon]||0) + 1;
-            sequence.push(other.labelCanon);
-            stepLog.appendJSONL(nome,'robe',{step:'btn_flow_click', phase, label: other.labelCanon, file: fileBefore});
-            const w = await waitButtonEffect(page, other.labelCanon, { timeoutMs: 8000, hrefBefore });
-            stepLog.appendJSONL(nome,'robe',{step:'btn_flow_effect', phase, label: other.labelCanon, effect: w});
-            const fileAfter = `click_${other.labelCanon}_fase${phase}_after.png`;
-            await forensicScreenshot(page, nome, fileAfter.replace('.png',''));
-            if (gqlWatcher && typeof gqlWatcher.promise === 'object') {
-              const raced = await Promise.race([
-                gqlWatcher.promise.catch(()=>false),
-                new Promise(r=>setTimeout(()=>r(false), 200))
-              ]);
-              if (raced) lastCommitSeen = true;
-            }
-            break phase_loop;
-          }
-        }
-        await new Promise(r => setTimeout(r, scanIntervalMs));
-        continue;
-      }
-
-      const chosenMeta = chosen;
-      const handle = await resolveButtonHandle(page, chosenMeta.labelCanon);
-      if (!handle) {
-        await new Promise(r => setTimeout(r, scanIntervalMs));
-        continue;
-      }
-      const fileBefore = `click_${chosenMeta.labelCanon}_fase${phase}_before.png`;
-      await forensicElementScreenshot(page, nome, handle, fileBefore);
-      // clique sempre central!
-      const hrefBefore = await page.evaluate(()=>location.href).catch(()=>null);
-      const box = await handle.boundingBox().catch(()=>null);
-      try { await handle.focus().catch(()=>{}); } catch {}
-      if (box && box.width>0 && box.height>0) {
-        const cx = box.x + box.width/2, cy = box.y + box.height/2;
-        await page.mouse.move(cx, cy);
-        await page.mouse.down();
-        await sleep(30);
-        await page.mouse.up();
-      } else {
-        await handle.click({ delay: 60 }).catch(()=>{});
-      }
-      clicksByLabel[labelCanon] = (clicksByLabel[labelCanon]||0) + 1;
-      sequence.push(labelCanon);
-      clickedLabel = labelCanon;
-
-      stepLog.appendJSONL(nome,'robe',{step:'btn_flow_click', phase, label: labelCanon, file: fileBefore});
-      const w = await waitButtonEffect(page, chosenMeta.labelCanon, { timeoutMs: 8000, hrefBefore });
-      stepLog.appendJSONL(nome,'robe',{step:'btn_flow_effect', phase, label: labelCanon, effect: w});
-      const fileAfter = `click_${labelCanon}_fase${phase}_after.png`;
-      await forensicScreenshot(page, nome, fileAfter.replace('.png',''));
-      if (gqlWatcher && typeof gqlWatcher.promise === 'object') {
-        const raced = await Promise.race([
-          gqlWatcher.promise.catch(()=>false),
-          new Promise(r=>setTimeout(()=>r(false), 200))
-        ]);
-        if (raced) lastCommitSeen = true;
-      }
-      break phase_loop;
-    }
-  }
-  return {
-    sequence, clicksByLabel, lastCommitSeen,
-    elapsedMs: Date.now() - t0
-  };
 }
 
 // Fonte de localizações (JSON)
@@ -1513,26 +1291,14 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
 
-  // 2. TROQUE O BLOCO CRÍTICO DE publishAndWatch PARA USO DO LAÇO DINÂMICO:
-  stepLog.appendJSONL(nome,'robe',{step:'btn_flow_start'});
-  const flowRes = await runDynamicButtonFlow(page, nome, {
-    maxPhases: 4,
-    perPhaseTimeoutMs: 10000,
-    scanIntervalMs: 150,
-    maxClicksPerLabel: 3
-  }, gql);
+  // 2. TROQUE O BLOCO CRÍTICO DE publishAndWatch PARA USO DO LAÇO EXATO:
+  stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_start' });
+  const flowRes = await clickFlowExactRetry(page, nome, { maxSteps: 24, publishMaxRetries: 3 });
+  stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_end', sequence: flowRes.sequence, publishClicked: flowRes.publishClicked });
 
-  stepLog.appendJSONL(nome,'robe',{
-    step: 'btn_flow_end',
-    sequence: flowRes.sequence,
-    clicksByLabel: flowRes.clicksByLabel,
-    gqlCommitSeen: flowRes.lastCommitSeen,
-    elapsedMs: flowRes.elapsedMs
-  });
-
-  if (!flowRes.sequence.length && !flowRes.lastCommitSeen) {
+  if (!flowRes.sequence.length) {
     await forensicScreenshot(page, nome, 'btn_flow_no_sequence');
-    stepLog.appendJSONL(nome,'robe',{step:'publish_click_failed', reason: 'no_buttons_clicked'});
+    stepLog.appendJSONL(nome, 'robe', { step: 'publish_click_failed', reason: 'no_buttons_clicked' });
     gql.cleanup && gql.cleanup();
     return { ok: false, reason: 'publish_click_failed' };
   }
