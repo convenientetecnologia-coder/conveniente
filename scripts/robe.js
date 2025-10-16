@@ -604,55 +604,151 @@ function canonicalLabel(tNorm) {
   return tNorm;
 }
 
-async function elementIsVisibleAndClickable(el) {
-  try {
-    const st = window.getComputedStyle(el);
-    if (!st || st.visibility === 'hidden' || st.display === 'none') return false;
-    const r = el.getBoundingClientRect();
-    if (!r || r.width < 20 || r.height < 16) return false;
-    const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
-    const tabIndex = el.getAttribute('tabindex');
-    const disabledProp = el.disabled === true;
-    if (ariaDisabled || disabledProp || tabIndex === '-1') return false;
-    const hasSpinner = !!(el.querySelector('svg[aria-label*="carregando"], [aria-busy="true"], div[role="progressbar"], svg[role="progressbar"]'));
-    if (hasSpinner) return false;
-    return true;
-  } catch { return false; }
+// NOVOS HELPERS ATUALIZADOS: meta e resolução robusta de botões
+function __robeComputeButtonMeta(el, wantedCanon) {
+  function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
+  function matches(t){ t=N(t); return wantedCanon ? (t===wantedCanon || (wantedCanon==='avancar' && (t==='avançar'||t==='avancar'))) : (t==='publicar'||t==='avancar'||t==='avançar'); }
+  function findWizardRoot(){
+    const mains = Array.from(document.querySelectorAll('[role="main"]'));
+    const hasCreateSignals = (el) => {
+      const txt = (el.innerText||'').toLowerCase();
+      if (/(prévia|previa|detalhes|para vender|anunciar em mais locais|os itens do marketplace são públicos)/i.test(txt)) return true;
+      if (el.querySelector('input[aria-label="Título"],input[aria-label="Localização"],label[role="combobox"] span')) return true;
+      return false;
+    };
+    for (const m of mains) if (hasCreateSignals(m)) return m;
+    const dlg = Array.from(document.querySelectorAll('[role="dialog"]'))
+      .find(d => /marketplace|criar|anunciar/i.test((d.getAttribute('aria-label')||d.innerText||'').toLowerCase()));
+    return dlg || document.body;
+  }
+  const root = findWizardRoot();
+  const st = window.getComputedStyle(el);
+  const r = el.getBoundingClientRect();
+  const text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
+  const t = N(text);
+  const visible = !!(st && st.visibility!=='hidden' && st.display!=='none' && r && r.width>=20 && r.height>=16);
+  const ariaDisabled = el.getAttribute('aria-disabled')==='true';
+  const tabIndex = el.getAttribute('tabindex') || '';
+  const disabledProp = el.disabled===true;
+  const hasSpinner = !!el.querySelector('svg[role="progressbar"], div[role="progressbar"], [aria-busy="true"], svg[aria-label*="carregando"]');
+  const inDialog = !!el.closest('[role="dialog"]');
+  const inNav = !!el.closest('[role="navigation"],[role="banner"],header');
+  const inRoot = !!(root && root.contains(el));
+  const fixed = st.position==='fixed';
+  const sticky = st.position==='sticky';
+  const peNone = st.pointerEvents==='none';
+  const inViewport = r && r.width>0 && r.height>0 && (r.bottom>0) && (r.right>0) && (r.top<window.innerHeight) && (r.left<window.innerWidth);
+  let occluded = true;
+  if (inViewport) {
+    const cx = Math.min(window.innerWidth-1, Math.max(1, Math.floor(r.left + r.width/2)));
+    const cy = Math.min(window.innerHeight-1, Math.max(1, Math.floor(r.top + r.height/2)));
+    const top = document.elementFromPoint(cx, cy);
+    occluded = !!(top && top!==el && !el.contains(top));
+  }
+  const enabled = matches(t) && visible && !ariaDisabled && !disabledProp && tabIndex!=='-1' && !hasSpinner && !peNone && !inDialog && !inNav && inRoot && !fixed && inViewport && !occluded;
+  const z = parseInt(st.zIndex||'0',10)||0;
+  return {
+    t, labelCanon: (t==='avançar'||t==='avancar')?'avancar':t,
+    visible, ariaDisabled, tabIndex, disabledProp, hasSpinner,
+    inDialog, inNav, inRoot, position: st.position, pointerEvents: st.pointerEvents,
+    inViewport, occluded, z,
+    rect: { x: r?.x||0, y: r?.y||0, w: r?.width||0, h: r?.height||0 },
+    enabled,
+    outerHTML: (el.outerHTML||'').slice(0,700)
+  };
 }
-
+async function elementIsVisibleAndClickable(el, wantedCanon=null) {
+  try {
+    return await el.executionContext().evaluate(__robeComputeButtonMeta, el, wantedCanon);
+  } catch { return { enabled:false }; }
+}
 async function getButtonsSnapshot(page) {
   return await page.evaluate(() => {
-    const out = [];
-    const N = (s) => { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return (s||'').trim().toLowerCase(); } };
-    const isWanted = (t) => t === 'avancar' || t === 'avançar' || t === 'publicar';
-    const candidates = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
-    for (let i = 0; i < candidates.length; i++) {
-      const el = candidates[i];
-      const text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
-      const tNorm = N(text);
-      if (!isWanted(tNorm)) continue;
+    function __robeComputeButtonMetaLocal(el, wantedCanon) {
+      function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
+      function matches(t){ t=N(t); return wantedCanon ? (t===wantedCanon || (wantedCanon==='avancar' && (t==='avançar'||t==='avancar'))) : (t==='publicar'||t==='avancar'||t==='avançar'); }
+      function findWizardRoot(){
+        const mains = Array.from(document.querySelectorAll('[role="main"]'));
+        const hasCreateSignals = (el) => {
+          const txt = (el.innerText||'').toLowerCase();
+          if (/(prévia|previa|detalhes|para vender|anunciar em mais locais|os itens do marketplace são públicos)/i.test(txt)) return true;
+          if (el.querySelector('input[aria-label="Título"],input[aria-label="Localização"],label[role="combobox"] span')) return true;
+          return false;
+        };
+        for (const m of mains) if (hasCreateSignals(m)) return m;
+        const dlg = Array.from(document.querySelectorAll('[role="dialog"]'))
+          .find(d => /marketplace|criar|anunciar/i.test((d.getAttribute('aria-label')||d.innerText||'').toLowerCase()));
+        return dlg || document.body;
+      }
+      const root = findWizardRoot();
       const st = window.getComputedStyle(el);
-      const visible = !!(st && st.visibility !== 'hidden' && st.display !== 'none');
       const r = el.getBoundingClientRect();
-      const sizeOk = !!(r && r.width >= 20 && r.height >= 16);
-      const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
+      const text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
+      const t = N(text);
+      const visible = !!(st && st.visibility!=='hidden' && st.display!=='none' && r && r.width>=20 && r.height>=16);
+      const ariaDisabled = el.getAttribute('aria-disabled')==='true';
       const tabIndex = el.getAttribute('tabindex') || '';
-      const disabledProp = el.disabled === true;
-      const hasSpinner = !!(el.querySelector('svg[aria-label*="carregando"], [aria-busy="true"], div[role="progressbar"], svg[role="progressbar"]'));
-      const enabled = visible && sizeOk && !ariaDisabled && !disabledProp && tabIndex !== '-1' && !hasSpinner;
-      out.push({
-        label: tNorm,
-        labelCanon: (tNorm === 'avançar' || tNorm === 'avancar') ? 'avancar' : tNorm,
-        visible, sizeOk, ariaDisabled, tabIndex, disabledProp, hasSpinner, enabled,
+      const disabledProp = el.disabled===true;
+      const hasSpinner = !!el.querySelector('svg[role="progressbar"], div[role="progressbar"], [aria-busy="true"], svg[aria-label*="carregando"]');
+      const inDialog = !!el.closest('[role="dialog"]');
+      const inNav = !!el.closest('[role="navigation"],[role="banner"],header');
+      const inRoot = !!(root && root.contains(el));
+      const fixed = st.position==='fixed';
+      const peNone = st.pointerEvents==='none';
+      const inViewport = r && r.width>0 && r.height>0 && (r.bottom>0) && (r.right>0) && (r.top<window.innerHeight) && (r.left<window.innerWidth);
+      let occluded = true;
+      if (inViewport) {
+        const cx = Math.min(window.innerWidth-1, Math.max(1, Math.floor(r.left + r.width/2)));
+        const cy = Math.min(window.innerHeight-1, Math.max(1, Math.floor(r.top + r.height/2)));
+        const top = document.elementFromPoint(cx, cy);
+        occluded = !!(top && top!==el && !el.contains(top));
+      }
+      const enabled = matches(t) && visible && !ariaDisabled && !disabledProp && tabIndex!=='-1' && !hasSpinner && !peNone && !inDialog && !inNav && inRoot && !fixed && inViewport && !occluded;
+      const z = parseInt(st.zIndex||'0',10)||0;
+      return {
+        t, labelCanon: (t==='avançar'||t==='avancar')?'avancar':t,
+        visible, ariaDisabled, tabIndex, disabledProp, hasSpinner,
+        inDialog, inNav, inRoot, position: st.position, pointerEvents: st.pointerEvents,
+        inViewport, occluded, z,
         rect: { x: r?.x||0, y: r?.y||0, w: r?.width||0, h: r?.height||0 },
-        domIndex: i,
-        outerHTML: (el.outerHTML || '').slice(0, 1000)
-      });
+        enabled,
+        outerHTML: (el.outerHTML||'').slice(0,700)
+      };
+    }
+    const out = [];
+    const all = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+    for (let i=0;i<all.length;i++){
+      const el = all[i];
+      try {
+        const meta = __robeComputeButtonMetaLocal(el, null);
+        if (meta && (meta.t==='publicar' || meta.t==='avancar' || meta.t==='avançar')) {
+          out.push({
+            label: meta.t,
+            labelCanon: meta.labelCanon,
+            enabled: meta.enabled,
+            visible: meta.visible,
+            ariaDisabled: meta.ariaDisabled,
+            tabIndex: meta.tabIndex,
+            disabledProp: meta.disabledProp,
+            hasSpinner: meta.hasSpinner,
+            inDialog: meta.inDialog,
+            inNav: meta.inNav,
+            inRoot: meta.inRoot,
+            position: meta.position,
+            pointerEvents: meta.pointerEvents,
+            inViewport: meta.inViewport,
+            occluded: meta.occluded,
+            z: meta.z,
+            rect: meta.rect,
+            outerHTML: meta.outerHTML,
+            domIndex: i
+          });
+        }
+      } catch {}
     }
     return out;
   });
 }
-
 async function forensicElementScreenshot(page, nome, elHandle, filename) {
   try {
     const dir = path.join(__dirname, '..', 'dados', 'perfis', String(nome||'system'));
@@ -676,80 +772,77 @@ async function forensicElementScreenshot(page, nome, elHandle, filename) {
     return file;
   } catch { return null; }
 }
-
 async function resolveButtonHandle(page, labelCanon) {
-  const N = normLabel;
-  const wanted = labelCanon;
-  const handles = await page.evaluateHandle((wanted) => {
-    const N = (s) => { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return (s||'').trim().toLowerCase(); } };
-    const list = [];
-    const all = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
-    for (const el of all) {
-      const text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
-      const t = N(text);
-      if (t === wanted || (wanted==='avancar' && (t==='avancar'||t==='avançar'))) {
-        list.push(el);
-      }
-    }
-    return list;
+  const arrHandle = await page.evaluateHandle((wanted) => {
+    function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
+    const sel = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+    return sel.filter(el => {
+      const t = N(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
+      return (wanted==='avancar' ? (t==='avancar'||t==='avançar') : t===wanted);
+    });
   }, labelCanon);
-  const props = await handles.getProperties().catch(()=>null);
+  const props = await arrHandle.getProperties().catch(()=>null);
   if (!props) return null;
+  const scored = [];
   for (const h of props.values()) {
     const el = h.asElement ? h.asElement() : null;
     if (!el) continue;
-    const ok = await page.evaluate(elementIsVisibleAndClickable, el).catch(()=>false);
-    if (ok) return el;
-    try { await h.dispose(); } catch {}
+    const meta = await elementIsVisibleAndClickable(el, labelCanon);
+    if (!meta) continue;
+    let score = 0;
+    if (meta.inRoot) score += 100;
+    if (meta.inDialog || meta.inNav) score -= 1000;
+    if (meta.position === 'fixed') score -= 300;
+    if (!meta.inViewport) score -= 80;
+    if (meta.occluded) score -= 120;
+    if (meta.visible) score += 20;
+    if (!meta.ariaDisabled && !meta.disabledProp && meta.tabIndex !== '-1') score += 10;
+    if (labelCanon === 'publicar') score += 5;
+    try { score += Math.min(60, Math.max(0, meta.rect.y)); } catch {}
+    scored.push({ el, meta, score });
   }
-  try { await handles.dispose(); } catch {}
-  return null;
-}
-
-async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000 } = {}) {
-  const end = Date.now() + timeoutMs;
-  const lab = clickedLabelCanon;
-  while (Date.now() < end) {
+  try { await arrHandle.dispose(); } catch {}
+  if (!scored.length) return null;
+  scored.sort((a,b)=>b.score - a.score);
+  const best = scored[0];
+  if (!best.meta.enabled) return null;
+  // Scroll somente se necessário e seguro (não dialog/fixed)
+  if (!best.meta.inViewport && !best.meta.inDialog && best.meta.position!=='fixed') {
     try {
-      const state = await page.evaluate((lab) => {
-        const N = (s) => { try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return (s||'').trim().toLowerCase(); } };
-        const matches = (t) => (lab==='avancar' ? (t==='avancar'||t==='avançar') : t===lab);
-        const btns = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
-        let hasAny = false, anyEnabled=false, anyDisabled=false, anySpinner=false;
-        for (const el of btns) {
-          const t = N(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
-          if (!matches(t)) continue;
-          hasAny = true;
-          const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
-          const tabIndex = el.getAttribute('tabindex') || '';
-          const disabledProp = el.disabled === true;
-          const st = window.getComputedStyle(el);
-          const vis = !!(st && st.visibility !== 'hidden' && st.display !== 'none');
-          const r = el.getBoundingClientRect();
-          const sizeOk = !!(r && r.width >= 20 && r.height >= 16);
-          const hasSp = !!(el.querySelector('svg[aria-label*="carregando"], [aria-busy="true"], div[role="progressbar"], svg[role="progressbar"]'));
-          const enabled = vis && sizeOk && !ariaDisabled && !disabledProp && tabIndex !== '-1' && !hasSp;
-          if (enabled) anyEnabled = true;
-          if (ariaDisabled || disabledProp || tabIndex === '-1') anyDisabled = true;
-          if (hasSp) anySpinner = true;
-        }
-        const route = location.pathname + location.search;
-        const routeSelling = /marketplace\/(you\/selling|profile|you\/dashboard)/.test(location.pathname);
-        const stepChanged = /[?&]step=/.test(location.search);
-        return {
-          hasAny, anyEnabled, anyDisabled, anySpinner,
-          route, stepChanged, routeSelling,
-          effect: (!hasAny || anyDisabled || anySpinner || routeSelling || stepChanged)
-        };
-      }, lab);
-
-      if (state && state.effect) {
-        return { ok: true, state };
-      }
+      await page.evaluate((node) => node.scrollIntoView({behavior:'instant', block:'center', inline:'center'}), best.el);
     } catch {}
-    await new Promise(r => setTimeout(r, 150));
   }
-  return { ok: false, timeout: true };
+  const meta2 = await elementIsVisibleAndClickable(best.el, labelCanon);
+  if (!meta2 || !meta2.enabled) return null;
+  return best.el;
+}
+async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000, hrefBefore = null } = {}) {
+  const href0 = hrefBefore || await page.evaluate(() => location.href).catch(()=>null);
+  try {
+    const ok = await page.waitForFunction((lab, href0) => {
+      function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
+      const matches = (t) => (lab==='avancar' ? (t==='avancar'||t==='avançar') : t===lab);
+      const btns = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+      let exists = false, disabled=false, spinner=false;
+      for (const el of btns) {
+        const t = N(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
+        if (!matches(t)) continue;
+        exists = true;
+        const ariaDisabled = el.getAttribute('aria-disabled')==='true';
+        const tabIndex = el.getAttribute('tabindex') || '';
+        const disProp = el.disabled===true;
+        const sp = !!el.querySelector('svg[role="progressbar"], [role="progressbar"], [aria-busy="true"], svg[aria-label*="carregando"]');
+        if (ariaDisabled || disProp || tabIndex==='-1') disabled = true;
+        if (sp) spinner = true;
+      }
+      const hrefChanged = (href0 && href0 !== location.href);
+      const routeSelling = /marketplace\/(you\/selling|profile|you\/dashboard)/.test(location.pathname);
+      return (!exists) || disabled || spinner || hrefChanged || routeSelling;
+    }, { timeout: timeoutMs }, clickedLabelCanon, href0);
+    return { ok: !!ok };
+  } catch {
+    return { ok:false, timeout:true };
+  }
 }
 
 async function runDynamicButtonFlow(page, nome, {
@@ -801,11 +894,23 @@ async function runDynamicButtonFlow(page, nome, {
           if (otherHandle) {
             const fileBefore = `click_${other.labelCanon}_fase${phase}_before.png`;
             await forensicElementScreenshot(page, nome, otherHandle, fileBefore);
-            await otherHandle.click({delay: 60}).catch(()=>{});
+            // clique sempre central!
+            const hrefBefore = await page.evaluate(()=>location.href).catch(()=>null);
+            const box = await otherHandle.boundingBox().catch(()=>null);
+            try { await otherHandle.focus().catch(()=>{}); } catch {}
+            if (box && box.width>0 && box.height>0) {
+              const cx = box.x + box.width/2, cy = box.y + box.height/2;
+              await page.mouse.move(cx, cy);
+              await page.mouse.down();
+              await page.waitForTimeout(30);
+              await page.mouse.up();
+            } else {
+              await otherHandle.click({ delay: 60 }).catch(()=>{});
+            }
             clicksByLabel[other.labelCanon] = (clicksByLabel[other.labelCanon]||0) + 1;
             sequence.push(other.labelCanon);
             stepLog.appendJSONL(nome,'robe',{step:'btn_flow_click', phase, label: other.labelCanon, file: fileBefore});
-            const w = await waitButtonEffect(page, other.labelCanon, { timeoutMs: 8000 });
+            const w = await waitButtonEffect(page, other.labelCanon, { timeoutMs: 8000, hrefBefore });
             stepLog.appendJSONL(nome,'robe',{step:'btn_flow_effect', phase, label: other.labelCanon, effect: w});
             const fileAfter = `click_${other.labelCanon}_fase${phase}_after.png`;
             await forensicScreenshot(page, nome, fileAfter.replace('.png',''));
@@ -823,21 +928,33 @@ async function runDynamicButtonFlow(page, nome, {
         continue;
       }
 
-      const handle = await resolveButtonHandle(page, labelCanon);
+      const chosenMeta = chosen;
+      const handle = await resolveButtonHandle(page, chosenMeta.labelCanon);
       if (!handle) {
         await new Promise(r => setTimeout(r, scanIntervalMs));
         continue;
       }
-      const fileBefore = `click_${labelCanon}_fase${phase}_before.png`;
+      const fileBefore = `click_${chosenMeta.labelCanon}_fase${phase}_before.png`;
       await forensicElementScreenshot(page, nome, handle, fileBefore);
-      await handle.focus().catch(()=>{});
-      await handle.click({ delay: 60 }).catch(()=>{});
+      // clique sempre central!
+      const hrefBefore = await page.evaluate(()=>location.href).catch(()=>null);
+      const box = await handle.boundingBox().catch(()=>null);
+      try { await handle.focus().catch(()=>{}); } catch {}
+      if (box && box.width>0 && box.height>0) {
+        const cx = box.x + box.width/2, cy = box.y + box.height/2;
+        await page.mouse.move(cx, cy);
+        await page.mouse.down();
+        await page.waitForTimeout(30);
+        await page.mouse.up();
+      } else {
+        await handle.click({ delay: 60 }).catch(()=>{});
+      }
       clicksByLabel[labelCanon] = (clicksByLabel[labelCanon]||0) + 1;
       sequence.push(labelCanon);
       clickedLabel = labelCanon;
 
       stepLog.appendJSONL(nome,'robe',{step:'btn_flow_click', phase, label: labelCanon, file: fileBefore});
-      const w = await waitButtonEffect(page, labelCanon, { timeoutMs: 8000 });
+      const w = await waitButtonEffect(page, chosenMeta.labelCanon, { timeoutMs: 8000, hrefBefore });
       stepLog.appendJSONL(nome,'robe',{step:'btn_flow_effect', phase, label: labelCanon, effect: w});
       const fileAfter = `click_${labelCanon}_fase${phase}_after.png`;
       await forensicScreenshot(page, nome, fileAfter.replace('.png',''));
