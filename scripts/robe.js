@@ -471,6 +471,128 @@ async function findEnabledButton(page, label, timeout = 3000) {
   return null;
 }
 
+// ===================== PATCH MILITAR: Clique Publicar aguardando cinza/spinner ======================
+async function robustFindEnabledButton(page, labels = [], timeoutMs = 2000) {
+  const started = Date.now();
+  function norm(s){ try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').toLowerCase().trim(); } }
+  const wanted = (labels||[]).map(norm);
+  while ((Date.now() - started) < timeoutMs) {
+    try {
+      const el = await page.evaluateHandle((wanted) => {
+        function norm(s){ try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').toLowerCase().trim(); } }
+        function isVisible(el){
+          const st = window.getComputedStyle(el);
+          if (!st) return false;
+          if (st.visibility === 'hidden' || st.display === 'none') return false;
+          const r = el.getBoundingClientRect();
+          return r && r.width > 20 && r.height > 16;
+        }
+        const all = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"]'));
+        for (const el of all) {
+          if (!isVisible(el)) continue;
+          const label = norm(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
+          if (!label) continue;
+          if (wanted.some(w => label.includes(w))) return el;
+        }
+        // fallback por spans
+        const spans = Array.from(document.querySelectorAll('span')).filter(s => {
+          const t = norm(s.innerText || s.textContent || '');
+          return t && wanted.some(w => t.includes(w));
+        });
+        for (const sp of spans) {
+          let p = sp;
+          let steps=0;
+          while (p && steps < 5) {
+            if ((p.tagName === 'BUTTON') || (p.getAttribute && p.getAttribute('role') === 'button')) {
+              if (isVisible(p)) return p;
+            }
+            p = p.parentElement; steps++;
+          }
+        }
+        return null;
+      }, wanted);
+      const btn = await el.asElement();
+      if (btn) return btn;
+    } catch {}
+    await new Promise(r => setTimeout(r, 120));
+  }
+  return null;
+}
+
+async function forensicScreenshot(page, nome, label) {
+  try {
+    const dir = require('path').join(__dirname, '..', 'dados', 'perfis', String(nome||'system'));
+    require('fs').mkdirSync(dir, { recursive: true });
+    const file = require('path').join(dir, `${label}_${Date.now()}.png`);
+    await page.screenshot({ path: file, fullPage: false }).catch(()=>{});
+    return file;
+  } catch { return null; }
+}
+
+// --- O PATCH PRINCIPAL: clique só uma vez, espera o botão PUBLICAR ficar cinza/desabilitado/spinner ---
+async function clickPublishAndWaitState(page, nome, {
+  maxTries = 3,
+  publishLabel = 'Publicar',
+  waitSpinnerTimeoutMs = 12000
+} = {}) {
+  const norm = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+  let tries = 0, clicked = false;
+  for (; ++tries <= maxTries;) {
+    // 1. Localiza o botão habilitado, azul, texto exato!
+    const btn = await robustFindEnabledButton(page, [publishLabel], 2000);
+    if (!btn) {
+      await forensicScreenshot(page, nome, `no_publish_btn_${tries}`);
+      return { clicked: false, confirmed: false, reason: 'no_btn' };
+    }
+    // Estado _antes_
+    const btnTxt = (await page.evaluate(el => el.innerText || el.textContent || '', btn)).trim();
+    const disabled = await page.evaluate(el => el.disabled || el.getAttribute('aria-disabled') === 'true' || el.getAttribute('tabindex') === '-1', btn);
+
+    if (norm(btnTxt) !== norm(publishLabel) || disabled) {
+      await forensicScreenshot(page, nome, `publish_btn_not_ready_${tries}`);
+      return { clicked: false, confirmed: false, reason: 'not_ready' };
+    }
+    await forensicScreenshot(page, nome, `before_click_publish_${tries}`);
+
+    // 2. Clique!
+    let clickOk = false;
+    try { await btn.focus(); await btn.click({delay: 70}); clickOk = true; } catch {}
+    clicked = true;
+    await forensicScreenshot(page, nome, `after_click_publish_${tries}`);
+
+    // 3. Espera: botão PUBLICAR muda para cinza/desabilitado/spinner?
+    try {
+      const stateChange = await page.waitForFunction((_label) => {
+        const norm = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+        const btns = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+        for (const el of btns) {
+          const t = (el.innerText || el.textContent || '').trim();
+          if (norm(t) === norm(_label)) {
+            const disabled = el.getAttribute('aria-disabled')==='true' || el.disabled || el.getAttribute('tabindex')==='-1';
+            // botão virou cinza/desabilitado: AGUARDE, NÃO RECLIQUE
+            if (disabled) return true;
+            // spinner? (verifica o loading… icone/svg dentro do botão)
+            const hasSpinner = !!el.querySelector('svg[aria-label*="carregando"], svg, div[aria-label*="carregando"]');
+            if (hasSpinner) return true;
+          }
+        }
+        // botão sumiu? página mudou
+        const hasBtn = btns.some(el => norm(el.innerText || el.textContent || '') === norm(_label));
+        if (!hasBtn) return true;
+        // Página já foi para painel seller?
+        if (/marketplace\/(you\/selling|profile|you\/dashboard)/.test(location.pathname)) return true;
+        // Rota changed (step audience?) ok também
+        if (/[?&]step=/.test(location.search)) return true;
+        return false;
+      }, {timeout: waitSpinnerTimeoutMs}, publishLabel);
+      if (stateChange) return { clicked: true, confirmed: true };
+    } catch {}
+    // Se não virou cinza, tenta de novo até maxTries
+  }
+  return { clicked, confirmed: false, reason: 'never_disabled' };
+}
+// ===================== FIM PATCH MILITAR ======================
+
 // Fonte de localizações (JSON)
 function listLocalizacoesPorCidade(cidade) {
   try {
@@ -1017,27 +1139,17 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
 
-  // 3) Clique controlado em "Publicar" (1 único clique)
-  let clicked = false;
-  for (let i = 0; i < 12; i++) {
-    const btnPub = await findEnabledButton(page, 'Publicar', 600);
-    if (btnPub) {
-      try { await btnPub.click({ delay: 60 }); } catch {}
-      clicked = true;
-      break;
-    }
-    const btnAv = await findEnabledButton(page, 'Avançar', 600);
-    if (btnAv) {
-      try { await btnAv.click({ delay: 60 }); } catch {}
-      await sleep(350);
-      continue;
-    }
-    await sleep(220);
-  }
-  if (!clicked) {
+  // 2. TROQUE O BLOCO DE PUBLISH DO publishAndWatch POR:
+  // CLIQUE "Publicar" seguro (NUNCA DUPLICA)
+  const publishRes = await clickPublishAndWaitState(page, nome);
+  if (!publishRes.clicked || !publishRes.confirmed) {
+    // Loga e aborta
+    await forensicScreenshot(page, nome, 'publish_never_confirmed');
+    stepLog.appendJSONL(nome, 'robe', { step: 'publish_click_failed', reason: publishRes.reason });
     gql.cleanup();
-    return { ok: false, reason: 'no_publish_button' };
+    return { ok: false, reason: 'publish_click_failed' };
   }
+  stepLog.appendJSONL(nome, 'robe', { step: 'publish_click_confirmed' });
 
   // Logging array para rounds de dwell (forense)
   const dwellDebugRounds = [];
