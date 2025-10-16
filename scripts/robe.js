@@ -607,7 +607,37 @@ function canonicalLabel(tNorm) {
 // NOVOS HELPERS ATUALIZADOS: meta e resolução robusta de botões
 function __robeComputeButtonMeta(el, wantedCanon) {
   function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
-  function matches(t){ t=N(t); return wantedCanon ? (t===wantedCanon || (wantedCanon==='avancar' && (t==='avançar'||t==='avancar'))) : (t==='publicar'||t==='avancar'||t==='avançar'); }
+  function BTN_labelCanonFromText(txt) {
+    const t = N(txt);
+    if (!t) return null;
+    // publicar em pt/en e variantes
+    if (
+      t === "publicar" ||
+      t.startsWith("publicar") ||
+      t.includes("postar") ||
+      t === "post" ||
+      t.startsWith("post ") ||
+      t.includes("publish")
+    ) return "publicar";
+    // avancar, continuar, próximo em pt/en
+    if (
+      t === "avancar" ||
+      t === "avançar" ||
+      t.startsWith("avancar") ||
+      t.startsWith("avançar") ||
+      t.includes("próximo") ||
+      t.includes("proximo") ||
+      t.includes("continuar") ||
+      t.includes("continue") ||
+      t === "next"
+    ) return "avancar";
+    return null;
+  }
+  function BTN_isTargetLabel(txt, wantedCanon) {
+    const canon = BTN_labelCanonFromText(txt);
+    if (!wantedCanon) return canon === "publicar" || canon === "avancar";
+    return canon === wantedCanon;
+  }
   function findWizardRoot(){
     const mains = Array.from(document.querySelectorAll('[role="main"]'));
     const hasCreateSignals = (el) => {
@@ -645,10 +675,24 @@ function __robeComputeButtonMeta(el, wantedCanon) {
     const top = document.elementFromPoint(cx, cy);
     occluded = !!(top && top!==el && !el.contains(top));
   }
-  const enabled = matches(t) && visible && !ariaDisabled && !disabledProp && tabIndex!=='-1' && !hasSpinner && !peNone && !inDialog && !inNav && inRoot && !fixed && inViewport && !occluded;
+  const rootIsDialog = !!(root && root.getAttribute && root.getAttribute('role') === 'dialog');
+  const inWizardDialog = inDialog && rootIsDialog && root && root.contains(el);
+  const allowedDialogGate = (!inDialog) || inWizardDialog;
+  const allowedFixedGate = (st.position !== 'fixed') || inWizardDialog || inRoot;
+  const enabled =
+    BTN_isTargetLabel(text, wantedCanon) &&
+    visible &&
+    !ariaDisabled && !disabledProp && tabIndex !== '-1' &&
+    !hasSpinner && !peNone &&
+    allowedDialogGate &&
+    !inNav &&
+    inRoot &&
+    allowedFixedGate &&
+    inViewport &&
+    !occluded;
   const z = parseInt(st.zIndex||'0',10)||0;
   return {
-    t, labelCanon: (t==='avançar'||t==='avancar')?'avancar':t,
+    t, labelCanon: BTN_labelCanonFromText(text),
     visible, ariaDisabled, tabIndex, disabledProp, hasSpinner,
     inDialog, inNav, inRoot, position: st.position, pointerEvents: st.pointerEvents,
     inViewport, occluded, z,
@@ -666,7 +710,37 @@ async function getButtonsSnapshot(page) {
   return await page.evaluate(() => {
     function __robeComputeButtonMetaLocal(el, wantedCanon) {
       function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
-      function matches(t){ t=N(t); return wantedCanon ? (t===wantedCanon || (wantedCanon==='avancar' && (t==='avançar'||t==='avancar'))) : (t==='publicar'||t==='avancar'||t==='avançar'); }
+      function BTN_labelCanonFromText(txt) {
+        const t = N(txt);
+        if (!t) return null;
+        // publicar em pt/en e variantes
+        if (
+          t === "publicar" ||
+          t.startsWith("publicar") ||
+          t.includes("postar") ||
+          t === "post" ||
+          t.startsWith("post ") ||
+          t.includes("publish")
+        ) return "publicar";
+        // avancar, continuar, próximo em pt/en
+        if (
+          t === "avancar" ||
+          t === "avançar" ||
+          t.startsWith("avancar") ||
+          t.startsWith("avançar") ||
+          t.includes("próximo") ||
+          t.includes("proximo") ||
+          t.includes("continuar") ||
+          t.includes("continue") ||
+          t === "next"
+        ) return "avancar";
+        return null;
+      }
+      function BTN_isTargetLabel(txt, wantedCanon) {
+        const canon = BTN_labelCanonFromText(txt);
+        if (!wantedCanon) return canon === "publicar" || canon === "avancar";
+        return canon === wantedCanon;
+      }
       function findWizardRoot(){
         const mains = Array.from(document.querySelectorAll('[role="main"]'));
         const hasCreateSignals = (el) => {
@@ -703,10 +777,24 @@ async function getButtonsSnapshot(page) {
         const top = document.elementFromPoint(cx, cy);
         occluded = !!(top && top!==el && !el.contains(top));
       }
-      const enabled = matches(t) && visible && !ariaDisabled && !disabledProp && tabIndex!=='-1' && !hasSpinner && !peNone && !inDialog && !inNav && inRoot && !fixed && inViewport && !occluded;
+      const rootIsDialog = !!(root && root.getAttribute && root.getAttribute('role') === 'dialog');
+      const inWizardDialog = inDialog && rootIsDialog && root && root.contains(el);
+      const allowedDialogGate = (!inDialog) || inWizardDialog;
+      const allowedFixedGate = (st.position !== 'fixed') || inWizardDialog || inRoot;
+      const enabled =
+        BTN_isTargetLabel(text, wantedCanon) &&
+        visible &&
+        !ariaDisabled && !disabledProp && tabIndex!=='-1' &&
+        !hasSpinner && !peNone &&
+        allowedDialogGate &&
+        !inNav &&
+        inRoot &&
+        allowedFixedGate &&
+        inViewport &&
+        !occluded;
       const z = parseInt(st.zIndex||'0',10)||0;
       return {
-        t, labelCanon: (t==='avançar'||t==='avancar')?'avancar':t,
+        t, labelCanon: BTN_labelCanonFromText(text),
         visible, ariaDisabled, tabIndex, disabledProp, hasSpinner,
         inDialog, inNav, inRoot, position: st.position, pointerEvents: st.pointerEvents,
         inViewport, occluded, z,
@@ -721,7 +809,7 @@ async function getButtonsSnapshot(page) {
       const el = all[i];
       try {
         const meta = __robeComputeButtonMetaLocal(el, null);
-        if (meta && (meta.t==='publicar' || meta.t==='avancar' || meta.t==='avançar')) {
+        if (meta && (meta.labelCanon === 'publicar' || meta.labelCanon === 'avancar')) {
           out.push({
             label: meta.t,
             labelCanon: meta.labelCanon,
@@ -776,9 +864,16 @@ async function resolveButtonHandle(page, labelCanon) {
   const arrHandle = await page.evaluateHandle((wanted) => {
     function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
     const sel = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
+    function matchesWanted(txt, wanted) {
+      const t = N(txt);
+      if (wanted === 'avancar') return (t==='avancar'||t==='avançar'||t.startsWith('avancar')||t.startsWith('avançar')||t.includes('próximo')||t.includes('proximo')||t.includes('continuar')||t.includes('continue')||t==='next');
+      if (wanted === 'publicar') return (t==='publicar'||t.startsWith('publicar')||t.includes('postar')||t==='post'||t.startsWith('post ')||t.includes('publish'));
+      return false;
+    }
+
     return sel.filter(el => {
-      const t = N(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
-      return (wanted==='avancar' ? (t==='avancar'||t==='avançar') : t===wanted);
+      const raw = el.getAttribute('aria-label') || el.innerText || el.textContent || '';
+      return matchesWanted(raw, wanted);
     });
   }, labelCanon);
   const props = await arrHandle.getProperties().catch(()=>null);
@@ -821,7 +916,12 @@ async function waitButtonEffect(page, clickedLabelCanon, { timeoutMs = 8000, hre
   try {
     const ok = await page.waitForFunction((lab, href0) => {
       function N(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase(); } catch { return String(s||'').trim().toLowerCase(); } }
-      const matches = (t) => (lab==='avancar' ? (t==='avancar'||t==='avançar') : t===lab);
+      const matches = (tt) => {
+        const t = (tt||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+        if (lab==='avancar') return (t==='avancar'||t==='avançar'||t.startsWith('avancar')||t.startsWith('avançar')||t.includes('próximo')||t.includes('proximo')||t.includes('continuar')||t.includes('continue')||t==='next');
+        if (lab==='publicar') return (t==='publicar'||t.startsWith('publicar')||t.includes('postar')||t==='post'||t.startsWith('post ')||t.includes('publish'));
+        return false;
+      };
       const btns = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
       let exists = false, disabled=false, spinner=false;
       for (const el of btns) {
