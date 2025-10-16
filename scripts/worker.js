@@ -15,6 +15,11 @@ const fotos        = require('./fotos.js'); // gestor central de fotos
 const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 
+// --- SHARD SUPPORT (multi-node auto) ---
+const SHARD_PROFILES = (() => { try { return JSON.parse(process.env.SHARD_PROFILES || '[]'); } catch { return []; }})();
+const SHARD_SET = new Set(Array.isArray(SHARD_PROFILES) ? SHARD_PROFILES : []);
+const STATUS_FILE_NAME = process.env.STATUS_FILE_NAME || 'status.json';
+
 // Bloqueio universal: Detecta se o pauseReason=limit_posting e o cooldown está ativo
 async function isLimitPostingActive(nome) {
   try {
@@ -382,7 +387,7 @@ const perfisDir = path.join(__dirname, '../dados', 'perfis');
 
 // === INÍCIO: Adicionar caminhos dos arquivos desired.json e status.json + utilitários atômicos de I/O ===
 const desiredPath = path.join(__dirname, '../dados', 'desired.json');
-const statusPath  = path.join(__dirname, '../dados', 'status.json');
+const statusPath  = path.join(__dirname, '../dados', STATUS_FILE_NAME);
 
 function readJsonFile(file, fallback) {
 try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -867,8 +872,11 @@ function sendReply(msgId, data) {
 
 // Helpers de perfis
 function loadPerfisJson() {
-  try { return JSON.parse(fs.readFileSync(perfisPath, 'utf8')); }
-  catch { return []; }
+  try {
+    const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
+    if (!SHARD_SET.size) return arr; // fallback se não shard (single instance)
+    return arr.filter(p => p && p.nome && SHARD_SET.has(p.nome));
+  } catch { return []; }
 }
 function savePerfisJson(arr) {
   try { fs.writeFileSync(perfisPath, JSON.stringify(arr, null, 2)); } catch {}

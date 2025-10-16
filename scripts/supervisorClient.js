@@ -1,12 +1,14 @@
 // scripts/supervisorClient.js
 /*
  * CLIENTE PARA O SUPERVISOR UNIVERSAL IN-PROCESS (UNIFICADO)
- * Todas as chamadas são diretas ao módulo supervisor.js.
+ * Todas as chamadas são diretas ao módulo supervisor.js ou roteadas via IPC.
  * Tolerante a erro, nunca lança uncaught.
  */
 
-const supervisor = require('./supervisor.js');
 const logger = require('./logger.js'); // <- Adicionado conforme instrução
+
+// Worker child — usa IPC com master
+const isChild = (process && process.env && process.env.IS_WORKER_CHILD === '1');
 
 // Patch kill_guard_until: bloqueio proativo
 const fs = require('fs');
@@ -29,29 +31,75 @@ function localKillGuardActive(perfil) {
 }
 // --- FIM PATCH local function
 
+function newMsgId(){ return Math.random().toString(36).slice(2); }
+
 async function requestOpen(perfil, url) {
   if (localKillGuardActive(perfil)) {
     return { ok: false, error: 'kill_guard_until', msg: 'Abertura de slot negada por kill_guard_until' };
   }
-  try {
-    return supervisor.requestOpen(perfil);
-  } catch (e) {
-    logger.warn('[supervisorClient] requestOpen erro:', { error: e && e.message || e });
-    return { ok: false, error: e && e.message || e };
+  if (!isChild) {
+    try {
+      const supervisor = require('./supervisor.js');
+      return supervisor.requestOpen(perfil);
+    } catch (e) {
+      logger.warn('[supervisorClient] requestOpen erro:', { error: e && e.message || e });
+      return { ok: false, error: e && e.message || e };
+    }
   }
+  // child: IPC
+  return new Promise((resolve) => {
+    const msgId = newMsgId();
+    const onMsg = (m) => {
+      if (m && m.replyTo === msgId) {
+        try { process.off('message', onMsg); } catch {}
+        resolve(m.data);
+      }
+    };
+    try { process.on('message', onMsg); } catch {}
+    try { process.send({ type: 'sup:reqOpen', perfil, msgId }); } catch(e) {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'ipc_send_failed' });
+    }
+    setTimeout(() => {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'timeout' });
+    }, 15000);
+  });
 }
 
 async function notifyOpened(perfil, resultado = "ok", url) {
-  try {
-    return supervisor.notifyOpened(perfil, resultado);
-  } catch (e) {
-    logger.warn('[supervisorClient] notifyOpened erro:', { error: e && e.message || e });
-    return { ok: false, error: e && e.message || e };
+  if (!isChild) {
+    try {
+      const supervisor = require('./supervisor.js');
+      return supervisor.notifyOpened(perfil, resultado);
+    } catch (e) {
+      logger.warn('[supervisorClient] notifyOpened erro:', { error: e && e.message || e });
+      return { ok: false, error: e && e.message || e };
+    }
   }
+  return new Promise((resolve) => {
+    const msgId = newMsgId();
+    const onMsg = (m) => {
+      if (m && m.replyTo === msgId) {
+        try { process.off('message', onMsg); } catch {}
+        resolve(m.data);
+      }
+    };
+    try { process.on('message', onMsg); } catch {}
+    try { process.send({ type: 'sup:notifyOpened', perfil, result: resultado, msgId }); } catch(e) {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'ipc_send_failed' });
+    }
+    setTimeout(() => {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'timeout' });
+    }, 15000);
+  });
 }
 
 async function sendTelemetria(evt, url) {
   try {
+    const supervisor = require('./supervisor.js');
     return supervisor.sendTelemetria(evt);
   } catch (e) {
     logger.warn('[supervisorClient] sendTelemetria erro:', { error: e && e.message || e });
@@ -60,16 +108,38 @@ async function sendTelemetria(evt, url) {
 }
 
 async function getStatus(url) {
-  try {
-    return supervisor.getStatus();
-  } catch (e) {
-    logger.warn('[supervisorClient] getStatus erro:', { error: e && e.message || e });
-    return { ok: false, error: e && e.message || e };
+  if (!isChild) {
+    try {
+      const supervisor = require('./supervisor.js');
+      return supervisor.getStatus();
+    } catch (e) {
+      logger.warn('[supervisorClient] getStatus erro:', { error: e && e.message || e });
+      return { ok: false, error: e && e.message || e };
+    }
   }
+  return new Promise((resolve) => {
+    const msgId = newMsgId();
+    const onMsg = (m) => {
+      if (m && m.replyTo === msgId) {
+        try { process.off('message', onMsg); } catch {}
+        resolve(m.data);
+      }
+    };
+    try { process.on('message', onMsg); } catch {}
+    try { process.send({ type: 'sup:getStatus', msgId }); } catch(e) {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'ipc_send_failed' });
+    }
+    setTimeout(() => {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'timeout' });
+    }, 8000);
+  });
 }
 
 async function getRam(url) {
   try {
+    const supervisor = require('./supervisor.js');
     return supervisor.getRam();
   } catch (e) {
     logger.warn('[supervisorClient] getRam erro:', { error: e && e.message || e });
@@ -79,6 +149,7 @@ async function getRam(url) {
 
 async function resetSupervisor(url) {
   try {
+    const supervisor = require('./supervisor.js');
     return supervisor.resetSupervisor();
   } catch (e) {
     logger.warn('[supervisorClient] resetSupervisor erro:', { error: e && e.message || e });

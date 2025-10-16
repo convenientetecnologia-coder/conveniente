@@ -9,7 +9,6 @@ const open = require('open'); // <-- adicione/mova isso aqui!
 const logger = require('./scripts/logger.js');
 
 // Helpers/pontes
-const workerClient = require('./scripts/workerClient.js');
 const fileStore = require('./scripts/fileStore.js');
 
 // supervisor interno unificado (importação obrigatória — side effect: inicializa timers ttl/probe)
@@ -69,13 +68,24 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 // app.use('/', express.static(path.join(__dirname, 'scripts')));
 // app.use('/scripts', express.static(path.join(__dirname, 'scripts')));
 
+// ===================== CLUSTER MULTI-NODE =====================
+let clusterClient = null;
+(async () => {
+  const { createCluster } = require('./scripts/clusterMaster.js');
+  logger.info('[BOOT] Construindo cluster multi-node (auto)...');
+  clusterClient = createCluster(); // { plan, children, sendWorkerCommand, kill }
+  logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes);
+})();
+// ===================== FIM CLUSTER MULTI-NODE =====================
+
 // API endpoints (militar por arquivo de rota, modular, fácil de achar)
-require('./scripts/api_status.js')(app, workerClient, fileStore);
-require('./scripts/api_perfis.js')(app, workerClient, fileStore);
-require('./scripts/api_robes.js')(app, workerClient, fileStore);
-require('./scripts/api_cidades.js')(app, workerClient, fileStore);
-require('./scripts/api_sys.js')(app, workerClient, fileStore);
-require('./scripts/api_issues.js')(app, workerClient, fileStore);
+const apiClient = { sendWorkerCommand: (...args) => clusterClient.sendWorkerCommand(...args) };
+require('./scripts/api_status.js')(app, apiClient, fileStore);
+require('./scripts/api_perfis.js')(app, apiClient, fileStore);
+require('./scripts/api_robes.js')(app, apiClient, fileStore);
+require('./scripts/api_cidades.js')(app, apiClient, fileStore);
+require('./scripts/api_sys.js')(app, apiClient, fileStore);
+require('./scripts/api_issues.js')(app, apiClient, fileStore);
 // Se usar api_static.js/adicional, inclua aqui: require('./scripts/api_static.js')(app);
 
 // Troque todos os console.log por logger.info conforme checklist
@@ -110,9 +120,6 @@ fileStore.ensurePerfisJson();
     logger.info('[BOOT] ROBE_PAUSE_24H_ON_BOOT aplicado em ' + count + ' perfis');
   }
 })();
-
-logger.info('[BOOT] Spawning worker (automação)...');
-workerClient.fork();
 
 // Health check endpoint (opcional)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
@@ -178,20 +185,12 @@ if (process.env.OPEN_CHROMIUM_ON_START == '1') {
 // Graceful shutdown — encerra worker e faz cleanup
 process.on('SIGINT', async () => {
   logger.info('[STOP] SIGINT recebido. Encerrando...');
-  try {
-    // Descomente se quiser resetar contas ao sair
-    // fileStore.resetDesiredAllOffOnBoot();
-    await workerClient.kill();
-  } catch(e) {}
+  try { await (clusterClient && clusterClient.kill && clusterClient.kill()); } catch(e){}
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   logger.info('[STOP] SIGTERM recebido. Encerrando...');
-  try {
-    // Descomente se quiser resetar contas ao sair
-    // fileStore.resetDesiredAllOffOnBoot();
-    await workerClient.kill();
-  } catch(e) {}
+  try { await (clusterClient && clusterClient.kill && clusterClient.kill()); } catch(e){}
   process.exit(0);
 });
