@@ -11,7 +11,7 @@ function mb(x) { return Math.floor(x / (1024 * 1024)); }
 
 /**
  * Calcula plano automático de memória/sharding para multi-node, multinacional.
- * - NODES = ceil(RAM FÍSICA / 16GB) (NUNCA por RAM livre/usable! Sempre arredondado para mais)
+ * - NODES = ceil(RAM FÍSICA / 16GB) (NUNCA por RAM livre!)
  * - 10% colchão (min 2GB)
  * - Overhead de 2GB por Node.
  * - Limite de ~30 perfis por Node, nunca mais.
@@ -29,27 +29,27 @@ function planMemoryAndShards({ totalProfiles }) {
   const MAX_PER_NODE = 30;
   const CHROME_AVG_MB = 600;
 
-  // *** NOVA LÓGICA: ***
-  // 1) Nodes exatos SEMPRE pelo hardware, não importa quanto de RAM livre/sistema (ceil, nunca floor)
+  // 1) Nodes exatos PELO HARDWARE, independente de RAM livre
   let nodes = Math.ceil(totalMB / NODE_SEG_MB);
   if (nodes < 1) nodes = 1;
 
-  // 2) Limite para não rodar mais nodes que perfis (ex: pouco perfil)
+  // 2) Limite para não rodar mais nodes do que perfis disponíveis
+  // (mas nunca limita nodes por RAM SOBRANTE/livre, só por máximo necessário para os perfis)
   const nodesByProfiles = Math.max(1, Math.ceil(totalProfiles / MAX_PER_NODE));
   nodes = Math.min(nodes, nodesByProfiles);
 
-  // 3) RAM útil para Chrome (inicial) ainda considera colchão e overhead (mas apenas para chrome, NUNCA para reduzir nodes)
+  // 3) RAM útil para Chrome: colchão e overhead só para calcular máximo de Chromes globais
   const reservedForOverheadMB = nodes * NODE_OVERHEAD_MB;
   const usableMB = Math.max(0, totalMB - cushionMB);
   const remainingForChromesMB = Math.max(0, usableMB - reservedForOverheadMB);
 
-  // 4) Limite final de quantos Chrome (bots) o host aguenta (cap global por RAM sobra/dentro do hardware)
+  // 4) Limite global de quantos Chrome (bots) o host aguenta (cap global por RAM sobra/dentro do hardware)
   const maxChromesPossibleGlobal = Math.min(
     totalProfiles,
     Math.floor(remainingForChromesMB / CHROME_AVG_MB)
   );
 
-  // 5) Limite per Node (MAX_PER_NODE, global cap, nunca <1)
+  // 5) Limite por Node
   const targetPerNode = Math.min(
     MAX_PER_NODE,
     Math.max(1, Math.ceil(maxChromesPossibleGlobal / nodes))

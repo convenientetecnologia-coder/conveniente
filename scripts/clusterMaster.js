@@ -36,16 +36,8 @@ function createCluster() {
   const names = allPerfis.map(p => p.nome);
   const plan = planMemoryAndShards({ totalProfiles: names.length });
 
-  // --- PATCH 1 - REMOVER corte de perfis durante sharding ---
-  /*
-  const chromesGlobalCap = plan.budgets.remainingForChromesMB > 0
-    ? Math.min(names.length, Math.floor(plan.budgets.remainingForChromesMB / plan.budgets.chromeAvgMB))
-    : 0;
-  const usableNames = names.slice(0, chromesGlobalCap || names.length);
-  const blocks = splitInBlocks(usableNames, plan.nodes, plan.perNode.maxChromes);
-  */
+  // PATCH: não corte nada, atribua todos os nomes para balancear
   const blocks = splitInBlocks(names, plan.nodes, plan.perNode.maxChromes);
-  // ---------------------------------------------------------
 
   logger.info('[CLUSTER][PLAN]', {
     totalMB: plan.totalMB,
@@ -111,22 +103,20 @@ function createCluster() {
     logger.info('[CLUSTER] Worker iniciado', { idx: idx + 1, perfis: shardNames.length });
   }
 
-  // --- PATCH 3: Telemetria/Logs de atribuição ---
+  // Telemetria de atribuição de perfis ao route:
   logger.info('[CLUSTER][ROUTE]', {
     totalPerfis: names.length,
     nodes: blocks.length,
     assigned: Object.keys(route).length,
     unassigned: names.length - Object.keys(route).length
   });
-  // ----------------------------------------------
 
-  // --- PATCH 2: Garantir route[nome] para todos, sem fallback para worker 0 ---
+  // PATCH: nunca fallback para worker 0; erro explícito se perfil não atribuído
   function findChildByPerfil(nome) {
     const i = route[nome];
     if (typeof i === 'number') return i;
     throw new Error('profile_not_assigned_to_any_worker:' + nome);
   }
-  // ---------------------------------------------------------------------------
 
   async function sendTo(idx, type, payload, { timeoutMs = 20000 } = {}) {
     const child = children[idx];
