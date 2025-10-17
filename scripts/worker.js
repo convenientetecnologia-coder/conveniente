@@ -2593,7 +2593,7 @@ try {
       typeof man.uaString === 'string' && man.uaString &&
       typeof man.uaCh === 'object' && man.uaCh &&
       typeof man.fp === 'object' && man.fp &&
-      Array.isArray(man.cookies) && man.cookies.length &&
+      Array.isArray(m.cookies) && m.cookies.length &&
       typeof man.userDataDir === 'string' && man.userDataDir;
     manifestStatus = ok ? 'ok' : 'incomplete';
   } else {

@@ -2,14 +2,12 @@
 
 const { fork } = require('child_process');
 const path = require('path');
-const os = require('os');
 const fs = require('fs');
 const { planMemoryAndShards } = require('./memoryPlan.js');
 const fileStore = require('./fileStore.js');
 const logger = require('./logger.js');
 const supervisor = require('./supervisor.js');
 
-// Util simples para RPC msgId por worker
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
 function splitInBlocks(list, blocks, maxPerBlock) {
@@ -19,7 +17,6 @@ function splitInBlocks(list, blocks, maxPerBlock) {
   let i = 0;
   while (arr.length) {
     const name = arr.shift();
-    // Se já atingiu maxPerBlock, pula para próximo bloco
     let loops = 0;
     while (out[i].length >= maxPerBlock) {
       i = (i+1) % blocks;
@@ -31,12 +28,21 @@ function splitInBlocks(list, blocks, maxPerBlock) {
   return out;
 }
 
+function readNodeStatusFile(idx) {
+  try {
+    const file = path.join(__dirname, '..', 'dados', `status_node_${idx+1}.json`);
+    if (!fs.existsSync(file)) return null;
+    const stat = fs.statSync(file);
+    const ageMs = Date.now() - stat.mtimeMs;
+    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { json, ageMs };
+  } catch { return null; }
+}
+
 function createCluster() {
   const allPerfis = fileStore.loadPerfisJson() || [];
   const names = allPerfis.map(p => p.nome);
   const plan = planMemoryAndShards({ totalProfiles: names.length });
-
-  // PATCH: não corte nada, atribua todos os nomes para balancear
   const blocks = splitInBlocks(names, plan.nodes, plan.perNode.maxChromes);
 
   logger.info('[CLUSTER][PLAN]', {
@@ -52,8 +58,8 @@ function createCluster() {
     effectiveChromesCap: 'all'
   });
 
-  const children = []; // [{ id, proc, shardSet, pending, statusLast }]
-  const route = {};    // nome -> idx filho
+  const children = [];
+  const route = {};
 
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
@@ -73,7 +79,6 @@ function createCluster() {
     const pending = new Map();
 
     proc.on('message', (msg) => {
-      // RPC para comandos de slot/supervisão
       if (msg && msg.replyTo && pending.has(msg.replyTo)) {
         const { resolve } = pending.get(msg.replyTo);
         pending.delete(msg.replyTo);
@@ -103,7 +108,6 @@ function createCluster() {
     logger.info('[CLUSTER] Worker iniciado', { idx: idx + 1, perfis: shardNames.length });
   }
 
-  // Telemetria de atribuição de perfis ao route:
   logger.info('[CLUSTER][ROUTE]', {
     totalPerfis: names.length,
     nodes: blocks.length,
@@ -111,12 +115,13 @@ function createCluster() {
     unassigned: names.length - Object.keys(route).length
   });
 
-  // PATCH: nunca fallback para worker 0; erro explícito se perfil não atribuído
   function findChildByPerfil(nome) {
     const i = route[nome];
     if (typeof i === 'number') return i;
     throw new Error('profile_not_assigned_to_any_worker:' + nome);
   }
+
+  const STATUS_TIMEOUT_MS = parseInt(process.env.CLUSTER_STATUS_TIMEOUT_MS || '25000', 10);
 
   async function sendTo(idx, type, payload, { timeoutMs = 20000 } = {}) {
     const child = children[idx];
@@ -142,31 +147,73 @@ function createCluster() {
 
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
     const nome = payload && payload.nome;
-    // GET UNIFIED STATUS
     if (type === 'get-status' && !nome) {
-      const results = await Promise.all(children.map((_, i) => sendTo(i, 'get-status', {}, { timeoutMs: 8000 })));
-      // Merge resultados de todos filhos
-      const perfis = [];
-      const robes = {};
-      const robeQueue = [];
-      let autoMode = null;
-      let sys = null;
-      for (const r of results) {
-        if (r && r.perfis) perfis.push(...r.perfis);
-        if (r && r.robes) Object.assign(robes, r.robes);
-        if (r && Array.isArray(r.robeQueue)) robeQueue.push(...r.robeQueue);
-        if (!autoMode && r && r.autoMode) autoMode = r.autoMode;
-        if (!sys && r && r.sys) sys = r.sys;
+      // --- PATCH AGREGADOR ROBUSTO ---
+      const allPerfis = fileStore.loadPerfisJson() || [];
+      const baseMap = new Map();
+      for (const p of allPerfis) {
+        baseMap.set(p.nome, {
+          nome: p.nome,
+          label: p.label || null,
+          cidade: p.cidade,
+          uaPresetId: p.uaPresetId,
+          active: false, trabalhando:false, configurando:false, humanControl:false,
+          issuesCount: 0,
+          ramMB: null, cpuPercent: null, numPages: null,
+          robeFrozenUntil: null, frozenReason:null, frozenAt:null, frozenSetBy:null,
+          activationHeldUntil:null, killGuardUntil:null, reopenAt:null,
+          openBackoffMs:null, lastSwapAt:null, lastSwapPeer:null, swapCooldown:null, whyNotOpen:null
+        });
       }
-      return { perfis, robes, robeQueue, autoMode, sys, ts: Date.now() };
+
+      const results = await Promise.allSettled(
+        children.map((_, i) => sendTo(i, 'get-status', {}, { timeoutMs: STATUS_TIMEOUT_MS }))
+      );
+
+      let warningParts = [];
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        let payload = null;
+        let source = 'rpc';
+        if (r.status === 'fulfilled' && r.value && Array.isArray(r.value.perfis)) {
+          payload = r.value;
+        } else {
+          const fb = readNodeStatusFile(i);
+          if (fb && fb.json && Array.isArray(fb.json.perfis) && fb.ageMs <= 30000) {
+            payload = fb.json;
+            source = `file(${Math.round(fb.ageMs/1000)}s)`;
+            warningParts.push(`node${i+1}: rpc_fail -> file_ok(${Math.round(fb.ageMs/1000)}s)`);
+          } else {
+            warningParts.push(`node${i+1}: no_reply`);
+          }
+        }
+        if (!payload) continue;
+        for (const p of payload.perfis || []) {
+          const m = baseMap.get(p.nome);
+          if (!m) continue;
+          Object.assign(m, p); // overlay fields
+        }
+      }
+
+      const perfis = Array.from(baseMap.values());
+      const robes = {}; // opcional: merge dos workers, se precisar
+      const robeQueue = []; // concat arrays
+      let out = { perfis, robes, robeQueue, autoMode: null, sys: null, ts: Date.now() };
+      if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
+      // LOG policia
+      if (warningParts.length) {
+        logger.warn('[CLUSTER][STATUS] parcial', { nodes: children.length, warn: out.warning, perfis: perfis.length, totalPerfis: allPerfis.length });
+      } else {
+        logger.info('[CLUSTER][STATUS] ok', { nodes: children.length, perfis: perfis.length });
+      }
+      return out;
     }
-    // BROADCAST (ex: unfreeze-all, robes-release-all)
+    // BROADCAST
     if (type === 'unfreeze-all' || type === 'robes-release-all') {
       const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
       const allOk = results.every(r => r && r.ok !== false);
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }
-    // ROTA POR PERFIL
     try {
       const i = findChildByPerfil(nome);
       return sendTo(i, type, payload, opts);
