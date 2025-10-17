@@ -11,8 +11,8 @@ function mb(x) { return Math.floor(x / (1024 * 1024)); }
 
 /**
  * Calcula plano automático de memória/sharding para multi-node, multinacional.
+ * - NODES = ceil(RAM FÍSICA / 16GB) (NUNCA por RAM livre/usable! Sempre arredondado para mais)
  * - 10% colchão (min 2GB)
- * - Cada Node: 16GB bloco
  * - Overhead de 2GB por Node.
  * - Limite de ~30 perfis por Node, nunca mais.
  * - Nunca ENV/manual; tudo autodetect.
@@ -24,32 +24,32 @@ function mb(x) { return Math.floor(x / (1024 * 1024)); }
 function planMemoryAndShards({ totalProfiles }) {
   const totalMB = mb(os.totalmem());
   const cushionMB = Math.max(Math.floor(totalMB * 0.10), 2048); // 10% colchão, min 2GB
-  const usableMB = Math.max(0, totalMB - cushionMB);
-
-  const NODE_SEG_MB = 16384; // 16GB/node
-  const NODE_OVERHEAD_MB = 2048; // 2GB por node
+  const NODE_SEG_MB = 16384; // 16GB por Node
+  const NODE_OVERHEAD_MB = 2048; // 2GB por Node
   const MAX_PER_NODE = 30;
-  const CHROME_AVG_MB = 600; // uso inicial robusto/Chrome com bots ativos
+  const CHROME_AVG_MB = 600;
 
-  // Quantos nodes possíveis pelo critério RAM (não>MAX_PER_NODE/profiles)
-  let nodes = Math.floor(usableMB / NODE_SEG_MB);
+  // *** NOVA LÓGICA: ***
+  // 1) Nodes exatos SEMPRE pelo hardware, não importa quanto de RAM livre/sistema (ceil, nunca floor)
+  let nodes = Math.ceil(totalMB / NODE_SEG_MB);
   if (nodes < 1) nodes = 1;
 
-  // Limite também pelo número de perfis (não ter node ocioso)
+  // 2) Limite para não rodar mais nodes que perfis (ex: pouco perfil)
   const nodesByProfiles = Math.max(1, Math.ceil(totalProfiles / MAX_PER_NODE));
   nodes = Math.min(nodes, nodesByProfiles);
 
-  // Overhead total pro Node processes
+  // 3) RAM útil para Chrome (inicial) ainda considera colchão e overhead (mas apenas para chrome, NUNCA para reduzir nodes)
   const reservedForOverheadMB = nodes * NODE_OVERHEAD_MB;
+  const usableMB = Math.max(0, totalMB - cushionMB);
   const remainingForChromesMB = Math.max(0, usableMB - reservedForOverheadMB);
 
-  // Limite final de quantos Chrome (bots) o host aguenta
+  // 4) Limite final de quantos Chrome (bots) o host aguenta (cap global por RAM sobra/dentro do hardware)
   const maxChromesPossibleGlobal = Math.min(
     totalProfiles,
     Math.floor(remainingForChromesMB / CHROME_AVG_MB)
   );
 
-  // Limite per Node (MAX_PER_NODE, global cap, nunca <1)
+  // 5) Limite per Node (MAX_PER_NODE, global cap, nunca <1)
   const targetPerNode = Math.min(
     MAX_PER_NODE,
     Math.max(1, Math.ceil(maxChromesPossibleGlobal / nodes))
