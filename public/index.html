@@ -1307,11 +1307,6 @@
       return ok;
     }
 
-    // Wrapper para listar todos os perfis pela API dedicada (/api/perfis)
-    window.electronAPI = window.electronAPI || {};
-    window.electronAPI.listPerfis = () =>
-      fetch('/api/perfis').then(r => r.json()).catch(() => null);
-
     async function startAllSequential() {
       if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
       if (stopAllLock)  { alertMassActionRunning(); return; }
@@ -1320,11 +1315,9 @@
       const startBtn = document.getElementById('startAllBtn');
       if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
       try {
-        // ALTERAÇÃO: usar /api/perfis para enumerar TODOS os perfis cadastrados
-        const lp = await window.electronAPI.listPerfis();
-        let perfis = Array.isArray(lp) ? lp : (lp && Array.isArray(lp.perfis) ? lp.perfis : []);
-        if (!Array.isArray(perfis)) perfis = [];
-        // Ordem: como retornado por /api/perfis
+        const st = await window.electronAPI.getStatus();
+        const perfis = st?.perfis || [];
+        // Ordem: como exibido
         for (let i = 0; i < perfis.length; i++) {
           const p = perfis[i];
           // Re-checa status a cada iteração (robusto)
@@ -1353,10 +1346,9 @@
               return cur && cur.trabalhando;
             }, { timeoutMs: 30000, intervalMs: 400 });
 
-            // Resgata lista atualizada para próximo ciclo via /api/perfis (NÃO usar /api/status)
-            const lpNext = await window.electronAPI.listPerfis();
-            const nextList = Array.isArray(lpNext) ? lpNext : (lpNext && Array.isArray(lpNext.perfis) ? lpNext.perfis : []);
-            perfis.splice(0, perfis.length, ...(nextList || []));
+            // Resgata status atualizado para próximo ciclo
+            const stNext = await window.electronAPI.getStatus();
+            perfis.splice(0, perfis.length, ...(stNext.perfis || []));
           } catch (e) {
             console.warn('[StartAll] Falha em', p && p.nome, e && e.message || e);
           }
