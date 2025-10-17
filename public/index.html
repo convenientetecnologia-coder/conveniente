@@ -558,7 +558,28 @@
 
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
-      const st = await window.electronAPI.getStatus();
+      const [st, perfisResp] = await Promise.all([
+        window.electronAPI.getStatus().catch(() => null),
+        window.electronAPI.listPerfis().catch(() => null)
+      ]);
+      const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
+      const perfisMap = new Map(basePerfis.map(p => [p.nome, Object.assign({
+        active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
+        ramMB: null, cpuPercent: null, numPages: null,
+        robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
+        activationHeldUntil: null, reopenAt: null, openBackoffMs: null, lastSwapAt: null, swapCooldown: null, whyNotOpen: null,
+        manifestStatus: null, closingReason: null
+      }, p)]));
+      // Overlay de /api/status (st)
+      if (Array.isArray(st?.perfis)) {
+        st.perfis.forEach(o => {
+          const dst = perfisMap.get(o.nome);
+          if (dst) Object.assign(dst, o);
+        });
+      }
+      const perfis = Array.from(perfisMap.values());
+      const robes  = st?.robes || {};
+      const robeQueue = st?.robeQueue || [];
 
       // Banner global de aviso (warning) caso backend informe
       const warn = st && st.warning;
@@ -579,10 +600,6 @@
         const b = document.getElementById('globalWarn');
         if (b) b.remove();
       }
-
-      const perfis = st?.perfis || [];
-      const robes  = st?.robes  || {};
-      const robeQueue = st?.robeQueue || [];
 
       // ----- ALTERAÇÃO: GLOBAL HEALTH PANEL ------
       // Militar: somar apenas perfis com RAM !== null

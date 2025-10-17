@@ -293,144 +293,57 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 }
 
 
-if (workerClient && typeof workerClient.sendWorkerCommand === 'function') {
-  let workerStatus;
+// ======= INÍCIO DA INSTRUÇÃO/ALTERAÇÃO PEDIDA =======
+  // Implementação SOLICITADA — substitua toda a estrutura da rota por este bloco DO INÍCIO AO FIM!
+
+  // 1) Baseline do perfis.json SEMPRE — nunca array vazia
+  const perfisArr = fileStore.loadPerfisJson() || [];
+  const baseMap = new Map(perfisArr.map(p => [p.nome, {
+    nome: p.nome,
+    label: p.label || null,
+    cidade: p.cidade,
+    uaPresetId: p.uaPresetId,
+    active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
+    ramMB: null, cpuPercent: null, numPages: null, robeEstado: null, robeCooldownSec: null,
+    robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
+    activationHeldUntil: null, reopenAt: null, openBackoffMs: null, lastSwapAt: null, lastSwapPeer: null,
+    swapCooldown: null, whyNotOpen: null, manifestStatus: null, closingReason: null, isFrozen: false
+    // outros campos militares do shape retrocompatível
+  }]));
+  let warningINST = undefined;
+  let erroMsgINST = undefined;
+
+  // 2) Tente overlay do workerClient (cluster), mas nunca trunque a lista do baseline!
+  let overlayINST = null;
   try {
-    workerStatus = await workerClient.sendWorkerCommand('get-status', { workerId }, { timeoutMs: 5000 }).catch(() => null);
-    if (!workerStatus || !workerStatus.perfis) {
-      // Se worker respondeu mas vazio, aguarde 200ms e tente de novo (janela atômica de swap de status.json)
-      await new Promise(r => setTimeout(r, 200));
-      workerStatus = await workerClient.sendWorkerCommand('get-status', { workerId }, { timeoutMs: 5000 }).catch(() => null);
+    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+  } catch (e) {
+    warningINST = 'status temporarily unavailable';
+  }
+  if (overlayINST && Array.isArray(overlayINST.perfis) && overlayINST.perfis.length > 0) {
+    // Overlay de status/metrics apenas nos que existem no baseline
+    for (const o of overlayINST.perfis) {
+      const b = baseMap.get(o.nome);
+      if (b) Object.assign(b, o);
     }
-  } catch (err) {
-    erroMsg = String((err && err.message) || err);
+  } else if (overlayINST && overlayINST.warning) {
+    warningINST = overlayINST.warning;
   }
 
-  // MOD: Checagem snapshot parcial/incompleto/truncado (jamais permitir truncar array!)
-  // Le perfis.json baseline. Se houver overlay, aplica; se não, skeleton. 
-  // Se workerStatus incompleto/ausente/truncado, só faz overlay dos perfis conhecidos!
-  let totalPerfisJsonLen = 0;
-  let perfisJsonRaw = [];
-  try {
-    perfisJsonRaw = fileStore.loadPerfisJsonSync
-      ? fileStore.loadPerfisJsonSync()
-      : fileStore.perfisJson // pode ser cache
-      ? fileStore.perfisJson
-      : require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8') && JSON.parse(require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8'));
-  } catch(e) {
-    perfisJsonRaw = [];
-  }
-  totalPerfisJsonLen = (perfisJsonRaw || []).length;
-
-  if (
-    workerStatus &&
-    Array.isArray(workerStatus.perfis) &&
-    workerStatus.perfis.length > 0 &&
-    workerStatus.perfis.length === totalPerfisJsonLen
-  ) {
-    // snapshot completo, OK
-    if (!('autoMode' in workerStatus)) workerStatus.autoMode = null;
-    if (!('sys' in workerStatus)) workerStatus.sys = null;
-    const payload = montarPayloadCompleto(workerStatus, erroMsg, warning);
-    return res.json(payload);
-  } else if (
-    workerStatus &&
-    Array.isArray(workerStatus.perfis) &&
-    // casos: null, snapshot truncado, array menor que perfis.json
-    workerStatus.perfis.length > 0 &&
-    workerStatus.perfis.length < totalPerfisJsonLen
-  ) {
-    // Truncado: nunca permita truncamento! Faz overlay (para cada baseline, aplica overlay por nome)
-    warning = "snapshot incompleto do worker; revertendo skeletons neutros para algum(ns) perfis";
-    const payload = montarPayloadCompleto(workerStatus, erroMsg, warning);
-    return res.json(payload);
-  } else {
-    // null/perfis ausente/etc: precisa fallback
-    warning = "status temporarily unavailable";
-  }
-}
-
-// Fallback — SEMPRE: baseline via perfis.json, overlay se possível do status.json (file)
-let fallbackStatus = fileStore.getStatusSnapshot();
-// Garante SEMPRE autoMode/sys presentes (mesmo que null)
-if (fallbackStatus && typeof fallbackStatus === 'object') {
-  if (!('autoMode' in fallbackStatus)) fallbackStatus.autoMode = null;
-  if (!('sys' in fallbackStatus)) fallbackStatus.sys = null;
-}
-
-// Nunca devolva array vazia: se não tem campo, null; nunca “perfil sumido”.
-if (
-  !fallbackStatus ||
-  !Array.isArray(fallbackStatus.perfis) ||
-  fallbackStatus.perfis.length === 0
-) {
-  // Monta baseline de perfis.json (shape completo, valores neutros)
-  let perfisSkeleton = [];
-  try {
-    let listaPerfis = fileStore.loadPerfisJsonSync
-      ? fileStore.loadPerfisJsonSync()
-      : fileStore.perfisJson
-      ? fileStore.perfisJson
-      : require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8') && JSON.parse(require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8'));
-    perfisSkeleton = (listaPerfis || []).map(perfil => ({
-      nome: perfil.nome,
-      label: perfil.label,
-      cidade: perfil.cidade,
-      uaPresetId: perfil.uaPresetId,
-      active: false,
-      trabalhando: false,
-      configurando: false,
-      humanControl: false,
-      issuesCount: 0,
-      ramMB: null,
-      cpuPercent: null,
-      numPages: null,
-      robeEstado: null,
-      robeCooldownSec: null,
-      robeFrozenUntil: null,
-      frozenReason: null,
-      frozenAt: null,
-      frozenSetBy: null,
-      activationHeldUntil: null,
-      reopenAt: null,
-      openBackoffMs: null,
-      lastSwapAt: null,
-      lastSwapPeer: null,
-      swapCooldown: null,
-      whyNotOpen: null,
-      virtusId: null,
-      manifestStatus: null,
-      pendingManifestRetries: null,
-      robeStatusDetail: null,
-      lastVirtusPing: null,
-      lastVirtusError: null,
-      discordWebhook: null,
-      extraDebug: null,
-      virtusPid: null,
-      virtusOnline: null,
-      lastHealthCheck: null,
-      lastVirtusCrash: null,
-      virtusFlags: null,
-      extraVirtusDebug: null,
-      isFrozen: false
-    }));
-  } catch(e) {
-    perfisSkeleton = [];
-  }
-  return res.json({
-    perfis: perfisSkeleton,
-    robes: {},
-    robeQueue: [],
-    ts: Date.now(),
-    warning: "status temporarily unavailable",
-    autoMode: (typeof fallbackStatus?.autoMode !== 'undefined') ? fallbackStatus.autoMode : null,
-    sys: (typeof fallbackStatus?.sys !== 'undefined') ? fallbackStatus.sys : null
+  // 3) Monte array final de perfis SEMPRE do baseline (com overlay) e retorne shape original
+  const perfisFinalINST = Array.from(baseMap.values());
+  res.json({
+    perfis: perfisFinalINST,
+    robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
+    robeQueue: overlayINST && overlayINST.robeQueue ? overlayINST.robeQueue : [],
+    autoMode: overlayINST && typeof overlayINST.autoMode !== 'undefined' ? overlayINST.autoMode : null,
+    sys: overlayINST && typeof overlayINST.sys !== 'undefined' ? overlayINST.sys : null,
+    warning: warningINST,
+    ts: Date.now()
   });
-}
+  return;
 
-// No fallback, alertar warning caso haja pane Worker
-const payload = montarPayloadCompleto(fallbackStatus, erroMsg, warning);
-res.json(payload);
+  // ======= FIM DA INSTRUÇÃO/ALTERAÇÃO PEDIDA =======
 
 } catch (e) {
   // Anti-spam: não log, só payload!
