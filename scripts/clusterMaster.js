@@ -11,7 +11,6 @@ const supervisor = require('./supervisor.js');
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
 function splitInBlocks(list, blocks, maxPerBlock) {
-  // Distribuição round-robin, balanceada por node
   const arr = Array.from(list);
   const out = Array.from({ length: blocks }, () => []);
   let i = 0;
@@ -148,7 +147,6 @@ function createCluster() {
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
     const nome = payload && payload.nome;
     if (type === 'get-status' && !nome) {
-      // --- PATCH AGREGADOR ROBUSTO ---
       const allPerfis = fileStore.loadPerfisJson() || [];
       const baseMap = new Map();
       for (const p of allPerfis) {
@@ -191,24 +189,21 @@ function createCluster() {
         for (const p of payload.perfis || []) {
           const m = baseMap.get(p.nome);
           if (!m) continue;
-          Object.assign(m, p); // overlay fields
+          Object.assign(m, p);
         }
       }
 
       const perfis = Array.from(baseMap.values());
-      const robes = {}; // opcional: merge dos workers, se precisar
-      const robeQueue = []; // concat arrays
+      const robes = {};
+      const robeQueue = [];
       let out = { perfis, robes, robeQueue, autoMode: null, sys: null, ts: Date.now() };
       if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
-      // LOG policia
       if (warningParts.length) {
         logger.warn('[CLUSTER][STATUS] parcial', { nodes: children.length, warn: out.warning, perfis: perfis.length, totalPerfis: allPerfis.length });
-      } else {
-        logger.info('[CLUSTER][STATUS] ok', { nodes: children.length, perfis: perfis.length });
       }
+      // --- logger.info OK removido para evitar poluição ---
       return out;
     }
-    // BROADCAST
     if (type === 'unfreeze-all' || type === 'robes-release-all') {
       const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
       const allOk = results.every(r => r && r.ok !== false);
