@@ -379,6 +379,9 @@ try {
 } catch (e) {
   try { logger.warn('[WORKER][BOOT] log error', { error: e && e.message || e }); } catch {}
 }
+try {
+  logger.info(`[WORKER][BOOT][SHARD] pid=${process.pid} shardSize=${SHARD_SET.size}`);
+} catch {}
 
 // Caminhos principais
 const perfisPath = path.join(__dirname, '../dados', 'perfis.json');
@@ -426,7 +429,7 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 
 // === Helpers de manifest + cooldown ===
 function manifestPathOf(nome) {
-  const perfisArr = loadPerfisJson();
+  const perfisArr = JSON.parse(fs.readFileSync(perfisPath, 'utf8')); // PERFIS BRUTO, SEM FILTRO DE SHARD
   const perfil = perfisArr.find(p => p && p.nome === nome);
   if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
   return path.join(perfil.userDataDir, 'manifest.json');
@@ -492,7 +495,7 @@ function countErrorsLocal(nome) {
 }
 // =============== FIM: Helpers/Contagem de ERROS ========================
 
-function ensureManifestValid(nome) {
+async function ensureManifestValid(nome) {
   // Campos essenciais: nome, cidade, uaPresetId, uaString, uaCh, fp, cookies, userDataDir
   function hasEssentials(man) {
     return man &&
@@ -513,6 +516,14 @@ function ensureManifestValid(nome) {
       manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
     }
   } catch {}
+  // Fallback: tenta manifestStore.read (sem filtro de shard)
+  if (!manifest) {
+    try {
+      const ms = require('./manifestStore.js');
+      const m2 = await ms.read(nome); // leitura SEM FILTRAGEM DE SHARD
+      if (m2 && hasEssentials(m2)) return m2;
+    } catch {}
+  }
   if (hasEssentials(manifest)) return manifest;
 
   // Tenta curar (merge) com perfis.json
@@ -697,6 +708,14 @@ async function activateOnce(nome, source = '') {
   opening[nome] = true;
   let _supervisorSlotGranted = false;
   try {
+    // EARLY-GUARD SHARD: nunca abrir perfis fora do shard
+    if (SHARD_SET.size && !SHARD_SET.has(nome)) {
+      await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
+      logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${SHARD_SET.has(nome)} size=${SHARD_SET.size}`);
+      return { ok: false, error: 'wrong_shard' };
+    }
+    logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${SHARD_SET.has(nome)} size=${SHARD_SET.size}`);
+
     // Supervisor interlock para aberturas durante kill_guard
     if (killGuardActive(nome)) {
       await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
@@ -733,7 +752,7 @@ async function activateOnce(nome, source = '') {
       logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
         logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
-        const manifest = ensureManifestValid(nome);
+        const manifest = await ensureManifestValid(nome);
         if (!manifest) {
           // Não foi possível auto-curar (manifest + perfis.json quebrado)
           await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
@@ -2947,6 +2966,12 @@ async function nurseTick() {
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
     for (const nome of Object.keys(desired.perfis || {})) {
+      if (SHARD_SET.size && !SHARD_SET.has(nome)) {
+        if (process.env.NURSE_DEBUG === '1') {
+          try { logger.info(`[NURSE][SKIP_OTHER_SHARD] ${nome}`); } catch {}
+        }
+        continue; // PERFIL FORA DO SHARD, IGNORAR
+      }
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
 
@@ -3728,7 +3753,8 @@ process.on('message', async (msg) => {
 
 process.on('uncaughtException', (e) => {
   try { logger.error('uncaught', { error: e && e.message || e }, e); } catch {}
-});
+}
+);
 process.on('unhandledRejection', (e) => {
   try { logger.error('unhandled', { error: (e && e.message) || e }, e); } catch {}
 });

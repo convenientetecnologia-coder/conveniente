@@ -36,12 +36,16 @@ function createCluster() {
   const names = allPerfis.map(p => p.nome);
   const plan = planMemoryAndShards({ totalProfiles: names.length });
 
-  // Corta perfis se RAM real não comportar todos os Chromes
+  // --- PATCH 1 - REMOVER corte de perfis durante sharding ---
+  /*
   const chromesGlobalCap = plan.budgets.remainingForChromesMB > 0
     ? Math.min(names.length, Math.floor(plan.budgets.remainingForChromesMB / plan.budgets.chromeAvgMB))
     : 0;
   const usableNames = names.slice(0, chromesGlobalCap || names.length);
   const blocks = splitInBlocks(usableNames, plan.nodes, plan.perNode.maxChromes);
+  */
+  const blocks = splitInBlocks(names, plan.nodes, plan.perNode.maxChromes);
+  // ---------------------------------------------------------
 
   logger.info('[CLUSTER][PLAN]', {
     totalMB: plan.totalMB,
@@ -53,7 +57,7 @@ function createCluster() {
     remainingForChromesMB: plan.budgets.remainingForChromesMB,
     chromeAvgMB: plan.budgets.chromeAvgMB,
     totalProfiles: names.length,
-    effectiveChromesCap: chromesGlobalCap || 'all'
+    effectiveChromesCap: 'all'
   });
 
   const children = []; // [{ id, proc, shardSet, pending, statusLast }]
@@ -107,6 +111,23 @@ function createCluster() {
     logger.info('[CLUSTER] Worker iniciado', { idx: idx + 1, perfis: shardNames.length });
   }
 
+  // --- PATCH 3: Telemetria/Logs de atribuição ---
+  logger.info('[CLUSTER][ROUTE]', {
+    totalPerfis: names.length,
+    nodes: blocks.length,
+    assigned: Object.keys(route).length,
+    unassigned: names.length - Object.keys(route).length
+  });
+  // ----------------------------------------------
+
+  // --- PATCH 2: Garantir route[nome] para todos, sem fallback para worker 0 ---
+  function findChildByPerfil(nome) {
+    const i = route[nome];
+    if (typeof i === 'number') return i;
+    throw new Error('profile_not_assigned_to_any_worker:' + nome);
+  }
+  // ---------------------------------------------------------------------------
+
   async function sendTo(idx, type, payload, { timeoutMs = 20000 } = {}) {
     const child = children[idx];
     if (!child) return { ok: false, error: 'child_not_found' };
@@ -127,11 +148,6 @@ function createCluster() {
       }, timeoutMs);
     });
     return p;
-  }
-
-  function findChildByPerfil(nome) {
-    const i = route[nome];
-    return typeof i === 'number' ? i : 0; // fallback
   }
 
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
@@ -161,8 +177,15 @@ function createCluster() {
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }
     // ROTA POR PERFIL
-    const i = findChildByPerfil(nome);
-    return sendTo(i, type, payload, opts);
+    try {
+      const i = findChildByPerfil(nome);
+      return sendTo(i, type, payload, opts);
+    } catch (err) {
+      if (err && String(err).startsWith('Error: profile_not_assigned_to_any_worker')) {
+        return { ok: false, error: 'profile_not_assigned' };
+      }
+      throw err;
+    }
   }
 
   async function kill() {
