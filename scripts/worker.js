@@ -831,6 +831,10 @@ async function activateOnce(nome, source = '') {
                 }
               });
             } catch {}
+            // Adicione ESTA linha abaixo:
+            try {
+              browserHelper.installAboutBlankKiller(ctrl.browser, nome, { graceMs: 7000 });
+            } catch {}
           }
         } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
@@ -1053,34 +1057,44 @@ function getWorkingProfileNames() {
 // ========== INICIO ALTERAÇÃO PRUNING DE ABAS ==============
 async function closeExtraPages(browser, mainPage, nome) {
   try {
-    const ctrl = controllers.get(nome);
-    if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) return;
-    // NOVO: nunca prune durante envio
-    if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) return;
-    if (browser && browser._robeActiveFor === nome) return; // Nunca prune se Robe ativo
-    // GUARD EXTREMO: nunca prune se emExecucao==true para esse perfil
-    if (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true) {
-      return; // NÃO FECHA ABAS DURANTE O ROBE DESTE PERFIL
-    }
-
+    const issues = require('./issues.js');
+    // 1) FECHA SEMPRE qualqer about:blank extra (independente do estado)
     const pages = await browser.pages();
     let closed = 0;
-    for (const page of pages) {
-      if (mainPage && page === mainPage) continue;
-      if (!mainPage && pages[0] && page === pages[0]) continue;
-      // NOVO PATCH: n-u-n-c-a feche aba de Create Item (do Robe) deste perfil
-      if (nome) {
-        try {
-          const url = typeof page.url === 'function' ? page.url() : '';
-          if (/facebook\.com\/marketplace\/create\/item/i.test(url)) {
-            continue;
-          }
-        } catch {}
-      }
-      try { await page.close({ runBeforeUnload: false }); closed++; } catch {}
+    for (const p of pages) {
+      try {
+        if (mainPage && p === mainPage) continue;
+        if (!mainPage && pages[0] && p === pages[0]) continue;
+        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+        if (!url || url === 'about:blank') {
+          await p.close({ runBeforeUnload: false }).catch(()=>{});
+          closed++;
+        }
+      } catch {}
     }
+
+    const ctrl = controllers.get(nome);
+    const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
+    const inRobe = (browser && browser._robeActiveFor === nome) || (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true);
+    const inConfig = ctrl && ctrl.configurando === true;
+    const inHuman = ctrl && ctrl.humanControl === true;
+
+    // 2) PRUNE amplo SOMENTE se permitido
+    if (!(sendLockActive || inRobe || inConfig || inHuman)) {
+      const again = await browser.pages();
+      for (const p of again) {
+        if (mainPage && p === mainPage) continue;
+        if (!mainPage && again[0] && p === again[0]) continue;
+        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+        if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
+        await p.close({ runBeforeUnload: false }).catch(()=>{});
+        closed++;
+      }
+    }
+
     if (closed > 0) {
       logger.info('[PRUNER] Fechou abas extras', { nome, closed });
+      try { await issues.append(nome, 'mil_action', `pruner_closed_extras n=${closed}`); } catch {}
     }
   } catch (e) {
     if (process.env.PRUNE_DEBUG === '1') {

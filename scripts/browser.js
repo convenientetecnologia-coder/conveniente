@@ -493,88 +493,49 @@ function ensureChromeProfilePreferences(userDataDir) {
  * Após prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
-  if (browser && browser._robeActiveFor === nome) return;
+  // 1) Sempre fecha about:blank extras (nunca aguarda flags)
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  try {
+    const pages = await browser.pages();
+    for (const p of pages) {
+      try {
+        if (mainPage && p === mainPage) continue;
+        if (!mainPage && pages[0] && p === pages[0]) continue;
+        let u = ''; try { u = p.url(); } catch {}
+        if (!u || u === 'about:blank') {
+          await p.close({ runBeforeUnload: false }).catch(()=>{});
+        }
+      } catch {}
+    }
+  } catch {}
+
+  // 2) Se em Robe/config/etc, não faz prune amplo
+  const isRobeActive = robeMeta && nome && robeMeta[nome] && robeMeta[nome].emExecucao === true;
+  const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
+  const isConfig = ctrl && ctrl.configurando === true;
+  const isHuman = ctrl && ctrl.humanControl === true;
+  const robeActiveFor = (browser && browser._robeActiveFor === nome);
+
+  if (isRobeActive || robeActiveFor || sendLockActive || isConfig || isHuman) {
+    return;
+  }
+
+  // 3) Prune amplo padrão (mais de 1 page)
   const t0 = Date.now();
-  let iterations = 0;
-  try {
-    const proc = browser.process && browser.process();
-    if (proc && proc.pid) {
-      if (process.env.BROWSER_DEBUG === '1') {
-        logger.debug(`[BROWSER][PID] ${proc.pid}`);
-      }
-    }
-  } catch (e) {
-    logger.warn('[BROWSER][PRUNE] erro ao obter PID do processo', { nome, error: (e && e.message) || e });
-  }
-
-  // Proteção ULTRA CONSCIENTE
-  try {
-    if (
-      robeMeta &&
-      nome &&
-      (
-        (robeMeta[nome]?.emExecucao === true) ||
-        (ctrl?.skipPruneUntil > Date.now())
-      )
-    ) {
-      // Militar: prune adiado devido Robe emExecucao/skipPruneUntil
-      if (process.env.BROWSER_DEBUG === '1') {
-        logger.debug(`[BROWSER][PRUNE][SKIP] Militar: prune adiado devido Robe emExecucao/skipPruneUntil para perfil ${nome}`);
-      }
-      return;
-    }
-  } catch (e) {
-    logger.warn('[BROWSER][PRUNE] erro ao avaliar proteção ULTRA CONSCIENTE', { nome, error: (e && e.message) || e });
-  }
-
-  let numPagesAfter = 0;
-
   while ((Date.now() - t0) < timeoutMs) {
-    iterations++;
     try {
       const pages = await browser.pages();
-      const pageInfos = [];
+      if (pages.length <= 1) break;
       for (const p of pages) {
-        let u = '';
-        try { u = p.url(); } catch {}
-        pageInfos.push(u || 'about:blank');
+        if (mainPage && p === mainPage) continue;
+        if (!mainPage && pages[0] && p === pages[0]) continue;
+        let u = ''; try { u = p.url(); } catch {}
+        if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
+        await p.close({ runBeforeUnload: false }).catch(()=>{});
       }
-      if (pages.length <= 1) {
-        if (iterations === 1 && process.env.BROWSER_DEBUG === '1') logger.debug(`[BROWSER][PRUNE] pages=${pages.length} urls=${JSON.stringify(pageInfos)}`);
-        break;
-      }
-      if (process.env.BROWSER_DEBUG === '1') {
-        logger.debug(`[BROWSER][PRUNE] detected ${pages.length} pages, closing extras... urls=${JSON.stringify(pageInfos)}`);
-      }
-      // Mantém a mainPage; fecha as demais
-      for (const p of pages) {
-        if (p === mainPage) continue;
-        try {
-          await p.close({ runBeforeUnload: false }).catch(()=>{});
-        } catch (e) {
-          logger.warn('[BROWSER][PRUNE] erro ao fechar página extra', { nome, error: (e && e.message) || e });
-        }
-      }
-      // Pequena pausa e revalida
       await sleep(intervalMs);
-    } catch (e) {
-      logger.warn('[BROWSER][PRUNE] erro durante varredura/fechamento de páginas', { nome, error: (e && e.message) || e });
-      break;
-    }
+    } catch { break; }
   }
-
-  // Atualiza robeMeta[nome].numPages pós-prune
-  try {
-    if (robeMeta && nome) {
-      numPagesAfter = await browser.pages().then(arr => arr.length).catch(() => 0);
-      robeMeta[nome].numPages = numPagesAfter;
-      // Militar: numPages atualizado para painel
-    }
-  } catch (e) {
-    logger.warn('[BROWSER][PRUNE] erro ao atualizar robeMeta.numPages', { nome, error: (e && e.message) || e });
-  }
-
-  return;
 }
 
 // END -- PRUNING PATCH
@@ -1940,6 +1901,79 @@ async function detectLimitOverlayEverywhere(page, msWindow = 0) {
   return { blocked:false };
 }
 
+// ==== Patch Killer de about:blank ====
+// Fecha qualquer aba "about:blank" que não navegue para uma URL real em até graceMs.
+// Ativo em qualquer contexto (human, robe, config, virtus).
+function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
+  if (!browser || browser._aboutBlankKillerInstalled) return;
+  browser._aboutBlankKillerInstalled = true;
+  const issues = require('./issues.js');
+  const timers = new Map();
+
+  async function pageFromTarget(t) {
+    try { return await t.page(); } catch { return null; }
+  }
+  function keyFor(target, page) {
+    return (page && page._targetId) || (target && target._targetId) || Math.random().toString(36).slice(2);
+  }
+  function clearTimer(key) {
+    const t = timers.get(key);
+    if (t) clearTimeout(t);
+    timers.delete(key);
+  }
+
+  async function armKiller(target) {
+    try {
+      if (!target || (typeof target.type === 'function' && target.type() !== 'page')) return;
+      const page = await pageFromTarget(target);
+      if (!page) return;
+      const key = keyFor(target, page);
+
+      // Se a page navegar para algo real antes do grace, cancela
+      try {
+        page.once('domcontentloaded', async () => {
+          try {
+            const u = page.url ? page.url() : '';
+            if (u && u !== 'about:blank') clearTimer(key);
+          } catch {}
+        });
+        page.once('close', () => clearTimer(key));
+      } catch {}
+
+      const timer = setTimeout(async () => {
+        try {
+          if (page.isClosed && page.isClosed()) return;
+          const u = page.url ? page.url() : '';
+          if (!u || u === 'about:blank') {
+            try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+            try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
+          }
+        } finally {
+          clearTimer(key);
+        }
+      }, graceMs);
+      timers.set(key, timer);
+    } catch {}
+  }
+
+  browser.on('targetcreated', armKiller);
+  browser.on('targetchanged', async (t) => {
+    try {
+      const p = await pageFromTarget(t);
+      const key = keyFor(t, p);
+      const u = p && p.url ? p.url() : '';
+      if (u && u !== 'about:blank') clearTimer(key);
+    } catch {}
+  });
+  browser.on('targetdestroyed', async (t) => {
+    try {
+      const p = await pageFromTarget(t);
+      const key = keyFor(t, p);
+      clearTimer(key);
+    } catch {}
+  });
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -1966,5 +2000,6 @@ module.exports = {
   // ======= ADICIONE ESTES DOIS:
   resolveNonceIfPresent,
   clickContinuarComo,
-  installOneTabGuard
+  installOneTabGuard,
+  installAboutBlankKiller
 };
