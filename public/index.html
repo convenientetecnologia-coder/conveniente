@@ -695,7 +695,7 @@
         // LEFT: toggle
         const left = document.createElement('div'); left.className='leftCol';
         const toggle = document.createElement('button');
-        toggle.className = 'toggle ' + (p.active ? 'close':'open');
+        toggle.className = 'toggle ' + (p.active ? 'close btn-vermelho':'open btn-verde');
         toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
         toggle.onclick = () => toggleBrowserUI(p, toggle);
         if (isFrozen) toggle.disabled = true;
@@ -707,7 +707,7 @@
 
         // NOVO: start 24h logo abaixo do toggle (com loading)
         const btnStartLeft = document.createElement('button');
-        btnStartLeft.className = 'btn';
+        btnStartLeft.className = 'btn btn-roxo';
         btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
         btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
         if (isFrozen) btnStartLeft.disabled = true;
@@ -867,7 +867,7 @@
 
         // Após montar as pills do Robe…
         const btnPlay = document.createElement('button');
-        btnPlay.className='icon-btn mini';
+        btnPlay.className='icon-btn mini btn-branco';
         btnPlay.title='Forçar postagem agora (Robe Play)';
         btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
         btnPlay.onclick = () => robePlayUI(p, btnPlay);
@@ -876,7 +876,7 @@
 
         // Novo botão: Robe 24h (por conta)
         const btnRobe24 = document.createElement('button');
-        btnRobe24.className = 'icon-btn mini';
+        btnRobe24.className = 'icon-btn mini btn-azul';
         btnRobe24.title='Pausar Robe por 24h';
         btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
         btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
@@ -951,7 +951,7 @@
         } else {
           // Botão “Invocar Humano” padrão
           const btnHuman = document.createElement('button');
-          btnHuman.className='icon-btn';
+          btnHuman.className='icon-btn btn-amarelo';
           btnHuman.title='Invocar Humano';
           btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
           btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
@@ -1577,7 +1577,8 @@
         } catch (e) {
           alert('Erro ao descongelar todos: ' + (e && e.message || e));
         } finally {
-          btn.disabled = false; btn.textContent = 'Descongelar';
+          btn.disabled = false;
+          btn.textContent = 'Descongelar';
         }
       };
     })();
