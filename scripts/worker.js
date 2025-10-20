@@ -17,8 +17,11 @@ const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NO
 
 // --- SHARD SUPPORT (multi-node auto) ---
 const SHARD_PROFILES = (() => { try { return JSON.parse(process.env.SHARD_PROFILES || '[]'); } catch { return []; }})();
-const SHARD_SET = new Set(Array.isArray(SHARD_PROFILES) ? SHARD_PROFILES : []);
+let SHARD_SET = new Set(Array.isArray(SHARD_PROFILES) ? SHARD_PROFILES : []); // era 'const', agora 'let'
 const STATUS_FILE_NAME = process.env.STATUS_FILE_NAME || 'status.json';
+
+// Helper para checar se um perfil está no shard
+function inShard(nome) { return SHARD_SET.size === 0 ? true : SHARD_SET.has(nome); }
 
 // Bloqueio universal: Detecta se o pauseReason=limit_posting e o cooldown está ativo
 async function isLimitPostingActive(nome) {
@@ -709,12 +712,12 @@ async function activateOnce(nome, source = '') {
   let _supervisorSlotGranted = false;
   try {
     // EARLY-GUARD SHARD: nunca abrir perfis fora do shard
-    if (SHARD_SET.size && !SHARD_SET.has(nome)) {
+    if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
-      logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${SHARD_SET.has(nome)} size=${SHARD_SET.size}`);
+      logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=false size=${SHARD_SET.size}`);
       return { ok: false, error: 'wrong_shard' };
     }
-    logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${SHARD_SET.has(nome)} size=${SHARD_SET.size}`);
+    logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${inShard(nome)} size=${SHARD_SET.size}`);
 
     // Supervisor interlock para aberturas durante kill_guard
     if (killGuardActive(nome)) {
@@ -897,8 +900,8 @@ function sendReply(msgId, data) {
 function loadPerfisJson() {
   try {
     const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
-    if (!SHARD_SET.size) return arr; // fallback se não shard (single instance)
-    return arr.filter(p => p && p.nome && SHARD_SET.has(p.nome));
+    if (!SHARD_SET.size) return arr;
+    return arr.filter(p => p && p.nome && inShard(p.nome));
   } catch { return []; }
 }
 function savePerfisJson(arr) {
@@ -2557,6 +2560,46 @@ const handlers = {
       }
       return { ok: true };
     } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
+  },
+
+  // Adiciona/atualiza o shard dinâmico e faz cleanup dos perfis não pertencentes mais ao shard
+  async ['set-shard']({ names }) {
+    try {
+      const newSet = new Set(Array.isArray(names) ? names : []);
+      // Descobre perfis que saíram deste shard
+      const removed = [];
+      for (const nome of SHARD_SET) {
+        if (!newSet.has(nome)) removed.push(nome);
+      }
+      SHARD_SET = newSet;
+
+      // Remove/stop/desanexar perfis que saíram do shard
+      for (const nome of removed) {
+        try { robeQueue.skip && robeQueue.skip(nome); } catch {}
+        try {
+          const ctrl = controllers.get(nome);
+          if (ctrl && ctrl.browser) {
+            await handlers.deactivate({ nome, reason: 'shard_moved', policy: 'preserveDesired' });
+          }
+        } catch {}
+        controllers.delete(nome);
+        try { healthState.delete(nome); } catch {}
+        try { profileFailures.delete(nome); } catch {}
+        if (robeMeta[nome]) {
+          delete robeMeta[nome].emExecucao;
+          delete robeMeta[nome].emFila;
+          delete robeMeta[nome].cpuHistory;
+          delete robeMeta[nome].ramHist;
+          delete robeMeta[nome].reloadAttemptsWindow;
+          delete robeMeta[nome].blockDetectWindow;
+        }
+      }
+      await snapshotStatusAndWrite();
+      return { ok: true, size: SHARD_SET.size, removed };
+
+    } catch (e) {
+      return { ok: false, error: e && e.message || String(e) };
+    }
   }
 };
 
@@ -2980,7 +3023,7 @@ async function nurseTick() {
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
     for (const nome of Object.keys(desired.perfis || {})) {
-      if (SHARD_SET.size && !SHARD_SET.has(nome)) {
+      if (SHARD_SET.size && !inShard(nome)) {
         if (process.env.NURSE_DEBUG === '1') {
           try { logger.info(`[NURSE][SKIP_OTHER_SHARD] ${nome}`); } catch {}
         }

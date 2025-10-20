@@ -10,22 +10,19 @@ const supervisor = require('./supervisor.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
-function splitInBlocks(list, blocks, maxPerBlock) {
-  const arr = Array.from(list);
+// NOVO: Algoritmo determinístico, justo, distribui round-robin lexicográfico.
+// Balanceamento perfeito, diferença máxima 1 entre nodes.
+function splitRoundRobinFair(names, blocks) {
+  if (blocks < 1) return [names.slice()];
+  const sorted = names.slice().sort((a, b) => a.localeCompare(b, 'pt-BR', {sensitivity:'base'}));
   const out = Array.from({ length: blocks }, () => []);
-  let i = 0;
-  while (arr.length) {
-    const name = arr.shift();
-    let loops = 0;
-    while (out[i].length >= maxPerBlock) {
-      i = (i+1) % blocks;
-      loops++; if (loops > blocks+2) break;
-    }
-    out[i].push(name);
-    i = (i+1) % blocks;
-  }
+  sorted.forEach((name, idx) => {
+    out[idx % blocks].push(name);
+  });
   return out;
 }
+
+// REMOVIDO splitInBlocks
 
 function readNodeStatusFile(idx) {
   try {
@@ -42,7 +39,7 @@ function createCluster() {
   const allPerfis = fileStore.loadPerfisJson() || [];
   const names = allPerfis.map(p => p.nome);
   const plan = planMemoryAndShards({ totalProfiles: names.length });
-  const blocks = splitInBlocks(names, plan.nodes, plan.perNode.maxChromes);
+  const blocks = splitRoundRobinFair(names, plan.nodes);
 
   logger.info('[CLUSTER][PLAN]', {
     totalMB: plan.totalMB,
@@ -59,6 +56,13 @@ function createCluster() {
 
   const children = [];
   const route = {};
+
+  // Rebuild route from a block array (idx->name list)
+  function routeRebuildFromBlocks(blocksArr) {
+    for (let i = 0; i < blocksArr.length; i++) {
+      for (const n of (blocksArr[i] || [])) route[n] = i;
+    }
+  }
 
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
@@ -103,15 +107,14 @@ function createCluster() {
       logger.warn('[CLUSTER] worker dropado', { idx, code, signal });
     });
 
-    children.push({ id: idx, proc, shardSet, pending, statusLast: null });
+    children.push({ id: idx, proc, pending, shard: new Set(shardNames) });
     logger.info('[CLUSTER] Worker iniciado', { idx: idx + 1, perfis: shardNames.length });
   }
 
   logger.info('[CLUSTER][ROUTE]', {
     totalPerfis: names.length,
     nodes: blocks.length,
-    assigned: Object.keys(route).length,
-    unassigned: names.length - Object.keys(route).length
+    assigned: Object.keys(route).length
   });
 
   function findChildByPerfil(nome) {
@@ -142,6 +145,46 @@ function createCluster() {
       }, timeoutMs);
     });
     return p;
+  }
+
+  // -------- HOT REBALANCE/HOT WATCHING ---------
+
+  // Aplica shards diretamente em todos os workers e reconstrói as rotas internas (route)
+  async function applyShardsToWorkers(blocksArr, reason = 'rebalance') {
+    logger.info('[CLUSTER][REB] applyShardsToWorkers', { reason, nodes: blocksArr.length });
+    const tasks = [];
+    for (let i = 0; i < children.length; i++) {
+      const shardNames = blocksArr[i] || [];
+      children[i].shard = new Set(shardNames);
+      tasks.push(sendTo(i, 'set-shard', { names: shardNames }, { timeoutMs: 20000 }));
+    }
+    await Promise.all(tasks);
+    // reconstrói rota
+    for (const k of Object.keys(route)) delete route[k];
+    routeRebuildFromBlocks(blocksArr);
+  }
+
+  // Garante rebalanceamento justo (diferença <= 1) sob evento ou demanda
+  async function rebalance(reason = 'watcher') {
+    const perfis = fileStore.loadPerfisJson() || [];
+    const namesNow = perfis.map(p => p.nome);
+    const k = children.length;
+    const fairBlocks = splitRoundRobinFair(namesNow, k);
+    await applyShardsToWorkers(fairBlocks, reason);
+  }
+
+  // Fallback para caso especial: novo perfil não roteado ainda
+  async function ensureAssigned(nome, reason = 'on_demand') {
+    const exists = (fileStore.loadPerfisJson() || []).some(p => p.nome === nome);
+    if (!exists) return false;
+    try {
+      findChildByPerfil(nome);
+      return true;
+    } catch {
+      await rebalance(reason + ': ' + nome);
+      try { findChildByPerfil(nome); return true; }
+      catch { return false; }
+    }
   }
 
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
@@ -209,11 +252,15 @@ function createCluster() {
       const allOk = results.every(r => r && r.ok !== false);
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }
+    // para comandos por perfil, assegura roteamento
+    if (nome && route[nome] === undefined) {
+      await ensureAssigned(nome, 'on_demand_send');
+    }
     try {
       const i = findChildByPerfil(nome);
       return sendTo(i, type, payload, opts);
     } catch (err) {
-      if (err && String(err).startsWith('Error: profile_not_assigned_to_any_worker')) {
+      if (String(err).startsWith('Error: profile_not_assigned_to_any_worker')) {
         return { ok: false, error: 'profile_not_assigned' };
       }
       throw err;
@@ -226,7 +273,23 @@ function createCluster() {
     }
   }
 
-  return { plan, children, sendWorkerCommand, kill };
+  // Watcher hot/rebalance em perfis.json
+  (function watchPerfisJson(){
+    const perfisFile = path.join(__dirname, '..', 'dados', 'perfis.json');
+    let timer = null;
+    try {
+      fs.watch(perfisFile, { persistent: false }, () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          rebalance('watcher:perfis.json').catch(e => logger.warn('[CLUSTER][REB] watcher error', { error: e && e.message || e }));
+        }, 150);
+      });
+    } catch (e) {
+      logger.warn('[CLUSTER] fs.watch perfis.json falhou; prossegue sem watcher.', { error: e && e.message || e });
+    }
+  })();
+
+  return { plan, children, sendWorkerCommand, kill, rebalance };
 }
 
 module.exports = { createCluster };
