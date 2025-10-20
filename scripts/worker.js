@@ -755,6 +755,9 @@ async function activateOnce(nome, source = '') {
       logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
         logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
+        // GARANTE “1 abertura por node”: mutex por worker
+        await acquireNodeOpen();
+
         const manifest = await ensureManifestValid(nome);
         if (!manifest) {
           // Não foi possível auto-curar (manifest + perfis.json quebrado)
@@ -878,6 +881,7 @@ async function activateOnce(nome, source = '') {
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
         return { ok: false, error: e && e.message || String(e) };
       } finally {
+        try { releaseNodeOpen(); } catch {}
         activationLocks.delete(nome);
       }
     })();
@@ -2600,7 +2604,48 @@ const handlers = {
     } catch (e) {
       return { ok: false, error: e && e.message || String(e) };
     }
-  }
+  },
+
+  async ['batch_start']({ names, startWork }) {
+    try {
+      const list = Array.isArray(names) ? names.filter(n => inShard(n)) : [];
+      if (!list.length) return { ok: true, accepted: true, processed: 0 };
+
+      // Lock simples contra sobreposição no mesmo worker
+      if (this._batchStartRunning) return { ok: true, accepted: false, info: 'already_running' };
+      this._batchStartRunning = true;
+
+      let count = 0;
+      for (const nome of list) {
+        try {
+          // skip se frozen
+          if (isFrozenNow(nome)) continue;
+
+          // Ativa navegador (usar activateOnce que já respeita semáforo por node)
+          const r = await activateOnce(nome, 'batch_start');
+          if (r && r.ok) {
+            // acionamento opcional do startWork
+            if (startWork) {
+              try { await start_work({ nome }); } catch {}
+            }
+            count++;
+          }
+        } catch (e) {
+          try { await issues.append(nome, 'mil_action', 'batch_start_item_failed ' + (e && e.message || e)); } catch {}
+        }
+        // delay curto entre tentativas para respirar
+        await new Promise(r => setTimeout(r, OPEN_ACTIVATION_DELAY_MS || 1200));
+      }
+
+      this._batchStartRunning = false;
+      await issues.append('system', 'mil_action', `batch_start_done processed=${count}/${list.length}`);
+      return { ok: true, processed: count, total: list.length };
+
+    } catch (e) {
+      this._batchStartRunning = false;
+      return { ok: false, error: e && e.message || String(e) };
+    }
+  },
 };
 
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
@@ -2792,6 +2837,19 @@ const NURSE_CFG = {
 const MAX_OPEN_CONCURRENCY = 1; // hard para servidor fraco!
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10); // delay entre ativações
+
+// Node-level open semaphore (garante 1 abertura por node)
+let _nodeOpenInUse = false;
+const _nodeOpenWaiters = [];
+async function acquireNodeOpen() {
+  if (!_nodeOpenInUse) { _nodeOpenInUse = true; return; }
+  return new Promise(res => _nodeOpenWaiters.push(res));
+}
+function releaseNodeOpen() {
+  const next = _nodeOpenWaiters.shift();
+  if (next) { try { setImmediate(next); } catch { next(); } }
+  else _nodeOpenInUse = false;
+}
 
 // === ULTRA RECOVERY (militar) ===
 const ULTRA_RECOVERY = {

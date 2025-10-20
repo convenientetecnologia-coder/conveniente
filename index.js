@@ -88,6 +88,8 @@ require('./scripts/api_sys.js')(app, apiClient, fileStore);
 require('./scripts/api_issues.js')(app, apiClient, fileStore);
 // Se usar api_static.js/adicional, inclua aqui: require('./scripts/api_static.js')(app);
 
+require('./scripts/api_cluster.js')(app, clusterClient, fileStore); // <-- ADICIONE aqui
+
 // Troque todos os console.log por logger.info conforme checklist
 logger.info('[BOOT] Garantindo arquivos base...');
 fileStore.ensureDesired();

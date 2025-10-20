@@ -1532,7 +1532,28 @@
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
       if (!btn) return;
-      btn.onclick = startAllSequential;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        startAllLock = true;
+        setGlobalActionButtonsDisabled(true);
+        if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
+        btn.disabled = true; btn.style.opacity='0.7'; btn.textContent='Iniciando...';
+        try {
+          const r = await fetch('/api/perfis/start-all', { method: 'POST' }).then(r=>r.json());
+          if (!r || !r.ok) {
+            alert('Falha ao iniciar orquestração: ' + ((r && r.error)||''));
+          } else {
+            alert('Orquestração de abertura iniciada. Os nodes abrirão 1 por vez, em paralelo entre si.');
+          }
+        } catch (e) {
+          alert('Erro ao iniciar start-all: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.style.opacity=''; btn.textContent = btn.dataset.idleTxt;
+          setGlobalActionButtonsDisabled(false);
+          startAllLock = false;
+          reloadPerfis();
+        }
+      };
     })();
 
     // Robe 24h (todos)

@@ -6,6 +6,9 @@ const issues = require('./issues.js');
 const { getAvailableMB } = require('./utils.js'); // <<< ADICIONADO CONFORME INSTRUÇÃO
 const logger = require('./logger.js');
 
+// LOCK GLOBAL PARA START-ALL (novo)
+let START_ALL_RUNNING = false;
+
 // --- HELPERS DE VALIDAÇÃO (conforme instrução) ---
 const isValidSlug = s => typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
 function assertPerfilExists(fileStore, nome) {
@@ -568,6 +571,35 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro fatal na rota delete perfil', { rota: '/api/perfis/:nome', nome: req.params && req.params.nome, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  // --- NOVA ROTA: ORQUESTRAÇÃO EM LOTE (start-all) ---
+  // POST /api/perfis/start-all — orquestra start-all clusterizado
+  app.post('/api/perfis/start-all', async (req, res) => {
+    if (START_ALL_RUNNING) {
+      return res.json({ ok: false, error: 'start_all_already_running' });
+    }
+    START_ALL_RUNNING = true;
+    try {
+      const all = fileStore.loadPerfisJson() || [];
+      const names = all.map(p => p && p.nome).filter(Boolean);
+
+      // Log de auditoria
+      try { await issues.append('system', 'mil_action', `start_all_triggered count=${names.length}`); } catch {}
+
+      // Dispara para o cluster — cada worker receberá a sua fatia via clusterMaster
+      // Não bloqueia: a execução é sequencial por node, mas paralela entre nodes
+      const r = await workerClient.sendWorkerCommand('batch_start', { names, startWork: true }, { timeoutMs: 30000 });
+      if (!r || r.ok === false) {
+        return res.json({ ok: false, error: (r && r.error) || 'batch_start_failed' });
+      }
+      return res.json({ ok: true, accepted: true, totalPerfis: names.length });
+
+    } catch (e) {
+      return res.json({ ok: false, error: e && e.message || String(e) });
+    } finally {
+      START_ALL_RUNNING = false;
     }
   });
 };

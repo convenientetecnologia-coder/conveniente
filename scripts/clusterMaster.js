@@ -189,6 +189,20 @@ function createCluster() {
 
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
     const nome = payload && payload.nome;
+    // ===== INÍCIO ALTERAÇÃO batch_start =====
+    if (type === 'batch_start') {
+      const allNames = Array.isArray(payload && payload.names) ? payload.names : [];
+      const startWork = !!(payload && payload.startWork);
+      const tasks = [];
+      for (let i = 0; i < children.length; i++) {
+        const namesForThis = allNames.filter(n => children[i].shard.has(n));
+        tasks.push(sendTo(i, 'batch_start', { names: namesForThis, startWork }, opts));
+      }
+      const results = await Promise.all(tasks);
+      const allOk = results.every(r => r && r.ok !== false);
+      return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
+    }
+    // ===== FIM ALTERAÇÃO batch_start =====
     if (type === 'get-status' && !nome) {
       const allPerfis = fileStore.loadPerfisJson() || [];
       const baseMap = new Map();
