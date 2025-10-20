@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <title>Gerenciador de Contas — Conveniente Tecnologia</title>
   <style>
-    :root{ --bg:#0e1420; --card:#111826; --card2:#0f1723; --border:#1f2a3a; --text:#e8eef8; --muted:#9fb2cf; --brand:#3c82f6; --brand2:#1f6be1; --good:#17b67c; --warn:#f0b429; --bad:#e35a5a; --pill:#1a2232; --pill-border:#2a3954; --btn:#1a2334; --btn-border:#2a3954; --btn-hover:#21304a; --stroke:#162033; }
+    :root{ --botao-fechar:#E82444; --botao-robe24h:#1887F2; --botao-liberarrobe:#17b67c; --botao-abrir24h:#9B32F5; --botao-invocarhum:#FFD600; --bg:#0e1420; --card:#111826; --card2:#0f1723; --border:#1f2a3a; --text:#e8eef8; --muted:#9fb2cf; --brand:#3c82f6; --brand2:#1f6be1; --good:#17b67c; --warn:#f0b429; --bad:#e35a5a; --pill:#1a2232; --pill-border:#2a3954; --btn:#1a2334; --btn-border:#2a3954; --btn-hover:#21304a; --stroke:#162033; }
     *{box-sizing:border-box} html,body{height:100%}
     body{
       margin:0;
@@ -193,6 +193,22 @@
     }
     .filters{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px }
     .filters .btn.active{ background:linear-gradient(135deg, var(--brand), var(--brand2)); border:0; color:#fff }
+
+    /* Cores fixas para automações (botões principais) */
+    .btn-fechar         { background: var(--botao-fechar) !important; color: #fff !important; border: none !important; }
+    .btn-fechar:hover   { background: #a1172f !important; }
+
+    .btn-robe24h        { background: var(--botao-robe24h) !important; color: #fff !important; border: none !important; }
+    .btn-robe24h:hover  { background: #125bc9 !important; }
+
+    .btn-liberarrobe    { background: var(--botao-liberarrobe) !important; color: #fff !important; border: none !important; }
+    .btn-liberarrobe:hover { background: #118255 !important; }
+
+    .btn-abrir24h       { background: var(--botao-abrir24h) !important; color: #fff !important; border: none !important; }
+    .btn-abrir24h:hover { background: #7118b4 !important; }
+
+    .btn-invocarhum     { background: var(--botao-invocarhum) !important; color: #322d00 !important; border: none !important; }
+    .btn-invocarhum:hover { background: #dec93b !important; }
   </style>
 </head>
 <body>
@@ -219,10 +235,10 @@
   <div class="toolbar toolbar-sticky">
     <button class="add-btn" id="addPerfilBtn">+Nova Conta</button>
     <button class="btn" id="citiesCountBtn">Cidades</button>
-    <button class="btn" id="startAllBtn">Abrir Todos 24h</button>
-    <button class="btn danger" id="stopAllBtn">Fechar Todos</button>
-    <button class="btn" id="robe24AllBtn">Robe 24h</button>
-    <button class="btn" id="robeReleaseAllBtn">Liberar Robe</button>
+    <button class="btn btn-abrir24h" id="startAllBtn">Abrir Todos 24h</button>
+    <button class="btn btn-fechar" id="stopAllBtn">Fechar Todos</button>
+    <button class="btn btn-robe24h" id="robe24AllBtn">Robe 24h</button>
+    <button class="btn btn-liberarrobe" id="robeReleaseAllBtn">Liberar Robe</button>
     <button class="btn" id="unfreezeAllBtn">Descongelar</button>
     <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
       <button class="btn" id="filterAll">Todas</button>
@@ -687,7 +703,7 @@
         // LEFT: toggle
         const left = document.createElement('div'); left.className='leftCol';
         const toggle = document.createElement('button');
-        toggle.className = 'toggle ' + (p.active ? 'close':'open');
+        toggle.className = 'toggle ' + (p.active ? 'close btn-fechar' : 'open btn-abrir24h');
         toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
         toggle.onclick = () => toggleBrowserUI(p, toggle);
         if (isFrozen) toggle.disabled = true;
@@ -699,7 +715,7 @@
 
         // NOVO: start 24h logo abaixo do toggle (com loading)
         const btnStartLeft = document.createElement('button');
-        btnStartLeft.className = 'btn';
+        btnStartLeft.className = 'btn btn-abrir24h';
         btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
         btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
         if (isFrozen) btnStartLeft.disabled = true;
@@ -868,7 +884,7 @@
 
         // Novo botão: Robe 24h (por conta)
         const btnRobe24 = document.createElement('button');
-        btnRobe24.className = 'icon-btn mini';
+        btnRobe24.className = 'icon-btn mini btn-robe24h';
         btnRobe24.title='Pausar Robe por 24h';
         btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
         btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
@@ -943,7 +959,7 @@
         } else {
           // Botão “Invocar Humano” padrão
           const btnHuman = document.createElement('button');
-          btnHuman.className='icon-btn';
+          btnHuman.className='icon-btn btn-invocarhum';
           btnHuman.title='Invocar Humano';
           btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
           btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
@@ -1069,6 +1085,7 @@
       ids.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.toggle('active',
+          (id==='filterAll'     && f==='all') ||
           (id==='filterAll'     && f==='all') ||
           (id==='filterActive'  && f==='active') ||
           (id==='filterInactive'&& f==='inactive') ||
