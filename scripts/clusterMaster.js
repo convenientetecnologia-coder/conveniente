@@ -199,8 +199,10 @@ function createCluster() {
         tasks.push(sendTo(i, 'batch_start', { names: namesForThis, startWork }, opts));
       }
       const results = await Promise.all(tasks);
-      const allOk = results.every(r => r && r.ok !== false);
-      return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
+      const processed = results.reduce((acc, r) => acc + (r && r.processed || 0), 0);
+      const total = results.reduce((acc, r) => acc + (r && r.total || 0), 0);
+      // NUNCA retorne partial_fail — a reconciliação segue na camada nurseTick/supervisor e é monitorada por start-all/status
+      return { ok: true, accepted: true, processed, total };
     }
     // ===== FIM ALTERAÇÃO batch_start =====
     if (type === 'get-status' && !nome) {

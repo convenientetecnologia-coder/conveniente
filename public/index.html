@@ -151,6 +151,7 @@
       font-weight: 800;
       box-shadow:0 1px 7px #a4791e12;
       letter-spacing:0.1px;
+      text-transform: none;
     }
     .btn.reset-memmil:disabled { opacity:.55; filter: saturate(0.7); cursor:not-allowed;}
     .icon-btn{
@@ -1543,7 +1544,37 @@
           if (!r || !r.ok) {
             alert('Falha ao iniciar orquestração: ' + ((r && r.error)||''));
           } else {
-            alert('Orquestração de abertura iniciada. Os nodes abrirão 1 por vez, em paralelo entre si.');
+            // Polling de progresso (até 15min)
+            const t0 = Date.now();
+            const poll = async () => {
+              try {
+                const p = await fetch('/api/perfis/start-all/status').then(r=>r.json()).catch(()=>null);
+                if (p && p.ok) {
+                  // Atualiza header (Ativos/Trabalhando) já vem por reloadPerfis()
+                  // Aqui, decide convergência:
+                  const done = (p.ativos + p.frozen) >= p.total;
+                  if (done) {
+                    alert(`Convergência atingida: Ativos=${p.ativos}/${p.total} (Frozen=${p.frozen}).`);
+                    return;
+                  }
+                  if ((Date.now() - t0) > 15*60*1000) {
+                    // Timeout: reportar faltantes
+                    const faltantes = (p.faltantesDetalhe||p.faltantes||[]);
+                    let msg = `Nem todos abriram em 15 min. Faltando ${p.faltando}/${p.total}.`;
+                    if (faltantes && faltantes.length) {
+                      const lines = Array.isArray(faltantes) ? faltantes.slice(0, 12).map(x=>{
+                        return typeof x === 'string' ? x : `${x.nome} ${x.why?('why='+x.why):''} ${x.lastError?('last='+x.lastError):''}`;
+                      }).join('\n') : '';
+                      msg += `\nDetalhes:\n${lines}`;
+                    }
+                    alert(msg);
+                    return;
+                  }
+                }
+              } catch {}
+              setTimeout(poll, 1200);
+            };
+            poll();
           }
         } catch (e) {
           alert('Erro ao iniciar start-all: ' + (e && e.message || e));

@@ -2611,6 +2611,18 @@ const handlers = {
       const list = Array.isArray(names) ? names.filter(n => inShard(n)) : [];
       if (!list.length) return { ok: true, accepted: true, processed: 0 };
 
+      // SINALIZA desired.active=true + virtus='on' (ou 'off' se startWork=false) para TODOS os nomes (segurança máxima)
+      try {
+        const d = readJsonFile(desiredPath, { perfis: {} });
+        d.perfis = d.perfis || {};
+        for (const nome of list) {
+          d.perfis[nome] = { ...(d.perfis[nome]||{}), active: true, virtus: (startWork ? 'on' : 'off') };
+        }
+        writeJsonAtomic(desiredPath, d);
+      } catch (e) {
+        try { await issues.append('system', 'mil_action', 'batch_start_desired_patch_failed ' + (e && e.message || e)); } catch {}
+      }
+
       // Lock simples contra sobreposição no mesmo worker
       if (this._batchStartRunning) return { ok: true, accepted: false, info: 'already_running' };
       this._batchStartRunning = true;
@@ -2621,25 +2633,30 @@ const handlers = {
           // skip se frozen
           if (isFrozenNow(nome)) continue;
 
-          // Ativa navegador (usar activateOnce que já respeita semáforo por node)
+          // Tenta abrir de fato
           const r = await activateOnce(nome, 'batch_start');
           if (r && r.ok) {
-            // acionamento opcional do startWork
+            // Inicia Virtus se solicitado
             if (startWork) {
               try { await start_work({ nome }); } catch {}
             }
             count++;
+          } else {
+            // Loga a falha desta tentativa (nurseTick fará retentativa na sequência pois desired já está on)
+            const msg = (r && r.error) ? ('activate_err: ' + r.error) : 'activate_unknown_failure';
+            try { await issues.append(nome, 'mil_action', 'batch_start_item_failed ' + msg); } catch {}
           }
         } catch (e) {
           try { await issues.append(nome, 'mil_action', 'batch_start_item_failed ' + (e && e.message || e)); } catch {}
         }
-        // delay curto entre tentativas para respirar
+        // Delay curto entre ativações (respeita OPEN_ACTIVATION_DELAY_MS)
         await new Promise(r => setTimeout(r, OPEN_ACTIVATION_DELAY_MS || 1200));
       }
 
       this._batchStartRunning = false;
-      await issues.append('system', 'mil_action', `batch_start_done processed=${count}/${list.length}`);
-      return { ok: true, processed: count, total: list.length };
+      try { await issues.append('system', 'mil_action', `batch_start_done processed=${count}/${list.length}`); } catch {}
+      // NUNCA retornamos erro global — a reconciliação segue via nurseTick
+      return { ok: true, processed: count, total: list.length, partial: count < list.length };
 
     } catch (e) {
       this._batchStartRunning = false;
@@ -2966,7 +2983,8 @@ async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
     const now = Date.now();
     let applied = { until: now + msDuration, mode: 'set' };
     await manifestStore.update(nome, (man) => {
-      man = man || {};
+      man = man || {}
+;
       const existingMem = (robeMeta[nome] && robeMeta[nome].frozenUntil) || 0;
       const existingDisk = (man && man.frozenUntil) || 0;
       const existing = Math.max(existingMem, existingDisk, 0);
@@ -3579,7 +3597,8 @@ async function recoveryStep(nome, page, step) {
   if (step === 'navHome') {
     st.counters.navHomes10m = _pruneWindow(st.counters.navHomes10m, 10*60*1000);
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
-    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
+    try {
+      await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
     st.counters.navHomes10m.push(Date.now());
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}

@@ -28,6 +28,20 @@ function resolveChromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
+// helper: retorna última issue de 'activate_failed'/'browser_disconnected'/'mil_action' por perfil
+async function lastOpenError(nome) {
+  try {
+    const file = path.join(fileStore.perfisDir, nome, 'issues.json');
+    const arr = fileStore.readJsonSafe(file, []);
+    if (!Array.isArray(arr) || !arr.length) return null;
+    const pick = arr.slice().reverse().find(it => {
+      const t = (it && it.type) ? String(it.type) : '';
+      return /activate_failed|browser_disconnected|mil_action/i.test(t);
+    });
+    return pick ? (pick.message || null) : null;
+  } catch { return null; }
+}
+
 module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
@@ -575,7 +589,6 @@ module.exports = (app, workerClient, fileStore) => {
   });
 
   // --- NOVA ROTA: ORQUESTRAÇÃO EM LOTE (start-all) ---
-  // POST /api/perfis/start-all — orquestra start-all clusterizado
   app.post('/api/perfis/start-all', async (req, res) => {
     if (START_ALL_RUNNING) {
       return res.json({ ok: false, error: 'start_all_already_running' });
@@ -585,21 +598,87 @@ module.exports = (app, workerClient, fileStore) => {
       const all = fileStore.loadPerfisJson() || [];
       const names = all.map(p => p && p.nome).filter(Boolean);
 
-      // Log de auditoria
-      try { await issues.append('system', 'mil_action', `start_all_triggered count=${names.length}`); } catch {}
+      // Hard-guard: desired.active=true + virtus='on' (work 24h) pra TODOS
+      try {
+        await fileStore.withDesiredLock(desired => {
+          desired.perfis = desired.perfis || {};
+          for (const nome of names) {
+            desired.perfis[nome] = { ...(desired.perfis[nome]||{}), active: true, virtus: 'on' };
+          }
+          return desired;
+        });
+        await issues.append('system', 'mil_action', `start_all_desired_on count=${names.length}`);
+      } catch (e) {}
 
-      // Dispara para o cluster — cada worker receberá a sua fatia via clusterMaster
-      // Não bloqueia: a execução é sequencial por node, mas paralela entre nodes
+      // Dispara o batch_start clusterizado (o worker já vai marcar desired também por redundância)
       const r = await workerClient.sendWorkerCommand('batch_start', { names, startWork: true }, { timeoutMs: 30000 });
       if (!r || r.ok === false) {
-        return res.json({ ok: false, error: (r && r.error) || 'batch_start_failed' });
+        // NUNCA quebre o fluxo. Apenas anote a falha do RPC e siga com desired ligado.
+        await issues.append('system', 'mil_action', `start_all_rpc_warn ${ (r && r.error) || 'unknown' }`);
       }
-      return res.json({ ok: true, accepted: true, totalPerfis: names.length });
+
+      // Resposta SEMPRE ok: o progresso é acompanhado por /api/perfis/start-all/status
+      res.json({ ok: true, accepted: true, totalPerfis: names.length });
 
     } catch (e) {
-      return res.json({ ok: false, error: e && e.message || String(e) });
+      res.json({ ok: false, error: e && e.message || String(e) });
     } finally {
       START_ALL_RUNNING = false;
+    }
+  });
+
+  // GET /api/perfis/start-all/status — progresso X/Y (vivo), congelados, holds e faltantes
+  app.get('/api/perfis/start-all/status', async (req, res) => {
+    try {
+      const perfisArr = fileStore.loadPerfisJson() || [];
+      const names = perfisArr.map(p => p.nome).filter(Boolean);
+      const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 20000 }).catch(() => null);
+
+      const overlay = Array.isArray(st && st.perfis) ? st.perfis : [];
+      const byName = new Map(overlay.map(o => [o.nome, o]));
+
+      let ativos = 0, trabalhando = 0, frozen = 0, hold = 0;
+      const faltantes = [];
+      const holdList = [];
+      const frozenList = [];
+      const faltantesDetalhe = [];
+
+      for (const nome of names) {
+        const o = byName.get(nome);
+        const isActive = !!(o && o.active);
+        const isTrab = !!(o && o.trabalhando);
+        const isFrozen = !!(o && o.robeFrozenUntil && o.robeFrozenUntil > Date.now());
+        const held = !!(o && o.activationHeldUntil && o.activationHeldUntil > Date.now());
+        if (isActive) ativos++;
+        if (isTrab) trabalhando++;
+        if (isFrozen) { frozen++; frozenList.push(nome); }
+        if (held) { hold++; holdList.push(nome); }
+        if (!isActive && !isFrozen) faltantes.push(nome);
+      }
+
+      // Para cada faltante, colhe um “porquê” (whyNotOpen/closingReason) + última issue relevante, para o painel
+      for (const nome of faltantes) {
+        const o = byName.get(nome);
+        const why = o && (o.whyNotOpen || o.closingReason || '');
+        const err = await lastOpenError(nome);
+        faltantesDetalhe.push({ nome, why, lastError: err || '' });
+      }
+
+      res.json({
+        ok: true,
+        total: names.length,
+        ativos,
+        trabalhando,
+        faltando: faltantes.length,
+        frozen,
+        hold,
+        faltantes,
+        frozenList,
+        holdList,
+        faltantesDetalhe
+      });
+    } catch (e) {
+      res.json({ ok: false, error: e && e.message || String(e) });
     }
   });
 };
