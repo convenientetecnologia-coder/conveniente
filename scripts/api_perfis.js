@@ -156,6 +156,13 @@ module.exports = (app, workerClient, fileStore) => {
     }
     await issues.append(nome, 'admin_activate_request', `by=${op}`);
 
+    // Override explícito do hold humano ao ativar manualmente/por Abrir Todos
+    await fileStore.withDesiredLock(desired => {
+      desired.perfis = desired.perfis || {};
+      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false };
+      return desired;
+    });
+
     // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
     {
       const freeMB = getAvailableMB();
@@ -324,6 +331,30 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro fatal na rota invoke_human', { nome, rota: '/api/perfis/:nome/invoke-human', error: e && e.message }, e);
       return res.json({ ok: false, error: (e && e.message) || 'invoke_human_failed' });
+    }
+  });
+
+  // Invocar Humano em TODOS os navegadores ATIVOS (não abre navegadores fechados)
+  app.post('/api/perfis/invoke-human-all-active', async (req, res) => {
+    try {
+      await issues.append('system', 'admin_invoke_human_request', 'mass_invoke_all_active');
+      const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 25000 });
+      const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+      const ativos = perfis.filter(p => p.active && !p.humanControl);
+      let okCount = 0, fail = [];
+      for (const p of ativos) {
+        try {
+          const r = await workerClient.sendWorkerCommand('invoke_human', { nome: p.nome }, { timeoutMs: 60000 });
+          if (r && r.ok) okCount++;
+          else fail.push(p.nome);
+        } catch (e) {
+          fail.push(p.nome);
+        }
+      }
+      if (fail.length) return res.json({ ok: false, invoked: okCount, failed: fail });
+      return res.json({ ok: true, invoked: okCount });
+    } catch (e) {
+      return res.json({ ok: false, error: e && e.message || String(e) });
     }
   });
 

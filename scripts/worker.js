@@ -725,6 +725,15 @@ async function activateOnce(nome, source = '') {
       return { ok:false, error:"kill_guard_until" };
     }
 
+    // BLINDAGEM: não abrir se estiver em hold de humano (somente override via API que limpa o hold)
+    try {
+      const desired = readJsonFile(desiredPath, { perfis: {} });
+      if (desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true) {
+        await reportAction(nome, 'mil_action', 'activate_skip_human_hold');
+        return { ok: false, error: 'human_hold' };
+      }
+    } catch {}
+
     // [PATCH-GPT5] Não bloquear ativação por limit_posting — Virtus deve poder operar mesmo durante pausa do Robe.
     // Mantemos o gate de supervisor/slots/RAM, mas permitimos abrir o navegador mesmo com pauseReason='limit_posting'.
 
@@ -1802,10 +1811,11 @@ try {
   // Checagem desired e reopenAt existente: NÃO sobrescreva um reopenAt futuro já calculado
   const d = readJsonFile(desiredPath, { perfis: {} });
   const isDesiredActive = d.perfis?.[nome]?.active === true;
+  const isHold = d.perfis?.[nome]?.humanHold === true;
   robeMeta[nome] = robeMeta[nome] || {};
   const now = Date.now();
 
-  if (!isFrozenNow(nome) && isDesiredActive) {
+  if (!isFrozenNow(nome) && isDesiredActive && !isHold) {
     if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
       robeMeta[nome].reopenAt = now + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
       robeMeta[nome].closingReason = 'disconnected';
@@ -1816,7 +1826,8 @@ try {
     }
   } else {
     robeMeta[nome].reopenAt = null;
-    issues.append(nome, 'mil_action', isFrozenNow(nome) ? 'reopen_suppressed_frozen' : 'reopen_suppressed_desired_off').catch(()=>{});
+    issues.append(nome, 'mil_action', isFrozenNow(nome) ? 
+      'reopen_suppressed_frozen' : (isHold ? 'reopen_suppressed_human_hold' : 'reopen_suppressed_desired_off')).catch(()=>{});
   }
 } catch {}
 
@@ -1985,7 +1996,9 @@ const handlers = {
   }
   const ctrl = controllers.get(nome);
   if (!ctrl) {
-    if (preserve && !isFrozenNow(nome)) {
+    const d = readJsonFile(desiredPath, { perfis: {} });
+    const isHold = d.perfis?.[nome]?.humanHold === true;
+    if (preserve && !isFrozenNow(nome) && !isHold) {
       robeMeta[nome] = robeMeta[nome] || {};
       const now = Date.now();
       // Só agenda se não houver reopenAt futuro
@@ -1996,6 +2009,10 @@ const handlers = {
       } else {
         issues.append(nome, 'mil_action', 'reopen_preserved_existing').catch(()=>{});
       }
+    } else if (preserve && isHold) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].reopenAt = null;
+      issues.append(nome, 'mil_action', 'reopen_suppressed_human_hold').catch(()=>{});
     }
     await snapshotStatusAndWrite();
     logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
@@ -2045,14 +2062,21 @@ const handlers = {
       if (!ok) { try { await issues.append('system','persist_failed', `${nome}|deactivate_desired_write`); } catch {} }
     } catch {}
   } else {
+    const d = readJsonFile(desiredPath, { perfis: {} });
+    const isHold = d.perfis?.[nome]?.humanHold === true;
     robeMeta[nome] = robeMeta[nome] || {};
     const now = Date.now();
-    if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
-      robeMeta[nome].reopenAt = now + reopenDelayMs;
-      robeMeta[nome].closingReason = reason || '';
-      issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
+    if (!isHold) {
+      if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
+        robeMeta[nome].reopenAt = now + reopenDelayMs;
+        robeMeta[nome].closingReason = reason || '';
+        issues.append(nome, 'mil_action', `reopen_scheduled(${reason||'unknown'}) in ${Math.round(reopenDelayMs/1000)}s`).catch(()=>{});
+      } else {
+        issues.append(nome, 'mil_action', 'reopen_preserved_existing').catch(()=>{});
+      }
     } else {
-      issues.append(nome, 'mil_action', 'reopen_preserved_existing').catch(()=>{});
+      robeMeta[nome].reopenAt = null;
+      issues.append(nome, 'mil_action', 'reopen_suppressed_human_hold').catch(()=>{});
     }
   }
   await snapshotStatusAndWrite();
@@ -2127,6 +2151,21 @@ const handlers = {
 
     // 2. ATENÇÃO: SETE AS FLAGS _ANTES_ DE TUDO!
     ctrl.humanControl = true;
+
+    // Persistir hold humano e limpar qualquer reabertura programada
+    try {
+      const desired = readJsonFile(desiredPath, { perfis: {} });
+      desired.perfis = desired.perfis || {};
+      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true };
+      writeJsonAtomic(desiredPath, desired);
+    } catch {}
+
+    try {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].reopenAt = null;
+      robeMeta[nome].closingReason = null;
+    } catch {}
+
     ctrl.configurando = false;
     stopPruneLoop(nome); // Garante que NENHUM prune corra durante humano
     try {
@@ -2192,6 +2231,15 @@ const handlers = {
 
     await snapshotStatusAndWrite();
     logger.info('[HANDLER] human-resume ok', { nome });
+
+    // Remover hold humano (override explícito)
+    try {
+      const desired = readJsonFile(desiredPath, { perfis: {} });
+      desired.perfis = desired.perfis || {};
+      if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
+      writeJsonAtomic(desiredPath, desired);
+    } catch {}
+
     return { ok:true };
   },
 
@@ -2427,6 +2475,7 @@ const handlers = {
     // FIM DA INSTRUÇÃO 5
 
     const perfisArr = loadPerfisJson();
+    const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
     const perfis = perfisArr.map(p => {
       const nome = p.nome;
       let issuesCount = 0;
@@ -2468,6 +2517,7 @@ const handlers = {
         trabalhando: !!(controllers.get(nome)?.trabalhando),
         configurando: !!(controllers.get(nome)?.configurando),
         humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
+        humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
         issuesCount,
         ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
@@ -2641,6 +2691,7 @@ try {
 // FIM DA INSTRUÇÃO 5
 
 const perfisArr = loadPerfisJson();
+const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
 const perfis = perfisArr.map(p => {
 const nome = p.nome;
 let issuesCount = 0;
@@ -2682,6 +2733,7 @@ return {
   trabalhando: !!(controllers.get(nome)?.trabalhando),
   configurando: !!(controllers.get(nome)?.configurando),
   humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
+  humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
   issuesCount,
   ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
   cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
@@ -3047,6 +3099,12 @@ async function nurseTick() {
       }
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
+
+      // Nunca abrir/reconciliar durante hold humano
+      if (want.humanHold === true) {
+        await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
+        continue;
+      }
 
       // INSTRUÇÃO CIRÚRGICA: Guard emExecucao no nurseTick (logo após pegar ctrl)
       {

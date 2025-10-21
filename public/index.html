@@ -229,6 +229,7 @@
     <button class="btn" id="citiesCountBtn">Cidades</button>
     <button class="btn btn-roxo" id="startAllBtn">Abrir Todos 24h</button>
     <button class="btn btn-vermelho" id="stopAllBtn">Fechar Todos</button>
+    <button class="btn btn-amarelo" id="invokeAllBtn">Invocar Tudo</button>
     <button class="btn btn-azul" id="robe24AllBtn">Robe 24h</button>
     <button class="btn btn-branco" id="robeReleaseAllBtn">Liberar Robe</button>
     <button class="btn btn-cinza" id="unfreezeAllBtn">Descongelar</button>
@@ -856,8 +857,9 @@
         }
 
         // Opcional: Adicione pill/status visual "Modo Humano"
-        if (p.humanControl) {
-          titleRow.append(buildPill('Modo Humano', 'warn'));
+        if (p.humanControl || p.humanHold) {
+          const label = p.humanControl ? 'Modo Humano' : 'Modo Humano (hold)';
+          titleRow.append(buildPill(label, 'warn'));
         }
 
         // ------------- ABAS/NUMPAGES PILL -------------
@@ -1579,6 +1581,31 @@
         } finally {
           btn.disabled = false;
           btn.textContent = 'Descongelar';
+        }
+      };
+    })();
+
+    // Bind do botão “Invocar Tudo”
+    (function bindInvokeAllBtn(){
+      const btn = document.getElementById('invokeAllBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        const idleTxt = btn.textContent;
+        btn.disabled = true; btn.style.opacity='0.7'; btn.textContent='Invocando...';
+        setGlobalActionButtonsDisabled(true, { exclude: ['invokeAllBtn'] });
+        try {
+          const r = await window.electronAPI.invokeHumanAllActive();
+          if (!r || !r.ok) {
+            alert('Falha ao invocar humano em massa: ' + ((r && r.error) || ''));
+          }
+          await new Promise(r=>setTimeout(r,500));
+          reloadPerfis();
+        } catch (e) {
+          alert('Erro no Invocar Tudo: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.style.opacity=''; btn.textContent = idleTxt;
+          setGlobalActionButtonsDisabled(false);
         }
       };
     })();
