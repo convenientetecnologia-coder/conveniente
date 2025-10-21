@@ -46,7 +46,6 @@ const api = {
     return data;
   },
   resumeHuman:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/human-resume`, { method: 'POST' }).then(r => r.json()),
-  startAll:        () => fetch('/api/perfis/start-all', { method: 'POST' }).then(r => r.json()),
   // Adicione abaixo endpoints de auditoria/search para localizacoes_ruins quando implementar
 };
 

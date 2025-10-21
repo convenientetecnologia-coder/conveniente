@@ -260,37 +260,6 @@ async function patchPage(nome, page, coords) {
   } catch {}
 }
 
-// Adicionada função patchPageWithRetry logo abaixo de patchPage (conforme instrução)
-async function patchPageWithRetry(nome, page, coords, tries = 2) {
-  let lastErr = null;
-  for (let i=0; i<tries; i++) {
-    try {
-      if (page && page.isClosed && page.isClosed()) {
-        // reabre
-        const b = page.browser && page.browser();
-        if (!b) throw new Error('browser_lost');
-        const np = await b.newPage();
-        page = np;
-      }
-      await patchPage(nome, page, coords);
-      return page;
-    } catch (e) {
-      lastErr = e;
-      const msg = (e && e.message) || String(e);
-      if (!/Session closed|Target closed|Execution context was destroyed/i.test(msg)) {
-        throw e;
-      }
-      // fecha e tenta nova
-      try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-      const b = page.browser && page.browser();
-      if (!b) throw e;
-      const np = await b.newPage();
-      page = np;
-    }
-  }
-  throw lastErr || new Error('patch_retry_exhausted');
-}
-
 // Minimização suave
 async function ensureMinimizedWindowForPage(page) {
   // GUARDA: A função minimize é inerte para steady-state (só uso manual/debug)
@@ -913,8 +882,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
 
     // 5) patchPage na primeira aba — se falhar, fecha e relança
     try {
-      let page = (await browser.pages())[0];
-      page = await patchPageWithRetry(manifest.nome, page, coords, 2);
+      const page = (await browser.pages())[0];
+      await patchPage(manifest.nome, page, coords);
     } catch (e) {
       await safeCloseBrowser(browser);
       throw e;
@@ -2010,7 +1979,6 @@ module.exports = {
   configureProfile,
   invocarHumano,
   patchPage,
-  patchPageWithRetry,
   injectCookies,
   ensureMinimizedWindowForPage,
   pruneExtraWindows, // expose for worker (força prune)

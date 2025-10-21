@@ -189,22 +189,6 @@ function createCluster() {
 
   async function sendWorkerCommand(type, payload = {}, opts = {}) {
     const nome = payload && payload.nome;
-    // ===== INÍCIO ALTERAÇÃO batch_start =====
-    if (type === 'batch_start') {
-      const allNames = Array.isArray(payload && payload.names) ? payload.names : [];
-      const startWork = !!(payload && payload.startWork);
-      const tasks = [];
-      for (let i = 0; i < children.length; i++) {
-        const namesForThis = allNames.filter(n => children[i].shard.has(n));
-        tasks.push(sendTo(i, 'batch_start', { names: namesForThis, startWork }, opts));
-      }
-      const results = await Promise.all(tasks);
-      const processed = results.reduce((acc, r) => acc + (r && r.processed || 0), 0);
-      const total = results.reduce((acc, r) => acc + (r && r.total || 0), 0);
-      // NUNCA retorne partial_fail — a reconciliação segue na camada nurseTick/supervisor e é monitorada por start-all/status
-      return { ok: true, accepted: true, processed, total };
-    }
-    // ===== FIM ALTERAÇÃO batch_start =====
     if (type === 'get-status' && !nome) {
       const allPerfis = fileStore.loadPerfisJson() || [];
       const baseMap = new Map();
