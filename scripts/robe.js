@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { patchPage, patchPageWithRetry/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
+const { patchPage/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 const utils = require('./utils.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
@@ -1079,18 +1079,9 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
     try {
       p = await browser.newPage();
       await ensureXPathPolyfill(p);
-      p = await patchPageWithRetry(nome, p, coords, 2); // NOVO: retry para patchPage
+      await patchPage(nome, p, coords);
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
-      // Se body não aparecer logo, tente reload curto antes de lançar erro (ultra robustez)
-      try {
-        await p.waitForSelector('body', { timeout: 3500 });
-      } catch {
-        try {
-          await p.reload({ waitUntil: 'domcontentloaded', timeout: 10000 }); 
-          await p.waitForSelector('body', { timeout: 3000 }); 
-        } catch {}
-      }
       return p; // sucesso
     } catch (e) {
       lastError = e;
