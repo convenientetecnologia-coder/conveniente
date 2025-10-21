@@ -1078,6 +1078,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
     let p = null;
     try {
       p = await browser.newPage();
+      // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
+      const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
+      guard[nome] = Date.now() + 20000;
+
       await ensureXPathPolyfill(p);
       await patchPage(nome, p, coords);
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
@@ -1516,7 +1520,20 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // PASSO 1 — Detector ultra-específico antes de qualquer attach/fastDetect/overlay:
     // GUARDA ULTRA-RÁPIDO: Detecta <span>Limite atingido</span> e ABORTA na hora
-    await page.waitForSelector('body', { timeout: 5000 });
+    // Aguarda DOM básico sem fragilidade, com fallback
+    const waitBody = async () => {
+      const ok = await page.waitForFunction(() => !!(document && document.body), { timeout: 15000 }).catch(()=>false);
+      if (ok) return true;
+      // Se a página fechou, classifique explicitamente
+      if (typeof page.isClosed === 'function' && page.isClosed()) {
+        throw new Error('page_closed_before_body');
+      }
+      try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 }); } catch {}
+      return await page.waitForFunction(() => !!(document && document.body), { timeout: 5000 }).catch(()=>false) || false;
+    };
+    const hasBody = await waitBody();
+    if (!hasBody) throw new Error('create_body_not_available');
+
     const bloqueioLimite = await page.evaluate(() => {
       function normalize(str) {
         return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();

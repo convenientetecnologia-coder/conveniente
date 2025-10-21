@@ -276,16 +276,20 @@ function createCluster() {
   // Watcher hot/rebalance em perfis.json
   (function watchPerfisJson(){
     const perfisFile = path.join(__dirname, '..', 'dados', 'perfis.json');
-    let timer = null;
-    try {
-      fs.watch(perfisFile, { persistent: false }, () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => {
-          rebalance('watcher:perfis.json').catch(e => logger.warn('[CLUSTER][REB] watcher error', { error: e && e.message || e }));
-        }, 150);
-      });
-    } catch (e) {
-      logger.warn('[CLUSTER] fs.watch perfis.json falhou; prossegue sem watcher.', { error: e && e.message || e });
+    if (process.env.CLUSTER_AUTO_REBALANCE === '1') {
+      let timer = null;
+      try {
+        fs.watch(perfisFile, { persistent: false }, () => {
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            rebalance('watcher:perfis.json').catch(e => logger.warn('[CLUSTER][REB] watcher error', { error: e && e.message || e }));
+          }, 150);
+        });
+      } catch (e) {
+        logger.warn('[CLUSTER] fs.watch perfis.json falhou; prossegue sem watcher.', { error: e && e.message || e });
+      }
+    } else {
+      logger.info('[CLUSTER][REB] watcher disabled (CLUSTER_AUTO_REBALANCE!=1)');
     }
   })();
 

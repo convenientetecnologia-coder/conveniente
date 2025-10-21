@@ -1061,20 +1061,8 @@ function getWorkingProfileNames() {
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
-    // 1) FECHA SEMPRE qualqer about:blank extra (independente do estado)
     const pages = await browser.pages();
     let closed = 0;
-    for (const p of pages) {
-      try {
-        if (mainPage && p === mainPage) continue;
-        if (!mainPage && pages[0] && p === pages[0]) continue;
-        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-        if (!url || url === 'about:blank') {
-          await p.close({ runBeforeUnload: false }).catch(()=>{});
-          closed++;
-        }
-      } catch {}
-    }
 
     const ctrl = controllers.get(nome);
     const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
@@ -1082,7 +1070,22 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman = ctrl && ctrl.humanControl === true;
 
-    // 2) PRUNE amplo SOMENTE se permitido
+    // 1) NÃO feche about:blank durante Robe/Config/Humano/SendLock
+    if (!(sendLockActive || inRobe || inConfig || inHuman)) {
+      for (const p of pages) {
+        try {
+          if (mainPage && p === mainPage) continue;
+          if (!mainPage && pages[0] && p === pages[0]) continue;
+          let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+          if (!url || url === 'about:blank') {
+            await p.close({ runBeforeUnload: false }).catch(()=>{});
+            closed++;
+          }
+        } catch {}
+      }
+    }
+
+    // 2) PRUNE amplo SOMENTE se permitido (mantém exatamente como está)
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       const again = await browser.pages();
       for (const p of again) {
@@ -2575,9 +2578,22 @@ const handlers = {
 
       // Remove/stop/desanexar perfis que saíram do shard
       for (const nome of removed) {
+        const ctrl = controllers.get(nome);
+        const rm = robeMeta[nome] || {};
+        const robeRunning = rm.emExecucao === true || (ctrl && ctrl.browser && ctrl.browser._robeActiveFor === nome);
+        const busy = robeRunning || (ctrl && (ctrl.configurando === true || ctrl.humanControl === true));
+
+        if (busy) {
+          // Modo drain: não derrubar agora; agenda para depois
+          robeMeta[nome] = rm;
+          rm.pendingShardMove = true;
+          rm.deferShardMoveUntil = Date.now() + 10*60*1000; // 10 min de janela
+          await issues.append(nome, 'mil_action', 'shard_move_deferred (busy)');
+          continue; // não desativa agora
+        }
+
         try { robeQueue.skip && robeQueue.skip(nome); } catch {}
         try {
-          const ctrl = controllers.get(nome);
           if (ctrl && ctrl.browser) {
             await handlers.deactivate({ nome, reason: 'shard_moved', policy: 'preserveDesired' });
           }

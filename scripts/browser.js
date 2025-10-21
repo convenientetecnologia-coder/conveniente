@@ -1942,6 +1942,13 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
 
       const timer = setTimeout(async () => {
         try {
+          // Nunca matar about:blank enquanto o Robe desta conta estiver ativo
+          if (browser && browser._robeActiveFor === nome) return;
+
+          // Respeitar supressão explícita por conta (armada pelo robe.js ao abrir a page)
+          const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
+          if (sup > Date.now()) return;
+
           if (page.isClosed && page.isClosed()) return;
           const u = page.url ? page.url() : '';
           if (!u || u === 'about:blank') {
