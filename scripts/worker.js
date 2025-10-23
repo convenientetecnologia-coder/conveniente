@@ -386,6 +386,9 @@ try {
   logger.info(`[WORKER][BOOT][SHARD] pid=${process.pid} shardSize=${SHARD_SET.size}`);
 } catch {}
 
+// Snapshot inicial imediato — garante status_node_X.json no boot mesmo sem browsers
+setImmediate(() => { try { snapshotStatusAndWrite().catch(()=>{}); } catch {} });
+
 // Caminhos principais
 const perfisPath = path.join(__dirname, '../dados', 'perfis.json');
 const presetsPath = path.join(__dirname, '../dados', 'ua_presets.json');
@@ -1925,7 +1928,7 @@ const handlers = {
   async ['criar-perfil']({ cidade, cookies }) {
     logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
     if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
-    if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
+    if (!fs.existsExists(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
@@ -2753,8 +2756,8 @@ return {
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
-  // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
-  // lastResetAt: robeMeta[nome]?.lastResetAt || null,
+  // lastMaintenanceAt: !!robeMeta[nome]?.lastMaintenanceAt || null,
+  // lastResetAt: (robeMeta[nome]?.lastResetAt) || null,
   // lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
   // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
   // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
@@ -2784,8 +2787,8 @@ robes[nome] = {
   lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
-  // lastMaintenanceAt: robeMeta[nome]?.lastMaintenanceAt || null,
-  // lastResetAt: robeMeta[nome]?.lastResetAt || null,
+  // lastMaintenanceAt: !!robeMeta[nome]?.lastMaintenanceAt || null,
+  // lastResetAt: (robeMeta[nome]?.lastResetAt) || null,
   // lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
   // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
   // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null

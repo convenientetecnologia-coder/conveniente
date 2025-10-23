@@ -35,6 +35,8 @@ function readNodeStatusFile(idx) {
   } catch { return null; }
 }
 
+const MAX_FILE_AGE_MS = parseInt(process.env.CLUSTER_STATUS_FILE_MAX_AGE_MS || '60000', 10);
+
 function createCluster() {
   const allPerfis = fileStore.loadPerfisJson() || [];
   const names = allPerfis.map(p => p.nome);
@@ -198,12 +200,13 @@ function createCluster() {
           label: p.label || null,
           cidade: p.cidade,
           uaPresetId: p.uaPresetId,
-          active: false, trabalhando:false, configurando:false, humanControl:false,
+          active: false, trabalhando: false, configurando: false, humanControl: false,
           issuesCount: 0,
           ramMB: null, cpuPercent: null, numPages: null,
-          robeFrozenUntil: null, frozenReason:null, frozenAt:null, frozenSetBy:null,
-          activationHeldUntil:null, killGuardUntil:null, reopenAt:null,
-          openBackoffMs:null, lastSwapAt:null, lastSwapPeer:null, swapCooldown:null, whyNotOpen:null
+          robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
+          activationHeldUntil: null, killGuardUntil: null, reopenAt: null,
+          openBackoffMs: null, lastSwapAt: null, lastSwapPeer: null, swapCooldown: null, whyNotOpen: null,
+          manifestStatus: null, closingReason: null
         });
       }
 
@@ -211,40 +214,95 @@ function createCluster() {
         children.map((_, i) => sendTo(i, 'get-status', {}, { timeoutMs: STATUS_TIMEOUT_MS }))
       );
 
-      let warningParts = [];
+      let combinedRobes = {};
+      let combinedQueue = [];
+      let anyOverlay = false;
+      let sysPick = null;
+      const warningParts = [];
+
+      // Primeira passada: RPC ou arquivo fresco (<= MAX_FILE_AGE_MS)
       for (let i = 0; i < results.length; i++) {
-        const r = results[i];
         let payload = null;
         let source = 'rpc';
+        const r = results[i];
+
         if (r.status === 'fulfilled' && r.value && Array.isArray(r.value.perfis)) {
           payload = r.value;
         } else {
           const fb = readNodeStatusFile(i);
-          if (fb && fb.json && Array.isArray(fb.json.perfis) && fb.ageMs <= 30000) {
+          if (fb && fb.json && Array.isArray(fb.json.perfis) && fb.ageMs <= MAX_FILE_AGE_MS) {
             payload = fb.json;
-            source = `file(${Math.round(fb.ageMs/1000)}s)`;
-            warningParts.push(`node${i+1}: rpc_fail -> file_ok(${Math.round(fb.ageMs/1000)}s)`);
+            source = `file(${Math.round(fb.ageMs / 1000)}s)`;
+            warningParts.push(`node${i + 1}: rpc_fail -> file_ok(${Math.round(fb.ageMs / 1000)}s)`);
           } else {
-            warningParts.push(`node${i+1}: no_reply`);
+            warningParts.push(`node${i + 1}: no_reply`);
           }
         }
         if (!payload) continue;
+        anyOverlay = true;
+
+        // perfis
         for (const p of payload.perfis || []) {
-          const m = baseMap.get(p.nome);
-          if (!m) continue;
-          Object.assign(m, p);
+          const dst = baseMap.get(p.nome);
+          if (dst) Object.assign(dst, p);
+        }
+
+        // robes
+        if (payload.robes && typeof payload.robes === 'object') {
+          combinedRobes = Object.assign(combinedRobes, payload.robes);
+        }
+        // robeQueue
+        if (Array.isArray(payload.robeQueue)) {
+          combinedQueue.push(...payload.robeQueue);
+        }
+
+        if (!sysPick && payload.sys) sysPick = payload.sys;
+      }
+
+      // Segunda passada: se não houve overlay nenhum, aceite arquivos mesmo “stale”
+      if (!anyOverlay) {
+        for (let i = 0; i < children.length; i++) {
+          const fb = readNodeStatusFile(i);
+          if (fb && fb.json && Array.isArray(fb.json.perfis)) {
+            const payload = fb.json;
+            // perfis
+            for (const p of payload.perfis || []) {
+              const dst = baseMap.get(p.nome);
+              if (dst) Object.assign(dst, p);
+            }
+            // robes/queue
+            if (payload.robes && typeof payload.robes === 'object') {
+              combinedRobes = Object.assign(combinedRobes, payload.robes);
+            }
+            if (Array.isArray(payload.robeQueue)) {
+              combinedQueue.push(...payload.robeQueue);
+            }
+            if (!sysPick && payload.sys) sysPick = payload.sys;
+            warningParts.push(`node${i + 1}: using_stale_file(${Math.round((fb.ageMs || 0) / 1000)}s)`);
+          }
         }
       }
 
-      const perfis = Array.from(baseMap.values());
-      const robes = {};
-      const robeQueue = [];
-      let out = { perfis, robes, robeQueue, autoMode: null, sys: null, ts: Date.now() };
-      if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
-      if (warningParts.length) {
-        logger.warn('[CLUSTER][STATUS] parcial', { nodes: children.length, warn: out.warning, perfis: perfis.length, totalPerfis: allPerfis.length });
+      // dedup e ordem para robeQueue
+      if (combinedQueue.length) {
+        const seen = new Set();
+        combinedQueue = combinedQueue.filter(n => {
+          if (!n || seen.has(n)) return false;
+          seen.add(n);
+          return true;
+        });
       }
-      // --- logger.info OK removido para evitar poluição ---
+
+      const perfis = Array.from(baseMap.values());
+      const out = {
+        perfis,
+        robes: combinedRobes,
+        robeQueue: combinedQueue,
+        autoMode: null,
+        sys: sysPick || null,
+        ts: Date.now()
+      };
+      if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
       return out;
     }
     if (type === 'unfreeze-all' || type === 'robes-release-all') {

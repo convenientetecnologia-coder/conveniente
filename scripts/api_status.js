@@ -337,7 +337,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
     robeQueue: overlayINST && overlayINST.robeQueue ? overlayINST.robeQueue : [],
     autoMode: overlayINST && typeof overlayINST.autoMode !== 'undefined' ? overlayINST.autoMode : null,
-    sys: overlayINST && typeof overlayINST.sys !== 'undefined' ? overlayINST.sys : null,
+    sys: overlayINST && typeof overlayINST.sys !== 'undefined'
+      ? overlayINST.sys
+      : (fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null),
     warning: warningINST,
     ts: Date.now()
   });
