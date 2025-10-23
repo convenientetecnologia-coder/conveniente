@@ -708,6 +708,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
     ];
 
+    // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
+    if (process.env.MEDIA_AUTO_UI === '1') {
+      launchArgs.push('--use-fake-ui-for-media-stream');
+    }
+
     // ENV para adicionar argumentos de debug
     const extraArgsEnv = (process.env.CHROME_EXTRA_ARGS || '').trim();
     if (extraArgsEnv) {
@@ -844,23 +849,56 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       });
     } catch {}
 
-    // 3) Permissões GEO (se falhar, segue)
+    // 3) Permissões: GEO + CAMERA + MICROFONE (militar, multi-origin, dinâmico)
     try {
       const context = browser.defaultBrowserContext();
-      const origins = [
+      const MEDIA_ORIGINS = [
         'https://facebook.com',
         'https://www.facebook.com',
         'https://m.facebook.com',
+        'https://web.facebook.com',
+        'https://mbasic.facebook.com',
         'https://business.facebook.com',
         'https://messenger.com',
-        'https://www.messenger.com'
+        'https://www.messenger.com',
+        'https://lookaside.facebook.com',
+        'https://staticxx.facebook.com'
       ];
-      for (const o of origins) {
-        await context.overridePermissions(o, ['geolocation']);
+      for (const o of MEDIA_ORIGINS) {
+        await context.overridePermissions(o, ['geolocation', 'camera', 'microphone']);
       }
-      if (process.env.BROWSER_DEBUG === '1') logger.debug('>> [BROWSER][STEP] Permissão GEO concedida [OK]');
+
+      // Blindagem dinâmica: qualquer nova target criada/alterada (iframe/popup/flow) -> re-grant
+      function originOf(u) {
+        try {
+          const url = new URL(u);
+          return `${url.protocol}//${url.host}`;
+        } catch { return null; }
+      }
+      function isFbHost(host) {
+        return !!host && (
+          host.endsWith('.facebook.com') || host === 'facebook.com' ||
+          host.endsWith('.messenger.com') || host === 'messenger.com'
+        );
+      }
+      async function grantForUrl(u) {
+        const ori = originOf(u);
+        if (!ori) return;
+        try {
+          const h = (new URL(u)).host;
+          if (isFbHost(h)) {
+            await context.overridePermissions(ori, ['geolocation', 'camera', 'microphone']);
+          }
+        } catch {}
+      }
+      browser.on('targetcreated', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
+      browser.on('targetchanged', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
+
+      if (process.env.BROWSER_DEBUG === '1') {
+        logger.debug('>> [BROWSER][STEP] Permissões de mídia concedidas para Facebook/Messenger.');
+      }
     } catch (e) {
-      logger.warn('[BROWSER][Permissão GEO] Falha ao conceder geolocalização: ' + ((e && e.message) || e));
+      logger.warn('[BROWSER][Permissões mídia] Falha ao conceder mídia: ' + ((e && e.message) || e));
     }
 
     // 4) Espera por pelo menos 1 page pronta
