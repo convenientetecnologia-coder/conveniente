@@ -214,10 +214,14 @@ function createCluster() {
         children.map((_, i) => sendTo(i, 'get-status', {}, { timeoutMs: STATUS_TIMEOUT_MS }))
       );
 
+      // INÍCIO: Adicionado para agregação resiliente de autoMode e sys
+      let autoModePick = null;
+      let sysPick = null;
+      // FIM DECLARAÇÕES INICIAIS
+
       let combinedRobes = {};
       let combinedQueue = [];
       let anyOverlay = false;
-      let sysPick = null;
       const warningParts = [];
 
       // Primeira passada: RPC ou arquivo fresco (<= MAX_FILE_AGE_MS)
@@ -256,7 +260,9 @@ function createCluster() {
           combinedQueue.push(...payload.robeQueue);
         }
 
+        // NOVO: Agregue autoMode e sys do primeiro node válido desta rodada
         if (!sysPick && payload.sys) sysPick = payload.sys;
+        if (!autoModePick && payload.autoMode) autoModePick = payload.autoMode;
       }
 
       // Segunda passada: se não houve overlay nenhum, aceite arquivos mesmo “stale”
@@ -277,7 +283,9 @@ function createCluster() {
             if (Array.isArray(payload.robeQueue)) {
               combinedQueue.push(...payload.robeQueue);
             }
+            // NOVO: Agregue autoMode e sys do primeiro arquivo válido "stale"
             if (!sysPick && payload.sys) sysPick = payload.sys;
+            if (!autoModePick && payload.autoMode) autoModePick = payload.autoMode;
             warningParts.push(`node${i + 1}: using_stale_file(${Math.round((fb.ageMs || 0) / 1000)}s)`);
           }
         }
@@ -294,11 +302,12 @@ function createCluster() {
       }
 
       const perfis = Array.from(baseMap.values());
+      // TROQUE: autoMode: null → autoMode: autoModePick || null (sys já faz sysPick || null)
       const out = {
         perfis,
         robes: combinedRobes,
         robeQueue: combinedQueue,
-        autoMode: null,
+        autoMode: autoModePick || null,
         sys: sysPick || null,
         ts: Date.now()
       };

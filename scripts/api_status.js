@@ -419,23 +419,53 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 
 // Militar: retorna shape exato esperado pelo painel — { mem: {...}, cpu: {...} }
 // Mantenha extras apenas como extensão, mas NUNCA altere/remova mem/cpu.
-app.get('/api/sys', (req, res) => {
-try {
-const snap = fileStore.getSysMetricsSnapshot();
-// snap: { mem: {...}, cpu: {...} } já no formato esperado
-const os = require('os');
-const extra = {
-osCpu: {
-percent: Math.round((os.loadavg()[0] / os.cpus().length) * 100),
-load1m: os.loadavg()[0],
-load5m: os.loadavg()[1],
-load15m: os.loadavg()[2],
-cores: os.cpus().length
-}
-};
-res.json({ ...snap, ...extra }); // Nunca remove/reescreve mem/cpu da raiz
-} catch (e) {
-res.json({ ok: false, error: e && e.message || String(e) });
-}
+app.get('/api/sys', async (req, res) => {
+  try {
+    const os = require('os');
+    // 1) Tenta overlay agregado do cluster (get-status)
+    let overlay = null;
+    try {
+      overlay = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+    } catch {}
+
+    // 2) Se overlay OK, compute CPU a partir de overlay.robes[*].cpuPercent
+    if (overlay && overlay.robes && typeof overlay.robes === 'object') {
+      let somaCpu = 0;
+      let count = 0;
+      for (const nome in overlay.robes) {
+        const v = overlay.robes[nome] && overlay.robes[nome].cpuPercent;
+        if (typeof v === 'number') { somaCpu += v; count++; }
+      }
+      const cores = (os.cpus() || []).length || 1;
+      const cpuPercent = (count > 0) ? Math.min(100, Math.round(somaCpu / cores)) : null;
+
+      const totalBytes = os.totalmem();
+      const freeBytes  = os.freemem();
+      const usedBytes  = totalBytes - freeBytes;
+      const toMB = (b) => Math.round(b / (1024*1024));
+      const toGB = (b) => Math.round(b / (1024*1024*10)) / 100; // duas casas
+
+      const mem = {
+        totalBytes,
+        freeBytes,
+        usedBytes,
+        totalMB: toMB(totalBytes),
+        freeMB:  toMB(freeBytes),
+        usedMB:  toMB(usedBytes),
+        totalGB: toGB(totalBytes),
+        freeGB:  toGB(freeBytes),
+        usedGB:  toGB(usedBytes),
+        minFreeRequiredMB: parseInt(process.env.MIN_FREE_RAM_MB || '1536', 10)
+      };
+      return res.json({ ok: true, mem, cpu: { percent: cpuPercent }, ts: Date.now() });
+    }
+
+    // 3) Fallback: fileStore.getSysMetricsSnapshot() (mantém retrocompatibilidade)
+    const snap = fileStore.getSysMetricsSnapshot();
+    return res.json(snap);
+
+  } catch (e) {
+    res.json({ ok: false, error: e && e.message || String(e) });
+  }
 });
 };
