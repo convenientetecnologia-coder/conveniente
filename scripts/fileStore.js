@@ -434,9 +434,8 @@ function resetDesiredAllOffOnBoot() {
 function getSysMetricsSnapshot() {
   const os = require('os');
   const totalBytes = os.totalmem();
-  const freeMB = utils.getAvailableMB();
-  const freeBytes = freeMB * 1024 * 1024;
-  const usedBytes = totalBytes - freeBytes;
+  const freeBytes  = os.freemem();
+  const usedBytes  = totalBytes - freeBytes;
   const toMB = (b) => Math.round(b / (1024*1024));
   const toGB = (b) => Math.round(b / (1024*1024*10)) / 100; // duas casas
 
@@ -465,7 +464,7 @@ function getSysMetricsSnapshot() {
       freeBytes,
       usedBytes,
       totalMB: toMB(totalBytes),
-      freeMB:  freeMB,
+      freeMB:  toMB(freeBytes),
       usedMB:  toMB(usedBytes),
       totalGB: toGB(totalBytes),
       freeGB:  toGB(freeBytes),
