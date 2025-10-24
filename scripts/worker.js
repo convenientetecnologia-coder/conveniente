@@ -2586,9 +2586,11 @@ const handlers = {
     }
     const robeQueueList = robeQueue.queueList();
     // PATCH autoMode/sys: incluir autoMode e sys
+    const freeMB = utils.getAvailableMB();
+    const totalMB = Math.round(os.totalmem() / (1024*1024));
     const sys = {
-      freeMB: Math.round(os.freemem()/(1024*1024)),
-      totalMB: Math.round(os.totalmem()/(1024*1024)),
+      freeMB,
+      totalMB,
       cores: (os.cpus()||[]).length,
       cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
     };
@@ -2821,9 +2823,11 @@ if (pauseActive) {
 }
 const robeQueueList = robeQueue.queueList();
 // PATCH autoMode/sys: incluir no statusObj
+const freeMB = utils.getAvailableMB();
+const totalMB = Math.round(os.totalmem() / (1024*1024));
 const sys = {
-  freeMB: Math.round(os.freemem()/(1024*1024)),
-  totalMB: Math.round(os.totalmem()/(1024*1024)),
+  freeMB,
+  totalMB,
   cores: (os.cpus()||[]).length,
   cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
 };

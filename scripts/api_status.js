@@ -421,6 +421,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 // Mantenha extras apenas como extensão, mas NUNCA altere/remova mem/cpu.
 app.get('/api/sys', async (req, res) => {
   try {
+    const utils = require('./utils.js');
     const os = require('os');
     // 1) Tenta overlay agregado do cluster (get-status)
     let overlay = null;
@@ -439,24 +440,27 @@ app.get('/api/sys', async (req, res) => {
       const cores = (os.cpus() || []).length || 1;
       const cpuPercent = (count > 0) ? Math.min(100, Math.round(somaCpu / cores)) : null;
 
+      // ========= INÍCIO DA ALTERAÇÃO DE MEM RAM =========
+      const totalMB = Math.round(os.totalmem() / (1024*1024));
+      const freeMB = utils.getAvailableMB();
       const totalBytes = os.totalmem();
-      const freeBytes  = os.freemem();
-      const usedBytes  = totalBytes - freeBytes;
-      const toMB = (b) => Math.round(b / (1024*1024));
-      const toGB = (b) => Math.round(b / (1024*1024*10)) / 100; // duas casas
+      const freeBytes = freeMB * 1024 * 1024;
+      const usedBytes = totalBytes - freeBytes;
+      const toGB = (mb) => +(mb/1024).toFixed(2);
 
       const mem = {
         totalBytes,
         freeBytes,
         usedBytes,
-        totalMB: toMB(totalBytes),
-        freeMB:  toMB(freeBytes),
-        usedMB:  toMB(usedBytes),
-        totalGB: toGB(totalBytes),
-        freeGB:  toGB(freeBytes),
-        usedGB:  toGB(usedBytes),
+        totalMB,
+        freeMB,
+        usedMB: totalMB - freeMB,
+        totalGB: toGB(totalMB),
+        freeGB:  toGB(freeMB),
+        usedGB:  toGB(totalMB - freeMB),
         minFreeRequiredMB: parseInt(process.env.MIN_FREE_RAM_MB || '1536', 10)
       };
+      // ========== FIM DA ALTERAÇÃO DE MEM RAM ===========
       return res.json({ ok: true, mem, cpu: { percent: cpuPercent }, ts: Date.now() });
     }
 

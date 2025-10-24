@@ -58,3 +58,60 @@ const api = {
 if (typeof window !== 'undefined') {
   window.electronAPI = api;
 }
+
+// ================= INÍCIO PATCH - EXIBIÇÃO RAM E SOMA DOS CHROMES ==================
+
+// ** INSERIR ESTE PADRÃO no seu script, se não já tiver: **
+// Em reloadPerfis(), após ler status, guarde global:
+async function reloadPerfis() {
+  const [st, perfisResp] = await Promise.all([
+    window.electronAPI.getStatus().catch(() => null),
+    window.electronAPI.listPerfis().catch(() => null)
+  ]);
+  window.__lastStatus = st; // Armazena o status para cálculo suma Chrome
+  // ... restante da função do seu projeto (listagem, etc)
+}
+
+// Em updateSysMetrics, após pegar m.mem:
+async function updateSysMetrics() {
+  try {
+    const m = await window.electronAPI.getSysMetrics().catch(()=>null);
+    if (m && m.mem) {
+      // Update badge RAM normalmente
+      const r = document.getElementById('mRam');
+      if (r) r.textContent = (typeof m.mem.freeGB === 'number')
+        ? `${Number(m.mem.freeGB).toFixed(2)} GB`
+        : '--';
+
+      // Exibir soma dos Chromes no tooltip do badge RAM
+      let somaChromes = 0;
+      if (window.__lastStatus && Array.isArray(window.__lastStatus.perfis)) {
+        somaChromes = window.__lastStatus.perfis.reduce(
+          (a, p) => a + (typeof p.ramMB === "number" ? p.ramMB : 0), 0
+        );
+      }
+      if (r && r.parentElement) {
+        r.parentElement.title =
+          `RAM disponível no sistema (SO): ${ (m.mem.freeMB != null ? m.mem.freeMB : '--') } MB\n` +
+          `Soma RAM usada pelos bots (Chromes): ${somaChromes} MB\n` +
+          `Ao abrir/fechar bots, este número oscila.`;
+      }
+      // ... continue updateSysMetrics normalmente (CPU, addPerfilBtn, etc)
+    }
+
+    // Fotos (contagem, manter como no seu original)
+    const f = await window.electronAPI.getFotosCount().catch(()=>null);
+    if (f && f.ok) {
+      const el = document.getElementById('mFotos');
+      if (el) el.textContent = String(f.count || 0);
+    }
+  } catch (e) {
+    // silencioso
+  }
+}
+
+// ================= FIM PATCH - EXIBIÇÃO RAM E SOMA DOS CHROMES ==================
+
+// OBS: Se sua função reloadPerfis e updateSysMetrics estão mais complexas,
+// faça os patches exatamente nestes pontos no seu JS principal —
+// garanta window.__lastStatus atualizado sempre, e tooltip do ramo RAM.
