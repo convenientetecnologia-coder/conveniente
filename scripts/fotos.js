@@ -131,28 +131,21 @@ function loadIndex() {
     }
   }
 
-  // [item 2]: SHA256 obrigatório para todas gerações
-  const dir = resolveFotosDir();
-  let shaWrites = false;
+  // NUNCA calcular SHA em massa aqui. O SHA é calculado lazy/streaming em applyStatToRec()
+  // quando um arquivo é visto/necessário, evitando buffers gigantes no heap.
+  // Mantemos apenas saneamento das estruturas:
   for (const name of Object.keys(idx)) {
-    const rec = idx[name];
-    if (!rec.sha256) {
-      try {
-        const abs = path.join(dir, name);
-        if (fs.existsSync(abs)) {
-          const stat = fs.statSync(abs);
-          rec.sha256 = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
-          // também atualize size/mtimeMs (re-normalização)
-          rec.size = stat.size;
-          rec.mtimeMs = stat.mtimeMs;
-          shaWrites = true;
-        }
-      } catch (e) {
-        logger.warn('[FOTOS][loadIndex/sha256] Erro ao criar SHA256 para', name);
-      }
-    }
+    const rec = idx[name] || {};
+    if (!Array.isArray(rec.postedBy)) rec.postedBy = [];
+    if (!rec.reservedBy || typeof rec.reservedBy !== 'object') rec.reservedBy = {};
+    if (rec.size != null && typeof rec.size !== 'number') delete rec.size;
+    if (rec.mtimeMs != null && typeof rec.mtimeMs !== 'number') delete rec.mtimeMs;
+    if (rec.deletePending != null && typeof rec.deletePending !== 'boolean') delete rec.deletePending;
+    if (rec.generation != null && typeof rec.generation !== 'number') delete rec.generation;
+    idx[name] = rec;
   }
-  if (shaWrites) writeJsonAtomic(INDEX_FILE, idx);
+
+  // O restante da função igual, sem cálculo massa de SHA, size, mtimeMs global.
 
   return idx;
 }

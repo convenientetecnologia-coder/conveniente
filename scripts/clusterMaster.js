@@ -66,6 +66,10 @@ function createCluster() {
     }
   }
 
+  // ================= BEGIN PATCH: perfisWatcher handle ====================
+  let perfisWatcher = null;
+  // ================= END PATCH: perfisWatcher handle ======================
+
   for (let idx = 0; idx < blocks.length; idx++) {
     const shardNames = blocks[idx] || [];
     const shardSet = new Set(shardNames);
@@ -76,11 +80,20 @@ function createCluster() {
     env.STATUS_FILE_NAME = `status_node_${idx + 1}.json`;
 
     const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
+
     const proc = fork(path.join(__dirname, 'worker.js'), [], {
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       execPath,
       env
     });
+
+    // ================== BEGIN PATCH: worker error+close handlers ================
+    proc.on('error', (err) => {
+      try { logger.error('[WORKER] erro no fork', { error: err && err.message || err }, err); } catch {}
+    });
+    proc.on('close', () => { /* noop para manter referência viva até exit resolver */ });
+    // ================== END PATCH: worker error+close handlers ==================
+
     const pending = new Map();
 
     proc.on('message', (msg) => {
@@ -335,6 +348,9 @@ function createCluster() {
   }
 
   async function kill() {
+    // ============= BEGIN PATCH: close perfisWatcher before killing =============
+    try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
+    // ============= END PATCH: close perfisWatcher before killing ===============
     for (const c of children) {
       try { c.proc.kill('SIGTERM'); } catch {}
     }
@@ -346,12 +362,14 @@ function createCluster() {
     if (process.env.CLUSTER_AUTO_REBALANCE === '1') {
       let timer = null;
       try {
-        fs.watch(perfisFile, { persistent: false }, () => {
+        // =================== BEGIN PATCH: hold watcher handle ===================
+        perfisWatcher = fs.watch(perfisFile, { persistent: false }, () => {
           clearTimeout(timer);
           timer = setTimeout(() => {
             rebalance('watcher:perfis.json').catch(e => logger.warn('[CLUSTER][REB] watcher error', { error: e && e.message || e }));
           }, 150);
         });
+        // ==================== END PATCH: hold watcher handle ====================
       } catch (e) {
         logger.warn('[CLUSTER] fs.watch perfis.json falhou; prossegue sem watcher.', { error: e && e.message || e });
       }

@@ -891,8 +891,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
           }
         } catch {}
       }
-      browser.on('targetcreated', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
-      browser.on('targetchanged', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
+      if (!browser._mediaPermListenerInstalled) {
+        browser._mediaPermListenerInstalled = true;
+        browser.on('targetcreated', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
+        browser.on('targetchanged', async t => { try { await grantForUrl(t.url && t.url()); } catch {} });
+      }
 
       if (process.env.BROWSER_DEBUG === '1') {
         logger.debug('>> [BROWSER][STEP] Permissões de mídia concedidas para Facebook/Messenger.');
@@ -1951,8 +1954,10 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   async function pageFromTarget(t) {
     try { return await t.page(); } catch { return null; }
   }
-  function keyFor(target, page) {
-    return (page && page._targetId) || (target && target._targetId) || Math.random().toString(36).slice(2);
+  function keyFor(target) {
+    // Blindado: só aceita _targetId. Sem aleatório.
+    try { if (target && target._targetId) return String(target._targetId); } catch {}
+    return null;
   }
   function clearTimer(key) {
     const t = timers.get(key);
@@ -1965,7 +1970,8 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
       if (!target || (typeof target.type === 'function' && target.type() !== 'page')) return;
       const page = await pageFromTarget(target);
       if (!page) return;
-      const key = keyFor(target, page);
+      const key = keyFor(target);
+      if (!key) return; // sem key consistente, não arma
 
       // Se a page navegar para algo real antes do grace, cancela
       try {
@@ -1980,13 +1986,9 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
 
       const timer = setTimeout(async () => {
         try {
-          // Nunca matar about:blank enquanto o Robe desta conta estiver ativo
           if (browser && browser._robeActiveFor === nome) return;
-
-          // Respeitar supressão explícita por conta (armada pelo robe.js ao abrir a page)
           const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
           if (sup > Date.now()) return;
-
           if (page.isClosed && page.isClosed()) return;
           const u = page.url ? page.url() : '';
           if (!u || u === 'about:blank') {
@@ -2005,7 +2007,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   browser.on('targetchanged', async (t) => {
     try {
       const p = await pageFromTarget(t);
-      const key = keyFor(t, p);
+      const key = keyFor(t);
       const u = p && p.url ? p.url() : '';
       if (u && u !== 'about:blank') clearTimer(key);
     } catch {}
@@ -2013,10 +2015,23 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   browser.on('targetdestroyed', async (t) => {
     try {
       const p = await pageFromTarget(t);
-      const key = keyFor(t, p);
+      const key = keyFor(t);
       clearTimer(key);
     } catch {}
   });
+
+  try {
+    browser.once && browser.once('disconnected', () => {
+      try { timers.forEach(t => clearTimeout(t)); } catch {}
+      timers.clear();
+      // Limpeza defensiva dos listeners
+      try { 
+        browser.removeAllListeners && browser.removeAllListeners('targetcreated');
+        browser.removeAllListeners && browser.removeAllListeners('targetchanged');
+        browser.removeAllListeners && browser.removeAllListeners('targetdestroyed');
+      } catch {}
+    });
+  } catch {}
 }
 
 module.exports = {

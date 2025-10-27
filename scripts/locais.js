@@ -21,6 +21,8 @@ const LOCALIZACOES_RUINS_FILE = path.join(getDesktopDir(), 'localizacoes_ruins.j
 function logBadLocation(cidade, location, reason) {
   let arr = [];
   try { arr = JSON.parse(fs.readFileSync(LOCALIZACOES_RUINS_FILE, "utf8")); } catch { arr = []; }
+  // Cap em 500 entradas (remove mais antigas, sem piedade)
+  if (arr.length > 500) arr.splice(0, arr.length - 500);
   // dedup por cidade+location
   const key = cidade + '|' + location;
   let found = arr.find(x => (x.cidade + '|' + x.location) === key);

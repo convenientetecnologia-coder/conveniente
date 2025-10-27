@@ -1839,6 +1839,12 @@ try { await snapshotStatusAndWrite(); } catch {}
 } catch (e) {
   try { logger.warn('[WORKER][BROWSER] disconnect handler err', { error: e && e.message || e }); } catch {}
 }
+// FINAL: Remove listeners de browser e do about:blank killer para garantir GC imediato de guards/timers
+try {
+  browser.removeAllListeners && browser.removeAllListeners('targetcreated');
+  browser.removeAllListeners && browser.removeAllListeners('targetchanged');
+  browser.removeAllListeners && browser.removeAllListeners('targetdestroyed');
+} catch {}
 });  // <-- Fecha o browser.once('disconnected', async () => { ... })
 }     // <-- Fecha a função attachBrowserLifecycle(nome, browser)
 
@@ -3090,6 +3096,7 @@ let _nurseTickRunning = false;
 async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
+  if (controllers.size === 0) { _nurseTickRunning = false; return; }
   try {
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
@@ -3642,6 +3649,7 @@ async function escalateToReopen(nome, reason='health_reopen') {
 }
 
 async function healthTick() {
+  if (controllers.size === 0) { return; }
   for (const [nome, ctrl] of controllers) {
     // INSTRUÇÃO CIRÚRGICA: Guard emExecucao no healthTick (logo no início do loop)
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
