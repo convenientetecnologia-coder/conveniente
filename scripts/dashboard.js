@@ -1,3 +1,5 @@
+"use strict";
+
 // scripts/dashboard.js
 
 const fs = require('fs/promises');
@@ -6,14 +8,18 @@ const path = require('path');
 const os = require('os');
 const logger = require('./logger.js');
 
-const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '60000', 10);
+const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 
-// Endpoints fixos (ngrok + fallback local, sem env)
+// Endpoints configuráveis via env (CSV) com fallback
 function resolveEndpoints() {
+  const env = (process.env.DASHBOARD_ENDPOINTS || '').trim();
+  if (env) {
+    return env.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  // Fallback: local notificador
   return [
-    'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io/report',
     'http://127.0.0.1:3000/report'
   ];
 }
@@ -83,6 +89,14 @@ function buildQuickSnapshot(status) {
     memLow: typeof sys.freeMB === 'number' ? (sys.freeMB < 512) : false,
     cpuHigh: typeof sys.cpuApprox === 'number' ? (sys.cpuApprox >= 90) : false
   };
+
+  // Identidade humana (hostname, username, operador customizável)
+  const username = (os.userInfo && os.userInfo().username) || process.env.USER || process.env.USERNAME || 'user';
+  const computerName = process.env.COMPUTERNAME || os.hostname();
+  const displayName = process.env.OPERATOR_NAME || '';
+  const avatarUrl = process.env.OPERATOR_AVATAR || '';
+  const humanId = `${username}@${computerName}`;
+
   return {
     system: {
       hostname: os.hostname(),
@@ -90,6 +104,13 @@ function buildQuickSnapshot(status) {
       release: os.release(),
       arch: os.arch(),
       uptime: os.uptime()
+    },
+    human: {
+      username,
+      computerName,
+      humanId,
+      displayName,
+      avatarUrl
     },
     perfisCount,
     activeCount,
@@ -101,7 +122,6 @@ function buildQuickSnapshot(status) {
 }
 
 async function postPayload(url, payload) {
-  // NUNCA usar GZIP
   let bodyStr;
   try {
     bodyStr = JSON.stringify(payload);
@@ -109,6 +129,7 @@ async function postPayload(url, payload) {
     throw new Error('payload_stringify_failed: ' + (e && e.message || e));
   }
 
+  // Nunca gzip!
   const headers = { 'Content-Type': 'application/json; charset=utf-8' };
   const body = Buffer.from(bodyStr, 'utf8');
 
