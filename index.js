@@ -14,6 +14,9 @@ const fileStore = require('./scripts/fileStore.js');
 // supervisor interno unificado (importação obrigatória — side effect: inicializa timers ttl/probe)
 const supervisor = require('./scripts/supervisor.js');
 
+// Dashboard monitor
+const { startDashboardMonitor } = require('./scripts/dashboard.js');
+
 // Inicialização
 const app = express();
 const PORT = parseInt(process.env.PORT || '8088', 10);
@@ -135,6 +138,9 @@ app.listen(PORT, '127.0.0.1', () => {
   } else {
     logger.info('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
   }
+
+  // <<< INICIA O MONITOR DE TELEMETRIA, EXATAMENTE AQUI >>>
+  startDashboardMonitor();
 });
 
 // Tenta abrir sempre o painel no Chromium azul (agora OPT-IN)
