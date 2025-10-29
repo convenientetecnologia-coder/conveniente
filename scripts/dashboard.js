@@ -12,15 +12,10 @@ const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); 
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 
-// Endpoints configuráveis via env (CSV) com fallback
+// Endpoint fixo do notificador na nuvem via ngrok
 function resolveEndpoints() {
-  const env = (process.env.DASHBOARD_ENDPOINTS || '').trim();
-  if (env) {
-    return env.split(',').map(s => s.trim()).filter(Boolean);
-  }
-  // Fallback: local notificador
   return [
-    'http://127.0.0.1:3000/report'
+    'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io/report'
   ];
 }
 
