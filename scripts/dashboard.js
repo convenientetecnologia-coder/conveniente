@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 const logger = require('./logger.js');
 
+const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
@@ -61,12 +62,82 @@ async function getOrCreateHostId() {
   }
 }
 
-async function readStatusFile() {
+// Nova função: vê API, fallback para arquivos locais
+async function readAggregatedStatus() {
+  // (1) HTTP local
+  try {
+    const res = await fetch(`http://127.0.0.1:${httpPort}/api/status`, { method: 'GET' });
+    if (res && res.ok) {
+      const st = await res.json();
+      if (st && typeof st === 'object') return st;
+    }
+  } catch {}
+  // (2) Local status.json
   try {
     const raw = await fs.readFile(STATUS_PATH, 'utf8');
-    return JSON.parse(raw);
+    const j = JSON.parse(raw);
+    if (j && typeof j === 'object') return j;
+  } catch {}
+  // (3) Fallback: agrega todos os status_node_*.json
+  try {
+    const dir = path.join(__dirname, '..', 'dados');
+    const files = fsSync.readdirSync(dir).filter(n => /^status_node_\d+.json$/i.test(n));
+    const basePerfisArr = (() => {
+      try { return JSON.parse(fsSync.readFileSync(path.join(dir, 'perfis.json'), 'utf8')) || []; }
+      catch { return []; }
+    })();
+    const baseMap = new Map(basePerfisArr.map(p => [p.nome, {
+      nome: p.nome,
+      label: p.label || null,
+      cidade: p.cidade,
+      uaPresetId: p.uaPresetId,
+      active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
+      ramMB: null, cpuPercent: null, numPages: null, robeEstado: null, robeCooldownSec: null,
+      robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
+      activationHeldUntil: null, reopenAt: null, openBackoffMs: null, lastSwapAt: null, lastSwapPeer: null,
+      swapCooldown: null, whyNotOpen: null, manifestStatus: null, closingReason: null
+    }]));
+    let combinedRobes = {};
+    let combinedQueue = [];
+    let sysPick = null;
+    for (const f of files) {
+      try {
+        const j = JSON.parse(fsSync.readFileSync(path.join(dir, f), 'utf8'));
+        if (!j || typeof j !== 'object') continue;
+        const perf = Array.isArray(j.perfis) ? j.perfis : [];
+        for (const o of perf) {
+          const dst = baseMap.get(o && o.nome);
+          if (dst) Object.assign(dst, o);
+        }
+        if (j.robes && typeof j.robes === 'object') {
+          combinedRobes = Object.assign(combinedRobes, j.robes);
+        }
+        if (Array.isArray(j.robeQueue)) {
+          combinedQueue.push(...j.robeQueue);
+        }
+        if (!sysPick && j.sys) sysPick = j.sys;
+      } catch {}
+    }
+    if (combinedQueue.length) {
+      const seen = new Set();
+      combinedQueue = combinedQueue.filter(n => {
+        if (!n || seen.has(n)) return false;
+        seen.add(n); return true;
+      });
+    }
+    return {
+      perfis: Array.from(baseMap.values()),
+      robes: combinedRobes,
+      robeQueue: combinedQueue,
+      sys: sysPick || {
+        freeMB: Math.round(os.freemem()/(1024*1024)),
+        totalMB: Math.round(os.totalmem()/(1024*1024)),
+        cores: (os.cpus()||[]).length
+      },
+      ts: Date.now()
+    };
   } catch (e) {
-    return { erro: 'falha ao ler status.json: ' + (e && e.message || String(e)) };
+    return { perfis: [], robes: {}, robeQueue: [], ts: Date.now(), error: 'sem snapshot' };
   }
 }
 
@@ -172,7 +243,7 @@ async function tick() {
   if (inFlight) return; // anti-overlap
   inFlight = true;
   try {
-    const [status, hostId] = await Promise.all([readStatusFile(), getOrCreateHostId()]);
+    const [status, hostId] = await Promise.all([readAggregatedStatus(), getOrCreateHostId()]);
     const quick = buildQuickSnapshot(status);
 
     const payload = {

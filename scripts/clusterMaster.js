@@ -325,6 +325,13 @@ function createCluster() {
         ts: Date.now()
       };
       if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
+      
+      // ADICIONADO: grava agregado em dados/status.json antes do return out;
+      try {
+        const aggPath = path.join(__dirname, '..', 'dados', 'status.json');
+        fileStore.writeJsonAtomic(aggPath, out);
+      } catch {}
+      
       return out;
     }
     if (type === 'unfreeze-all' || type === 'robes-release-all') {
