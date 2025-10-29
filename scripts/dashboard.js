@@ -7,6 +7,7 @@ const fsSync = require('fs');
 const path = require('path');
 const os = require('os');
 const logger = require('./logger.js');
+const fotos = require('./fotos.js'); // ADICIONADO
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -141,6 +142,9 @@ async function readAggregatedStatus() {
   }
 }
 
+// Helper para verificar se é imagem
+function isImage(name) { return /\.(jpe?g|png)$/i.test(String(name||'')); }
+
 function buildQuickSnapshot(status) {
   const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
   const perfisCount = perfis.length;
@@ -163,6 +167,14 @@ function buildQuickSnapshot(status) {
   const avatarUrl = process.env.OPERATOR_AVATAR || '';
   const humanId = `${username}@${computerName}`;
 
+  // NOVO: fotosCount — leitura do diretório de fotos
+  let fotosCount = 0;
+  try {
+    const dir = fotos.resolveFotosDir();
+    const list = fsSync.readdirSync(dir, { withFileTypes: true });
+    fotosCount = list.filter(ent => ent.isFile() && isImage(ent.name)).length;
+  } catch {}
+
   return {
     system: {
       hostname: os.hostname(),
@@ -183,7 +195,8 @@ function buildQuickSnapshot(status) {
     workingCount,
     sys,
     risk,
-    ts: now()
+    ts: now(),
+    fotosCount // NOVO CAMPO
   };
 }
 
