@@ -749,7 +749,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
           dumpio: !!process.env.BROWSER_DEBUG,
         });
         if (process.env.BROWSER_DEBUG === '1') {
-          const spawnargs = b.process && b.process ? b.process().spawnargs : null;
+          const spawnargs = b.process && b.process() ? b.process().spawnargs : null;
           logger.debug('[BROWSER][DEBUG] spawnargs: ' + JSON.stringify(spawnargs));
         }
         return b;
@@ -1313,6 +1313,24 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   }
 
   // (REMOVIDO BLOCO DE PRUNING APÓS CONFIGURATION CONFORME INSTRUÇÃO)
+
+  // FECHAMENTO OBRIGATÓRIO DAS ABAS AUXILIARES pós-configuração/injeção de cookies
+  try {
+    const all = await browser.pages();
+    const main = (all && all[0]) || null;
+    for (const p of (all || [])) {
+      if (main && p === main) continue;
+      try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+    }
+  } catch {}
+
+  // Confirmar estado final de abas
+  try {
+    const all2 = await browser.pages();
+    if (process.env.PRUNE_DEBUG === '1') {
+      require('./logger.js').info('[CONFIG][PRUNE] Fechadas abas auxiliares pós-configure', { nome, pages: (all2 && all2.length) || 0 });
+    }
+  } catch {}
 
   if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 14: Todas abas abertas/logadas, firmadas e curadas. Configuração concluída!');
   if (process.env.CONFIGURE_DEBUG === '1') logger.debug('[CONFIG] configureProfile FINALIZADO em ' + nome);

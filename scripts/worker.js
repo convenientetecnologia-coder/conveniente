@@ -833,14 +833,11 @@ async function activateOnce(nome, source = '') {
               browserHelper.installOneTabGuard(ctrl.browser, nome, {
                 allow: () => {
                   const c = controllers.get(nome);
-                  const rm = robeMeta[nome] || {};
-                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true));
+                  return !!(c && (c.configurando === true || (robeMeta[nome] && robeMeta[nome].emExecucao === true)));
                 },
                 maxPagesWhenAllow: () => {
-                  const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
-                  if (c && c.humanControl === true) return Number.MAX_SAFE_INTEGER;
-                  return rm.emExecucao === true ? 3 : 10;
+                  return rm.emExecucao === true ? 3 : 2;
                 },
                 onNumPages: (n) => {
                   robeMeta[nome] = robeMeta[nome] || {};
@@ -2100,10 +2097,6 @@ const handlers = {
     logger.info('[HANDLER] configure chamada', { nome });
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    // Supressão do about:blank killer durante toda configuração
-    const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-    guard[nome] = Date.now() + 10601000; // ~10 minutos de supressão total durante configurar
-
     const perfisArr = loadPerfisJson();
     const perfil = perfisArr.find(p => p && p.nome === nome);
     if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
@@ -2138,6 +2131,7 @@ const handlers = {
     } finally {
       // 1) Sai do modo configurando e fecha ABAS EXTRAS AGORA (obrigatório)
       ctrl.configurando = false;
+      try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
       // 2) Entra em humano (fluxo já existente)
       ctrl.humanControl = true;
       stopPruneLoop(nome);
@@ -2191,14 +2185,11 @@ const handlers = {
     } catch {}
     await snapshotStatusAndWrite();
 
-    // Supressão do about:blank killer durante modo humano
-    const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-    guard[nome] = Date.now() + 246060*1000; // 24h em ms: supressão total enquanto humano
-
     // 3. Mata Virtus agressivamente + fence (pode ser logo após flags)
     try { await stopVirtus(nome); } catch {}
 
     // 4. Só então faça a navegação do humano:
+    try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
     await browserHelper.invocarHumano(ctrl.browser, nome);
 
     // 5. (Opcional para robustez/nurse): freezer cooldown como já fazia
@@ -2217,8 +2208,6 @@ const handlers = {
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
-    // Limpa supressão do about:blank killer ao sair do modo humano
-    try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
 
     let pages2 = [];
     try { pages2 = await ctrl.browser.pages(); } catch {}
@@ -2929,9 +2918,9 @@ function getFailureCounts(nome) {
   const rec = profileFailures.get(nome);
   if (!rec) return { internal: 0, external: 0, unknown: 0 };
   const pruned = {
-    internal: (rec.internal||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS),
-    external: (rec.external||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS),
-    unknown: (rec.unknown||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS)
+    internal: (rec.internal||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS),
+    external: (rec.external||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS),
+    unknown: (rec.unknown||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS)
   };
   // Atualiza janela já podada
   profileFailures.set(nome, pruned);
@@ -3153,7 +3142,7 @@ async function nurseTick() {
       // nurseTick não compete se healthTick recovering (histerese de recuperação)
       const hs = getHealth && getHealth(nome);
       if (hs && ['recover1','recover2','recover3'].includes(hs.stage)) {
-        await appendIssueNurseDebounced(nome, 'mil_action', 'health_recovery_in_progress_skip', 'health_recovery_in_progress_skip');
+        await appendIssueNurseDebounced(nome,'mil_action','health_recovery_in_progress_skip','health_recovery_in_progress_skip');
         continue;
       }
 
