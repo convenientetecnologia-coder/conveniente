@@ -116,8 +116,16 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
   // Fila e limitação máxima global
   let holderPromise; // essa promise será retornada
 
+  // ==== PATCH: timeout enquanto espera na fila global ====
+  // se for get-status, timeout baixo, demais, timeout já definido
+  const queueWaitMs = (type === 'get-status') ? 3000 : (opts.timeoutMs || 15000);
+  function withQueueTimeout(p, ms) {
+    let id;
+    const to = new Promise(r => { id = setTimeout(() => r({ ok:false, error:'queue_timeout' }), ms); });
+    return Promise.race([ p.finally(() => clearTimeout(id)), to ]);
+  }
+
   holderPromise = globalCommandPool(async () => {
-    // --- DEBUG LOG STATE ---
     debugLogCommand(type, payload, globalCommandPool.activeCount, '[START]');
     const timeoutMs = Number((opts && opts.timeoutMs) || 15000);
     return await new Promise((resolve) => {
@@ -193,16 +201,14 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
     });
   });
 
-  inflightOp.set(opKey, holderPromise);
+  // PATCH aplicado: aplicando timeout na espera de slot da fila global
+  const raced = withQueueTimeout(holderPromise, queueWaitMs);
+  inflightOp.set(opKey, raced);
 
   // DEBUG LOG comando enviado
   debugLogCommand(type, payload, globalCommandPool.activeCount, '[ENQUED]');
-  // Quando finalizar (resolve ou reject), tira do inflight para liberar nova entrada
-  holderPromise.finally(() => {
-    if (inflightOp.has(opKey)) inflightOp.delete(opKey);
-  });
-
-  return holderPromise;
+  raced.finally(() => { if (inflightOp.has(opKey)) inflightOp.delete(opKey); });
+  return raced;
 }
 
 // ---- Encerrar o worker manualmente ----

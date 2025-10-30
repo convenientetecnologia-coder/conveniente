@@ -63,16 +63,25 @@ async function getOrCreateHostId() {
   }
 }
 
-// Nova função: vê API, fallback para arquivos locais
+// Função utilitária de fetch com timeout (NOVO)
+function timeoutFetch(url, { timeoutMs = 3000, ...opt } = {}) {
+  const ac = new (global.AbortController || require('node-abort-controller'))();
+  const id = setTimeout(() => { try { ac.abort(); } catch {} }, timeoutMs);
+  return fetch(url, { ...opt, signal: ac.signal }).finally(() => clearTimeout(id));
+}
+
+// Nova função: vê API, fallback para arquivos locais - PATCH CIRÚRGICO!
 async function readAggregatedStatus() {
-  // (1) HTTP local
+  // (1) HTTP local COM TIMEOUT (3s)
   try {
-    const res = await fetch(`http://127.0.0.1:${httpPort}/api/status`, { method: 'GET' });
+    const res = await timeoutFetch(`http://127.0.0.1:${httpPort}/api/status`, { timeoutMs: 3000 });
     if (res && res.ok) {
       const st = await res.json();
       if (st && typeof st === 'object') return st;
     }
-  } catch {}
+  } catch {
+    logger && logger.warn && logger.warn('[DASH][TICK] api/status timeout, using fallback');
+  }
   // (2) Local status.json
   try {
     const raw = await fs.readFile(STATUS_PATH, 'utf8');
@@ -253,10 +262,15 @@ async function tryAllEndpoints(payload) {
 }
 
 async function tick() {
+  logger.info('[DASH][TICK] start: ' + new Date().toISOString());
+  const start = Date.now();
+
   if (inFlight) return; // anti-overlap
   inFlight = true;
   try {
     const [status, hostId] = await Promise.all([readAggregatedStatus(), getOrCreateHostId()]);
+    logger.info(`[DASH][TICK] got status in ${Date.now() - start}ms`);
+
     const quick = buildQuickSnapshot(status);
 
     const payload = {
@@ -270,6 +284,7 @@ async function tick() {
     };
 
     await tryAllEndpoints(payload);
+    logger.info(`[DASH][TICK] post finish in ${Date.now() - start}ms`);
 
   } catch (e) {
     const m = e && e.message ? e.message : String(e);
