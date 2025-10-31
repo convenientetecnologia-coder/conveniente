@@ -211,6 +211,7 @@ function buildQuickSnapshot(status) {
 
 async function postPayload(url, payload) {
   let bodyStr;
+  let body = null;
   try {
     bodyStr = JSON.stringify(payload);
   } catch (e) {
@@ -219,7 +220,7 @@ async function postPayload(url, payload) {
 
   // Nunca gzip!
   const headers = { 'Content-Type': 'application/json; charset=utf-8' };
-  const body = Buffer.from(bodyStr, 'utf8');
+  const bodyBuf = Buffer.from(bodyStr, 'utf8');
 
   const Aborter = global.AbortController || require('node-abort-controller');
   const ac = new Aborter();
@@ -230,7 +231,7 @@ async function postPayload(url, payload) {
     const resp = await fetch(url, {
       method: 'POST',
       headers,
-      body,
+      body: bodyBuf,
       signal: ac.signal
     });
     if (!resp.ok) {
@@ -240,7 +241,6 @@ async function postPayload(url, payload) {
       err.text = txt;
       throw err;
     }
-    let body = null;
     try { body = await resp.json(); } catch { body = { ok: true }; }
     logger.info('[DASHBOARD] enviado com sucesso para ' + url);
     return body;
