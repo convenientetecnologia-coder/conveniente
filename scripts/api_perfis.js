@@ -604,7 +604,6 @@ module.exports = (app, workerClient, fileStore) => {
 
 // ========== ENDPOINT CANÔNICO: abrir todos 24h (identico ao local) ==========
   app.post('/api/perfis/open-all-24h', async (req, res) => {
-    const workerClient = require('./workerClient.js');
     const issues = require('./issues.js');
 
     try {
