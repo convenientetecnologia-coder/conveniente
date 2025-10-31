@@ -601,4 +601,68 @@ module.exports = (app, workerClient, fileStore) => {
       res.json({ ok: false, error: e && e.message || String(e) });
     }
   });
+
+// ========== ENDPOINT CANÔNICO: abrir todos 24h (identico ao local) ==========
+  app.post('/api/perfis/open-all-24h', async (req, res) => {
+    const workerClient = require('./workerClient.js');
+    const issues = require('./issues.js');
+
+    try {
+      const perfisArr = fileStore.loadPerfisJson() || [];
+
+      // 1) PASSO ATÔMICO: zera humanHold, e já seta virtus:on + active:true em todos
+      await fileStore.withDesiredLock(desired => {
+        desired.perfis = desired.perfis || {};
+        for (const p of perfisArr) {
+          if (!p || !p.nome) continue;
+          const nome = p.nome;
+          desired.perfis[nome] = {
+            ...(desired.perfis[nome] || {}),
+            humanHold: false,
+            active: true,
+            virtus: 'on'
+          };
+        }
+        return desired;
+      });
+
+      // LOG por perfil: hold reset
+      for (const p of perfisArr) {
+        try { await issues.append(p.nome, 'mil_action', 'human_hold=false (bulk_open_all)'); } catch {}
+      }
+
+      // 2) Loop de abertura + start-work (sequencial)
+      const results = [];
+      for (const p of perfisArr) {
+        const nome = p.nome;
+        let okActivate = false, okStart = false, err = null;
+
+        try {
+          const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 });
+          okActivate = !!(r1 && r1.ok);
+        } catch (e) {
+          err = (e && e.message) || String(e);
+        }
+
+        if (okActivate) {
+          try {
+            const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 });
+            okStart = !!(r2 && r2.ok);
+          } catch (e) {
+            err = (e && e.message) || String(e);
+          }
+        }
+
+        results.push({ nome, activate: okActivate, start: okStart, error: err || null });
+
+        // pequeno respiro (igual ao front local)
+        await new Promise(r => setTimeout(r, 800));
+      }
+
+      return res.json({ ok: true, total: perfisArr.length, results });
+
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
 };

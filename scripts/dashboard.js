@@ -298,17 +298,16 @@ async function execCloseAll() {
     }
   } catch {}
 }
+// ===== INÍCIO ALTERAÇÃO =====
 async function execOpenAll24h() {
   try {
-    const lp = await httpJson('/api/perfis');
-    const perfis = (lp && lp.ok && Array.isArray(lp.perfis)) ? lp.perfis : [];
-    for (const p of perfis) {
-      await ensureFreeMB(3072);
-      try { await httpJson(`/api/perfis/${encodeURIComponent(p.nome)}/start-work`, { method:'POST' }); } catch {}
-      await sleep(800);
-    }
-  } catch {}
+    // Agora chamamos o handler canônico do backend
+    await httpJson('/api/perfis/open-all-24h', { method: 'POST' });
+  } catch (e) {
+    // silencioso — o ACK/erro já será refletido no notificador
+  }
 }
+// ===== FIM ALTERAÇÃO =====
 async function execRobePauseAll() {
   try { await httpJson('/api/robes/pause-24h-all', { method:'POST' }); } catch {}
 }
