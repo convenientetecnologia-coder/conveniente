@@ -240,7 +240,10 @@ async function postPayload(url, payload) {
       err.text = txt;
       throw err;
     }
+    let body = null;
+    try { body = await resp.json(); } catch { body = { ok: true }; }
     logger.info('[DASHBOARD] enviado com sucesso para ' + url);
+    return body;
   } finally {
     clearTimeout(t);
   }
@@ -251,14 +254,76 @@ async function tryAllEndpoints(payload) {
   let lastErr = null;
   for (const u of endpoints) {
     try {
-      await postPayload(u, payload);
-      return true;
+      const body = await postPayload(u, payload);
+      return body || { ok:true };
     } catch (e) {
       lastErr = e;
     }
   }
   if (lastErr) throw lastErr;
-  return false;
+  return { ok:false };
+}
+
+// === Helpers/execução de comandos remotos (inserido acima de tick()) ===
+async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function httpJson(path, { method='GET', body=null } = {}) {
+  const res = await fetch(`http://127.0.0.1:${httpPort}${path}`, {
+    method,
+    headers: body ? { 'Content-Type':'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : null
+  });
+  return res.json();
+}
+async function ensureFreeMB(minMB = 3072) {
+  while (true) {
+    try {
+      const m = await httpJson('/api/sys');
+      const free = (m && m.mem && m.mem.freeMB) || 0;
+      const cpu  = (m && m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0;
+      if (free >= minMB && (cpu === 0 || cpu <= 90)) return;
+    } catch {}
+    await sleep(1200);
+  }
+}
+async function execCloseAll() {
+  try {
+    const st = await httpJson('/api/status');
+    const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+    for (const p of perfis) {
+      try { await httpJson(`/api/perfis/${encodeURIComponent(p.nome)}/deactivate`, { method:'POST' }); } catch {}
+    }
+  } catch {}
+}
+async function execOpenAll24h() {
+  try {
+    const lp = await httpJson('/api/perfis');
+    const perfis = (lp && lp.ok && Array.isArray(lp.perfis)) ? lp.perfis : [];
+    for (const p of perfis) {
+      await ensureFreeMB(3072);
+      try { await httpJson(`/api/perfis/${encodeURIComponent(p.nome)}/start-work`, { method:'POST' }); } catch {}
+      await sleep(800);
+    }
+  } catch {}
+}
+async function execRobePauseAll() {
+  try { await httpJson('/api/robes/pause-24h-all', { method:'POST' }); } catch {}
+}
+async function execRobeReleaseAll() {
+  try { await httpJson('/api/robes/release-all', { method:'POST' }); } catch {}
+}
+async function applyCommands(cmds = []) {
+  for (const c of cmds) {
+    try {
+      if (!c || !c.type) continue;
+      if (c.type === 'close_all')             { await execCloseAll(); }
+      else if (c.type === 'open_all_24h')     { await execOpenAll24h(); }
+      else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
+      else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
+      logger.info('[DASH][CMD] executado: ' + c.type);
+    } catch (e) {
+      logger.warn('[DASH][CMD] falha ao executar ' + (c && c.type), { error: e && e.message || e });
+    }
+  }
 }
 
 async function tick() {
@@ -283,7 +348,10 @@ async function tick() {
       }
     };
 
-    await tryAllEndpoints(payload);
+    const resp = await tryAllEndpoints(payload);
+    if (resp && Array.isArray(resp.commands) && resp.commands.length) {
+      await applyCommands(resp.commands);
+    }
     logger.info(`[DASH][TICK] post finish in ${Date.now() - start}ms`);
 
   } catch (e) {
