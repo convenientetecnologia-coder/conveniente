@@ -25,6 +25,10 @@ let timer = null;
 let inFlight = false;
 let lastWarnAt = 0;
 
+// ===== ALTERAÇÃO INÍCIO: adicionado hostIdCache ===========
+let hostIdCache = null;
+// ===== ALTERAÇÃO FIM =====================================
+
 function now() { return Date.now(); }
 function debounceWarn(msg, ms = 60000) {
   const t = now();
@@ -311,6 +315,33 @@ async function execRobePauseAll() {
 async function execRobeReleaseAll() {
   try { await httpJson('/api/robes/release-all', { method:'POST' }); } catch {}
 }
+
+// ===== ALTERAÇÃO INÍCIO: add notifierBaseFromEndpoints e ackCommand =====
+function notifierBaseFromEndpoints() {
+  try {
+    const u = resolveEndpoints()[0] || '';
+    const url = new URL(u);
+    return `${url.protocol}//${url.host}`;
+  } catch { return null; }
+}
+async function ackCommand(cmdId, ok, errorMsg) {
+  try {
+    const base = notifierBaseFromEndpoints();
+    if (!base || !hostIdCache || !cmdId) return;
+    const controller = new (global.AbortController || require('node-abort-controller'))();
+    const t = setTimeout(() => { try { controller.abort(); } catch {} }, 3000);
+    await fetch(`${base}/api/commands/ack`, {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify({ hostId: hostIdCache, id: cmdId, ok: !!ok, error: errorMsg ? String(errorMsg) : null }),
+      signal: controller.signal
+    }).catch(()=>{});
+    clearTimeout(t);
+  } catch {}
+}
+// ===== ALTERAÇÃO FIM ===============================================
+
+// ===== ALTERAÇÃO INÍCIO: applyCommands para ACK após cada execução =====
 async function applyCommands(cmds = []) {
   for (const c of cmds) {
     try {
@@ -320,11 +351,16 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
       logger.info('[DASH][CMD] executado: ' + c.type);
+      // ACK de sucesso
+      try { await ackCommand(c.id, true, null); } catch {}
     } catch (e) {
       logger.warn('[DASH][CMD] falha ao executar ' + (c && c.type), { error: e && e.message || e });
+      // ACK de erro
+      try { await ackCommand(c && c.id, false, (e && e.message) || String(e)); } catch {}
     }
   }
 }
+// ===== ALTERAÇÃO FIM ===============================================
 
 async function tick() {
   logger.info('[DASH][TICK] start: ' + new Date().toISOString());
@@ -333,7 +369,10 @@ async function tick() {
   if (inFlight) return; // anti-overlap
   inFlight = true;
   try {
+    // ===== ALTERAÇÃO: obter [status, hostId] e atualizar hostIdCache =====
     const [status, hostId] = await Promise.all([readAggregatedStatus(), getOrCreateHostId()]);
+    hostIdCache = hostId;
+    // ===== FIM ======
     logger.info(`[DASH][TICK] got status in ${Date.now() - start}ms`);
 
     const quick = buildQuickSnapshot(status);
