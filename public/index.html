@@ -68,6 +68,8 @@
       border-radius:8px; background:var(--pill); font-size:12px; color:var(--muted)
     }
     .metric b{color:var(--text); font-size:13px}
+    .metric.clickable { cursor: pointer; }
+    .metric.clickable:hover { filter: brightness(1.07); }
     .wrap{ max-width:1100px; margin:0 auto; padding:0 16px; padding-top:110px; }
     /* Toolbar refinada: ações à direita, quebra suave */
     .toolbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px }
@@ -219,6 +221,8 @@
       <div class="metric"><span>RAM</span><b id="mRam">--</b></div>
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
+      <div class="metric clickable" id="metricLogin" style="display:none"><span>Login requerido</span><b id="mLoginReq">0</b></div>
+      <div class="metric clickable" id="metricBanned" style="display:none"><span>Banidas</span><b id="mBanidas">0</b></div>
       <div class="metric"><span>Modo</span><b id="mModo">--</b></div>
       <div class="metric" id="mRamPanel" style="display:none"><span>RAM total:</span><b id="mRamTotal">--</b> <span>| RAM máx:</span> <b id="mRamMax">--</b> <span>| Perfis c/ RAM alta:</span> <b id="mRamMilit">0</b> <span>| Cooldown:</span> <b id="mPCooldown">0</b> <span>| Congelados:</span> <b id="mPFrozen">0</b></div>
     </div>
@@ -664,6 +668,22 @@
       document.getElementById('mTrabalhando').textContent = String(perfis.filter(p => p.trabalhando).length);
       document.getElementById('mFila').textContent = String(robeQueue.length);
 
+      // Contagens agregadas
+      const loginCount  = perfis.filter(p => p.loginRequired === true).length;
+      const bannedCount = perfis.filter(p => p.banned === true).length;
+
+      // Atualiza cards do header
+      const loginCard = document.getElementById('metricLogin');
+      const banCard   = document.getElementById('metricBanned');
+      const mLogin    = document.getElementById('mLoginReq');
+      const mBan      = document.getElementById('mBanidas');
+
+      if (mLogin) mLogin.textContent = String(loginCount);
+      if (mBan)   mBan.textContent   = String(bannedCount);
+
+      if (loginCard) loginCard.style.display = loginCount > 0 ? 'inline-flex' : 'none';
+      if (banCard)   banCard.style.display   = bannedCount > 0 ? 'inline-flex' : 'none';
+
       const lista = document.getElementById('listaPerfis');
       lista.innerHTML = '';
       if (!perfis.length) {
@@ -1103,6 +1123,8 @@
       if (currentFilter === 'active')   return !!p.active;
       if (currentFilter === 'inactive') return !p.active;
       if (currentFilter === 'issues')   return issuesCount > 0;
+      if (currentFilter === 'login')  return p.loginRequired === true;
+      if (currentFilter === 'banned') return p.banned === true;
       return true; // 'all'
     }
 
@@ -1238,6 +1260,12 @@
       });
       // default
       setFilter('all');
+    })();
+    (function bindLoginBannedCards(){
+      const loginCard = document.getElementById('metricLogin');
+      const banCard   = document.getElementById('metricBanned');
+      if (loginCard) loginCard.onclick = () => setFilter('login');
+      if (banCard)   banCard.onclick   = () => setFilter('banned');
     })();
 
     // 4.2 Atualização das métricas (RAM/CPU/Fotos) — sem bloquear "+ Nova Conta" em RAM baixa

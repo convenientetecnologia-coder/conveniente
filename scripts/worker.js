@@ -37,7 +37,11 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
       return man;
     });
     if (!already) {
-      await issues.append(nome, 'mil_action', `login_required_detected reason=${reason||''} source=${source||''}`);
+      await issues.append(
+        nome,
+        'login_required_detected',
+        `reason=${reason||''} source=${source||''} at=${new Date().toISOString()}`
+      );
     }
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].loginRequired = true;
@@ -59,7 +63,11 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       return man;
     });
     if (!already) {
-      await issues.append(nome, 'mil_action', `account_banned_detected reason=${reason||''} snippet="${(snippet||'').slice(0, 120)}"`);
+      await issues.append(
+        nome,
+        'account_banned_detected',
+        `reason=${reason||''} snippet="${(snippet||'').slice(0,120)}" at=${new Date().toISOString()}`
+      );
     }
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].banned = true;
@@ -93,10 +101,10 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
       return man;
     });
     if (which.includes('loginRequired') && (prev && prev.loginRequired)) {
-      await issues.append(nome, 'mil_action', 'login_required_cleared');
+      await issues.append(nome, 'login_required_cleared', `at=${new Date().toISOString()}`);
     }
     if (which.includes('banned') && (prev && prev.banned)) {
-      await issues.append(nome, 'mil_action', 'account_banned_cleared');
+      await issues.append(nome, 'account_banned_cleared', `at=${new Date().toISOString()}`);
     }
     robeMeta[nome] = robeMeta[nome] || {};
     if (which.includes('loginRequired')) {
@@ -1952,7 +1960,7 @@ function resolveChromeUserDataRoot() {
     const la = process.env.LOCALAPPDATA;
     if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
     const os = require('os');
-    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+    return path.join(os.homedir(), 'AppData', Local', 'Google', 'Chrome', 'User Data');
   }
   const os = require('os');
   return path.join(os.homedir(), '.config', 'google-chrome');

@@ -129,7 +129,12 @@ const ISSUE_TYPES_SET = new Set([
   'photo_ban',
   'photo_delete',
   'photo_skip_banned',
-  'photo_gc'
+  'photo_gc',
+  // Novos tipos — evento tipado de login/ban
+  'login_required_detected',
+  'login_required_cleared',
+  'account_banned_detected',
+  'account_banned_cleared'
 ]);
 
 function padronizaType(type) {
