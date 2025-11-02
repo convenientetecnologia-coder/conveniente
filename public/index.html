@@ -798,6 +798,18 @@
         }
         // ===================== FIM NOVOS PILLS — STATUS MILITAR =====================
 
+        // ---- NOVOS PILLS LOGIN/BANNED ----
+        if (p.loginRequired === true) {
+          const lr = buildPill('Login requerido', 'warn');
+          lr.title = p.loginReason ? ('Motivo: ' + p.loginReason) : 'Sessão/Checkpoint/Captcha detectado';
+          titleRow.append(lr);
+        }
+        if (p.banned === true) {
+          const bn = buildPill('Conta suspensa', 'bad');
+          bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
+          titleRow.append(bn);
+        }
+
         // -------- FROZEN pill explícito (primeiro) ---------
         if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
 

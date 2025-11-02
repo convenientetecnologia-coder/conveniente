@@ -2016,6 +2016,88 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   } catch {}
 }
 
+// ==== NOVOS DETECTORES LOGIN E SUSPENSÃO ====
+
+/**
+ * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
+ * Retorna { loginRequired: true/false, reason: string, domain: string }
+ */
+async function detectLoginRequired(page) {
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    if (!isFbOrMsg) return { loginRequired: false };
+
+    const v = await page.evaluate(() => {
+      function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+      // 1) Formulários de login canônicos
+      const hasRoyal = !!document.querySelector('form[data-testid="royal_login_form"], form#login_form');
+      const hasInputs = !!document.querySelector('input[name="email"], input#email') && !!document.querySelector('input[name="pass"], input#pass');
+      // 2) Checkpoint/captcha
+      const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
+      const hasPersonaText = h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person'));
+      return { hasRoyal, hasInputs, hasPersonaText };
+    });
+
+    if (v && (v.hasRoyal && v.hasInputs)) {
+      return { loginRequired: true, reason: 'login_form', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
+    }
+    if (v && v.hasPersonaText) {
+      return { loginRequired: true, reason: 'checkpoint_captcha', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
+    }
+  } catch {}
+  return { loginRequired: false };
+}
+
+/**
+ * Detecta se a conta foi bloqueada de modo permanente/banida/suspensa.
+ * Retorna { banned: true/false, reason, snippet }
+ */
+async function detectAccountSuspended(page) {
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    if (!isFbOrMsg) return { banned: false };
+
+    const v = await page.evaluate(() => {
+      function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+      const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2500);
+      const texts = nodes.map(el => (el.innerText || el.textContent || '')).filter(Boolean);
+      const tnorm = texts.map(norm);
+
+      // Multilíngue PT/EN/ES variantes para “suspensa/suspendida/suspended”
+      const hit = tnorm.some(t =>
+        t.includes('sua conta foi suspensa') ||
+        t.includes('sua conta esta suspensa') ||
+        t.includes('your account was suspended') ||
+        t.includes('your account is suspended') ||
+        t.includes('tu cuenta ha sido suspendida') ||
+        t.includes('tu cuenta esta suspendida')
+      );
+
+      // Evidência adicional contendo prazo/efeito (opcional e robusta)
+      const more = tnorm.some(t =>
+        t.includes('nao esta visivel no facebook') ||
+        t.includes('you cannot use it right now') ||
+        t.includes('no puedes usarla ahora') ||
+        t.includes('sera desabilitada permanentemente') ||
+        t.includes('will be permanently disabled')
+      );
+
+      let snippet = '';
+      if (hit) {
+        snippet = texts.find(s => /[Ss]uspens[oa]/.test(s)) || texts.slice(0,20).join(' | ').slice(0,300);
+      }
+      return { hit, more, snippet };
+    });
+
+    if (v && v.hit) {
+      return { banned: true, reason: 'suspended_ui', snippet: v.snippet || '' };
+    }
+  } catch {}
+  return { banned: false };
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -2043,5 +2125,8 @@ module.exports = {
   resolveNonceIfPresent,
   clickContinuarComo,
   installOneTabGuard,
-  installAboutBlankKiller
+  installAboutBlankKiller,
+  // ==== NOVOS:
+  detectLoginRequired,
+  detectAccountSuspended
 };

@@ -15,6 +15,99 @@ const fotos        = require('./fotos.js'); // gestor central de fotos
 const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 
+// ====== ACCOUNT FLAGS (loginRequired / banned) — persistência atômica ======
+async function readAccountFlags(nome) {
+  try {
+    const m = await manifestStore.read(nome).catch(()=>null);
+    return (m && m.accountFlags) ? m.accountFlags : {};
+  } catch { return {}; }
+}
+
+async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
+  try {
+    const prev = await readAccountFlags(nome);
+    const already = prev && prev.loginRequired === true;
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.loginRequired = true;
+      man.accountFlags.loginReason = String(reason||'');
+      man.accountFlags.loginSource = String(source||'');
+      man.accountFlags.lastLoginRequiredAt = Date.now();
+      return man;
+    });
+    if (!already) {
+      await issues.append(nome, 'mil_action', `login_required_detected reason=${reason||''} source=${source||''}`);
+    }
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].loginRequired = true;
+    robeMeta[nome].loginReason = reason || '';
+  } catch {}
+}
+
+async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
+  try {
+    const prev = await readAccountFlags(nome);
+    const already = prev && prev.banned === true;
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.banned = true;
+      man.accountFlags.bannedAt = Date.now();
+      man.accountFlags.bannedReason = String(reason||'');
+      man.accountFlags.bannedText = String(snippet||'').slice(0, 400);
+      return man;
+    });
+    if (!already) {
+      await issues.append(nome, 'mil_action', `account_banned_detected reason=${reason||''} snippet="${(snippet||'').slice(0, 120)}"`);
+    }
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].banned = true;
+  } catch {}
+}
+
+async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
+  try {
+    const prev = await readAccountFlags(nome);
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      if (which.includes('loginRequired')) {
+        if (man.accountFlags.loginRequired || man.accountFlags.loginReason || man.accountFlags.loginSource) {
+          delete man.accountFlags.loginRequired;
+          delete man.accountFlags.loginReason;
+          delete man.accountFlags.loginSource;
+          delete man.accountFlags.lastLoginRequiredAt;
+        }
+      }
+      if (which.includes('banned')) {
+        if (man.accountFlags.banned || man.accountFlags.bannedAt || man.accountFlags.bannedReason || man.accountFlags.bannedText) {
+          delete man.accountFlags.banned;
+          delete man.accountFlags.bannedAt;
+          delete man.accountFlags.bannedReason;
+          delete man.accountFlags.bannedText;
+        }
+      }
+      // Se ficar vazio, opcional: remover accountFlags inteiro
+      if (Object.keys(man.accountFlags).length === 0) delete man.accountFlags;
+      return man;
+    });
+    if (which.includes('loginRequired') && (prev && prev.loginRequired)) {
+      await issues.append(nome, 'mil_action', 'login_required_cleared');
+    }
+    if (which.includes('banned') && (prev && prev.banned)) {
+      await issues.append(nome, 'mil_action', 'account_banned_cleared');
+    }
+    robeMeta[nome] = robeMeta[nome] || {};
+    if (which.includes('loginRequired')) {
+      delete robeMeta[nome].loginRequired;
+      delete robeMeta[nome].loginReason;
+    }
+    if (which.includes('banned')) delete robeMeta[nome].banned;
+    await snapshotStatusAndWrite();
+  } catch {}
+}
+
 // --- SHARD SUPPORT (multi-node auto) ---
 const SHARD_PROFILES = (() => { try { return JSON.parse(process.env.SHARD_PROFILES || '[]'); } catch { return []; }})();
 let SHARD_SET = new Set(Array.isArray(SHARD_PROFILES) ? SHARD_PROFILES : []); // era 'const', agora 'let'
@@ -2128,6 +2221,7 @@ const handlers = {
 
     try {
       await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
+      try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
       // NÃO execute closeExtraPages/prune aqui!
       logger.info('[HANDLER] configure ok', { nome });
       return { ok: true };
@@ -2217,6 +2311,8 @@ const handlers = {
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
     ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
+    // LIMPA FLAGS AO RETOMAR TRABALHO (loginRequired e banned)
+    try { await clearAccountFlags(nome, ['loginRequired','banned']); } catch {}
     // Limpa supressão do about:blank killer ao sair do modo humano
     try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
 
@@ -2556,7 +2652,57 @@ const handlers = {
         manifestStatus,
         closingReason: robeMeta[nome]?.closingReason || null,
         openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
-        lastSwapAt: robeMeta[nome]?.lastSwapAt || null
+        lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
+        loginRequired: (() => {
+          try {
+            const mPath = manifestPathOf(nome);
+            if (fs.existsSync(mPath)) {
+              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+              return !!(man.accountFlags && man.accountFlags.loginRequired === true);
+            }
+          } catch {}
+          return !!robeMeta[nome]?.loginRequired;
+        })(),
+        loginReason: (() => {
+          try {
+            const mPath = manifestPathOf(nome);
+            if (fs.existsSync(mPath)) {
+              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+              return (man.accountFlags && man.accountFlags.loginReason) || null;
+            }
+          } catch {}
+          return robeMeta[nome]?.loginReason || null;
+        })(),
+        banned: (() => {
+          try {
+            const mPath = manifestPathOf(nome);
+            if (fs.existsSync(mPath)) {
+              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+              return !!(man.accountFlags && man.accountFlags.banned === true);
+            }
+          } catch {}
+          return !!robeMeta[nome]?.banned;
+        })(),
+        bannedAt: (() => {
+          try {
+            const mPath = manifestPathOf(nome);
+            if (fs.existsSync(mPath)) {
+              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+              return (man.accountFlags && man.accountFlags.bannedAt) || null;
+            }
+          } catch {}
+          return null;
+        })(),
+        bannedText: (() => {
+          try {
+            const mPath = manifestPathOf(nome);
+            if (fs.existsSync(mPath)) {
+              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+              return (man.accountFlags && man.accountFlags.bannedText) || null;
+            }
+          } catch {}
+          return null;
+        })()
       };
     });
     const robes = {};
@@ -2770,7 +2916,57 @@ return {
   manifestStatus,
   closingReason: robeMeta[nome]?.closingReason || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
-  lastSwapAt: robeMeta[nome]?.lastSwapAt || null
+  lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
+  loginRequired: (() => {
+    try {
+      const mPath = manifestPathOf(nome);
+      if (fs.existsSync(mPath)) {
+        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+        return !!(man.accountFlags && man.accountFlags.loginRequired === true);
+      }
+    } catch {}
+    return !!robeMeta[nome]?.loginRequired;
+  })(),
+  loginReason: (() => {
+    try {
+      const mPath = manifestPathOf(nome);
+      if (fs.existsSync(mPath)) {
+        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+        return (man.accountFlags && man.accountFlags.loginReason) || null;
+      }
+    } catch {}
+    return robeMeta[nome]?.loginReason || null;
+  })(),
+  banned: (() => {
+    try {
+      const mPath = manifestPathOf(nome);
+      if (fs.existsSync(mPath)) {
+        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+        return !!(man.accountFlags && man.accountFlags.banned === true);
+      }
+    } catch {}
+    return !!robeMeta[nome]?.banned;
+  })(),
+  bannedAt: (() => {
+    try {
+      const mPath = manifestPathOf(nome);
+      if (fs.existsSync(mPath)) {
+        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+        return (man.accountFlags && man.accountFlags.bannedAt) || null;
+      }
+    } catch {}
+    return null;
+  })(),
+  bannedText: (() => {
+    try {
+      const mPath = manifestPathOf(nome);
+      if (fs.existsSync(mPath)) {
+        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+        return (man.accountFlags && man.accountFlags.bannedText) || null;
+      }
+    } catch {}
+    return null;
+  })()
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
   // lastMaintenanceAt: !!robeMeta[nome]?.lastMaintenanceAt || null,
@@ -3252,6 +3448,19 @@ async function nurseTick() {
       }
 
       const p0 = pages[0];
+      // === LOGIN/BANNED DETECTION (informativo) ===
+      try {
+        const lr = await browserHelper.detectLoginRequired(p0);
+        if (lr && lr.loginRequired) {
+          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
+        }
+      } catch {}
+      try {
+        const bd = await browserHelper.detectAccountSuspended(p0);
+        if (bd && bd.banned) {
+          await setBannedFlag(nome, { reason: bd.reason || '', snippet: bd.snippet || '' });
+        }
+      } catch {}
       // INSTRUÇÃO 1: SUBSTITUIR LÓGICA DE DETECÇÃO
       // DETECÇÃO: sempre checar Messenger; checar Facebook só em create/seller
       let det = { blocked:false };
@@ -3574,7 +3783,7 @@ async function wirePageObservers(nome, page) {
     }
   });
   page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
+  page.on('requestfailed', () => { GetHealth(nome).lastNetEventAt = Date.now(); });
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 }

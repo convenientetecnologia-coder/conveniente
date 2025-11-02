@@ -74,7 +74,13 @@ async function montarPerfisBaseline() {
     lastVirtusCrash: null,
     virtusFlags: null,
     extraVirtusDebug: null,
-    isFrozen: false
+    isFrozen: false,
+    // === CAMPOS ADICIONADOS PARA BLINDAGEM DE SHAPE:
+    loginRequired: false,
+    loginReason: null,
+    banned: false,
+    bannedAt: null,
+    bannedText: null
   }));
 }
 
@@ -135,7 +141,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     lastVirtusCrash: null,
     virtusFlags: null,
     extraVirtusDebug: null,
-    isFrozen: false
+    isFrozen: false,
+    // === CAMPOS ADICIONADOS PARA BLINDAGEM DE SHAPE:
+    loginRequired: false,
+    loginReason: null,
+    banned: false,
+    bannedAt: null,
+    bannedText: null
   }));
 
   // Overlay dos perfis atuais vindos do status (worker ou fallback)
@@ -307,7 +319,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     ramMB: null, cpuPercent: null, numPages: null, robeEstado: null, robeCooldownSec: null,
     robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
     activationHeldUntil: null, reopenAt: null, openBackoffMs: null, lastSwapAt: null, lastSwapPeer: null,
-    swapCooldown: null, whyNotOpen: null, manifestStatus: null, closingReason: null, isFrozen: false
+    swapCooldown: null, whyNotOpen: null, manifestStatus: null, closingReason: null, isFrozen: false,
+    // === CAMPOS ADICIONADOS PARA BLINDAGEM DE SHAPE:
+    loginRequired: false,
+    loginReason: null,
+    banned: false,
+    bannedAt: null,
+    bannedText: null
     // outros campos militares do shape retrocompatível
   }]));
   let warningINST = undefined;
@@ -397,7 +415,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       lastVirtusCrash: null,
       virtusFlags: null,
       extraVirtusDebug: null,
-      isFrozen: false
+      isFrozen: false,
+      // === CAMPOS ADICIONADOS PARA BLINDAGEM DE SHAPE:
+      loginRequired: false,
+      loginReason: null,
+      banned: false,
+      bannedAt: null,
+      bannedText: null
     }));
   } catch(e2) {
     perfisSkeleton = [];
