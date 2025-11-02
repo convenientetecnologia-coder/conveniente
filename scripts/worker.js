@@ -1960,7 +1960,7 @@ function resolveChromeUserDataRoot() {
     const la = process.env.LOCALAPPDATA;
     if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
     const os = require('os');
-    return path.join(os.homedir(), 'AppData', Local', 'Google', 'Chrome', 'User Data');
+    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
   }
   const os = require('os');
   return path.join(os.homedir(), '.config', 'google-chrome');
