@@ -38,7 +38,6 @@
       min-height: 38px;
       padding: 0 22px;
       justify-content: flex-start;
-      flex-wrap: wrap;
     }
     .toolbar-sticky button,
     .toolbar-sticky .btn,
@@ -53,63 +52,6 @@
       margin-left: 18px;
       gap: 6px;
     }
-    /* Busca + Problemas + Info */
-    #searchBox{
-      height: 30px;
-      padding: 6px 10px;
-      border-radius: 8px;
-      border: 1px solid var(--btn-border);
-      background: var(--btn);
-      color: var(--text);
-      min-width: 220px;
-    }
-    #resultsInfo{
-      font-size: 12px;
-      color: var(--muted);
-      margin-left: auto;
-      white-space: nowrap;
-    }
-    #problemsBtn.has-selected{
-      background: linear-gradient(135deg, var(--brand), var(--brand2));
-      color: #fff;
-      border: 0;
-    }
-
-    /* Popover Toolbox de Problemas */
-    #problemsPopover{
-      position: fixed;
-      display: none;
-      background: #0f1625;
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px;
-      z-index: 1000;
-      min-width: 280px;
-      box-shadow: 0 12px 30px rgba(0,0,0,.45);
-    }
-    #problemsList{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-bottom: 10px;
-      max-width: 420px;
-    }
-    .problem-pill{
-      border:1px solid var(--pill-border); background:var(--pill); color:var(--text);
-      font-size:12px; padding:5px 10px; border-radius:999px; display:inline-flex; gap:6px; align-items:center; cursor:pointer;
-      user-select: none;
-    }
-    .problem-pill.selected{
-      background: linear-gradient(135deg, var(--brand), var(--brand2));
-      border-color: transparent;
-      color:#fff;
-      font-weight: 700;
-    }
-    .problems-footer{
-      display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px;
-    }
-
     .brand{
       display:flex; align-items:center; gap:12px; font-weight:800; letter-spacing:.2px; font-size:18px;
     }
@@ -301,290 +243,13 @@
       <button class="btn" id="filterInactive">Inativas</button>
       <button class="btn" id="filterIssues">Com problema</button>
     </div>
-    <input id="searchBox" type="text" placeholder="Pesquisar (nome, label, cidade)..." />
-    <button class="btn" id="problemsBtn">Problemas ▾</button>
-    <span id="resultsInfo">Mostrando 0 de 0 (Total: 0)</span>
   </div>
 
   <div class="wrap">
     <div id="listaPerfis" class="list"></div>
   </div>
-  <div id="problemsPopover">
-    <div style="font-weight:800;margin-bottom:6px">Problemas</div>
-    <div id="problemsList"></div>
-    <div class="problems-footer">
-      <div>
-        <label><input type="radio" name="problemsLogic" value="any" checked> Qualquer</label>
-        <label style="margin-left:8px"><input type="radio" name="problemsLogic" value="all"> Todos</label>
-      </div>
-      <button class="btn" id="problemsClear">Limpar</button>
-    </div>
-  </div>
   <script src="app.js"></script>
   <script>
-    // ====================== TOP: BUSCA INTELIGENTE + TOOLBOX PROBLEMAS + RENDER ESCALÁVEL ======================
-    // Estado global do painel
-    let PERFIS_DATA = [];         // lista de perfis completa em memória (enriquecida por buildSearchIndex)
-    let ROBES_DATA  = {};         // mapa { nomePerfil: statusRobe }
-    let ROBE_QUEUE  = [];         // fila atual do robe
-    let SEARCH_QUERY = '';        // texto de busca
-    const PROBLEM_SELECTED = new Set(); // conjunto de keys selecionadas
-    let PROBLEM_LOGIC = 'any';    // 'any' (OR) ou 'all' (AND)
-    let isRendering = false;      // lock para evitar renders concorrentes
-    let PAGE = 1;                 // página atual (para "carregar mais")
-    const PAGE_SIZE = 80;         // tamanho da página
-
-    // Helpers utilitários
-    function debounce(fn, ms){ let t=null; return function(...args){ clearTimeout(t); t=setTimeout(() => fn.apply(this,args), ms); }; }
-    function normalizeStr(str){
-      try { return String(str||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
-      catch { return String(str||'').toLowerCase(); }
-    }
-
-    function buildSearchIndex(p){
-      try {
-        const norm = normalizeStr([p.nome, p.label, p.cidade].filter(Boolean).join(' '));
-        p._norm = norm;
-      } catch { p._norm = ''; }
-      return p;
-    }
-
-    function passesSearch(p){
-      const q = (SEARCH_QUERY || '').trim();
-      if (!q) return true;
-      const tokens = normalizeStr(q).split(/\s+/).filter(Boolean);
-      if (!tokens.length) return true;
-      const hay = p._norm || '';
-      // AND: todo token deve estar contido (fuzzy substring)
-      for (const tk of tokens) if (hay.indexOf(tk) === -1) return false;
-      return true;
-    }
-
-    // Lista real de Problemas suportados (predicados sob forma real)
-    const PROBLEM_FILTERS = [
-      { key:'loginRequired', label:'loginRequired', pred:(p)=>p.loginRequired === true },
-      { key:'banned', label:'banned', pred:(p)=>p.banned === true },
-      { key:'limit_posting', label:'robe.pauseReason=limit_posting', pred:(p,robes)=>{ const r=robes[p.nome]; return !!(r && r.pauseReason==='limit_posting' && (r.cooldownSec||0)>0); } },
-      { key:'manifest_missing', label:'manifestStatus=missing', pred:(p)=>p.manifestStatus==='missing' },
-      { key:'manifest_incomplete', label:'manifestStatus=incomplete', pred:(p)=>p.manifestStatus==='incomplete' },
-      { key:'frozen', label:'robeFrozenUntil>now', pred:(p)=> (p.robeFrozenUntil||0) > Date.now() },
-      { key:'ram_high', label:'ramMB>=700', pred:(p)=> typeof p.ramMB==='number' && p.ramMB>=700 },
-      { key:'issues', label:'issuesCount>0', pred:(p)=> Number(p.issuesCount||0) > 0 },
-      { key:'activation_hold', label:'activationHeldUntil>now', pred:(p)=> (p.activationHeldUntil||0) > Date.now() },
-      { key:'virtus_offline_active', label:'active=true & trabalhando=false', pred:(p)=> p.active===true && p.trabalhando!==true }
-    ];
-
-    function passProblemFilters(p, robes){
-      if (!PROBLEM_SELECTED || PROBLEM_SELECTED.size===0) return true;
-      const keys = Array.from(PROBLEM_SELECTED);
-      const preds = keys.map(k => (PROBLEM_FILTERS.find(f => f.key===k) || {}).pred).filter(Boolean);
-      if (!preds.length) return true;
-      if (PROBLEM_LOGIC === 'all') {
-        return preds.every(fn => {
-          try { return !!fn(p, robes); } catch { return false; }
-        });
-      }
-      // any (OR)
-      return preds.some(fn => {
-        try { return !!fn(p, robes); } catch { return false; }
-      });
-    }
-
-    function combinedPassFilters(p){
-      try {
-        // Usa o filtro legado (currentFilter) + busca + toolbox problemas
-        return passFilter(p) && passesSearch(p) && passProblemFilters(p, ROBES_DATA);
-      } catch { return false; }
-    }
-
-    function getFiltered(){
-      try {
-        return (PERFIS_DATA || []).filter(combinedPassFilters);
-      } catch {
-        return [];
-      }
-    }
-
-    function updateResultsInfo(){
-      const info = document.getElementById('resultsInfo');
-      if (!info) return;
-      const total = (PERFIS_DATA || []).length;
-      const filtered = getFiltered();
-      const shown = Math.min(filtered.length, PAGE * PAGE_SIZE);
-      let extra = '';
-      if (PROBLEM_SELECTED.size > 0) {
-        extra = ` • Problemas: ${PROBLEM_SELECTED.size} (${PROBLEM_LOGIC==='all'?'todos':'qualquer'})`;
-      }
-      info.textContent = `Mostrando ${shown} de ${filtered.length} (Total: ${total})${extra}`;
-    }
-
-    function updateProblemsBtn(){
-      const btn = document.getElementById('problemsBtn');
-      if (!btn) return;
-      const sel = PROBLEM_SELECTED.size;
-      btn.classList.toggle('has-selected', sel>0);
-      btn.textContent = sel>0 ? `Problemas (${sel}) ▾` : 'Problemas ▾';
-    }
-
-    function populateProblemsList(){
-      const cont = document.getElementById('problemsList');
-      if (!cont) return;
-      cont.innerHTML = '';
-      PROBLEM_FILTERS.forEach(f => {
-        const pill = document.createElement('div');
-        pill.className = 'problem-pill' + (PROBLEM_SELECTED.has(f.key)?' selected':'');
-        pill.textContent = f.label;
-        pill.dataset.key = f.key;
-        pill.onclick = () => {
-          if (PROBLEM_SELECTED.has(f.key)) PROBLEM_SELECTED.delete(f.key);
-          else PROBLEM_SELECTED.add(f.key);
-          // Reset página
-          PAGE = 1;
-          // Atualiza UI
-          pill.classList.toggle('selected');
-          updateProblemsBtn();
-          renderList();
-        };
-        cont.appendChild(pill);
-      });
-    }
-
-    function closeProblemsPopover(){ const pv = document.getElementById('problemsPopover'); if (pv) pv.style.display='none'; }
-    function openProblemsPopover(){
-      const pv = document.getElementById('problemsPopover');
-      const btn = document.getElementById('problemsBtn');
-      if (!pv || !btn) return;
-      // Posiciona ao lado do botão
-      const r = btn.getBoundingClientRect();
-      pv.style.display = 'block';
-      const y = r.bottom + 6 + window.scrollY;
-      let x = r.left + window.scrollX;
-      // evita estouro à direita
-      const vw = window.innerWidth || document.documentElement.clientWidth;
-      const pvWidth = Math.min(360, Math.max(280, pv.offsetWidth || 280));
-      if (x + pvWidth + 10 > vw) x = Math.max(10, vw - pvWidth - 10);
-      pv.style.top = `${y}px`;
-      pv.style.left = `${x}px`;
-      // Popular lista sempre que abrir (mantém sync)
-      populateProblemsList();
-      // Radios estado
-      const radios = pv.querySelectorAll('input[name="problemsLogic"]');
-      radios.forEach(r => r.checked = (r.value === PROBLEM_LOGIC));
-    }
-
-    // Render escalável da lista (paginado)
-    function renderList(){
-      if (isRendering) return; // lock simples
-      isRendering = true;
-      try {
-        const lista = document.getElementById('listaPerfis');
-        if (!lista) { isRendering = false; return; }
-        lista.innerHTML = '';
-
-        const filtered = getFiltered();
-        if (!filtered.length) {
-          const empty = document.createElement('div');
-          empty.className='pill';
-          empty.textContent = (SEARCH_QUERY || PROBLEM_SELECTED.size>0) ? 'Nenhum resultado para os filtros aplicados.' : 'Nenhuma conta cadastrada.';
-          lista.appendChild(empty);
-          updateResultsInfo();
-          isRendering = false;
-          return;
-        }
-
-        const end = Math.min(filtered.length, PAGE * PAGE_SIZE);
-        const slice = filtered.slice(0, end);
-
-        // Renderiza SOMENTE o trecho atual (até PAGE * PAGE_SIZE)
-        slice.forEach((p, idx) => {
-          const card = buildPerfilCard(p, idx, ROBES_DATA, ROBE_QUEUE);
-          lista.appendChild(card);
-        });
-
-        // Paginator: "Carregar mais"
-        if (end < filtered.length) {
-          const moreWrap = document.createElement('div');
-          moreWrap.style.display = 'flex';
-          moreWrap.style.justifyContent = 'center';
-          moreWrap.style.margin = '6px 0 16px';
-          const moreBtn = document.createElement('button');
-          moreBtn.className = 'btn';
-          moreBtn.id = 'loadMoreBtn';
-          moreBtn.textContent = `Carregar mais (${Math.min(PAGE_SIZE, filtered.length - end)})`;
-          moreBtn.onclick = () => {
-            PAGE++;
-            renderList();
-          };
-          moreWrap.appendChild(moreBtn);
-          lista.appendChild(moreWrap);
-        }
-
-        updateResultsInfo();
-      } finally {
-        isRendering = false;
-      }
-    }
-
-    // Bind de Busca
-    (function bindSmartSearch(){
-      const el = document.getElementById('searchBox');
-      if (!el) return;
-      const handler = debounce((ev) => {
-        SEARCH_QUERY = (ev.target.value || '').trim();
-        PAGE = 1;
-        renderList();
-      }, 180);
-      el.addEventListener('input', handler);
-    })();
-
-    // Bind Toolbox de Problemas
-    (function bindProblemsToolbox(){
-      const btn = document.getElementById('problemsBtn');
-      const pv  = document.getElementById('problemsPopover');
-      if (!btn || !pv) return;
-
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (pv.style.display === 'block') closeProblemsPopover();
-        else openProblemsPopover();
-      });
-
-      // Clear
-      const clearBtn = document.getElementById('problemsClear');
-      if (clearBtn) {
-        clearBtn.onclick = () => {
-          PROBLEM_SELECTED.clear();
-          PAGE = 1;
-          updateProblemsBtn();
-          populateProblemsList();
-          renderList();
-        };
-      }
-
-      // Lógica ANY/ALL
-      pv.addEventListener('change', (ev) => {
-        const t = ev.target;
-        if (t && t.name === 'problemsLogic') {
-          PROBLEM_LOGIC = (t.value === 'all') ? 'all' : 'any';
-          PAGE = 1;
-          renderList();
-          updateResultsInfo();
-        }
-      });
-
-      // Fechar ao clicar fora
-      document.addEventListener('click', (ev) => {
-        if (!pv || pv.style.display !== 'block') return;
-        const within = pv.contains(ev.target) || (btn && btn.contains(ev.target));
-        if (!within) closeProblemsPopover();
-      });
-
-      // Inicial
-      updateProblemsBtn();
-      populateProblemsList();
-    })();
-    // ====================== FIM TOPO: BUSCA/PROBLEMAS/RENDER ======================
-
     // Lock para impedir múltiplos comandos em massa simultâneos — fortalece UX com fluxo único!
     let startAllLock = false; // lock para "Abrir Todos e Iniciar 24h"
     let stopAllLock = false;  // lock para "Fechar todos"
@@ -904,369 +569,6 @@
     }
     // ============================= FIM ALTERAÇÕES PEDIDAS – RESTO SÓ CHAMADA NOS LUGARES =============================
 
-    // Função para construir um card de perfil (refatorado da listagem original)
-    function buildPerfilCard(p, idx, robes, robeQueue) {
-      const robeStatus = robes[p.nome] || {};
-      const robeCooldownSec = robeStatus.cooldownSec || 0;
-      const fila = robeQueue || [];
-      const inQueue = fila.includes(p.nome);
-      const isNext = (fila[0] === p.nome);
-      const display = p.label || p.nome;
-      const idxStr = String(idx + 1).padStart(3, '0'); // 001, 002, ...
-
-      const card = document.createElement('div');
-      card.className='perfil';
-
-      // ----- BLOQUEIO/CONGELAMENTO: antiflood skip/frozen ----
-      const isFrozen = (p.robeFrozenUntil && p.robeFrozenUntil > Date.now());
-      if (isFrozen) card.classList.add('frozen');
-
-      // -- NOVO: Ativação em espera e Reabrirá em --
-      const activationHeldPill = buildActivationHeldPill(p);
-      const reopenAtPill = buildReopenAtPill(p);
-
-      // LEFT: toggle
-      const left = document.createElement('div'); left.className='leftCol';
-      const toggle = document.createElement('button');
-      toggle.className = 'toggle ' + (p.active ? 'close btn-vermelho':'open btn-verde');
-      toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
-      toggle.onclick = () => toggleBrowserUI(p, toggle);
-      if (isFrozen) toggle.disabled = true;
-      if (activationHeldPill) {
-        toggle.disabled = true;
-        toggle.title = 'Ativação em espera pelo sistema militar RAM/CPU';
-      }
-      left.append(toggle);
-
-      // NOVO: start 24h logo abaixo do toggle (com loading)
-      const btnStartLeft = document.createElement('button');
-      btnStartLeft.className = 'btn btn-roxo';
-      btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
-      btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
-      if (isFrozen) btnStartLeft.disabled = true;
-      left.append(btnStartLeft);
-
-      // ------------------- RAM VISUAL (ADICIONADO) -------------------
-      // Militar: null-aware, badge neutra se RAM/CPU desconhecida
-      // RAM por conta (campo .ramMB): mostra RAM: NNN MB, warn (>700MB pill vermelho), warn amarelo >500MB, badge neutra se null
-      const ramPill = buildRamPill(p.ramMB); // RAM por conta
-
-      // Exibir CPU percent (com null-aware)
-      const cpuPill = buildCpuPill(p.cpuPercent);
-
-      // ------------------- FROZEN/CONGELADO (ADICIONADO) -------------------
-      // Militar: frozenUntil/COOLDOWN badge lógica
-      const frozenPill = buildFrozenPill(p);
-
-      // -----------------------------------------------------
-
-      // CENTER: info
-      const center = document.createElement('div'); center.className='centerCol';
-      const titleRow = document.createElement('div'); titleRow.className='titleRow';
-      const nameEl = document.createElement('div'); nameEl.className='accName';
-      nameEl.textContent = `[${idxStr}] ${display}`; // <- enumerado
-      titleRow.append(nameEl);
-
-      // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
-      titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
-      titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
-
-      // -------- RAM e CPU pill explícito ---------
-      if (ramPill) titleRow.append(ramPill); // RAM por conta
-      if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
-
-      // -------- NOVO: Pill "Gordo" (>=600MB) — suprimido --------
-      const gordoPill = buildGordoPill(p);
-      if (gordoPill) titleRow.append(gordoPill);
-
-      // -------- NOVO: Última manutenção e Δ última — suprimidos --------
-      const lastMaintPill = buildLastMaintenancePill(p.lastMaintenanceAt);
-      if (lastMaintPill) titleRow.append(lastMaintPill);
-      const lastDeltaPill = buildLastDeltaPill(p.lastDeltaMB);
-      if (lastDeltaPill) titleRow.append(lastDeltaPill);
-
-      // -- NOVO: Ativação em espera/hold --
-      if (activationHeldPill) titleRow.append(activationHeldPill);
-
-      // -- NOVO: Reabrirá em... --
-      if (reopenAtPill) titleRow.append(reopenAtPill);
-
-      // ===================== NOVOS PILLS — STATUS MILITAR: BACKOFF/SWAP/HOLD/WHY-NOT-OPEN =====================
-      {
-        const now = Date.now();
-
-        // Pill — BACKOFF DE ABERTURA/SWAP
-        if (typeof p.openBackoffMs === "number" && (p.activationHeldUntil && p.activationHeldUntil > now)) {
-          const restante = Math.max(0, Math.floor((p.activationHeldUntil - now)/1000));
-          const backoffPill = buildPill(`Backoff de abertura (${tempoRestante(restante)})`, 'warn');
-          backoffPill.title = `Abertura em backoff. O sistema está aguardando antes de abrir para evitar swap/thrashing.\nopenBackoffMs: ${p.openBackoffMs} ms\nLiberará em: ${new Date(p.activationHeldUntil).toLocaleString()}`;
-          titleRow.append(backoffPill);
-        }
-
-        // Pill — SWAP cooldown
-        if (typeof p.swapCooldown === "number" && p.swapCooldown > 0) {
-          // tolerante: se vier em ms, converte para segundos
-          const scSec = Math.floor(p.swapCooldown > 100000 ? p.swapCooldown/1000 : p.swapCooldown);
-          const swapCdPill = buildPill(`Swap cooldown: ${tempoRestante(scSec)}`, 'warn');
-          swapCdPill.title = `Aguardando cooldown de swap expirar para nova tentativa.`;
-          titleRow.append(swapCdPill);
-        }
-
-        // Pill — Por que não abriu (whyNotOpen)
-        if (typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
-          const whyPill = buildPill(`Por que não abriu: ${p.whyNotOpen}`, 'bad');
-          whyPill.title = `Motivo registrado pelo sistema para não abrir o navegador.`;
-          titleRow.append(whyPill);
-        }
-
-        // Pill — Último swap (somente últimos 30min)
-        if (typeof p.lastSwapAt === "number" && now - p.lastSwapAt < 1800000) {
-          const peer = p.lastSwapPeer || '';
-          const dt = new Date(p.lastSwapAt).toLocaleTimeString();
-          const swapPill = buildPill(`Último swap: ${peer ? peer + ', ' : ''}${dt}`, 'info');
-          swapPill.title = `Última tentativa de swap${peer ? ` com ${peer}` : ''} em ${new Date(p.lastSwapAt).toLocaleString()}.`;
-          titleRow.append(swapPill);
-        }
-      }
-      // ===================== FIM NOVOS PILLS — STATUS MILITAR =====================
-
-      // ---- NOVOS PILLS LOGIN/BANNED ----
-      if (p.loginRequired === true) {
-        const lr = buildPill('Login requerido', 'warn');
-        lr.title = p.loginReason ? ('Motivo: ' + p.loginReason) : 'Sessão/Checkpoint/Captcha detectado';
-        titleRow.append(lr);
-      }
-      if (p.banned === true) {
-        const bn = buildPill('Conta suspensa', 'bad');
-        bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
-        titleRow.append(bn);
-      }
-
-      // -------- FROZEN pill explícito (primeiro) ---------
-      if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
-
-      // -------- NOVO: Pill para manifestStatus --------
-      if (p.manifestStatus === 'incomplete') {
-        titleRow.append(buildPill('Manifesto incompleto', 'warn'));
-      }
-      if (p.manifestStatus === 'missing') {
-        titleRow.append(buildPill('Manifesto ausente', 'bad'));
-      }
-
-      // Pill "Bloqueio temporário Messenger"
-      if (typeof p.closingReason === 'string' && p.closingReason === 'virtus_block') {
-        titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
-      }
-
-      // Pill “Robe em pausa 24h (FB bloqueado)”
-      {
-        const r = robes && robes[p.nome];
-        if (
-          !isFrozen &&
-          p.manifestStatus === 'ok' &&
-          p.closingReason !== 'virtus_block' &&
-          r && r.cooldownSec > 80000 &&
-          r.pauseReason === 'fb_block' &&
-          r.lastRobeBlockAt && (Date.now() - r.lastRobeBlockAt) < 25*60*60*1000
-        ) {
-          titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
-        }
-      }
-      // Pill “Robe Limite atingido” (amarela) — pauseReason === 'limit_posting'
-      {
-        const r = robes && robes[p.nome];
-        if (
-          !isFrozen &&
-          p.manifestStatus === 'ok' &&
-          r && r.pauseReason === 'limit_posting'
-        ) {
-          const pill = buildPill('Robe: Limite atingido', 'warn');
-          pill.title = "Foi detectado Limite atingido (overlay do Facebook). O Robe está pausado até que a limitação suma ou você dê PLAY.\nVirtus permanece online.";
-          titleRow.append(pill);
-        }
-      }
-
-      // ------- COOLDOWN (ADICIONAL) -------
-      if (robeCooldownSec > 0) {
-        titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil
-      } else {
-        if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
-        else if (inQueue) titleRow.append(buildPill('Robe: Aguardando fila', 'info'));
-        else titleRow.append(buildPill('Robe: Pronto', 'good'));
-      }
-
-      // ------- Estado do robe ------
-      if (robeStatus && robeStatus.estado) {
-        titleRow.append(buildRobeEstadoPill(robeStatus.estado));
-      }
-
-      // Opcional: Adicione pill/status visual "Modo Humano"
-      if (p.humanControl || p.humanHold) {
-        const label = p.humanControl ? 'Modo Humano' : 'Modo Humano (hold)';
-        titleRow.append(buildPill(label, 'warn'));
-      }
-
-      // ------------- ABAS/NUMPAGES PILL -------------
-      const abasPill = buildAbasPill(p.numPages);
-      if (abasPill) titleRow.append(abasPill);
-
-      // Após montar as pills do Robe…
-      const btnPlay = document.createElement('button');
-      btnPlay.className='icon-btn mini btn-branco';
-      btnPlay.title='Forçar postagem agora (Robe Play)';
-      btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
-      btnPlay.onclick = () => robePlayUI(p, btnPlay);
-      if (isFrozen) btnPlay.disabled = true;
-      titleRow.append(btnPlay);
-
-      // Novo botão: Robe 24h (por conta)
-      const btnRobe24 = document.createElement('button');
-      btnRobe24.className = 'icon-btn mini btn-azul';
-      btnRobe24.title='Pausar Robe por 24h';
-      btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
-      btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
-      if (isFrozen) btnRobe24.disabled = true;
-      titleRow.append(btnRobe24);
-
-      const subRow = document.createElement('div'); subRow.className='subRow';
-      subRow.textContent = p.cidade ? ('Cidade: ' + p.cidade) : '';
-      center.append(titleRow, subRow);
-
-      // RIGHT: actions (ajustado conforme instruções)
-      const right = document.createElement('div'); right.className='rightCol';
-
-      // ===================== ALTERAÇÃO SOLICITADA — INÍCIO ======================
-      const btnCookies = document.createElement('button');
-      btnCookies.className='btn';
-      btnCookies.textContent='Injetar Cookies';
-      btnCookies.title='Injetar cookies salvos neste perfil';
-      btnCookies.onclick = async (ev) => {
-        setBtnLoading(btnCookies, true, 'Injetando...');
-        try {
-          const res = await window.electronAPI.configure(p.nome);
-          if (!res || !res.ok) {
-            alert('Falha ao injetar cookies: ' + (res && res.error ? res.error : 'erro desconhecido'));
-          } else {
-            alert('Cookies injetados com sucesso.');
-          }
-        } catch (e) {
-          alert('Falha ao injetar cookies: ' + (e && e.message || e));
-        } finally {
-          setBtnLoading(btnCookies, false);
-          reloadPerfis();
-        }
-      };
-      if (isFrozen) btnCookies.disabled = true;
-      // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
-
-      const btnCfg = document.createElement('button');
-      btnCfg.className='icon-btn';
-      btnCfg.title='Configurações da Conta';
-      btnCfg.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm0-6 2.2 1.6 2.6-.6 1.1 2.5 2.6.6-.2 2.7 2 1.8-2 1.8.2 2.7-2.6.6-1.1 2.5-2.6-.6L12 22l-2.2-1.6-2.6.6-1.1-2.5-2.6-.6.2-2.7-2-1.8 2-1.8-.2-2.7 2.6-.6 1.1-2.5 2.6.6L12 2.5Z"/></svg><span>Configurar</span>`;
-      btnCfg.onclick = () => showConfigPerfilModal({ perfil: p, onClose: reloadPerfis });
-      if (isFrozen) btnCfg.disabled = true;
-
-      // Botão Arquivo/Log por conta - alterado para ponto se issuesCount > 0
-      const btnLog = document.createElement('button');
-      btnLog.className='icon-btn';
-      btnLog.title='Ver Log da Conta';
-      btnLog.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm9 0v5h5"/></svg><span>Arquivo</span>${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
-      btnLog.onclick = () => showIssuesModal(p.nome);
-      if (isFrozen) btnLog.disabled = true;
-
-      // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
-      if (p.humanControl) {
-        // Botão “Retomar Trabalho”
-        const btnResume = document.createElement('button');
-        btnResume.className='icon-btn';
-        btnResume.title='Retomar atendimento e automação';
-        btnResume.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`;
-        btnResume.onclick = async () => {
-          btnResume.disabled = true;
-          btnResume.innerText = 'Resumindo...';
-          try {
-            await window.electronAPI.resumeHuman(p.nome);
-            await new Promise(r=>setTimeout(r,800));
-            reloadPerfis();
-          } catch(e){ alert('Falha ao retomar trabalho: '+(e&&e.message||e)); }
-          finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
-        };
-        if (isFrozen) btnResume.disabled = true;
-        right.append(btnCookies, btnResume, btnCfg, btnLog);
-      } else {
-        // Botão “Invocar Humano” padrão
-        const btnHuman = document.createElement('button');
-        btnHuman.className='icon-btn btn-amarelo';
-        btnHuman.title='Invocar Humano';
-        btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
-        btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
-        if (isFrozen) btnHuman.disabled = true;
-        right.append(btnCookies, btnHuman, btnCfg, btnLog);
-      }
-      // ----------------------------------------------------------------------------------
-
-      // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
-      // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
-      let estadoCritico = false;
-      let podeResetar = false;
-      let robeEstadoVal = (robeStatus && typeof robeStatus.estado === 'string' ? robeStatus.estado : '');
-      let ramMBval = (typeof p.ramMB === "number") ? p.ramMB : null;
-      if (ramMBval !== null && ramMBval >= 700) estadoCritico = true;
-      if (/erro|grave|backoff|fail/i.test(robeEstadoVal)) estadoCritico = true;
-      if (estadoCritico && !isFrozen && !p.resetando && !p.resetEmCurso && !p.humanControl && !p.trabalhando) {
-        // Somente se navegador não está ativo ou perfil não está resetando/congelado
-        podeResetar = !p.active;
-      }
-      if (estadoCritico && podeResetar) {
-        const btnResetMil = document.createElement('button');
-        btnResetMil.className = 'btn reset-memmil';
-        btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
-        btnResetMil.onclick = async () => {
-          btnResetMil.disabled = true; btnResetMil.innerHTML = `<span class="spinner"></span> Resetando...`;
-          try {
-            await window.electronAPI.deactivate(p.nome);
-            await new Promise(r=>setTimeout(r,1100));
-            await window.electronAPI.activate(p.nome);
-            alert('Perfil resetado.');
-            reloadPerfis();
-          } catch(e) {
-            alert('Falha ao resetar perfil: '+(e&&e.message||e));
-          } finally {
-            btnResetMil.disabled = false; btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
-          }
-        };
-        right.append(btnResetMil);
-      }
-      // ----------------------------------------------------------------------------------
-
-      // Botão "Descongelar" por perfil congelado
-      if (isFrozen) {
-        const btnUnfreeze = document.createElement('button');
-        btnUnfreeze.className = 'btn';
-        btnUnfreeze.textContent = 'Descongelar';
-        btnUnfreeze.title = 'Remover congelamento (permite retorno à operação)';
-        btnUnfreeze.onclick = async () => {
-          btnUnfreeze.disabled = true;
-          btnUnfreeze.textContent = 'Descongelando...';
-          try {
-            const r = await fetch(`/api/perfis/${encodeURIComponent(p.nome)}/unfreeze`, { method: 'POST' }).then(r=>r.json());
-            if (!r || !r.ok) alert('Falha ao descongelar: ' + ((r && r.error) || ''));
-            await new Promise(r=>setTimeout(r, 600));
-            reloadPerfis();
-          } catch (e) {
-            alert('Erro ao descongelar: ' + (e && e.message || e));
-          } finally {
-            btnUnfreeze.disabled = false;
-            btnUnfreeze.textContent = 'Descongelar';
-          }
-        };
-        right.appendChild(btnUnfreeze);
-      }
-
-      card.append(left, center, right);
-      return card;
-    }
-
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
       const [st, perfisResp] = await Promise.all([
@@ -1382,393 +684,378 @@
       if (loginCard) loginCard.style.display = loginCount > 0 ? 'inline-flex' : 'none';
       if (banCard)   banCard.style.display   = bannedCount > 0 ? 'inline-flex' : 'none';
 
-      // Atualiza dados em memória para renderização RAM-only
-      PERFIS_DATA = perfis.map(buildSearchIndex);
-      ROBES_DATA  = robes || {};
-      ROBE_QUEUE  = robeQueue || [];
-
-      // Limpa lista e renderiza por página
       const lista = document.getElementById('listaPerfis');
-      if (lista) lista.innerHTML = '';
-      PAGE = 1; // opcional: resetar página a cada reload
-      renderList();
+      lista.innerHTML = '';
+      if (!perfis.length) {
+        const empty = document.createElement('div');
+        empty.className='pill'; empty.textContent='Nenhuma conta cadastrada.';
+        lista.appendChild(empty);
+        return;
+      }
 
-      // ========================= BLOCO LEGADO (renderização total) — DESATIVADO =========================
-      // Mantido apenas para preservação do código original durante a migração. Não remover.
-      if (false) {
-        if (!perfis.length) {
-          const empty = document.createElement('div');
-          empty.className='pill'; empty.textContent='Nenhuma conta cadastrada.';
-          lista.appendChild(empty);
-          return;
+      perfis.filter(passFilter).forEach((p, idx) => {
+        const robeStatus = robes[p.nome] || {};
+        const robeCooldownSec = robeStatus.cooldownSec || 0;
+        const fila = robeQueue || [];
+        const inQueue = fila.includes(p.nome);
+        const isNext = (fila[0] === p.nome);
+        const display = p.label || p.nome;
+        const idxStr = String(idx + 1).padStart(3, '0'); // 001, 002, ...
+
+        const card = document.createElement('div');
+        card.className='perfil';
+
+        // ----- BLOQUEIO/CONGELAMENTO: antiflood skip/frozen ----
+        const isFrozen = (p.robeFrozenUntil && p.robeFrozenUntil > Date.now());
+        if (isFrozen) card.classList.add('frozen');
+
+        // -- NOVO: Ativação em espera e Reabrirá em --
+        const activationHeldPill = buildActivationHeldPill(p);
+        const reopenAtPill = buildReopenAtPill(p);
+
+        // LEFT: toggle
+        const left = document.createElement('div'); left.className='leftCol';
+        const toggle = document.createElement('button');
+        toggle.className = 'toggle ' + (p.active ? 'close btn-vermelho':'open btn-verde');
+        toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
+        toggle.onclick = () => toggleBrowserUI(p, toggle);
+        if (isFrozen) toggle.disabled = true;
+        if (activationHeldPill) {
+          toggle.disabled = true;
+          toggle.title = 'Ativação em espera pelo sistema militar RAM/CPU';
+        }
+        left.append(toggle);
+
+        // NOVO: start 24h logo abaixo do toggle (com loading)
+        const btnStartLeft = document.createElement('button');
+        btnStartLeft.className = 'btn btn-roxo';
+        btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
+        btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
+        if (isFrozen) btnStartLeft.disabled = true;
+        left.append(btnStartLeft);
+
+        // ------------------- RAM VISUAL (ADICIONADO) -------------------
+        // Militar: null-aware, badge neutra se RAM/CPU desconhecida
+        // RAM por conta (campo .ramMB): mostra RAM: NNN MB, warn (>700MB pill vermelho), warn amarelo >500MB, badge neutra se null
+        const ramPill = buildRamPill(p.ramMB); // RAM por conta
+
+        // Exibir CPU percent (com null-aware)
+        const cpuPill = buildCpuPill(p.cpuPercent);
+
+        // ------------------- FROZEN/CONGELADO (ADICIONADO) -------------------
+        // Militar: frozenUntil/COOLDOWN badge lógica
+        const frozenPill = buildFrozenPill(p);
+
+        // -----------------------------------------------------
+
+        // CENTER: info
+        const center = document.createElement('div'); center.className='centerCol';
+        const titleRow = document.createElement('div'); titleRow.className='titleRow';
+        const nameEl = document.createElement('div'); nameEl.className='accName';
+        nameEl.textContent = `[${idxStr}] ${display}`; // <- enumerado
+        titleRow.append(nameEl);
+
+        // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
+        titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
+        titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
+
+        // -------- RAM e CPU pill explícito ---------
+        if (ramPill) titleRow.append(ramPill); // RAM por conta
+        if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
+
+        // -------- NOVO: Pill "Gordo" (>=600MB) — suprimido --------
+        const gordoPill = buildGordoPill(p);
+        if (gordoPill) titleRow.append(gordoPill);
+
+        // -------- NOVO: Última manutenção e Δ última — suprimidos --------
+        const lastMaintPill = buildLastMaintenancePill(p.lastMaintenanceAt);
+        if (lastMaintPill) titleRow.append(lastMaintPill);
+        const lastDeltaPill = buildLastDeltaPill(p.lastDeltaMB);
+        if (lastDeltaPill) titleRow.append(lastDeltaPill);
+
+        // -- NOVO: Ativação em espera/hold --
+        if (activationHeldPill) titleRow.append(activationHeldPill);
+
+        // -- NOVO: Reabrirá em... --
+        if (reopenAtPill) titleRow.append(reopenAtPill);
+
+        // ===================== NOVOS PILLS — STATUS MILITAR: BACKOFF/SWAP/HOLD/WHY-NOT-OPEN =====================
+        {
+          const now = Date.now();
+
+          // Pill — BACKOFF DE ABERTURA/SWAP
+          if (typeof p.openBackoffMs === "number" && (p.activationHeldUntil && p.activationHeldUntil > now)) {
+            const restante = Math.max(0, Math.floor((p.activationHeldUntil - now)/1000));
+            const backoffPill = buildPill(`Backoff de abertura (${tempoRestante(restante)})`, 'warn');
+            backoffPill.title = `Abertura em backoff. O sistema está aguardando antes de abrir para evitar swap/thrashing.\nopenBackoffMs: ${p.openBackoffMs} ms\nLiberará em: ${new Date(p.activationHeldUntil).toLocaleString()}`;
+            titleRow.append(backoffPill);
+          }
+
+          // Pill — SWAP cooldown
+          if (typeof p.swapCooldown === "number" && p.swapCooldown > 0) {
+            // tolerante: se vier em ms, converte para segundos
+            const scSec = Math.floor(p.swapCooldown > 100000 ? p.swapCooldown/1000 : p.swapCooldown);
+            const swapCdPill = buildPill(`Swap cooldown: ${tempoRestante(scSec)}`, 'warn');
+            swapCdPill.title = `Aguardando cooldown de swap expirar para nova tentativa.`;
+            titleRow.append(swapCdPill);
+          }
+
+          // Pill — Por que não abriu (whyNotOpen)
+          if (typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
+            const whyPill = buildPill(`Por que não abriu: ${p.whyNotOpen}`, 'bad');
+            whyPill.title = `Motivo registrado pelo sistema para não abrir o navegador.`;
+            titleRow.append(whyPill);
+          }
+
+          // Pill — Último swap (somente últimos 30min)
+          if (typeof p.lastSwapAt === "number" && now - p.lastSwapAt < 1800000) {
+            const peer = p.lastSwapPeer || '';
+            const dt = new Date(p.lastSwapAt).toLocaleTimeString();
+            const swapPill = buildPill(`Último swap: ${peer ? peer + ', ' : ''}${dt}`, 'info');
+            swapPill.title = `Última tentativa de swap${peer ? ` com ${peer}` : ''} em ${new Date(p.lastSwapAt).toLocaleString()}.`;
+            titleRow.append(swapPill);
+          }
+        }
+        // ===================== FIM NOVOS PILLS — STATUS MILITAR =====================
+
+        // ---- NOVOS PILLS LOGIN/BANNED ----
+        if (p.loginRequired === true) {
+          const lr = buildPill('Login requerido', 'warn');
+          lr.title = p.loginReason ? ('Motivo: ' + p.loginReason) : 'Sessão/Checkpoint/Captcha detectado';
+          titleRow.append(lr);
+        }
+        if (p.banned === true) {
+          const bn = buildPill('Conta suspensa', 'bad');
+          bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
+          titleRow.append(bn);
         }
 
-        perfis.filter(passFilter).forEach((p, idx) => {
-          const robeStatus = robes[p.nome] || {};
-          const robeCooldownSec = robeStatus.cooldownSec || 0;
-          const fila = robeQueue || [];
-          const inQueue = fila.includes(p.nome);
-          const isNext = (fila[0] === p.nome);
-          const display = p.label || p.nome;
-          const idxStr = String(idx + 1).padStart(3, '0'); // 001, 002, ...
+        // -------- FROZEN pill explícito (primeiro) ---------
+        if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
 
-          const card = document.createElement('div');
-          card.className='perfil';
+        // -------- NOVO: Pill para manifestStatus --------
+        if (p.manifestStatus === 'incomplete') {
+          titleRow.append(buildPill('Manifesto incompleto', 'warn'));
+        }
+        if (p.manifestStatus === 'missing') {
+          titleRow.append(buildPill('Manifesto ausente', 'bad'));
+        }
 
-          // ----- BLOQUEIO/CONGELAMENTO: antiflood skip/frozen ----
-          const isFrozen = (p.robeFrozenUntil && p.robeFrozenUntil > Date.now());
-          if (isFrozen) card.classList.add('frozen');
+        // Pill "Bloqueio temporário Messenger"
+        if (typeof p.closingReason === 'string' && p.closingReason === 'virtus_block') {
+          titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
+        }
 
-          // -- NOVO: Ativação em espera e Reabrirá em --
-          const activationHeldPill = buildActivationHeldPill(p);
-          const reopenAtPill = buildReopenAtPill(p);
-
-          // LEFT: toggle
-          const left = document.createElement('div'); left.className='leftCol';
-          const toggle = document.createElement('button');
-          toggle.className = 'toggle ' + (p.active ? 'close btn-vermelho':'open btn-verde');
-          toggle.textContent = p.active ? 'Fechar navegador' : 'Abrir navegador';
-          toggle.onclick = () => toggleBrowserUI(p, toggle);
-          if (isFrozen) toggle.disabled = true;
-          if (activationHeldPill) {
-            toggle.disabled = true;
-            toggle.title = 'Ativação em espera pelo sistema militar RAM/CPU';
+        // Pill “Robe em pausa 24h (FB bloqueado)” — só aparece se houve bloqueio real recente (pauseReason==='fb_block' + cooldown>22h + lastRobeBlockAt<25h)
+        {
+          const r = robes && robes[p.nome];
+          if (
+            !isFrozen &&
+            p.manifestStatus === 'ok' &&
+            p.closingReason !== 'virtus_block' &&
+            r && r.cooldownSec > 80000 &&
+            r.pauseReason === 'fb_block' &&
+            r.lastRobeBlockAt && (Date.now() - r.lastRobeBlockAt) < 25*60*60*1000
+          ) {
+            titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
           }
-          left.append(toggle);
+        }
+        // Pill “Robe Limite atingido” (amarela) — aparece sempre que pauseReason === 'limit_posting'
+        {
+          const r = robes && robes[p.nome];
+          if (
+            !isFrozen &&
+            p.manifestStatus === 'ok' &&
+            r && r.pauseReason === 'limit_posting'
+          ) {
+            const pill = buildPill('Robe: Limite atingido', 'warn');
+            pill.title = "Foi detectado Limite atingido (overlay do Facebook). O Robe está pausado até que a limitação suma ou você dê PLAY.\nVirtus permanece online.";
+            titleRow.append(pill);
+          }
+        }
 
-          // NOVO: start 24h logo abaixo do toggle (com loading)
-          const btnStartLeft = document.createElement('button');
-          btnStartLeft.className = 'btn btn-roxo';
-          btnStartLeft.textContent = 'Iniciar Atendimento e Postagem 24Hrs';
-          btnStartLeft.onclick = (ev) => startWorkUI(p, btnStartLeft);
-          if (isFrozen) btnStartLeft.disabled = true;
-          left.append(btnStartLeft);
+        // ------- COOLDOWN (ADICIONAL) -------
+        if (robeCooldownSec > 0) {
+          titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil
+        } else {
+          if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
+          else if (inQueue) titleRow.append(buildPill('Robe: Aguardando fila', 'info'));
+          else titleRow.append(buildPill('Robe: Pronto', 'good'));
+        }
 
-          // ------------------- RAM VISUAL (ADICIONADO) -------------------
-          // Militar: null-aware, badge neutra se RAM/CPU desconhecida
-          // RAM por conta (campo .ramMB): mostra RAM: NNN MB, warn (>700MB pill vermelho), warn amarelo >500MB, badge neutra se null
-          const ramPill = buildRamPill(p.ramMB); // RAM por conta
+        // ------- Estado do robe ------
+        if (robeStatus && robeStatus.estado) {
+          titleRow.append(buildRobeEstadoPill(robeStatus.estado));
+        }
 
-          // Exibir CPU percent (com null-aware)
-          const cpuPill = buildCpuPill(p.cpuPercent);
+        // Opcional: Adicione pill/status visual "Modo Humano"
+        if (p.humanControl || p.humanHold) {
+          const label = p.humanControl ? 'Modo Humano' : 'Modo Humano (hold)';
+          titleRow.append(buildPill(label, 'warn'));
+        }
 
-          // ------------------- FROZEN/CONGELADO (ADICIONADO) -------------------
-          // Militar: frozenUntil/COOLDOWN badge lógica
-          const frozenPill = buildFrozenPill(p);
+        // ------------- ABAS/NUMPAGES PILL -------------
+        // Militar: Se campo não for null, badge “Abas: N” para contas com N > 1 (alerta, cor de warning). Se null/undefined, simplesmente não exibir.
+        const abasPill = buildAbasPill(p.numPages);
+        if (abasPill) titleRow.append(abasPill);
 
-          // -----------------------------------------------------
+        // Após montar as pills do Robe…
+        const btnPlay = document.createElement('button');
+        btnPlay.className='icon-btn mini btn-branco';
+        btnPlay.title='Forçar postagem agora (Robe Play)';
+        btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
+        btnPlay.onclick = () => robePlayUI(p, btnPlay);
+        if (isFrozen) btnPlay.disabled = true;
+        titleRow.append(btnPlay);
 
-          // CENTER: info
-          const center = document.createElement('div'); center.className='centerCol';
-          const titleRow = document.createElement('div'); titleRow.className='titleRow';
-          const nameEl = document.createElement('div'); nameEl.className='accName';
-          nameEl.textContent = `[${idxStr}] ${display}`; // <- enumerado
-          titleRow.append(nameEl);
+        // Novo botão: Robe 24h (por conta)
+        const btnRobe24 = document.createElement('button');
+        btnRobe24.className = 'icon-btn mini btn-azul';
+        btnRobe24.title='Pausar Robe por 24h';
+        btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
+        btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
+        if (isFrozen) btnRobe24.disabled = true;
+        titleRow.append(btnRobe24);
 
-          // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
-          titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
-          titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
+        const subRow = document.createElement('div'); subRow.className='subRow';
+        subRow.textContent = p.cidade ? ('Cidade: ' + p.cidade) : '';
+        center.append(titleRow, subRow);
 
-          // -------- RAM e CPU pill explícito ---------
-          if (ramPill) titleRow.append(ramPill); // RAM por conta
-          if (cpuPill) titleRow.append(cpuPill); // CPU por conta (null-aware)
+        // RIGHT: actions (ajustado conforme instruções)
+        const right = document.createElement('div'); right.className='rightCol';
 
-          // -------- NOVO: Pill "Gordo" (>=600MB) — suprimido --------
-          const gordoPill = buildGordoPill(p);
-          if (gordoPill) titleRow.append(gordoPill);
-
-          // -------- NOVO: Última manutenção e Δ última — suprimidos --------
-          const lastMaintPill = buildLastMaintenancePill(p.lastMaintenanceAt);
-          if (lastMaintPill) titleRow.append(lastMaintPill);
-          const lastDeltaPill = buildLastDeltaPill(p.lastDeltaMB);
-          if (lastDeltaPill) titleRow.append(lastDeltaPill);
-
-          // -- NOVO: Ativação em espera/hold --
-          if (activationHeldPill) titleRow.append(activationHeldPill);
-
-          // -- NOVO: Reabrirá em... --
-          if (reopenAtPill) titleRow.append(reopenAtPill);
-
-          // ===================== NOVOS PILLS — STATUS MILITAR: BACKOFF/SWAP/HOLD/WHY-NOT-OPEN =====================
-          {
-            const now = Date.now();
-
-            // Pill — BACKOFF DE ABERTURA/SWAP
-            if (typeof p.openBackoffMs === "number" && (p.activationHeldUntil && p.activationHeldUntil > now)) {
-              const restante = Math.max(0, Math.floor((p.activationHeldUntil - now)/1000));
-              const backoffPill = buildPill(`Backoff de abertura (${tempoRestante(restante)})`, 'warn');
-              backoffPill.title = `Abertura em backoff. O sistema está aguardando antes de abrir para evitar swap/thrashing.\nopenBackoffMs: ${p.openBackoffMs} ms\nLiberará em: ${new Date(p.activationHeldUntil).toLocaleString()}`;
-              titleRow.append(backoffPill);
+        // ===================== ALTERAÇÃO SOLICITADA — INÍCIO ======================
+        const btnCookies = document.createElement('button');
+        btnCookies.className='btn';
+        btnCookies.textContent='Injetar Cookies';
+        btnCookies.title='Injetar cookies salvos neste perfil';
+        btnCookies.onclick = async (ev) => {
+          setBtnLoading(btnCookies, true, 'Injetando...');
+          try {
+            const res = await window.electronAPI.configure(p.nome);
+            if (!res || !res.ok) {
+              alert('Falha ao injetar cookies: ' + (res && res.error ? res.error : 'erro desconhecido'));
+            } else {
+              alert('Cookies injetados com sucesso.');
             }
-
-            // Pill — SWAP cooldown
-            if (typeof p.swapCooldown === "number" && p.swapCooldown > 0) {
-              // tolerante: se vier em ms, converte para segundos
-              const scSec = Math.floor(p.swapCooldown > 100000 ? p.swapCooldown/1000 : p.swapCooldown);
-              const swapCdPill = buildPill(`Swap cooldown: ${tempoRestante(scSec)}`, 'warn');
-              swapCdPill.title = `Aguardando cooldown de swap expirar para nova tentativa.`;
-              titleRow.append(swapCdPill);
-            }
-
-            // Pill — Por que não abriu (whyNotOpen)
-            if (typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
-              const whyPill = buildPill(`Por que não abriu: ${p.whyNotOpen}`, 'bad');
-              whyPill.title = `Motivo registrado pelo sistema para não abrir o navegador.`;
-              titleRow.append(whyPill);
-            }
-
-            // Pill — Último swap (somente últimos 30min)
-            if (typeof p.lastSwapAt === "number" && now - p.lastSwapAt < 1800000) {
-              const peer = p.lastSwapPeer || '';
-              const dt = new Date(p.lastSwapAt).toLocaleTimeString();
-              const swapPill = buildPill(`Último swap: ${peer ? peer + ', ' : ''}${dt}`, 'info');
-              swapPill.title = `Última tentativa de swap${peer ? ` com ${peer}` : ''} em ${new Date(p.lastSwapAt).toLocaleString()}.`;
-              titleRow.append(swapPill);
-            }
+          } catch (e) {
+            alert('Falha ao injetar cookies: ' + (e && e.message || e));
+          } finally {
+            setBtnLoading(btnCookies, false);
+            reloadPerfis();
           }
-          // ===================== FIM NOVOS PILLS — STATUS MILITAR =====================
+        };
+        if (isFrozen) btnCookies.disabled = true;
+        // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
 
-          // ---- NOVOS PILLS LOGIN/BANNED ----
-          if (p.loginRequired === true) {
-            const lr = buildPill('Login requerido', 'warn');
-            lr.title = p.loginReason ? ('Motivo: ' + p.loginReason) : 'Sessão/Checkpoint/Captcha detectado';
-            titleRow.append(lr);
-          }
-          if (p.banned === true) {
-            const bn = buildPill('Conta suspensa', 'bad');
-            bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
-            titleRow.append(bn);
-          }
+        const btnCfg = document.createElement('button');
+        btnCfg.className='icon-btn';
+        btnCfg.title='Configurações da Conta';
+        btnCfg.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm0-6 2.2 1.6 2.6-.6 1.1 2.5 2.6.6-.2 2.7 2 1.8-2 1.8.2 2.7-2.6.6-1.1 2.5-2.6-.6L12 22l-2.2-1.6-2.6.6-1.1-2.5-2.6-.6.2-2.7-2-1.8 2-1.8-.2-2.7 2.6-.6 1.1-2.5 2.6.6L12 2.5Z"/></svg><span>Configurar</span>`;
+        btnCfg.onclick = () => showConfigPerfilModal({ perfil: p, onClose: reloadPerfis });
+        if (isFrozen) btnCfg.disabled = true;
 
-          // -------- FROZEN pill explícito (primeiro) ---------
-          const frozenPill = buildFrozenPill(p);
-          if (frozenPill) titleRow.append(frozenPill); // ROBO frozen: antiflood/antispam militar
+        // Botão Arquivo/Log por conta - alterado para ponto se issuesCount > 0
+        const btnLog = document.createElement('button');
+        btnLog.className='icon-btn';
+        btnLog.title='Ver Log da Conta';
+        btnLog.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm9 0v5h5"/></svg><span>Arquivo</span>${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
+        btnLog.onclick = () => showIssuesModal(p.nome);
+        if (isFrozen) btnLog.disabled = true;
 
-          // -------- NOVO: Pill para manifestStatus --------
-          if (p.manifestStatus === 'incomplete') {
-            titleRow.append(buildPill('Manifesto incompleto', 'warn'));
-          }
-          if (p.manifestStatus === 'missing') {
-            titleRow.append(buildPill('Manifesto ausente', 'bad'));
-          }
-
-          // Pill "Bloqueio temporário Messenger"
-          if (typeof p.closingReason === 'string' && p.closingReason === 'virtus_block') {
-            titleRow.append(buildPill('Bloqueio temporário Messenger', 'warn'));
-          }
-
-          // Pill “Robe em pausa 24h (FB bloqueado)” — só aparece se houve bloqueio real recente (pauseReason==='fb_block' + cooldown>22h + lastRobeBlockAt<25h)
-          {
-            const r = robes && robes[p.nome];
-            if (
-              !isFrozen &&
-              p.manifestStatus === 'ok' &&
-              p.closingReason !== 'virtus_block' &&
-              r && r.cooldownSec > 80000 &&
-              r.pauseReason === 'fb_block' &&
-              r.lastRobeBlockAt && (Date.now() - r.lastRobeBlockAt) < 25*60*60*1000
-            ) {
-              titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
-            }
-          }
-          // Pill “Robe Limite atingido” (amarela) — aparece sempre que pauseReason === 'limit_posting'
-          {
-            const r = robes && robes[p.nome];
-            if (
-              !isFrozen &&
-              p.manifestStatus === 'ok' &&
-              r && r.pauseReason === 'limit_posting'
-            ) {
-              const pill = buildPill('Robe: Limite atingido', 'warn');
-              pill.title = "Foi detectado Limite atingido (overlay do Facebook). O Robe está pausado até que a limitação suma ou você dê PLAY.\nVirtus permanece online.";
-              titleRow.append(pill);
-            }
-          }
-
-          // ------- COOLDOWN (ADICIONAL) -------
-          if (robeCooldownSec > 0) {
-            titleRow.append(buildCooldownPill(robeCooldownSec)); // Cooldown por perfil
-          } else {
-            if (isNext) titleRow.append(buildPill('Robe: Na fila (próximo)', 'info'));
-            else if (inQueue) titleRow.append(buildPill('Robe: Aguardando fila', 'info'));
-            else titleRow.append(buildPill('Robe: Pronto', 'good'));
-          }
-
-          // ------- Estado do robe ------
-          if (robeStatus && robeStatus.estado) {
-            titleRow.append(buildRobeEstadoPill(robeStatus.estado));
-          }
-
-          // Opcional: Adicione pill/status visual "Modo Humano"
-          if (p.humanControl || p.humanHold) {
-            const label = p.humanControl ? 'Modo Humano' : 'Modo Humano (hold)';
-            titleRow.append(buildPill(label, 'warn'));
-          }
-
-          // ------------- ABAS/NUMPAGES PILL -------------
-          // Militar: Se campo não for null, badge “Abas: N” para contas com N > 1 (alerta, cor de warning). Se null/undefined, simplesmente não exibir.
-          const abasPill = buildAbasPill(p.numPages);
-          if (abasPill) titleRow.append(abasPill);
-
-          // Após montar as pills do Robe…
-          const btnPlay = document.createElement('button');
-          btnPlay.className='icon-btn mini btn-branco';
-          btnPlay.title='Forçar postagem agora (Robe Play)';
-          btnPlay.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg><span>Robe Play</span>`;
-          btnPlay.onclick = () => robePlayUI(p, btnPlay);
-          if (isFrozen) btnPlay.disabled = true;
-          titleRow.append(btnPlay);
-
-          // Novo botão: Robe 24h (por conta)
-          const btnRobe24 = document.createElement('button');
-          btnRobe24.className = 'icon-btn mini btn-azul';
-          btnRobe24.title='Pausar Robe por 24h';
-          btnRobe24.innerHTML = `<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg><span>Robe 24h</span>`;
-          btnRobe24.onclick = () => robePause24hUI(p, btnRobe24);
-          if (isFrozen) btnRobe24.disabled = true;
-          titleRow.append(btnRobe24);
-
-          const subRow = document.createElement('div'); subRow.className='subRow';
-          subRow.textContent = p.cidade ? ('Cidade: ' + p.cidade) : '';
-          center.append(titleRow, subRow);
-
-          // RIGHT: actions (ajustado conforme instruções)
-          const right = document.createElement('div'); right.className='rightCol';
-
-          // ===================== ALTERAÇÃO SOLICITADA — INÍCIO ======================
-          const btnCookies = document.createElement('button');
-          btnCookies.className='btn';
-          btnCookies.textContent='Injetar Cookies';
-          btnCookies.title='Injetar cookies salvos neste perfil';
-          btnCookies.onclick = async (ev) => {
-            setBtnLoading(btnCookies, true, 'Injetando...');
+        // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
+        if (p.humanControl) {
+          // Botão “Retomar Trabalho”
+          const btnResume = document.createElement('button');
+          btnResume.className='icon-btn';
+          btnResume.title='Retomar atendimento e automação';
+          btnResume.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`;
+          btnResume.onclick = async () => {
+            btnResume.disabled = true;
+            btnResume.innerText = 'Resumindo...';
             try {
-              const res = await window.electronAPI.configure(p.nome);
-              if (!res || !res.ok) {
-                alert('Falha ao injetar cookies: ' + (res && res.error ? res.error : 'erro desconhecido'));
-              } else {
-                alert('Cookies injetados com sucesso.');
-              }
-            } catch (e) {
-              alert('Falha ao injetar cookies: ' + (e && e.message || e));
-            } finally {
-              setBtnLoading(btnCookies, false);
+              await window.electronAPI.resumeHuman(p.nome);
+              await new Promise(r=>setTimeout(r,800));
               reloadPerfis();
+            } catch(e){ alert('Falha ao retomar trabalho: '+(e&&e.message||e)); }
+            finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
+          };
+          if (isFrozen) btnResume.disabled = true;
+          right.append(btnCookies, btnResume, btnCfg, btnLog);
+        } else {
+          // Botão “Invocar Humano” padrão
+          const btnHuman = document.createElement('button');
+          btnHuman.className='icon-btn btn-amarelo';
+          btnHuman.title='Invocar Humano';
+          btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
+          btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
+          if (isFrozen) btnHuman.disabled = true;
+          right.append(btnCookies, btnHuman, btnCfg, btnLog);
+        }
+        // ----------------------------------------------------------------------------------
+
+        // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
+        // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
+        let estadoCritico = false;
+        let podeResetar = false;
+        let robeEstadoVal = (robeStatus && typeof robeStatus.estado === 'string' ? robeStatus.estado : '');
+        let ramMBval = (typeof p.ramMB === "number") ? p.ramMB : null;
+        if (ramMBval !== null && ramMBval >= 700) estadoCritico = true;
+        if (/erro|grave|backoff|fail/i.test(robeEstadoVal)) estadoCritico = true;
+        if (estadoCritico && !isFrozen && !p.resetando && !p.resetEmCurso && !p.humanControl && !p.trabalhando) {
+          // Somente se navegador não está ativo ou perfil não está resetando/congelado
+          podeResetar = !p.active;
+        }
+        if (estadoCritico && podeResetar) {
+          const btnResetMil = document.createElement('button');
+          btnResetMil.className = 'btn reset-memmil';
+          btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
+          btnResetMil.onclick = async () => {
+            btnResetMil.disabled = true; btnResetMil.innerHTML = `<span class="spinner"></span> Resetando...`;
+            try {
+              await window.electronAPI.deactivate(p.nome);
+              await new Promise(r=>setTimeout(r,1100));
+              await window.electronAPI.activate(p.nome);
+              alert('Perfil resetado.');
+              reloadPerfis();
+            } catch(e) {
+              alert('Falha ao resetar perfil: '+(e&&e.message||e));
+            } finally {
+              btnResetMil.disabled = false; btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
             }
           };
-          if (isFrozen) btnCookies.disabled = true;
-          // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
+          right.append(btnResetMil);
+        }
+        // ----------------------------------------------------------------------------------
 
-          const btnCfg = document.createElement('button');
-          btnCfg.className='icon-btn';
-          btnCfg.title='Configurações da Conta';
-          btnCfg.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Zm0-6 2.2 1.6 2.6-.6 1.1 2.5 2.6.6-.2 2.7 2 1.8-2 1.8.2 2.7-2.6.6-1.1 2.5-2.6-.6L12 22l-2.2-1.6-2.6.6-1.1-2.5-2.6-.6.2-2.7-2-1.8 2-1.8-.2-2.7 2.6-.6 1.1-2.5 2.6.6L12 2.5Z"/></svg><span>Configurar</span>`;
-          btnCfg.onclick = () => showConfigPerfilModal({ perfil: p, onClose: reloadPerfis });
-          if (isFrozen) btnCfg.disabled = true;
+        // Botão "Descongelar" por perfil congelado
+        if (isFrozen) {
+          const btnUnfreeze = document.createElement('button');
+          btnUnfreeze.className = 'btn';
+          btnUnfreeze.textContent = 'Descongelar';
+          btnUnfreeze.title = 'Remover congelamento (permite retorno à operação)';
+          btnUnfreeze.onclick = async () => {
+            btnUnfreeze.disabled = true;
+            btnUnfreeze.textContent = 'Descongelando...';
+            try {
+              const r = await fetch(`/api/perfis/${encodeURIComponent(p.nome)}/unfreeze`, { method: 'POST' }).then(r=>r.json());
+              if (!r || !r.ok) alert('Falha ao descongelar: ' + ((r && r.error) || ''));
+              await new Promise(r=>setTimeout(r, 600));
+              reloadPerfis();
+            } catch (e) {
+              alert('Erro ao descongelar: ' + (e && e.message || e));
+            } finally {
+              btnUnfreeze.disabled = false;
+              btnUnfreeze.textContent = 'Descongelar';
+            }
+          };
+          right.appendChild(btnUnfreeze);
+        }
 
-          // Botão Arquivo/Log por conta - alterado para ponto se issuesCount > 0
-          const btnLog = document.createElement('button');
-          btnLog.className='icon-btn';
-          btnLog.title='Ver Log da Conta';
-          btnLog.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm9 0v5h5"/></svg><span>Arquivo</span>${ (p.issuesCount && p.issuesCount > 0) ? '<span class="notif-dot"></span>' : '' }`;
-          btnLog.onclick = () => showIssuesModal(p.nome);
-          if (isFrozen) btnLog.disabled = true;
+        card.append(left, center, right);
+        lista.appendChild(card);
 
-          // ========== ALTERAÇÃO AQUI: Botão Human/Resume conforme estado ==========
-          if (p.humanControl) {
-            // Botão “Retomar Trabalho”
-            const btnResume = document.createElement('button');
-            btnResume.className='icon-btn';
-            btnResume.title='Retomar atendimento e automação';
-            btnResume.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`;
-            btnResume.onclick = async () => {
-              btnResume.disabled = true;
-              btnResume.innerText = 'Resumindo...';
-              try {
-                await window.electronAPI.resumeHuman(p.nome);
-                await new Promise(r=>setTimeout(r,800));
-                reloadPerfis();
-              } catch(e){ alert('Falha ao retomar trabalho: '+(e&&e.message||e)); }
-              finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
-            };
-            if (isFrozen) btnResume.disabled = true;
-            right.append(btnCookies, btnResume, btnCfg, btnLog);
-          } else {
-            // Botão “Invocar Humano” padrão
-            const btnHuman = document.createElement('button');
-            btnHuman.className='icon-btn btn-amarelo';
-            btnHuman.title='Invocar Humano';
-            btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
-            btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
-            if (isFrozen) btnHuman.disabled = true;
-            right.append(btnCookies, btnHuman, btnCfg, btnLog);
-          }
-          // ----------------------------------------------------------------------------------
-
-          // ---------------------- RESETAR PERFIL MILITAR (opcional) ------------------------
-          // Se RAM >700MB OU robeEstado anormal/erro, E não está congelado, ativo, resetando
-          let estadoCritico = false;
-          let podeResetar = false;
-          let robeEstadoVal = (robeStatus && typeof robeStatus.estado === 'string' ? robeStatus.estado : '');
-          let ramMBval = (typeof p.ramMB === "number") ? p.ramMB : null;
-          if (ramMBval !== null && ramMBval >= 700) estadoCritico = true;
-          if (/erro|grave|backoff|fail/i.test(robeEstadoVal)) estadoCritico = true;
-          if (estadoCritico && !isFrozen && !p.resetando && !p.resetEmCurso && !p.humanControl && !p.trabalhando) {
-            // Somente se navegador não está ativo ou perfil não está resetando/congelado
-            podeResetar = !p.active;
-          }
-          if (estadoCritico && podeResetar) {
-            const btnResetMil = document.createElement('button');
-            btnResetMil.className = 'btn reset-memmil';
-            btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
-            btnResetMil.onclick = async () => {
-              btnResetMil.disabled = true; btnResetMil.innerHTML = `<span class="spinner"></span> Resetando...`;
-              try {
-                await window.electronAPI.deactivate(p.nome);
-                await new Promise(r=>setTimeout(r,1100));
-                await window.electronAPI.activate(p.nome);
-                alert('Perfil resetado.');
-                reloadPerfis();
-              } catch(e) {
-                alert('Falha ao resetar perfil: '+(e&&e.message||e));
-              } finally {
-                btnResetMil.disabled = false; btnResetMil.innerHTML = `<svg style="width:14px;height:14px;vertical-align:-2px;" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#8a6b0d" stroke-width="1.5"/><path d="M7 3v4l3 3" stroke="#654b0f" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg> <span>Resetar Perfil</span>`;
-              }
-            };
-            right.append(btnResetMil);
-          }
-          // ----------------------------------------------------------------------------------
-
-          // Botão "Descongelar" por perfil congelado
-          if (isFrozen) {
-            const btnUnfreeze = document.createElement('button');
-            btnUnfreeze.className = 'btn';
-            btnUnfreeze.textContent = 'Descongelar';
-            btnUnfreeze.title = 'Remover congelamento (permite retorno à operação)';
-            btnUnfreeze.onclick = async () => {
-              btnUnfreeze.disabled = true;
-              btnUnfreeze.textContent = 'Descongelando...';
-              try {
-                const r = await fetch(`/api/perfis/${encodeURIComponent(p.nome)}/unfreeze`, { method: 'POST' }).then(r=>r.json());
-                if (!r || !r.ok) alert('Falha ao descongelar: ' + ((r && r.error) || ''));
-                await new Promise(r=>setTimeout(r, 600));
-                reloadPerfis();
-              } catch (e) {
-                alert('Erro ao descongelar: ' + (e && e.message || e));
-              } finally {
-                btnUnfreeze.disabled = false;
-                btnUnfreeze.textContent = 'Descongelar';
-              }
-            };
-            right.appendChild(btnUnfreeze);
-          }
-
-          card.append(left, center, right);
-          lista.appendChild(card);
-
-        });
-      }
-      // ========================= FIM BLOCO LEGADO =========================
+      });
     }
 
     // Nova Conta (chama o modal; o modal faz a criação com loading)
@@ -1829,8 +1116,7 @@
           (id==='filterInactive'&& f==='inactive') ||
           (id==='filterIssues'  && f==='issues'));
       });
-      // Mantém compatibilidade, mas renderização nova se impõe
-      renderList();
+      reloadPerfis();
     }
     function passFilter(p) {
       const issuesCount = Number(p.issuesCount || 0);
@@ -1978,19 +1264,8 @@
     (function bindLoginBannedCards(){
       const loginCard = document.getElementById('metricLogin');
       const banCard   = document.getElementById('metricBanned');
-      const applySingleProblem = (key) => {
-        // Seleciona apenas este problema
-        PROBLEM_SELECTED.clear();
-        PROBLEM_SELECTED.add(key);
-        PROBLEM_LOGIC = 'any';
-        PAGE = 1;
-        updateProblemsBtn();
-        // Abre popover para visibilidade
-        openProblemsPopover();
-        renderList();
-      };
-      if (loginCard) loginCard.onclick = () => applySingleProblem('loginRequired');
-      if (banCard)   banCard.onclick   = () => applySingleProblem('banned');
+      if (loginCard) loginCard.onclick = () => setFilter('login');
+      if (banCard)   banCard.onclick   = () => setFilter('banned');
     })();
 
     // 4.2 Atualização das métricas (RAM/CPU/Fotos) — sem bloquear "+ Nova Conta" em RAM baixa

@@ -220,7 +220,7 @@ async function patchPage(nome, page, coords) {
       // EVITAR MÚLTIPLOS setRequestInterception/listeners:
       if (!page._virtusIntercepted) {
         await page.setRequestInterception(true);
-        const onReq = (req) => {
+        page.on('request', (req) => {
           const u = req.url();
           const type = req.resourceType();
           const allowLoginFlow = (url) => /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(url);
@@ -228,6 +228,7 @@ async function patchPage(nome, page, coords) {
             try { return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(page.url() || ''); }
             catch { return false; }
           };
+
           if (allowLoginFlow(u)) return req.continue();
           if (!isLoggedArea()) {
             if (type === 'image' && /facebook\.com/i.test(u)) return req.continue();
@@ -241,11 +242,9 @@ async function patchPage(nome, page, coords) {
             return req.continue();
           }
           return req.continue();
-        };
-        page.on('request', onReq);
+        });
         page._virtusIntercepted = true;
         interceptionConfigured = true;
-        page.once('close', () => { try { page.off('request', onReq); } catch {} });
       }
     } catch (err) {
       // log silencioso
@@ -783,12 +782,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
-
-    // Suprimir about:blank kill por 20s durante boot do browser
-    try {
-      browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {};
-      browser._suppressBlankKillUntil[nome] = Date.now() + 20000;
-    } catch {}
 
     // 1. PATCH: Set protocol timeout GLOBAL para 60s
     try {
