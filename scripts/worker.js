@@ -3791,7 +3791,7 @@ async function wirePageObservers(nome, page) {
     }
   });
   page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('requestfailed', () => { GetHealth(nome).lastNetEventAt = Date.now(); });
+  page.on('requestfailed', () => { getHealth(nome).lastNetEventAt = Date.now(); });
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 }

@@ -370,11 +370,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // CRÍTICO: sempre baseline de perfis.json
   let perfisSkeleton = [];
   try {
-    let listaPerfis = fileStore.loadPerfisJsonSync
-      ? fileStore.loadPerfisJsonSync()
-      : fileStore.perfisJson
-      ? fileStore.perfisJson
-      : require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8') && JSON.parse(require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8'));
+    const listaPerfis = fileStore.loadPerfisJson() || [];
     perfisSkeleton = (listaPerfis || []).map(perfil => ({
       nome: perfil.nome,
       label: perfil.label,
@@ -423,9 +419,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       bannedAt: null,
       bannedText: null
     }));
-  } catch(e2) {
-    perfisSkeleton = [];
-  }
+  } catch {}
   res.json({
     perfis: perfisSkeleton,
     robes: {},
@@ -433,7 +427,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     ts: Date.now(),
     error: String(e && e.message || e),
     autoMode: null,
-    sys: null
+    sys: fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null
   });
 }
 

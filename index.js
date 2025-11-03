@@ -22,38 +22,37 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '8088', 10);
 
 // ===================== CORS restrito =====================
-/**
- * CORS Middleware restritivo:
- * - Permite apenas origens localhost:<PORT> e 127.0.0.1:<PORT>
- * - Permite origin indefinido (Electron/localfile).
- * - Bloqueia o resto com erro CORS explícito.
- */
 const allowedOrigins = [
   `http://localhost:${PORT}`,
   `http://127.0.0.1:${PORT}`
 ];
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const isLocalReq = (req.ip === '127.0.0.1' || req.hostname === 'localhost');
-  if (
-    allowedOrigins.includes(origin) ||
-    (!origin && isLocalReq)
-  ) {
-    // Libera CORS somente para as origens válidas e undefined
-    res.header('Access-Control-Allow-Origin', origin || '*');
+  // Normaliza IP (suporta ::1 e ::ffff:127.0.0.1)
+  const rawIp = (req.ip || '').toLowerCase();
+  const ip = rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
+  const host = (req.hostname || '').toLowerCase();
+
+  const isLocalHost = (host === 'localhost' || host === '127.0.0.1');
+  const isLocalIp = (ip === '127.0.0.1' || ip === '::1');
+  const isLocalReq = isLocalHost || isLocalIp;
+
+  // Não bloqueie assets estáticos/HTML (sem Origin)
+  if (!origin) {
+    // Permite GET/HEAD/OPTIONS sem Origin (recursos locais)
+    return next();
+  }
+
+  if (allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    if (req.method === 'OPTIONS') {
-      // Pré-flight para CORS
-      return res.sendStatus(204);
-    }
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
     return next();
-  } else {
-    // Bloqueia tudo que não é de painel local
-    res.status(403).json({
-      error: 'CORS Restrito: apenas painel local pode acessar este serviço.'
-    });
   }
+
+  // Bloqueio explícito para demais origens
+  return res.status(403).json({ error: 'CORS Restrito: apenas painel local pode acessar este serviço.' });
 });
 // ===================== Fim CORS restrito =====================
 
