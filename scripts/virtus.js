@@ -256,12 +256,21 @@ async function coletaChatsMarketplaceTodos(page) {
         } catch {}
         return '';
       }
+      function _lastFromMe(row) {
+        try {
+          const raw = (row && (row.innerText || row.textContent) || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+          // Lista do Messenger normalmente mostra "Você:" ou "You:" quando a última mensagem foi sua.
+          if (/\bvoce:\b/.test(raw) || /\bvocê:\b/.test(raw) || /\byou:\b/.test(raw)) return true;
+        } catch {}
+        return false;
+      }
       const arr = els.map(el => {
         const href = el.getAttribute('href') || el.href || '';
         const id = _extraiId(href);
         const row = el.closest('div[role="row"]') || el.parentElement;
         const tempo = _extraiTempo(row);
-        return { id, tempo, href };
+        const lastFromMe = _lastFromMe(row);
+        return { id, tempo, href, lastFromMe };
       }).filter(o => o.id);
       const map = new Map();
       for (const it of arr) if (!map.has(it.id)) map.set(it.id, it);
@@ -801,7 +810,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         ]);
       } catch {}
       const todos = await coletaChatsMarketplaceTodos(p);
-      const filtrados = todos.filter(c => c.id && isChatRecente(c.tempo));
+      const filtrados = todos.filter(c => c.id && isChatRecente(c.tempo) && !c.lastFromMe);
       return filtrados;
     } catch (err) {
       logger.error('Erro ao coletar chats', { nome }, err);
@@ -1007,7 +1016,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!jaRespondido && !fila.includes(c.id)) {
         fila.push(c.id);
         novosAti++;
-        log(`NOVO chat em Fila: ${c.id} (${c.tempo})`);
+        log(`NOVO chat em Fila: ${c.id} (${c.tempo}) lastFromMe=${c.lastFromMe ? 'yes' : 'no'}`);
       }
     });
 
@@ -1173,6 +1182,35 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
+          return;
+        }
+
+        // GUARD EXTRA: dentro do chat, verifique se a última mensagem é “sua” (Você/You).
+        const lastFromMeThread = await p.evaluate(() => {
+          try {
+            // Procura nas últimas bolhas/linhas qualquer indicador textual de “Você enviou / You sent” ou "Você:"
+            // Snippet robusto para PT/EN
+            const lastNodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-60).reverse();
+            const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+            for (const n of lastNodes) {
+              const t = norm(n.innerText || n.textContent || '');
+              if (/\b(voce enviou|voce:|você enviou|você:|you sent|you:)\b/.test(t)) {
+                return true;
+              }
+              // Se achar inbound antes de outbound, feche.
+              if (/\benviou\b/.test(t) || /\bmandou\b/.test(t) || /\bdisse\b/.test(t)) {
+                return false;
+              }
+            }
+          } catch {}
+          return false;
+        });
+        if (lastFromMeThread) {
+          // Abort gélido: NÃO responder. Remove da fila, zera lock/pending e registra ação.
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          await logIssue(nome, 'mil_action', `virtus_skip_no_new_inbound (chat ${chatId})`);
           return;
         }
 
