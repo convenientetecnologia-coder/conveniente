@@ -80,7 +80,8 @@ async function montarPerfisBaseline() {
     loginReason: null,
     banned: false,
     bannedAt: null,
-    bannedText: null
+    bannedText: null,
+    problem: false // <<< ALTERAÇÃO AQUI
   }));
 }
 
@@ -147,7 +148,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     loginReason: null,
     banned: false,
     bannedAt: null,
-    bannedText: null
+    bannedText: null,
+    problem: false // <<< ALTERAÇÃO AQUI
   }));
 
   // Overlay dos perfis atuais vindos do status (worker ou fallback)
@@ -325,7 +327,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     loginReason: null,
     banned: false,
     bannedAt: null,
-    bannedText: null
+    bannedText: null,
+    problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 1)
     // outros campos militares do shape retrocompatível
   }]));
   let warningINST = undefined;
@@ -421,7 +424,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       loginReason: null,
       banned: false,
       bannedAt: null,
-      bannedText: null
+      bannedText: null,
+      problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 2)
     }));
   } catch(e2) {
     perfisSkeleton = [];

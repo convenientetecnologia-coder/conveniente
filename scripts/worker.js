@@ -2710,7 +2710,20 @@ const handlers = {
             }
           } catch {}
           return null;
-        })()
+        })(),
+        problem: (() => {
+          try {
+            const mPath = manifestPathOf(nome);
+            if (fs.existsSync(mPath)) {
+              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+              const lr = !!(man.accountFlags && man.accountFlags.loginRequired === true);
+              const bd = !!(man.accountFlags && man.accountFlags.banned === true);
+              return lr || bd;
+            }
+          } catch {}
+          const rm = robeMeta[nome] || {};
+          return !!(rm.loginRequired || rm.banned);
+        })(),
       };
     });
     const robes = {};
@@ -2974,6 +2987,19 @@ return {
       }
     } catch {}
     return null;
+  })(),
+  problem: (() => {
+    try {
+      const mPath = manifestPathOf(nome);
+      if (fs.existsSync(mPath)) {
+        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+        const lr = !!(man.accountFlags && man.accountFlags.loginRequired === true);
+        const bd = !!(man.accountFlags && man.accountFlags.banned === true);
+        return lr || bd;
+      }
+    } catch {}
+    const rm = robeMeta[nome] || {};
+    return !!(rm.loginRequired || rm.banned);
   })()
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,

@@ -1299,23 +1299,29 @@
         const el = document.getElementById(id);
         if (el) el.classList.toggle('active',
           (id==='filterAll'     && f==='all') ||
+          (id==='filterAll'     && f==='') ||
           (id==='filterActive'  && f==='active') ||
           (id==='filterInactive'&& f==='inactive') ||
           (id==='filterIssues'  && f==='issues'));
       });
       reloadPerfis();
     }
+    // NUNCA usar issuesCount para filtrar “Com problema”.
+    // Apenas loginRequired === true OU banned === true.
     function passFilter(p) {
-      const issuesCount = Number(p.issuesCount || 0);
       let ok = true;
-      if (currentFilter === 'active')   ok = !!p.active;
-      else if (currentFilter === 'inactive') ok = !p.active;
-      else if (currentFilter === 'issues')   ok = issuesCount > 0;
-      else if (currentFilter === 'login')    ok = (p.loginRequired === true);
-      else if (currentFilter === 'banned')   ok = (p.banned === true);
-      // Se falhar filtro da view, já retorna falso
+
+      if (currentFilter === 'active')         ok = !!p.active;
+      else if (currentFilter === 'inactive')  ok = !p.active;
+
+      // “Com problema” (filterIssues): SOMENTE loginRequired OU banned
+      else if (currentFilter === 'issues')    ok = (p.problem === true) || (p.loginRequired === true) || (p.banned === true);
+
+      // Clicks das métricas
+      else if (currentFilter === 'login')     ok = (p.loginRequired === true);
+      else if (currentFilter === 'banned')    ok = (p.banned === true);
+
       if (!ok) return false;
-      // Busca aplicada SOBRE a view (tokens)
       return passSearch(p);
     }
 

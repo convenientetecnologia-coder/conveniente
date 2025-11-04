@@ -170,7 +170,8 @@ function getStatusSnapshot() {
       // PATCH: campos detalhados do freezer
       frozenReason,
       frozenAt,
-      frozenSetBy
+      frozenSetBy,
+      problem: false // <<< ADICIONE ESTA LINHA ao objeto retornado de cada perfil
       // Adicione outros campos health militar que o painel consome, sempre iniciando com null se não disponível.
     };
   });
