@@ -25,6 +25,10 @@ function resolveChromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
+// ===== IMPORTAÇÃO DO p-limit NO TOPO (conforme instrução) =====
+const pLimitImport = require('p-limit');
+const pLimit = pLimitImport.default || pLimitImport;
+
 module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
@@ -344,6 +348,8 @@ module.exports = (app, workerClient, fileStore) => {
       let okCount = 0, fail = [];
       for (const p of ativos) {
         try {
+          // ====== ALTERAÇÃO ======
+          await issues.append(p.nome, 'admin_invoke_human_request', 'by=mass');
           const r = await workerClient.sendWorkerCommand('invoke_human', { nome: p.nome }, { timeoutMs: 60000 });
           if (r && r.ok) okCount++;
           else fail.push(p.nome);
@@ -353,6 +359,41 @@ module.exports = (app, workerClient, fileStore) => {
       }
       if (fail.length) return res.json({ ok: false, invoked: okCount, failed: fail });
       return res.json({ ok: true, invoked: okCount });
+    } catch (e) {
+      return res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  // ===== NOVO ENDPOINT: Retomar trabalho em todos ATIVOS + humanControl (conforme instrução) =====
+  app.post('/api/perfis/human-resume-all', async (req, res) => {
+    const limit = pLimit(parseInt(process.env.RESUME_ALL_CONCURRENCY || '4', 10));
+    try {
+      await issues.append('system', 'admin_human_resume_request', 'mass_resume_all');
+
+      const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 25000 });
+      const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+      // Filtro: somente ativos + humanControl; ignora congelados (opcional)
+      const candidatos = perfis.filter(p =>
+        p && p.active === true && p.humanControl === true && !(p.robeFrozenUntil && p.robeFrozenUntil > Date.now())
+      );
+
+      let okCount = 0;
+      const failed = [];
+      const tasks = candidatos.map(p => limit(async () => {
+        try {
+          await issues.append(p.nome, 'admin_human_resume_request', 'by=mass');
+          const r = await workerClient.sendWorkerCommand('human-resume', { nome: p.nome }, { timeoutMs: 60000 });
+          if (r && r.ok) okCount++; else failed.push(p.nome);
+        } catch (e) {
+          failed.push(p.nome);
+        }
+      }));
+      await Promise.all(tasks);
+
+      return failed.length
+        ? res.json({ ok: false, resumed: okCount, failed, total: candidatos.length })
+        : res.json({ ok: true, resumed: okCount, total: candidatos.length });
+
     } catch (e) {
       return res.json({ ok: false, error: e && e.message || String(e) });
     }

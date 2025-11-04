@@ -277,6 +277,7 @@
     <button class="btn btn-roxo" id="startAllBtn">Abrir Todos 24h</button>
     <button class="btn btn-vermelho" id="stopAllBtn">Fechar Todos</button>
     <button class="btn btn-amarelo" id="invokeAllBtn">Invocar Tudo</button>
+    <button class="btn btn-verde" id="resumeAllBtn">Retomar Tudo</button>
     <button class="btn btn-azul" id="robe24AllBtn">Robe 24h</button>
     <button class="btn btn-branco" id="robeReleaseAllBtn">Liberar Robe</button>
     <button class="btn btn-cinza" id="unfreezeAllBtn">Descongelar</button>
@@ -301,14 +302,15 @@
   <script src="app.js"></script>
   <script>
     // Lock para impedir múltiplos comandos em massa simultâneos — fortalece UX com fluxo único!
-    let startAllLock = false; // lock para "Abrir Todos e Iniciar 24h"
-    let stopAllLock = false;  // lock para "Fechar todos"
-    function isMassActionRunning(){ return startAllLock || stopAllLock; }
+    let startAllLock = false;
+    let stopAllLock  = false;
+    let massMiscLock = false; // Novo lock para ações de massa diversas (invoke/resume)
+    function isMassActionRunning(){ return startAllLock || stopAllLock || massMiscLock; }
     function alertMassActionRunning(msg){
       alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
     }
     function setGlobalActionButtonsDisabled(disable, { exclude = [] } = {}) {
-      const ids = ['startAllBtn','stopAllBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn'];
+      const ids = ['startAllBtn','stopAllBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn'];
       ids.forEach(id => {
         if (exclude.includes(id)) return;
         const el = document.getElementById(id);
@@ -1844,6 +1846,33 @@
         } catch (e) {
           alert('Erro no Invocar Tudo: ' + (e && e.message || e));
         } finally {
+          btn.disabled = false; btn.style.opacity=''; btn.textContent = idleTxt;
+          setGlobalActionButtonsDisabled(false);
+        }
+      };
+    })();
+
+    // Bind do botão “Retomar Tudo”
+    (function bindResumeAllBtn(){
+      const btn = document.getElementById('resumeAllBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        const idleTxt = btn.textContent;
+        massMiscLock = true;
+        btn.disabled = true; btn.style.opacity='0.7'; btn.textContent='Retomando...';
+        setGlobalActionButtonsDisabled(true, { exclude: ['resumeAllBtn'] });
+        try {
+          const r = await window.electronAPI.resumeHumanAllActive();
+          if (!r || !r.ok) {
+            alert('Falha ao retomar trabalho em massa: ' + ((r && r.error) || ''));
+          }
+          await new Promise(r=>setTimeout(r,500));
+          reloadPerfis();
+        } catch (e) {
+          alert('Erro no Retomar Tudo: ' + (e && e.message || e));
+        } finally {
+          massMiscLock = false;
           btn.disabled = false; btn.style.opacity=''; btn.textContent = idleTxt;
           setGlobalActionButtonsDisabled(false);
         }

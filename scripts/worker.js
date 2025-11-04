@@ -532,6 +532,41 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 }
 // === FIM: desired.json/status.json helpers ===
 
+// ===== INSTRUÇÃO ULTRA DETALHADA PARA BLINDAGEM DE desired.json =====
+// Helpers de lock de arquivo atômico para desired.json
+const desiredLockFile = desiredPath + '.lock';
+
+function acquireDesiredLock({ retries = 80, delayMs = 25 } = {}) {
+  return new Promise((resolve, reject) => {
+    let tries = 0;
+    (function tryOnce() {
+      tries++;
+      try {
+        const fd = fs.openSync(desiredLockFile, 'wx');
+        return resolve(fd);
+      } catch {
+        if (tries >= retries) return reject(new Error('desired_lock_timeout'));
+        setTimeout(tryOnce, delayMs);
+      }
+    })();
+  });
+}
+function releaseDesiredLock(fd) {
+  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
+  try { fs.unlinkSync(desiredLockFile); } catch {}
+}
+async function withDesiredFileLockUpdate(mutator) {
+  let fd = null;
+  try {
+    fd = await acquireDesiredLock();
+    const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+    const next = await Promise.resolve(mutator(desired)) || desired;
+    const ok = writeJsonAtomic(desiredPath, next);
+    if (!ok) { try { await issues.append('system', 'persist_failed', 'desired_write_failed'); } catch {} }
+  } finally {
+    releaseDesiredLock(fd);
+  }
+}
 
 
 // === Helpers de manifest + cooldown ===
@@ -2168,12 +2203,14 @@ const handlers = {
   stopPruneLoop(nome);
   if (!preserve) {
     try {
-      const d = readJsonFile(desiredPath, { perfis: {} });
-      d.perfis = d.perfis || {};
-      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-      const ok = writeJsonAtomic(desiredPath, d);
-      if (!ok) { try { await issues.append('system','persist_failed', `${nome}|deactivate_desired_write`); } catch {} }
-    } catch {}
+      await withDesiredFileLockUpdate((d) => {
+        d.perfis = d.perfis || {};
+        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+        return d;
+      });
+    } catch (e) {
+      try { await issues.append('system','persist_failed', `${nome}|deactivate_desired_write`); } catch {}
+    }
   } else {
     const d = readJsonFile(desiredPath, { perfis: {} });
     const isHold = d.perfis?.[nome]?.humanHold === true;
@@ -2221,10 +2258,11 @@ const handlers = {
     try { await stopVirtus(nome); } catch {}
 
     try {
-      const desired = readJsonFile(desiredPath, { perfis: {} });
-      desired.perfis = desired.perfis || {};
-      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
-      writeJsonAtomic(desiredPath, desired);
+      await withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
+        return desired;
+      });
     } catch {}
 
     try {
@@ -2271,10 +2309,11 @@ const handlers = {
 
     // Persistir hold humano e limpar qualquer reabertura programada
     try {
-      const desired = readJsonFile(desiredPath, { perfis: {} });
-      desired.perfis = desired.perfis || {};
-      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true };
-      writeJsonAtomic(desiredPath, desired);
+      await withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true };
+        return desired;
+      });
     } catch {}
 
     try {
@@ -2286,10 +2325,11 @@ const handlers = {
     ctrl.configurando = false;
     stopPruneLoop(nome); // Garante que NENHUM prune corra durante humano
     try {
-      const desired = readJsonFile(desiredPath, { perfis: {} });
-      desired.perfis = desired.perfis || {};
-      desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
-      writeJsonAtomic(desiredPath, desired);
+      await withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
+        return desired;
+      });
     } catch {}
     await snapshotStatusAndWrite();
 
@@ -2358,10 +2398,11 @@ const handlers = {
 
     // Remover hold humano (override explícito)
     try {
-      const desired = readJsonFile(desiredPath, { perfis: {} });
-      desired.perfis = desired.perfis || {};
-      if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
-      writeJsonAtomic(desiredPath, desired);
+      await withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
+        return desired;
+      });
     } catch {}
 
     return { ok:true };

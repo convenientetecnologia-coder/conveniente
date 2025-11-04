@@ -49,6 +49,7 @@ const api = {
 
   // === INÍCIO PATCH ===
   invokeHumanAllActive: () => fetch('/api/perfis/invoke-human-all-active', { method: 'POST' }).then(r => r.json()),
+  resumeHumanAllActive: () => fetch('/api/perfis/human-resume-all', { method: 'POST' }).then(r => r.json()),
   // === FIM PATCH ===
 
   // Adicione abaixo endpoints de auditoria/search para localizacoes_ruins quando implementar
