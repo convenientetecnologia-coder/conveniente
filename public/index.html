@@ -203,6 +203,49 @@
     .btn-amarelo  { background: var(--btn-amarelo) !important; color: var(--btn-txt-dark) !important; font-weight: 800; }
     .btn-cinza    { background: var(--btn-cinza) !important; color: var(--btn-txt-dark) !important; font-weight: 800; }
     .btn-branco   { background: var(--btn-branco) !important; color: var(--btn-txt-dark) !important; font-weight: 800; }
+
+    /* === BUSCA — estilos coesos com toolbar === */
+    .search-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 12px;
+    }
+    .search-input {
+      height: 30px;
+      padding: 6px 10px;
+      border: 1px solid var(--btn-border);
+      background: var(--btn);
+      color: var(--text);
+      border-radius: 8px;
+      font-size: 13px;
+      width: 260px;
+      outline: none;
+    }
+    .search-input::placeholder {
+      color: var(--muted);
+    }
+    .search-clear {
+      height: 30px;
+      padding: 6px 10px;
+      border: 1px solid var(--btn-border);
+      background: var(--btn);
+      color: var(--text);
+      border-radius: 8px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .search-clear:hover { background: var(--btn-hover); }
+    /* Mensagem de “nenhum resultado para a busca” */
+    .no-results {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border: 1px dashed var(--pill-border);
+      border-radius: 8px;
+      background: #0b1322;
+      color: var(--muted);
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -237,6 +280,13 @@
     <button class="btn btn-azul" id="robe24AllBtn">Robe 24h</button>
     <button class="btn btn-branco" id="robeReleaseAllBtn">Liberar Robe</button>
     <button class="btn btn-cinza" id="unfreezeAllBtn">Descongelar</button>
+
+    <!-- >>> BUSCA: imediatamente antes dos filtros <<< -->
+    <div class="search-group">
+      <input id="searchInput" class="search-input" type="text" placeholder="Pesquisar contas (Ctrl+K, ESC para limpar)" autocomplete="off" />
+      <button id="searchClear" class="search-clear" type="button">Limpar</button>
+    </div>
+
     <div class="filters" style="display:inline-flex;gap:6px;margin-left:10px">
       <button class="btn" id="filterAll">Todas</button>
       <button class="btn" id="filterActive">Ativas</button>
@@ -455,6 +505,120 @@
     }
 
     function buildPill(text, cls='info'){ const span=document.createElement('span'); span.className='pill '+cls; span.innerHTML=`<span class="dot"></span>${text}`; return span; }
+
+    // === BUSCA — Estado e helpers (blindado) ===
+    const UI_SEARCH_STORAGE_KEY = 'admin_search_query_v1';
+    const uiSearch = {
+      query: '',
+      tokens: [],
+      inputEl: null,
+      clearEl: null,
+      debounce: null
+    };
+
+    let lastPerfisCache = [];          // cache do dataset “total”
+    let lastRobesCache = {};           // cache do status de Robe
+    let lastRobeQueueCache = [];       // cache da fila
+    let lastSearchIndexCache = new Map(); // nome -> texto normalizado para busca
+
+    function normalizeText(s) {
+      return String(s || '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+    }
+    function computeTokens(q) {
+      const t = normalizeText(q).trim().split(/\s+/).filter(Boolean);
+      return t;
+    }
+    // Constrói índice de busca do perfil usando campos relevantes
+    function buildSearchIndex(perfis, robes) {
+      const m = new Map();
+      for (const p of perfis) {
+        const robe = robes && robes[p.nome] || {};
+        const fields = [
+          p.nome || '',
+          p.label || '',
+          p.cidade || '',
+          p.manifestStatus || '',
+          p.closingReason || '',
+          p.loginRequired ? 'login requerido' : '',
+          p.banned ? 'banida suspensa' : '',
+          robe.estado || '',
+          robe.pauseReason || '',
+          (p.loginReason || ''),
+          (p.bannedText || ''),
+          (p.whyNotOpen || '')
+        ];
+        m.set(p.nome, normalizeText(fields.join(' ')));
+      }
+      return m;
+    }
+    // Predicado da BUSCA — aplica sobre tokens normalizados
+    function passSearch(p) {
+      if (!uiSearch.tokens.length) return true;
+      const s = lastSearchIndexCache.get(p.nome) || '';
+      // todos os tokens devem ocorrer
+      for (const tok of uiSearch.tokens) {
+        if (!s.includes(tok)) return false;
+      }
+      return true;
+    }
+    function setSearchQuery(newQ, { persist = true, rerender = true } = {}) {
+      const q = String(newQ || '');
+      uiSearch.query = q;
+      uiSearch.tokens = computeTokens(q);
+      if (persist) {
+        try { localStorage.setItem(UI_SEARCH_STORAGE_KEY, q); } catch {}
+      }
+      if (rerender) renderListFromCache();
+    }
+    function bindSearchUI() {
+      uiSearch.inputEl = document.getElementById('searchInput');
+      uiSearch.clearEl = document.getElementById('searchClear');
+
+      // inicializa de localStorage
+      let q = '';
+      try { q = localStorage.getItem(UI_SEARCH_STORAGE_KEY) || ''; } catch {}
+      if (uiSearch.inputEl) uiSearch.inputEl.value = q;
+      setSearchQuery(q, { persist: false, rerender: false });
+
+      const onInput = () => {
+        clearTimeout(uiSearch.debounce);
+        uiSearch.debounce = setTimeout(() => {
+          setSearchQuery(uiSearch.inputEl.value, { persist: true, rerender: true });
+        }, 120);
+      };
+      uiSearch.inputEl && uiSearch.inputEl.addEventListener('input', onInput);
+
+      // ESC para limpar
+      uiSearch.inputEl && uiSearch.inputEl.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') {
+          uiSearch.inputEl.value = '';
+          setSearchQuery('', { persist: true, rerender: true });
+          uiSearch.inputEl.focus();
+        }
+      });
+      // Ctrl+K para focar
+      document.addEventListener('keydown', (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && (ev.key.toLowerCase() === 'k')) {
+          ev.preventDefault();
+          uiSearch.inputEl && uiSearch.inputEl.focus();
+          uiSearch.inputEl && uiSearch.inputEl.select && uiSearch.inputEl.select();
+        }
+      });
+      // botão limpar
+      uiSearch.clearEl && uiSearch.clearEl.addEventListener('click', () => {
+        if (uiSearch.inputEl) uiSearch.inputEl.value = '';
+        setSearchQuery('', { persist: true, rerender: true });
+        uiSearch.inputEl && uiSearch.inputEl.focus();
+      });
+    }
+    // RENDER LOCAL — usa apenas caches (sem backend)
+    function renderListFromCache() {
+      try {
+        buildList(lastPerfisCache, lastRobesCache, lastRobeQueueCache);
+      } catch {}
+    }
 
     // ============================= INÍCIO ALTERAÇÕES PEDIDAS =============================
     // Militar: null-aware, badge neutra se RAM/CPU desconhecida
@@ -684,16 +848,39 @@
       if (loginCard) loginCard.style.display = loginCount > 0 ? 'inline-flex' : 'none';
       if (banCard)   banCard.style.display   = bannedCount > 0 ? 'inline-flex' : 'none';
 
+      // No final da reloadPerfis, sempre faça:
+      lastPerfisCache = perfis;
+      lastRobesCache = robes;
+      lastRobeQueueCache = robeQueue;
+      lastSearchIndexCache = buildSearchIndex(lastPerfisCache, lastRobesCache);
+      buildList(lastPerfisCache, lastRobesCache, lastRobeQueueCache);
+    }
+
+    function buildList(perfisInput, robes, robeQueue) {
       const lista = document.getElementById('listaPerfis');
       lista.innerHTML = '';
-      if (!perfis.length) {
+
+      if (!perfisInput.length) {
         const empty = document.createElement('div');
-        empty.className='pill'; empty.textContent='Nenhuma conta cadastrada.';
+        empty.className='pill';
+        empty.textContent='Nenhuma conta cadastrada.';
         lista.appendChild(empty);
         return;
       }
 
-      perfis.filter(passFilter).forEach((p, idx) => {
+      const filtered = perfisInput.filter(passFilter);
+      if (!filtered.length) {
+        const no = document.createElement('div');
+        no.className = 'no-results';
+        const q = uiSearch.query ? ` para “${uiSearch.query}”` : '';
+        no.textContent = `Nenhuma conta encontrada${q}.`;
+        lista.appendChild(no);
+        return;
+      }
+
+      // Render com fragment para reduzir reflow
+      const frag = document.createDocumentFragment();
+      filtered.forEach((p, idx) => {
         const robeStatus = robes[p.nome] || {};
         const robeCooldownSec = robeStatus.cooldownSec || 0;
         const fila = robeQueue || [];
@@ -1053,9 +1240,9 @@
         }
 
         card.append(left, center, right);
-        lista.appendChild(card);
-
+        frag.appendChild(card);
       });
+      lista.appendChild(frag);
     }
 
     // Nova Conta (chama o modal; o modal faz a criação com loading)
@@ -1120,12 +1307,16 @@
     }
     function passFilter(p) {
       const issuesCount = Number(p.issuesCount || 0);
-      if (currentFilter === 'active')   return !!p.active;
-      if (currentFilter === 'inactive') return !p.active;
-      if (currentFilter === 'issues')   return issuesCount > 0;
-      if (currentFilter === 'login')  return p.loginRequired === true;
-      if (currentFilter === 'banned') return p.banned === true;
-      return true; // 'all'
+      let ok = true;
+      if (currentFilter === 'active')   ok = !!p.active;
+      else if (currentFilter === 'inactive') ok = !p.active;
+      else if (currentFilter === 'issues')   ok = issuesCount > 0;
+      else if (currentFilter === 'login')    ok = (p.loginRequired === true);
+      else if (currentFilter === 'banned')   ok = (p.banned === true);
+      // Se falhar filtro da view, já retorna falso
+      if (!ok) return false;
+      // Busca aplicada SOBRE a view (tokens)
+      return passSearch(p);
     }
 
     // Robe: UI helpers
@@ -1245,6 +1436,9 @@
 
       load();
     }
+
+    // Inicialização do campo de busca e render local
+    bindSearchUI();
 
     // Binds filtros
     (function bindFilters(){
