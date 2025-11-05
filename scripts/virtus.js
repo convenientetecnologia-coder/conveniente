@@ -508,7 +508,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let chatAtivo = null;
 
   const HIST_FILE = HIST_JSON_NAME(nome);
-  const NO_REPEAT_WINDOW_SEC = 24 * 3600;
+  const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
   const POLL_INTERVAL_MS = 30_000; // polling de novos chats
   const MIN_REPLY_DELAY_MS = 60_000;
   const MAX_REPLY_DELAY_MS = 120_000;
@@ -1234,6 +1234,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatAtivo = null;
           return;
         }
+// REVALIDAÇÃO FINAL DE TTL: aborta se alguém marcou este chat < janela
+{
+  const tsPrev2 = respondedCache.get(chatId) || Number(historico[chatId] || 0);
+  if (tsPrev2 && (agoraEpoch() - tsPrev2) < NO_REPEAT_WINDOW_SEC) {
+    try { await pendingDel(nome, chatId); } catch {}
+    fila = fila.filter(id => id !== chatId);
+    chatAtivo = null;
+    await logIssue(nome, 'mil_action', `virtus_ttl_recheck_abort: chat ${chatId} dentro da janela final`);
+    return;
+  }
+}
 
         resetFail(chatId);
 

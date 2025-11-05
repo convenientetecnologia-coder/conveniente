@@ -14,7 +14,7 @@ function key(perfil, chatId) {
   return path.join(LOCK_DIR, `${perfil}__${chatId}.lock`);
 }
 
-const STALE_MS = 10 * 60 * 1000; // 10min
+const STALE_MS = 30 * 60 * 1000; // 30min
 
 function isStale(fp) {
   try {
