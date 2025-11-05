@@ -339,13 +339,6 @@ function createCluster() {
       const allOk = results.every(r => r && r.ok !== false);
       return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
     }
-    if (type === 'stop-all') {
-      const results = await Promise.all(children.map((_, i) =>
-        sendTo(i, 'stop-all', payload, { timeoutMs: opts.timeoutMs || 180000 })
-      ));
-      const ok = results.every(r => r && r.ok !== false);
-      return ok ? { ok: true } : { ok: false, error: 'partial_fail' };
-    }
     // para comandos por perfil, assegura roteamento
     if (nome && route[nome] === undefined) {
       await ensureAssigned(nome, 'on_demand_send');

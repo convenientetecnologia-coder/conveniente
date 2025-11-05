@@ -6,25 +6,6 @@ const issues = require('./issues.js');
 const { getAvailableMB } = require('./utils.js'); // <<< ADICIONADO CONFORME INSTRUÇÃO
 const logger = require('./logger.js');
 
-// === INÍCIO PATCH STOP ALL LOCK ===
-const STOP_LOCK = path.join(__dirname, '..', 'dados', 'stop_all.lock');
-function isStopAllLocked() {
-  try { fs.accessSync(STOP_LOCK, fs.constants.F_OK); return true; } catch { return false; }
-}
-function acquireStopAllLock() {
-  try { fs.closeSync(fs.openSync(STOP_LOCK, 'wx')); return true; } catch { return false; }
-}
-function releaseStopAllLock() {
-  try { fs.unlinkSync(STOP_LOCK); } catch {}
-}
-function denyIfStopAll(res, label) {
-  if (isStopAllLocked()) {
-    return res.json({ ok: false, error: 'stop_all_in_progress', detail: `${label} bloqueado enquanto STOP ALL em andamento` });
-  }
-  return null;
-}
-// === FIM PATCH STOP ALL LOCK ===
-
 // --- HELPERS DE VALIDAÇÃO (conforme instrução) ---
 const isValidSlug = s => typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
 function assertPerfilExists(fileStore, nome) {
@@ -171,7 +152,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/activate', async (req, res) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/activate chamada', { nome });
-    { const r = denyIfStopAll(res, 'activate'); if (r) return; }
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { 
@@ -268,7 +248,6 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/start-work', async (req, res) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/start-work chamada', { nome });
-    { const r = denyIfStopAll(res, 'start-work'); if (r) return; }
     const op = String(req.headers['x-operator'] || 'unknown');
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) {
@@ -667,7 +646,6 @@ module.exports = (app, workerClient, fileStore) => {
 // ========== ENDPOINT CANÔNICO: abrir todos 24h (identico ao local) ==========
   app.post('/api/perfis/open-all-24h', async (req, res) => {
     const issues = require('./issues.js');
-    { const r = denyIfStopAll(res, 'open-all-24h'); if (r) return; }
 
     try {
       const perfisArr = fileStore.loadPerfisJson() || [];
@@ -727,66 +705,4 @@ module.exports = (app, workerClient, fileStore) => {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
-
-// ===== INÍCIO ENDPOINT STOP ALL CLUSTER-SAFE =====
-  app.post('/api/perfis/stop-all', async (req, res) => {
-    const issues = require('./issues.js');
-    const supervisor = require('./supervisor.js'); // local, in-process
-
-    if (!acquireStopAllLock()) {
-      return res.json({ ok: false, error: 'stop_all_in_progress' });
-    }
-    try {
-      await issues.append('system', 'admin_action', 'stop_all_begin');
-
-      // 1) Desired: todos inativos e Virtus off (único ponto de verdade)
-      await fileStore.withDesiredLock(desired => {
-        const perfisArr = fileStore.loadPerfisJson() || [];
-        desired.perfis = desired.perfis || {};
-        for (const p of perfisArr) {
-          if (!p || !p.nome) continue;
-          desired.perfis[p.nome] = { ...(desired.perfis[p.nome] || {}), active: false, virtus: 'off' };
-        }
-        return desired;
-      });
-
-      // 2) Broadcast para todos os workers
-      const r = await workerClient.sendWorkerCommand('stop-all', { reason: 'admin' }, { timeoutMs: 180000 });
-      if (!r || r.ok === false) {
-        await issues.append('system', 'mil_action', 'stop_all_broadcast_partial_fail');
-      }
-
-      // 3) Reseta supervisor (slots etc)
-      try { supervisor.resetSupervisor(); } catch {}
-
-      // 4) Aguarda convergência (timeout: 3min)
-      const t0 = Date.now();
-      const timeoutMs = 180000;
-      let ok = false;
-      while ((Date.now() - t0) < timeoutMs) {
-        const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 15000 }).catch(()=>null);
-        const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
-        const queue  = Array.isArray(st && st.robeQueue) ? st.robeQueue : [];
-        const allClosed = perfis.every(p => !p.active);
-        const queueEmpty = queue.length === 0;
-        if (allClosed && queueEmpty) { ok = true; break; }
-        await new Promise(r => setTimeout(r, 800));
-      }
-
-      if (!ok) {
-        await issues.append('system', 'mil_action', 'stop_all_timeout');
-        return res.json({ ok: false, error: 'timeout_convergence' });
-      }
-
-      await issues.append('system', 'mil_action', 'stop_all_done');
-      return res.json({ ok: true });
-    } catch (e) {
-      await issues.append('system', 'mil_action', 'stop_all_exception ' + (e && e.message || e));
-      return res.json({ ok: false, error: e && e.message || String(e) });
-    } finally {
-      releaseStopAllLock();
-    }
-  });
-// ===== FIM ENDPOINT STOP ALL =====
-
 };

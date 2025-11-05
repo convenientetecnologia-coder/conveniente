@@ -289,15 +289,15 @@ async function ensureFreeMB(minMB = 3072) {
     await sleep(1200);
   }
 }
-// ===== INÍCIO ALTERAÇÃO - PATCH CANÔNICO “STOP ALL” =====
 async function execCloseAll() {
   try {
-    // PATCH: usa endpoint canônico/atômico
-    await httpJson('/api/perfis/stop-all', { method:'POST' });
+    const st = await httpJson('/api/status');
+    const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+    for (const p of perfis) {
+      try { await httpJson(`/api/perfis/${encodeURIComponent(p.nome)}/deactivate`, { method:'POST' }); } catch {}
+    }
   } catch {}
 }
-// ===== FIM ALTERAÇÃO ===================
-
 // ===== INÍCIO ALTERAÇÃO =====
 async function execOpenAll24h() {
   try {

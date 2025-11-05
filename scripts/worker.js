@@ -706,15 +706,9 @@ const controllers = new Map(); // nome => { browser, virtus, robe, status, confi
 // Estado global do Robe (cooldown, fila, etc)
 const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
 
-// === INÍCIO PATCH STOP ALL FLAG ==== 
-let stopAllInProgress = false; // FLAG ATOMIC
-// === FIM PATCH STOP ALL FLAG ====
-
-/*
-INICIO DA INSTRUÇÃO (worker.js)
-
-Objetivo: Sweeper global de memória para evitar crescimento indefinido dos estados efêmeros
-*/
+// INICIO DA INSTRUÇÃO (worker.js)
+//
+// Objetivo: Sweeper global de memória para evitar crescimento indefinido dos estados efêmeros
 function memorySweep() {
   try {
     const nomesValidos = new Set(loadPerfisJson().map(p => p.nome));
@@ -2903,30 +2897,6 @@ const handlers = {
   }
 };
 
-// ===== INÍCIO PATCH CANÔNICO: FUNÇÃO STOP ALL =====
-async function stopAllNow(reason = 'admin_stopall') {
-  if (stopAllInProgress) return { ok: true, already: true };
-  stopAllInProgress = true;
-  try {
-    try { robeQueue.clear(); } catch {}
-    const perfisArr = loadPerfisJson();
-    for (const p of perfisArr) {
-      const nome = p && p.nome;
-      if (!nome) continue;
-      try {
-        await handlers.deactivate({ nome, reason, policy: null }); // preserveDesired = false
-      } catch {}
-    }
-    try { await killStrayChromes(); } catch {}
-    try { await ramCpuMonitorTick(); } catch {}
-    await snapshotStatusAndWrite();
-    return { ok: true };
-  } finally {
-    stopAllInProgress = false;
-  }
-}
-// ===== FIM PATCH CANÔNICO =====
-
 // == INÍCIO: função para escrever o snapshot de status (status.json) ==
 async function snapshotStatusAndWrite() {
 _statusLock = _statusLock.then(async () => {
@@ -3406,8 +3376,6 @@ async function detectMessengerTempBlock(page) {
 let _nurseTickRunning = false;
 
 async function nurseTick() {
-  // PATCH: SUSPENDE NURSE DURANTE STOP ALL
-  if (stopAllInProgress) { _nurseTickRunning = false; return; }
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
   if (controllers.size === 0) { _nurseTickRunning = false; return; }
@@ -3978,8 +3946,6 @@ async function escalateToReopen(nome, reason='health_reopen') {
 async function healthTick() {
   if (controllers.size === 0) { return; }
   for (const [nome, ctrl] of controllers) {
-    // PATCH: SUSPENDE HEALTH DURANTE STOP ALL
-    if (stopAllInProgress) continue;
     // INSTRUÇÃO CIRÚRGICA: Guard emExecucao no healthTick (logo no início do loop)
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
@@ -4207,10 +4173,6 @@ process.on('disconnect', () => gracefulShutdown('disconnect'));
 process.on('message', async (msg) => {
   if (!msg || !msg.type || !msg.msgId) return;
   //logger.info('[WORKER][MESSAGE] received', { type: msg.type, hasMsgId: !!msg.msgId });
-  if (msg && msg.type === 'stop-all') {
-    const r = await stopAllNow((msg.payload && msg.payload.reason) || 'admin_stopall');
-    return sendReply(msg.msgId, r);
-  }
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
     logger.warn('Comando desconhecido recebido', { type: msg.type, hasMsgId: !!msg.msgId });
