@@ -982,6 +982,17 @@
         // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
         titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
+        // PILL: Mensagem Personalizada Virtus
+        if (
+          p.customVirtusMessageEnabled &&
+          typeof p.customVirtusMessage === 'string' &&
+          p.customVirtusMessage.trim().length > 0
+        ) {
+          const pill = buildPill('Mensagem Personalizada', 'warn');
+          pill.style.cursor = 'pointer';
+          pill.title = p.customVirtusMessage;
+          titleRow.append(pill);
+        }
 
         // -------- RAM e CPU pill explícito ---------
         if (ramPill) titleRow.append(ramPill); // RAM por conta
