@@ -20,6 +20,7 @@ const utils = require('./utils.js');
 const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
+const manifestStore = require('./manifestStore.js');
 
 // Variável global de lock
 let VIRTUS_INPUT_LOCK = false;
@@ -1248,17 +1249,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         resetFail(chatId);
 
-        if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
-          logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
+        // 1) Verifica customização por manifest (mensagem personalizada Virtus)
+        let msg = null;
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          if (man && man.customVirtusMessageEnabled && String(man.customVirtusMessage || '').trim()) {
+            msg = String(man.customVirtusMessage).trim();
+          }
+        } catch {}
 
-        let msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
-        if (Array.isArray(msg)) msg = msg.join('\n');
-        if (typeof msg !== 'string') msg = String(msg);
+        // 2) Se não houver custom, cai no atendimento.json como hoje
+        if (!msg) {
+          if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
+            logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+          msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
+          if (Array.isArray(msg)) msg = msg.join('\n');
+          if (typeof msg !== 'string') msg = String(msg);
+        }
 
         if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
         if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }

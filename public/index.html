@@ -457,6 +457,16 @@
           <input type="text" id="labelInput" placeholder="Ex.: Nome do Facebook" value="${labelAtual.replace(/"/g,'&quot;')}"/>
         </div>
         <div class="form-row">
+          <label>
+            <input type="checkbox" id="customVirtusMsgCk" />
+            Usar mensagem personalizada Virtus
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Mensagem personalizada Virtus</label>
+          <textarea id="customVirtusMsg" placeholder="Exemplo: Olá, como posso ajudar?"></textarea>
+        </div>
+        <div class="form-row">
           <label><input type="checkbox" id="renameSlugCk" ${ativo ? 'disabled' : ''}/> Renomear identificador/diretório (somente com navegador fechado)</label>
         </div>
         <div class="modal-actions">
@@ -469,6 +479,18 @@
         </div>
       `;
       overlay.append(box);
+
+      // Carrega os campos customVirtusMessage do manifest
+      (async () => {
+        try {
+          const r = await fetch(`/api/perfis/${encodeURIComponent(perfil.nome)}/manifest`).then(r=>r.json()).catch(()=>null);
+          if (r && r.ok === true && r.manifest) {
+            box.querySelector('#customVirtusMsgCk').checked = !!r.manifest.customVirtusMessageEnabled;
+            box.querySelector('#customVirtusMsg').value = r.manifest.customVirtusMessage || '';
+          }
+        } catch {}
+      })();
+
       document.body.append(overlay);
 
       box.querySelector('#fecharCfg').onclick = () => { overlay.remove(); onClose && onClose(); };
@@ -476,6 +498,19 @@
         const novoLabel = box.querySelector('#labelInput').value.trim();
         const renameSlug = box.querySelector('#renameSlugCk').checked && !ativo;
         if (!novoLabel) { alert('Informe um nome exibido.'); return; }
+        // 1) Salva a mensagem personalizada Virtus
+        try {
+          const enabled = box.querySelector('#customVirtusMsgCk').checked;
+          const message = box.querySelector('#customVirtusMsg').value || '';
+          await fetch(`/api/perfis/${encodeURIComponent(nomeAtual)}/custom-virtus-message`, {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ enabled, message })
+          });
+        } catch (e) {
+          alert('Falha ao salvar a mensagem personalizada: ' + (e && e.message || e));
+          // prossegue com label para não travar fluxo
+        }
         try {
           await window.electronAPI.renamePerfil({ nome: nomeAtual, novoLabel, renameSlug });
           alert('Configurações salvas.');

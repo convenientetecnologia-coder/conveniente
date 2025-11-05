@@ -29,6 +29,9 @@ function resolveChromeUserDataRoot() {
 const pLimitImport = require('p-limit');
 const pLimit = pLimitImport.default || pLimitImport;
 
+// ===== IMPORTAÇÃO DO manifestStore (conforme PASSO 1) =====
+const manifestStore = require('./manifestStore.js');
+
 module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
@@ -38,6 +41,22 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro fatal na rota listagem de perfis', { rota: '/api/perfis', error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });
+    }
+  });
+
+  // ===== PASSO 2 — Adicionar endpoint GET /api/perfis/:nome/manifest =====
+  // GET /api/perfis/:nome/manifest — devolve manifest.json do perfil
+  app.get('/api/perfis/:nome/manifest', async (req, res) => {
+    const nome = req.params.nome;
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      return res.json({ ok:false, error:e.message });
+    }
+    try {
+      const man = await manifestStore.read(nome);
+      res.json({ ok: true, manifest: man });
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
 
@@ -448,6 +467,29 @@ module.exports = (app, workerClient, fileStore) => {
       logger.error('Falha ao aplicar robe 24h', { nome, rota: '/api/perfis/:nome/robe-24h', error: e && e.message }, e);
       await issues.append(nome, 'robe24h_failed', e && e.message || e);
       res.json({ ok: false, error: 'Não foi possível aplicar pause 24h: ' + (e && e.message || e) });
+    }
+  });
+
+  // ===== PASSO 3 — Adicionar endpoint POST /api/perfis/:nome/custom-virtus-message =====
+  // POST /api/perfis/:nome/custom-virtus-message — atualiza mensagem personalizada Virtus
+  app.post('/api/perfis/:nome/custom-virtus-message', async (req, res) => {
+    const nome = req.params.nome;
+    const { enabled, message } = req.body || {};
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      logger.warn('Tentativa de custom-virtus para perfil inexistente', { nome, error: e && e.message });
+      return res.json({ ok:false, error:e.message });
+    }
+    try {
+      await manifestStore.update(nome, m => {
+        m = m || {};
+        m.customVirtusMessageEnabled = !!enabled;
+        m.customVirtusMessage = String(message || '');
+        return m;
+      });
+      res.json({ ok:true });
+    } catch (e) {
+      res.json({ ok:false, error: (e && e.message) || String(e) });
     }
   });
 
