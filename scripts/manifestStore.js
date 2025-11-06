@@ -9,6 +9,9 @@ const path = require('path');
 
 const locks = new Map();
 
+/** Espera não bloqueante (promise-based). */
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 /** Resolve o caminho absoluto do manifest.json de um perfil (por slug/nome). */
 function getManifestPath(nome) {
   // Lê perfis.json diretamente para resolver o caminho do manifest
@@ -51,10 +54,26 @@ function withLock(nome, fn) {
   return job;
 }
 
-/** Leitura atômica sob lock (pode ser usado sem lock, mas sempre lock em update!). */
+/** Leitura atômica/retry tolerante para manifest.json. */
 async function read(nome) {
   const file = getManifestPath(nome);
-  return readJsonSafe(file, null);
+  // Tolerante a janela de rename: 5 tentativas com backoff (20ms)
+  for (let i = 0; i < 5; i++) {
+    try {
+      if (fs.existsSync(file)) {
+        const data = fs.readFileSync(file, 'utf8');
+        return JSON.parse(data);
+      }
+      // fallback: tente ler o .tmp se existe (escrita atômica em progresso)
+      const tmp = file + '.tmp';
+      if (fs.existsSync(tmp)) {
+        const data = fs.readFileSync(tmp, 'utf8');
+        return JSON.parse(data);
+      }
+    } catch {}
+    await sleep(20);
+  }
+  return null;
 }
 
 /** Escrita atômica sob lock. */

@@ -14,6 +14,24 @@ const fotos        = require('./fotos.js'); // gestor central de fotos
 
 const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NOVO
+const fileStore = require('./fileStore.js');
+
+// Lock serializado por perfil (para evitar races/profile overlaps)
+const _profileOpLocks = new Map();
+async function lockProfileAction(nome, fn) {
+  if (!nome) return fn();
+  const prev = _profileOpLocks.get(nome) || Promise.resolve();
+  let resolveNext;
+  const next = new Promise(res => resolveNext = res);
+  _profileOpLocks.set(nome, prev.then(() => next));
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    resolveNext();
+    if (_profileOpLocks.get(nome) === next) _profileOpLocks.delete(nome);
+  }
+}
 
 // ====== ACCOUNT FLAGS (loginRequired / banned) — persistência atômica ======
 async function readAccountFlags(nome) {
@@ -534,39 +552,6 @@ if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 
 // ===== INSTRUÇÃO ULTRA DETALHADA PARA BLINDAGEM DE desired.json =====
 // Helpers de lock de arquivo atômico para desired.json
-const desiredLockFile = desiredPath + '.lock';
-
-function acquireDesiredLock({ retries = 80, delayMs = 25 } = {}) {
-  return new Promise((resolve, reject) => {
-    let tries = 0;
-    (function tryOnce() {
-      tries++;
-      try {
-        const fd = fs.openSync(desiredLockFile, 'wx');
-        return resolve(fd);
-      } catch {
-        if (tries >= retries) return reject(new Error('desired_lock_timeout'));
-        setTimeout(tryOnce, delayMs);
-      }
-    })();
-  });
-}
-function releaseDesiredLock(fd) {
-  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
-  try { fs.unlinkSync(desiredLockFile); } catch {}
-}
-async function withDesiredFileLockUpdate(mutator) {
-  let fd = null;
-  try {
-    fd = await acquireDesiredLock();
-    const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-    const next = await Promise.resolve(mutator(desired)) || desired;
-    const ok = writeJsonAtomic(desiredPath, next);
-    if (!ok) { try { await issues.append('system', 'persist_failed', 'desired_write_failed'); } catch {} }
-  } finally {
-    releaseDesiredLock(fd);
-  }
-}
 
 
 // === Helpers de manifest + cooldown ===
@@ -638,7 +623,6 @@ function countErrorsLocal(nome) {
 // =============== FIM: Helpers/Contagem de ERROS ========================
 
 async function ensureManifestValid(nome) {
-  // Campos essenciais: nome, cidade, uaPresetId, uaString, uaCh, fp, cookies, userDataDir
   function hasEssentials(man) {
     return man &&
       typeof man.nome === 'string' && man.nome &&
@@ -650,42 +634,39 @@ async function ensureManifestValid(nome) {
       Array.isArray(man.cookies) && man.cookies.length &&
       typeof man.userDataDir === 'string' && man.userDataDir;
   }
-
-  let manifest = null;
-  try {
-    const mPath = manifestPathOf(nome);
-    if (fs.existsSync(mPath)) {
-      manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-    }
-  } catch {}
-  // Fallback: tenta manifestStore.read (sem filtro de shard)
-  if (!manifest) {
-    try {
-      const ms = require('./manifestStore.js');
-      const m2 = await ms.read(nome); // leitura SEM FILTRAGEM DE SHARD
-      if (m2 && hasEssentials(m2)) return m2;
-    } catch {}
-  }
-  if (hasEssentials(manifest)) return manifest;
-
-  // Tenta curar (merge) com perfis.json
+  let manifest = await manifestStore.read(nome).catch(()=>null);
+  if (manifest && hasEssentials(manifest)) return manifest;
+  // Tentativa de autocura com perfis.json
   try {
     const perfisArr = loadPerfisJson();
     const perfil = perfisArr.find(p => p && p.nome === nome);
     if (perfil && hasEssentials(perfil)) {
       const merged = Object.assign({}, perfil, manifest || {});
-      // Persiste merge, agora sanado
       if (merged.userDataDir && !fs.existsSync(merged.userDataDir)) {
         fs.mkdirSync(merged.userDataDir, { recursive: true });
       }
-      // Escreve autosanado
-      fs.writeFileSync(manifestPathOf(nome), JSON.stringify(merged, null, 2), 'utf8');
+      await manifestStore.update(nome, () => merged);
       return merged;
     }
   } catch {}
-
-  // Se não curou, retorna null
   return null;
+}
+
+async function computeManifestStatus(nome) {
+  try {
+    const man = await manifestStore.read(nome);
+    if (!man) return 'unknown';
+    const ok = man &&
+      typeof man.nome === 'string' && man.nome &&
+      typeof man.cidade === 'string' && man.cidade &&
+      typeof man.uaPresetId !== 'undefined' &&
+      typeof man.uaString === 'string' && man.uaString &&
+      typeof man.uaCh === 'object' && man.uaCh &&
+      typeof man.fp === 'object' && man.fp &&
+      Array.isArray(man.cookies) && man.cookies.length &&
+      typeof man.userDataDir === 'string' && man.userDataDir;
+    return ok ? 'ok' : 'incomplete';
+  } catch { return 'unknown'; }
 }
 
 // =============== Issues/Actions logger (silencioso) ================
@@ -1182,14 +1163,11 @@ function robeCooldownLeft(nome) {
   return left;
 }
 
-function robeLastPosted(nome) {
+async function robeLastPosted(nome) {
   let ts = 0;
   try {
-    const perfilPath = manifestPathOf(nome);
-    if (fs.existsSync(perfilPath)) {
-      const p = JSON.parse(fs.readFileSync(perfilPath, 'utf8'));
-      if (p.ultimaPostagemRobe) ts = p.ultimaPostagemRobe;
-    }
+    const p = await manifestStore.read(nome).catch(()=>null);
+    if (p && p.ultimaPostagemRobe) ts = p.ultimaPostagemRobe;
   } catch {}
   return ts;
 }
@@ -1786,10 +1764,11 @@ async function robeTickGlobal() {
               return m;
             });
           } catch {}
+          const last = await robeLastPosted(nome);
           robeUpdateMeta(nome, {
             estado: 'ok',
             cooldownSec: await normalizeCooldown(nome),
-            proximaPostagem: robeLastPosted(nome) + robePauseMs,
+            proximaPostagem: last + robePauseMs,
             ultimaPostagem: Date.now()
           });
           try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso'); } catch {}
@@ -2008,65 +1987,67 @@ function automationAllowed(ctrl) {
 
 // PATCH 2: handler.start_work (definido fora do objeto handlers)
 async function start_work({ nome }) {
-  logger.info('[HANDLER] start_work chamada', { nome });
+  return lockProfileAction(nome, async () => {
+    logger.info('[HANDLER] start_work chamada', { nome });
 
-  const ctrl = controllers.get(nome);
-  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
-    return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+    const ctrl = controllers.get(nome);
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
+      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
-  // BLOQUEIO: nunca permite start_work se humano/configurando
-  if (ctrl.humanControl || ctrl.configurando) {
-    await issues.append(nome, 'mil_action', 'start_work_denied (human/config mode)');
-    logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
-    return { ok: false, error: 'profile_in_human_or_config' };
-  }
-  if (ctrl.trabalhando && ctrl.virtus) {
-    logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
-    return { ok: true };
-  }
-  if (ctrl._virtusStarting) {
-    logger.info('[HANDLER] start_work ok (_virtusStarting)', { nome });
-    return { ok: true };
-  }
-
-  try {
-    ctrl._virtusStarting = true;
-    if (!automationAllowed(ctrl)) {
-      await issues.append(nome, 'mil_action', 'automation_not_allowed');
-      logger.warn('[HANDLER] automation_not_allowed em start_work', { nome });
-      return { ok: false, error: 'automation_not_allowed' };
+    // BLOQUEIO: nunca permite start_work se humano/configurando
+    if (ctrl.humanControl || ctrl.configurando) {
+      await issues.append(nome, 'mil_action', 'start_work_denied (human/config mode)');
+      logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
+      return { ok: false, error: 'profile_in_human_or_config' };
     }
-    // Fence: sincronize epoch para Virtus runner anti-zumbi
-    ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+    if (ctrl.trabalhando && ctrl.virtus) {
+      logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
+      return { ok: true };
+    }
+    if (ctrl._virtusStarting) {
+      logger.info('[HANDLER] start_work ok (_virtusStarting)', { nome });
+      return { ok: true };
+    }
 
-    ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
-    ctrl.trabalhando = true;
     try {
-      await browserHelper.forceCloseExtras(ctrl.browser);
-      const ps = await ctrl.browser.pages();
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].numPages = (ps && ps.length) || 0;
+      ctrl._virtusStarting = true;
+      if (!automationAllowed(ctrl)) {
+        await issues.append(nome, 'mil_action', 'automation_not_allowed');
+        logger.warn('[HANDLER] automation_not_allowed em start_work', { nome });
+        return { ok: false, error: 'automation_not_allowed' };
+      }
+      // Fence: sincronize epoch para Virtus runner anti-zumbi
+      ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
+      ctrl.trabalhando = true;
+      try {
+        await browserHelper.forceCloseExtras(ctrl.browser);
+        const ps = await ctrl.browser.pages();
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].numPages = (ps && ps.length) || 0;
+        await snapshotStatusAndWrite();
+      } catch {}
+
+      if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
+        await browserHelper.forceCloseExtras(ctrl.browser);
+      }
+
+      try {
+        await unfreezeCooldownIfWorking(nome);
+        await normalizeCooldown(nome);
+      } catch {}
+
       await snapshotStatusAndWrite();
-    } catch {}
-
-    if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
-      await browserHelper.forceCloseExtras(ctrl.browser);
+      logger.info('[HANDLER] start_work ok', { nome });
+      return { ok: true };
+    } catch (e) {
+      logger.error('[HANDLER] start_work erro', { nome, error: e && e.message }, e);
+      return { ok: false, error: e && e.message || String(e) };
+    } finally {
+      ctrl._virtusStarting = false;
     }
-
-    try {
-      await unfreezeCooldownIfWorking(nome);
-      await normalizeCooldown(nome);
-    } catch {}
-
-    await snapshotStatusAndWrite();
-    logger.info('[HANDLER] start_work ok', { nome });
-    return { ok: true };
-  } catch (e) {
-    logger.error('[HANDLER] start_work erro', { nome, error: e && e.message }, e);
-    return { ok: false, error: e && e.message || String(e) };
-  } finally {
-    ctrl._virtusStarting = false;
-  }
+  });
 }
 
 const handlers = {
@@ -2121,13 +2102,16 @@ const handlers = {
   },
 
   async activate({ nome }) {
-    logger.info('[HANDLER] activate chamada', { nome });
-    const r = await activateOnce(nome, 'message');
-    logger.info('[HANDLER] activate resultado', { nome, ok: !!(r && r.ok), error: r && r.error });
-    return r;
+    return lockProfileAction(nome, async () => {
+      logger.info('[HANDLER] activate chamada', { nome });
+      const r = await activateOnce(nome, 'message');
+      logger.info('[HANDLER] activate resultado', { nome, ok: !!(r && r.ok), error: r && r.error });
+      return r;
+    });
   },
 
   async deactivate({ nome, reason, policy }) {
+  return lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
   const preserve = (policy === 'preserveDesired');
   let reopenDelayMs = 0;
@@ -2203,7 +2187,7 @@ const handlers = {
   stopPruneLoop(nome);
   if (!preserve) {
     try {
-      await withDesiredFileLockUpdate((d) => {
+      await fileStore.withDesiredFileLockUpdate((d) => {
         d.perfis = d.perfis || {};
         d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
         return d;
@@ -2232,369 +2216,379 @@ const handlers = {
   await snapshotStatusAndWrite();
   logger.info('[HANDLER] deactivate concluído', { nome, reason, policy });
   return { ok: true };
+  });
 },
 
   async configure({ nome }) {
-    logger.info('[HANDLER] configure chamada', { nome });
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    // Supressão do about:blank killer durante toda configuração
-    const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-    guard[nome] = Date.now() + 10601000; // ~10 minutos de supressão total durante configurar
+    return lockProfileAction(nome, async () => {
+      logger.info('[HANDLER] configure chamada', { nome });
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      // Supressão do about:blank killer durante toda configuração
+      const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
+      guard[nome] = Date.now() + 10601000; // ~10 minutos de supressão total durante configurar
 
-    const perfisArr = loadPerfisJson();
-    const perfil = perfisArr.find(p => p && p.nome === nome);
-    if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
-    const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
-    if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    if (!Array.isArray(manifest.cookies) || !manifest.cookies.length) {
-      try { await issues.append(nome, 'cookie_inject_failed', 'Cookies não encontrados no manifest!'); } catch {}
-      return { ok: false, error: 'Cookies não encontrados no manifest!' };
-    }
-    ctrl.configurando = true;
+      const perfisArr = loadPerfisJson();
+      const perfil = perfisArr.find(p => p && p.nome === nome);
+      if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
+      const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
+      if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (!Array.isArray(manifest.cookies) || !manifest.cookies.length) {
+        try { await issues.append(nome, 'cookie_inject_failed', 'Cookies não encontrados no manifest!'); } catch {}
+        return { ok: false, error: 'Cookies não encontrados no manifest!' };
+      }
+      ctrl.configurando = true;
 
-    // Pare Virtus antes de configurar
-    try { await stopVirtus(nome); } catch {}
+      // Pare Virtus antes de configurar
+      try { await stopVirtus(nome); } catch {}
 
-    try {
-      await withDesiredFileLockUpdate((desired) => {
-        desired.perfis = desired.perfis || {};
-        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
-        return desired;
-      });
-    } catch {}
+      try {
+        await fileStore.withDesiredFileLockUpdate((desired) => {
+          desired.perfis = desired.perfis || {};
+          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
+          return desired;
+        });
+      } catch {}
 
-    try {
-      await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
-      try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
-      // NÃO execute closeExtraPages/prune aqui!
-      logger.info('[HANDLER] configure ok', { nome });
-      return { ok: true };
-    } catch (e) {
-      try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
-      logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
-      return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
-    } finally {
-      // 1) Sai do modo configurando e fecha ABAS EXTRAS AGORA (obrigatório)
-      ctrl.configurando = false;
-      // 2) Entra em humano (fluxo já existente)
-      ctrl.humanControl = true;
-      stopPruneLoop(nome);
-      await snapshotStatusAndWrite();
-    }
+      try {
+        await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
+        try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+        // NÃO execute closeExtraPages/prune aqui!
+        logger.info('[HANDLER] configure ok', { nome });
+        return { ok: true };
+      } catch (e) {
+        try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
+        logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
+        return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
+      } finally {
+        // 1) Sai do modo configurando e fecha ABAS EXTRAS AGORA (obrigatório)
+        ctrl.configurando = false;
+        // 2) Entra em humano (fluxo já existente)
+        ctrl.humanControl = true;
+        stopPruneLoop(nome);
+        await snapshotStatusAndWrite();
+      }
+    });
   },
 
   start_work,
 
   async invoke_human({ nome }) {
-    logger.info('[HANDLER] invoke_human chamada', { nome });
+    return lockProfileAction(nome, async () => {
+      logger.info('[HANDLER] invoke_human chamada', { nome });
 
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
-    // 1. Esperar Robe terminar (se estiver em execução para esta conta)
-    const robes = robeMeta[nome] || {};
-    if (robes.emExecucao) {
-      // Aguarda (polling simples)
-      const waitTimeout = 180 * 1000; // máx 3 minutos
-      const started = Date.now();
-      while ((robeMeta[nome] && robeMeta[nome].emExecucao) && (Date.now() - started < waitTimeout)) {
-        await new Promise(r => setTimeout(r, 600));
+      // 1. Esperar Robe terminar (se estiver em execução para esta conta)
+      const robes = robeMeta[nome] || {};
+      if (robes.emExecucao) {
+        // Aguarda (polling simples)
+        const waitTimeout = 180 * 1000; // máx 3 minutos
+        const started = Date.now();
+        while ((robeMeta[nome] && robeMeta[nome].emExecucao) && (Date.now() - started < waitTimeout)) {
+          await new Promise(r => setTimeout(r, 600));
+        }
       }
-    }
 
-    // 2. ATENÇÃO: SETE AS FLAGS _ANTES_ DE TUDO!
-    ctrl.humanControl = true;
+      // 2. ATENÇÃO: SETE AS FLAGS _ANTES_ DE TUDO!
+      ctrl.humanControl = true;
 
-    // Persistir hold humano e limpar qualquer reabertura programada
-    try {
-      await withDesiredFileLockUpdate((desired) => {
-        desired.perfis = desired.perfis || {};
-        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true };
-        return desired;
-      });
-    } catch {}
+      // Persistir hold humano e limpar qualquer reabertura programada
+      try {
+        await fileStore.withDesiredFileLockUpdate((desired) => {
+          desired.perfis = desired.perfis || {};
+          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true };
+          return desired;
+        });
+      } catch {}
 
-    try {
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].reopenAt = null;
-      robeMeta[nome].closingReason = null;
-    } catch {}
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].reopenAt = null;
+        robeMeta[nome].closingReason = null;
+      } catch {}
 
-    ctrl.configurando = false;
-    stopPruneLoop(nome); // Garante que NENHUM prune corra durante humano
-    try {
-      await withDesiredFileLockUpdate((desired) => {
-        desired.perfis = desired.perfis || {};
-        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
-        return desired;
-      });
-    } catch {}
-    await snapshotStatusAndWrite();
+      ctrl.configurando = false;
+      stopPruneLoop(nome); // Garante que NENHUM prune corra durante humano
+      try {
+        await fileStore.withDesiredFileLockUpdate((desired) => {
+          desired.perfis = desired.perfis || {};
+          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
+          return desired;
+        });
+      } catch {}
+      await snapshotStatusAndWrite();
 
-    // Supressão do about:blank killer durante modo humano
-    const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-    guard[nome] = Date.now() + 246060*1000; // 24h em ms: supressão total enquanto humano
+      // Supressão do about:blank killer durante modo humano
+      const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
+      guard[nome] = Date.now() + 246060*1000; // 24h em ms: supressão total enquanto humano
 
-    // 3. Mata Virtus agressivamente + fence (pode ser logo após flags)
-    try { await stopVirtus(nome); } catch {}
+      // 3. Mata Virtus agressivamente + fence (pode ser logo após flags)
+      try { await stopVirtus(nome); } catch {}
 
-    // 4. Só então faça a navegação do humano:
-    await browserHelper.invocarHumano(ctrl.browser, nome);
+      // 4. Só então faça a navegação do humano:
+      await browserHelper.invocarHumano(ctrl.browser, nome);
 
-    // 5. (Opcional para robustez/nurse): freezer cooldown como já fazia
-    try { freezeCooldownIfNotWorking(nome); } catch {}
+      // 5. (Opcional para robustez/nurse): freezer cooldown como já fazia
+      try { freezeCooldownIfNotWorking(nome); } catch {}
 
-    await snapshotStatusAndWrite();
+      await snapshotStatusAndWrite();
 
-    logger.info('[HANDLER] invoke_human ok', { nome });
-    return { ok: true };
+      logger.info('[HANDLER] invoke_human ok', { nome });
+      return { ok: true };
+    });
   },
 
   async ['human-resume']({ nome }) {
-    logger.info('[HANDLER] human-resume chamada', { nome });
+    return lockProfileAction(nome, async () => {
+      logger.info('[HANDLER] human-resume chamada', { nome });
 
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
-    ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
-    // LIMPA FLAGS AO RETOMAR TRABALHO (loginRequired e banned)
-    try { await clearAccountFlags(nome, ['loginRequired','banned']); } catch {}
-    // Limpa supressão do about:blank killer ao sair do modo humano
-    try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
+      ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
+      // LIMPA FLAGS AO RETOMAR TRABALHO (loginRequired e banned)
+      try { await clearAccountFlags(nome, ['loginRequired','banned']); } catch {}
+      // Limpa supressão do about:blank killer ao sair do modo humano
+      try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
 
-    let pages2 = [];
-    try { pages2 = await ctrl.browser.pages(); } catch {}
-    if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]); // Reabilita prune ao retornar ao robô
-    try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
-    try {
-      const ps = await ctrl.browser.pages();
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].numPages = (ps && ps.length) || 0;
-      await snapshotStatusAndWrite();
-    } catch {}
-
-    let pages;
-    try { pages = await ctrl.browser.pages(); } catch {}
-    if (pages && pages[0]) {
+      let pages2 = [];
+      try { pages2 = await ctrl.browser.pages(); } catch {}
+      if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]); // Reabilita prune ao retornar ao robô
+      try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
       try {
-        await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
-        await new Promise(r => setTimeout(r, 350));
-        await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const ps = await ctrl.browser.pages();
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].numPages = (ps && ps.length) || 0;
+        await snapshotStatusAndWrite();
       } catch {}
-    }
 
-    // Religando Virtus APÓS a minimização/navegação
-    if (automationAllowed(ctrl)) {
-      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
-      ctrl.trabalhando = true;
-    }
+      let pages;
+      try { pages = await ctrl.browser.pages(); } catch {}
+      if (pages && pages[0]) {
+        try {
+          await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
+          await new Promise(r => setTimeout(r, 350));
+          await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } catch {}
+      }
 
-    try { unfreezeCooldownIfWorking(nome); } catch {}
+      // Religando Virtus APÓS a minimização/navegação
+      if (automationAllowed(ctrl)) {
+        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+        ctrl.trabalhando = true;
+      }
 
-    await snapshotStatusAndWrite();
-    logger.info('[HANDLER] human-resume ok', { nome });
+      try { unfreezeCooldownIfWorking(nome); } catch {}
 
-    // Remover hold humano (override explícito)
-    try {
-      await withDesiredFileLockUpdate((desired) => {
-        desired.perfis = desired.perfis || {};
-        if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
-        return desired;
-      });
-    } catch {}
+      await snapshotStatusAndWrite();
+      logger.info('[HANDLER] human-resume ok', { nome });
 
-    return { ok:true };
+      // Remover hold humano (override explícito)
+      try {
+        await fileStore.withDesiredFileLockUpdate((desired) => {
+          desired.perfis = desired.perfis || {};
+          if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
+          return desired;
+        });
+      } catch {}
+
+      return { ok:true };
+    });
   },
 
   // == ALTERAÇÃO 3: Handler robe-play substituído ==
   async ['robe-play']({ nome }) {
-    logger.info('[HANDLER] robe-play chamada', { nome });
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+    return lockProfileAction(nome, async () => {
+      logger.info('[HANDLER] robe-play chamada', { nome });
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
-    // P0.3: recusa se frozen
-    if (isFrozenNow(nome)) {
-      return { ok: false, error: 'account_frozen' }
-    }
-    // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
-    if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
-
-    // Zera cooldown REAL no manifest (libera imediatamente este perfil) e limpa fb_block
-    try {
-      await manifestStore.update(nome, (m) => {
-        m = m || {};
-        m.robeCooldownUntil = Date.now();
-        m.robeCooldownRemainingMs = 0;
-        if (m.robePauseReason) delete m.robePauseReason;
-        return m;
-      });
-      if (robeMeta[nome]) {
-        delete robeMeta[nome].pauseReason;
-        delete robeMeta[nome].lastRobeBlockAt;
+      // P0.3: recusa se frozen
+      if (isFrozenNow(nome)) {
+        return { ok: false, error: 'account_frozen' }
       }
-    } catch {}
+      // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
+      if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
 
-    // Se não está na fila nem ativo, enfileira o callback REAL igual ao robeTickGlobal:
-    if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
-      robeUpdateMeta(nome, { emFila: true });
-      robeQueue.enqueue(nome, async () => {
-
-        robeUpdateMeta(nome, { emExecucao: true, emFila: false });
-
-        let virtusWasRunning = false;
-        const ctrl = controllers.get(nome);
-        const workingNow = getWorkingProfileNames();
-        if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
-
-        // GUARD: browser precisa estar vivo
-        if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-          robeUpdateMeta(nome, { estado: 'erro' });
-          try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (robe-play guard)'); } catch {}
-          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
-          return;
+      // Zera cooldown REAL no manifest (libera imediatamente este perfil) e limpa fb_block
+      try {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          m.robeCooldownUntil = Date.now();
+          m.robeCooldownRemainingMs = 0;
+          if (m.robePauseReason) delete m.robePauseReason;
+          return m;
+        });
+        if (robeMeta[nome]) {
+          delete robeMeta[nome].pauseReason;
+          delete robeMeta[nome].lastRobeBlockAt;
         }
+      } catch {}
 
-        // Log de início do Robe (robe-play)
-        try { logger.info('[WORKER][robe-play] Robe start', { nome }); } catch {}
-        try { await reportAction(nome, 'robe_start', 'Iniciando Robe via robe-play'); } catch {}
+      // Se não está na fila nem ativo, enfileira o callback REAL igual ao robeTickGlobal:
+      if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
+        robeUpdateMeta(nome, { emFila: true });
+        robeQueue.enqueue(nome, async () => {
 
-        let mainPage = null;
-        try {
-          if (ctrl && ctrl.browser && !ctrl.mainPage) {
-            try {
-              const pages = await ctrl.browser.pages();
-              if (pages[0]) {
-                ctrl.mainPage = pages[0];
-                try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
-              }
-            } catch {}
-          }
-          mainPage = ctrl.mainPage;
+          robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
-          // Sempre parar Virtus ANTES de prune
-          if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
-            virtusWasRunning = true;
-            try { await ctrl.virtus.stop(); } catch {}
-            ctrl.virtus = null;
+          let virtusWasRunning = false;
+          const ctrl = controllers.get(nome);
+          const workingNow = getWorkingProfileNames();
+          if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
+
+          // GUARD: browser precisa estar vivo
+          if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+            robeUpdateMeta(nome, { estado: 'erro' });
+            try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (robe-play guard)'); } catch {}
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            return;
           }
 
-          // PRUNE ANTI-ABAS (Virtus parado)
-          try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
+          // Log de início do Robe (robe-play)
+          try { logger.info('[WORKER][robe-play] Robe start', { nome }); } catch {}
+          try { await reportAction(nome, 'robe_start', 'Iniciando Robe via robe-play'); } catch {}
 
-          // ==== ALTERAÇÃO HOTFIX: ANTIMANIFEST-FLOOD, COOL/PRUNED ERRORS ====
-          let res;
+          let mainPage = null;
           try {
-            res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
-          } catch (e) {
-            // PATCH: Se bloqueio LIMIT_POSTING, pause só o Robe e feche a aba criada
-            if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
+            if (ctrl && ctrl.browser && !ctrl.mainPage) {
+              try {
+                const pages = await ctrl.browser.pages();
+                if (pages[0]) {
+                  ctrl.mainPage = pages[0];
+                  try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
+                }
+              } catch {}
+            }
+            mainPage = ctrl.mainPage;
+
+            // Sempre parar Virtus ANTES de prune
+            if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+              virtusWasRunning = true;
+              try { await ctrl.virtus.stop(); } catch {}
+              ctrl.virtus = null;
+            }
+
+            // PRUNE ANTI-ABAS (Virtus parado)
+            try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
+
+            // ==== ALTERAÇÃO HOTFIX: ANTIMANIFEST-FLOOD, COOL/PRUNED ERRORS ====
+            let res;
+            try {
+              res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
+            } catch (e) {
+              // PATCH: Se bloqueio LIMIT_POSTING, pause só o Robe e feche a aba criada
+              if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
+                robeMeta[nome] = robeMeta[nome] || {};
+                robeMeta[nome].limitPostingThisRun = Date.now();
+                robeMeta[nome].pauseReason = 'limit_posting';
+                robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
+                try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robe-play)'); } catch {}
+                try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+                // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
+                return;
+              }
+              await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
+              robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
+              try { logger.warn('[WORKER][robe-play] Robe error', { nome, error: e && e.message || e }); } catch {}
+              try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+              return;
+            }
+            // ==== EOF COOL/PRUNED ERRORS ====
+
+            if (isLimitPostingRes(res)) {
               robeMeta[nome] = robeMeta[nome] || {};
               robeMeta[nome].limitPostingThisRun = Date.now();
               robeMeta[nome].pauseReason = 'limit_posting';
               robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
-              try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robe-play)'); } catch {}
+              await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h (robe-play)');
               try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
               // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
+              return; // ciclo abortado, não religar virtus
+            }
+
+            if (res && res.ok) {
+              try {
+                await manifestStore.update(nome, (m) => {
+                  m = m || {};
+                  m.ultimaPostagemRobe = Date.now();
+                  return m;
+                });
+              } catch {}
+              const last = await robeLastPosted(nome);
+              robeUpdateMeta(nome, {
+                estado: 'ok',
+                cooldownSec: await normalizeCooldown(nome),
+                proximaPostagem: last + ((15+Math.floor(Math.random()*16))*60*1000),
+                ultimaPostagem: Date.now()
+              });
+              try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso (robe-play)'); } catch {}
+              try { logger.info('[WORKER][robe-play] Robe success', { nome }); } catch {}
+            } else {
+              robeUpdateMeta(nome, {
+                estado: 'idle',
+                cooldownSec: await normalizeCooldown(nome)
+              });
+            }
+          } catch (e) {
+            robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
+          } finally {
+            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
+              await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
+              delete robeMeta[nome].limitPostingThisRun;
+              try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+              robeUpdateMeta(nome, { emExecucao: false });
+              if (virtusWasRunning && automationAllowed(ctrl)) {
+                try {
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.trabalhando = true;
+                  await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
+                } catch {
+                  ctrl.virtus = null;
+                  ctrl.trabalhando = false;
+                }
+              }
+              await snapshotStatusAndWrite();
               return;
             }
-            await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
-            robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
-            try { logger.warn('[WORKER][robe-play] Robe error', { nome, error: e && e.message || e }); } catch {}
-            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
-            return;
-          }
-          // ==== EOF COOL/PRUNED ERRORS ====
-
-          if (isLimitPostingRes(res)) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].limitPostingThisRun = Date.now();
-            robeMeta[nome].pauseReason = 'limit_posting';
-            robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
-            await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h (robe-play)');
-            try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
-            // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
-            return; // ciclo abortado, não religar virtus
-          }
-
-          if (res && res.ok) {
-            try {
-              await manifestStore.update(nome, (m) => {
-                m = m || {};
-                m.ultimaPostagemRobe = Date.now();
-                return m;
-              });
-            } catch {}
-            robeUpdateMeta(nome, {
-              estado: 'ok',
-              cooldownSec: await normalizeCooldown(nome),
-              proximaPostagem: robeLastPosted(nome) + ((15+Math.floor(Math.random()*16))*60*1000),
-              ultimaPostagem: Date.now()
-            });
-            try { await reportAction(nome, 'robe_success', 'Robe finalizado com sucesso (robe-play)'); } catch {}
-            try { logger.info('[WORKER][robe-play] Robe success', { nome }); } catch {}
-          } else {
-            robeUpdateMeta(nome, {
-              estado: 'idle',
-              cooldownSec: await normalizeCooldown(nome)
-            });
-          }
-        } catch (e) {
-          robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
-        } finally {
-          try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
-          if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
-            await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
-            delete robeMeta[nome].limitPostingThisRun;
+            // PRUNE DE ABAS antes de religar o Virtus
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+
             robeUpdateMeta(nome, { emExecucao: false });
-            if (virtusWasRunning && automationAllowed(ctrl)) {
-              try {
-                ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
-                ctrl.trabalhando = true;
-                await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
-              } catch {
+
+            if (virtusWasRunning) {
+              if (automationAllowed(ctrl)) {
+                try {
+                  // Sincronize epoch
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.trabalhando = true;
+                } catch (e) {
+                  ctrl.virtus = null;
+                  ctrl.trabalhando = false;
+                }
+              } else {
                 ctrl.virtus = null;
                 ctrl.trabalhando = false;
               }
-            }
-            await snapshotStatusAndWrite();
-            return;
-          }
-          // PRUNE DE ABAS antes de religar o Virtus
-          try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-
-          robeUpdateMeta(nome, { emExecucao: false });
-
-          if (virtusWasRunning) {
-            if (automationAllowed(ctrl)) {
-              try {
-                // Sincronize epoch
-                ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
-                ctrl.trabalhando = true;
-              } catch (e) {
-                ctrl.virtus = null;
-                ctrl.trabalhando = false;
-              }
+              await snapshotStatusAndWrite();
             } else {
-              ctrl.virtus = null;
-              ctrl.trabalhando = false;
+              await snapshotStatusAndWrite();
             }
-            await snapshotStatusAndWrite();
-          } else {
-            await snapshotStatusAndWrite();
-          }
 
-          // Log de término do Robe (robe-play)
-          try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
-          try { logger.info('[WORKER][robe-play] Robe end', { nome }); } catch {}
-        }
-      });
-      await snapshotStatusAndWrite();
-    }
-    logger.info('[HANDLER] robe-play ok', { nome });
-    return { ok: true };
+            // Log de término do Robe (robe-play)
+            try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
+            try { logger.info('[WORKER][robe-play] Robe end', { nome }); } catch {}
+          }
+        });
+        await snapshotStatusAndWrite();
+      }
+      logger.info('[HANDLER] robe-play ok', { nome });
+      return { ok: true };
+    });
   },
   // == FIM ALTERAÇÃO 3 ==
 
@@ -2641,7 +2635,8 @@ const handlers = {
 
     const perfisArr = loadPerfisJson();
     const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
-    const perfis = perfisArr.map(p => {
+    const perfis = [];
+    for (const p of perfisArr) {
       const nome = p.nome;
       let issuesCount = 0;
       try {
@@ -2653,27 +2648,18 @@ const handlers = {
         }
       } catch { issuesCount = 0; }
       const fail = getFailureCounts(nome);
-      // PATCH 7 — manifestStatus
-      let manifestStatus = 'missing';
-      try {
-        const mPath = manifestPathOf(nome);
-        if (fs.existsSync(mPath)) {
-          const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-          const ok = man &&
-            typeof man.nome === 'string' && man.nome &&
-            typeof man.cidade === 'string' && man.cidade &&
-            typeof man.uaPresetId !== 'undefined' &&
-            typeof man.uaString === 'string' && man.uaString &&
-            typeof man.uaCh === 'object' && man.uaCh &&
-            typeof man.fp === 'object' && man.fp &&
-            Array.isArray(man.cookies) && man.cookies.length &&
-            typeof man.userDataDir === 'string' && man.userDataDir;
-          manifestStatus = ok ? 'ok' : 'incomplete';
-        } else {
-          manifestStatus = 'missing';
-        }
-      } catch { manifestStatus = 'missing'; }
-      return {
+      let manifestStatus = await computeManifestStatus(nome);
+      const man = await manifestStore.read(nome).catch(()=>null);
+      const loginRequired = man ? !!(man.accountFlags && man.accountFlags.loginRequired === true) : !!robeMeta[nome]?.loginRequired;
+      const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) || null) : (robeMeta[nome]?.loginReason || null);
+      const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
+      const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
+      const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+      const problem = man
+        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
+        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
+
+      perfis.push({
         nome,
         label: p.label || null,
         cidade: p.cidade,
@@ -2702,71 +2688,14 @@ const handlers = {
         closingReason: robeMeta[nome]?.closingReason || null,
         openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
         lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
-        loginRequired: (() => {
-          try {
-            const mPath = manifestPathOf(nome);
-            if (fs.existsSync(mPath)) {
-              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-              return !!(man.accountFlags && man.accountFlags.loginRequired === true);
-            }
-          } catch {}
-          return !!robeMeta[nome]?.loginRequired;
-        })(),
-        loginReason: (() => {
-          try {
-            const mPath = manifestPathOf(nome);
-            if (fs.existsSync(mPath)) {
-              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-              return (man.accountFlags && man.accountFlags.loginReason) || null;
-            }
-          } catch {}
-          return robeMeta[nome]?.loginReason || null;
-        })(),
-        banned: (() => {
-          try {
-            const mPath = manifestPathOf(nome);
-            if (fs.existsSync(mPath)) {
-              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-              return !!(man.accountFlags && man.accountFlags.banned === true);
-            }
-          } catch {}
-          return !!robeMeta[nome]?.banned;
-        })(),
-        bannedAt: (() => {
-          try {
-            const mPath = manifestPathOf(nome);
-            if (fs.existsSync(mPath)) {
-              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-              return (man.accountFlags && man.accountFlags.bannedAt) || null;
-            }
-          } catch {}
-          return null;
-        })(),
-        bannedText: (() => {
-          try {
-            const mPath = manifestPathOf(nome);
-            if (fs.existsSync(mPath)) {
-              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-              return (man.accountFlags && man.accountFlags.bannedText) || null;
-            }
-          } catch {}
-          return null;
-        })(),
-        problem: (() => {
-          try {
-            const mPath = manifestPathOf(nome);
-            if (fs.existsSync(mPath)) {
-              const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-              const lr = !!(man.accountFlags && man.accountFlags.loginRequired === true);
-              const bd = !!(man.accountFlags && man.accountFlags.banned === true);
-              return lr || bd;
-            }
-          } catch {}
-          const rm = robeMeta[nome] || {};
-          return !!(rm.loginRequired || rm.banned);
-        })(),
-      };
-    });
+        loginRequired,
+        loginReason,
+        banned,
+        bannedAt,
+        bannedText,
+        problem
+      });
+    }
     const robes = {};
     for (const p of perfisArr) {
       const nome = p.nome;
@@ -2827,9 +2756,11 @@ const handlers = {
   },
 
   async unfreeze({ nome, setBy }) {
-    if (!nome) return { ok: false, error: 'nome_obrigatorio' };
-    try { await unfreezeProfile(nome, setBy || 'admin'); } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
-    return { ok: true };
+    return lockProfileAction(nome, async () => {
+      if (!nome) return { ok: false, error: 'nome_obrigatorio' };
+      try { await unfreezeProfile(nome, setBy || 'admin'); } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
+      return { ok: true };
+    });
   },
 
   async ['unfreeze-all']() {
@@ -2920,7 +2851,8 @@ try {
 
 const perfisArr = loadPerfisJson();
 const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
-const perfis = perfisArr.map(p => {
+const perfis = [];
+for (const p of perfisArr) {
 const nome = p.nome;
 let issuesCount = 0;
 try {
@@ -2932,27 +2864,18 @@ try {
   }
 } catch {}
 const fail = getFailureCounts(nome);
-// PATCH 7 — manifestStatus
-let manifestStatus = 'missing';
-try {
-  const mPath = manifestPathOf(nome);
-  if (fs.existsSync(mPath)) {
-    const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-    const ok = man &&
-      typeof man.nome === 'string' && man.nome &&
-      typeof man.cidade === 'string' && man.cidade &&
-      typeof man.uaPresetId !== 'undefined' &&
-      typeof man.uaString === 'string' && man.uaString &&
-      typeof man.uaCh === 'object' && man.uaCh &&
-      typeof man.fp === 'object' && man.fp &&
-      Array.isArray(m.cookies) && m.cookies.length &&
-      typeof man.userDataDir === 'string' && man.userDataDir;
-    manifestStatus = ok ? 'ok' : 'incomplete';
-  } else {
-    manifestStatus = 'missing';
-  }
-} catch { manifestStatus = 'missing'; }
-return {
+let manifestStatus = await computeManifestStatus(nome);
+const man = await manifestStore.read(nome).catch(()=>null);
+const loginRequired = man ? !!(man.accountFlags && man.accountFlags.loginRequired === true) : !!robeMeta[nome]?.loginRequired;
+const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) || null) : (robeMeta[nome]?.loginReason || null);
+const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
+const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
+const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+const problem = man
+  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
+  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
+
+perfis.push({
   nome,
   label: p.label || null,
   cidade: p.cidade,
@@ -2979,69 +2902,12 @@ return {
   closingReason: robeMeta[nome]?.closingReason || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
-  loginRequired: (() => {
-    try {
-      const mPath = manifestPathOf(nome);
-      if (fs.existsSync(mPath)) {
-        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-        return !!(man.accountFlags && man.accountFlags.loginRequired === true);
-      }
-    } catch {}
-    return !!robeMeta[nome]?.loginRequired;
-  })(),
-  loginReason: (() => {
-    try {
-      const mPath = manifestPathOf(nome);
-      if (fs.existsSync(mPath)) {
-        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-        return (man.accountFlags && man.accountFlags.loginReason) || null;
-      }
-    } catch {}
-    return robeMeta[nome]?.loginReason || null;
-  })(),
-  banned: (() => {
-    try {
-      const mPath = manifestPathOf(nome);
-      if (fs.existsSync(mPath)) {
-        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-        return !!(man.accountFlags && man.accountFlags.banned === true);
-      }
-    } catch {}
-    return !!robeMeta[nome]?.banned;
-  })(),
-  bannedAt: (() => {
-    try {
-      const mPath = manifestPathOf(nome);
-      if (fs.existsSync(mPath)) {
-        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-        return (man.accountFlags && man.accountFlags.bannedAt) || null;
-      }
-    } catch {}
-    return null;
-  })(),
-  bannedText: (() => {
-    try {
-      const mPath = manifestPathOf(nome);
-      if (fs.existsSync(mPath)) {
-        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-        return (man.accountFlags && man.accountFlags.bannedText) || null;
-      }
-    } catch {}
-    return null;
-  })(),
-  problem: (() => {
-    try {
-      const mPath = manifestPathOf(nome);
-      if (fs.existsSync(mPath)) {
-        const man = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-        const lr = !!(man.accountFlags && man.accountFlags.loginRequired === true);
-        const bd = !!(man.accountFlags && man.accountFlags.banned === true);
-        return lr || bd;
-      }
-    } catch {}
-    const rm = robeMeta[nome] || {};
-    return !!(rm.loginRequired || rm.banned);
-  })()
+  loginRequired,
+  loginReason,
+  banned,
+  bannedAt,
+  bannedText,
+  problem
   // overweightNow: !!robeMeta[nome]?.overweightNow,
   // overweightSince: robeMeta[nome]?.overweightSince || null,
   // lastMaintenanceAt: !!robeMeta[nome]?.lastMaintenanceAt || null,
@@ -3049,8 +2915,8 @@ return {
   // lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
   // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
   // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
-};
 });
+}
 const robes = {};
 for (const p of perfisArr) {
 const nome = p.nome;
@@ -4077,46 +3943,38 @@ setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
 // =================== FIM HEALTH ===================
 
 // ============ INÍCIO: PATCH/MODO FROZEN SE MANIFEST AUSENTE ==============
-
-// PATCH: intercepta robeHelper.startRobe para bloquear e congelar militarmente se manifest ausente
+// ============ INÍCIO: PATCH/MODO TOLERANTE MANIFEST UNAVAILABLE ==============
 const _startRobeOrig = robeHelper.startRobe;
 robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
-  // GUARD: antifila infinito, antiflood militar se manifest ausente
-  let manifest;
-  try { manifest = await manifestStore.read(nome); } catch(e){}
+  // Tente ler manifest com tolerância (já patchado no manifestStore.read)
+  let manifest = null;
+  try { manifest = await manifestStore.read(nome); } catch{}
   if (!manifest) {
-    // Congela por 12h via worker
-    try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_missing', 'system').catch(()=>{}); } catch {}
-    await reportAction(nome, 'robe_error', 'manifest ausente; congelado por 12h');
-    await ensureFrozenShutdown(nome, 'manifest_missing'); // para manifest ausente
-    return { ok: false, error: 'no_manifest' };
+    // NÃO congele! Abort leve, registrar ação e segurar ativação curta
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+    await reportAction(nome, 'mil_action', 'robe_abort_manifest_unavailable (no freeze)');
+    return { ok: false, error: 'manifest_unavailable' };
   }
-
-  // Circuit breaker/migração manifest incompleto
   if (!manifest.cookies || !manifest.fp) {
-    try { freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system').catch(()=>{}); } catch {}
-    await reportAction(nome, 'robe_error', 'manifest incompleto (cookies/fp); congelado por 12h');
-    await ensureFrozenShutdown(nome, 'manifest_incomplete'); // para manifest incompleto
-    return { ok: false, error: 'incomplete_manifest' };
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+    await reportAction(nome, 'mil_action', 'robe_abort_manifest_incomplete (no freeze)');
+    return { ok: false, error: 'manifest_incomplete' };
   }
-
-  // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
   const now = Date.now();
-  // RAM killbackoff (Terminator)
-  if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > Date.now()) {
+  if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > now) {
     return { ok: false, error: 'ram_backoff' };
   }
   try {
-    // Chamando normalmente
     return await _startRobeOrig.apply(this, arguments);
   } catch (e) {
-    // Cooldown sempre é 15–30min padronizado! NUNCA penalidade curta especial pós-falha.
     await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão (15–30min) será aplicado por robe.js`);
     return { ok: false, error: String(e&&e.message||e) };
   }
 };
+// ============ FIM ==============
 
-// ============ FIM: PATCH/MODO FROZEN SE MANIFEST AUSENTE ==============
 
 // ===== Watchdog de stuck/frozen =====
 setInterval(() => {

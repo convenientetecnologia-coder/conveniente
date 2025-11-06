@@ -87,32 +87,44 @@ function pickUaPreset() {
   } catch { return null; }
 }
 
-///// === LOCK INTERNO DE desired.json  (Promise chain FIFO) === /////
-let _desiredLock = Promise.resolve();
-// Executa a função asyncFn(desejado atual), espera resultado, salva, retorna novo desired.
-// Garantido em ordem serial via promise chain lock.
-async function withDesiredLock(asyncFn) {
-  let ret;
-  _desiredLock = _desiredLock
-    .then(async () => {
-      ensureDesired();
-      let desired = readJsonSafe(desiredPath, { perfis: {} });
-      const novo = await asyncFn(desired);
-      // Só salva se retornou objeto (não null/undefined)
-      if (novo && typeof novo === 'object') {
-        writeJsonAtomic(desiredPath, novo);
+// === FILE LOCK HELPERS FOR desired.json ===
+const desiredLockPath = desiredPath + '.lock';
+function acquireDesiredLockFile({ retries = 120, delayMs = 20 } = {}) {
+  return new Promise((resolve, reject) => {
+    let tries = 0;
+    (function attempt(){
+      tries++;
+      try {
+        const fd = fs.openSync(desiredLockPath, 'wx');
+        return resolve(fd);
+      } catch {
+        if (tries >= retries) return reject(new Error('desired_lock_timeout'));
+        setTimeout(attempt, delayMs);
       }
-      ret = novo;
-    })
-    .catch(()=>{});
-  await _desiredLock;
-  return ret;
+    })();
+  });
+}
+function releaseDesiredLockFile(fd) {
+  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
+  try { fs.unlinkSync(desiredLockPath); } catch {}
+}
+async function withDesiredFileLockUpdate(mutator) {
+  let fd = null;
+  try {
+    fd = await acquireDesiredLockFile();
+    const desired = readJsonSafe(desiredPath, { perfis: {} }) || { perfis: {} };
+    const next = await Promise.resolve(mutator(desired)) || desired;
+    writeJsonAtomic(desiredPath, next);
+    return next;
+  } finally {
+    releaseDesiredLockFile(fd);
+  }
 }
 
 //// PATCH DESIRED PERFIL ////
-// Refatorada: lock atômico global
+// PATCH DESIRED PERFIL // Lock atômico físico
 async function patchDesired(nome, patch) {
-  return withDesiredLock(desired => {
+  return withDesiredFileLockUpdate(desired => {
     desired.perfis = desired.perfis || {};
     desired.perfis[nome] = { ...(desired.perfis[nome] || {}), ...(patch || {}) };
     return desired;
@@ -121,7 +133,7 @@ async function patchDesired(nome, patch) {
 
 // Remove uma entrada completamente do desired.json (lock atômico)
 async function removeDesired(nome) {
-  return withDesiredLock(desired => {
+  return withDesiredFileLockUpdate(desired => {
     desired.perfis = desired.perfis || {};
     if (desired.perfis[nome]) delete desired.perfis[nome];
     return desired;
@@ -377,7 +389,7 @@ function renamePerfilSlug(nomeAntigo, nomeNovoDesejado) {
   writeJsonAtomic(manifestPath, man);
   // --- FIM DO NOVO BLOCO ---
   // desired.json (usando lock)
-  withDesiredLock(desired => {
+  withDesiredFileLockUpdate(desired => {
     if (desired.perfis && desired.perfis[nomeAntigo]) {
       desired.perfis[novoSlug] = { ...(desired.perfis[novoSlug] || {}), ...(desired.perfis[nomeAntigo]) };
       delete desired.perfis[nomeAntigo];
@@ -409,7 +421,7 @@ function isPerfilAtivo(nome) {
 //// RESETAR desired TODOS OFF ao boot //// 
 function resetDesiredAllOffOnBoot() {
   // ATUALIZADO: lock
-  withDesiredLock(desired => {
+  withDesiredFileLockUpdate(desired => {
     ensureDesired();
     const perfisArr = loadPerfisJson();
     desired.perfis = desired.perfis || {};
@@ -436,7 +448,7 @@ function getSysMetricsSnapshot() {
   const os = require('os');
   const totalBytes = os.totalmem();
   const freeBytes  = os.freemem();
-  const usedBytes  = totalBytes - freeBytes;
+  const usedBytes = totalBytes - freeBytes;
   const toMB = (b) => Math.round(b / (1024*1024));
   const toGB = (b) => Math.round(b / (1024*1024*10)) / 100; // duas casas
 
@@ -543,6 +555,6 @@ module.exports = {
   isValidSlug,
   assertPerfilExists,
   // Lock helper export
-  withDesiredLock,
+  withDesiredFileLockUpdate,
   removeDesired, // <<--------- NOVO EXPORT
 };

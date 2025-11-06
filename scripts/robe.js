@@ -1471,7 +1471,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let perfilPath, manifest;
 
   try {
-    // Leitura do manifest via manifestStore (com lock)
+    // Leitura do manifest via manifestStore (com retry e tolerância)
     manifest = await manifestStore.read(nome);
 
     // Limpa pauseReason residual antes do novo ciclo (SÓ se cooldown zerou e NÃO for 'limit_posting')
@@ -1487,13 +1487,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       });
     } catch {}
 
-    // NOVO: Não congelar localmente — apenas detectar, logar e retornar para o worker decidir
+    // ATENÇÃO: Não congele o perfil por “manifesto ausente” transitório.
     if (!manifest) {
-      try { await logIssue(nome, 'robe_error', 'manifest ausente; flow deve congelar via worker'); } catch {}
+      try { await logIssue(nome, 'robe_error', 'manifest ausente; retorno ao worker (sem freeze local)'); } catch {}
       return { ok: false, error: 'no_manifest' };
     }
     if (!manifest.cookies || !manifest.fp) {
-      try { await logIssue(nome, 'robe_error', 'manifest incompleto (cookies/fp); flow deve congelar via worker'); } catch {}
+      try { await logIssue(nome, 'robe_error', 'manifest incompleto (cookies/fp); retorno ao worker (sem freeze local)'); } catch {}
       return { ok: false, error: 'incomplete_manifest' };
     }
 

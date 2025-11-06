@@ -157,7 +157,11 @@ module.exports = (app, workerClient, fileStore) => {
 
       // desired.json default (não liga nada) - ATOMICIDADE GARANTIDA PELO LOCK!
       // ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
-      await fileStore.patchDesired(nome, { active: false, virtus: 'off' });
+      await fileStore.withDesiredFileLockUpdate(desired => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
+        return desired;
+      });
 
       logger.info('Perfil criado com sucesso', { nome, cidade });
       res.json({ ok: true, perfil: perfilObj });
@@ -180,7 +184,7 @@ module.exports = (app, workerClient, fileStore) => {
     await issues.append(nome, 'admin_activate_request', `by=${op}`);
 
     // Override explícito do hold humano ao ativar manualmente/por Abrir Todos
-    await fileStore.withDesiredLock(desired => {
+    await fileStore.withDesiredFileLockUpdate(desired => {
       desired.perfis = desired.perfis || {};
       desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false };
       return desired;
@@ -200,7 +204,13 @@ module.exports = (app, workerClient, fileStore) => {
     // BLOQUEIO de ativação por limit_posting
     // --- PATCH CIRÚRGICO: BLOCO REMOVIDO CONFORME INSTRUÇÃO ---
 
-    try { await fileStore.patchDesired(nome, { active: true }); } catch (e) {
+    try { 
+      await fileStore.withDesiredFileLockUpdate(desired => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: true };
+        return desired;
+      });
+    } catch (e) {
       logger.error('Erro ao patchDesired para ativação', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);
     }
     // Chama worker para ativar imediatamente:
@@ -228,7 +238,13 @@ module.exports = (app, workerClient, fileStore) => {
     }
     await issues.append(nome, 'admin_deactivate_request', `by=${op}`);
 
-    try { await fileStore.patchDesired(nome, { active: false, virtus: 'off' }); } catch (e) {
+    try { 
+      await fileStore.withDesiredFileLockUpdate(desired => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
+        return desired;
+      });
+    } catch (e) {
       logger.error('Erro ao patchDesired durante desativação', { nome, rota: '/api/perfis/:nome/deactivate', error: e && e.message }, e);
     }
     // Chama worker para desativar imediatamente:
@@ -287,7 +303,11 @@ module.exports = (app, workerClient, fileStore) => {
     }
 
     try {
-      await fileStore.patchDesired(nome, { virtus: 'on', active: true }); // remova robePause24h
+      await fileStore.withDesiredFileLockUpdate(desired => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'on', active: true };
+        return desired;
+      });
     } catch (e) {
       logger.error('Erro ao patchDesired para start_work', { nome, error: e && e.message }, e);
     }
@@ -693,7 +713,7 @@ module.exports = (app, workerClient, fileStore) => {
       const perfisArr = fileStore.loadPerfisJson() || [];
 
       // 1) PASSO ATÔMICO: zera humanHold, e já seta virtus:on + active:true em todos
-      await fileStore.withDesiredLock(desired => {
+      await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;

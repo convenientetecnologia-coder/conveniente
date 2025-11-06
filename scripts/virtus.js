@@ -67,17 +67,6 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-// ========== HELPER GETPERFILMANIFEST ADICIONADO ==========
-function getPerfilManifest(nome) {
-  const perfisArr = JSON.parse(fsRaw.readFileSync(path.join(__dirname, '../dados/perfis.json'), 'utf8'));
-  const perfil = perfisArr.find(p => p && p.nome === nome);
-  if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
-  const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
-  if (!fsRaw.existsSync(manifestPath)) throw new Error('Manifest não existe: ' + manifestPath);
-  return { manifest: JSON.parse(fsRaw.readFileSync(manifestPath, 'utf8')), perfil };
-}
-// ========== FIM HELPER ==========
-
 // Log de issues (robusto; falha silenciosa se o módulo não existir)
 let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
@@ -489,8 +478,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // Checagem ultra robusta de freezer
   let manifestFrozenUntil = 0;
   try {
-    const { manifest } = getPerfilManifest(nome);
-    manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+    const manifest = await manifestStore.read(nome);
+    manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
   } catch {}
   if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
     const log = (...args) => logger.info(args.join(' '), { nome });
@@ -666,8 +655,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // cria nova aba
           const newP = await browser.newPage();
           try {
-            const { manifest } = getPerfilManifest(nome);
-            const coords = utils.getCoords(manifest.cidade || '');
+            const manifest = await manifestStore.read(nome);
+            const coords = utils.getCoords((manifest && manifest.cidade) ? manifest.cidade : '');
             if (!running || !epochOk()) return null;
             await patchPage(nome, newP, coords);
             if (!running || !epochOk()) return null;
@@ -815,8 +804,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
-      const { manifest } = getPerfilManifest(nome);
-      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+      const manifest = await manifestStore.read(nome);
+      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
     } catch {}
     if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
       running = false;
@@ -1055,8 +1044,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
-      const { manifest } = getPerfilManifest(nome);
-      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+      const manifest = await manifestStore.read(nome);
+      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
     } catch {}
     if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
       running = false;
@@ -1331,8 +1320,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
-      const { manifest } = getPerfilManifest(nome);
-      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+      const manifest = await manifestStore.read(nome);
+      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
     } catch {}
     if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
       running = false;
@@ -1508,8 +1497,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
-      const { manifest } = getPerfilManifest(nome);
-      manifestFrozenUntil = typeof manifest.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+      const manifest = await manifestStore.read(nome);
+      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
     } catch {}
     if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
       running = false;
