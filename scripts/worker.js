@@ -3019,32 +3019,12 @@ async function nurseTick() {
       let now2 = Date.now();
 
       if (det && det.blocked && det.domain === 'messenger') {
-        robeMeta[nome].blockDetectWindow.push(now2);
-        robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow.filter(ts => now2 - ts <= 5000);
-        while (robeMeta[nome].blockDetectWindow.length > 8) robeMeta[nome].blockDetectWindow.shift();
-
-        if (robeMeta[nome].blockDetectWindow.length >= 2 && (!robeMeta[nome].blockHysteresisUntil || robeMeta[nome].blockHysteresisUntil < now2)) {
-          await appendIssueNurseDebounced(nome, `action_virtus_block`, `blockDetectWindow=${robeMeta[nome].blockDetectWindow.length}`, 'action_virtus_block');
-          robeMeta[nome].blockHysteresisUntil = now2 + 15*60*1000;
-          if (killGuardActive(nome)) {
-            await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)', 'guard_skip_block');
-            continue;
-          }
-          await stopVirtus(nome);
-          if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now2)) {
-            robeMeta[nome].reopenAt = now2 + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
-            robeMeta[nome].closingReason = 'virtus_block';
-          }
-          await registerFailure(nome, 'messenger_temp_block', 'external');
-          await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
-          setKillGuard(nome);
-          await snapshotStatusAndWrite();
-          continue;
-        } else {
-          await appendIssueNurseDebounced(nome, `suspect_messenger_block`, `strike=${robeMeta[nome].blockDetectWindow.length}`, 'suspect_messenger_block');
-          continue;
-        }
+        try { await issues.append(nome, 'block_detected', 'domain=messenger temp_block'); } catch {}
+        await freezeProfileFor(nome, TEMP_BLOCK_FREEZE_MS, 'temp_block', 'system');
+        await snapshotStatusAndWrite();
+        continue;
       }
+
       if (robeMeta[nome].blockHysteresisUntil && robeMeta[nome].blockHysteresisUntil > now2) continue;
 
       if (det && det.blocked && det.domain === 'facebook') {
@@ -3064,6 +3044,12 @@ async function nurseTick() {
           }
         } catch {}
         const man = await manifestStore.read(nome).catch(()=>null);
+        if (det && det.blocked && det.domain === 'facebook') {
+          try { await issues.append(nome, 'block_detected', 'domain=facebook temp_block'); } catch {}
+          await freezeProfileFor(nome, TEMP_BLOCK_FREEZE_MS, 'temp_block', 'system');
+          await snapshotStatusAndWrite();
+          continue;
+        }
         if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
           await issues.append(nome, 'mil_action', 'preserve_limit_posting_on_fb_block');
           await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
