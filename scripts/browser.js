@@ -1115,6 +1115,19 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
       const loginUrl = isMessenger ? urlLoginMessenger : urlLoginFB;
       try {
         await page.goto(loginUrl, { waitUntil:'domcontentloaded', timeout:timeoutMs });
+
+        // FALLBACK Messenger indisponível -> Facebook (somente se indisponível)
+        await sleep(400);
+        if (isMessenger) {
+          const unavailable = await isMessengerUnavailablePage(page);
+          if (unavailable) {
+            try {
+              await page.goto('https://www.facebook.com/login', { waitUntil:'domcontentloaded', timeout: timeoutMs });
+              isMessenger = false; // força fluxar como FB
+            } catch {}
+          }
+        }
+
         await sleep(600);
 
         // Inputs para login
@@ -1184,6 +1197,27 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
           if (/segurança|checkpoint|captcha|confirme/i.test(domtxt)) {
             return { ok: false, reason: 'checkpoint', message: 'Checkpoint ou captcha após login' };
           }
+        }
+
+        // Pós submit, trate os checkpoints/ban
+        // 1) Selfie de vídeo (ban/tratamento como ban irrecuperável)
+        if (await isFacebookVideoSelfieCheckpoint(page)) {
+          return { ok:false, reason:'banned', message:'video_selfie_checkpoint' };
+        }
+
+        // 2) “Verifique sua conta do Facebook” com botão Continuar
+        const verifyPage = await page.evaluate(() => {
+          const t = (document.body && document.body.innerText || '').toLowerCase();
+          return t.includes('verifique sua conta do facebook') || t.includes('go to facebook to finish signing up') || t.includes('check your facebook account');
+        });
+        if (verifyPage) {
+          await clickContinueCheckpoint(page);
+          await sleep(1000);
+        }
+
+        // 3) “Desabilitamos sua conta” (ban permanente)
+        if (await isFacebookAccountDisabledPage(page)) {
+          return { ok:false, reason:'banned', message:'disabled_checkpoint' };
         }
 
         // PÓS-login: chegou grid messenger, marketplace, etc?
@@ -2215,6 +2249,63 @@ async function detectAccountSuspended(page) {
     }
   } catch {}
   return { banned: false };
+}
+
+// Helpers obrigatórios adicionados (login/ban/checkpoints)
+async function isMessengerUnavailablePage(page) {
+  try {
+    const v = await page.evaluate(() => {
+      const root = document.body && document.body.innerText || '';
+      const title = document.title || '';
+      const ok = /Esta página não está disponível/i.test(root || '') || /not available/i.test(root || '');
+      return !!ok;
+    });
+    return !!v;
+  } catch { return false; }
+}
+
+async function isFacebookVideoSelfieCheckpoint(page) {
+  try {
+    const v = await page.evaluate(() => {
+      const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const txt = norm(document.body && (document.body.innerText || ''));
+      return txt.includes('confirme sua identidade com uma selfie de video') || txt.includes('confirm your identity with a video selfie');
+    });
+    return !!v;
+  } catch { return false; }
+}
+
+async function clickContinueCheckpoint(page) {
+  try {
+    const ok = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('a[role="button"],button'));
+      for (const b of buttons) {
+        const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+        if (t.includes('continuar') || t.includes('continue')) {
+          try {
+            b.scrollIntoView({behavior:'instant', block:'center'});
+            b.click();
+            return true;
+          } catch {}
+        }
+      }
+      return false;
+    });
+    if (ok) {
+      try { await page.waitForNavigation({ waitUntil:'domcontentloaded', timeout: 15000 }); } catch {}
+    }
+    return ok;
+  } catch { return false; }
+}
+
+async function isFacebookAccountDisabledPage(page) {
+  try {
+    const v = await page.evaluate(() => {
+      const t = (document.body && document.body.innerText || '').toLowerCase();
+      return t.includes('desabilitamos sua conta') || t.includes('your account has been disabled') || t.includes('conta desabilitada');
+    });
+    return !!v;
+  } catch { return false; }
 }
 
 module.exports = {

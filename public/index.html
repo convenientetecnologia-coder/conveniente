@@ -367,7 +367,7 @@
         </div>
         <div class="form-row">
           <label>Senha (opcional)</label>
-          <input id="senhaCampo" type="password" autocomplete="new-password" placeholder="Senha" />
+          <input id="senhaCampo" type="text" autocomplete="new-password" placeholder="Senha" />
         </div>
         <div class="modal-actions">
           <button class="btn" id="cancelarBtn" type="button">Cancelar</button>
@@ -491,7 +491,7 @@
           </div>
           <div style="margin-top:7px">
             <label style="font-weight:500;font-size:13px;">Senha</label>
-            <input id="credSenhaInput" type="password" autocomplete="current-password" placeholder="Senha" />
+            <input id="credSenhaInput" type="text" autocomplete="current-password" placeholder="Senha" />
             <button type="button" class="btn" id="clearCredSenha" style="margin-top:6px;padding:5px 11px;font-size:12px;">Limpar senha</button>
           </div>
           <div class="modal-actions" style="margin-top:10px;">
@@ -754,12 +754,11 @@
       try {
         const ts = Number(p.robeFrozenUntil);
         if (!ts || ts < Date.now()) return null;
-        const agora = Date.now();
-        the_restante = Math.max(0, Math.floor((ts-agora)/1000));
-        const reason = p.frozenReason ? String(p.frozenReason) : 'motivo não informado';
-        const sinceStr = p.frozenAt ? new Date(p.frozenAt).toLocaleString() : '';
-        const span = buildPill(`ROBE Congelado (${tempoRestante(the_restante)})`, 'frozen');
-        span.title = `Motivo: ${reason}\nDesde: ${sinceStr}`;
+        const restante = Math.max(0, Math.floor((ts - Date.now()) / 1000));
+        const reason = p.frozenReason ? String(p.frozenReason) : '';
+        const label = reason === 'temp_block' ? 'Bloqueio Temporário (6h)' : 'Congelado';
+        const span = buildPill(`${label} (${tempoRestante(restante)})`, 'frozen');
+        span.title = `Motivo: ${reason || 'desconhecido'}`;
         return span;
       } catch { return null; }
     }
