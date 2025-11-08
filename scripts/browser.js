@@ -1927,7 +1927,7 @@ async function detectLimitOverlayEverywhere(page, msWindow = 0) {
 // ==== Patch Killer de about:blank ====
 // Fecha qualquer aba "about:blank" que não navegue para uma URL real em até graceMs.
 // Ativo em qualquer contexto (human, robe, config, virtus).
-function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
+function installAboutBlankKiller(browser, nome, { graceMs = 20000 } = {}) {
   if (!browser || browser._aboutBlankKillerInstalled) return;
   browser._aboutBlankKillerInstalled = true;
   const issues = require('./issues.js');
@@ -1968,7 +1968,6 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
 
       const timer = setTimeout(async () => {
         try {
-          if (browser && browser._robeActiveFor === nome) return;
           const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
           if (sup > Date.now()) return;
           if (page.isClosed && page.isClosed()) return;

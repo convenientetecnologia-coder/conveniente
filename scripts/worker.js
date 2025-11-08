@@ -1199,22 +1199,19 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman = ctrl && ctrl.humanControl === true;
 
-    // 1) NÃO feche about:blank durante Robe/Config/Humano/SendLock
-    if (!(sendLockActive || inRobe || inConfig || inHuman)) {
-      for (const p of pages) {
-        try {
-          if (mainPage && p === mainPage) continue;
-          if (!mainPage && pages[0] && p === pages[0]) continue;
-          let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-          if (!url || url === 'about:blank') {
-            await p.close({ runBeforeUnload: false }).catch(()=>{});
-            closed++;
-          }
-        } catch {}
-      }
+    // Fase A — SEMPRE: fechar about:blank exceto main
+    for (const p of pages) {
+      try {
+        if (mainPage && p === mainPage) continue;
+        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+        if (!url || url === 'about:blank') {
+          await p.close({ runBeforeUnload: false }).catch(()=>{});
+          closed++;
+        }
+      } catch {}
     }
 
-    // 2) PRUNE amplo SOMENTE se permitido (mantém exatamente como está)
+    // Fase B — prune amplo apenas se não estiver em envio/robe/config/humano
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       const again = await browser.pages();
       for (const p of again) {

@@ -1078,7 +1078,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
     let p = null;
     try {
       p = await browser.newPage();
-      // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
+      // SUPRESSOR para o killer de about:blank durante patchPage+goto (7s de guarda, alinhado ao killer)
       const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
       guard[nome] = Date.now() + 20000;
 
