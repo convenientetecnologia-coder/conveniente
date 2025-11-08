@@ -63,7 +63,9 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
-  // ===== PASSO 3 — NOVO ENDPOINT: credentials masked - GET =====
+  // TROCA COMPLETA DOS ENDPOINTS DE CREDENCIAIS PARA MANIFEST REAL E SEM MASCARAMENTO
+
+  // GET - credenciais cruas (sem máscara)
   app.get('/api/perfis/:nome/credentials', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok:false, error:'nome ausente' });
@@ -71,14 +73,19 @@ module.exports = (app, workerClient, fileStore) => {
       return res.json({ ok:false, error:e.message });
     }
     try {
-      const masked = await manifestStore.readCredentialsMasked(nome);
-      res.json({ ok:true, ...masked });
+      const c = await manifestStore.readCredentials(nome);
+      res.json({
+        ok: true,
+        login: (c && typeof c.login === 'string') ? c.login : '',
+        password: (c && typeof c.password === 'string') ? c.password : '',
+        autoLoginEnabled: !!(c && c.autoLoginEnabled)
+      });
     } catch(e) {
       res.json({ ok:false, error: (e&&e.message)||String(e) });
     }
   });
 
-  // ===== PASSO 3 — NOVO ENDPOINT: credentials masked - POST =====
+  // POST - salva/limpa credenciais (login/senha em branco limpam no manifest)
   app.post('/api/perfis/:nome/credentials', async (req, res) => {
     const nome = req.params.nome;
     if (!nome) return res.json({ ok:false, error:'nome ausente' });
@@ -88,7 +95,7 @@ module.exports = (app, workerClient, fileStore) => {
     const { login, password, autoLoginEnabled } = req.body || {};
     try {
       await manifestStore.updateCredentials(nome, { login, password, autoLoginEnabled });
-      await issues.append(nome, 'admin_action', 'credentials_updated (masked)');
+      await issues.append(nome, 'admin_action', 'credentials_updated');
       res.json({ ok:true });
     } catch(e) {
       res.json({ ok:false, error: (e&&e.message)||String(e) });

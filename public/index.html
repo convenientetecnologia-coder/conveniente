@@ -490,14 +490,15 @@
         </div>
         <div style="border-bottom:1px solid #2a3954;margin:15px 0 10px 0"></div>
         <div class="form-row">
-          <label>Credenciais (armazenadas no manifest, nunca expostas)</label>
+          <label>Credenciais</label>
           <div>
-            <label style="font-weight:500;font-size:13px;">Login (visualização)</label>
-            <input id="credLoginMasked" type="text" readonly placeholder="—" style="background:#161c29;border-color:#2a3954;" />
+            <label style="font-weight:500;font-size:13px;">Login</label>
+            <input id="credLoginValue" type="text" autocomplete="username" spellcheck="false" placeholder="E-mail ou telefone" />
+            <button type="button" class="btn" id="clearCredLogin" style="margin-top:6px;padding:5px 11px;font-size:12px;">Limpar login</button>
           </div>
           <div style="margin-top:7px">
-            <label style="font-weight:500;font-size:13px;">Nova senha (em branco: não altera, “limpar” zera)</label>
-            <input id="credSenhaInput" type="password" autocomplete="new-password" placeholder="Nova senha (opcional)" />
+            <label style="font-weight:500;font-size:13px;">Senha</label>
+            <input id="credSenhaInput" type="password" autocomplete="current-password" placeholder="Senha" />
             <button type="button" class="btn" id="clearCredSenha" style="margin-top:6px;padding:5px 11px;font-size:12px;">Limpar senha</button>
           </div>
           <div style="margin-top:7px">
@@ -534,50 +535,39 @@
 
       document.body.append(overlay);
 
-      // Busca credenciais masked via API ao abrir
+      // Carregamento dos campos de credenciais visíveis/editáveis
       (async () => {
         try {
           const cred = await window.electronAPI.getCredentials(perfil.nome);
-          if (cred && typeof cred.loginMasked === 'string')
-            box.querySelector('#credLoginMasked').value = cred.loginMasked || '';
-          if (cred && typeof cred.autoLoginEnabled !== 'undefined')
+          if (cred && cred.ok) {
+            box.querySelector('#credLoginValue').value = cred.login || '';
+            box.querySelector('#credSenhaInput').value = cred.password || '';
             box.querySelector('#credAutoLoginCk').checked = !!cred.autoLoginEnabled;
+          }
         } catch {}
       })();
 
-      // Botão Limpar Senha
-      const clearCredBtn = box.querySelector('#clearCredSenha');
-      if (clearCredBtn) {
-        clearCredBtn.onclick = () => {
-          box.querySelector('#credSenhaInput').value = '';
-        };
-      }
+      // Botões limpar adicionados
+      box.querySelector('#clearCredLogin').onclick = () => { box.querySelector('#credLoginValue').value = ''; };
+      box.querySelector('#clearCredSenha').onclick = () => { box.querySelector('#credSenhaInput').value = ''; };
 
       // Botão Salvar Credenciais
-      const salvarCredBtn = box.querySelector('#salvarCredBtn');
-      if (salvarCredBtn) {
-        salvarCredBtn.onclick = async () => {
-          const login = box.querySelector('#credLoginMasked').value.trim();
-          const password = box.querySelector('#credSenhaInput').value; // string vazia = "não altera"
-          const autoLoginEnabled = !!box.querySelector('#credAutoLoginCk').checked;
-          setBtnLoading(box.querySelector('#salvarCredBtn'), true, 'Salvando...');
-          try {
-            await window.electronAPI.setCredentials(perfil.nome, {
-              login,
-              password: password === '' ? undefined : password,
-              autoLoginEnabled
-            });
-            alert('Credenciais salvas.');
-            box.querySelector('#credSenhaInput').value = '';
-            onClose && onClose();
-            overlay.remove();
-          } catch (e) {
-            alert('Falha ao salvar credenciais: ' + (e && e.message || e));
-          } finally {
-            setBtnLoading(box.querySelector('#salvarCredBtn'), false);
-          }
-        };
-      }
+      box.querySelector('#salvarCredBtn').onclick = async () => {
+        const login = box.querySelector('#credLoginValue').value;     // "" limpa
+        const password = box.querySelector('#credSenhaInput').value;  // "" limpa
+        const autoLoginEnabled = !!box.querySelector('#credAutoLoginCk').checked;
+        setBtnLoading(box.querySelector('#salvarCredBtn'), true, 'Salvando...');
+        try {
+          const r = await window.electronAPI.setCredentials(perfil.nome, { login, password, autoLoginEnabled });
+          if (!r || !r.ok) throw new Error((r && r.error) || 'Falha ao salvar credenciais');
+          alert('Credenciais salvas.');
+          // Permanece no formulário, usuário pode continuar editando se quiser.
+        } catch (e) {
+          alert('Falha ao salvar credenciais: ' + (e && e.message || e));
+        } finally {
+          setBtnLoading(box.querySelector('#salvarCredBtn'), false);
+        }
+      };
 
       box.querySelector('#fecharCfg').onclick = () => { overlay.remove(); onClose && onClose(); };
       box.querySelector('#salvarCfg').onclick = async () => {
@@ -774,7 +764,6 @@
     }
 
     // Helper badge Frozen/skip/antiflood (roboFrozenUntil > Date.now())
-    // Militar: frozenUntil/COOLDOWN badge lógica
     function buildFrozenPill(p) {
       if (!p || !p.robeFrozenUntil) return null;
       try {

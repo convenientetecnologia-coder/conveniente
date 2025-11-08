@@ -100,19 +100,41 @@ async function update(nome, patchFn) {
 
 /**
  * Atualiza credenciais no manifest, atomicamente.
- * - Recebe { login, password, autoLoginEnabled }
- * - Se password === '', mantém existente; se password === null, remove a senha.
- * - updatedAt sempre atualizado.
+ * - login === "" ou null → remove campo login do manifest.
+ * - password === "" ou null → remove campo password do manifest.
+ * - autoLoginEnabled booleana, se definida.
+ * - Se ambos forem removidos, remove obj credentials do manifest; senão, atualiza timestamp updatedAt.
  */
 async function updateCredentials(nome, { login, password, autoLoginEnabled }) {
   return update(nome, m => {
     m = m || {};
-    m.credentials = m.credentials || {};
-    if (typeof login === 'string') m.credentials.login = login.trim();
-    if (password === null) delete m.credentials.password;
-    else if (typeof password === 'string' && password.length) m.credentials.password = password;
-    if (typeof autoLoginEnabled === 'boolean') m.credentials.autoLoginEnabled = autoLoginEnabled;
-    m.credentials.updatedAt = Date.now();
+    m.credentials = (m.credentials && typeof m.credentials === 'object') ? m.credentials : {};
+
+    // Login: string vazia ou null -> remove; string não vazia -> define
+    if (login === null || login === '') {
+      delete m.credentials.login;
+    } else if (typeof login === 'string') {
+      m.credentials.login = login.trim();
+    }
+
+    // Senha: string vazia ou null -> remove; string não vazia -> define
+    if (password === null || password === '') {
+      delete m.credentials.password;
+    } else if (typeof password === 'string') {
+      m.credentials.password = password;
+    }
+
+    // autoLoginEnabled (boolean)
+    if (typeof autoLoginEnabled === 'boolean') {
+      m.credentials.autoLoginEnabled = autoLoginEnabled;
+    }
+
+    // Atualiza timestamp ou remove credentials se esvaziou geral
+    if (Object.keys(m.credentials).length === 0) {
+      delete m.credentials;
+    } else {
+      m.credentials.updatedAt = Date.now();
+    }
     return m;
   });
 }
