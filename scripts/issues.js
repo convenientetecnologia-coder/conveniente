@@ -5,6 +5,10 @@
 const fs = require('fs');
 const path = require('path');
 
+// INÍCIO DA INSTRUÇÃO: Adicionando helper maskLogin de utils
+let maskLogin = (v) => '****';
+try { maskLogin = require('./utils.js').maskLogin || maskLogin; } catch {}
+
 const DADOS_DIR  = path.join(__dirname, '..', 'dados');
 const PERFIS_DIR = path.join(DADOS_DIR, 'perfis');
 const MAX_ISSUES = parseInt(process.env.ISSUES_MAX || '200', 10);
@@ -61,6 +65,12 @@ function sanitizeMessage(msg) {
     s = s.replace(/[\r\n]+/g, ' ').trim();
     // Limite defensivo de 400 chars
     if (s.length > 400) s = s.slice(0, 400);
+
+    // INÍCIO DA INSTRUÇÃO: Sanitização militar de senha/login/email/tel
+    s = s.replace(/(senha|pass(?:word)?)(\s*[:=]\s*)([^ ]+)/gi, '$1$2****');
+    s = s.replace(/(login|email|usuario|user(?:name)?)(\s*[:=]\s*)([^ ]+)/gi, (m, g1, g2, val) => g1 + g2 + maskLogin(val));
+    // FIM DA INSTRUÇÃO
+
     return s;
   } catch {
     return '';

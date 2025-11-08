@@ -361,6 +361,20 @@
           <textarea id="cookiesCampo" placeholder="Cole aqui os cookies exportados da conta"></textarea>
         </div>
         <div id="criarContaMsg" style="display:none" class="pill"></div>
+        <div class="form-row">
+          <label>Login (opcional)</label>
+          <input id="loginCampo" type="text" placeholder="E-mail ou telefone" autocomplete="username" spellcheck="false" />
+        </div>
+        <div class="form-row">
+          <label>Senha (opcional)</label>
+          <input id="senhaCampo" type="password" autocomplete="new-password" placeholder="Senha" />
+        </div>
+        <div class="form-row">
+          <label>
+            <input id="autoLoginCk" type="checkbox" style="vertical-align:middle;margin-right:4px">
+            Habilitar auto-login quando necessário
+          </label>
+        </div>
         <div class="modal-actions">
           <button class="btn" id="cancelarBtn" type="button">Cancelar</button>
           <button class="btn primary" id="confirmarBtn" type="button">Criar Conta</button>
@@ -416,7 +430,12 @@
         // ========================== FIM ALTERAÇÃO RAM MILITAR ==========================
 
         try {
-          const res = await window.electronAPI.criarPerfil({ cidade, cookies });
+          // Coleta de credenciais adicionais (opcional)
+          const login = box.querySelector('#loginCampo').value.trim();
+          const password = box.querySelector('#senhaCampo').value;
+          const autoLoginEnabled = !!box.querySelector('#autoLoginCk').checked;
+
+          const res = await window.electronAPI.criarPerfil({ cidade, cookies, login, password, autoLoginEnabled });
           if (!res || !res.ok) {
             msgEl.className = 'pill bad';
             msgEl.textContent = 'Falha ao criar: ' + ((res && res.error) || 'erro desconhecido');
@@ -469,6 +488,28 @@
         <div class="form-row">
           <label><input type="checkbox" id="renameSlugCk" ${ativo ? 'disabled' : ''}/> Renomear identificador/diretório (somente com navegador fechado)</label>
         </div>
+        <div style="border-bottom:1px solid #2a3954;margin:15px 0 10px 0"></div>
+        <div class="form-row">
+          <label>Credenciais (armazenadas no manifest, nunca expostas)</label>
+          <div>
+            <label style="font-weight:500;font-size:13px;">Login (visualização)</label>
+            <input id="credLoginMasked" type="text" readonly placeholder="—" style="background:#161c29;border-color:#2a3954;" />
+          </div>
+          <div style="margin-top:7px">
+            <label style="font-weight:500;font-size:13px;">Nova senha (em branco: não altera, “limpar” zera)</label>
+            <input id="credSenhaInput" type="password" autocomplete="new-password" placeholder="Nova senha (opcional)" />
+            <button type="button" class="btn" id="clearCredSenha" style="margin-top:6px;padding:5px 11px;font-size:12px;">Limpar senha</button>
+          </div>
+          <div style="margin-top:7px">
+            <label style="font-weight:500;font-size:13px;">
+              <input type="checkbox" id="credAutoLoginCk" style="vertical-align:middle;margin-right:4px">
+              Habilitar auto-login quando necessário
+            </label>
+          </div>
+          <div class="modal-actions" style="margin-top:10px;">
+            <button class="btn" id="salvarCredBtn" type="button">Salvar Credenciais</button>
+          </div>
+        </div>
         <div class="modal-actions">
           <button class="btn" id="fecharCfg">Fechar</button>
           <button class="btn primary" id="salvarCfg">Salvar</button>
@@ -492,6 +533,51 @@
       })();
 
       document.body.append(overlay);
+
+      // Busca credenciais masked via API ao abrir
+      (async () => {
+        try {
+          const cred = await window.electronAPI.getCredentials(perfil.nome);
+          if (cred && typeof cred.loginMasked === 'string')
+            box.querySelector('#credLoginMasked').value = cred.loginMasked || '';
+          if (cred && typeof cred.autoLoginEnabled !== 'undefined')
+            box.querySelector('#credAutoLoginCk').checked = !!cred.autoLoginEnabled;
+        } catch {}
+      })();
+
+      // Botão Limpar Senha
+      const clearCredBtn = box.querySelector('#clearCredSenha');
+      if (clearCredBtn) {
+        clearCredBtn.onclick = () => {
+          box.querySelector('#credSenhaInput').value = '';
+        };
+      }
+
+      // Botão Salvar Credenciais
+      const salvarCredBtn = box.querySelector('#salvarCredBtn');
+      if (salvarCredBtn) {
+        salvarCredBtn.onclick = async () => {
+          const login = box.querySelector('#credLoginMasked').value.trim();
+          const password = box.querySelector('#credSenhaInput').value; // string vazia = "não altera"
+          const autoLoginEnabled = !!box.querySelector('#credAutoLoginCk').checked;
+          setBtnLoading(box.querySelector('#salvarCredBtn'), true, 'Salvando...');
+          try {
+            await window.electronAPI.setCredentials(perfil.nome, {
+              login,
+              password: password === '' ? undefined : password,
+              autoLoginEnabled
+            });
+            alert('Credenciais salvas.');
+            box.querySelector('#credSenhaInput').value = '';
+            onClose && onClose();
+            overlay.remove();
+          } catch (e) {
+            alert('Falha ao salvar credenciais: ' + (e && e.message || e));
+          } finally {
+            setBtnLoading(box.querySelector('#salvarCredBtn'), false);
+          }
+        };
+      }
 
       box.querySelector('#fecharCfg').onclick = () => { overlay.remove(); onClose && onClose(); };
       box.querySelector('#salvarCfg').onclick = async () => {
@@ -1626,6 +1712,19 @@
     window.electronAPI = window.electronAPI || {};
     window.electronAPI.listPerfis = () =>
       fetch('/api/perfis').then(r => r.json()).catch(() => null);
+    // Garantia: wrappers de credenciais (caso não existam no preload/app.js)
+    if (!window.electronAPI.getCredentials) {
+      window.electronAPI.getCredentials = (nome) =>
+        fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`).then(r => r.json());
+    }
+    if (!window.electronAPI.setCredentials) {
+      window.electronAPI.setCredentials = (nome, payload) =>
+        fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload || {})
+        }).then(r => r.json());
+    }
 
     async function startAllSequential() {
       if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }

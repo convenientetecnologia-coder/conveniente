@@ -98,5 +98,54 @@ async function update(nome, patchFn) {
   });
 }
 
+/**
+ * Atualiza credenciais no manifest, atomicamente.
+ * - Recebe { login, password, autoLoginEnabled }
+ * - Se password === '', mantém existente; se password === null, remove a senha.
+ * - updatedAt sempre atualizado.
+ */
+async function updateCredentials(nome, { login, password, autoLoginEnabled }) {
+  return update(nome, m => {
+    m = m || {};
+    m.credentials = m.credentials || {};
+    if (typeof login === 'string') m.credentials.login = login.trim();
+    if (password === null) delete m.credentials.password;
+    else if (typeof password === 'string' && password.length) m.credentials.password = password;
+    if (typeof autoLoginEnabled === 'boolean') m.credentials.autoLoginEnabled = autoLoginEnabled;
+    m.credentials.updatedAt = Date.now();
+    return m;
+  });
+}
+
+/**
+ * Lê credenciais brutas (uso interno worker/browser).
+ */
+async function readCredentials(nome) {
+  const m = await read(nome);
+  return (m && m.credentials) || {};
+}
+
+/**
+ * Lê credenciais de forma mascarada (para API/UI):
+ * loginMasked: máscara defensiva
+ * hasPassword: boolean, autoLoginEnabled, updatedAt.
+ */
+async function readCredentialsMasked(nome) {
+  const m = await read(nome);
+  const c = (m && m.credentials) || {};
+  // Requere utils.js.maskLogin
+  let mask = s=>s;
+  try { mask = require('./utils.js').maskLogin; } catch {}
+  return {
+    loginMasked: c.login ? mask(c.login) : '',
+    hasPassword: !!c.password,
+    autoLoginEnabled: !!c.autoLoginEnabled,
+    updatedAt: c.updatedAt || null
+  };
+}
+
 // Só use read/write/update deste módulo para trabalhar com manifest.json em workers, apis ou scripts! Não acesse nem escreva o arquivo direto!
-module.exports = { getManifestPath, read, write, update };
+module.exports = {
+  getManifestPath, read, write, update,
+  updateCredentials, readCredentials, readCredentialsMasked
+};

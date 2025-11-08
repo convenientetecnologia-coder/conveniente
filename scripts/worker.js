@@ -2258,7 +2258,7 @@ const handlers = {
         externalFailCountWindow: fail.external,
         unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
         lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
-        activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
+        activationHeldUntil: robeMeta[nome]?.activationHeldUntil || 0,
         killGuardUntil: robeMeta[nome]?.killGuardUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
         manifestStatus,
@@ -2301,7 +2301,7 @@ const handlers = {
       const pauseActive = await (async () => {
         try {
           const man = await manifestStore.read(nome).catch(()=>null);
-          return !!(man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now());
+          return !!(man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now());
         } catch { return false; }
       })();
       if (pauseActive) {
@@ -2767,6 +2767,71 @@ async function detectMessengerTempBlock(page) {
   } catch { return { blocked: false }; }
 }
 
+/**
+ * Tenta auto-login caso loginRequired + autoLoginEnabled=true e dentro do backoff.
+ * Usado somente por nurseTick. SÓ limpa loginRequired se login for sucesso de fato.
+ * |-> Limpa loginRequired/banned se sucesso. Seta backoff por perfil (manifest.accountFlags.loginBackoffUntil) em caso de erro, checkpoint, etc.
+ */
+async function attemptAutoLogin(nome) {
+  return lockProfileAction(nome, async () => {
+    try {
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return false;
+      if (ctrl.humanControl || ctrl.configurando) return false;
+      const man = await manifestStore.read(nome); // credentials + flags
+      if (!man || !man.credentials || !man.credentials.login || !man.credentials.password) return false;
+      if (!man.credentials.autoLoginEnabled) return false;
+      if (man.accountFlags && man.accountFlags.loginBackoffUntil && man.accountFlags.loginBackoffUntil > Date.now()) {
+        await issues.append(nome, 'auto_login_backoff_active', `backoffUntil=${man.accountFlags.loginBackoffUntil}`);
+        return false;
+      }
+      await issues.append(nome, 'auto_login_attempt', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
+      let page = ctrl.mainPage;
+      if (!page) {
+        const pages = await ctrl.browser.pages();
+        page = pages && pages[0];
+      }
+      if (!page) return false;
+      // Chama função robusta; nunca loga senha
+      const res = await browserHelper.loginWithCredentials(page, {
+        login: man.credentials.login,
+        password: man.credentials.password,
+        keepLogged: true,
+        preferMessenger: true
+      }, { timeoutMs: 45000 });
+      if (res && res.ok) {
+        await clearAccountFlags(nome, ['loginRequired']);
+        await manifestStore.update(nome, m => {
+          m = m || {};
+          m.accountFlags = m.accountFlags || {};
+          if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
+          return m;
+        });
+        await issues.append(nome, 'auto_login_success', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
+        await snapshotStatusAndWrite();
+        return true;
+      } else {
+        let addMs = 900000; // padrão 15min
+        let reason = (res && res.reason) || 'unknown';
+        if (reason === 'checkpoint') addMs = 60*60*1000;
+        if (reason === 'invalid') addMs = 1800000;
+        await manifestStore.update(nome, m => {
+          m = m || {};
+          m.accountFlags = m.accountFlags || {};
+          m.accountFlags.loginBackoffUntil = Date.now() + addMs;
+          return m;
+        });
+        await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
+        await snapshotStatusAndWrite();
+        return false;
+      }
+    } catch (e) {
+      await issues.append(nome, 'auto_login_fail_exception', (e && e.message) || String(e));
+      return false;
+    }
+  });
+}
+
 let _nurseTickRunning = false;
 
 async function nurseTick() {
@@ -2906,6 +2971,21 @@ async function nurseTick() {
         const lr = await browserHelper.detectLoginRequired(p0);
         if (lr && lr.loginRequired) {
           await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
+        }
+      } catch {}
+      // Se loginRequired está setado, tente auto-login SE autoLoginEnabled e credenciais presentes.
+      try {
+        const man = await manifestStore.read(nome).catch(()=>null);
+        if (
+          man &&
+          man.accountFlags &&
+          man.accountFlags.loginRequired &&
+          man.credentials &&
+          man.credentials.autoLoginEnabled &&
+          man.credentials.login &&
+          man.credentials.password
+        ) {
+          await attemptAutoLogin(nome);
         }
       } catch {}
       try {

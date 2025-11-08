@@ -54,9 +54,44 @@ module.exports = (app, workerClient, fileStore) => {
     }
     try {
       const man = await manifestStore.read(nome);
+      const maskedCreds = await manifestStore.readCredentialsMasked(nome);
+      if (man.credentials) delete man.credentials;
+      man.credentialsInfo = maskedCreds;
       res.json({ ok: true, manifest: man });
     } catch (e) {
       res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // ===== PASSO 3 — NOVO ENDPOINT: credentials masked - GET =====
+  app.get('/api/perfis/:nome/credentials', async (req, res) => {
+    const nome = req.params.nome;
+    if (!nome) return res.json({ ok:false, error:'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      return res.json({ ok:false, error:e.message });
+    }
+    try {
+      const masked = await manifestStore.readCredentialsMasked(nome);
+      res.json({ ok:true, ...masked });
+    } catch(e) {
+      res.json({ ok:false, error: (e&&e.message)||String(e) });
+    }
+  });
+
+  // ===== PASSO 3 — NOVO ENDPOINT: credentials masked - POST =====
+  app.post('/api/perfis/:nome/credentials', async (req, res) => {
+    const nome = req.params.nome;
+    if (!nome) return res.json({ ok:false, error:'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      return res.json({ ok:false, error:e.message });
+    }
+    const { login, password, autoLoginEnabled } = req.body || {};
+    try {
+      await manifestStore.updateCredentials(nome, { login, password, autoLoginEnabled });
+      await issues.append(nome, 'admin_action', 'credentials_updated (masked)');
+      res.json({ ok:true });
+    } catch(e) {
+      res.json({ ok:false, error: (e&&e.message)||String(e) });
     }
   });
 
@@ -64,7 +99,10 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis', async (req, res) => {
     logger.info('POST /api/perfis chamada', {});
     try {
-      const { cidade, cookies } = req.body || {};
+      // =========== PATCH PARA SUPORTE DE CREDENCIAIS BLINDADAS ===========
+      const { cidade, cookies, login, password, autoLoginEnabled } = req.body || {};
+      // ====================================================================
+
       if (!cidade || !cookies) {
         logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade });
         return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
@@ -163,8 +201,13 @@ module.exports = (app, workerClient, fileStore) => {
         return desired;
       });
 
+      // ===== PATCH CIRÚRGICO: SUPORTE DE CREDENCIAIS BLINDADAS POR PERFIL =====
+      if (typeof login === 'string' || typeof password === 'string' || typeof autoLoginEnabled === 'boolean') {
+        await manifestStore.updateCredentials(nome, { login, password, autoLoginEnabled });
+      }
+
       logger.info('Perfil criado com sucesso', { nome, cidade });
-      res.json({ ok: true, perfil: perfilObj });
+      res.json({ ok: true, perfil: perfilObj }); // NUNCA ENVIA MANIFEST INTEIRO/SENHA!
     } catch (e) {
       logger.error('Erro fatal na rota criação de perfil', { rota: '/api/perfis', cidade: req.body && req.body.cidade, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });

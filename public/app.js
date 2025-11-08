@@ -52,7 +52,12 @@ const api = {
   resumeHumanAllActive: () => fetch('/api/perfis/human-resume-all', { method: 'POST' }).then(r => r.json()),
   // === FIM PATCH ===
 
-  // Adicione abaixo endpoints de auditoria/search para localizacoes_ruins quando implementar
+  getCredentials:   (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`).then(r => r.json()),
+  setCredentials:   (nome, dados) => fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(dados) 
+                      }).then(r => r.json()),
 };
 
 // Expor como window.electronAPI para compatibilidade com o index.html atual
