@@ -186,7 +186,7 @@
     .modal-box h2{ margin:6px 0 14px; font-size:18px }
     .form-row{ margin-bottom:12px }
     label{ display:block; margin-bottom:6px; color:#cdd9f0; font-weight:600; font-size:13px }
-    input[type="text"], textarea, select{
+    input[type="text"], input[type="password"], textarea, select{
       width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:#0a1322; color:var(--text);
     }
     .modal-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:14px }
@@ -369,12 +369,6 @@
           <label>Senha (opcional)</label>
           <input id="senhaCampo" type="password" autocomplete="new-password" placeholder="Senha" />
         </div>
-        <div class="form-row">
-          <label>
-            <input id="autoLoginCk" type="checkbox" style="vertical-align:middle;margin-right:4px">
-            Habilitar auto-login quando necessário
-          </label>
-        </div>
         <div class="modal-actions">
           <button class="btn" id="cancelarBtn" type="button">Cancelar</button>
           <button class="btn primary" id="confirmarBtn" type="button">Criar Conta</button>
@@ -433,9 +427,8 @@
           // Coleta de credenciais adicionais (opcional)
           const login = box.querySelector('#loginCampo').value.trim();
           const password = box.querySelector('#senhaCampo').value;
-          const autoLoginEnabled = !!box.querySelector('#autoLoginCk').checked;
 
-          const res = await window.electronAPI.criarPerfil({ cidade, cookies, login, password, autoLoginEnabled });
+          const res = await window.electronAPI.criarPerfil({ cidade, cookies, login, password });
           if (!res || !res.ok) {
             msgEl.className = 'pill bad';
             msgEl.textContent = 'Falha ao criar: ' + ((res && res.error) || 'erro desconhecido');
@@ -501,12 +494,6 @@
             <input id="credSenhaInput" type="password" autocomplete="current-password" placeholder="Senha" />
             <button type="button" class="btn" id="clearCredSenha" style="margin-top:6px;padding:5px 11px;font-size:12px;">Limpar senha</button>
           </div>
-          <div style="margin-top:7px">
-            <label style="font-weight:500;font-size:13px;">
-              <input type="checkbox" id="credAutoLoginCk" style="vertical-align:middle;margin-right:4px">
-              Habilitar auto-login quando necessário
-            </label>
-          </div>
           <div class="modal-actions" style="margin-top:10px;">
             <button class="btn" id="salvarCredBtn" type="button">Salvar Credenciais</button>
           </div>
@@ -542,7 +529,6 @@
           if (cred && cred.ok) {
             box.querySelector('#credLoginValue').value = cred.login || '';
             box.querySelector('#credSenhaInput').value = cred.password || '';
-            box.querySelector('#credAutoLoginCk').checked = !!cred.autoLoginEnabled;
           }
         } catch {}
       })();
@@ -555,10 +541,9 @@
       box.querySelector('#salvarCredBtn').onclick = async () => {
         const login = box.querySelector('#credLoginValue').value;     // "" limpa
         const password = box.querySelector('#credSenhaInput').value;  // "" limpa
-        const autoLoginEnabled = !!box.querySelector('#credAutoLoginCk').checked;
         setBtnLoading(box.querySelector('#salvarCredBtn'), true, 'Salvando...');
         try {
-          const r = await window.electronAPI.setCredentials(perfil.nome, { login, password, autoLoginEnabled });
+          const r = await window.electronAPI.setCredentials(perfil.nome, { login, password });
           if (!r || !r.ok) throw new Error((r && r.error) || 'Falha ao salvar credenciais');
           alert('Credenciais salvas.');
           // Permanece no formulário, usuário pode continuar editando se quiser.

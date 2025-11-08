@@ -77,8 +77,7 @@ module.exports = (app, workerClient, fileStore) => {
       res.json({
         ok: true,
         login: (c && typeof c.login === 'string') ? c.login : '',
-        password: (c && typeof c.password === 'string') ? c.password : '',
-        autoLoginEnabled: !!(c && c.autoLoginEnabled)
+        password: (c && typeof c.password === 'string') ? c.password : ''
       });
     } catch(e) {
       res.json({ ok:false, error: (e&&e.message)||String(e) });
@@ -92,9 +91,9 @@ module.exports = (app, workerClient, fileStore) => {
     try { assertPerfilExists(fileStore, nome); } catch(e) {
       return res.json({ ok:false, error:e.message });
     }
-    const { login, password, autoLoginEnabled } = req.body || {};
+    const { login, password } = req.body || {};
     try {
-      await manifestStore.updateCredentials(nome, { login, password, autoLoginEnabled });
+      await manifestStore.updateCredentials(nome, { login, password });
       await issues.append(nome, 'admin_action', 'credentials_updated');
       res.json({ ok:true });
     } catch(e) {
@@ -107,7 +106,7 @@ module.exports = (app, workerClient, fileStore) => {
     logger.info('POST /api/perfis chamada', {});
     try {
       // =========== PATCH PARA SUPORTE DE CREDENCIAIS BLINDADAS ===========
-      const { cidade, cookies, login, password, autoLoginEnabled } = req.body || {};
+      const { cidade, cookies, login, password } = req.body || {};
       // ====================================================================
 
       if (!cidade || !cookies) {
@@ -209,8 +208,8 @@ module.exports = (app, workerClient, fileStore) => {
       });
 
       // ===== PATCH CIRÚRGICO: SUPORTE DE CREDENCIAIS BLINDADAS POR PERFIL =====
-      if (typeof login === 'string' || typeof password === 'string' || typeof autoLoginEnabled === 'boolean') {
-        await manifestStore.updateCredentials(nome, { login, password, autoLoginEnabled });
+      if (typeof login === 'string' || typeof password === 'string') {
+        await manifestStore.updateCredentials(nome, { login, password });
       }
 
       logger.info('Perfil criado com sucesso', { nome, cidade });

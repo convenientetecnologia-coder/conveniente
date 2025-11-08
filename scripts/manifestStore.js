@@ -102,13 +102,17 @@ async function update(nome, patchFn) {
  * Atualiza credenciais no manifest, atomicamente.
  * - login === "" ou null → remove campo login do manifest.
  * - password === "" ou null → remove campo password do manifest.
- * - autoLoginEnabled booleana, se definida.
+ * - (autoLoginEnabled é totalmente ignorado/removido; nunca salvo)
  * - Se ambos forem removidos, remove obj credentials do manifest; senão, atualiza timestamp updatedAt.
+ * - Ao gravar, sempre remove o campo autoLoginEnabled herdado de manifests antigos.
  */
-async function updateCredentials(nome, { login, password, autoLoginEnabled }) {
+async function updateCredentials(nome, { login, password } = {}) {
   return update(nome, m => {
     m = m || {};
     m.credentials = (m.credentials && typeof m.credentials === 'object') ? m.credentials : {};
+
+    // Purga autoLoginEnabled legado:
+    if ('autoLoginEnabled' in m.credentials) delete m.credentials.autoLoginEnabled;
 
     // Login: string vazia ou null -> remove; string não vazia -> define
     if (login === null || login === '') {
@@ -124,13 +128,9 @@ async function updateCredentials(nome, { login, password, autoLoginEnabled }) {
       m.credentials.password = password;
     }
 
-    // autoLoginEnabled (boolean)
-    if (typeof autoLoginEnabled === 'boolean') {
-      m.credentials.autoLoginEnabled = autoLoginEnabled;
-    }
-
-    // Atualiza timestamp ou remove credentials se esvaziou geral
-    if (Object.keys(m.credentials).length === 0) {
+    const hasLogin = typeof m.credentials.login === 'string' && m.credentials.login.trim() !== '';
+    const hasPass  = typeof m.credentials.password === 'string' && m.credentials.password.length > 0;
+    if (!hasLogin && !hasPass) {
       delete m.credentials;
     } else {
       m.credentials.updatedAt = Date.now();

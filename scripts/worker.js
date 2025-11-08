@@ -2780,7 +2780,6 @@ async function attemptAutoLogin(nome) {
       if (ctrl.humanControl || ctrl.configurando) return false;
       const man = await manifestStore.read(nome); // credentials + flags
       if (!man || !man.credentials || !man.credentials.login || !man.credentials.password) return false;
-      if (!man.credentials.autoLoginEnabled) return false;
       if (man.accountFlags && man.accountFlags.loginBackoffUntil && man.accountFlags.loginBackoffUntil > Date.now()) {
         await issues.append(nome, 'auto_login_backoff_active', `backoffUntil=${man.accountFlags.loginBackoffUntil}`);
         return false;
@@ -2981,7 +2980,6 @@ async function nurseTick() {
           man.accountFlags &&
           man.accountFlags.loginRequired &&
           man.credentials &&
-          man.credentials.autoLoginEnabled &&
           man.credentials.login &&
           man.credentials.password
         ) {
