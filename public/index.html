@@ -645,7 +645,8 @@
           robe.pauseReason || '',
           (p.loginReason || ''),
           (p.bannedText || ''),
-          (p.whyNotOpen || '')
+          (p.whyNotOpen || ''),
+          (p.postLoginAutomationFail ? 'problemas no login pos' : '') // <----- aqui
         ];
         m.set(p.nome, normalizeText(fields.join(' ')));
       }
@@ -1122,6 +1123,13 @@
           const bn = buildPill('Conta suspensa', 'bad');
           bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
           titleRow.append(bn);
+        }
+
+        // Adicione isso depois dos pills de loginRequired/banned:
+        if (p.postLoginAutomationFail === true) {
+          const pl = buildPill('Problemas no login (pós)', 'warn');
+          pl.title = 'Falha pós-login ao iniciar Virtus/Robe. Recomenda-se intervenção manual (modo humano).';
+          titleRow.append(pl);
         }
 
         // -------- FROZEN pill explícito (primeiro) ---------

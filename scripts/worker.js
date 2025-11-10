@@ -366,7 +366,7 @@ async function killProcessTreeByRootPid(pid) {
 $parent = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; 
 if ($parent) {
   $queue = @($parent);
-  for ($i=0; $i -lt $queue.Count; $i++) {
+  for ($i=0; i -lt $queue.Count; $i++) {
     $cur = $queue[$i];
     $children = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $cur.ProcessId };
     $queue += $children;
@@ -2147,8 +2147,11 @@ const handlers = {
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+      const postLoginAutomationFail = man ? !!(man.accountFlags && man.accountFlags.postLoginAutomationFail === true) : false;
       const problem = man
-        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
+        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) ||
+             (man.accountFlags && man.accountFlags.banned === true) ||
+             (man.accountFlags && man.accountFlags.postLoginAutomationFail === true))
         : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
       perfis.push({
         nome,
@@ -2184,6 +2187,7 @@ const handlers = {
         banned,
         bannedAt,
         bannedText,
+        postLoginAutomationFail,
         problem
       });
     }
@@ -2344,8 +2348,11 @@ const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) ||
 const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
 const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
 const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+const postLoginAutomationFail = man ? !!(man.accountFlags && man.accountFlags.postLoginAutomationFail === true) : false;
 const problem = man
-  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
+  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) ||
+       (man.accountFlags && man.accountFlags.banned === true) ||
+       (man.accountFlags && man.accountFlags.postLoginAutomationFail === true))
   : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
 perfis.push({
   nome,
@@ -2379,6 +2386,7 @@ perfis.push({
   banned,
   bannedAt,
   bannedText,
+  postLoginAutomationFail,
   problem
 });
 }
@@ -2667,43 +2675,135 @@ async function attemptAutoLogin(nome) {
         page = pages && pages[0];
       }
       if (!page) return false;
+
       const res = await browserHelper.loginWithCredentials(page, {
         login: man.credentials.login,
         password: man.credentials.password,
         keepLogged: true,
         preferMessenger: true
       }, { timeoutMs: 45000 });
+
+      // Helper para marcar backoff + contador tentativas erradas
+      const markBackoff = async (addMs, reason) => {
+        await manifestStore.update(nome, m => {
+          m = m || {};
+          m.accountFlags = m.accountFlags || {};
+          m.accountFlags.loginBackoffUntil = Date.now() + addMs;
+          if (reason === 'invalid') {
+            const prev = (m.accountFlags.loginFailCount || 0);
+            m.accountFlags.loginFailCount = prev + 1;
+          }
+          return m;
+        });
+      };
+
+      // Invoca humano e prepara modo humano no painel/painel desired/humanHold
+      const invokeHumanInline = async (why) => {
+        try {
+          ctrl.humanControl = true;
+          await fileStore.withDesiredFileLockUpdate((desired) => {
+            desired.perfis = desired.perfis || {};
+            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
+            return desired;
+          });
+          try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+          await issues.append(nome, 'auto_login_invoke_human', `reason=${why||''}`);
+          await snapshotStatusAndWrite();
+        } catch {}
+      };
+
+      // --- CASO SUCESSO
       if (res && res.ok) {
         await clearAccountFlags(nome, ['loginRequired']);
         await manifestStore.update(nome, m => {
           m = m || {};
           m.accountFlags = m.accountFlags || {};
           if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
+          if (m.accountFlags && m.accountFlags.postLoginAutomationFail) {
+            delete m.accountFlags.postLoginAutomationFail;
+            delete m.accountFlags.humanRecommended;
+            delete m.accountFlags.humanReason;
+          }
           return m;
         });
         await issues.append(nome, 'auto_login_success', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
         await snapshotStatusAndWrite();
-        return true;
-      } else {
-        let addMs = 900000;
-        let reason = (res && res.reason) || 'unknown';
-        if (reason === 'checkpoint') addMs = 60*60*1000;
-        if (reason === 'invalid') addMs = 1800000;
-        await manifestStore.update(nome, m => {
-          m = m || {};
-          m.accountFlags = m.accountFlags || {};
-          m.accountFlags.loginBackoffUntil = Date.now() + addMs;
-          return m;
-        });
-        await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
-        await snapshotStatusAndWrite();
-        return false;
+
+        // NOVO: tenta start_work até 3x
+        const okAuto = await ensurePostLoginAutomations(nome, ctrl, 3);
+        return !!okAuto;
       }
+
+      // --- FALHA
+      let addMs = 15 * 60 * 1000;
+      let reason = (res && res.reason) || 'unknown';
+      if (reason === 'checkpoint' || reason === 'checkpoint_captcha' || reason === 'temporarily_blocked') addMs = 60 * 60 * 1000;
+      if (reason === 'invalid') addMs = 30 * 60 * 1000;
+      await markBackoff(addMs, reason);
+      await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
+      // Mantém loginRequired e marca motivo
+      await setLoginRequiredFlag(nome, { reason, source: 'auto_login' });
+      await invokeHumanInline(reason);
+      await snapshotStatusAndWrite();
+      return false;
     } catch (e) {
       await issues.append(nome, 'auto_login_fail_exception', (e && e.message) || String(e));
+      // Invoca humano também
+      try {
+        const ctrl = controllers.get(nome);
+        if (ctrl && ctrl.browser) {
+          ctrl.humanControl = true;
+          await fileStore.withDesiredFileLockUpdate((desired) => {
+            desired.perfis = desired.perfis || {};
+            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
+            return desired;
+          });
+          try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+        }
+      } catch {}
       return false;
     }
   });
+}
+
+async function ensurePostLoginAutomations(nome, ctrl, maxTries = 3) {
+  // Tenta start_work (Virtus) até N vezes pós-login, para garantir automação funcional
+  for (let i = 0; i < maxTries; i++) {
+    try {
+      const r = await start_work({ nome });
+      await new Promise(r => setTimeout(r, 10000));
+      const c2 = controllers.get(nome);
+      if (c2 && c2.trabalhando) {
+        await issues.append(nome, 'mil_action', `post_login_automation_started try=${i+1}`);
+        return true;
+      }
+    } catch {}
+  }
+  // Falhou iniciar: marca flag, loga, invoca humano
+  try {
+    await manifestStore.update(nome, (m) => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      m.accountFlags.postLoginAutomationFail = true;
+      m.accountFlags.humanRecommended = true;
+      m.accountFlags.humanReason = 'Falha pós-login (Virtus/Robe não iniciado)';
+      return m;
+    });
+    await issues.append(nome, 'auto_login_fail_post_login', 'Falha ao iniciar automação após login. Invocando humano.');
+    // Invoca humano
+    const ctrl3 = controllers.get(nome);
+    if (ctrl3 && ctrl3.browser) {
+      ctrl3.humanControl = true;
+      await fileStore.withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
+        return desired;
+      });
+      try { await browserHelper.invocarHumano(ctrl3.browser, nome); } catch {}
+    }
+    await snapshotStatusAndWrite();
+  } catch {}
+  return false;
 }
 
 let _nurseTickRunning = false;

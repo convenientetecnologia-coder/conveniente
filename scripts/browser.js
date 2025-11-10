@@ -1059,6 +1059,51 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
   return !/messenger.com\/login\/nonce/i.test(page.url() || '');
 }
 
+// Adicione logo DEPOIS de waitAny/clickByXPath/resolveNonceIfPresent
+async function detectInvalidCredentials(page) {
+  try {
+    const res = await page.evaluate(() => {
+      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const texts = Array.from(document.querySelectorAll('h1,h2,div,span,p,section,label'))
+        .slice(0, 1500)
+        .map(el => norm(el.innerText || el.textContent || ''))
+        .filter(Boolean);
+      const hasWrongPass =
+        texts.some(t =>
+          t.includes('a senha que voce inseriu esta incorreta') ||
+          t.includes('digite sua senha novamente') ||
+          t.includes('the password you entered is incorrect')
+        );
+      const hasWrongLogin =
+        texts.some(t =>
+          t.includes('email ou telefone incorreto') ||
+          t.includes('o email ou o numero de celular que voce inseriu nao esta conectado a uma conta') ||
+          t.includes('the email or mobile number you entered isnt connected to an account') ||
+          t.includes('find your account and log in')
+        );
+      const hasTempBlocked =
+        texts.some(t =>
+          t.includes('voce esta bloqueado temporariamente') ||
+          t.includes('youre temporarily blocked') ||
+          t.includes('you are temporarily blocked')
+        );
+      return {
+        wrongPassword: !!hasWrongPass,
+        wrongLogin: !!hasWrongLogin,
+        temporarilyBlocked: !!hasTempBlocked
+      };
+    });
+
+    if (!res) return null;
+    if (res.temporarilyBlocked) return { type: 'temporarily_blocked' };
+    if (res.wrongPassword) return { type: 'invalid', subreason: 'wrong_password' };
+    if (res.wrongLogin) return { type: 'invalid', subreason: 'wrong_login' };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', timeout = 15000 } = {}) {
   // Seletor CSS universal para “Continuar como ...”
   const btn = await waitAny(page, [
@@ -1186,6 +1231,18 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
           }
         }
 
+        // Depois dos handlers tradicionais, ANTES do return ok:true
+        const invalidDet = await detectInvalidCredentials(page);
+        if (invalidDet) {
+          if (invalidDet.type === 'temporarily_blocked') {
+            return { ok: false, reason: 'temporarily_blocked', message: 'Bloqueio temporário após login' };
+          }
+          if (invalidDet.type === 'invalid') {
+            const sub = invalidDet.subreason || '';
+            return { ok: false, reason: 'invalid', message: sub ? 'invalid_' + sub : 'invalid_credentials' };
+          }
+        }
+
         // PÓS-login: chegou grid messenger, marketplace, etc?
         const urlAfter = (page.url && page.url()) || '';
         if (
@@ -1198,6 +1255,19 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
         if (lr2 && lr2.loginRequired) {
           return { ok: false, reason: 'invalid', message: 'login ainda requerido' };
         }
+
+        // Depois dos handlers tradicionais, ANTES do return ok:true
+        const invalidDet2 = await detectInvalidCredentials(page);
+        if (invalidDet2) {
+          if (invalidDet2.type === 'temporarily_blocked') {
+            return { ok: false, reason: 'temporarily_blocked', message: 'Bloqueio temporário após login' };
+          }
+          if (invalidDet2.type === 'invalid') {
+            const sub = invalidDet2.subreason || '';
+            return { ok: false, reason: 'invalid', message: sub ? 'invalid_' + sub : 'invalid_credentials' };
+          }
+        }
+
         // Sucesso se tudo certo
         return { ok:true };
       } catch (e) {
@@ -2363,6 +2433,18 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
           }
         }
 
+        // Depois dos handlers tradicionais, ANTES do return ok:true
+        const invalidDet = await detectInvalidCredentials(page);
+        if (invalidDet) {
+          if (invalidDet.type === 'temporarily_blocked') {
+            return { ok: false, reason: 'temporarily_blocked', message: 'Bloqueio temporário após login' };
+          }
+          if (invalidDet.type === 'invalid') {
+            const sub = invalidDet.subreason || '';
+            return { ok: false, reason: 'invalid', message: sub ? 'invalid_' + sub : 'invalid_credentials' };
+          }
+        }
+
         const urlAfter = (page.url && page.url()) || '';
         if (/messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(urlAfter) || /facebook\.com\/marketplace/.test(urlAfter)) {
           return { ok:true };
@@ -2372,6 +2454,19 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
         if (lr2 && lr2.loginRequired) {
           return { ok: false, reason: 'invalid', message: 'login ainda requerido' };
         }
+
+        // Depois dos handlers tradicionais, ANTES do return ok:true
+        const invalidDet2 = await detectInvalidCredentials(page);
+        if (invalidDet2) {
+          if (invalidDet2.type === 'temporarily_blocked') {
+            return { ok: false, reason: 'temporarily_blocked', message: 'Bloqueio temporário após login' };
+          }
+          if (invalidDet2.type === 'invalid') {
+            const sub = invalidDet2.subreason || '';
+            return { ok: false, reason: 'invalid', message: sub ? 'invalid_' + sub : 'invalid_credentials' };
+          }
+        }
+
         return { ok:true };
       } catch (e) {}
     }
