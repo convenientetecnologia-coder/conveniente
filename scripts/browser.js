@@ -2217,6 +2217,170 @@ async function detectAccountSuspended(page) {
   return { banned: false };
 }
 
+/**
+ * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
+ * Retorna { loginRequired: true/false, reason: string, domain: string }
+ */
+async function detectLoginRequired(page) {
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    if (!isFbOrMsg) return { loginRequired: false };
+
+    const v = await page.evaluate(() => {
+      function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+      const hasRoyal = !!document.querySelector('form[data-testid="royal_login_form"], form#login_form');
+      const hasInputs = !!document.querySelector('input[name="email"], input#email') && !!document.querySelector('input[name="pass"], input#pass');
+      const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
+      const hasPersonaText = h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person'));
+      return { hasRoyal, hasInputs, hasPersonaText };
+    });
+
+    if (v && (v.hasRoyal && v.hasInputs)) {
+      return { loginRequired: true, reason: 'login_form', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
+    }
+    if (v && v.hasPersonaText) {
+      return { loginRequired: true, reason: 'checkpoint_captcha', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
+    }
+  } catch {}
+  return { loginRequired: false };
+}
+
+/**
+ * Detecta se a conta foi bloqueada de modo permanente/banida/suspensa.
+ * Retorna { banned: true/false, reason, snippet }
+ */
+async function detectAccountSuspended(page) {
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    if (!isFbOrMsg) return { banned: false };
+
+    const v = await page.evaluate(() => {
+      function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+      const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2500);
+      const texts = nodes.map(el => (el.innerText || el.textContent || '')).filter(Boolean);
+      const tnorm = texts.map(norm);
+      const hit = tnorm.some(t =>
+        t.includes('sua conta foi suspensa') ||
+        t.includes('sua conta esta suspensa') ||
+        t.includes('your account was suspended') ||
+        t.includes('your account is suspended') ||
+        t.includes('tu cuenta ha sido suspendida') ||
+        t.includes('tu cuenta esta suspendida')
+      );
+      let snippet = '';
+      if (hit) {
+        snippet = texts.find(s => /[Ss]uspens[oa]/.test(s)) || texts.slice(0,20).join(' | ').slice(0,300);
+      }
+      return { hit, snippet };
+    });
+
+    if (v && v.hit) {
+      return { banned: true, reason: 'suspended_ui', snippet: v.snippet || '' };
+    }
+  } catch {}
+  return { banned: false };
+}
+
+/**
+ * Realiza login robusto no Facebook/Messenger com as credenciais fornecidas.
+ * - Campo login/password vêm do manifest.credentials 
+ * - Nunca loga senha
+ * - keepLogged: clica para manter conectado se true
+ * - preferMessenger: começa pelo Messenger; fallback pro FB se houver erro
+ * Retorna { ok:true } em sucesso, ou { ok:false, reason, message }
+ */
+async function loginWithCredentials(page, { login, password, keepLogged = true, preferMessenger = true }, { timeoutMs = 45000 } = {}) {
+  try {
+    if (!page) return { ok:false, reason:'no_page' };
+    const mask = s => (typeof utils.maskLogin === "function" ? utils.maskLogin(s) : '****');
+    const urlLoginMessenger = 'https://www.messenger.com/login';
+    const urlLoginFB = 'https://www.facebook.com/login';
+
+    for (let rotas = 0; rotas < 2; rotas++) {
+      let isMessenger = rotas === 0 ? !!preferMessenger : !preferMessenger;
+      const loginUrl = isMessenger ? urlLoginMessenger : urlLoginFB;
+      try {
+        await page.goto(loginUrl, { waitUntil:'domcontentloaded', timeout:timeoutMs });
+        await sleep(600);
+
+        const emailSel = ['#email', '[name="email"]', 'input[type="text"][name]'];
+        const passSel  = ['#pass', '[name="pass"]', 'input[type="password"][name]'];
+
+        const emailInput = await waitAny(page, emailSel, { timeout: 4500, visible: true });
+        const passInput  = await waitAny(page, passSel,  { timeout: 4500, visible: true });
+
+        if (!emailInput || !passInput) {
+          const hasRoyal = await page.$('form[data-testid="royal_login_form"], form#login_form');
+          if (!hasRoyal) return { ok: false, reason: 'checkpoint', message: 'No login form' };
+        }
+
+        await emailInput.click({ clickCount: 3 }).catch(()=>{});
+        await emailInput.type(login, { delay: 12 }).catch(()=>{});
+        await passInput.click({ clickCount: 3 }).catch(()=>{});
+        await passInput.type(password, { delay: 12 }).catch(()=>{});
+
+        if (keepLogged) {
+          const cks = await page.$$('input[type="checkbox"]:not(:disabled)');
+          for (const ck of cks) {
+            try {
+              const labTxt = await page.evaluate(el => (el.parentElement && (el.parentElement.innerText || el.parentElement.textContent || '')), ck);
+              if (labTxt && /(mantenha-?me conectado|manter(-|\s)m(eu)? login|keep me logged|remember)/i.test(labTxt)) {
+                const checked = await page.evaluate(el => el.checked, ck);
+                if (!checked) await ck.click().catch(()=>{});
+              }
+            } catch {}
+          }
+        }
+
+        const btnSel = ['[data-testid="royal_login_button"]', '#loginbutton', 'button[type="submit"]', 'input[type="submit"]'];
+        const btn = await waitAny(page, btnSel, { timeout: 5000, visible: true });
+        if (btn) {
+          await btn.click({delay: 50}).catch(()=>{});
+        } else {
+          await page.keyboard.press('Enter').catch(()=>{});
+        }
+
+        let okNav = false;
+        try {
+          await page.waitForNavigation({ waitUntil:'domcontentloaded', timeout:15000 });
+          okNav = true;
+        } catch {}
+
+        await resolveNonceIfPresent(page, {});
+
+        const lr = await detectLoginRequired(page);
+        if (lr && lr.loginRequired) {
+          return { ok: false, reason: 'invalid', message: 'login ainda requerido após submissão' };
+        }
+
+        const hasRoyalNow = await page.$('form[data-testid="royal_login_form"], form#login_form');
+        if (hasRoyalNow) {
+          const domtxt = await page.content();
+          if (/segurança|checkpoint|captcha|confirme/i.test(domtxt)) {
+            return { ok: false, reason: 'checkpoint', message: 'Checkpoint ou captcha após login' };
+          }
+        }
+
+        const urlAfter = (page.url && page.url()) || '';
+        if (/messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(urlAfter) || /facebook\.com\/marketplace/.test(urlAfter)) {
+          return { ok:true };
+        }
+
+        const lr2 = await detectLoginRequired(page);
+        if (lr2 && lr2.loginRequired) {
+          return { ok: false, reason: 'invalid', message: 'login ainda requerido' };
+        }
+        return { ok:true };
+      } catch (e) {}
+    }
+    return { ok:false, reason:'unknown', message: 'erro loginWithCredentials' };
+  } catch (err) {
+    return { ok: false, reason:'exception', message: (err && err.message)||String(err) };
+  }
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
