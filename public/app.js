@@ -10,7 +10,14 @@ const api = {
   invokeHuman:     (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/invoke-human`, { method: 'POST' }).then(r => r.json()),
   robePlay:        (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/robe-play`, { method: 'POST' }).then(r => r.json()),
   robePause24h:    (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/robe-24h`,   { method: 'POST' }).then(r => r.json()),
-  criarPerfil:     (dados) => fetch('/api/perfis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dados) }).then(r => r.json()),
+  criarPerfil:     (dados) => {
+    // Remover autoLoginEnabled se estiver presente
+    if ('autoLoginEnabled' in dados) {
+      const { autoLoginEnabled, ...rest } = dados;
+      dados = rest;
+    }
+    return fetch('/api/perfis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(dados) }).then(r => r.json());
+  },
   listarCidades:   () => fetch('/api/cidades').then(r=>r.json()).then(d => (d && Array.isArray(d.cidades) ? d.cidades : [])),
   listarCidadesPerfisCount: () => fetch('/api/cidades/contagem').then(r => r.json()),
   deletePerfil:    (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}`, { method:'DELETE' }).then(r => r.json()),
@@ -52,7 +59,15 @@ const api = {
   resumeHumanAllActive: () => fetch('/api/perfis/human-resume-all', { method: 'POST' }).then(r => r.json()),
   // === FIM PATCH ===
 
-  // Adicione abaixo endpoints de auditoria/search para localizacoes_ruins quando implementar
+  getCredentials:   (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`).then(r => r.json()),
+  setCredentials:   (nome, dados) => fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                          login: dados.login,
+                          password: dados.password
+                        })
+                      }).then(r => r.json()),
 };
 
 // Expor como window.electronAPI para compatibilidade com o index.html atual

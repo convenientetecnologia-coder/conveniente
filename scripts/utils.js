@@ -288,6 +288,31 @@ function getAvailableMB() {
   return Math.round(os.freemem()/(1024*1024));
 }
 
+/**
+ * Mascaramento defensivo/login/email/telefone:
+ * - email: mostra primeiros 2 chars, “***”, @, domínio
+ * - telefone: mostra 2-3 finais,  “(***)***123”
+ * - username: mostra 2 primeiros, “**...”
+ */
+function maskLogin(value) {
+  const s = String(value || '').trim();
+  // Email (exemplo: bernardo@gmail.com → be***@gmail.com)
+  const emailMatch = /^([^@]+)@(.+)$/.exec(s);
+  if (emailMatch) {
+    const local = emailMatch[1], domain = emailMatch[2];
+    if (local.length <= 2) return '*@' + domain;
+    return local.slice(0,2) + '***@' + domain;
+  }
+  // Telefone: só números, mostra 3 finais
+  if (/^\d{8,}$/.test(s.replace(/[^\d]/g, ''))) {
+    const digits = s.replace(/[^\d]/g, '');
+    return '(***)***' + digits.slice(-3);
+  }
+  // Default: username, mostra 2 primeiras, resto oculta
+  if (s.length <= 2) return '**';
+  return s.slice(0,2) + '...' + (s.length >= 7 ? s.slice(-2) : '');
+}
+
 module.exports = {
   slugify,
   readJsonSafe,
@@ -295,4 +320,5 @@ module.exports = {
   normalizeCookies,
   getCoords,
   getAvailableMB,
+  maskLogin,
 };
