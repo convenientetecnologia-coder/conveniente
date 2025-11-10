@@ -54,50 +54,9 @@ module.exports = (app, workerClient, fileStore) => {
     }
     try {
       const man = await manifestStore.read(nome);
-      const maskedCreds = await manifestStore.readCredentialsMasked(nome);
-      if (man.credentials) delete man.credentials;
-      man.credentialsInfo = maskedCreds;
       res.json({ ok: true, manifest: man });
     } catch (e) {
       res.json({ ok: false, error: (e && e.message) || String(e) });
-    }
-  });
-
-  // TROCA COMPLETA DOS ENDPOINTS DE CREDENCIAIS PARA MANIFEST REAL E SEM MASCARAMENTO
-
-  // GET - credenciais cruas (sem máscara)
-  app.get('/api/perfis/:nome/credentials', async (req, res) => {
-    const nome = req.params.nome;
-    if (!nome) return res.json({ ok:false, error:'nome ausente' });
-    try { assertPerfilExists(fileStore, nome); } catch(e) {
-      return res.json({ ok:false, error:e.message });
-    }
-    try {
-      const c = await manifestStore.readCredentials(nome);
-      res.json({
-        ok: true,
-        login: (c && typeof c.login === 'string') ? c.login : '',
-        password: (c && typeof c.password === 'string') ? c.password : ''
-      });
-    } catch(e) {
-      res.json({ ok:false, error: (e&&e.message)||String(e) });
-    }
-  });
-
-  // POST - salva/limpa credenciais (login/senha em branco limpam no manifest)
-  app.post('/api/perfis/:nome/credentials', async (req, res) => {
-    const nome = req.params.nome;
-    if (!nome) return res.json({ ok:false, error:'nome ausente' });
-    try { assertPerfilExists(fileStore, nome); } catch(e) {
-      return res.json({ ok:false, error:e.message });
-    }
-    const { login, password } = req.body || {};
-    try {
-      await manifestStore.updateCredentials(nome, { login, password });
-      await issues.append(nome, 'admin_action', 'credentials_updated');
-      res.json({ ok:true });
-    } catch(e) {
-      res.json({ ok:false, error: (e&&e.message)||String(e) });
     }
   });
 
@@ -105,10 +64,7 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis', async (req, res) => {
     logger.info('POST /api/perfis chamada', {});
     try {
-      // =========== PATCH PARA SUPORTE DE CREDENCIAIS BLINDADAS ===========
-      const { cidade, cookies, login, password } = req.body || {};
-      // ====================================================================
-
+      const { cidade, cookies } = req.body || {};
       if (!cidade || !cookies) {
         logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade });
         return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
@@ -207,13 +163,8 @@ module.exports = (app, workerClient, fileStore) => {
         return desired;
       });
 
-      // ===== PATCH CIRÚRGICO: SUPORTE DE CREDENCIAIS BLINDADAS POR PERFIL =====
-      if (typeof login === 'string' || typeof password === 'string') {
-        await manifestStore.updateCredentials(nome, { login, password });
-      }
-
       logger.info('Perfil criado com sucesso', { nome, cidade });
-      res.json({ ok: true, perfil: perfilObj }); // NUNCA ENVIA MANIFEST INTEIRO/SENHA!
+      res.json({ ok: true, perfil: perfilObj });
     } catch (e) {
       logger.error('Erro fatal na rota criação de perfil', { rota: '/api/perfis', cidade: req.body && req.body.cidade, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });

@@ -186,7 +186,7 @@
     .modal-box h2{ margin:6px 0 14px; font-size:18px }
     .form-row{ margin-bottom:12px }
     label{ display:block; margin-bottom:6px; color:#cdd9f0; font-weight:600; font-size:13px }
-    input[type="text"], input[type="password"], textarea, select{
+    input[type="text"], textarea, select{
       width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:#0a1322; color:var(--text);
     }
     .modal-actions{ display:flex; gap:10px; justify-content:flex-end; margin-top:14px }
@@ -361,14 +361,6 @@
           <textarea id="cookiesCampo" placeholder="Cole aqui os cookies exportados da conta"></textarea>
         </div>
         <div id="criarContaMsg" style="display:none" class="pill"></div>
-        <div class="form-row">
-          <label>Login (opcional)</label>
-          <input id="loginCampo" type="text" placeholder="E-mail ou telefone" autocomplete="username" spellcheck="false" />
-        </div>
-        <div class="form-row">
-          <label>Senha (opcional)</label>
-          <input id="senhaCampo" type="text" autocomplete="new-password" placeholder="Senha" />
-        </div>
         <div class="modal-actions">
           <button class="btn" id="cancelarBtn" type="button">Cancelar</button>
           <button class="btn primary" id="confirmarBtn" type="button">Criar Conta</button>
@@ -424,11 +416,7 @@
         // ========================== FIM ALTERAÇÃO RAM MILITAR ==========================
 
         try {
-          // Coleta de credenciais adicionais (opcional)
-          const login = box.querySelector('#loginCampo').value.trim();
-          const password = box.querySelector('#senhaCampo').value;
-
-          const res = await window.electronAPI.criarPerfil({ cidade, cookies, login, password });
+          const res = await window.electronAPI.criarPerfil({ cidade, cookies });
           if (!res || !res.ok) {
             msgEl.className = 'pill bad';
             msgEl.textContent = 'Falha ao criar: ' + ((res && res.error) || 'erro desconhecido');
@@ -481,23 +469,6 @@
         <div class="form-row">
           <label><input type="checkbox" id="renameSlugCk" ${ativo ? 'disabled' : ''}/> Renomear identificador/diretório (somente com navegador fechado)</label>
         </div>
-        <div style="border-bottom:1px solid #2a3954;margin:15px 0 10px 0"></div>
-        <div class="form-row">
-          <label>Credenciais</label>
-          <div>
-            <label style="font-weight:500;font-size:13px;">Login</label>
-            <input id="credLoginValue" type="text" autocomplete="username" spellcheck="false" placeholder="E-mail ou telefone" />
-            <button type="button" class="btn" id="clearCredLogin" style="margin-top:6px;padding:5px 11px;font-size:12px;">Limpar login</button>
-          </div>
-          <div style="margin-top:7px">
-            <label style="font-weight:500;font-size:13px;">Senha</label>
-            <input id="credSenhaInput" type="text" autocomplete="current-password" placeholder="Senha" />
-            <button type="button" class="btn" id="clearCredSenha" style="margin-top:6px;padding:5px 11px;font-size:12px;">Limpar senha</button>
-          </div>
-          <div class="modal-actions" style="margin-top:10px;">
-            <button class="btn" id="salvarCredBtn" type="button">Salvar Credenciais</button>
-          </div>
-        </div>
         <div class="modal-actions">
           <button class="btn" id="fecharCfg">Fechar</button>
           <button class="btn primary" id="salvarCfg">Salvar</button>
@@ -521,38 +492,6 @@
       })();
 
       document.body.append(overlay);
-
-      // Carregamento dos campos de credenciais visíveis/editáveis
-      (async () => {
-        try {
-          const cred = await window.electronAPI.getCredentials(perfil.nome);
-          if (cred && cred.ok) {
-            box.querySelector('#credLoginValue').value = cred.login || '';
-            box.querySelector('#credSenhaInput').value = cred.password || '';
-          }
-        } catch {}
-      })();
-
-      // Botões limpar adicionados
-      box.querySelector('#clearCredLogin').onclick = () => { box.querySelector('#credLoginValue').value = ''; };
-      box.querySelector('#clearCredSenha').onclick = () => { box.querySelector('#credSenhaInput').value = ''; };
-
-      // Botão Salvar Credenciais
-      box.querySelector('#salvarCredBtn').onclick = async () => {
-        const login = box.querySelector('#credLoginValue').value;     // "" limpa
-        const password = box.querySelector('#credSenhaInput').value;  // "" limpa
-        setBtnLoading(box.querySelector('#salvarCredBtn'), true, 'Salvando...');
-        try {
-          const r = await window.electronAPI.setCredentials(perfil.nome, { login, password });
-          if (!r || !r.ok) throw new Error((r && r.error) || 'Falha ao salvar credenciais');
-          alert('Credenciais salvas.');
-          // Permanece no formulário, usuário pode continuar editando se quiser.
-        } catch (e) {
-          alert('Falha ao salvar credenciais: ' + (e && e.message || e));
-        } finally {
-          setBtnLoading(box.querySelector('#salvarCredBtn'), false);
-        }
-      };
 
       box.querySelector('#fecharCfg').onclick = () => { overlay.remove(); onClose && onClose(); };
       box.querySelector('#salvarCfg').onclick = async () => {
@@ -749,16 +688,18 @@
     }
 
     // Helper badge Frozen/skip/antiflood (roboFrozenUntil > Date.now())
+    // Militar: frozenUntil/COOLDOWN badge lógica
     function buildFrozenPill(p) {
       if (!p || !p.robeFrozenUntil) return null;
       try {
         const ts = Number(p.robeFrozenUntil);
         if (!ts || ts < Date.now()) return null;
-        const restante = Math.max(0, Math.floor((ts - Date.now()) / 1000));
-        const reason = p.frozenReason ? String(p.frozenReason) : '';
-        const label = reason === 'temp_block' ? 'Bloqueio Temporário (6h)' : 'Congelado';
-        const span = buildPill(`${label} (${tempoRestante(restante)})`, 'frozen');
-        span.title = `Motivo: ${reason || 'desconhecido'}`;
+        const agora = Date.now();
+        the_restante = Math.max(0, Math.floor((ts-agora)/1000));
+        const reason = p.frozenReason ? String(p.frozenReason) : 'motivo não informado';
+        const sinceStr = p.frozenAt ? new Date(p.frozenAt).toLocaleString() : '';
+        const span = buildPill(`ROBE Congelado (${tempoRestante(the_restante)})`, 'frozen');
+        span.title = `Motivo: ${reason}\nDesde: ${sinceStr}`;
         return span;
       } catch { return null; }
     }
@@ -1685,19 +1626,6 @@
     window.electronAPI = window.electronAPI || {};
     window.electronAPI.listPerfis = () =>
       fetch('/api/perfis').then(r => r.json()).catch(() => null);
-    // Garantia: wrappers de credenciais (caso não existam no preload/app.js)
-    if (!window.electronAPI.getCredentials) {
-      window.electronAPI.getCredentials = (nome) =>
-        fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`).then(r => r.json());
-    }
-    if (!window.electronAPI.setCredentials) {
-      window.electronAPI.setCredentials = (nome, payload) =>
-        fetch(`/api/perfis/${encodeURIComponent(nome)}/credentials`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload || {})
-        }).then(r => r.json());
-    }
 
     async function startAllSequential() {
       if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
