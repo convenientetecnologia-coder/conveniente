@@ -98,5 +98,76 @@ async function update(nome, patchFn) {
   });
 }
 
+/**
+ * Atualiza credenciais no manifest, atomicamente.
+ * - login === "" ou null → remove campo login do manifest.
+ * - password === "" ou null → remove campo password do manifest.
+ * - (autoLoginEnabled é totalmente ignorado/removido; nunca salvo)
+ * - Se ambos forem removidos, remove obj credentials do manifest; senão, atualiza timestamp updatedAt.
+ * - Ao gravar, sempre remove o campo autoLoginEnabled herdado de manifests antigos.
+ */
+async function updateCredentials(nome, { login, password } = {}) {
+  return update(nome, m => {
+    m = m || {};
+    m.credentials = (m.credentials && typeof m.credentials === 'object') ? m.credentials : {};
+
+    // Purga autoLoginEnabled legado:
+    if ('autoLoginEnabled' in m.credentials) delete m.credentials.autoLoginEnabled;
+
+    // Login: string vazia ou null -> remove; string não vazia -> define
+    if (login === null || login === '') {
+      delete m.credentials.login;
+    } else if (typeof login === 'string') {
+      m.credentials.login = login.trim();
+    }
+
+    // Senha: string vazia ou null -> remove; string não vazia -> define
+    if (password === null || password === '') {
+      delete m.credentials.password;
+    } else if (typeof password === 'string') {
+      m.credentials.password = password;
+    }
+
+    const hasLogin = typeof m.credentials.login === 'string' && m.credentials.login.trim() !== '';
+    const hasPass  = typeof m.credentials.password === 'string' && m.credentials.password.length > 0;
+    if (!hasLogin && !hasPass) {
+      delete m.credentials;
+    } else {
+      m.credentials.updatedAt = Date.now();
+    }
+    return m;
+  });
+}
+
+/**
+ * Lê credenciais brutas (uso interno worker/browser).
+ */
+async function readCredentials(nome) {
+  const m = await read(nome);
+  return (m && m.credentials) || {};
+}
+
+/**
+ * Lê credenciais de forma mascarada (para API/UI):
+ * loginMasked: máscara defensiva
+ * hasPassword: boolean, autoLoginEnabled, updatedAt.
+ */
+async function readCredentialsMasked(nome) {
+  const m = await read(nome);
+  const c = (m && m.credentials) || {};
+  // Requere utils.js.maskLogin
+  let mask = s=>s;
+  try { mask = require('./utils.js').maskLogin; } catch {}
+  return {
+    loginMasked: c.login ? mask(c.login) : '',
+    hasPassword: !!c.password,
+    autoLoginEnabled: !!c.autoLoginEnabled,
+    updatedAt: c.updatedAt || null
+  };
+}
+
 // Só use read/write/update deste módulo para trabalhar com manifest.json em workers, apis ou scripts! Não acesse nem escreva o arquivo direto!
-module.exports = { getManifestPath, read, write, update };
+module.exports = {
+  getManifestPath, read, write, update,
+  updateCredentials, readCredentials, readCredentialsMasked
+};
