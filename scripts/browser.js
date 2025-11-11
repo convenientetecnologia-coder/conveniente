@@ -1185,6 +1185,7 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
  * - preferMessenger: começa pelo Messenger; fallback pro FB se houver erro
  * Retorna { ok:true } em sucesso, ou { ok:false, reason, message }
  */
+/* [DUPLICATE REMOVED PER INSTRUCTION] Anterior loginWithCredentials comentado
 async function loginWithCredentials(page, { login, password, keepLogged = true, preferMessenger = true }, { timeoutMs = 45000, singleDomain = true } = {}) {
   try {
     if (!page) return { ok:false, reason:'no_page' };
@@ -1275,6 +1276,7 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
     return { ok: false, reason:'exception', message: (err && err.message)||String(err) };
   }
 }
+*/
 
 // ===============
 // configureProfile USA A LEITURA correta do manifest
@@ -1995,18 +1997,19 @@ function deepScanLimitOverlayInDocument() {
           try {
             const hits = 1;
             const where = 'global_any';
+            const el2 = el;
             const debugPayload = {
               step: 'deepScan_limit_overlay_debug',
               found: hits > 0,
               where: where,
               snippet,
-              tags: el ? (
+              tags: el2 ? (
                 {
-                  id: el.id || '',
-                  class: el.className || '',
-                  ariaLabel: el.getAttribute ? el.getAttribute('aria-label') : '',
-                  ariaLabelled: el.getAttribute ? el.getAttribute('aria-labelledby') : '',
-                  title: el.getAttribute ? el.getAttribute('title') : '',
+                  id: el2.id || '',
+                  class: el2.className || '',
+                  ariaLabel: el2.getAttribute ? el2.getAttribute('aria-label') : '',
+                  ariaLabelled: el2.getAttribute ? el2.getAttribute('aria-labelledby') : '',
+                  title: el2.getAttribute ? el2.getAttribute('title') : '',
                 }
               ) : {},
               strongEvidenceCount: hits,
@@ -2205,6 +2208,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 20000 } = {}) {
  * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
  * Retorna { loginRequired: true/false, reason: string, domain: string }
  */
+/* [DUPLICATE REMOVED PER INSTRUCTION] Funções detectLoginRequired/detectAccountSuspended duplicadas — primeira cópia comentada
 async function detectLoginRequired(page) {
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
@@ -2231,11 +2235,13 @@ async function detectLoginRequired(page) {
   } catch {}
   return { loginRequired: false };
 }
+*/
 
 /**
  * Detecta se a conta foi bloqueada de modo permanente/banida/suspensa.
  * Retorna { banned: true/false, reason, snippet }
  */
+/* [DUPLICATE REMOVED PER INSTRUCTION] 
 async function detectAccountSuspended(page) {
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
@@ -2280,6 +2286,7 @@ async function detectAccountSuspended(page) {
   } catch {}
   return { banned: false };
 }
+*/
 
 /**
  * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
@@ -2359,61 +2366,76 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
   try {
     if (!page) return { ok:false, reason:'no_page' };
     const urlLoginMessenger = 'https://www.messenger.com/login';
-    const urlLoginFB = 'https://www.facebook.com/login';
-
-    // SEM fallback cross-domain: apenas tenta no domínio informado
+    const urlLoginFB        = 'https://www.facebook.com/login';
     const isMessenger = !!preferMessenger;
     const loginUrl = isMessenger ? urlLoginMessenger : urlLoginFB;
 
-    // 1) Vai direto ao domínio definido
-    await page.goto(loginUrl, { waitUntil:'domcontentloaded', timeout:timeoutMs }).catch(()=>{});
+    // 1) Navega para a URL de login do domínio correto
+    await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(()=>{});
     await sleep(600);
 
-    // 2) Checa anomalia de “Return to Messenger”/“página indisponível”
+    // 2) Checa anomalia REAL (página impossível de logar). Só aqui pode retornar non_login_page.
     const anomaly = await detectNonLoginAnomaly(page);
     if (anomaly && anomaly.anomaly) {
       return { ok: false, reason: 'non_login_page', message: anomaly.message || 'Página indisponível' };
     }
 
-    // 3) Inputs e preenchimento
-    const emailSel = ['#email', '[name="email"]', 'input[type="text"][name]'];
-    const passSel  = ['#pass', '[name="pass"]', 'input[type="password"][name]'];
+    // 3) Aguarda campos e tenta input/click/submit UMA VEZ
+    const emailSel = ['#email', '[name="email"]', 'input[type="text"][name="email"]', 'input[name="email"]'];
+    const passSel  = ['#pass',  '[name="pass"]',  'input[type="password"][name="pass"]', 'input[name="pass"]'];
 
-    const emailInput = await waitAny(page, emailSel, { timeout: 5500, visible: true });
-    const passInput  = await waitAny(page, passSel,  { timeout: 5500, visible: true });
+    // Tenta achar os campos com um pouco mais de tolerância (até 9000ms)
+    const emailInput = await waitAny(page, emailSel, { timeout: 9000, visible: true });
+    const passInput  = await waitAny(page, passSel,  { timeout: 9000, visible: true });
 
+    // Se ainda não achou campos: é FORM AUSENTE, não “página inválida”
     if (!emailInput || !passInput) {
-      // Não há campos de login: trate como anomalia de página inválida
-      return { ok: false, reason: 'non_login_page', message: 'Campos de login ausentes' };
+      // Como tentativa extra, aperte Tab/Enter para ver se o formulário revela
+      try { await page.keyboard.press('Tab'); } catch {}
+      await sleep(250);
+      const email2 = (!emailInput) ? await waitAny(page, emailSel, { timeout: 2000, visible: true }) : emailInput;
+      const pass2  = (!passInput)  ? await waitAny(page, passSel,  { timeout: 2000, visible: true }) : passInput;
+
+      if (!email2 || !pass2) {
+        return { ok: false, reason: 'login_form_not_found', message: 'Campos de login não encontrados' };
+      }
     }
 
-    await emailInput.click({ clickCount: 3 }).catch(()=>{});
-    await emailInput.type(login, { delay: 12 }).catch(()=>{});
-    await passInput.click({ clickCount: 3 }).catch(()=>{});
-    await passInput.type(password, { delay: 12 }).catch(()=>{});
+    // Usa a melhor referência de campo (caso tenhamos reatribuído acima)
+    const email = emailInput || await waitAny(page, emailSel, { timeout: 1000, visible: true });
+    const pass  = passInput  || await waitAny(page, passSel,  { timeout: 1000, visible: true });
 
+    // Input de login/senha (1x)
+    await email.click({ clickCount: 3 }).catch(()=>{});
+    await email.type(login, { delay: 12 }).catch(()=>{});
+    await pass.click({ clickCount: 3 }).catch(()=>{});
+    await pass.type(password, { delay: 12 }).catch(()=>{});
+
+    // Checkbox “manter conectado”, se houver
     if (keepLogged) {
-      const cks = await page.$$('input[type="checkbox"]:not(:disabled)');
-      for (const ck of cks) {
-        try {
+      try {
+        const cks = await page.$$('input[type="checkbox"]:not(:disabled)');
+        for (const ck of cks) {
           const labTxt = await page.evaluate(el => (el.parentElement && (el.parentElement.innerText || el.parentElement.textContent || '')), ck);
           if (labTxt && /(manter.*conectado|keep me logged|remember)/i.test(labTxt)) {
             const checked = await page.evaluate(el => el.checked, ck);
             if (!checked) await ck.click().catch(()=>{});
           }
-        } catch {}
-      }
+        }
+      } catch {}
     }
 
+    // Clica no botão "Entrar"/"Login" (ou Enter) — 1x
     const btnSel = ['[data-testid="royal_login_button"]', '#loginbutton', 'button[type="submit"]', 'input[type="submit"]'];
     const btn = await waitAny(page, btnSel, { timeout: 5000, visible: true });
     if (btn) await btn.click({delay: 50}).catch(()=>{});
     else     await page.keyboard.press('Enter').catch(()=>{});
 
-    await page.waitForNavigation({ waitUntil:'domcontentloaded', timeout:15000 }).catch(()=>{});
+    // Aguarda navegação e trata nonce (uma vez)
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
     await resolveNonceIfPresent(page, {});
 
-    // Credenciais inválidas/bloqueio temporário
+    // 4) Analisa resultado: credenciais inválidas / bloqueio temporário
     const invalidDet = await detectInvalidCredentials(page);
     if (invalidDet) {
       if (invalidDet.type === 'temporarily_blocked') {
@@ -2425,17 +2447,19 @@ async function loginWithCredentials(page, { login, password, keepLogged = true, 
       }
     }
 
-    // Sucesso: rotas esperadas
-    const urlAfter = (page.url && page.url()) || '';
-    if (
-      /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(urlAfter) ||
-      /facebook\.com\/marketplace/i.test(urlAfter)
-    ) return { ok:true };
-
-    // Recheca login requerido
+    // Se continuou em /login pedindo login de novo: trate como “invalid” (não-ambíguo)
     const lr2 = await detectLoginRequired(page);
     if (lr2 && lr2.loginRequired) {
       return { ok: false, reason: 'invalid', message: 'login ainda requerido' };
+    }
+
+    // 5) Sucesso: rotas esperadas Messenger/Facebook Marketplace após login
+    const urlAfter = (page.url && page.url()) || '';
+    if (
+      /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(urlAfter) ||
+      /facebook\.com\/(marketplace|home|me)/i.test(urlAfter)
+    ) {
+      return { ok:true };
     }
 
     // fallback: funciona mesmo se não bateu nos padrões
