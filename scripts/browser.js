@@ -2187,7 +2187,6 @@ async function detectAccountSuspended(page) {
   } catch {}
   return { banned: false };
 }
-*/
 
 /**
  * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
