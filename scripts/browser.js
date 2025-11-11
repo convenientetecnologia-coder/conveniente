@@ -1177,8 +1177,6 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
   return ok;
 }
 
-*/
-
 // ===============
 // configureProfile USA A LEITURA correta do manifest
 // ===============
