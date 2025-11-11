@@ -3680,7 +3680,8 @@ process.on('message', async (msg) => {
 });
 process.on('uncaughtException', (e) => {
   try { logger.error('uncaught', { error: e && e.message || e }, e); } catch {}
-});
+}
+);
 process.on('unhandledRejection', (e) => {
   try { logger.error('unhandled', { error: (e && e.message) || e }, e); } catch {}
 });
