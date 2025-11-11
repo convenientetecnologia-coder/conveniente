@@ -33,15 +33,32 @@ async function readAccountFlags(nome) {
     return (m && m.accountFlags) ? m.accountFlags : {};
   } catch { return {}; }
 }
-async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
+// 2. Adicione o mapeador translate reason→PT-BR
+function mapLoginReasonPt(reason, message) {
+  const msg = String(message || '').toLowerCase();
+  const r = String(reason || '').toLowerCase();
+  if (r === 'temporarily_blocked') return 'Bloqueio temporário';
+  if (r === 'checkpoint' || r === 'checkpoint_captcha') return 'Checkpoint/Captcha';
+  if (r === 'invalid') {
+    if (msg.includes('wrong_password')) return 'Senha incorreta';
+    if (msg.includes('wrong_login')) return 'E-mail ou telefone inválido';
+    return 'Credenciais inválidas';
+  }
+  if (r === 'login_form') return 'Login requerido';
+  return 'Login requerido';
+}
+// 3. Atualize setLoginRequiredFlag para motivo textual PT-BR
+async function setLoginRequiredFlag(nome, { reason = '', source = '', message = '' } = {}) {
   try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.loginRequired === true;
+    const pt = mapLoginReasonPt(reason, message);
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
       man.accountFlags.loginRequired = true;
-      man.accountFlags.loginReason = String(reason||'');
+      man.accountFlags.loginReason = pt;
+      man.accountFlags.loginReasonCode = String(reason||'');
       man.accountFlags.loginSource = String(source||'');
       man.accountFlags.lastLoginRequiredAt = Date.now();
       return man;
@@ -50,12 +67,12 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
       await issues.append(
         nome,
         'login_required_detected',
-        `reason=${reason||''} source=${source||''} at=${new Date().toISOString()}`
+        `reason=${reason||''} msg=${(message||'').slice(0,60)} source=${source||''} at=${new Date().toISOString()}`
       );
     }
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].loginRequired = true;
-    robeMeta[nome].loginReason = reason || '';
+    robeMeta[nome].loginReason = pt;
   } catch {}
 }
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
@@ -2675,30 +2692,21 @@ async function attemptAutoLogin(nome) {
         page = pages && pages[0];
       }
       if (!page) return false;
+      const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
+      let preferMessenger = /messenger\.com/i.test(urlNow) ? true : (/facebook\.com/i.test(urlNow) ? false : true);
 
-      const res = await browserHelper.loginWithCredentials(page, {
-        login: man.credentials.login,
-        password: man.credentials.password,
-        keepLogged: true,
-        preferMessenger: true
-      }, { timeoutMs: 45000 });
-
-      // Helper para marcar backoff + contador tentativas erradas
-      const markBackoff = async (addMs, reason) => {
+      const markBackoff = async (addMs, reasonCode) => {
         await manifestStore.update(nome, m => {
           m = m || {};
           m.accountFlags = m.accountFlags || {};
           m.accountFlags.loginBackoffUntil = Date.now() + addMs;
-          if (reason === 'invalid') {
-            const prev = (m.accountFlags.loginFailCount || 0);
-            m.accountFlags.loginFailCount = prev + 1;
+          if (reasonCode === 'invalid') {
+            m.accountFlags.loginFailCount = (m.accountFlags.loginFailCount || 0) + 1;
           }
           return m;
         });
       };
-
-      // Invoca humano e prepara modo humano no painel/painel desired/humanHold
-      const invokeHumanInline = async (why) => {
+      const invokeHumanInline = async (whyCode, whyMsg) => {
         try {
           ctrl.humanControl = true;
           await fileStore.withDesiredFileLockUpdate((desired) => {
@@ -2707,48 +2715,62 @@ async function attemptAutoLogin(nome) {
             return desired;
           });
           try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-          await issues.append(nome, 'auto_login_invoke_human', `reason=${why||''}`);
+          await issues.append(nome, 'auto_login_invoke_human', `reason=${whyCode||''} msg=${(whyMsg||'').slice(0,60)}`);
           await snapshotStatusAndWrite();
         } catch {}
       };
 
-      // --- CASO SUCESSO
-      if (res && res.ok) {
-        await clearAccountFlags(nome, ['loginRequired']);
-        await manifestStore.update(nome, m => {
-          m = m || {};
-          m.accountFlags = m.accountFlags || {};
-          if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
-          if (m.accountFlags && m.accountFlags.postLoginAutomationFail) {
-            delete m.accountFlags.postLoginAutomationFail;
-            delete m.accountFlags.humanRecommended;
-            delete m.accountFlags.humanReason;
-          }
-          return m;
-        });
-        await issues.append(nome, 'auto_login_success', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
-        await snapshotStatusAndWrite();
+      const tryLogin = async (prefer) => {
+        return await browserHelper.loginWithCredentials(page, {
+          login: man.credentials.login,
+          password: man.credentials.password,
+          keepLogged: true,
+          preferMessenger: !!prefer
+        }, { timeoutMs: 45000 });
+      };
 
-        // NOVO: tenta start_work até 3x
-        const okAuto = await ensurePostLoginAutomations(nome, ctrl, 3);
-        return !!okAuto;
+      const attempts = [
+        { prefer: preferMessenger },
+        { prefer: !preferMessenger }
+      ];
+
+      for (let i = 0; i < attempts.length; i++) {
+        const res = await tryLogin(attempts[i].prefer);
+        if (res && res.ok) {
+          await clearAccountFlags(nome, ['loginRequired']);
+          await manifestStore.update(nome, m => {
+            m = m || {};
+            m.accountFlags = m.accountFlags || {};
+            if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
+            if (m.accountFlags && m.accountFlags.postLoginAutomationFail) {
+              delete m.accountFlags.postLoginAutomationFail;
+              delete m.accountFlags.humanRecommended;
+              delete m.accountFlags.humanReason;
+            }
+            return m;
+          });
+          await issues.append(nome, 'auto_login_success', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
+          await snapshotStatusAndWrite();
+          const okAuto = await ensurePostLoginAutomations(nome, ctrl, 3);
+          return !!okAuto;
+        }
+        const reason = (res && res.reason) || 'unknown';
+        const message = (res && res.message) || '';
+        let addMs = 15 * 60 * 1000;
+        if (reason === 'temporarily_blocked' || reason === 'checkpoint' || reason === 'checkpoint_captcha') addMs = 60 * 60 * 1000;
+        if (reason === 'invalid') addMs = 30 * 60 * 1000;
+        await markBackoff(addMs, reason);
+        await setLoginRequiredFlag(nome, { reason, source: (attempts[i].prefer ? 'messenger' : 'facebook'), message });
+        await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
+        await invokeHumanInline(reason, message);
+        if (i === attempts.length - 1) {
+          await snapshotStatusAndWrite();
+          return false;
+        }
       }
-
-      // --- FALHA
-      let addMs = 15 * 60 * 1000;
-      let reason = (res && res.reason) || 'unknown';
-      if (reason === 'checkpoint' || reason === 'checkpoint_captcha' || reason === 'temporarily_blocked') addMs = 60 * 60 * 1000;
-      if (reason === 'invalid') addMs = 30 * 60 * 1000;
-      await markBackoff(addMs, reason);
-      await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
-      // Mantém loginRequired e marca motivo
-      await setLoginRequiredFlag(nome, { reason, source: 'auto_login' });
-      await invokeHumanInline(reason);
-      await snapshotStatusAndWrite();
       return false;
     } catch (e) {
       await issues.append(nome, 'auto_login_fail_exception', (e && e.message) || String(e));
-      // Invoca humano também
       try {
         const ctrl = controllers.get(nome);
         if (ctrl && ctrl.browser) {
@@ -2929,7 +2951,7 @@ async function nurseTick() {
       try {
         const lr = await browserHelper.detectLoginRequired(p0);
         if (lr && lr.loginRequired) {
-          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
+          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '', message: (lr && lr.message) || '' });
         }
       } catch {}
       try {
@@ -2954,7 +2976,7 @@ async function nurseTick() {
       try {
         const lr = await browserHelper.detectLoginRequired(p0);
         if (lr && lr.loginRequired) {
-          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
+          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '', message: (lr && lr.message) || '' });
         }
       } catch {}
       try {
@@ -3235,7 +3257,9 @@ async function wirePageObservers(nome, page) {
     }
   });
   page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('requestfailed', () => { GetHealth(nome).lastNetEventAt = Date.now(); });
+  page.on('requestfailed', () => {
+  try { getHealth(nome).lastNetEventAt = Date.now(); } catch {}
+});
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 }
@@ -3335,7 +3359,7 @@ async function healthTick() {
     try {
       const lr = await browserHelper.detectLoginRequired(page);
       if (lr && lr.loginRequired) {
-        await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
+        await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '', message: (lr && lr.message) || '' });
         const man = await manifestStore.read(nome).catch(()=>null);
         if (man && man.accountFlags && man.accountFlags.loginRequired && man.credentials && man.credentials.login && man.credentials.password) {
           await attemptAutoLogin(nome);
