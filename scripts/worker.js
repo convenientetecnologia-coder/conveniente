@@ -1955,9 +1955,9 @@ const handlers = {
         m = m || {};
         m.accountFlags = m.accountFlags || {};
         // Limpa TODO erro de login, problem flags e resíduos
+        m.accountFlags.loginAutoAttemptCount = 0;
         delete m.accountFlags.loginBackoffUntil;
         delete m.accountFlags.loginFailCount;
-        delete m.accountFlags.loginAutoAttemptCount;
         delete m.accountFlags.lastLoginTryError;
         delete m.accountFlags.lastLoginTryReasonCode;
         delete m.accountFlags.lastLoginTrySource;
