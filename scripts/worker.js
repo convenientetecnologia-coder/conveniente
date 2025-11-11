@@ -37,7 +37,7 @@ async function readAccountFlags(nome) {
 function mapLoginReasonPt(reason, message) {
   const msg = String(message || '').toLowerCase();
   const r = String(reason || '').toLowerCase();
-  if (r === 'temporarily_blocked') return 'Bloqueio temporário';
+  if (r === 'temporarily_blocked') return 'Bloqueado temporariamente';
   if (r === 'checkpoint' || r === 'checkpoint_captcha') return 'Checkpoint/Captcha';
   if (r === 'invalid') {
     if (msg.includes('wrong_password')) return 'Senha incorreta';
@@ -1940,58 +1940,78 @@ const handlers = {
     });
   },
   async ['human-resume']({ nome }) {
-    return lockProfileAction(nome, async () => {
-      logger.info('[HANDLER] human-resume chamada', { nome });
-      const ctrl = controllers.get(nome);
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-      ctrl.humanControl = false;
-      try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
-      try {
-        await manifestStore.update(nome, (m) => {
-          m = m || {};
-          m.accountFlags = m.accountFlags || {};
-          if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
-          if ('loginFailCount' in m.accountFlags) delete m.accountFlags.loginFailCount;
-          return m;
-        });
-      } catch {}
-      try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
-      let pages2 = [];
-      try { pages2 = await ctrl.browser.pages(); } catch {}
-      if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]);
-      try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
-      try {
-        const ps = await ctrl.browser.pages();
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].numPages = (ps && ps.length) || 0;
-        await snapshotStatusAndWrite();
-      } catch {}
-      let pages;
-      try { pages = await ctrl.browser.pages(); } catch {}
-      if (pages && pages[0]) {
-        try {
-          await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
-          await new Promise(r => setTimeout(r, 350));
-          await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
-        } catch {}
-      }
-      if (automationAllowed(ctrl)) {
-        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
-        ctrl.trabalhando = true;
-      }
-      try { unfreezeCooldownIfWorking(nome); } catch {}
+  return lockProfileAction(nome, async () => {
+    logger.info('[HANDLER] human-resume chamada', { nome });
+    const ctrl = controllers.get(nome);
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) 
+      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+    ctrl.humanControl = false;
+
+    try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+
+    // PATCH MILITAR: Apague todos os resíduos/flags antigos de erro/login
+    try {
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.accountFlags = m.accountFlags || {};
+        // Limpa TODO erro de login, problem flags e resíduos
+        delete m.accountFlags.loginBackoffUntil;
+        delete m.accountFlags.loginFailCount;
+        delete m.accountFlags.loginAutoAttemptCount;
+        delete m.accountFlags.lastLoginTryError;
+        delete m.accountFlags.lastLoginTryReasonCode;
+        delete m.accountFlags.lastLoginTrySource;
+        delete m.accountFlags.autoLoginEscalatedAt;
+        delete m.accountFlags.humanRecommended;
+        delete m.accountFlags.humanReason;
+        delete m.accountFlags.postLoginAutomationFail;
+        delete m.accountFlags.problemaConta;
+        delete m.accountFlags.problemaContaMsg;
+        delete m.accountFlags.loginTemporaryBlock;
+        delete m.accountFlags.loginReason;
+        delete m.accountFlags.loginReasonCode;
+        return m;
+      });
       await snapshotStatusAndWrite();
-      logger.info('[HANDLER] human-resume ok', { nome });
+    } catch {}
+
+    try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
+    let pages2 = [];
+    try { pages2 = await ctrl.browser.pages(); } catch {}
+    if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]);
+    try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
+    try {
+      const ps = await ctrl.browser.pages();
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].numPages = (ps && ps.length) || 0;
+      await snapshotStatusAndWrite();
+    } catch {}
+    let pages;
+    try { pages = await ctrl.browser.pages(); } catch {}
+    if (pages && pages[0]) {
       try {
-        await fileStore.withDesiredFileLockUpdate((desired) => {
-          desired.perfis = desired.perfis || {};
-          if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
-          return desired;
-        });
+        await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
+        await new Promise(r => setTimeout(r, 350));
+        await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
       } catch {}
-      return { ok:true };
-    });
-  },
+    }
+    if (automationAllowed(ctrl)) {
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+      ctrl.trabalhando = true;
+    }
+    try { unfreezeCooldownIfWorking(nome); } catch {}
+    await snapshotStatusAndWrite();
+    logger.info('[HANDLER] human-resume ok', { nome });
+    try {
+      await fileStore.withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
+        return desired;
+      });
+    } catch {}
+    return { ok:true };
+  });
+},
   async ['robe-play']({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] robe-play chamada', { nome });
@@ -2803,7 +2823,7 @@ if (ctrl.humanControl || ctrl.configurando) return false;
           keepLogged: true,
           preferMessenger: !!preferMessenger
         },
-        { timeoutMs: 60000, singleDomain: false }
+        { timeoutMs: 60000, singleDomain: true }
       );
     } catch (e) {
       res = { ok:false, reason:'exception', message: (e && e.message) || String(e) };
