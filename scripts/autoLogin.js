@@ -167,7 +167,7 @@ await manifestStore.update(nome, (m) => {
 m = m || {};
 m.accountFlags = m.accountFlags || {};
 m.accountFlags.postLoginAutomationFail = true;
-m.accountFlags.lastLoginTryError = ${String(reasonCode||'unknown')}${message ? (':' + String(message).slice(0,160)) : ''};
+m.accountFlags.lastLoginTryError = `${String(reasonCode||'unknown')}${message ? (':' + String(message).slice(0,160)) : ''}`;
 m.accountFlags.lastLoginTryReasonCode = String(reasonCode||'unknown');
 m.accountFlags.lastLoginTrySource = 'messenger';
 return m;
