@@ -3684,4 +3684,5 @@ process.on('uncaughtException', (e) => {
 );
 process.on('unhandledRejection', (e) => {
   try { logger.error('unhandled', { error: (e && e.message) || e }, e); } catch {}
+}
 });
