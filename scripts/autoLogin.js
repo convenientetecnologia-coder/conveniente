@@ -206,7 +206,7 @@ m.accountFlags.problemaConta = true;
 m.accountFlags.problemaContaMsg = 'Problemas na conta — Auto-login falhou 3x (programático)';
 return m;
 });
-await issues.append(nome, 'auto_login_escalate_human', after=3 tries);
+await issues.append(nome, 'auto_login_escalate_human', 'after=3 tries');
 }
 
 async function checkVirtusOk(page) {
