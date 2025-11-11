@@ -2210,6 +2210,10 @@ const handlers = {
       const hasProblemConta = man ? !!(man.accountFlags && man.accountFlags.problemaConta === true) : false;
       const problemContaMsg = man ? ((man.accountFlags && man.accountFlags.problemaContaMsg) || null) : null;
       const problem = man
+      const loginAutoAttemptCount = man ? Number(man.accountFlags && man.accountFlags.loginAutoAttemptCount || 0) : 0;
+      const lastLoginAutoAttemptAt = man ? (man.accountFlags && man.accountFlags.lastLoginAutoAttemptAt || null) : null;
+      const lastLoginTryError = man ? ((man.accountFlags && man.accountFlags.lastLoginTryError) || null) : null;
+      const autoLoginEscalatedAt = man ? (man.accountFlags && man.accountFlags.autoLoginEscalatedAt || null) : null;
         ? !!((man.accountFlags && man.accountFlags.loginRequired === true) ||
              (man.accountFlags && man.accountFlags.banned === true) ||
              (man.accountFlags && man.accountFlags.postLoginAutomationFail === true) ||
@@ -2416,6 +2420,10 @@ const postLoginAutomationFail = man ? !!(man.accountFlags && man.accountFlags.po
 const hasProblemConta = man ? !!(man.accountFlags && man.accountFlags.problemaConta === true) : false;
 const problemContaMsg = man ? ((man.accountFlags && man.accountFlags.problemaContaMsg) || null) : null;
 const problem = man
+const loginAutoAttemptCount = man ? Number(man.accountFlags && man.accountFlags.loginAutoAttemptCount || 0) : 0;
+const lastLoginAutoAttemptAt = man ? (man.accountFlags && man.accountFlags.lastLoginAutoAttemptAt || null) : null;
+const lastLoginTryError = man ? ((man.accountFlags && man.accountFlags.lastLoginTryError) || null) : null;
+const autoLoginEscalatedAt = man ? (man.accountFlags && man.accountFlags.autoLoginEscalatedAt || null) : null;
   ? !!((man.accountFlags && man.accountFlags.loginRequired === true) ||
        (man.accountFlags && man.accountFlags.banned === true) ||
        (man.accountFlags && man.accountFlags.postLoginAutomationFail === true) ||
@@ -2457,6 +2465,10 @@ perfis.push({
   accountProblem: hasProblemConta,
   accountProblemText: problemContaMsg,
   problem
+  loginAutoAttemptCount,
+  lastLoginAutoAttemptAt,
+  lastLoginTryError,
+  autoLoginEscalatedAt
 });
 }
 const robes = {};
@@ -2732,105 +2744,122 @@ const ctrl = controllers.get(nome);
 if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return false;
 if (ctrl.humanControl || ctrl.configurando) return false;
 
+  // Ler manifest + credenciais
   const man = await manifestStore.read(nome);
   if (!man || !man.credentials || !man.credentials.login || !man.credentials.password) return false;
 
-  // NUNCA bloqueie tentativa por problemaConta antes de tentar pelo menos 1 login real.
+  // NUNCA bloquear por problemaConta antes de tentar pelo menos 1 login real.
   // Só respeite problemaConta se já houver "postLoginAutomationFail" ou 2 fails consecutivos registrados.
-  if (man.accountFlags && man.accountFlags.problemaConta === true && !man.accountFlags.postLoginAutomationFail) {
-    // Permitir 1 tentativa real, então só respeitar no futuro.
-  }
+  const MAX_TRIES = 3;
+  const flags = (man.accountFlags || {});
+  let count = Number(flags.loginAutoAttemptCount || 0) || 0;
 
-  if (man.accountFlags && man.accountFlags.loginBackoffUntil && man.accountFlags.loginBackoffUntil > Date.now()) {
-    await issues.append(nome, 'auto_login_backoff_active', `backoffUntil=${man.accountFlags.loginBackoffUntil}`);
-    return false;
-  }
-
-  await issues.append(nome, 'auto_login_attempt', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
-
+  // Página base
   let page = ctrl.mainPage;
   if (!page) {
-    const pages = await ctrl.browser.pages();
+    const pages = await ctrl.browser.pages().catch(()=>[]);
     page = pages && pages[0];
   }
   if (!page) return false;
 
+  // Contexto corrente para escolher domínio
   const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
   const messengerCtx = /messenger\.com/i.test(urlNow);
   const robeCtx = /facebook\.com\/marketplace/i.test(urlNow);
   const preferMessenger = messengerCtx ? true : (!robeCtx ? true : false);
 
-  // TENTATIVA REAL: não execute detectNonLoginAnomaly antes de tentar.
-  const res = await require('./browser.js').loginWithCredentials(
-    page,
-    {
-      login: man.credentials.login,
-      password: man.credentials.password,
-      keepLogged: true,
-      preferMessenger: !!preferMessenger
-    },
-    { timeoutMs: 60000, singleDomain: false } // ALLOW FALLBACK CROSS-DOMAIN
-  );
-
-  if (res && res.ok) {
-    await clearAccountFlags(nome, ['loginRequired']);
-    await manifestStore.update(nome, m => {
+  // Executa até 3 tentativas, SEM escalonar humano antes de 3
+  while (count < MAX_TRIES) {
+    count++;
+    await manifestStore.update(nome, (m) => {
       m = m || {};
       m.accountFlags = m.accountFlags || {};
-      if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
-      if (m.accountFlags && m.accountFlags.postLoginAutomationFail) {
-        delete m.accountFlags.postLoginAutomationFail;
-        delete m.accountFlags.humanRecommended;
-        delete m.accountFlags.humanReason;
-      }
-      if (m.accountFlags && m.accountFlags.problemaConta) {
-        delete m.accountFlags.problemaConta;
-        delete m.accountFlags.problemaContaMsg;
-      }
+      m.accountFlags.loginAutoAttemptCount = count;
+      m.accountFlags.lastLoginAutoAttemptAt = Date.now();
       return m;
     });
-    await issues.append(nome, 'auto_login_success', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
-    await snapshotStatusAndWrite();
-    const okAuto = await ensurePostLoginAutomations(nome, ctrl, 3);
-    return !!okAuto;
-  }
 
-  // FALHAS: trate de forma graduada
-  const reason = (res && res.reason) || 'unknown';
-  const message = (res && res.message) || '';
+    await issues.append(
+      nome,
+      'auto_login_attempt',
+      `try=${count}/${MAX_TRIES} loginMasked=${utils.maskLogin(man.credentials.login)} ctx=${preferMessenger ? 'messenger' : 'facebook'}`
+    );
 
-  // Campos não encontrados após espera/fallback: não escale humano imediatamente; backoff curto e retente mais tarde
-  if (reason === 'login_form_not_found' || reason === 'no_login_fields' || reason === 'non_login_page') {
-    const addMs = 2 * 60 * 1000; // 2 minutos
-    await manifestStore.update(nome, m => {
+    // Tentativa em si
+    let res = null;
+    try {
+      res = await require('./browser.js').loginWithCredentials(
+        page,
+        {
+          login: man.credentials.login,
+          password: man.credentials.password,
+          keepLogged: true,
+          preferMessenger: !!preferMessenger
+        },
+        { timeoutMs: 60000, singleDomain: false }
+      );
+    } catch (e) {
+      res = { ok:false, reason:'exception', message: (e && e.message) || String(e) };
+    }
+
+    if (res && res.ok === true) {
+      // Sucesso — limpar loginRequired e resetar contador/erros
+      try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.accountFlags = m.accountFlags || {};
+        m.accountFlags.loginAutoAttemptCount = 0;
+        m.accountFlags.lastLoginTryError = null;
+        m.accountFlags.lastLoginSuccessAt = Date.now();
+        if ('autoLoginEscalatedAt' in m.accountFlags) delete m.accountFlags.autoLoginEscalatedAt;
+        if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
+        if ('postLoginAutomationFail' in (m.accountFlags||{})) delete m.accountFlags.postLoginAutomationFail;
+        if ('humanRecommended' in (m.accountFlags||{})) delete m.accountFlags.humanRecommended;
+        if ('humanReason' in (m.accountFlags||{})) delete m.accountFlags.humanReason;
+        if (m.accountFlags && m.accountFlags.problemaConta) {
+          delete m.accountFlags.problemaConta;
+          delete m.accountFlags.problemaContaMsg;
+        }
+        return m;
+      });
+      await issues.append(nome, 'auto_login_success', `try=${count}/${MAX_TRIES} loginMasked=${utils.maskLogin(man.credentials.login)}`);
+      await snapshotStatusAndWrite();
+
+      const okAuto = await ensurePostLoginAutomations(nome, ctrl, 3);
+      return !!okAuto;
+    }
+
+    // Falhou — registrar última causa
+    const lastReasonCode = (res && res.reason) || 'unknown';
+    const lastMessage = (res && res.message) || '';
+    await manifestStore.update(nome, (m) => {
       m = m || {};
       m.accountFlags = m.accountFlags || {};
-      m.accountFlags.loginBackoffUntil = Date.now() + addMs;
+      m.accountFlags.lastLoginTryError = `${lastReasonCode}${lastMessage ? ':'+String(lastMessage).slice(0,160) : ''}`;
+      m.accountFlags.lastLoginTryReasonCode = lastReasonCode;
+      m.accountFlags.lastLoginTrySource = preferMessenger ? 'messenger' : 'facebook';
       return m;
     });
-    await setLoginRequiredFlag(nome, { reason: 'login_form', source: preferMessenger ? 'messenger' : 'facebook', message });
-    await issues.append(nome, 'auto_login_retry_later', `reason=${reason} backoff=${addMs}ms`);
-    await snapshotStatusAndWrite();
-    return false;
-  }
+    await issues.append(nome, 'auto_login_fail', `try=${count}/${MAX_TRIES} reason=${lastReasonCode} msg=${String(lastMessage).slice(0,120)}`);
 
-  // Falhas REAIS: invalid / temporariamente bloqueado / checkpoint
-  if (reason === 'temporarily_blocked' || reason === 'checkpoint' || reason === 'checkpoint_captcha' || reason === 'invalid') {
-    const addMs =
-      (reason === 'temporarily_blocked' || reason === 'checkpoint' || reason === 'checkpoint_captcha')
-        ? 60 * 60 * 1000
-        : 30 * 60 * 1000;
+    if (count < MAX_TRIES) {
+      await new Promise(r => setTimeout(r, 800));
+      continue;
+    }
 
-    await manifestStore.update(nome, m => {
-      m = m || {};
-      m.accountFlags = m.accountFlags || {};
-      m.accountFlags.loginBackoffUntil = Date.now() + addMs;
-      if (reason === 'invalid') m.accountFlags.loginFailCount = (m.accountFlags.loginFailCount || 0) + 1;
-      return m;
-    });
-    await setLoginRequiredFlag(nome, { reason, source: preferMessenger ? 'messenger' : 'facebook', message });
-
-    await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
+    // AQUI: count === 3 (estourou as 3 tentativas)
+    try {
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.accountFlags = m.accountFlags || {};
+        m.accountFlags.autoLoginEscalatedAt = Date.now();
+        m.accountFlags.humanRecommended = true;
+        m.accountFlags.humanReason = 'Auto-login falhou 3x';
+        return m;
+      });
+      await setAccountProblemFlag(nome, { message: 'Auto-login falhou 3x (programático)' });
+      await issues.append(nome, 'auto_login_escalate_human', `after=${count} tries last=${lastReasonCode}`);
+    } catch {}
 
     ctrl.humanControl = true;
     try {
@@ -2845,31 +2874,9 @@ if (ctrl.humanControl || ctrl.configurando) return false;
     return false;
   }
 
-  // Exceptions genéricas — backoff curto e retentar mais tarde (sem humano)
-  const addShort = 1 * 60 * 1000;
-  await manifestStore.update(nome, m => {
-    m = m || {};
-    m.accountFlags = m.accountFlags || {};
-    m.accountFlags.loginBackoffUntil = Date.now() + addShort;
-    return m;
-  });
-  await setLoginRequiredFlag(nome, { reason: reason || 'unknown', source: preferMessenger ? 'messenger' : 'facebook', message });
-  await issues.append(nome, 'auto_login_retry_later', `reason=${reason} backoff=${addShort}ms`);
-  await snapshotStatusAndWrite();
   return false;
-
 } catch (e) {
   await issues.append(nome, 'auto_login_fail_exception', (e && e.message) || String(e));
-  // Backoff curto e SEM humano
-  try {
-    await manifestStore.update(nome, m => {
-      m = m || {};
-      m.accountFlags = m.accountFlags || {};
-      m.accountFlags.loginBackoffUntil = Date.now() + 60*1000;
-      return m;
-    });
-    await snapshotStatusAndWrite();
-  } catch {}
   return false;
 }
 

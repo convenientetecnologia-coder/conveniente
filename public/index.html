@@ -1121,6 +1121,19 @@
           lr.title = p.loginReason ? ('Motivo: ' + p.loginReason) : 'Sessão/Checkpoint/Captcha detectado';
           titleRow.append(lr);
         }
+        // Tentativas de auto-login e última causa (se houver)
+        if (p.loginRequired === true) {
+          const atc = (typeof p.loginAutoAttemptCount === 'number') ? p.loginAutoAttemptCount : 0;
+          const attemptsPill = buildPill(`Tentativas login: ${Math.min(3, atc)}/3`, atc >= 3 ? 'bad' : 'warn');
+          attemptsPill.title = 'Número de tentativas de auto-login já executadas nesta conta';
+          titleRow.append(attemptsPill);
+
+          if (typeof p.lastLoginTryError === 'string' && p.lastLoginTryError.trim().length > 0) {
+            const errPill = buildPill(`Última causa: ${p.lastLoginTryError}`, 'bad');
+            errPill.title = 'Causa textual/código da última tentativa de auto-login';
+            titleRow.append(errPill);
+          }
+        }
         if (p.banned === true) {
           const bn = buildPill('Conta suspensa', 'bad');
           bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
