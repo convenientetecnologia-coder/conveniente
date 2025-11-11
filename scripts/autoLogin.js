@@ -182,7 +182,7 @@ const c = Number(m.accountFlags.loginAutoAttemptCount || 0) || 0;
 const next = Math.max(c, idx); // garante incremento
 m.accountFlags.loginAutoAttemptCount = next;
 m.accountFlags.lastLoginAutoAttemptAt = Date.now();
-m.accountFlags.lastLoginTryError = ${String(reasonCode||'unknown')}${message ? (':' + String(message).slice(0,160)) : ''};
+m.accountFlags.lastLoginTryError = `${String(reasonCode||'unknown')}${message ? (':' + String(message).slice(0,160)) : ''}`;
 m.accountFlags.lastLoginTryReasonCode = String(reasonCode||'unknown');
 m.accountFlags.lastLoginTrySource = 'messenger';
 return m;
