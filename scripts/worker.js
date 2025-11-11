@@ -61,6 +61,8 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '', message = 
       man.accountFlags.loginReasonCode = String(reason||'');
       man.accountFlags.loginSource = String(source||'');
       man.accountFlags.lastLoginRequiredAt = Date.now();
+      // Inicializa contador de tentativas (garantia do PIL imediato)
+      man.accountFlags.loginAutoAttemptCount = Number(man.accountFlags.loginAutoAttemptCount || 0);
       return man;
     });
     if (!already) {
@@ -2833,34 +2835,30 @@ async function attemptAutoLogin(nome) {
           });
         }
 
-        // IMEDIATAMENTE tentar Virtus e Robe após a tentativa (bem ou mal)
-        let virtusOk = false;
-        let robeOk = false;
-
+        // IMEDIATAMENTE dispare automations; sucesso só com Virtus (grid OK) + Robe ok
+        let postOk = false;
         try {
-          const rStart = await start_work({ nome });
-          await new Promise(r => setTimeout(r, 3000));
-          const c2 = controllers.get(nome);
-          virtusOk = !!(c2 && c2.trabalhando);
+          const cNow = controllers.get(nome);
+          let pNow = cNow && cNow.mainPage;
+          if (!pNow) {
+            const ps2 = await (cNow && cNow.browser ? cNow.browser.pages() : []);
+            if (ps2 && ps2[0]) pNow = ps2[0];
+          }
+          postOk = await ensurePostLoginAutomations(nome, cNow, pNow, 2);
         } catch {}
 
-        try {
-          const rRobe = await handlers['robe-play']({ nome });
-          robeOk = !!(rRobe && rRobe.ok);
-        } catch {}
-
-        // Re-detecta se ainda exige login após chamar Virtus/Robe
         let stillLogin = true;
         try {
-          const pNow = ctrl.mainPage || (await ctrl.browser.pages().catch(() => []))[0];
-          if (pNow) {
-            const lr = await browserHelper.detectLoginRequired(pNow);
+          const cNow2 = controllers.get(nome);
+          const pNow2 = cNow2 && cNow2.mainPage || (await (cNow2 && cNow2.browser ? cNow2.browser.pages() : []))[0];
+          if (pNow2) {
+            const lr = await browserHelper.detectLoginRequired(pNow2);
             stillLogin = !!(lr && lr.loginRequired);
           }
         } catch { stillLogin = true; }
 
-        // Sucesso: SOMENTE se Virtus+Robe disparados e não requerer mais login
-        if (virtusOk && robeOk && !stillLogin) {
+        // SUCESSO REAL: Virtus (grid) + Robe ok e não requer mais login
+        if (postOk && !stillLogin) {
           try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
           await manifestStore.update(nome, (m) => {
             m = m || {};
@@ -2879,16 +2877,22 @@ async function attemptAutoLogin(nome) {
             }
             return m;
           });
-          await issues.append(nome, 'auto_login_success', `try=${count}/${MAX_TRIES} both_automations_started=true`);
+          await issues.append(nome, 'auto_login_success', `try=${count}/${MAX_TRIES} both_automations_started=true&grid_ok=true`);
           await snapshotStatusAndWrite();
           return true;
         }
 
-        // Falha parcial: registra e itera
+        // Falha parcial/pós-login — marque postLoginAutomationFail e mantenha PILs
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          m.accountFlags = m.accountFlags || {};
+          m.accountFlags.postLoginAutomationFail = true;
+          return m;
+        });
         await issues.append(
           nome,
           'auto_login_fail',
-          `try=${count}/${MAX_TRIES} virtusOk=${virtusOk} robeOk=${robeOk} stillLogin=${stillLogin} reason=${(res && res.reason) || 'n/a'}`
+          `try=${count}/${MAX_TRIES} postOk=${postOk} stillLogin=${stillLogin} reason=${(res && res.reason) || 'n/a'}`
         );
 
         if (count < MAX_TRIES) {
@@ -2930,15 +2934,23 @@ async function attemptAutoLogin(nome) {
   });
 }
 
-async function ensurePostLoginAutomations(nome, ctrl, maxTries = 3) {
+async function ensurePostLoginAutomations(nome, ctrl, page, maxTries = 3) {
   for (let i = 0; i < maxTries; i++) {
     let virtusOk = false;
     let robeOk = false;
+
     try {
       const r = await start_work({ nome });
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 2500));
       const c2 = controllers.get(nome);
-      virtusOk = !!(c2 && c2.trabalhando);
+      if (c2 && c2.trabalhando) {
+        let main = c2.mainPage;
+        try { if (!main) { const ps = await c2.browser.pages(); if (ps && ps[0]) main = ps[0]; } } catch {}
+        if (main) {
+          const snap = await evaluateChatsState(main).catch(() => null);
+          virtusOk = !!(snap && isOkFromSnapshot(snap));
+        }
+      }
     } catch {}
 
     try {
@@ -2947,10 +2959,10 @@ async function ensurePostLoginAutomations(nome, ctrl, maxTries = 3) {
     } catch {}
 
     if (virtusOk && robeOk) {
-      await issues.append(nome, 'mil_action', `post_login_automations_started try=${i+1}`);
+      await issues.append(nome, 'mil_action', `post_login_automations_started try=${i + 1}`);
       return true;
     }
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 2500));
   }
   return false;
 }
