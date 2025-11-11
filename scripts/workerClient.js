@@ -97,7 +97,7 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
   if (perfilNome) perfilNome = String(perfilNome);
 
   if (
-    ['open','activate','startWork'].includes(type)
+    ['open', 'activate', 'startWork', 'start_work', 'invoke_human', 'human-resume'].includes(type)
   ) {
     // *** TODOS os comandos que envolvem ativação do mesmo perfil compartilham lock ***
     opKey = `@@PROFILE_OP_LOCK@@::${perfilNome}`;

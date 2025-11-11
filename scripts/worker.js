@@ -74,6 +74,7 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '', message = 
     robeMeta[nome].loginRequired = true;
     robeMeta[nome].loginReason = pt;
   } catch {}
+  await snapshotStatusAndWrite();
 }
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   try {
@@ -98,6 +99,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].banned = true;
   } catch {}
+  await snapshotStatusAndWrite();
 }
 async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
   try {
@@ -1872,7 +1874,6 @@ const handlers = {
       } catch {}
       try {
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
-        try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
         logger.info('[HANDLER] configure ok', { nome });
         return { ok: true };
       } catch (e) {
@@ -1881,8 +1882,12 @@ const handlers = {
         return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
       } finally {
         ctrl.configurando = false;
-        ctrl.humanControl = true;
-        stopPruneLoop(nome);
+        ctrl.humanControl = false;
+        // Reata o prune loop (mantém uma aba estável)
+        try {
+          const pages2 = await ctrl.browser.pages().catch(()=>[]);
+          if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]);
+        } catch {}
         await snapshotStatusAndWrite();
       }
     });
@@ -1940,7 +1945,16 @@ const handlers = {
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       ctrl.humanControl = false;
-      try { await clearAccountFlags(nome, ['loginRequired','banned']); } catch {}
+      try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+      try {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          m.accountFlags = m.accountFlags || {};
+          if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
+          if ('loginFailCount' in m.accountFlags) delete m.accountFlags.loginFailCount;
+          return m;
+        });
+      } catch {}
       try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
       let pages2 = [];
       try { pages2 = await ctrl.browser.pages(); } catch {}
@@ -3041,18 +3055,6 @@ async function nurseTick() {
           man.credentials.password
         ) {
           await attemptAutoLogin(nome);
-        }
-      } catch {}
-      try {
-        const bd = await browserHelper.detectAccountSuspended(p0);
-        if (bd && bd.banned) {
-          await setBannedFlag(nome, { reason: bd.reason || '', snippet: bd.snippet || '' });
-        }
-      } catch {}
-      try {
-        const lr = await browserHelper.detectLoginRequired(p0);
-        if (lr && lr.loginRequired) {
-          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '', message: (lr && lr.message) || '' });
         }
       } catch {}
       try {
