@@ -190,7 +190,7 @@ return m;
 await issues.append(
 nome,
 'auto_login_attempt',
-try=${idx}/${total} loginMasked=${loginMasked} reason=${reasonCode||''} msg=${(message||'').slice(0,80)}
+`try=${idx}/${total} loginMasked=${loginMasked} reason=${reasonCode||''} msg=${(message||'').slice(0,80)}`
 );
 }
 
