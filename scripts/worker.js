@@ -1,4 +1,5 @@
 // scripts/worker.js
+const autoLogin = require('./autoLogin.js');
 const path = require('path');
 const fs = require('fs');
 const logger = require('./logger.js');
@@ -2765,206 +2766,20 @@ async function detectMessengerTempBlock(page) {
   } catch { return { blocked: false }; }
 }
 
-// attemptAutoLogin atualizado
-async function attemptAutoLogin(nome) {
-  return lockProfileAction(nome, async () => {
-    try {
-      const ctrl = controllers.get(nome);
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return false;
-      if (ctrl.humanControl || ctrl.configurando) return false;
-
-      const man = await manifestStore.read(nome);
-      if (!man || !man.credentials || !man.credentials.login || !man.credentials.password) return false;
-
-      const MAX_TRIES = 3;
-      const flags = (man.accountFlags || {});
-      let count = Number(flags.loginAutoAttemptCount || 0) || 0;
-
-      // Resolve page
-      let page = ctrl.mainPage;
-      if (!page) {
-        const pages = await ctrl.browser.pages().catch(() => []);
-        page = pages && pages[0];
-      }
-      if (!page) return false;
-
-      while (count < MAX_TRIES) {
-        count++;
-        await manifestStore.update(nome, (m) => {
-          m = m || {};
-          m.accountFlags = m.accountFlags || {};
-          m.accountFlags.loginAutoAttemptCount = count;
-          m.accountFlags.lastLoginAutoAttemptAt = Date.now();
-          return m;
-        });
-
-        await issues.append(
-          nome,
-          'auto_login_attempt',
-          `try=${count}/${MAX_TRIES} loginMasked=${utils.maskLogin(man.credentials.login)}`
-        );
-
-        // Tentativa de login
-        let res = null;
-        try {
-          res = await require('./browser.js').loginWithCredentials(
-            page,
-            {
-              login: man.credentials.login,
-              password: man.credentials.password,
-              keepLogged: true,
-              preferMessenger: true
-            },
-            { timeoutMs: 60000, singleDomain: true }
-          );
-        } catch (e) {
-          res = { ok: false, reason: 'exception', message: (e && e.message) || String(e) };
-        }
-
-        // Marca causa da tentativa
-        {
-          const lastReasonCode = (res && res.reason) || 'unknown';
-          const lastMessage = (res && res.message) || '';
-          await manifestStore.update(nome, (m) => {
-            m = m || {};
-            m.accountFlags = m.accountFlags || {};
-            m.accountFlags.lastLoginTryError = `${lastReasonCode}${lastMessage ? ':' + String(lastMessage).slice(0, 160) : ''}`;
-            m.accountFlags.lastLoginTryReasonCode = lastReasonCode;
-            m.accountFlags.lastLoginTrySource = 'messenger';
-            return m;
-          });
-        }
-
-        // IMEDIATAMENTE dispare automations; sucesso só com Virtus (grid OK) + Robe ok
-        let postOk = false;
-        try {
-          const cNow = controllers.get(nome);
-          let pNow = cNow && cNow.mainPage;
-          if (!pNow) {
-            const ps2 = await (cNow && cNow.browser ? cNow.browser.pages() : []);
-            if (ps2 && ps2[0]) pNow = ps2[0];
-          }
-          postOk = await ensurePostLoginAutomations(nome, cNow, pNow, 2);
-        } catch {}
-
-        let stillLogin = true;
-        try {
-          const cNow2 = controllers.get(nome);
-          const pNow2 = cNow2 && cNow2.mainPage || (await (cNow2 && cNow2.browser ? cNow2.browser.pages() : []))[0];
-          if (pNow2) {
-            const lr = await browserHelper.detectLoginRequired(pNow2);
-            stillLogin = !!(lr && lr.loginRequired);
-          }
-        } catch { stillLogin = true; }
-
-        // SUCESSO REAL: Virtus (grid) + Robe ok e não requer mais login
-        if (postOk && !stillLogin) {
-          try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
-          await manifestStore.update(nome, (m) => {
-            m = m || {};
-            m.accountFlags = m.accountFlags || {};
-            m.accountFlags.loginAutoAttemptCount = 0;
-            m.accountFlags.lastLoginTryError = null;
-            m.accountFlags.lastLoginSuccessAt = Date.now();
-            delete m.accountFlags.autoLoginEscalatedAt;
-            delete m.accountFlags.loginBackoffUntil;
-            delete m.accountFlags.postLoginAutomationFail;
-            delete m.accountFlags.humanRecommended;
-            delete m.accountFlags.humanReason;
-            if (m.accountFlags && m.accountFlags.problemaConta) {
-              delete m.accountFlags.problemaConta;
-              delete m.accountFlags.problemaContaMsg;
-            }
-            return m;
-          });
-          await issues.append(nome, 'auto_login_success', `try=${count}/${MAX_TRIES} both_automations_started=true&grid_ok=true`);
-          await snapshotStatusAndWrite();
-          return true;
-        }
-
-        // Falha parcial/pós-login — marque postLoginAutomationFail e mantenha PILs
-        await manifestStore.update(nome, (m) => {
-          m = m || {};
-          m.accountFlags = m.accountFlags || {};
-          m.accountFlags.postLoginAutomationFail = true;
-          return m;
-        });
-        await issues.append(
-          nome,
-          'auto_login_fail',
-          `try=${count}/${MAX_TRIES} postOk=${postOk} stillLogin=${stillLogin} reason=${(res && res.reason) || 'n/a'}`
-        );
-
-        if (count < MAX_TRIES) {
-          await new Promise(r => setTimeout(r, 900));
-          continue;
-        }
-
-        // Estourou 3 tentativas: escalona para HUMANO + problema na conta
-        try {
-          await manifestStore.update(nome, (m) => {
-            m = m || {};
-            m.accountFlags = m.accountFlags || {};
-            m.accountFlags.autoLoginEscalatedAt = Date.now();
-            m.accountFlags.humanRecommended = true;
-            m.accountFlags.humanReason = 'Auto-login falhou 3x';
-            return m;
-          });
-          await setAccountProblemFlag(nome, { message: 'Auto-login falhou 3x (programático)' });
-          await issues.append(nome, 'auto_login_escalate_human', `after=${count} tries`);
-        } catch {}
-        ctrl.humanControl = true;
-        try {
-          await fileStore.withDesiredFileLockUpdate((desired) => {
-            desired.perfis = desired.perfis || {};
-            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
-            return desired;
-          });
-        } catch {}
-        try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-        await snapshotStatusAndWrite();
-        return false;
-      }
-
-      return false;
-    } catch (e) {
-      await issues.append(nome, 'auto_login_fail_exception', (e && e.message) || String(e));
-      return false;
+// Adapter para autoLogin.js
+function buildAutoLoginAdapter() {
+  return {
+    getController: (nome) => controllers.get(nome),
+    startVirtus: async (nome) => {
+      try { return await start_work({ nome }); } catch { return { ok:false }; }
+    },
+    robePlay: async (nome) => {
+      try { return await handlers['robe-play']({ nome }); } catch { return { ok:false }; }
+    },
+    escalateToHuman: async (nome) => {
+      try { return await handlers['invoke_human']({ nome }); } catch { return { ok:false }; }
     }
-  });
-}
-
-async function ensurePostLoginAutomations(nome, ctrl, page, maxTries = 3) {
-  for (let i = 0; i < maxTries; i++) {
-    let virtusOk = false;
-    let robeOk = false;
-
-    try {
-      const r = await start_work({ nome });
-      await new Promise(r => setTimeout(r, 2500));
-      const c2 = controllers.get(nome);
-      if (c2 && c2.trabalhando) {
-        let main = c2.mainPage;
-        try { if (!main) { const ps = await c2.browser.pages(); if (ps && ps[0]) main = ps[0]; } } catch {}
-        if (main) {
-          const snap = await evaluateChatsState(main).catch(() => null);
-          virtusOk = !!(snap && isOkFromSnapshot(snap));
-        }
-      }
-    } catch {}
-
-    try {
-      const rRobe = await handlers['robe-play']({ nome });
-      robeOk = !!(rRobe && rRobe.ok);
-    } catch {}
-
-    if (virtusOk && robeOk) {
-      await issues.append(nome, 'mil_action', `post_login_automations_started try=${i + 1}`);
-      return true;
-    }
-    await new Promise(r => setTimeout(r, 2500));
-  }
-  return false;
+  };
 }
 
 let _nurseTickRunning = false;
@@ -3103,7 +2918,7 @@ async function nurseTick() {
           man.credentials.login &&
           man.credentials.password
         ) {
-          await attemptAutoLogin(nome);
+          await autoLogin.tryAutoLogin({ nome, adapter: buildAutoLoginAdapter() });
         }
       } catch {}
       try {
@@ -3489,7 +3304,7 @@ async function healthTick() {
         await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '', message: (lr && lr.message) || '' });
         const man = await manifestStore.read(nome).catch(()=>null);
         if (man && man.accountFlags && man.accountFlags.loginRequired && man.credentials && man.credentials.login && man.credentials.password) {
-          await attemptAutoLogin(nome);
+          await autoLogin.tryAutoLogin({ nome, adapter: buildAutoLoginAdapter() });
         }
       }
     } catch {}
