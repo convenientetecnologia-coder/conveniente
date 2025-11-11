@@ -2420,15 +2420,22 @@ const postLoginAutomationFail = man ? !!(man.accountFlags && man.accountFlags.po
 const hasProblemConta = man ? !!(man.accountFlags && man.accountFlags.problemaConta === true) : false;
 const problemContaMsg = man ? ((man.accountFlags && man.accountFlags.problemaContaMsg) || null) : null;
 const problem = man
+  ? !!(
+      (man.accountFlags && man.accountFlags.loginRequired === true) ||
+      (man.accountFlags && man.accountFlags.banned === true) ||
+      (man.accountFlags && man.accountFlags.postLoginAutomationFail === true) ||
+      (man.accountFlags && man.accountFlags.problemaConta === true)
+    )
+  : !!(
+      (robeMeta[nome] || {}).loginRequired ||
+      (robeMeta[nome] || {}).banned ||
+      (robeMeta[nome] || {}).problemaConta
+    );
+
 const loginAutoAttemptCount = man ? Number(man.accountFlags && man.accountFlags.loginAutoAttemptCount || 0) : 0;
 const lastLoginAutoAttemptAt = man ? (man.accountFlags && man.accountFlags.lastLoginAutoAttemptAt || null) : null;
 const lastLoginTryError = man ? ((man.accountFlags && man.accountFlags.lastLoginTryError) || null) : null;
 const autoLoginEscalatedAt = man ? (man.accountFlags && man.accountFlags.autoLoginEscalatedAt || null) : null;
-  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) ||
-       (man.accountFlags && man.accountFlags.banned === true) ||
-       (man.accountFlags && man.accountFlags.postLoginAutomationFail === true) ||
-       (man.accountFlags && man.accountFlags.problemaConta === true))
-  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).problemaConta);
 perfis.push({
   nome,
   label: p.label || null,
@@ -2464,7 +2471,7 @@ perfis.push({
   postLoginAutomationFail,
   accountProblem: hasProblemConta,
   accountProblemText: problemContaMsg,
-  problem
+  problem,
   loginAutoAttemptCount,
   lastLoginAutoAttemptAt,
   lastLoginTryError,
