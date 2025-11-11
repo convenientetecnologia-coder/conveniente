@@ -2726,156 +2726,154 @@ async function detectMessengerTempBlock(page) {
 
 // attemptAutoLogin atualizado
 async function attemptAutoLogin(nome) {
-  return lockProfileAction(nome, async () => {
+return lockProfileAction(nome, async () => {
+try {
+const ctrl = controllers.get(nome);
+if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return false;
+if (ctrl.humanControl || ctrl.configurando) return false;
+
+  const man = await manifestStore.read(nome);
+  if (!man || !man.credentials || !man.credentials.login || !man.credentials.password) return false;
+
+  // NUNCA bloqueie tentativa por problemaConta antes de tentar pelo menos 1 login real.
+  // Só respeite problemaConta se já houver "postLoginAutomationFail" ou 2 fails consecutivos registrados.
+  if (man.accountFlags && man.accountFlags.problemaConta === true && !man.accountFlags.postLoginAutomationFail) {
+    // Permitir 1 tentativa real, então só respeitar no futuro.
+  }
+
+  if (man.accountFlags && man.accountFlags.loginBackoffUntil && man.accountFlags.loginBackoffUntil > Date.now()) {
+    await issues.append(nome, 'auto_login_backoff_active', `backoffUntil=${man.accountFlags.loginBackoffUntil}`);
+    return false;
+  }
+
+  await issues.append(nome, 'auto_login_attempt', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
+
+  let page = ctrl.mainPage;
+  if (!page) {
+    const pages = await ctrl.browser.pages();
+    page = pages && pages[0];
+  }
+  if (!page) return false;
+
+  const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
+  const messengerCtx = /messenger\.com/i.test(urlNow);
+  const robeCtx = /facebook\.com\/marketplace/i.test(urlNow);
+  const preferMessenger = messengerCtx ? true : (!robeCtx ? true : false);
+
+  // TENTATIVA REAL: não execute detectNonLoginAnomaly antes de tentar.
+  const res = await require('./browser.js').loginWithCredentials(
+    page,
+    {
+      login: man.credentials.login,
+      password: man.credentials.password,
+      keepLogged: true,
+      preferMessenger: !!preferMessenger
+    },
+    { timeoutMs: 60000, singleDomain: false } // ALLOW FALLBACK CROSS-DOMAIN
+  );
+
+  if (res && res.ok) {
+    await clearAccountFlags(nome, ['loginRequired']);
+    await manifestStore.update(nome, m => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
+      if (m.accountFlags && m.accountFlags.postLoginAutomationFail) {
+        delete m.accountFlags.postLoginAutomationFail;
+        delete m.accountFlags.humanRecommended;
+        delete m.accountFlags.humanReason;
+      }
+      if (m.accountFlags && m.accountFlags.problemaConta) {
+        delete m.accountFlags.problemaConta;
+        delete m.accountFlags.problemaContaMsg;
+      }
+      return m;
+    });
+    await issues.append(nome, 'auto_login_success', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
+    await snapshotStatusAndWrite();
+    const okAuto = await ensurePostLoginAutomations(nome, ctrl, 3);
+    return !!okAuto;
+  }
+
+  // FALHAS: trate de forma graduada
+  const reason = (res && res.reason) || 'unknown';
+  const message = (res && res.message) || '';
+
+  // Campos não encontrados após espera/fallback: não escale humano imediatamente; backoff curto e retente mais tarde
+  if (reason === 'login_form_not_found' || reason === 'no_login_fields' || reason === 'non_login_page') {
+    const addMs = 2 * 60 * 1000; // 2 minutos
+    await manifestStore.update(nome, m => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      m.accountFlags.loginBackoffUntil = Date.now() + addMs;
+      return m;
+    });
+    await setLoginRequiredFlag(nome, { reason: 'login_form', source: preferMessenger ? 'messenger' : 'facebook', message });
+    await issues.append(nome, 'auto_login_retry_later', `reason=${reason} backoff=${addMs}ms`);
+    await snapshotStatusAndWrite();
+    return false;
+  }
+
+  // Falhas REAIS: invalid / temporariamente bloqueado / checkpoint
+  if (reason === 'temporarily_blocked' || reason === 'checkpoint' || reason === 'checkpoint_captcha' || reason === 'invalid') {
+    const addMs =
+      (reason === 'temporarily_blocked' || reason === 'checkpoint' || reason === 'checkpoint_captcha')
+        ? 60 * 60 * 1000
+        : 30 * 60 * 1000;
+
+    await manifestStore.update(nome, m => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      m.accountFlags.loginBackoffUntil = Date.now() + addMs;
+      if (reason === 'invalid') m.accountFlags.loginFailCount = (m.accountFlags.loginFailCount || 0) + 1;
+      return m;
+    });
+    await setLoginRequiredFlag(nome, { reason, source: preferMessenger ? 'messenger' : 'facebook', message });
+
+    await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
+
+    ctrl.humanControl = true;
     try {
-      const ctrl = controllers.get(nome);
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return false;
-      if (ctrl.humanControl || ctrl.configurando) return false;
-
-      const man = await manifestStore.read(nome);
-      if (!man || !man.credentials || !man.credentials.login || !man.credentials.password) return false;
-
-      // Se já marcado problema de conta, não tentar mais nada
-      if (man.accountFlags && man.accountFlags.problemaConta === true) {
-        return false;
-      }
-
-      if (man.accountFlags && man.accountFlags.loginBackoffUntil && man.accountFlags.loginBackoffUntil > Date.now()) {
-        await issues.append(nome, 'auto_login_backoff_active', `backoffUntil=${man.accountFlags.loginBackoffUntil}`);
-        return false;
-      }
-
-      await issues.append(nome, 'auto_login_attempt', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
-
-      let page = ctrl.mainPage;
-      if (!page) {
-        const pages = await ctrl.browser.pages();
-        page = pages && pages[0];
-      }
-      if (!page) return false;
-
-      const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
-      // Contexto: Virtus=Messenger, Robe(FB create/marketplace)=Facebook
-      const messengerCtx = /messenger\.com/i.test(urlNow);
-      const robeCtx = /facebook\.com\/marketplace/i.test(urlNow);
-      const preferMessenger = messengerCtx ? true : (!robeCtx ? true : false);
-      const sourceDomain = preferMessenger ? 'messenger' : 'facebook';
-
-      // 1. DETECTA PÁGINA ANÔMALA ANTES DE TENTAR LOGIN
-      const anomaly = await require('./browser.js').detectNonLoginAnomaly(page);
-      if (anomaly && anomaly.anomaly) {
-        await setAccountProblemFlag(nome, { message: anomaly.message || 'Messenger indisponível ou página removida' });
-        ctrl.humanControl = true;
-        try {
-          await fileStore.withDesiredFileLockUpdate((desired) => {
-            desired.perfis = desired.perfis || {};
-            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
-            return desired;
-          });
-        } catch {}
-        try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-        await issues.append(nome, 'auto_login_fail_page_invalid', anomaly.message || 'Página inválida');
-        await snapshotStatusAndWrite();
-        return false;
-      }
-
-      // 2. TENTA LOGIN APENAS NO DOMÍNIO ADEQUADO
-      const res = await require('./browser.js').loginWithCredentials(
-        page,
-        {
-          login: man.credentials.login,
-          password: man.credentials.password,
-          keepLogged: true,
-          preferMessenger: !!preferMessenger
-        },
-        { timeoutMs: 45000, singleDomain: true }
-      );
-
-      if (res && res.ok) {
-        await clearAccountFlags(nome, ['loginRequired']);
-        await manifestStore.update(nome, m => {
-          m = m || {};
-          m.accountFlags = m.accountFlags || {};
-          if ('loginBackoffUntil' in m.accountFlags) delete m.accountFlags.loginBackoffUntil;
-          if (m.accountFlags && m.accountFlags.postLoginAutomationFail) {
-            delete m.accountFlags.postLoginAutomationFail;
-            delete m.accountFlags.humanRecommended;
-            delete m.accountFlags.humanReason;
-          }
-          if (m.accountFlags && m.accountFlags.problemaConta) {
-            delete m.accountFlags.problemaConta;
-            delete m.accountFlags.problemaContaMsg;
-          }
-          return m;
-        });
-        await issues.append(nome, 'auto_login_success', `loginMasked=${utils.maskLogin(man.credentials.login)} at=${(new Date()).toISOString()}`);
-        await snapshotStatusAndWrite();
-        const okAuto = await ensurePostLoginAutomations(nome, ctrl, 3);
-        return !!okAuto;
-      }
-
-      // 3. FALHA — MAPEIA RAZÃO; BACKOFF OU PIL CONFORME
-      const reason = (res && res.reason) || 'unknown';
-      const message = (res && res.message) || '';
-
-      if (reason === 'non_login_page') {
-        await setAccountProblemFlag(nome, { message: message || 'Página inválida de login' });
-        await issues.append(nome, 'auto_login_fail_page_invalid', message || 'Página inválida de login');
-        ctrl.humanControl = true;
-        try {
-          await fileStore.withDesiredFileLockUpdate((desired) => {
-            desired.perfis = desired.perfis || {};
-            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
-            return desired;
-          });
-        } catch {}
-        try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-        await snapshotStatusAndWrite();
-        return false;
-      }
-
-      // Falha tipo comum: backoff, loginRequired PT-BR, hold
-      const addMs = (reason === 'temporarily_blocked' || reason === 'checkpoint' || reason === 'checkpoint_captcha') ? 60*60*1000 :
-                    (reason === 'invalid' ? 30*60*1000 : 15*60*1000);
-      await manifestStore.update(nome, m => {
-        m = m || {};
-        m.accountFlags = m.accountFlags || {};
-        m.accountFlags.loginBackoffUntil = Date.now() + addMs;
-        if (reason === 'invalid') m.accountFlags.loginFailCount = (m.accountFlags.loginFailCount || 0) + 1;
-        return m;
+      await fileStore.withDesiredFileLockUpdate((desired) => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
+        return desired;
       });
-      await setLoginRequiredFlag(nome, { reason, source: sourceDomain, message });
+    } catch {}
+    try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+    await snapshotStatusAndWrite();
+    return false;
+  }
 
-      await issues.append(nome, 'auto_login_fail_' + reason, `backoffMs=${addMs} loginMasked=${utils.maskLogin(man.credentials.login)}`);
-      ctrl.humanControl = true;
-      try {
-        await fileStore.withDesiredFileLockUpdate((desired) => {
-          desired.perfis = desired.perfis || {};
-          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
-          return desired;
-        });
-      } catch {}
-      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-      await snapshotStatusAndWrite();
-      return false;
-
-    } catch (e) {
-      await issues.append(nome, 'auto_login_fail_exception', (e && e.message) || String(e));
-      try {
-        const ctrl = controllers.get(nome);
-        if (ctrl && ctrl.browser) {
-          ctrl.humanControl = true;
-          await fileStore.withDesiredFileLockUpdate((desired) => {
-            desired.perfis = desired.perfis || {};
-            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off' };
-            return desired;
-          });
-          try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-        }
-      } catch {}
-      return false;
-    }
+  // Exceptions genéricas — backoff curto e retentar mais tarde (sem humano)
+  const addShort = 1 * 60 * 1000;
+  await manifestStore.update(nome, m => {
+    m = m || {};
+    m.accountFlags = m.accountFlags || {};
+    m.accountFlags.loginBackoffUntil = Date.now() + addShort;
+    return m;
   });
+  await setLoginRequiredFlag(nome, { reason: reason || 'unknown', source: preferMessenger ? 'messenger' : 'facebook', message });
+  await issues.append(nome, 'auto_login_retry_later', `reason=${reason} backoff=${addShort}ms`);
+  await snapshotStatusAndWrite();
+  return false;
+
+} catch (e) {
+  await issues.append(nome, 'auto_login_fail_exception', (e && e.message) || String(e));
+  // Backoff curto e SEM humano
+  try {
+    await manifestStore.update(nome, m => {
+      m = m || {};
+      m.accountFlags = m.accountFlags || {};
+      m.accountFlags.loginBackoffUntil = Date.now() + 60*1000;
+      return m;
+    });
+    await snapshotStatusAndWrite();
+  } catch {}
+  return false;
+}
+
+});
 }
 
 async function ensurePostLoginAutomations(nome, ctrl, maxTries = 3) {
