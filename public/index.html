@@ -646,7 +646,9 @@
           (p.loginReason || ''),
           (p.bannedText || ''),
           (p.whyNotOpen || ''),
-          (p.postLoginAutomationFail ? 'problemas no login pos' : '') // <----- aqui
+          (p.postLoginAutomationFail ? 'problemas no login pos' : ''), // <----- aqui
+          (p.accountProblemText || ''),
+          (p.accountProblem ? 'problemas na conta' : '')
         ];
         m.set(p.nome, normalizeText(fields.join(' ')));
       }
@@ -1123,6 +1125,13 @@
           const bn = buildPill('Conta suspensa', 'bad');
           bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
           titleRow.append(bn);
+        }
+
+        // Pill: Problemas na conta (accountProblem)
+        if (p.accountProblem === true) {
+          const pb = buildPill('Problemas na conta', 'bad');
+          pb.title = p.accountProblemText || 'Página inválida/indisponível. Intervenção humana requerida.';
+          titleRow.append(pb);
         }
 
         // Adicione isso depois dos pills de loginRequired/banned:
