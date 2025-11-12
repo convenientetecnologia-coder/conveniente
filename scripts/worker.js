@@ -400,6 +400,21 @@ let _statusLock = Promise.resolve();
 async function milLog(type, msg) {
   try { await reportAction('system', type || 'mil_action', String(msg || '')); } catch {}
 }
+// HELPER: Segurar 6h no bloqueio temporário
+async function holdActivationForHours(nome, hours = 6, reason = 'temp_block') {
+  try {
+    const until = Date.now() + hours * 60 * 60 * 1000;
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].activationHeldUntil = until;
+    await fileStore.withDesiredFileLockUpdate((desired) => {
+      desired.perfis = desired.perfis || {};
+      const prev = desired.perfis[nome] || {};
+      desired.perfis[nome] = { ...prev, activationHeldUntil: until };
+      return desired;
+    });
+    await issues.append(nome, 'mil_action', `temp_block_hold ${hours}h (activationHeldUntil=${new Date(until).toISOString()})`);
+  } catch {}
+}
 let opening = {};
 async function killPids(pids = []) {
   for (const pid of (pids || [])) {
@@ -2260,10 +2275,6 @@ const handlers = {
         frozenReason: robeMeta[nome]?.frozenReason || null,
         frozenAt: robeMeta[nome]?.frozenAt || null,
         frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
-        internalFailCountWindow: fail.internal,
-        externalFailCountWindow: fail.external,
-        unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
-        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
         killGuardUntil: robeMeta[nome]?.killGuardUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
@@ -2951,30 +2962,17 @@ async function nurseTick() {
       robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow || [];
       let now2 = Date.now();
       if (det && det.blocked && det.domain === 'messenger') {
-        robeMeta[nome].blockDetectWindow.push(now2);
-        robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow.filter(ts => now2 - ts <= 5000);
-        while (robeMeta[nome].blockDetectWindow.length > 8) robeMeta[nome].blockDetectWindow.shift();
-        if (robeMeta[nome].blockDetectWindow.length >= 2 && (!robeMeta[nome].blockHysteresisUntil || robeMeta[nome].blockHysteresisUntil < now2)) {
-          await appendIssueNurseDebounced(nome, `action_virtus_block`, `blockDetectWindow=${robeMeta[nome].blockDetectWindow.length}`, 'action_virtus_block');
-          robeMeta[nome].blockHysteresisUntil = now2 + 15*60*1000;
-          if (killGuardActive(nome)) {
-            await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)', 'guard_skip_block');
-            continue;
-          }
-          await stopVirtus(nome);
-          if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now2)) {
-            robeMeta[nome].reopenAt = now2 + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
-            robeMeta[nome].closingReason = 'virtus_block';
-          }
-          await registerFailure(nome, 'messenger_temp_block', 'external');
-          await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
-          setKillGuard(nome);
-          await snapshotStatusAndWrite();
-          continue;
-        } else {
-          await appendIssueNurseDebounced(nome, `suspect_messenger_block`, `strike=${robeMeta[nome].blockDetectWindow.length}`, 'suspect_messenger_block');
+        try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
+        try { await stopVirtus(nome); } catch {}
+        await holdActivationForHours(nome, 6, 'temp_block');
+        if (killGuardActive(nome)) {
+          await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)', 'guard_skip_block');
           continue;
         }
+        await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
+        setKillGuard(nome);
+        await snapshotStatusAndWrite();
+        continue;
       }
       if (robeMeta[nome].blockHysteresisUntil && robeMeta[nome].blockHysteresisUntil > now2) continue;
       if (det && det.blocked && det.domain === 'facebook') {
@@ -3337,13 +3335,7 @@ async function healthTick() {
       if (det.domain === 'messenger') {
         try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         try { await stopVirtus(nome); } catch {}
-        robeMeta[nome] = robeMeta[nome] || {};
-        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
-        if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
-          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
-          robeMeta[nome].closingReason = 'virtus_block';
-        }
-        try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
+        await holdActivationForHours(nome, 6, 'temp_block');
         if (killGuardActive(nome)) {
           await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)');
           continue;

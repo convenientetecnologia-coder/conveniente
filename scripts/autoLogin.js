@@ -225,6 +225,88 @@ await sleep(300);
 return ok;
 }
 
+// PATCH START [autoLogin.js] — Helpers para garantir login nos dois contextos
+
+async function navigateAndClickContinue(page, url, { timeoutMs = 30000, logPrefix = '[autoLogin]' } = {}) {
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(()=>{});
+    await browserHelper.resolveNonceIfPresent(page, { logPrefix: logPrefix + '[nonce]' }).catch(()=>{});
+    await browserHelper.clickContinuarComo(page, { logPrefix, timeout: 15000 }).catch(()=>{});
+    const href = typeof page.url === 'function' ? page.url() : '';
+    if (!href || href === 'about:blank') {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isCreateItemReady(page, { timeout = 8000 } = {}) {
+  const start = Date.now();
+  while ((Date.now() - start) < timeout) {
+    try {
+      const ok = await page.evaluate(() => {
+        const hasFile = !!document.querySelector('input[type="file"][accept*="image"], input[type="file"]');
+        const hasTitulo = Array.from(document.querySelectorAll('input')).some(i => {
+          const al = i.getAttribute('aria-label') || '';
+          const ph = i.getAttribute('placeholder') || '';
+          return /t[ií]tulo/i.test(al) || /t[ií]tulo/i.test(ph);
+        });
+        const hasCategoria = Array.from(document.querySelectorAll('label[role="combobox"] span')).some(s => /categoria/i.test(s.textContent || ''));
+        return hasFile || (hasTitulo && hasCategoria);
+      });
+      if (ok) return true;
+    } catch {}
+    await sleep(150);
+  }
+  return false;
+}
+
+async function ensureMessengerLoggedIn(ctrl) {
+  try {
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return false;
+    let page = ctrl.mainPage || (await ctrl.browser.pages().catch(()=>[]))[0];
+    if (!page) {
+      const np = await ctrl.browser.newPage();
+      ctrl.mainPage = np;
+      page = np;
+    }
+    await navigateAndClickContinue(page, 'https://www.messenger.com/marketplace', { logPrefix: '[autoLogin][messenger]' });
+    const ok = await evaluateMessengerGridOk(page);
+    if (!ok) {
+      await page.reload({ waitUntil:'domcontentloaded', timeout: 15000 }).catch(()=>{});
+      await browserHelper.clickContinuarComo(page, { logPrefix: '[autoLogin][messenger][retry]', timeout: 10000 }).catch(()=>{});
+      return await evaluateMessengerGridOk(page);
+    }
+    return true;
+  } catch { return false; }
+}
+
+async function ensureFacebookMarketplaceLoggedIn(ctrl, credentials) {
+  try {
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return false;
+    const np = await ctrl.browser.newPage();
+    try {
+      await navigateAndClickContinue(np, 'https://www.facebook.com/marketplace/create/item', { logPrefix: '[autoLogin][fb]' });
+      const need = await browserHelper.detectLoginRequired(np);
+      if (need && need.loginRequired && credentials && credentials.login && credentials.password) {
+        await browserHelper.loginWithCredentials(
+          np,
+          { login: credentials.login, password: credentials.password, keepLogged: true, preferMessenger: false },
+          { timeoutMs: 45000, singleDomain: true }
+        );
+        await navigateAndClickContinue(np, 'https://www.facebook.com/marketplace/create/item', { logPrefix: '[autoLogin][fb][afterLogin]' });
+      }
+      const ready = await isCreateItemReady(np, { timeout: 8000 });
+      return !!ready;
+    } finally {
+      try { await np.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+    }
+  } catch { return false; }
+}
+// PATCH END [autoLogin.js]
+
 function ensureAdapter(adapter) {
 if (!adapter || typeof adapter.getController !== 'function') {
 throw new Error('adapter inválido: getController(nome) obrigatório');
@@ -316,14 +398,21 @@ for (let i = 1; i <= total; i++) {
   const virtusOk = await checkVirtusOk(page);
   const robeOk   = await checkRobeOk(nome, { waitMs: 6000 });
 
-  if (!stillLogin && virtusOk && robeOk) {
-    // SUCESSO — limpa flags e registra
+  // PATCH START [autoLogin.js] — Sucesso só se Messenger e Marketplace estiverem OK
+  const ctrlNow2 = await adapter.getController(nome);
+  const messengerOk = await ensureMessengerLoggedIn(ctrlNow2);
+  const marketOk    = await ensureFacebookMarketplaceLoggedIn(ctrlNow2, man.credentials);
+
+  if (!stillLogin && messengerOk && marketOk) {
     await clearLoginFlagsSuccess(nome);
-    await issues.append(nome, 'auto_login_success', `try=${i}/${total} grid_ok=true robe_ok=true`);
+    await issues.append(nome, 'auto_login_success', `try=${i}/${total} grid_ok=true fb_market_ok=true`);
     result.sucesso = true;
-    result.motivo = 'ok';
+    result.motivo = 'ok_total';
     return result;
   }
+  // PATCH END [autoLogin.js]
+
+  // Deixe a checagem antiga (virtusOk/robeOk) só como telemetria, não limite o critério principal!
 
   // Falha parcial — mantém PILs, marca pós login fail
   await markPostFail(nome, { reasonCode: (loginRes && loginRes.reason) || 'post_fail', message: (loginRes && loginRes.message) || '' });
