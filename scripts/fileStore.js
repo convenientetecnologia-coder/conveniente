@@ -183,14 +183,8 @@ function getStatusSnapshot() {
       frozenReason,
       frozenAt,
       frozenSetBy,
-      // === BLINDAGEM INCONDICIONAL/EXPLÍCITA DOS CAMPOS AQUI ===
-      loginRequired: false,
-      loginReason: null,
-      banned: false,
-      bannedAt: null,
-      bannedText: null,
-      problem: false
-      // outros campos health militar, sempre inicialize null se não disponível.
+      problem: false // <<< ADICIONE ESTA LINHA ao objeto retornado de cada perfil
+      // Adicione outros campos health militar que o painel consome, sempre iniciando com null se não disponível.
     };
   });
   // Não inventa campos militares se não existem snapshot

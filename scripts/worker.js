@@ -1,18 +1,22 @@
 // scripts/worker.js
-const autoLogin = require('./autoLogin.js');
 const path = require('path');
 const fs = require('fs');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
+
+// IMPORTS dos helpers
 const browserHelper = require('./browser.js');
 const virtusHelper = require('./virtus.js');
 const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
 const utils        = require('./utils.js');
-const fotos        = require('./fotos.js');
-const issues = require('./issues.js');
-const manifestStore = require('./manifestStore.js');
+const fotos        = require('./fotos.js'); // gestor central de fotos
+
+const issues = require('./issues.js'); // <<<<<<<<<<<<<< IMPORT NOVO
+const manifestStore = require('./manifestStore.js'); // <<<<<<<<<<<<<< IMPORT NOVO
 const fileStore = require('./fileStore.js');
+
+// Lock serializado por perfil (para evitar races/profile overlaps)
 const _profileOpLocks = new Map();
 async function lockProfileAction(nome, fn) {
   if (!nome) return fn();
@@ -28,57 +32,41 @@ async function lockProfileAction(nome, fn) {
     if (_profileOpLocks.get(nome) === next) _profileOpLocks.delete(nome);
   }
 }
+
+// ====== ACCOUNT FLAGS (loginRequired / banned) — persistência atômica ======
 async function readAccountFlags(nome) {
   try {
     const m = await manifestStore.read(nome).catch(()=>null);
     return (m && m.accountFlags) ? m.accountFlags : {};
   } catch { return {}; }
 }
-// 2. Adicione o mapeador translate reason→PT-BR
-function mapLoginReasonPt(reason, message) {
-  const msg = String(message || '').toLowerCase();
-  const r = String(reason || '').toLowerCase();
-  if (r === 'temporarily_blocked') return 'Bloqueado temporariamente';
-  if (r === 'checkpoint' || r === 'checkpoint_captcha') return 'Checkpoint/Captcha';
-  if (r === 'invalid') {
-    if (msg.includes('wrong_password')) return 'Senha incorreta';
-    if (msg.includes('wrong_login')) return 'E-mail ou telefone inválido';
-    return 'Credenciais inválidas';
-  }
-  if (r === 'login_form') return 'Login requerido';
-  return 'Login requerido';
-}
-// 3. Atualize setLoginRequiredFlag para motivo textual PT-BR
-async function setLoginRequiredFlag(nome, { reason = '', source = '', message = '' } = {}) {
+
+async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
   try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.loginRequired === true;
-    const pt = mapLoginReasonPt(reason, message);
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
       man.accountFlags.loginRequired = true;
-      man.accountFlags.loginReason = pt;
-      man.accountFlags.loginReasonCode = String(reason||'');
+      man.accountFlags.loginReason = String(reason||'');
       man.accountFlags.loginSource = String(source||'');
       man.accountFlags.lastLoginRequiredAt = Date.now();
-      // Inicializa contador de tentativas (garantia do PIL imediato)
-      man.accountFlags.loginAutoAttemptCount = Number(man.accountFlags.loginAutoAttemptCount || 0);
       return man;
     });
     if (!already) {
       await issues.append(
         nome,
         'login_required_detected',
-        `reason=${reason||''} msg=${(message||'').slice(0,60)} source=${source||''} at=${new Date().toISOString()}`
+        `reason=${reason||''} source=${source||''} at=${new Date().toISOString()}`
       );
     }
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].loginRequired = true;
-    robeMeta[nome].loginReason = pt;
+    robeMeta[nome].loginReason = reason || '';
   } catch {}
-  await snapshotStatusAndWrite();
 }
+
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   try {
     const prev = await readAccountFlags(nome);
@@ -102,8 +90,8 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].banned = true;
   } catch {}
-  await snapshotStatusAndWrite();
 }
+
 async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
   try {
     const prev = await readAccountFlags(nome);
@@ -126,6 +114,7 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.bannedText;
         }
       }
+      // Se ficar vazio, opcional: remover accountFlags inteiro
       if (Object.keys(man.accountFlags).length === 0) delete man.accountFlags;
       return man;
     });
@@ -145,46 +134,29 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
   } catch {}
 }
 
-// Função de flag de Problemas na conta (PIL)
-async function setAccountProblemFlag(nome, { message = '' } = {}) {
-  try {
-    const prev = await readAccountFlags(nome);
-    const already = prev && prev.problemaConta === true;
-    const texto = String(message || 'Messenger indisponível ou página removida').slice(0, 200);
-    await manifestStore.update(nome, (man) => {
-      man = man || {};
-      man.accountFlags = man.accountFlags || {};
-      man.accountFlags.problemaConta = true;
-      man.accountFlags.problemaContaMsg = `Problemas na conta — ${texto}`;
-      man.accountFlags.lastProblemAt = Date.now();
-      return man;
-    });
-    if (!already) {
-      await issues.append(
-        nome,
-        'account_problem_detected',
-        (prev && prev.problemaContaMsg) ? prev.problemaContaMsg : (texto || 'Problemas na conta')
-      );
-    }
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].problemaConta = true;
-    robeMeta[nome].problemaContaMsg = `Problemas na conta — ${texto}`;
-  } catch {}
-}
-
+// --- SHARD SUPPORT (multi-node auto) ---
 const SHARD_PROFILES = (() => { try { return JSON.parse(process.env.SHARD_PROFILES || '[]'); } catch { return []; }})();
-let SHARD_SET = new Set(Array.isArray(SHARD_PROFILES) ? SHARD_PROFILES : []);
+let SHARD_SET = new Set(Array.isArray(SHARD_PROFILES) ? SHARD_PROFILES : []); // era 'const', agora 'let'
 const STATUS_FILE_NAME = process.env.STATUS_FILE_NAME || 'status.json';
+
+// Helper para checar se um perfil está no shard
 function inShard(nome) { return SHARD_SET.size === 0 ? true : SHARD_SET.has(nome); }
+
+// Bloqueio universal: Detecta se o pauseReason=limit_posting e o cooldown está ativo
 async function isLimitPostingActive(nome) {
   try {
     const man = await manifestStore.read(nome).catch(()=>null);
     return !!(man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil || 0) > Date.now());
   } catch { return false; }
 }
+
+// Helper para normalizar retorno do Robe
 function isLimitPostingRes(res) {
   return !!(res && (res.limitPosting === true || res.error === 'limit_posting' || res.HALT === true));
 }
+
+// Detecta bloqueio do Marketplace em QUALQUER aba da conta (quando o robe está rodando)
+// Usada pelo nurseTick como fallback hypersafe
 async function detectFbLimitInAnyPage(ctrl) {
   try {
     if (!ctrl || !ctrl.browser || typeof ctrl.browser.pages !== 'function') return false;
@@ -203,10 +175,17 @@ async function detectFbLimitInAnyPage(ctrl) {
   } catch {}
   return false;
 }
+
+// NOVO: Import RAM/CPU cross-platform
 const pidusage = require('pidusage');
 const psList = require('ps-list');
+
+// Supervisor externo (slots)
 const supervisorClient = require('./supervisorClient.js');
+// Helper RAM disponível realista (utils)
 const { getAvailableMB } = utils;
+
+// =============== PATCH: HEALTH STATEFUL + RECOVERY ESCADA ===============
 const HEALTH_CFG = {
   TICK_MS: 10000,
   DEAD_NO_EVENT_MS: 45000,
@@ -224,10 +203,16 @@ const HEALTH_CFG = {
   ESCALATE_TO_REOPEN_AFTER: 2,
   ABOUT_BLANK_GRACE_MS: 7000
 };
+
+// INICIO DA INSTRUÇÃO (worker.js)
+//
+// ATUALIZAÇÃO ULTRA ROBUSTA PARA “PHANTOM STATE/SKELETON” DO MESSENGER
+//
+// 1) Adição após HEALTH_CFG
 const PHANTOM_CFG = {
-  INITIAL_GRACE_MS: 9000,
-  PERSIST_MS: 20000,
-  CHECK_INTERVAL_MS: 5000,
+  INITIAL_GRACE_MS: 9000,          // quanto tempo esperar “de boa” ao abrir Messenger
+  PERSIST_MS: 20000,               // skeleton por mais de 20s = stuck real
+  CHECK_INTERVAL_MS: 5000,         // nurseTick já usa, não precisa timer extra
   COOLDOWN_BETWEEN_TRIES_MS: 30000,
   MAX_PHTM_RELOADS_10M: 2,
   MAX_PHTM_NAV_10M: 2,
@@ -252,6 +237,7 @@ function getPhantomState(nome) {
   };
   return robeMeta[nome].phantom;
 }
+// 2) Snapshot DOM para o Messenger
 async function evaluateChatsState(page) {
   try {
     const res = await page.evaluate(() => {
@@ -284,6 +270,7 @@ async function evaluateChatsState(page) {
     return { hasGrid:false, rows:0, anchors:0, skeletons:0 };
   }
 }
+// 3) Helpers de análise
 function isPhantomFromSnapshot(snap) {
   const noThreads = (snap.rows === 0 && snap.anchors === 0);
   if (noThreads && snap.skeletons > 0) return true;
@@ -292,6 +279,7 @@ function isPhantomFromSnapshot(snap) {
 function isOkFromSnapshot(snap) {
   return (snap.rows > 0 || snap.anchors > 0);
 }
+// 4) Auto-curing principal
 async function tryFixPhantom(nome, page) {
   const ctrlGuard = controllers.get(nome);
   if (ctrlGuard && (ctrlGuard.humanControl === true || ctrlGuard.configurando === true)) return false;
@@ -301,10 +289,15 @@ async function tryFixPhantom(nome, page) {
   ph.navs10m = _prune(ph.navs10m, 10601000);
   ph.reloads10m = _prune(ph.reloads10m, 10601000);
   ph.newpages30m = _prune(ph.newpages30m, 30601000);
+
   if ((now - ph.lastActionAt) < PHANTOM_CFG.COOLDOWN_BETWEEN_TRIES_MS) return false;
+
+  // Evite durante Robe/config
   const ctrl = controllers.get(nome);
   if (!ctrl || !ctrl.browser || ctrl.configurando) return false;
   if (robeMeta[nome] && robeMeta[nome].emExecucao) return false;
+
+  // 1) navHome
   if (ph.navs10m.length < PHANTOM_CFG.MAX_PHTM_NAV_10M) {
     try {
       await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -315,6 +308,7 @@ async function tryFixPhantom(nome, page) {
       return true;
     } catch {}
   }
+  // 2) reload
   if (ph.reloads10m.length < PHANTOM_CFG.MAX_PHTM_RELOADS_10M) {
     try {
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
@@ -325,6 +319,7 @@ async function tryFixPhantom(nome, page) {
       return true;
     } catch {}
   }
+  // 3) newPage
   if (ph.newpages30m.length < PHANTOM_CFG.MAX_PHTM_NEWPAGE_30M) {
     try {
       const ctrl2 = controllers.get(nome);
@@ -344,8 +339,10 @@ async function tryFixPhantom(nome, page) {
       return true;
     } catch {}
   }
+  // 4) Escalade: reopen browser
   ph.failures = (ph.failures || 0) + 1;
   await issues.append(nome, 'mil_action', `phantom_escalate:reopen failures=${ph.failures}`);
+  // Interlock anti-flap
   if (killGuardActive(nome)) {
     await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
     return true;
@@ -355,6 +352,8 @@ async function tryFixPhantom(nome, page) {
   ph.lastActionAt = now;
   return true;
 }
+// FIM DA INSTRUÇÃO (worker.js) – PHANTOM STATE
+
 const healthState = new Map();
 function getHealth(nome) {
   const now = Date.now();
@@ -371,6 +370,9 @@ function _pruneWindow(arr, ms) {
   const now = Date.now();
   return arr.filter(ts => (now - ts) < ms);
 }
+// ============================ FIM PATCH HEALTH ============================
+
+// ===== PATCH MILITAR: BLOCO AUTO-ADAPTATIVO autoMode/sys/global =====
 const os = require('os');
 const AUTO_CFG = {
   MEM_ENTER_MB: 2048,
@@ -383,44 +385,45 @@ const AUTO_CFG = {
   COOL_TICKS: 3,
   MIN_HOLD_MS: 45000,
   ROBE_LIGHT_MIN_SPACING_MS: 60000,
-  RAM_KILL_MB: 1600,
+  RAM_KILL_MB: 1600, // Use pelo menos 1.6GB
   RAM_WARN_MB: 700
 };
-const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10);
-const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
-const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
+
+// APÓS o bloco do AUTO_CFG, adicione:
+const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10);   // mínimo RAM livre para abrir navegador
+const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10); // mínimo RAM que deve sobrar pós-abertura (desativado)
+const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10); // alvo de perfis vivos para SWAP quando abaixo
+
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
   light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
 };
+
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
 function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
+//— ===== FIM PATCH MILITAR: BLOCO AUTO-ADAPTATIVO =====
+
+// ===== LOCKS ATÔMICOS (status e manifest) =====
 let _statusLock = Promise.resolve();
+
+// ===== FIM LOCKS ATÔMICOS =====
+
+// ======= AUTOFIX/HEAL CONFIG =======
+
 async function milLog(type, msg) {
   try { await reportAction('system', type || 'mil_action', String(msg || '')); } catch {}
 }
-// HELPER: Segurar 6h no bloqueio temporário
-async function holdActivationForHours(nome, hours = 6, reason = 'temp_block') {
-  try {
-    const until = Date.now() + hours * 60 * 60 * 1000;
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].activationHeldUntil = until;
-    await fileStore.withDesiredFileLockUpdate((desired) => {
-      desired.perfis = desired.perfis || {};
-      const prev = desired.perfis[nome] || {};
-      desired.perfis[nome] = { ...prev, activationHeldUntil: until };
-      return desired;
-    });
-    await issues.append(nome, 'mil_action', `temp_block_hold ${hours}h (activationHeldUntil=${new Date(until).toISOString()})`);
-  } catch {}
-}
-let opening = {};
+
+// ===== OPENING FLAG (global) para proteção durante abertura e killStray =======
+let opening = {}; // { [nome]: true } enquanto activateOnce estiver em curso
+
 async function killPids(pids = []) {
   for (const pid of (pids || [])) {
     try { process.kill(pid, 'SIGKILL'); } catch {}
   }
 }
+
 async function killProcessTreeByRootPid(pid) {
   if (!pid) return;
   try {
@@ -431,7 +434,7 @@ async function killProcessTreeByRootPid(pid) {
 $parent = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; 
 if ($parent) {
   $queue = @($parent);
-  for ($i=0; i -lt $queue.Count; $i++) {
+  for ($i=0; $i -lt $queue.Count; $i++) {
     $cur = $queue[$i];
     $children = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $cur.ProcessId };
     $queue += $children;
@@ -441,13 +444,16 @@ if ($parent) {
         `], {stdio:'ignore'}, ()=>res());
       });
     } else {
+      // Linux/macOS: desativado — kills apenas via PowerShell/Windows
       return;
     }
   } catch {}
 }
+
 async function killStrayChromes() {
   try {
     if (process.platform !== 'win32') {
+      // Somente Windows: congelado em outras plataformas
       return;
     }
     const perfisArr = loadPerfisJson();
@@ -464,12 +470,12 @@ async function killStrayChromes() {
       if (!userDir) continue;
       const nome = nomeByDir[normalizePath(userDir)];
       if (!nome) continue;
-      if (controllers.has(nome)) continue;
+      if (controllers.has(nome)) continue; // não é stray
       if (!group[nome]) group[nome] = [];
       group[nome].push(Number(proc.pid));
     }
     for (const [nome, pidList] of Object.entries(group)) {
-      if (opening[nome]) {
+      if (opening[nome]) { // proteção: não matar perfis em abertura
         await milLog('mil_action', `stray_skip_opening: ${nome} pids=${pidList.join(',')}`);
         continue;
       }
@@ -479,6 +485,8 @@ async function killStrayChromes() {
     }
   } catch {}
 }
+
+// ====== BOOT ENV LOG ======
 try {
   logger.info('[WORKER][BOOT]', {
     pid: process.pid,
@@ -496,12 +504,19 @@ try {
 try {
   logger.info(`[WORKER][BOOT][SHARD] pid=${process.pid} shardSize=${SHARD_SET.size}`);
 } catch {}
+
+// Snapshot inicial imediato — garante status_node_X.json no boot mesmo sem browsers
 setImmediate(() => { try { snapshotStatusAndWrite().catch(()=>{}); } catch {} });
+
+// Caminhos principais
 const perfisPath = path.join(__dirname, '../dados', 'perfis.json');
 const presetsPath = path.join(__dirname, '../dados', 'ua_presets.json');
 const perfisDir = path.join(__dirname, '../dados', 'perfis');
+
+// === INÍCIO: Adicionar caminhos dos arquivos desired.json e status.json + utilitários atômicos de I/O ===
 const desiredPath = path.join(__dirname, '../dados', 'desired.json');
 const statusPath  = path.join(__dirname, '../dados', STATUS_FILE_NAME);
+
 function readJsonFile(file, fallback) {
 try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
@@ -513,7 +528,7 @@ const tmp = file + '.tmp';
 const fd = fs.openSync(tmp, 'w');
 try {
   fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
-  fs.fsyncSync(fd);
+  fs.fsyncSync(fd); // <--- ADD esta linha
 } finally {
   fs.closeSync(fd);
 }
@@ -533,12 +548,21 @@ try {
 if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} });
 } catch {}
 }
+// === FIM: desired.json/status.json helpers ===
+
+// ===== INSTRUÇÃO ULTRA DETALHADA PARA BLINDAGEM DE desired.json =====
+// Helpers de lock de arquivo atômico para desired.json
+
+
+// === Helpers de manifest + cooldown ===
 function manifestPathOf(nome) {
-  const perfisArr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
+  const perfisArr = JSON.parse(fs.readFileSync(perfisPath, 'utf8')); // PERFIS BRUTO, SEM FILTRO DE SHARD
   const perfil = perfisArr.find(p => p && p.nome === nome);
   if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
   return path.join(perfil.userDataDir, 'manifest.json');
 }
+
+// Converte robeCooldownUntil -> robeCooldownRemainingMs quando a conta NÃO está apta a postar (congela)
 async function freezeCooldownIfNotWorking(nome) {
   try {
     const ctrl = controllers.get(nome);
@@ -556,6 +580,8 @@ async function freezeCooldownIfNotWorking(nome) {
     });
   } catch {}
 }
+
+// Converte robeCooldownRemainingMs -> robeCooldownUntil quando a conta está apta a postar (descongela)
 async function unfreezeCooldownIfWorking(nome) {
   try {
     const ctrl = controllers.get(nome);
@@ -576,7 +602,11 @@ async function unfreezeCooldownIfWorking(nome) {
     });
   } catch {}
 }
+
+// =============== INÍCIO: Helpers/Contagem de ERROS =====================
+// === Somente ERROS devem contar para issuesCount ===
 const ERROR_TYPES = new Set(['robe_error', 'robe_no_photo', 'virtus_blocked', 'virtus_no_composer', 'virtus_send_failed']);
+
 function countErrorsLocal(nome) {
   try {
     const file = path.join(perfisDir, nome, 'issues.json');
@@ -590,6 +620,8 @@ function countErrorsLocal(nome) {
     return n;
   } catch { return 0; }
 }
+// =============== FIM: Helpers/Contagem de ERROS ========================
+
 async function ensureManifestValid(nome) {
   function hasEssentials(man) {
     return man &&
@@ -604,6 +636,7 @@ async function ensureManifestValid(nome) {
   }
   let manifest = await manifestStore.read(nome).catch(()=>null);
   if (manifest && hasEssentials(manifest)) return manifest;
+  // Tentativa de autocura com perfis.json
   try {
     const perfisArr = loadPerfisJson();
     const perfil = perfisArr.find(p => p && p.nome === nome);
@@ -618,6 +651,7 @@ async function ensureManifestValid(nome) {
   } catch {}
   return null;
 }
+
 async function computeManifestStatus(nome) {
   try {
     const man = await manifestStore.read(nome);
@@ -634,6 +668,8 @@ async function computeManifestStatus(nome) {
     return ok ? 'ok' : 'incomplete';
   } catch { return 'unknown'; }
 }
+
+// =============== Issues/Actions logger (silencioso) ================
 async function reportAction(nome, type, message) {
 try {
 if (!nome) return;
@@ -642,19 +678,35 @@ const msg = String(message == null ? '' : message).slice(0, 400);
 await issues.append(nome, type, msg);
 } catch {}
 }
-const controllers = new Map();
-const robeMeta = {};
+// ===================================================================
+
+//
+// Storage de perfis ativos
+const controllers = new Map(); // nome => { browser, virtus, robe, status, configurando, trabalhando }
+
+// Estado global do Robe (cooldown, fila, etc)
+const robeMeta = {}; // { [nome]: {cooldownSec, robeCooldownUntil, estado, proximaPostagem, ultimaPostagem, emFila, emExecucao} }
+
+// INICIO DA INSTRUÇÃO (worker.js)
+//
+// Objetivo: Sweeper global de memória para evitar crescimento indefinido dos estados efêmeros
 function memorySweep() {
   try {
     const nomesValidos = new Set(loadPerfisJson().map(p => p.nome));
+    // healthState (Map)
     for (const [n] of healthState) if (!nomesValidos.has(n) && !controllers.has(n)) healthState.delete(n);
+    // profileFailures (Map)
     for (const [n] of profileFailures) if (!nomesValidos.has(n) && !controllers.has(n)) profileFailures.delete(n);
+    // robeMeta (objeto)
     for (const n of Object.keys(robeMeta)) {
       if (!nomesValidos.has(n) && !controllers.has(n)) delete robeMeta[n];
     }
   } catch {}
 }
 setInterval(memorySweep, 10 * 60 * 1000);
+// FIM DA INSTRUÇÃO (worker.js)
+
+// Interlock global anti-flap per profile
 function killGuardActive(nome) {
   return robeMeta[nome]?.killGuardUntil && robeMeta[nome].killGuardUntil > Date.now();
 }
@@ -662,6 +714,8 @@ function setKillGuard(nome, ms=90000) {
   robeMeta[nome] = robeMeta[nome] || {};
   robeMeta[nome].killGuardUntil = Date.now() + ms;
 }
+
+// Repopular frozenUntil ao boot, lendo dos manifests
 try {
   const perfisArr = loadPerfisJson();
   for (const p of perfisArr) {
@@ -682,6 +736,8 @@ try {
 } catch (err) {
   try { logger.warn('[BOOT] Erro ao repopular frozenUntil dos manifests', { error: err && err.message || err }); } catch {}
 }
+
+// Wrapper para enriquecer automaticamente os logs de issues.append (contexto completo)
 const _issuesAppendOrig = issues && issues.append ? issues.append.bind(issues) : null;
 if (_issuesAppendOrig) {
   issues.append = async function(nome, type, msg) {
@@ -694,6 +750,7 @@ if (_issuesAppendOrig) {
       let recoveryHysteresisUntil = robeMeta[nome]?.recoveryHysteresisUntil || 0;
       let blockHysteresisUntil = robeMeta[nome]?.blockHysteresisUntil || 0;
       let strikes = 0;
+
       const ctrl = controllers.get(nome);
       let page = null;
       if (ctrl && ctrl.browser) {
@@ -720,6 +777,7 @@ if (_issuesAppendOrig) {
       }
       const rm = robeMeta[nome] || {};
       strikes = rm.noPagesStrikes || rm.zombieStrikes || (Array.isArray(rm.blockDetectWindow) ? rm.blockDetectWindow.length : 0) || 0;
+
       const extra = ` url=${url||''} readyState=${readyState||''} deltaDom=${deltaDom} deltaNet=${deltaNet} pagesCount=${pagesCount} strikes=${strikes} killGuardUntil=${killGuardUntil||0} recoveryHysteresisUntil=${recoveryHysteresisUntil||0} blockHysteresisUntil=${blockHysteresisUntil||0} healthStage=${healthStage||''}`;
       const newMsg = (msg == null ? '' : String(msg)) + extra;
       return await _issuesAppendOrig(nome, type, newMsg);
@@ -728,6 +786,11 @@ if (_issuesAppendOrig) {
     }
   };
 }
+
+// ======= INÍCIO: TRAVA DE ATIVAÇÃO SIMULTÂNEA =========
+// ======= FIM: TRAVA DE ATIVAÇÃO SIMULTÂNEA ============
+
+// ======= FUNÇÃO CENTRAL: isFrozenNow =======
 function isFrozenNow(nome) {
   const now = Date.now();
   const inMem = (robeMeta[nome] && robeMeta[nome].frozenUntil) || 0;
@@ -742,12 +805,20 @@ function isFrozenNow(nome) {
   const until = Math.max(inMem, inDisk || 0);
   return until > now ? until : 0;
 }
-const activationLocks = new Map();
+// ============================================
+
+// ======= INÍCIO: LOCK GLOBAL DE ATIVAÇÃO (ULTRA ROBUSTO) =======
+const activationLocks = new Map(); // nome => Promise em andamento
+
 async function activateOnce(nome, source = '') {
   if (opening[nome]) return { ok: false, error: 'already_opening' };
+
+  // EARLY EXIT: já está ativo? Não peça slot nem chame notifyOpened!
   if (controllers.has(nome)) {
     return { ok: true, already: true };
   }
+
+  // EARLY EXIT: já há job de ativação pendente? Não peça slot nem chame notifyOpened!
   const inflight = activationLocks.get(nome);
   if (inflight) {
     try { await inflight.catch(() => {}); } catch {}
@@ -755,19 +826,26 @@ async function activateOnce(nome, source = '') {
       ? { ok: true, already: true }
       : { ok: false, error: 'activation_in_progress' };
   }
+
+  // Chegou aqui, precisa abrir navegador mesmo — registre opening antes para killStray protection.
   opening[nome] = true;
   let _supervisorSlotGranted = false;
   try {
+    // EARLY-GUARD SHARD: nunca abrir perfis fora do shard
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
       logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=false size=${SHARD_SET.size}`);
       return { ok: false, error: 'wrong_shard' };
     }
     logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${inShard(nome)} size=${SHARD_SET.size}`);
+
+    // Supervisor interlock para aberturas durante kill_guard
     if (killGuardActive(nome)) {
       await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
       return { ok:false, error:"kill_guard_until" };
     }
+
+    // BLINDAGEM: não abrir se estiver em hold de humano (somente override via API que limpa o hold)
     try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
       if (desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true) {
@@ -775,34 +853,47 @@ async function activateOnce(nome, source = '') {
         return { ok: false, error: 'human_hold' };
       }
     } catch {}
+
+    // [PATCH-GPT5] Não bloquear ativação por limit_posting — Virtus deve poder operar mesmo durante pausa do Robe.
+    // Mantemos o gate de supervisor/slots/RAM, mas permitimos abrir o navegador mesmo com pauseReason='limit_posting'.
+
+    // SÓ AGORA peça slot ao supervisor
     const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
+      // Hold curto, não crasha
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].activationHeldUntil = Date.now() + 30000;
       await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'}`);
       return { ok:false, error: `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}` };
     }
     _supervisorSlotGranted = true;
+
     if (!nome) {
       if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
       return { ok: false, error: 'Nome ausente' };
     }
+
+    // BLOQUEIO: não ativa se estiver congelado
     if (isFrozenNow(nome)) {
       await reportAction(nome, 'mil_action', 'block_activate_frozen');
       if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
       return { ok: false, error: 'account_is_frozen' };
     }
+
     const job = (async () => {
       logger.info('[WORKER][activateOnce] start', { nome, source });
       try {
         logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
         const manifest = await ensureManifestValid(nome);
         if (!manifest) {
+          // Não foi possível auto-curar (manifest + perfis.json quebrado)
           await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
           await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; perfil congelado 12h');
           if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
           return { ok:false, error: 'manifest_incomplete' };
         }
+
+        // GATE DE RAM antes de abrir (livre > 3GB)
         {
           const freeMB = getAvailableMB();
           if (freeMB <= OPEN_MIN_FREE_MB) {
@@ -810,24 +901,42 @@ async function activateOnce(nome, source = '') {
             throw new Error('ram_insuficiente_para_ativar');
           }
         }
+
         const browser = await browserHelper.openBrowser(manifest);
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
         }
+        // Salve rootPid para killProcessTree depois
         const proc = browser.process && browser.process();
         if (proc && proc.pid) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].rootPid = proc.pid;
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+
+        // HEADROOM pós-abrir (rollback se < 2GB) — DESATIVADO POR POLÍTICA UPTIME FIRST
+        // {
+        //   const freeAfter = getAvailableMB();
+        //   if (freeAfter < HEADROOM_AFTER_OPEN_MB) {
+        //     await reportAction(nome, 'open_rollback_memory', `Headroom pós-abrir=${freeAfter}MB < ${HEADROOM_AFTER_OPEN_MB}MB; rollback preserveDesired`);
+        //     try { await handlers.deactivate({ nome, reason: 'open_headroom', policy: 'preserveDesired' }); } catch {}
+        //     if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+        //     return { ok: false, error: 'headroom_below_min_after_open' };
+        //   }
+        // }
+
+        // PATCH MILITAR: marcar ativação e limpar históricos/avisos
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activatedAt = Date.now();
         robeMeta[nome].ramHist = [];
         robeMeta[nome].cpuHistory = [];
         robeMeta[nome].lastWarn = null;
+
         try { healer.lastProgressAt = Date.now(); } catch {}
+
         try { attachBrowserLifecycle(nome, browser); } catch {}
         try {
+          // Define mainPage e observadores; inicia Pruner de abas
           const ctrl = controllers.get(nome);
           if (ctrl) {
             const pages = await browser.pages().catch(()=>[]);
@@ -837,6 +946,7 @@ async function activateOnce(nome, source = '') {
             }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
+              // Hard guard: só 1 aba salva exceções (Robe/config)
               browserHelper.installOneTabGuard(ctrl.browser, nome, {
                 allow: () => {
                   const c = controllers.get(nome);
@@ -856,19 +966,23 @@ async function activateOnce(nome, source = '') {
                 }
               });
             } catch {}
+            // Adicione ESTA linha abaixo:
             try {
               browserHelper.installAboutBlankKiller(ctrl.browser, nome, { graceMs: 7000 });
             } catch {}
           }
         } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
+        // INSTRUÇÃO 4: Limpa closingReason ao abrir e autenticar com sucesso
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].closingReason = null;
         logger.info('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
         logger.info('[WORKER][activateOnce] concluído', { nome, source });
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'ok'); } catch {} }
+
         return { ok: true };
       } catch (e) {
+        // Mantém status consistente (active:false) no snapshot em caso de falha
         try {
           const st = readJsonFile(statusPath, null) || { perfis: [] };
           let found = false;
@@ -885,11 +999,13 @@ async function activateOnce(nome, source = '') {
           });
         } catch {}
         try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
+        // INICIO DA INSTRUÇÃO 9: hold em erros de RAM/headroom
         if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].activationHeldUntil = Date.now() + 15000;
           try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s (activateOnce)'); } catch {}
         }
+        // FIM DA INSTRUÇÃO 9
         logger.error('[WORKER][activateOnce] fail', { nome, source, err: e && e.message || e }, e);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
         return { ok: false, error: e && e.message || String(e) };
@@ -897,17 +1013,22 @@ async function activateOnce(nome, source = '') {
         activationLocks.delete(nome);
       }
     })();
+
     activationLocks.set(nome, job);
     return await job;
   } finally {
     delete opening[nome];
   }
 }
+// ======= FIM: LOCK GLOBAL DE ATIVAÇÃO (ULTRA ROBUSTO) =======
+
 function sendReply(msgId, data) {
   if (process && process.send) {
     process.send({ replyTo: msgId, data });
   }
 }
+
+// Helpers de perfis
 function loadPerfisJson() {
   try {
     const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
@@ -918,24 +1039,30 @@ function loadPerfisJson() {
 function savePerfisJson(arr) {
   try { fs.writeFileSync(perfisPath, JSON.stringify(arr, null, 2)); } catch {}
 }
+
 function pickUaPreset() {
   const presets = JSON.parse(fs.readFileSync(presetsPath, 'utf8'));
   const perfis = loadPerfisJson();
   const count = {};
   for (const p of presets) count[p.id] = 0;
   for (const pf of perfis) {
-    if (pf.uaPresetId) count[pf.uaPresetId] = (count[pf.uaPresetId] || 0) + 1;
+    if (pf.uaPresetId) count[pf.uaPresetId] = (count[pf.uaPresetId] || 0) + 1; // corrigido bug [pf.f.uaPresetId] para [pf.uaPresetId]
   }
   let min = Math.min(...Object.values(count));
   const candidates = presets.filter(p => count[p.id] === min);
   candidates.sort(() => Math.random() - 0.5);
   return candidates[0];
 }
+
+// -- Utils Robe Timer
+
+// PATCH 1 — Função normalizeCooldown (blindagem e correção até/remaining)
 async function normalizeCooldown(nome) {
   try {
     const now = Date.now();
     const ctrl = controllers.get(nome);
     const man = await manifestStore.read(nome).catch(()=>null);
+    // INSTRUÇÃO: Sincronize pauseReason do manifest para robeMeta
     try {
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].pauseReason = man.robePauseReason || null;
@@ -945,6 +1072,8 @@ async function normalizeCooldown(nome) {
     const remaining = Number(man.robeCooldownRemainingMs || 0);
     const leftUntil = until > now ? (until - now) : 0;
     const leftRem = remaining > 0 ? remaining : 0;
+
+    // Se ambos existem e diferem bastante, privilegia maior janela
     if (leftUntil > 0 && leftRem > 0 && Math.abs(leftUntil - leftRem) > 60*1000) {
       const winner = Math.max(leftUntil, leftRem);
       if (ctrl && ctrl.trabalhando && !ctrl.humanControl) {
@@ -967,6 +1096,7 @@ async function normalizeCooldown(nome) {
         return Math.floor(winner/1000);
       }
     }
+    // Só um existe
     const finalMs = leftUntil > 0 ? leftUntil : leftRem;
     try {
       if (finalMs === 0) {
@@ -976,6 +1106,8 @@ async function normalizeCooldown(nome) {
     return Math.max(0, Math.floor(finalMs/1000));
   } catch { return 0; }
 }
+
+// 2.A — Função utilitária: limit_posting_release ao expirar cooldown
 async function releaseLimitPostingIfExpired(nome) {
   try {
     const man = await manifestStore.read(nome).catch(()=>null);
@@ -997,6 +1129,7 @@ async function releaseLimitPostingIfExpired(nome) {
   } catch {}
   return false;
 }
+
 function robeCooldownLeft(nome) {
   let left = 0;
   try {
@@ -1017,6 +1150,7 @@ function robeCooldownLeft(nome) {
         if (remaining > 0) {
           left = Math.floor(remaining > 0 ? remaining / 1000 : 0);
         } else {
+          // fallback defensivo (se por acaso houver until setado enquanto inativo)
           const until = Number(p.robeCooldownUntil || 0);
           if (until > now) {
             left = Math.floor((until - now) / 1000);
@@ -1028,6 +1162,7 @@ function robeCooldownLeft(nome) {
   } catch {}
   return left;
 }
+
 async function robeLastPosted(nome) {
   let ts = 0;
   try {
@@ -1036,10 +1171,13 @@ async function robeLastPosted(nome) {
   } catch {}
   return ts;
 }
+
 function robeUpdateMeta(nome, patch) {
   robeMeta[nome] = robeMeta[nome] || {};
   Object.assign(robeMeta[nome], patch || {});
 }
+
+// --------------- NOVO: listar contas trabalhando (ativas e em modo de trabalho)
 function getWorkingProfileNames() {
   const nomes = [];
   controllers.forEach((ctrl, nome) => {
@@ -1047,16 +1185,21 @@ function getWorkingProfileNames() {
   });
   return nomes;
 }
+
+// ========== INICIO ALTERAÇÃO PRUNING DE ABAS ==============
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
     const pages = await browser.pages();
     let closed = 0;
+
     const ctrl = controllers.get(nome);
     const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
     const inRobe = (browser && browser._robeActiveFor === nome) || (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true);
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman = ctrl && ctrl.humanControl === true;
+
+    // Fase A — SEMPRE: fechar about:blank exceto main
     for (const p of pages) {
       try {
         if (mainPage && p === mainPage) continue;
@@ -1067,6 +1210,8 @@ async function closeExtraPages(browser, mainPage, nome) {
         }
       } catch {}
     }
+
+    // Fase B — prune amplo apenas se não estiver em envio/robe/config/humano
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       const again = await browser.pages();
       for (const p of again) {
@@ -1078,6 +1223,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         closed++;
       }
     }
+
     if (closed > 0) {
       logger.info('[PRUNER] Fechou abas extras', { nome, closed });
       try { await issues.append(nome, 'mil_action', `pruner_closed_extras n=${closed}`); } catch {}
@@ -1088,7 +1234,10 @@ async function closeExtraPages(browser, mainPage, nome) {
     }
   }
 }
-const _pruners = new Map();
+
+// -------- PRUNE LOOP: Para cada browser, fecha abas extras periodicamente ---------
+const _pruners = new Map(); // nome => pruneInterval
+
 function maybeStartPruneLoop(nome, browser, mainPage) {
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
@@ -1102,30 +1251,43 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
   }, 2*60*1000);
   _pruners.set(nome, interval);
 }
+
 function stopPruneLoop(nome) {
   if (_pruners.has(nome)) {
     clearInterval(_pruners.get(nome));
     _pruners.delete(nome);
   }
 }
+// ========== FIM ALTERAÇÃO PRUNING DE ABAS ==============
+
+// ========== INICIO ALTERAÇÃO RAM/CHROME & CPU MONITOR CROSS-PLATFORM ==========
+
 let ramMonitorInterval = null;
+
+// Monitora RAM/CPU globalmente a cada N segundos, cross-platform
 async function ramCpuMonitorTick() {
   const perfisArr = loadPerfisJson();
+  // Build lookup userDataDir -> nome
   const nomeByUserDir = {};
   for (const p of perfisArr) {
     if (p.userDataDir) {
       nomeByUserDir[normalizePath(p.userDataDir)] = p.nome;
     }
   }
-  const assocPerPid = {};
-  const pidsByNome = {};
-  const pidsMeta = {};
+  // Associa cada perfil ao campo userDataDir normalizado
+  // Temporário para associar PIDs a perfis
+  const assocPerPid = {}; // pid => nome
+  const pidsByNome = {};  // nome => [pids]
+  const pidsMeta = {};    // pid => {cmd, ram, cpu}
   let psProcs = [];
   let winData = null;
   let erroMonitor = false;
-  const cpuPercentHistory = {};
+  // Para circuit-breaker CPU
+  const cpuPercentHistory = {}; // nome => [number, ...max 3]
   try {
     if (process.platform === 'win32') {
+      // Windows: pega via PowerShell/WMI
+      // timeout militar 5s
       await new Promise((resolve) => {
         let settled = false;
         const child = require('child_process').exec(
@@ -1142,15 +1304,18 @@ async function ramCpuMonitorTick() {
         );
         setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 5000);
       });
+      // winData pode ser objeto (único) ou array
       let allData = [];
       if (winData) {
         allData = Array.isArray(winData) ? winData : [winData];
       }
+      // PARA cada processo chrome:
       for (const wproc of allData) {
         const pid = Number(wproc.ProcessId);
         if (!pid) continue;
         const cmd = wproc.CommandLine || '';
         const memBytes = Number(wproc.WorkingSetSize) || 0;
+        // Detecta userDataDir
         const userDir = extractUserDataDir(cmd);
         let nome = userDir ? nomeByUserDir[normalizePath(userDir)] : null;
         if (nome) {
@@ -1161,12 +1326,14 @@ async function ramCpuMonitorTick() {
         pidsMeta[pid] = { cmd, memBytes };
       }
     } else {
+      // Linux/macOS: ps-list()
       try {
         psProcs = await psList();
         for (const proc of psProcs) {
           const pid = Number(proc.pid);
           if (!pid) continue;
           let cmd = proc.cmd || proc.command || '';
+          // Filtrar chrome/chromium (crosstable insensível)
           if (!/chrome|chromium/i.test(cmd)) continue;
           let userDir = extractUserDataDir(cmd);
           let nome = userDir ? nomeByUserDir[normalizePath(userDir)] : null;
@@ -1181,6 +1348,8 @@ async function ramCpuMonitorTick() {
         erroMonitor = true;
       }
     }
+
+    // === STRAY CHROME KILL (perfil sem controller) ===
     try {
       for (const [nome, pids] of Object.entries(pidsByNome)) {
         if (!controllers.has(nome) && Array.isArray(pids) && pids.length) {
@@ -1189,9 +1358,16 @@ async function ramCpuMonitorTick() {
         }
       }
     } catch {}
+
+    // Exemplo de debug: flag por env p/ troubleshooting de problemas de monitoramento
     if (process.env.METRICS_DEBUG === '1') {
       logger.info('[METRICS] pidsByNome', { nomes: Object.keys(pidsByNome), exampleCommand: Object.values(pidsMeta)[0]?.cmd || '' });
     }
+
+    // para cada nome: query pidusage para RAM/CPU dos seus PIDs
+    // [PATCH-ANTI-STUCK][RAM-METRICS RESET]
+    // Zera métricas de RAM/CPU e limpa históricos para perfis sem browser/pids.
+    // Garante que RAM breaker não fique atuando contra perfil já fechado/não-vivo.
     try {
       const nomesComPid = new Set(Object.keys(pidsByNome || {}));
       for (const nome of Object.keys(robeMeta)) {
@@ -1221,7 +1397,10 @@ async function ramCpuMonitorTick() {
             if (typeof st.cpu === "number") somaCpu += st.cpu;
             countValid++;
           }
-        } catch {}
+        } catch {
+          // Fallback: zero, mas controle erro!
+        }
+        // Fallback: soma memBytes do pidsMeta do Windows se pidusage falhar
         const memSumBytes = (pids || []).reduce((acc, pid) => acc + (pidsMeta[pid]?.memBytes || 0), 0);
         if (!countValid && memSumBytes > 0) {
           robeMeta[nome] = robeMeta[nome] || {};
@@ -1229,6 +1408,7 @@ async function ramCpuMonitorTick() {
           robeMeta[nome].cpuPercent = null;
           return;
         }
+        // Se não conseguiu coletar RAM/CPU suficientes (tem pids, mas erro), marcam null
         if (!countValid) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = null;
@@ -1238,11 +1418,16 @@ async function ramCpuMonitorTick() {
           robeMeta[nome].ramMB = typeof somaRam === "number" ? Math.round(somaRam/1024/1024) : null;
           robeMeta[nome].cpuPercent = typeof somaCpu === "number" ? Math.round(somaCpu) : null;
         }
+
+        // Atualiza histórico CPU breaker persistente
         if (typeof robeMeta[nome].cpuPercent === "number") {
+          // PATCH MILITAR: histórico persistente por perfil para CPU
           const ch = robeMeta[nome].cpuHistory || (robeMeta[nome].cpuHistory = []);
           ch.push({ t: Date.now(), p: robeMeta[nome].cpuPercent });
           while (robeMeta[nome].cpuHistory.length > 8) robeMeta[nome].cpuHistory.shift();
         }
+
+        // Resets de streaks RAM/CPU em leituras baixas
         if (typeof robeMeta[nome].cpuPercent === 'number' && robeMeta[nome].cpuPercent < 120) {
           const ch = robeMeta[nome].cpuHistory || [];
           if (ch.length >= 2 && ch.slice(-2).every(h => h.p < 120)) robeMeta[nome].cpuHistory = [];
@@ -1251,10 +1436,15 @@ async function ramCpuMonitorTick() {
           const rh = robeMeta[nome].ramHist || [];
           if (rh.length >= 2 && rh.slice(-2).every(h => h.mb < 800)) robeMeta[nome].ramHist = [];
         }
+
+        // PATCH MILITAR: nunca suicidar navegador por pico de boot/start/post,
+        // só mata leak persistente e nunca perfil único.
         const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
         const actAt = robeMeta[nome]?.activatedAt || 0;
-        if (!actAt || (Date.now() - actAt) < 180000) return;
-        if (vivos <= 1) return;
+        if (!actAt || (Date.now() - actAt) < 180000) return; // <3min após ativação? ignora breaker CPU
+        if (vivos <= 1) return; // nunca processa breaker se só 1 perfil trabalhando
+
+        // Circuit-breaker CPU: só kill se leak mesmo (5 leituras altas consecutivas)
         const hist = robeMeta[nome].cpuHistory || [];
         if (hist.length >= 5) {
           const last5 = hist.slice(-5);
@@ -1262,16 +1452,19 @@ async function ramCpuMonitorTick() {
           if (allHigh) {
             const ctrl = controllers.get(nome);
             if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) return;
+
+            // Interlock anti-flap
             if (killGuardActive(nome)) {
               await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
               logger.info('[BREAKER][CPU] guard_skip', { nome });
               return;
             }
+
             logger.warn('[BREAKER][CPU] acionado', { nome, last5: last5.map(h => h.p) });
             await handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'});
             setKillGuard(nome);
             await reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-            robeMeta[nome].cpuPercent = null;
+            robeMeta[nome].cpuPercent = null; // marca null até a volta
           }
         }
       })());
@@ -1280,23 +1473,38 @@ async function ramCpuMonitorTick() {
   } catch {
     erroMonitor = true;
   }
+
+  // ===== PATCH MILITAR: RAM breaker inteligente por perfil =====
   for (const nome of Object.keys(robeMeta)) {
+    // [PATCH-ANTI-STUCK] Só atua breaker se browser está realmente vivo!
     if (!controllers.has(nome)) continue;
+
     const now = Date.now();
+    // Histerese: não agir se recente kill RAM
     if (robeMeta[nome]?.ramKillHysteresisUntil && robeMeta[nome].ramKillHysteresisUntil > now) {
       await issues.append(nome, 'ram_hysteresis_skip', `skip_until=${robeMeta[nome].ramKillHysteresisUntil}`);
       logger.info('[BREAKER][RAM] hysteresis_skip', { nome, until: robeMeta[nome].ramKillHysteresisUntil });
       continue;
     }
+
     const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
     if (ramMB == null) continue;
+
+    // PATCH MILITAR: nunca suicidar navegador por pico de boot/start/post,
+    // só mata leak persistente e nunca perfil único.
     const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
-    if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue;
-    if (vivos <= 1) continue;
+    if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue; // <3min
+    if (vivos <= 1) continue; // nunca processa breaker se só 1 perfil trabalhando
+
+    // Thresholds: 2200MB em Windows, senão 1600MB
     const RAM_KILL_MB_LOCAL = process.platform === 'win32' ? 2200 : 1600;
+
+    // Histórico curto
     const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
     hist.push({ t: Date.now(), mb: ramMB });
     while (hist.length > 8) hist.shift();
+
+    // Resets de streaks RAM/CPU em leituras baixas (após atualizar históricos)
     if (typeof robeMeta[nome].cpuPercent === 'number' && robeMeta[nome].cpuPercent < 120) {
       const ch = robeMeta[nome].cpuHistory || [];
       if (ch.length >= 2 && ch.slice(-2).every(h => h.p < 120)) robeMeta[nome].cpuHistory = [];
@@ -1305,6 +1513,8 @@ async function ramCpuMonitorTick() {
       const rh = robeMeta[nome].ramHist || [];
       if (rh.length >= 2 && rh.slice(-2).every(h => h.mb < 800)) robeMeta[nome].ramHist = [];
     }
+
+    // Warn apenas se RAM muito alta, sem kill
     if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < RAM_KILL_MB_LOCAL) {
       if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
         try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
@@ -1312,6 +1522,8 @@ async function ramCpuMonitorTick() {
         robeMeta[nome].lastWarn = Date.now();
       }
     }
+
+    // **Agora só KILL se leak comprovado**
     if (hist.length >= 5) {
       const recent = hist.slice(-5);
       const allHigh = recent.every(h => h.mb >= RAM_KILL_MB_LOCAL);
@@ -1322,9 +1534,12 @@ async function ramCpuMonitorTick() {
         const dMin = Math.max(0.5, elapsedMs/60000);
         const slope = (B.mb - A.mb) / dMin;
         const avg = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
+        // Exige pelo menos 2 minutos de janela para acionar por slope
         slopeOK = (elapsedMs >= 120000) && (slope > 50) && (avg > 800);
       }
+      // Só kill se comprovado leak real!
       if (allHigh || slopeOK) {
+        // Dupla amostragem com delay
         try {
           await new Promise(r=>setTimeout(r,1500));
           let newStats = null;
@@ -1342,6 +1557,7 @@ async function ramCpuMonitorTick() {
               if (count2 > 0) ramMB2 = Math.round(somaRam2/1024/1024);
             } catch {}
           }
+          // Atualiza leitura no hist somente se conseguimos nova amostra
           if (typeof ramMB2 === 'number') {
             hist.push({ t: Date.now(), mb: ramMB2 });
             while (hist.length > 8) hist.shift();
@@ -1357,51 +1573,82 @@ async function ramCpuMonitorTick() {
             const avg2 = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
             slopeOK2 = (elapsedMs2 >= 120000) && (slope2 > 50) && (avg2 > 800);
           }
+
           if (!(allHigh2 || slopeOK2)) {
             await issues.append(nome, 'ram_double_sample_clear', `skip=${ramMB2!=null?ramMB2:'n/a'}MB`);
             logger.info('[BREAKER][RAM] double_sample_clear', { nome, sampleMB: ramMB2 });
             continue;
           }
         } catch {}
+
         const ctrl = controllers.get(nome);
         if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) continue;
+
+        // Interlock anti-flap
         if (killGuardActive(nome)) {
           await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
           logger.info('[BREAKER][RAM] guard_skip', { nome });
           continue;
         }
+
         logger.warn('[BREAKER][RAM] acionado', { nome, ramMB, allHigh, slopeOK });
         await handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' });
         setKillGuard(nome);
         await reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK}) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+
+        // Histerese 3min
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].ramKillHysteresisUntil = Date.now() + 180000;
         robeMeta[nome].ramKilledAt = Date.now();
       }
     }
   }
+  // ===== FIM PATCH MILITAR: RAM breaker inteligente por perfil =====
+
+  // Para RAM kill militar (old path/fallback, cross)
   for (const nome of Object.keys(robeMeta)) {
+    // PATCH MILITAR: fallback desativado; lógica de breaker RAM foi substituída pelo bloco acima.
+    // Mantido bloco para integridade estrutural, sem ação aqui.
   }
+  // ===== PATCH MILITAR: Avaliação/autoMode global =====
+
+  // No final, snapshot status global, nunca direto!
   await snapshotStatusAndWrite();
+
+  // Agenda próxima rodada (3–4s)
   ramMonitorInterval = setTimeout(ramCpuMonitorTick, 3500 + Math.floor(Math.random()*1000));
 }
+
 function normalizePath(x) { return String(x||'').replace(/\\/g,'/'); }
+
+// >>>>> PATCH: REGEX ROBUSTO
 function extractUserDataDir(cmd) {
   if (!cmd) return null;
+  // Aceita path entre aspas (duplas ou simples) e com espaços (Windows)!
   const m = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))/i.exec(cmd);
   return m ? (m[1] || m[2] || m[3]) : null;
 }
+// <<<<< PATCH: REGEX ROBUSTO
+
+// Inicia monitor global
 setTimeout(ramCpuMonitorTick, 5000);
+
+// ========== FIM ALTERAÇÃO RAM/CHROME & CPU MONITOR CROSS-PLATFORM ==========
+
+// --------------- ROBE/TICK
 async function robeTickGlobal() {
+  //logger.info('[WORKER][robeTickGlobal] Tick fila global', { hora: new Date().toLocaleString() });
+
   const perfisArr = loadPerfisJson();
+  // PATCH 2 — Usar normalizeCooldown em vez de robeCooldownLeft (pré-filtragem com Promise.all)
   const nomesAll = perfisArr.map(p => p.nome);
   const prontosArr = await Promise.all(nomesAll.map(async (nome) => {
-    if (isFrozenNow(nome)) return null;
+    if (isFrozenNow(nome)) return null; // GUARD: evita spam/OOM por manifest ausente, conta está congelada
     if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > Date.now()) {
-      return null;
+      return null; // GUARD: bloqueado até cooldown após RAM spike
     }
     const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null;
+    if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null; // impede fila em modo humano
     const cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
     const exec = robeQueue.isActive(nome);
@@ -1413,24 +1660,36 @@ async function robeTickGlobal() {
     return (cooldown === 0 && (!inFila) && (!exec)) ? nome : null;
   }));
   const prontos = prontosArr.filter(Boolean);
+
   for (const nome of prontos) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser) continue;
+
     logger.info('[WORKER][robeTickGlobal] Enfileirando', { nome, cooldown: await normalizeCooldown(nome), inQueue: robeQueue.inQueue(nome), isActive: robeQueue.isActive(nome) });
+
     robeQueue.enqueue(nome, async () => {
+
       robeUpdateMeta(nome, { emExecucao: true, emFila: false });
+
+      // Pausa Virtus da conta durante a postagem (nível militar)
       let virtusWasRunning = false;
       const ctrl = controllers.get(nome);
       const workingNow = getWorkingProfileNames();
+      // Sinaliza explicitamente, para que o Virtus/guard saibam: este browser está em ciclo de Robe/POSTAGEM.
       if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
+
+      // GUARD: browser precisa estar vivo
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         robeUpdateMeta(nome, { estado: 'erro' });
         try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (guard)'); } catch {}
         try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
         return;
       }
+
+      // Log de início do Robe
       try { logger.info('[WORKER][robeTickGlobal] Robe start', { nome }); } catch {}
       try { await reportAction(nome, 'robe_start', 'Iniciando Robe via fila global'); } catch {}
+
       let mainPage = null;
       try {
         if (ctrl && ctrl.browser && !ctrl.mainPage) {
@@ -1443,17 +1702,27 @@ async function robeTickGlobal() {
           } catch {}
         }
         mainPage = ctrl.mainPage;
+
+        // Sempre parar Virtus ANTES de prune
         if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
           virtusWasRunning = true;
           try { await ctrl.virtus.stop(); } catch {}
-          ctrl.virtus = null;
+          ctrl.virtus = null; // ficará pausado durante o Robe
+          // Mantemos ctrl.trabalhando = true para a semântica de "conta trabalhando"
         }
+
+        // PRUNE DE ABAS: sempre antes de começar (Virtus já parado)
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
+
+        // Pause curto pós-postagem
         const robePauseMs = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
+
+        // ==== ALTERAÇÃO HOTFIX: ANTIMANIFEST-FLOOD, COOL/PRUNED ERRORS ====
         let res;
         try {
           res = await robeHelper.startRobe(ctrl.browser, nome, robePauseMs, workingNow);
         } catch (e) {
+          // PATCH: Se bloqueio LIMIT_POSTING, pause só o Robe e feche a aba criada
           if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].limitPostingThisRun = Date.now();
@@ -1461,23 +1730,29 @@ async function robeTickGlobal() {
             robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
             try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robeTickGlobal)'); } catch {}
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+            // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
             return;
           }
+          // Outro erro técnico: mantém ciclo igual antes
           await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
           robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
           try { logger.warn('[WORKER][robeTickGlobal] Robe error', { nome, error: e && e.message || e }); } catch {}
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
           return;
         }
+        // ==== EOF COOL/PRUNED ERRORS ====
+
         if (isLimitPostingRes(res)) {
           robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].limitPostingThisRun = Date.now();
-          robeMeta[nome].pauseReason = 'limit_posting';
+          robeMeta[nome].limitPostingThisRun = Date.now(); // é só in-mem/ciclo
+          robeMeta[nome].pauseReason = 'limit_posting'; // reforço
           robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
           await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h');
           try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+          // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
           return;
         }
+
         if (res && res.ok) {
           try {
             await manifestStore.update(nome, (m) => {
@@ -1523,11 +1798,15 @@ async function robeTickGlobal() {
           await snapshotStatusAndWrite();
           return;
         }
+        // PRUNE DE ABAS antes de religar o Virtus (garantia: sem paralelismo Robe/Pruner)
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+
         robeUpdateMeta(nome, { emExecucao: false });
+
         if (virtusWasRunning) {
           if (automationAllowed(ctrl)) {
             try {
+              // Sincronize epoch
               ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
             } catch (e) {
@@ -1540,12 +1819,17 @@ async function robeTickGlobal() {
           }
           await snapshotStatusAndWrite();
         }
+
+        // Log de término do Robe
         try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado'); } catch {}
         try { logger.info('[WORKER][robeTickGlobal] Robe end', { nome }); } catch {}
       }
     });
+
     robeUpdateMeta(nome, { emFila: true });
   }
+
+  // Limpe apenas flags efêmeros quando o perfil não está na fila nem executando
   for (const n of Object.keys(robeMeta)) {
     const m = robeMeta[n];
     if (!m) continue;
@@ -1553,8 +1837,11 @@ async function robeTickGlobal() {
     if (!robeQueue.isActive(n)) delete m.emExecucao;
   }
 }
+
 setInterval(robeTickGlobal, 7000);
 setTimeout(robeTickGlobal, 3500);
+
+// ===== GC DE FOTOS (mantido/instalado) =====
 async function fotosGcTick() {
   try {
     const res = await fotos.gcSweep();
@@ -1567,6 +1854,8 @@ async function fotosGcTick() {
 }
 setInterval(fotosGcTick, 90_000);
 setTimeout(fotosGcTick, 8000);
+
+// == INÍCIO: helper para desligar o Virtus (sem remover nada existente) ==
 async function stopVirtus(nome) {
 const ctrl = controllers.get(nome);
 if (!ctrl) return;
@@ -1577,19 +1866,29 @@ await ctrl.virtus.stop().catch(()=>{});
 } catch {}
 ctrl.virtus = null;
 ctrl.trabalhando = false;
+// PATCH 3: Epoch fence increment + optional browser fence map
 ctrl.virtusEpoch = (ctrl.virtusEpoch || 0) + 1;
 if (ctrl.browser) {
   ctrl.browser._fenceEpochMap = ctrl.browser._fenceEpochMap || {};
   ctrl.browser._fenceEpochMap[nome] = ctrl.virtusEpoch;
 }
 try { freezeCooldownIfNotWorking(nome); } catch {}
+// INÍCIO ALTERAÇÃO 2
 await snapshotStatusAndWrite();
+// FIM ALTERAÇÃO 2
 }
+// == FIM: stopVirtus ==
+
+// == INÍCIO: Função de ciclo de vida do browser (fecha no X, etc) ==
 function attachBrowserLifecycle(nome, browser) {
+// Dispara quando o usuário fecha o Chrome no "X" (ou o processo cai)
 browser.once('disconnected', async () => {
 try {
 logger.info('[WORKER][BROWSER] disconnected', { nome });
+// Cancela Robe em fila (se estiver)
 try { robeQueue.skip && robeQueue.skip(nome); } catch {}
+
+// Para Virtus (se houver referência)
 const ctrl = controllers.get(nome);
 if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
 try {
@@ -1597,8 +1896,13 @@ try {
     await ctrl.virtus.stop().catch(()=>{});
   }
 } catch {}
+
 try { freezeCooldownIfNotWorking(nome); } catch {}
+
+// Remove do mapa de controladores
 controllers.delete(nome);
+
+// INÍCIO DA INSTRUÇÃO: Limpeza extra ao desconectar/disconnect
 try { healthState.delete(nome); } catch {}
 try { profileFailures.delete(nome); } catch {}
 try {
@@ -1611,21 +1915,30 @@ try {
     delete robeMeta[nome].blockDetectWindow;
   }
 } catch {}
+// FIM DA INSTRUÇÃO: Limpeza extra ao desconectar/disconnect
+
+// Log de morte/desconexão imediatamente após remover do controllers
 try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
+
+// LIMPA PRUNER DE ABAS
 stopPruneLoop(nome);
+
+// Registrar falha e agendar reabertura curta
 try { registerFailure(nome, 'disconnected', 'external'); } catch {}
 try {
+  // Checagem desired e reopenAt existente: NÃO sobrescreva um reopenAt futuro já calculado
   const d = readJsonFile(desiredPath, { perfis: {} });
   const isDesiredActive = d.perfis?.[nome]?.active === true;
   const isHold = d.perfis?.[nome]?.humanHold === true;
   robeMeta[nome] = robeMeta[nome] || {};
   const now = Date.now();
+
   if (!isFrozenNow(nome) && isDesiredActive && !isHold) {
     if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
       robeMeta[nome].reopenAt = now + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
       robeMeta[nome].closingReason = 'disconnected';
       issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
-      setKillGuard(nome, 30000);
+      setKillGuard(nome, 30000); // 30s para janela 'disconnected'
     } else {
       issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
     }
@@ -1635,17 +1948,24 @@ try {
       'reopen_suppressed_frozen' : (isHold ? 'reopen_suppressed_human_hold' : 'reopen_suppressed_desired_off')).catch(()=>{});
   }
 } catch {}
+
+// Atualiza status.json imediato
 try { await snapshotStatusAndWrite(); } catch {}
 } catch (e) {
   try { logger.warn('[WORKER][BROWSER] disconnect handler err', { error: e && e.message || e }); } catch {}
 }
+// FINAL: Remove listeners de browser e do about:blank killer para garantir GC imediato de guards/timers
 try {
   browser.removeAllListeners && browser.removeAllListeners('targetcreated');
   browser.removeAllListeners && browser.removeAllListeners('targetchanged');
   browser.removeAllListeners && browser.removeAllListeners('targetdestroyed');
 } catch {}
-});
-}
+});  // <-- Fecha o browser.once('disconnected', async () => { ... })
+}     // <-- Fecha a função attachBrowserLifecycle(nome, browser)
+
+// == FIM função ciclo de vida browser ==
+
+// ========== HANDLERS ==========
 function resolveChromeUserDataRoot() {
   if (process.platform === 'win32') {
     const la = process.env.LOCALAPPDATA;
@@ -1656,15 +1976,22 @@ function resolveChromeUserDataRoot() {
   const os = require('os');
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
+
+// PATCH 1: helper automationAllowed(ctrl) — logo antes dos handlers
 function automationAllowed(ctrl) {
   return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && !ctrl.trabalhando);
 }
+
+// PATCH 2: handler.start_work (definido fora do objeto handlers)
 async function start_work({ nome }) {
   return lockProfileAction(nome, async () => {
     logger.info('[HANDLER] start_work chamada', { nome });
+
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
       return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+
+    // BLOQUEIO: nunca permite start_work se humano/configurando
     if (ctrl.humanControl || ctrl.configurando) {
       await issues.append(nome, 'mil_action', 'start_work_denied (human/config mode)');
       logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
@@ -1678,6 +2005,7 @@ async function start_work({ nome }) {
       logger.info('[HANDLER] start_work ok (_virtusStarting)', { nome });
       return { ok: true };
     }
+
     try {
       ctrl._virtusStarting = true;
       if (!automationAllowed(ctrl)) {
@@ -1685,7 +2013,9 @@ async function start_work({ nome }) {
         logger.warn('[HANDLER] automation_not_allowed em start_work', { nome });
         return { ok: false, error: 'automation_not_allowed' };
       }
+      // Fence: sincronize epoch para Virtus runner anti-zumbi
       ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
       ctrl.trabalhando = true;
       try {
@@ -1695,13 +2025,16 @@ async function start_work({ nome }) {
         robeMeta[nome].numPages = (ps && ps.length) || 0;
         await snapshotStatusAndWrite();
       } catch {}
+
       if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
         await browserHelper.forceCloseExtras(ctrl.browser);
       }
+
       try {
         await unfreezeCooldownIfWorking(nome);
         await normalizeCooldown(nome);
       } catch {}
+
       await snapshotStatusAndWrite();
       logger.info('[HANDLER] start_work ok', { nome });
       return { ok: true };
@@ -1713,19 +2046,24 @@ async function start_work({ nome }) {
     }
   });
 }
+
 const handlers = {
   async ['criar-perfil']({ cidade, cookies }) {
     logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
     if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
     if (!fs.existsExists(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
+
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
+
     const preset = pickUaPreset();
     if (!preset) return { ok: false, error: 'UA preset esgotado.' };
+
     const cookiesArr = utils.normalizeCookies(cookies);
     if (!cookiesArr.length || !cookiesArr.find(c => c.name === 'c_user') || !cookiesArr.find(c => c.name === 'xs')) {
       return { ok: false, error: 'Cookies inválidos ou ausentes: precisa de c_user e xs!' };
     }
+
     const perfilObj = {
       nome,
       cidade,
@@ -1740,21 +2078,26 @@ const handlers = {
       cookies: cookiesArr,
       robeCooldownUntil: 0,
       configuredAt: null,
-      userDataDir: path.join(resolveChromeUserDataRoot(), 'Conveniente', nome)
+      userDataDir: path.join(resolveChromeUserDataRoot(), 'Conveniente', nome) // <- NOVO ROOT
     };
     try { fs.mkdirSync(perfilObj.userDataDir, { recursive: true }); } catch {}
+
     const perfisArr = loadPerfisJson();
     perfisArr.push(perfilObj);
     savePerfisJson(perfisArr);
+
+    // NOVO: gravar manifest via manifestStore.update (atomicidade/locks)
     try {
       await manifestStore.update(nome, (m) => {
         m = m || {};
         return Object.assign({}, m, perfilObj);
       });
     } catch {}
+
     logger.info('[HANDLER] criar-perfil ok', { nome });
     return { ok: true, perfil: perfilObj };
   },
+
   async activate({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] activate chamada', { nome });
@@ -1763,6 +2106,7 @@ const handlers = {
       return r;
     });
   },
+
   async deactivate({ nome, reason, policy }) {
   return lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
@@ -1774,6 +2118,7 @@ const handlers = {
       reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_RAMCPU_MS + Math.floor(Math.random()*120000);
     } else if (reason === 'virtus_block') {
       reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
+      // 2h + 5-25min jitter
     } else {
       reopenDelayMs = ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
     }
@@ -1785,6 +2130,7 @@ const handlers = {
     if (preserve && !isFrozenNow(nome) && !isHold) {
       robeMeta[nome] = robeMeta[nome] || {};
       const now = Date.now();
+      // Só agenda se não houver reopenAt futuro
       if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now)) {
         robeMeta[nome].reopenAt = now + reopenDelayMs;
         robeMeta[nome].closingReason = reason || '';
@@ -1811,6 +2157,7 @@ const handlers = {
       await ctrl.browser.close();
     }
   } catch {}
+  // Kill árvore de processos órfãos (rootPid salvo em robeMeta)
   try {
     const root = robeMeta[nome]?.rootPid;
     if (root) {
@@ -1820,6 +2167,8 @@ const handlers = {
   } catch {}
   try { freezeCooldownIfNotWorking(nome); } catch {}
   controllers.delete(nome);
+
+  // INICIO DA INSTRUÇÃO (opcional, recomendado): Limpeza de efêmeros em robeMeta ao desativar
   try {
     if (robeMeta[nome]) {
       delete robeMeta[nome].emExecucao;
@@ -1830,6 +2179,8 @@ const handlers = {
       delete robeMeta[nome].blockDetectWindow;
     }
   } catch {}
+  // FIM DA INSTRUÇÃO (opcional, recomendado)
+
   stopPruneLoop(nome);
   if (!preserve) {
     try {
@@ -1864,13 +2215,16 @@ const handlers = {
   return { ok: true };
   });
 },
+
   async configure({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      // Supressão do about:blank killer durante toda configuração
       const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-      guard[nome] = Date.now() + 10601000;
+      guard[nome] = Date.now() + 10601000; // ~10 minutos de supressão total durante configurar
+
       const perfisArr = loadPerfisJson();
       const perfil = perfisArr.find(p => p && p.nome === nome);
       if (!perfil || !perfil.userDataDir) return { ok: false, error: 'Perfil não encontrado!' };
@@ -1882,7 +2236,10 @@ const handlers = {
         return { ok: false, error: 'Cookies não encontrados no manifest!' };
       }
       ctrl.configurando = true;
+
+      // Pare Virtus antes de configurar
       try { await stopVirtus(nome); } catch {}
+
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
           desired.perfis = desired.perfis || {};
@@ -1890,8 +2247,11 @@ const handlers = {
           return desired;
         });
       } catch {}
+
       try {
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
+        try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+        // NÃO execute closeExtraPages/prune aqui!
         logger.info('[HANDLER] configure ok', { nome });
         return { ok: true };
       } catch (e) {
@@ -1899,32 +2259,40 @@ const handlers = {
         logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
         return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
       } finally {
+        // 1) Sai do modo configurando e fecha ABAS EXTRAS AGORA (obrigatório)
         ctrl.configurando = false;
-        ctrl.humanControl = false;
-        // Reata o prune loop (mantém uma aba estável)
-        try {
-          const pages2 = await ctrl.browser.pages().catch(()=>[]);
-          if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]);
-        } catch {}
+        // 2) Entra em humano (fluxo já existente)
+        ctrl.humanControl = true;
+        stopPruneLoop(nome);
         await snapshotStatusAndWrite();
       }
     });
   },
+
   start_work,
+
   async invoke_human({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
+
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+
+      // 1. Esperar Robe terminar (se estiver em execução para esta conta)
       const robes = robeMeta[nome] || {};
       if (robes.emExecucao) {
-        const waitTimeout = 180 * 1000;
+        // Aguarda (polling simples)
+        const waitTimeout = 180 * 1000; // máx 3 minutos
         const started = Date.now();
         while ((robeMeta[nome] && robeMeta[nome].emExecucao) && (Date.now() - started < waitTimeout)) {
           await new Promise(r => setTimeout(r, 600));
         }
       }
+
+      // 2. ATENÇÃO: SETE AS FLAGS _ANTES_ DE TUDO!
       ctrl.humanControl = true;
+
+      // Persistir hold humano e limpar qualquer reabertura programada
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
           desired.perfis = desired.perfis || {};
@@ -1932,13 +2300,15 @@ const handlers = {
           return desired;
         });
       } catch {}
+
       try {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].reopenAt = null;
         robeMeta[nome].closingReason = null;
       } catch {}
+
       ctrl.configurando = false;
-      stopPruneLoop(nome);
+      stopPruneLoop(nome); // Garante que NENHUM prune corra durante humano
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
           desired.perfis = desired.perfis || {};
@@ -1947,98 +2317,100 @@ const handlers = {
         });
       } catch {}
       await snapshotStatusAndWrite();
+
+      // Supressão do about:blank killer durante modo humano
       const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
-      guard[nome] = Date.now() + 246060*1000;
+      guard[nome] = Date.now() + 246060*1000; // 24h em ms: supressão total enquanto humano
+
+      // 3. Mata Virtus agressivamente + fence (pode ser logo após flags)
       try { await stopVirtus(nome); } catch {}
+
+      // 4. Só então faça a navegação do humano:
       await browserHelper.invocarHumano(ctrl.browser, nome);
+
+      // 5. (Opcional para robustez/nurse): freezer cooldown como já fazia
       try { freezeCooldownIfNotWorking(nome); } catch {}
+
       await snapshotStatusAndWrite();
+
       logger.info('[HANDLER] invoke_human ok', { nome });
       return { ok: true };
     });
   },
+
   async ['human-resume']({ nome }) {
-  return lockProfileAction(nome, async () => {
-    logger.info('[HANDLER] human-resume chamada', { nome });
-    const ctrl = controllers.get(nome);
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) 
-      return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
-    ctrl.humanControl = false;
+    return lockProfileAction(nome, async () => {
+      logger.info('[HANDLER] human-resume chamada', { nome });
 
-    try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
-    // PATCH MILITAR: Apague todos os resíduos/flags antigos de erro/login
-    try {
-      await manifestStore.update(nome, (m) => {
-        m = m || {};
-        m.accountFlags = m.accountFlags || {};
-        // Limpa TODO erro de login, problem flags e resíduos
-        m.accountFlags.loginAutoAttemptCount = 0;
-        delete m.accountFlags.loginBackoffUntil;
-        delete m.accountFlags.loginFailCount;
-        delete m.accountFlags.lastLoginTryError;
-        delete m.accountFlags.lastLoginTryReasonCode;
-        delete m.accountFlags.lastLoginTrySource;
-        delete m.accountFlags.autoLoginEscalatedAt;
-        delete m.accountFlags.humanRecommended;
-        delete m.accountFlags.humanReason;
-        delete m.accountFlags.postLoginAutomationFail;
-        delete m.accountFlags.problemaConta;
-        delete m.accountFlags.problemaContaMsg;
-        delete m.accountFlags.loginTemporaryBlock;
-        delete m.accountFlags.loginReason;
-        delete m.accountFlags.loginReasonCode;
-        return m;
-      });
-      await snapshotStatusAndWrite();
-    } catch {}
+      ctrl.humanControl = false; // Sai do modo humano antes de iniciar as automações
+      // LIMPA FLAGS AO RETOMAR TRABALHO (loginRequired e banned)
+      try { await clearAccountFlags(nome, ['loginRequired','banned']); } catch {}
+      // Limpa supressão do about:blank killer ao sair do modo humano
+      try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
 
-    try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
-    let pages2 = [];
-    try { pages2 = await ctrl.browser.pages(); } catch {}
-    if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]);
-    try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
-    try {
-      const ps = await ctrl.browser.pages();
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].numPages = (ps && ps.length) || 0;
-      await snapshotStatusAndWrite();
-    } catch {}
-    let pages;
-    try { pages = await ctrl.browser.pages(); } catch {}
-    if (pages && pages[0]) {
+      let pages2 = [];
+      try { pages2 = await ctrl.browser.pages(); } catch {}
+      if (pages2 && pages2[0]) maybeStartPruneLoop(nome, ctrl.browser, pages2[0]); // Reabilita prune ao retornar ao robô
+      try { await browserHelper.forceCloseExtras(ctrl.browser); } catch {}
       try {
-        await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
-        await new Promise(r => setTimeout(r, 350));
-        await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const ps = await ctrl.browser.pages();
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].numPages = (ps && ps.length) || 0;
+        await snapshotStatusAndWrite();
       } catch {}
-    }
-    if (automationAllowed(ctrl)) {
-      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
-      ctrl.trabalhando = true;
-    }
-    try { unfreezeCooldownIfWorking(nome); } catch {}
-    await snapshotStatusAndWrite();
-    logger.info('[HANDLER] human-resume ok', { nome });
-    try {
-      await fileStore.withDesiredFileLockUpdate((desired) => {
-        desired.perfis = desired.perfis || {};
-        if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
-        return desired;
-      });
-    } catch {}
-    return { ok:true };
-  });
-},
+
+      let pages;
+      try { pages = await ctrl.browser.pages(); } catch {}
+      if (pages && pages[0]) {
+        try {
+          await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
+          await new Promise(r => setTimeout(r, 350));
+          await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } catch {}
+      }
+
+      // Religando Virtus APÓS a minimização/navegação
+      if (automationAllowed(ctrl)) {
+        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+        ctrl.trabalhando = true;
+      }
+
+      try { unfreezeCooldownIfWorking(nome); } catch {}
+
+      await snapshotStatusAndWrite();
+      logger.info('[HANDLER] human-resume ok', { nome });
+
+      // Remover hold humano (override explícito)
+      try {
+        await fileStore.withDesiredFileLockUpdate((desired) => {
+          desired.perfis = desired.perfis || {};
+          if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
+          return desired;
+        });
+      } catch {}
+
+      return { ok:true };
+    });
+  },
+
+  // == ALTERAÇÃO 3: Handler robe-play substituído ==
   async ['robe-play']({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] robe-play chamada', { nome });
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+
+      // P0.3: recusa se frozen
       if (isFrozenNow(nome)) {
         return { ok: false, error: 'account_frozen' }
       }
+      // GUARD-RAIL: IMPEDIR PRUNE/POSTAGEM enquanto está em configuração (injeção de cookies)
       if (ctrl && ctrl.configurando) return { ok: false, error: 'perfil_em_configuracao' };
+
+      // Zera cooldown REAL no manifest (libera imediatamente este perfil) e limpa fb_block
       try {
         await manifestStore.update(nome, (m) => {
           m = m || {};
@@ -2052,22 +2424,31 @@ const handlers = {
           delete robeMeta[nome].lastRobeBlockAt;
         }
       } catch {}
+
+      // Se não está na fila nem ativo, enfileira o callback REAL igual ao robeTickGlobal:
       if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
         robeUpdateMeta(nome, { emFila: true });
         robeQueue.enqueue(nome, async () => {
+
           robeUpdateMeta(nome, { emExecucao: true, emFila: false });
+
           let virtusWasRunning = false;
           const ctrl = controllers.get(nome);
           const workingNow = getWorkingProfileNames();
           if (ctrl && ctrl.browser) ctrl.browser._robeActiveFor = nome;
+
+          // GUARD: browser precisa estar vivo
           if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
             robeUpdateMeta(nome, { estado: 'erro' });
             try { await reportAction(nome, 'browser_disconnected', 'Browser desconectado antes de iniciar o Robe (robe-play guard)'); } catch {}
             try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
             return;
           }
+
+          // Log de início do Robe (robe-play)
           try { logger.info('[WORKER][robe-play] Robe start', { nome }); } catch {}
           try { await reportAction(nome, 'robe_start', 'Iniciando Robe via robe-play'); } catch {}
+
           let mainPage = null;
           try {
             if (ctrl && ctrl.browser && !ctrl.mainPage) {
@@ -2080,16 +2461,23 @@ const handlers = {
               } catch {}
             }
             mainPage = ctrl.mainPage;
+
+            // Sempre parar Virtus ANTES de prune
             if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
               virtusWasRunning = true;
               try { await ctrl.virtus.stop(); } catch {}
               ctrl.virtus = null;
             }
+
+            // PRUNE ANTI-ABAS (Virtus parado)
             try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
+
+            // ==== ALTERAÇÃO HOTFIX: ANTIMANIFEST-FLOOD, COOL/PRUNED ERRORS ====
             let res;
             try {
               res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
             } catch (e) {
+              // PATCH: Se bloqueio LIMIT_POSTING, pause só o Robe e feche a aba criada
               if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].limitPostingThisRun = Date.now();
@@ -2097,6 +2485,7 @@ const handlers = {
                 robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
                 try { await issues.append(nome, 'mil_action', 'limit_posting_guard:caught_throw (robe-play)'); } catch {}
                 try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+                // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
                 return;
               }
               await reportAction(nome, 'robe_error', `Falha técnica: ${(e&&e.message)||e}; cooldown padrão (15–30min) será aplicado por robe.js`);
@@ -2105,6 +2494,8 @@ const handlers = {
               try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
               return;
             }
+            // ==== EOF COOL/PRUNED ERRORS ====
+
             if (isLimitPostingRes(res)) {
               robeMeta[nome] = robeMeta[nome] || {};
               robeMeta[nome].limitPostingThisRun = Date.now();
@@ -2112,8 +2503,10 @@ const handlers = {
               robeUpdateMeta(nome, { estado: 'paused_limit', cooldownSec: await normalizeCooldown(nome), emExecucao: false });
               await issues.append(nome, 'mil_action', 'limit_posting_guard: cycle aborted and locked to 24h (robe-play)');
               try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
-              return;
+              // CORRETO: NÃO fechar ctrl.mainPage. A aba de postagem já foi fechada pelo robe.js.
+              return; // ciclo abortado, não religar virtus
             }
+
             if (res && res.ok) {
               try {
                 await manifestStore.update(nome, (m) => {
@@ -2159,11 +2552,15 @@ const handlers = {
               await snapshotStatusAndWrite();
               return;
             }
+            // PRUNE DE ABAS antes de religar o Virtus
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
+
             robeUpdateMeta(nome, { emExecucao: false });
+
             if (virtusWasRunning) {
               if (automationAllowed(ctrl)) {
                 try {
+                  // Sincronize epoch
                   ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                 } catch (e) {
@@ -2178,6 +2575,8 @@ const handlers = {
             } else {
               await snapshotStatusAndWrite();
             }
+
+            // Log de término do Robe (robe-play)
             try { await reportAction(nome, 'robe_end', 'Robe ciclo finalizado (robe-play)'); } catch {}
             try { logger.info('[WORKER][robe-play] Robe end', { nome }); } catch {}
           }
@@ -2188,8 +2587,12 @@ const handlers = {
       return { ok: true };
     });
   },
+  // == FIM ALTERAÇÃO 3 ==
+
+  // INICIO DA INSTRUÇÃO (worker.js) - Handler robes-release-all
   async ['robes-release-all']() {
     logger.info('[HANDLER] robes-release-all chamada');
+    // Limpa pauseReason de todos os perfis em robeMeta + no manifest (remover robePauseReason)
     const perfisArr = loadPerfisJson();
     for (const p of perfisArr) {
       try {
@@ -2207,7 +2610,10 @@ const handlers = {
     logger.info('[HANDLER] robes-release-all ok');
     return { ok: true };
   },
+  // FIM DA INSTRUÇÃO (worker.js) - Handler robes-release-all
+
   async ['get-status']() {
+    // INICIO DA INSTRUÇÃO 5: cap arrays efêmeros antes de gerar status
     try {
       for (const n of Object.keys(robeMeta)) {
         const m = robeMeta[n];
@@ -2222,6 +2628,8 @@ const handlers = {
         while (m.blockDetectWindow.length > 8) m.blockDetectWindow.shift();
       }
     } catch {}
+    // FIM DA INSTRUÇÃO 5
+
     const perfisArr = loadPerfisJson();
     const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
     const perfis = [];
@@ -2233,7 +2641,7 @@ const handlers = {
           const res = issues.countErrors(nome);
           issuesCount = Number(res && res.count) || 0;
         } else {
-          issuesCount = countErrorsLocal(nome);
+          issuesCount = countErrorsLocal(nome); // fallback local
         }
       } catch { issuesCount = 0; }
       const fail = getFailureCounts(nome);
@@ -2244,19 +2652,10 @@ const handlers = {
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
-      const postLoginAutomationFail = man ? !!(man.accountFlags && man.accountFlags.postLoginAutomationFail === true) : false;
-      const hasProblemConta = man ? !!(man.accountFlags && man.accountFlags.problemaConta === true) : false;
-      const problemContaMsg = man ? ((man.accountFlags && man.accountFlags.problemaContaMsg) || null) : null;
       const problem = man
-        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) ||
-             (man.accountFlags && man.accountFlags.banned === true) ||
-             (man.accountFlags && man.accountFlags.postLoginAutomationFail === true) ||
-             (man.accountFlags && man.accountFlags.problemaConta === true))
-        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).problemaConta);
-      const loginAutoAttemptCount = man ? Number(man.accountFlags && man.accountFlags.loginAutoAttemptCount || 0) : 0;
-      const lastLoginAutoAttemptAt = man ? (man.accountFlags && man.accountFlags.lastLoginAutoAttemptAt || null) : null;
-      const lastLoginTryError = man ? ((man.accountFlags && man.accountFlags.lastLoginTryError) || null) : null;
-      const autoLoginEscalatedAt = man ? (man.accountFlags && man.accountFlags.autoLoginEscalatedAt || null) : null;
+        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
+        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
+
       perfis.push({
         nome,
         label: p.label || null,
@@ -2265,7 +2664,7 @@ const handlers = {
         active: controllers.has(nome),
         trabalhando: !!(controllers.get(nome)?.trabalhando),
         configurando: !!(controllers.get(nome)?.configurando),
-        humanControl: !!(controllers.get(nome)?.humanControl),
+        humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
         humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
         issuesCount,
         ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
@@ -2275,6 +2674,10 @@ const handlers = {
         frozenReason: robeMeta[nome]?.frozenReason || null,
         frozenAt: robeMeta[nome]?.frozenAt || null,
         frozenSetBy: robeMeta[nome]?.frozenSetBy || null,
+        internalFailCountWindow: fail.internal,
+        externalFailCountWindow: fail.external,
+        unfreezeCount: robeMeta[nome]?.unfreezeCount || 0,
+        lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
         activationHeldUntil: robeMeta[nome]?.activationHeldUntil || null,
         killGuardUntil: robeMeta[nome]?.killGuardUntil || null,
         reopenAt: robeMeta[nome]?.reopenAt || null,
@@ -2287,9 +2690,6 @@ const handlers = {
         banned,
         bannedAt,
         bannedText,
-        postLoginAutomationFail,
-        accountProblem: hasProblemConta,
-        accountProblemText: problemContaMsg,
         problem
       });
     }
@@ -2327,6 +2727,7 @@ const handlers = {
       if (pauseActive) {
         robes[nome].estado = 'paused_limit';
       }
+      // PATCH 1: Forçar transmissão de limit_posting no get-status
       const man = await manifestStore.read(nome).catch(()=>null);
       if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
         robes[nome].pauseReason = 'limit_posting';
@@ -2335,6 +2736,7 @@ const handlers = {
       }
     }
     const robeQueueList = robeQueue.queueList();
+    // PATCH autoMode/sys: incluir autoMode e sys
     const sys = {
       freeMB: Math.round(os.freemem()/(1024*1024)),
       totalMB: Math.round(os.totalmem()/(1024*1024)),
@@ -2349,6 +2751,7 @@ const handlers = {
       sys
     };
   },
+
   async unfreeze({ nome, setBy }) {
     return lockProfileAction(nome, async () => {
       if (!nome) return { ok: false, error: 'nome_obrigatorio' };
@@ -2356,6 +2759,7 @@ const handlers = {
       return { ok: true };
     });
   },
+
   async ['unfreeze-all']() {
     try {
       const perfisArr = loadPerfisJson();
@@ -2366,26 +2770,34 @@ const handlers = {
       return { ok: true };
     } catch (e) { return { ok: false, error: e && e.message || String(e) }; }
   },
+
+  // Adiciona/atualiza o shard dinâmico e faz cleanup dos perfis não pertencentes mais ao shard
   async ['set-shard']({ names }) {
     try {
       const newSet = new Set(Array.isArray(names) ? names : []);
+      // Descobre perfis que saíram deste shard
       const removed = [];
       for (const nome of SHARD_SET) {
         if (!newSet.has(nome)) removed.push(nome);
       }
       SHARD_SET = newSet;
+
+      // Remove/stop/desanexar perfis que saíram do shard
       for (const nome of removed) {
         const ctrl = controllers.get(nome);
         const rm = robeMeta[nome] || {};
         const robeRunning = rm.emExecucao === true || (ctrl && ctrl.browser && ctrl.browser._robeActiveFor === nome);
         const busy = robeRunning || (ctrl && (ctrl.configurando === true || ctrl.humanControl === true));
+
         if (busy) {
+          // Modo drain: não derrubar agora; agenda para depois
           robeMeta[nome] = rm;
           rm.pendingShardMove = true;
-          rm.deferShardMoveUntil = Date.now() + 10*60*1000;
+          rm.deferShardMoveUntil = Date.now() + 10*60*1000; // 10 min de janela
           await issues.append(nome, 'mil_action', 'shard_move_deferred (busy)');
-          continue;
+          continue; // não desativa agora
         }
+
         try { robeQueue.skip && robeQueue.skip(nome); } catch {}
         try {
           if (ctrl && ctrl.browser) {
@@ -2406,14 +2818,18 @@ const handlers = {
       }
       await snapshotStatusAndWrite();
       return { ok: true, size: SHARD_SET.size, removed };
+
     } catch (e) {
       return { ok: false, error: e && e.message || String(e) };
     }
   }
 };
+
+// == INÍCIO: função para escrever o snapshot de status (status.json) ==
 async function snapshotStatusAndWrite() {
 _statusLock = _statusLock.then(async () => {
 try {
+// INICIO DA INSTRUÇÃO 5: cap arrays efêmeros antes de gerar snapshot
 try {
   for (const n of Object.keys(robeMeta)) {
     const m = robeMeta[n];
@@ -2428,6 +2844,8 @@ try {
     while (m.blockDetectWindow.length > 8) m.blockDetectWindow.shift();
   }
 } catch {}
+// FIM DA INSTRUÇÃO 5
+
 const perfisArr = loadPerfisJson();
 const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
 const perfis = [];
@@ -2439,7 +2857,7 @@ try {
     const res = issues.countErrors(nome);
     issuesCount = Number(res && res.count) || 0;
   } else {
-    issuesCount = countErrorsLocal(nome);
+    issuesCount = countErrorsLocal(nome); // fallback local
   }
 } catch {}
 const fail = getFailureCounts(nome);
@@ -2450,26 +2868,10 @@ const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) ||
 const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
 const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
 const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
-const postLoginAutomationFail = man ? !!(man.accountFlags && man.accountFlags.postLoginAutomationFail === true) : false;
-const hasProblemConta = man ? !!(man.accountFlags && man.accountFlags.problemaConta === true) : false;
-const problemContaMsg = man ? ((man.accountFlags && man.accountFlags.problemaContaMsg) || null) : null;
 const problem = man
-  ? !!(
-      (man.accountFlags && man.accountFlags.loginRequired === true) ||
-      (man.accountFlags && man.accountFlags.banned === true) ||
-      (man.accountFlags && man.accountFlags.postLoginAutomationFail === true) ||
-      (man.accountFlags && man.accountFlags.problemaConta === true)
-    )
-  : !!(
-      (robeMeta[nome] || {}).loginRequired ||
-      (robeMeta[nome] || {}).banned ||
-      (robeMeta[nome] || {}).problemaConta
-    );
+  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
+  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
 
-const loginAutoAttemptCount = man ? Number(man.accountFlags && man.accountFlags.loginAutoAttemptCount || 0) : 0;
-const lastLoginAutoAttemptAt = man ? (man.accountFlags && man.accountFlags.lastLoginAutoAttemptAt || null) : null;
-const lastLoginTryError = man ? ((man.accountFlags && man.accountFlags.lastLoginTryError) || null) : null;
-const autoLoginEscalatedAt = man ? (man.accountFlags && man.accountFlags.autoLoginEscalatedAt || null) : null;
 perfis.push({
   nome,
   label: p.label || null,
@@ -2478,7 +2880,7 @@ perfis.push({
   active: controllers.has(nome),
   trabalhando: !!(controllers.get(nome)?.trabalhando),
   configurando: !!(controllers.get(nome)?.configurando),
-  humanControl: !!(controllers.get(nome)?.humanControl),
+  humanControl: !!(controllers.get(nome)?.humanControl), // <-- Expor flag Modo Humano na pill
   humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
   issuesCount,
   ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
@@ -2502,14 +2904,14 @@ perfis.push({
   banned,
   bannedAt,
   bannedText,
-  postLoginAutomationFail,
-  accountProblem: hasProblemConta,
-  accountProblemText: problemContaMsg,
-  problem,
-  loginAutoAttemptCount,
-  lastLoginAutoAttemptAt,
-  lastLoginTryError,
-  autoLoginEscalatedAt
+  problem
+  // overweightNow: !!robeMeta[nome]?.overweightNow,
+  // overweightSince: robeMeta[nome]?.overweightSince || null,
+  // lastMaintenanceAt: !!robeMeta[nome]?.lastMaintenanceAt || null,
+  // lastResetAt: (robeMeta[nome]?.lastResetAt) || null,
+  // lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
+  // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
+  // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 });
 }
 const robes = {};
@@ -2534,12 +2936,21 @@ robes[nome] = {
   lastUnfreezeAt: robeMeta[nome]?.lastUnfreezeAt || null,
   pauseReason: robeMeta[nome]?.pauseReason || null,
   lastRobeBlockAt: robeMeta[nome]?.lastRobeBlockAt || null
+  // overweightNow: !!robeMeta[nome]?.overweightNow,
+  // overweightSince: robeMeta[nome]?.overweightSince || null,
+  // lastMaintenanceAt: !!robeMeta[nome]?.lastMaintenanceAt || null,
+  // lastResetAt: (robeMeta[nome]?.lastResetAt) || null,
+  // lastRamBeforeReset: (typeof robeMeta[nome]?.lastRamBeforeReset === 'number') ? robeMeta[nome].lastRamBeforeReset : null,
+  // lastRamAfterReset: (typeof robeMeta[nome]?.lastRamAfterReset === 'number') ? robeMeta[nome].lastRamAfterReset : null,
+  // lastDeltaMB: (typeof robeMeta[nome]?.lastDeltaMB === 'number') ? robeMeta[nome].lastDeltaMB : null
 };
+// 2.C — Liberação automática: limit_posting_release ao expirar cooldown
 try {
   if (robes[nome].cooldownSec === 0) {
     await releaseLimitPostingIfExpired(nome);
   }
 } catch {}
+// (Opcional Higiene) – limpeza defensiva pós-cooldown
 if (robes[nome].cooldownSec === 0 && robeMeta[nome] && robeMeta[nome].pauseReason === 'fb_block') {
   const ts = robeMeta[nome].lastRobeBlockAt || 0;
   if (ts && (Date.now() - ts) > 25*60*60*1000) {
@@ -2560,6 +2971,7 @@ if (pauseActive) {
 }
 }
 const robeQueueList = robeQueue.queueList();
+// PATCH autoMode/sys: incluir no statusObj
 const sys = {
   freeMB: Math.round(os.freemem()/(1024*1024)),
   totalMB: Math.round(os.totalmem()/(1024*1024)),
@@ -2567,6 +2979,8 @@ const sys = {
   cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
 };
 const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
+// Não inclui mais robeRam obsoleto, pois RAM por perfil já está em perfis/robes.
+// Unificado cross-platform.
 const ok = writeJsonAtomic(statusPath, statusObj);
 if (!ok) { try { await issues.append('system','persist_failed', 'status_write'); } catch {} }
 } catch (e) {
@@ -2576,6 +2990,9 @@ try { logger.warn('[WORKER][statusWrite] erro', { error: e && e.message || e });
 try { supervisorClient.sendTelemetria({ type: 'hb', alive: controllers.size }); } catch {}
 return _statusLock;
 }
+// == FIM: snapshotStatusAndWrite ==
+
+// Debounce de logs via Nurse (1x/60s por diagnóstico)
 async function appendIssueNurseDebounced(nome, type, message, key) {
   if (!nome) return;
   robeMeta[nome] = robeMeta[nome] || {};
@@ -2586,47 +3003,61 @@ async function appendIssueNurseDebounced(nome, type, message, key) {
   robeMeta[nome].nurseLogDebounce[k] = Date.now();
   await issues.append(nome, type, message);
 }
+
+// ENFERMEIRO DIGITAL — Saúde contínua de contas/navegadores:
 const NURSE_CFG = {
   INTERVAL_MS: 5000,
-  PAGE_EVAL_TIMEOUT_MS: 5000
+  PAGE_EVAL_TIMEOUT_MS: 5000  // Mais tolerância, menos falso-positivo
 };
-const MAX_OPEN_CONCURRENCY = 1;
+
+// Pequeno slot global para abrir perfis em série + delay entre aberturas
+const MAX_OPEN_CONCURRENCY = 1; // hard para servidor fraco!
 let slotsInUse = 0;
-const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
+const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10); // delay entre ativações
+
+// === ULTRA RECOVERY (militar) ===
 const ULTRA_RECOVERY = {
-  MAX_RELOADS: 2,
-  RELOAD_TIMEOUT_MS: 10000,
-  RELOAD_POST_WAIT_MS: 250,
-  REOPEN_DELAY_SHORT_MS: 60000,
-  REOPEN_DELAY_RAMCPU_MS: 60000,
-  FAIL_WINDOW_MS: 3*60*60*1000,
-  FAIL_FREEZE_AFTER: 5,
-  FAIL_FREEZE_MS: 2*60*60*1000,
-  REOPEN_DELAY_VIRTUS_BLOCK_MS: 2*60*60*1000
+  MAX_RELOADS: 2,                   // no máximo 2 reloads curtos por página zumbi
+  RELOAD_TIMEOUT_MS: 10000,         // Mais tempo para reload Messenger
+  RELOAD_POST_WAIT_MS: 250,         // pequena espera pós-reload
+  REOPEN_DELAY_SHORT_MS: 60000,      // reabrir "já já" (nurse_kill, no_pages)
+  REOPEN_DELAY_RAMCPU_MS: 60000, // reabrir após 60s em RAM/CPU kill (usaremos também jitter)
+  FAIL_WINDOW_MS: 3*60*60*1000,     // 3h janela
+  FAIL_FREEZE_AFTER: 5,             // >5 falhas em 3h => congela
+  FAIL_FREEZE_MS: 2*60*60*1000,      // congela por 2h
+  REOPEN_DELAY_VIRTUS_BLOCK_MS: 2*60*60*1000 // 2h
 };
+
+// ===== INÍCIO DO MÉTODO ULTRA CIRÚRGICO: ensureFrozenShutdown =====
 async function ensureFrozenShutdown(nome, origin = 'frozen') {
   const ctrl = controllers.get(nome);
   if (!ctrl) return;
   try { robeQueue.skip && robeQueue.skip(nome); } catch {}
   try { await reportAction(nome, 'mil_action', 'frozen_kill'); } catch {}
   try {
+    // Fecha “preservando desired”, mas sem reabrir durante o frozen
     await handlers.deactivate({ nome, reason: 'frozen', policy: 'preserveDesired' });
   } catch {}
   try { stopPruneLoop(nome); } catch {}
   try {
     robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].reopenAt = null;
+    robeMeta[nome].reopenAt = null; // impede tentativa de reabrir antes do fim do frozen
     robeMeta[nome].activationHeldUntil = robeMeta[nome].frozenUntil || (Date.now() + 3600_000);
   } catch {}
   try { await snapshotStatusAndWrite(); } catch {}
 }
+// ===== FIM DO MÉTODO ULTRA CIRÚRGICO =====
+
+// ===== CLASSIFICAÇÃO DE FALHAS =====
 const INTERNAL_REASONS = new Set(['ramKill','cpuKill','manifest_missing','manifest_incomplete','panic','open_headroom']);
 const EXTERNAL_REASONS = new Set(['disconnected','no_pages','zombie','network','fb_dom','messenger_temp_block','blocked']);
+
 function classifyReason(reason, fallback) {
   if (INTERNAL_REASONS.has(reason)) return 'internal';
   if (EXTERNAL_REASONS.has(reason)) return 'external';
   return fallback || 'unknown';
 }
+
 function getFailureCounts(nome) {
   const now = Date.now();
   const rec = profileFailures.get(nome);
@@ -2636,29 +3067,37 @@ function getFailureCounts(nome) {
     external: (rec.external||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS),
     unknown: (rec.unknown||[]).filter(ts => (now - ts) < ULTRA_RECOVERY.FAIL_WINDOW_MS)
   };
+  // Atualiza janela já podada
   profileFailures.set(nome, pruned);
   return { internal: pruned.internal.length, external: pruned.external.length, unknown: pruned.unknown.length };
 }
-const profileFailures = new Map();
+
+const profileFailures = new Map(); // nome => { internal:[], external:[], unknown:[] }
 async function registerFailure(nome, reason, classification) {
   const now = Date.now();
   const cls = classification || classifyReason(reason, 'unknown');
   const rec = profileFailures.get(nome) || { internal: [], external: [], unknown: [] };
+  // prune old
   rec.internal = (rec.internal||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
   rec.external = (rec.external||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
   rec.unknown  = (rec.unknown ||[]).filter(ts => ts > now - ULTRA_RECOVERY.FAIL_WINDOW_MS);
+  // push
   if (cls === 'internal') rec.internal.push(now);
   else if (cls === 'external') rec.external.push(now);
   else rec.unknown.push(now);
   profileFailures.set(nome, rec);
   const counts = getFailureCounts(nome);
   try { await issues.append(nome, 'failure', `reason=${reason} class=${cls} internal=${counts.internal} external=${counts.external} unknown=${counts.unknown}`); } catch {}
+
+  // CONGELAR APENAS POR MOTIVO LÍCITO
   const ALLOWED_FREEZE_REASONS = new Set(['manifest_missing','manifest_incomplete']);
   if (ALLOWED_FREEZE_REASONS.has(reason)) {
-    await freezeProfileFor(nome, 12*60*60*1000, reason, 'system');
+    await freezeProfileFor(nome, 12*60*60*1000, reason, 'system'); // 12h
     await ensureFrozenShutdown(nome, reason || 'frozen');
   }
+  // Qualquer outro motivo: NUNCA congele; apenas log.
 }
+
 async function pageReadyBasic(p0) {
   try {
     const res = await Promise.race([
@@ -2668,6 +3107,7 @@ async function pageReadyBasic(p0) {
     return (res === 'interactive' || res === 'complete');
   } catch { return false; }
 }
+
 async function tryReloadShort(p0, nome, attempt) {
   try {
     if (process.env.NURSE_DEBUG === '1') {
@@ -2680,7 +3120,11 @@ async function tryReloadShort(p0, nome, attempt) {
   } catch {}
   return await pageReadyBasic(p0);
 }
+
+// Funções adicionadas próximas ao nurseTick
 function ms(h) { return h * 60 * 60 * 1000; }
+
+// Congela perfil por um tempo (msDuration), persiste congelamento, faz shutdown.
 async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
   try {
     const now = Date.now();
@@ -2693,22 +3137,25 @@ async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
       let until = now + msDuration;
       let mode = 'set';
       if (existing > now) {
-        until = existing + msDuration;
+        until = existing + msDuration; // soma janela
         mode = 'extended';
       }
       applied.until = until;
       applied.mode = mode;
+
       man.frozenUntil = until;
       man.frozenReason = String(reason || '');
       man.frozenAt = man.frozenAt || now;
       man.frozenSetBy = setBy || 'system';
       return man;
     });
+
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].frozenUntil = applied.until;
     robeMeta[nome].frozenReason = String(reason || '');
     robeMeta[nome].frozenAt = robeMeta[nome].frozenAt || now;
     robeMeta[nome].frozenSetBy = setBy || 'system';
+
     try {
       await issues.append(
         nome,
@@ -2716,23 +3163,27 @@ async function freezeProfileFor(nome, msDuration, reason, setBy = 'system') {
         `frozen_${Math.round(msDuration/60000)}min(${applied.mode}): reason=${reason||''} setBy=${setBy} until=${new Date(applied.until).toISOString()}`
       );
     } catch {}
+
     await ensureFrozenShutdown(nome, reason || 'frozen');
     await snapshotStatusAndWrite();
   } catch {}
 }
+
 async function unfreezeProfile(nome, setBy = 'admin') {
   try {
     const now = Date.now();
+
     robeMeta[nome] = robeMeta[nome] || {};
     delete robeMeta[nome].frozenUntil;
     delete robeMeta[nome].frozenReason;
     delete robeMeta[nome].frozenAt;
     delete robeMeta[nome].frozenSetBy;
-    robeMeta[nome].activationHeldUntil = now + 60*1000;
+    robeMeta[nome].activationHeldUntil = now + 60*1000; // 60s hold
     robeMeta[nome].reloadAttemptsWindow = [];
     robeMeta[nome].unfreezeCount = (robeMeta[nome].unfreezeCount || 0) + 1;
     robeMeta[nome].lastUnfreezeAt = now;
-    robeMeta[nome].reopenAt = null;
+    robeMeta[nome].reopenAt = null; // <<< LIMPA HOLDS RESIDUAIS AO DESCONGELAR
+
     await manifestStore.update(nome, (man) => {
       man = man || {};
       if ('frozenUntil' in man) delete man.frozenUntil;
@@ -2741,7 +3192,10 @@ async function unfreezeProfile(nome, setBy = 'admin') {
       if ('frozenSetBy' in man) delete man.frozenSetBy;
       return man;
     });
+
+    // Zera falhas
     profileFailures.set(nome, { internal: [], external: [], unknown: [] });
+
     try {
       await issues.append(
         nome,
@@ -2749,9 +3203,12 @@ async function unfreezeProfile(nome, setBy = 'admin') {
         `unfreeze by=${setBy}`
       );
     } catch {}
+
     await snapshotStatusAndWrite();
   } catch {}
 }
+
+// Detecta bloqueio temporário pelo DOM do Messenger, retorna {blocked, hasReloadBtn}
 async function detectMessengerTempBlock(page) {
   try {
     const url = page.url ? page.url() : '';
@@ -2762,6 +3219,7 @@ async function detectMessengerTempBlock(page) {
         .slice(0, 300)
         .map(el => norm(el.innerText || el.content || el.textContent || ''))
         .filter(Boolean);
+
       const hasBlocked =
         texts.some(t =>
           t.includes('voce esta bloqueado temporariamente') ||
@@ -2777,23 +3235,9 @@ async function detectMessengerTempBlock(page) {
   } catch { return { blocked: false }; }
 }
 
-// Adapter para autoLogin.js
-function buildAutoLoginAdapter() {
-  return {
-    getController: (nome) => controllers.get(nome),
-    startVirtus: async (nome) => {
-      try { return await start_work({ nome }); } catch { return { ok:false }; }
-    },
-    robePlay: async (nome) => {
-      try { return await handlers['robe-play']({ nome }); } catch { return { ok:false }; }
-    },
-    escalateToHuman: async (nome) => {
-      try { return await handlers['invoke_human']({ nome }); } catch { return { ok:false }; }
-    }
-  };
-}
-
+// LOCK de reentrada do nurseTick
 let _nurseTickRunning = false;
+
 async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
@@ -2806,14 +3250,18 @@ async function nurseTick() {
         if (process.env.NURSE_DEBUG === '1') {
           try { logger.info(`[NURSE][SKIP_OTHER_SHARD] ${nome}`); } catch {}
         }
-        continue;
+        continue; // PERFIL FORA DO SHARD, IGNORAR
       }
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
+
+      // Nunca abrir/reconciliar durante hold humano
       if (want.humanHold === true) {
         await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
         continue;
       }
+
+      // INSTRUÇÃO CIRÚRGICA: Guard emExecucao no nurseTick (logo após pegar ctrl)
       {
         const rm = robeMeta[nome] || {};
         if (rm.emExecucao === true) {
@@ -2821,26 +3269,37 @@ async function nurseTick() {
           continue;
         }
       }
+
       if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
-        continue;
+        continue; // NUNCA navega, religia, nem prune enquanto em humano ou configurando
       }
       if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
         await appendIssueNurseDebounced(nome, 'mil_action', 'send_lock_skip', 'send_lock_skip');
-        continue;
+        continue; // NÃO navega/reload/prune enquanto envio ativo
       }
+
+      // GUARD: nunca manter ativo durante frozen
       if (isFrozenNow(nome)) {
         if (ctrl) { await ensureFrozenShutdown(nome, 'nurse_guard'); }
         continue;
       }
+
+      // nurseTick não compete se healthTick recovering (histerese de recuperação)
       const hs = getHealth && getHealth(nome);
       if (hs && ['recover1','recover2','recover3'].includes(hs.stage)) {
         await appendIssueNurseDebounced(nome, 'mil_action', 'health_recovery_in_progress_skip', 'health_recovery_in_progress_skip');
         continue;
       }
+
+      // INICIO DA INSTRUÇÃO 6: substituição do trecho nurseTick para modo leve e holds
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
+
+        // Respeitar holds e agendamentos de reabertura
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) continue;
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) continue;
+
+        // Slot global de aberturas
         if (slotsInUse >= MAX_OPEN_CONCURRENCY) continue;
         slotsInUse++;
         try {
@@ -2851,8 +3310,12 @@ async function nurseTick() {
               const err = (r && r.error) || '';
               if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
+
+                // Tenta swap
                 const swapped = await trySwapOpen(nome);
+
                 if (!swapped) {
+                  // backoff progressivo: dobra até max 5min
                   robeMeta[nome] = robeMeta[nome] || {};
                   const prevBackoff = robeMeta[nome].openBackoffMs || 15000;
                   const curBackoff = Math.min(300000, prevBackoff*2);
@@ -2863,8 +3326,10 @@ async function nurseTick() {
                 } else {
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
+                // Se swap foi bem-sucedido, não seta activationHeld, tentará na próxima rodada normal
               }
             } else {
+              // Sucesso: zera backoff (se existia)
               if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 15000;
               logger.info('[NURSE] activateOnce ok', { nome });
             }
@@ -2872,17 +3337,24 @@ async function nurseTick() {
         } finally {
           slotsInUse--;
         }
+        // Pequeno delay entre ativações
         await new Promise(r => setTimeout(r, OPEN_ACTIVATION_DELAY_MS));
         continue;
       }
+      // FIM DA INSTRUÇÃO 6
+
       if (!ctrl || !ctrl.browser) continue;
       let pages = [];
       try { pages = await ctrl.browser.pages().catch(()=>[]); } catch {}
+
+      // INSTRUÇÃO 2: Dupla confirmação no_pages + retry + strikes
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].noPagesStrikes = robeMeta[nome].noPagesStrikes || 0;
       robeMeta[nome].lastNoPagesAt = robeMeta[nome].lastNoPagesAt || 0;
+
       if (!pages || !pages[0]) {
         let retryFailed = false;
+        // Se browser.isConnected?.() é true — tente pages() novamente após 400ms
         if (ctrl.browser.isConnected?.()) {
           await new Promise(r=>setTimeout(r,400));
           let retryPages = [];
@@ -2912,24 +3384,13 @@ async function nurseTick() {
       } else {
         robeMeta[nome].noPagesStrikes = 0;
       }
+
       const p0 = pages[0];
+      // === LOGIN/BANNED DETECTION (informativo) ===
       try {
         const lr = await browserHelper.detectLoginRequired(p0);
         if (lr && lr.loginRequired) {
-          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '', message: (lr && lr.message) || '' });
-        }
-      } catch {}
-      try {
-        const man = await manifestStore.read(nome).catch(()=>null);
-        if (
-          man &&
-          man.accountFlags &&
-          man.accountFlags.loginRequired &&
-          man.credentials &&
-          man.credentials.login &&
-          man.credentials.password
-        ) {
-          await autoLogin.tryAutoLogin({ nome, adapter: buildAutoLoginAdapter() });
+          await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
         }
       } catch {}
       try {
@@ -2938,6 +3399,8 @@ async function nurseTick() {
           await setBannedFlag(nome, { reason: bd.reason || '', snippet: bd.snippet || '' });
         }
       } catch {}
+      // INSTRUÇÃO 1: SUBSTITUIR LÓGICA DE DETECÇÃO
+      // DETECÇÃO: sempre checar Messenger; checar Facebook só em create/seller
       let det = { blocked:false };
       try {
         const urlNow = (typeof p0.url === 'function') ? (p0.url() || '') : '';
@@ -2945,10 +3408,12 @@ async function nurseTick() {
         const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const isCreateOrSellerRoute =
           /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
+
         if (isMessenger) {
           det = await browserHelper.detectMessengerTempBlock(p0);
           det.domain = 'messenger';
         } else if (robeRunning || isCreateOrSellerRoute) {
+          // Preferir detector profundo para overlays/bloqueios no Facebook
           const deep = await detectLimitOverlayDeep(p0, { alsoCheckFrames: true }).catch(()=>null);
           if (deep && deep.blocked) {
             det = { blocked: true, domain: 'facebook' };
@@ -2958,23 +3423,46 @@ async function nurseTick() {
           }
         }
       } catch {}
+
+      // INSTRUÇÃO 5: Bloqueio Messenger – Confirmação 2-de-3 leituras (janela 5s), blockHysteresisUntil
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow || [];
       let now2 = Date.now();
+
       if (det && det.blocked && det.domain === 'messenger') {
-        try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
-        try { await stopVirtus(nome); } catch {}
-        await holdActivationForHours(nome, 6, 'temp_block');
-        if (killGuardActive(nome)) {
-          await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)', 'guard_skip_block');
+        // Mantenha array dos últimos 3 detecções em 5s
+        robeMeta[nome].blockDetectWindow.push(now2);
+        // mantém só strikes na janela de 5s
+        robeMeta[nome].blockDetectWindow = robeMeta[nome].blockDetectWindow.filter(ts => now2 - ts <= 5000);
+        // Cap a 8 entradas
+        while (robeMeta[nome].blockDetectWindow.length > 8) robeMeta[nome].blockDetectWindow.shift();
+
+        if (robeMeta[nome].blockDetectWindow.length >= 2 && (!robeMeta[nome].blockHysteresisUntil || robeMeta[nome].blockHysteresisUntil < now2)) {
+          // Confirme: se for 2 de 3 strikes, só aqui desativa
+          await appendIssueNurseDebounced(nome, `action_virtus_block`, `blockDetectWindow=${robeMeta[nome].blockDetectWindow.length}`, 'action_virtus_block');
+          robeMeta[nome].blockHysteresisUntil = now2 + 15*60*1000; // 15min block window
+          if (killGuardActive(nome)) {
+            await appendIssueNurseDebounced(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)', 'guard_skip_block');
+            continue;
+          }
+          await stopVirtus(nome);
+          if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > now2)) {
+            robeMeta[nome].reopenAt = now2 + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + Math.floor(Math.random() * 21 + 5) * 60 * 1000;
+            robeMeta[nome].closingReason = 'virtus_block';
+          }
+          await registerFailure(nome, 'messenger_temp_block', 'external');
+          await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
+          setKillGuard(nome);
+          await snapshotStatusAndWrite();
+          continue;
+        } else {
+          await appendIssueNurseDebounced(nome, `suspect_messenger_block`, `strike=${robeMeta[nome].blockDetectWindow.length}`, 'suspect_messenger_block');
           continue;
         }
-        await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
-        setKillGuard(nome);
-        await snapshotStatusAndWrite();
-        continue;
       }
-      if (robeMeta[nome].blockHysteresisUntil && robeMeta[nome].blockHysteresisUntil > now2) continue;
+      if (robeMeta[nome].blockHysteresisUntil && robeMeta[nome].blockHysteresisUntil > now2) continue; // suprime dentro da block window
+
+      // Facebook block (mantém comportamento anterior)
       if (det && det.blocked && det.domain === 'facebook') {
         try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         const nowf = Date.now();
@@ -2991,19 +3479,23 @@ async function nurseTick() {
             });
           }
         } catch {}
+        // PATCH MILITAR: PRESERVAR limit_posting — não sobrescrever com fb_block
         const man = await manifestStore.read(nome).catch(()=>null);
         if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
           await issues.append(nome, 'mil_action', 'preserve_limit_posting_on_fb_block');
           await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
           await snapshotStatusAndWrite();
-          continue;
+          continue; // NÃO sobrescreve, pill correta; não aplica fb_block
         }
+        // Só se NÃO era limit_posting, aplica fb_block:
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].pauseReason = 'fb_block';
         robeMeta[nome].lastRobeBlockAt = Date.now();
         await snapshotStatusAndWrite();
         continue;
       }
+
+      // --- INICIO PATCH VARREDURA MULTI-TAB ENQUANTO ROBO ATIVO ---
       let anyFbBlocked = false;
       try {
         if (robeMeta[nome] && robeMeta[nome].emExecucao === true && ctrl && ctrl.browser) {
@@ -3026,12 +3518,13 @@ async function nurseTick() {
             });
           }
         } catch {}
+        // PATCH MILITAR MULTI-ABA: PRESERVAR limit_posting — não sobrescrever com fb_block
         const man = await manifestStore.read(nome).catch(()=>null);
         if (man && man.robePauseReason === 'limit_posting' && (man.robeCooldownUntil||0) > Date.now()) {
           await issues.append(nome, 'mil_action', 'preserve_limit_posting_on_fb_block');
           await appendIssueNurseDebounced(nome, 'mil_action', 'status_force_limit_posting', 'status_force_limit_posting');
           await snapshotStatusAndWrite();
-          continue;
+          continue; // não sobrescreve!
         }
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].pauseReason = 'fb_block';
@@ -3039,40 +3532,54 @@ async function nurseTick() {
         await snapshotStatusAndWrite();
         continue;
       }
+      // --- FIM PATCH VARREDURA MULTI-TAB ---
+
+      // NÃO competir com recovery stateful (redundante, mas mantém)
       const hs2 = getHealth && getHealth(nome);
       if (hs2 && (hs2.stage === 'recover1' || hs2.stage === 'recover2' || hs2.stage === 'recover3')) {
         continue;
       }
+
       let healthy = await pageReadyBasic(p0);
       if (!healthy) {
+        // Histerese pós-reload recover: suprime por 90s
         if (robeMeta[nome].recoveryHysteresisUntil && robeMeta[nome].recoveryHysteresisUntil > Date.now()) {
           await appendIssueNurseDebounced(nome, 'hysteresis_skip', 'Aguardando histerese pós-recover', 'hysteresis_skip_after_recover');
           continue;
         }
+
+        // Debounce: conta reloads nos últimos 60s, pausa se ultrapassar 3
         robeMeta[nome] = robeMeta[nome] || {};
         const nowReload = Date.now();
         if (!robeMeta[nome].reloadAttemptsWindow) robeMeta[nome].reloadAttemptsWindow = [];
         robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => nowReload - ts < 60000);
+
         robeMeta[nome].reloadAttemptsWindow.push(nowReload);
+        // Cap a 8 entradas
         while (robeMeta[nome].reloadAttemptsWindow.length > 8) robeMeta[nome].reloadAttemptsWindow.shift();
+
         if (robeMeta[nome].reloadAttemptsWindow.length > 3) {
+          // Log e GRACE: não tente novo reload nos próximos 60s
           robeMeta[nome].reloadBlockedUntil = nowReload+60000;
           await reportAction(nome, 'mil_action', 
             `nurse_reload_blocked: Excesso de reloads (${robeMeta[nome].reloadAttemptsWindow.length}) em 60s, url=${((p0.url&&p0.url())||'')}`
           );
-          continue;
+          continue; // Não tenta nem reload nem kill — só sai do loop até a próxima rodada.
         }
         if (robeMeta[nome].reloadBlockedUntil && robeMeta[nome].reloadBlockedUntil > nowReload) {
-          continue;
+          continue; // Se grace está ativo, pula hint de reload para este ciclo
         }
+
         healthy = await tryReloadShort(p0, nome, 1);
         if (!healthy) {
           healthy = await tryReloadShort(p0, nome, 2);
         }
         if (healthy) {
           await reportAction(nome, 'mil_action', 'nurse_recover_success(reload)');
+          // Histerese pós-reload
           robeMeta[nome].recoveryHysteresisUntil = Date.now() + 90000;
         } else {
+          // INSTRUÇÃO 4: “page_zumbi” dupla de falha em ciclos (anti-flap)
           robeMeta[nome].zombieStrikes = robeMeta[nome].zombieStrikes || 0;
           robeMeta[nome].zombieStrikes += 1;
           await appendIssueNurseDebounced(nome, `suspect_page_zombie`, `strike=${robeMeta[nome].zombieStrikes}`, 'suspect_page_zombie');
@@ -3093,6 +3600,8 @@ async function nurseTick() {
       } else {
         robeMeta[nome].zombieStrikes = 0;
       }
+
+      // INSTRUÇÃO 5 — INSERIR EXATAMENTE AQUI (DEPOIS de pageReadyBasic/reloads e ANTES de prune/virtus)
       try {
         const url = p0.url ? p0.url() : '';
         if (/messenger\.com\/.*marketplace/i.test(url) && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao)) {
@@ -3112,11 +3621,14 @@ async function nurseTick() {
                 await tryFixPhantom(nome, p0);
               }
             } else if (snap.skeletons === 0) {
-              ph.firstSeenAt = 0;
+              ph.firstSeenAt = 0; // vazio legítimo: não perturbar
             }
           }
         }
       } catch {}
+      // FIM DA INSERÇÃO DA INSTRUÇÃO 5
+
+      // Guard-rail ultra militar: nunca podar/prune abas durante configuração (injeção de cookies)
       if (ctrl && ctrl.configurando) {
         logger.info('[NURSE][SKIP PRUNE] Perfil em configuração, prune ignorado', { nome });
         continue;
@@ -3135,9 +3647,14 @@ async function nurseTick() {
     _nurseTickRunning = false;
   }
 }
+
+// PASSO 1 — Adicionar função trySwapOpen(nomeTarget) logo após nurseTick
 async function trySwapOpen(target) {
+  // Tenta fechar navegador mais RAM-eater para abrir "target"
   const aliveNames = Array.from(controllers.keys());
-  if (aliveNames.length <= 1) return false;
+  if (aliveNames.length <= 1) return false; // nunca swap se 1 só ativo
+
+  // Ordena vivos por RAM decrescente e pega quem tem mais RAM (mas ignora "target")
   const candidates = aliveNames
     .filter(n => n !== target)
     .map(n => ({
@@ -3149,13 +3666,16 @@ async function trySwapOpen(target) {
     }))
     .filter(c => !c.configurando && !c.emExecucao && !c.humanControl && c.mb >= (process.platform==='win32' ? 900 : 700))
     .sort((a, b) => b.mb - a.mb);
+
   for (const cand of candidates) {
     if (killGuardActive(cand.n)) continue;
     await issues.append(cand.n, 'mil_action', `swap_kill fechamento para abrir ${target} RAM=${cand.mb}MB`);
     logger.info('[SWAP] swap_kill', { fechar: cand.n, abrir: target, ramMB: cand.mb });
     await handlers.deactivate({ nome: cand.n, reason: 'swap_for_open', policy: 'preserveDesired' });
     setKillGuard(cand.n, 45000);
-    await new Promise(r=>setTimeout(r, 2000));
+    await new Promise(r=>setTimeout(r, 2000)); // settle RAM
+    
+    // Tenta abrir o target
     const r = await activateOnce(target, 'nurse_swap');
     if (r && r.ok) {
       await issues.append(target, 'mil_action', `swap_open_success após fechar ${cand.n}`);
@@ -3164,6 +3684,7 @@ async function trySwapOpen(target) {
       logger.info('[SWAP] swap_open_success', { target, fechado: cand.n });
       return true;
     }
+    // Swap não foi bem-sucedido, log e continue para o próximo possível
     await issues.append(target, 'mil_action', `swap_open_failed após fechar ${cand.n}`);
     logger.warn('[SWAP] swap_open_failed', { target, fechado: cand.n });
   }
@@ -3171,8 +3692,11 @@ async function trySwapOpen(target) {
   logger.warn('[SWAP] swap_open_failed_nenhum_sucesso', { target });
   return false;
 }
+
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
+
+// =================== HEALTH: Observers, Heuristics e Recovery ===================
 async function wirePageObservers(nome, page) {
   const st = getHealth(nome);
   try {
@@ -3197,12 +3721,11 @@ async function wirePageObservers(nome, page) {
     }
   });
   page.on('requestfinished', () => { getHealth(nome).lastNetEventAt = Date.now(); });
-  page.on('requestfailed', () => {
-  try { getHealth(nome).lastNetEventAt = Date.now(); } catch {}
-});
+  page.on('requestfailed', () => { GetHealth(nome).lastNetEventAt = Date.now(); });
   page.on('console', (msg) => { if (msg && msg.type && msg.type() === 'error') getHealth(nome).lastConsoleErrorAt = Date.now(); });
   page.on('pageerror', () => { getHealth(nome).lastConsoleErrorAt = Date.now(); });
 }
+
 async function isPageLikelyAlive(page, nome) {
   const st = getHealth(nome);
   const now = Date.now();
@@ -3223,6 +3746,7 @@ async function isPageLikelyAlive(page, nome) {
   const aliveByReady = (readyOk && urlIsFb && !aboutBlankStuck);
   return aliveBySignals || aliveByReady;
 }
+
 async function recoveryStep(nome, page, step) {
   const st = getHealth(nome);
   const now = Date.now();
@@ -3281,14 +3805,17 @@ async function escalateToReopen(nome, reason='health_reopen') {
   st.stage = 'reopen';
   st.nextTryAt = Date.now() + 60000;
 }
+
 async function healthTick() {
   if (controllers.size === 0) { return; }
   for (const [nome, ctrl] of controllers) {
+    // INSTRUÇÃO CIRÚRGICA: Guard emExecucao no healthTick (logo no início do loop)
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
+
     if (!ctrl || !ctrl.browser) continue;
     if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
-      continue;
+      continue; // Pula toda a lógica se envio em andamento
     }
     const st = getHealth(nome);
     const now = Date.now();
@@ -3296,26 +3823,12 @@ async function healthTick() {
     try { pages = await ctrl.browser.pages(); } catch {}
     if (!pages || !pages[0]) continue;
     const page = pages[0];
-    try {
-      const lr = await browserHelper.detectLoginRequired(page);
-      if (lr && lr.loginRequired) {
-        await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '', message: (lr && lr.message) || '' });
-        const man = await manifestStore.read(nome).catch(()=>null);
-        if (man && man.accountFlags && man.accountFlags.loginRequired && man.credentials && man.credentials.login && man.credentials.password) {
-          await autoLogin.tryAutoLogin({ nome, adapter: buildAutoLoginAdapter() });
-        }
-      }
-    } catch {}
-    try {
-      const bd = await browserHelper.detectAccountSuspended(page);
-      if (bd && bd.banned) {
-        await setBannedFlag(nome, { reason: bd.reason || '', snippet: bd.snippet || '' });
-      }
-    } catch {}
     if (page && ctrl.mainPage !== page) {
       ctrl.mainPage = page;
       await wirePageObservers(nome, page);
     }
+
+    // DETECÇÃO: sempre checar Messenger; checar Facebook só em create/seller
     let det = { blocked:false };
     try {
       const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
@@ -3323,6 +3836,7 @@ async function healthTick() {
       const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
       const isCreateOrSellerRoute =
         /facebook\.com\/marketplace\/(?:create|you\/selling|sell|listing|inventory|commerce_manager)/i.test(urlNow);
+
       if (isMessenger) {
         det = await browserHelper.detectMessengerTempBlock(page);
         det.domain = 'messenger';
@@ -3333,9 +3847,16 @@ async function healthTick() {
     } catch {}
     if (det && det.blocked) {
       if (det.domain === 'messenger') {
+        // Desliga Virtus, fecha navegador, agenda reopenAt, loga, UX: Bloqueio temporário Messenger
         try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         try { await stopVirtus(nome); } catch {}
-        await holdActivationForHours(nome, 6, 'temp_block');
+        robeMeta[nome] = robeMeta[nome] || {};
+        const jitterMs = (5 + Math.floor(Math.random() * 21)) * 60 * 1000;
+        if (!(robeMeta[nome].reopenAt && robeMeta[nome].reopenAt > Date.now())) {
+          robeMeta[nome].reopenAt = Date.now() + ULTRA_RECOVERY.REOPEN_DELAY_VIRTUS_BLOCK_MS + jitterMs;
+          robeMeta[nome].closingReason = 'virtus_block';
+        }
+        try { registerFailure(nome, 'messenger_temp_block', 'external'); } catch {}
         if (killGuardActive(nome)) {
           await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)');
           continue;
@@ -3346,6 +3867,7 @@ async function healthTick() {
         continue;
       }
       if (det.domain === 'facebook') {
+        // Pausa só o Robe, Virtus segue ativo; log, carimba motivo
         try { await issues.append(nome, 'block_detected', `domain=${det.domain}`); } catch {}
         const now = Date.now();
         const plus24 = 24 * 60 * 60 * 1000;
@@ -3368,6 +3890,7 @@ async function healthTick() {
           await snapshotStatusAndWrite();
           continue;
         }
+        // Só se NÃO era limit_posting, aplica fb_block:
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].pauseReason = 'fb_block';
         robeMeta[nome].lastRobeBlockAt = Date.now();
@@ -3375,6 +3898,7 @@ async function healthTick() {
         continue;
       }
     }
+
     if (isFrozenNow(nome)) continue;
     const alive = await isPageLikelyAlive(page, nome);
     if (alive) {
@@ -3406,17 +3930,24 @@ async function healthTick() {
     } else if (st.stage === 'recover3') {
       if (st.counters.cyclesWithoutLife >= HEALTH_CFG.ESCALATE_TO_REOPEN_AFTER) {
         await escalateToReopen(nome, 'health_no_progress');
+        // try { await registerFailure(nome, 'health_no_progress', 'internal'); } catch {}
       }
     }
   }
 }
 setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
+// =================== FIM HEALTH ===================
+
+// ============ INÍCIO: PATCH/MODO FROZEN SE MANIFEST AUSENTE ==============
+// ============ INÍCIO: PATCH/MODO TOLERANTE MANIFEST UNAVAILABLE ==============
 const _startRobeOrig = robeHelper.startRobe;
 robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
+  // Tente ler manifest com tolerância (já patchado no manifestStore.read)
   let manifest = null;
   try { manifest = await manifestStore.read(nome); } catch{}
   if (!manifest) {
+    // NÃO congele! Abort leve, registrar ação e segurar ativação curta
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].activationHeldUntil = Date.now() + 15000;
     await reportAction(nome, 'mil_action', 'robe_abort_manifest_unavailable (no freeze)');
@@ -3439,6 +3970,10 @@ robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
     return { ok: false, error: String(e&&e.message||e) };
   }
 };
+// ============ FIM ==============
+
+
+// ===== Watchdog de stuck/frozen =====
 setInterval(() => {
   const now = Date.now();
   for (const nome of Object.keys(robeMeta)) {
@@ -3447,10 +3982,13 @@ setInterval(() => {
     }
     const desired = readJsonFile(desiredPath, { perfis: {} });
     if (desired.perfis?.[nome]?.active === true && !controllers.has(nome)) {
+      // desired ativo mas não há browser controlando — stuck
       issues.append(nome, 'stuck_activation', 'Desired ativo sem browser por >10min');
     }
   }
 }, 10 * 60 * 1000);
+
+// ====== GRACEFUL SHUTDOWN ======
 let _shuttingDown = false;
 async function gracefulShutdown(reason) {
   if (_shuttingDown) return;
@@ -3458,6 +3996,7 @@ async function gracefulShutdown(reason) {
   try {
     logger.info('[WORKER] gracefulShutdown start', { reason });
     try { robeQueue.clear(); } catch {}
+    // Para o Virtus de todas as contas
     for (const [nome, ctrl] of controllers) {
       try {
         if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
@@ -3465,6 +4004,7 @@ async function gracefulShutdown(reason) {
         }
       } catch {}
     }
+    // Fecha os browsers de todas as contas
     for (const [nome, ctrl] of controllers) {
       try {
         if (ctrl && ctrl.browser && typeof ctrl.browser.close === 'function') {
@@ -3472,6 +4012,7 @@ async function gracefulShutdown(reason) {
         }
       } catch {}
     }
+    // LIMPA todos os intervals do pruner
     for (const nome of _pruners.keys()) stopPruneLoop(nome);
     if (ramMonitorInterval) try { clearTimeout(ramMonitorInterval); } catch{}
   } catch (e) {
@@ -3483,8 +4024,10 @@ async function gracefulShutdown(reason) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 process.on('disconnect', () => gracefulShutdown('disconnect'));
+
 process.on('message', async (msg) => {
   if (!msg || !msg.type || !msg.msgId) return;
+  //logger.info('[WORKER][MESSAGE] received', { type: msg.type, hasMsgId: !!msg.msgId });
   const fn = handlers[msg.type];
   if (typeof fn !== 'function') {
     logger.warn('Comando desconhecido recebido', { type: msg.type, hasMsgId: !!msg.msgId });
@@ -3499,6 +4042,7 @@ process.on('message', async (msg) => {
     sendReply(msg.msgId, { ok: false, error: e && e.message || String(e) });
   }
 });
+
 process.on('uncaughtException', (e) => {
   try { logger.error('uncaught', { error: e && e.message || e }, e); } catch {}
 }

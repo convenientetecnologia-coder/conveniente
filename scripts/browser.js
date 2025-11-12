@@ -1059,91 +1059,6 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
   return !/messenger.com\/login\/nonce/i.test(page.url() || '');
 }
 
-// 1. Adicione a função detectNonLoginAnomaly
-async function detectNonLoginAnomaly(page) {
-  try {
-    const res = await page.evaluate(() => {
-      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-      const texts = Array.from(document.querySelectorAll('h1,h2,div,span,a,p')).slice(0, 1800)
-        .map(el => (el.innerText || el.textContent || '')).filter(Boolean);
-      const tnorm = texts.map(norm);
-      const matchers = [
-        /this page isnt available/,
-        /esta pagina nao esta disponivel/,
-        /esta pagina não esta disponivel/,
-        /page removed/,
-        /return to messenger/,
-        /voltar ao messenger/,
-        /visit our help center/,
-        /visite nosso centro de ajuda/
-      ];
-      const hit = tnorm.some(t => matchers.some(rx => rx.test(t)));
-      let snippet = '';
-      if (hit) {
-        snippet = texts.find(s => /page|p[aá]gina|messenger|ajuda|help/i.test(s)) || texts.slice(0,10).join(' | ');
-      }
-      // Detectar ausência evidente de campos de login nos contextos FB/Messenger
-      const hasEmail = !!document.querySelector('input[name="email"], input#email');
-      const hasPass  = !!document.querySelector('input[name="pass"],  input#pass');
-      const noLoginFields = !(hasEmail && hasPass);
-      return { anomaly: !!hit, snippet: snippet.slice(0,200), noLoginFields };
-    });
-    // Anomalia só é relevante quando NÃO há login fields visíveis
-    if (!res) return { anomaly: false };
-    if (res.anomaly && res.noLoginFields) {
-      return { anomaly: true, message: res.snippet || 'Messenger indisponível ou página removida.' };
-    }
-    return { anomaly: false };
-  } catch {
-    return { anomaly: false };
-  }
-}
-
-// Adicione logo DEPOIS de waitAny/clickByXPath/resolveNonceIfPresent
-async function detectInvalidCredentials(page) {
-  try {
-    const res = await page.evaluate(() => {
-      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      const texts = Array.from(document.querySelectorAll('h1,h2,div,span,p,section,label'))
-        .slice(0, 1500)
-        .map(el => norm(el.innerText || el.textContent || ''))
-        .filter(Boolean);
-      const hasWrongPass =
-        texts.some(t =>
-          t.includes('a senha que voce inseriu esta incorreta') ||
-          t.includes('digite sua senha novamente') ||
-          t.includes('the password you entered is incorrect')
-        );
-      const hasWrongLogin =
-        texts.some(t =>
-          t.includes('email ou telefone incorreto') ||
-          t.includes('o email ou o numero de celular que voce inseriu nao esta conectado a uma conta') ||
-          t.includes('the email or mobile number you entered isnt connected to an account') ||
-          t.includes('find your account and log in')
-        );
-      const hasTempBlocked =
-        texts.some(t =>
-          t.includes('voce esta bloqueado temporariamente') ||
-          t.includes('youre temporarily blocked') ||
-          t.includes('you are temporarily blocked')
-        );
-      return {
-        wrongPassword: !!hasWrongPass,
-        wrongLogin: !!hasWrongLogin,
-        temporarilyBlocked: !!hasTempBlocked
-      };
-    });
-
-    if (!res) return null;
-    if (res.temporarilyBlocked) return { type: 'temporarily_blocked' };
-    if (res.wrongPassword) return { type: 'invalid', subreason: 'wrong_password' };
-    if (res.wrongLogin) return { type: 'invalid', subreason: 'wrong_login' };
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', timeout = 15000 } = {}) {
   // Seletor CSS universal para “Continuar como ...”
   const btn = await waitAny(page, [
@@ -1896,19 +1811,18 @@ function deepScanLimitOverlayInDocument() {
           try {
             const hits = 1;
             const where = 'global_any';
-            const el2 = el;
             const debugPayload = {
               step: 'deepScan_limit_overlay_debug',
               found: hits > 0,
               where: where,
               snippet,
-              tags: el2 ? (
+              tags: el ? (
                 {
-                  id: el2.id || '',
-                  class: el2.className || '',
-                  ariaLabel: el2.getAttribute ? el2.getAttribute('aria-label') : '',
-                  ariaLabelled: el2.getAttribute ? el2.getAttribute('aria-labelledby') : '',
-                  title: el2.getAttribute ? el2.getAttribute('title') : '',
+                  id: el.id || '',
+                  class: el.className || '',
+                  ariaLabel: el.getAttribute ? el.getAttribute('aria-label') : '',
+                  ariaLabelled: el.getAttribute ? el.getAttribute('aria-labelledby') : '',
+                  title: el.getAttribute ? el.getAttribute('title') : '',
                 }
               ) : {},
               strongEvidenceCount: hits,
@@ -2107,7 +2021,6 @@ function installAboutBlankKiller(browser, nome, { graceMs = 20000 } = {}) {
  * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
  * Retorna { loginRequired: true/false, reason: string, domain: string }
  */
-/* [DUPLICATE REMOVED PER INSTRUCTION] Funções detectLoginRequired/detectAccountSuspended duplicadas — primeira cópia comentada
 async function detectLoginRequired(page) {
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
@@ -2134,13 +2047,11 @@ async function detectLoginRequired(page) {
   } catch {}
   return { loginRequired: false };
 }
-*/
 
 /**
  * Detecta se a conta foi bloqueada de modo permanente/banida/suspensa.
  * Retorna { banned: true/false, reason, snippet }
  */
-/* [DUPLICATE REMOVED PER INSTRUCTION] 
 async function detectAccountSuspended(page) {
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
@@ -2186,191 +2097,6 @@ async function detectAccountSuspended(page) {
   return { banned: false };
 }
 
-/**
- * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
- * Retorna { loginRequired: true/false, reason: string, domain: string }
- */
-async function detectLoginRequired(page) {
-  try {
-    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
-    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
-    if (!isFbOrMsg) return { loginRequired: false };
-
-    const v = await page.evaluate(() => {
-      function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
-      const hasRoyal = !!document.querySelector('form[data-testid="royal_login_form"], form#login_form');
-      const hasInputs = !!document.querySelector('input[name="email"], input#email') && !!document.querySelector('input[name="pass"], input#pass');
-      const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
-      const hasPersonaText = h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person'));
-      return { hasRoyal, hasInputs, hasPersonaText };
-    });
-
-    if (v && (v.hasRoyal && v.hasInputs)) {
-      return { loginRequired: true, reason: 'login_form', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
-    }
-    if (v && v.hasPersonaText) {
-      return { loginRequired: true, reason: 'checkpoint_captcha', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
-    }
-  } catch {}
-  return { loginRequired: false };
-}
-
-/**
- * Detecta se a conta foi bloqueada de modo permanente/banida/suspensa.
- * Retorna { banned: true/false, reason, snippet }
- */
-async function detectAccountSuspended(page) {
-  try {
-    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
-    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
-    if (!isFbOrMsg) return { banned: false };
-
-    const v = await page.evaluate(() => {
-      function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
-      const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2500);
-      const texts = nodes.map(el => (el.innerText || el.textContent || '')).filter(Boolean);
-      const tnorm = texts.map(norm);
-      const hit = tnorm.some(t =>
-        t.includes('sua conta foi suspensa') ||
-        t.includes('sua conta esta suspensa') ||
-        t.includes('your account was suspended') ||
-        t.includes('your account is suspended') ||
-        t.includes('tu cuenta ha sido suspendida') ||
-        t.includes('tu cuenta esta suspendida')
-      );
-      let snippet = '';
-      if (hit) {
-        snippet = texts.find(s => /[Ss]uspens[oa]/.test(s)) || texts.slice(0,20).join(' | ').slice(0,300);
-      }
-      return { hit, snippet };
-    });
-
-    if (v && v.hit) {
-      return { banned: true, reason: 'suspended_ui', snippet: v.snippet || '' };
-    }
-  } catch {}
-  return { banned: false };
-}
-
-/**
- * Realiza login robusto no Facebook/Messenger com as credenciais fornecidas.
- * - Campo login/password vêm do manifest.credentials 
- * - Nunca loga senha
- * - keepLogged: clica para manter conectado se true
- * - preferMessenger: começa pelo Messenger; fallback pro FB se houver erro
- * Retorna { ok:true } em sucesso, ou { ok:false, reason, message }
- */
-async function loginWithCredentials(page, { login, password, keepLogged = true, preferMessenger = true }, { timeoutMs = 45000, singleDomain = true } = {}) {
-  try {
-    if (!page) return { ok:false, reason:'no_page' };
-    const urlLoginMessenger = 'https://www.messenger.com/login';
-    const urlLoginFB        = 'https://www.facebook.com/login';
-    const domainPrimary = preferMessenger ? urlLoginMessenger : urlLoginFB;
-    const domainAlt     = preferMessenger ? urlLoginFB        : urlLoginMessenger;
-
-    // Helper: tentar login num domínio (uma rodada)
-    async function tryOneDomain(loginUrl) {
-      try {
-        await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(()=>{});
-        await sleep(600);
-
-        // Antes: resolve nonce e “Continuar como...”
-        await resolveNonceIfPresent(page, {});
-        await clickContinuarComo(page, {});
-
-        // Aguarda campos de login até 12s
-        const emailSel = ['#email', '[name="email"]', 'input[type="text"][name="email"]', 'input[name="email"]'];
-        const passSel  = ['#pass',  '[name="pass"]',  'input[type="password"][name="pass"]', 'input[name="pass"]'];
-
-        const emailInput = await waitAny(page, emailSel, { timeout: 12000, visible: true });
-        const passInput  = await waitAny(page, passSel,  { timeout: 12000, visible: true });
-
-        if (!emailInput || !passInput) {
-          return { ok:false, reason:'login_form_not_found', message:'Campos de login não apareceram' };
-        }
-
-        // Digita credenciais
-        await emailInput.click({ clickCount: 3 }).catch(()=>{});
-        await emailInput.type(login, { delay: 12 }).catch(()=>{});
-        await passInput.click({ clickCount: 3 }).catch(()=>{});
-        await passInput.type(password, { delay: 12 }).catch(()=>{});
-
-        // “manter conectado”
-        if (keepLogged) {
-          try {
-            const cks = await page.$$('input[type="checkbox"]:not(:disabled)');
-            for (const ck of cks) {
-              const labTxt = await page.evaluate(el => (el.parentElement && (el.parentElement.innerText || el.parentElement.textContent || '')), ck);
-              if (labTxt && /(manter.*conectado|keep me logged|remember)/i.test(labTxt)) {
-                const checked = await page.evaluate(el => el.checked, ck);
-                if (!checked) await ck.click().catch(()=>{});
-              }
-            }
-          } catch {}
-        }
-
-        // Submit
-        const btnSel = ['[data-testid="royal_login_button"]', '#loginbutton', 'button[type="submit"]', 'input[type="submit"]'];
-        const btn = await waitAny(page, btnSel, { timeout: 5000, visible: true });
-        if (btn) await btn.click({delay: 50}).catch(()=>{});
-        else     await page.keyboard.press('Enter').catch(()=>{});
-
-        await page.waitForNavigation({ waitUntil:'domcontentloaded', timeout:15000 }).catch(()=>{});
-        await resolveNonceIfPresent(page, {});
-
-        // Analisa resultado
-        const invalidDet = await detectInvalidCredentials(page);
-        if (invalidDet) {
-          if (invalidDet.type === 'temporarily_blocked') {
-            return { ok: false, reason: 'temporarily_blocked', message: 'Bloqueio temporário após login' };
-          }
-          if (invalidDet.type === 'invalid') {
-            const sub = invalidDet.subreason || '';
-            return { ok: false, reason: 'invalid', message: sub ? 'invalid_' + sub : 'invalid_credentials' };
-          }
-        }
-
-        // Verifica se ainda pede login
-        const lr2 = await detectLoginRequired(page);
-        if (lr2 && lr2.loginRequired) {
-          return { ok: false, reason: 'invalid', message: 'login ainda requerido' };
-        }
-
-        // Sucesso: rotas esperadas Messenger/Facebook pós login
-        const urlAfter = (page.url && page.url()) || '';
-        if (
-          /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(urlAfter) ||
-          /facebook\.com\/(marketplace|home|me)/i.test(urlAfter)
-        ) {
-          return { ok:true };
-        }
-
-        // fallback: se não detectou nada, considerar ok
-        return { ok:true };
-
-      } catch (err) {
-        return { ok:false, reason:'exception', message: (err && err.message) || String(err) };
-      }
-    }
-
-    // Tenta no primário
-    let res = await tryOneDomain(domainPrimary);
-    if (res.ok) return res;
-
-    // Campos não apareceram? Se permitido, tente no domínio alternativo
-    if (!singleDomain && (res.reason === 'login_form_not_found' || res.reason === 'exception')) {
-      const res2 = await tryOneDomain(domainAlt);
-      if (res2.ok) return res2;
-      return res2;
-    }
-
-    return res;
-
-  } catch (err) {
-    return { ok:false, reason:'exception', message: (err && err.message)||String(err) };
-  }
-}
-
 module.exports = {
   openBrowser,
   configureProfile,
@@ -2401,6 +2127,5 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended,
-  loginWithCredentials,
+  detectAccountSuspended
 };
