@@ -747,6 +747,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
           args: launchArgs,
           defaultViewport,
           dumpio: !!process.env.BROWSER_DEBUG,
+          protocolTimeout: 120000 // 120 segundos garante o Stealth/plugin
         });
         if (process.env.BROWSER_DEBUG === '1') {
           const spawnargs = b.process && b.process ? b.process().spawnargs : null;
@@ -1953,16 +1954,11 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
       const page = await pageFromTarget(target);
       if (!page) return;
       const key = keyFor(target);
-      if (!key) return; // sem key consistente, não arma
+      if (!key) return;
 
-      // Se a page navegar para algo real antes do grace, cancela
+      // CANCELADORES - NÃO BUSQUE page.url()
       try {
-        page.once('domcontentloaded', async () => {
-          try {
-            const u = page.url ? page.url() : '';
-            if (u && u !== 'about:blank') clearTimer(key);
-          } catch {}
-        });
+        page.once('domcontentloaded', async () => { try { clearTimer(key); } catch {} });
         page.once('close', () => clearTimer(key));
       } catch {}
 
@@ -1972,6 +1968,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
           if (sup > Date.now()) return;
           if (page.isClosed && page.isClosed()) return;
+          // AQUI pode acessar page.url() pois mainFrame já existe
           const u = page.url ? page.url() : '';
           if (!u || u === 'about:blank') {
             try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
@@ -1988,15 +1985,14 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   browser.on('targetcreated', armKiller);
   browser.on('targetchanged', async (t) => {
     try {
-      const p = await pageFromTarget(t);
       const key = keyFor(t);
-      const u = p && p.url ? p.url() : '';
+      // Use t.url() apenas (ThreadSafe), não page.url()
+      const u = (t && typeof t.url === 'function') ? t.url() : '';
       if (u && u !== 'about:blank') clearTimer(key);
     } catch {}
   });
   browser.on('targetdestroyed', async (t) => {
     try {
-      const p = await pageFromTarget(t);
       const key = keyFor(t);
       clearTimer(key);
     } catch {}

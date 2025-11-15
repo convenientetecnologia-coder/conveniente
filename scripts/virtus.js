@@ -22,8 +22,10 @@ const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 
-// Variável global de lock
-let VIRTUS_INPUT_LOCK = false;
+// Locks por perfil de input
+const VIRTUS_INPUT_LOCKS = new Map();
+function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
+function isVirtusLocked(nome){ return VIRTUS_INPUT_LOCKS.has(nome); }
 
 // Helpers globais de send-lock/contexto
 function getBrowserFromPage(p) { try { return typeof p.browser === 'function' ? p.browser() : null; } catch { return null; } }
@@ -302,8 +304,8 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
  * Função utilitária para scrollar a lista de chats para o topo.
  * Executa direto via page.evaluate no Messenger.
  */
-async function scrollChatsToTop(page) {
-  if (VIRTUS_INPUT_LOCK) return false;
+async function scrollChatsToTop(page, nome) {
+  if (isVirtusLocked(nome)) return false;
   try {
     const b = getBrowserFromPage(page);
     if (b && b._sendLock && b._sendLock.active) return false;
@@ -393,7 +395,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
   const ctrlKey = (process.platform === 'darwin') ? 'Meta' : 'Control';
 
-  VIRTUS_INPUT_LOCK = true;
+  setVirtusInputLock(nome, true);
   try {
     // Foco real no composer
     await campo.click({ delay: 20 }).catch(()=>{});
@@ -449,7 +451,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     }
 
   } finally {
-    VIRTUS_INPUT_LOCK = false;
+    setVirtusInputLock(nome, false);
   }
 }
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
@@ -858,7 +860,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.info('Reload ultra robusto concluído.', { nome });
       // Chama scrollChatsToTop após reload ultra robusto
       try {
-        const ok = await scrollChatsToTop(p);
+        const ok = await scrollChatsToTop(p, nome);
         if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'Scroll OK' : 'Scroll DEU RUIM'); }
       } catch {}
       // Reforce após 800ms
@@ -868,7 +870,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const b = getBrowserFromPage(p);
           if (b && b._sendLock && b._sendLock.active) return;
         } catch {}
-        scrollChatsToTop(p);
+        scrollChatsToTop(p, nome);
       }, 800);
       lastScrollToTop = Date.now();
     } catch (e) {
@@ -1123,7 +1125,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-        await scrollChatsToTop(p).catch(()=>{});
+        await scrollChatsToTop(p, nome).catch(()=>{});
         await sleep(300);
         let found = await p.$(anchorSel);
 
@@ -1395,7 +1397,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // === BLOCO REMOVIDO CONFORME INSTRUÇÃO ===
 
       // Não dispare keepalive durante inserção de mensagem
-      if (!VIRTUS_INPUT_LOCK) {
+      if (!isVirtusLocked(nome)) {
         try {
           await p.evaluate(() => {
             window.dispatchEvent(new Event('focus'));
@@ -1430,7 +1432,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         scrollInterval = setInterval(async () => {
           if (!running || !epochOk()) return;
           try {
-            const ok = await scrollChatsToTop(p);
+            const ok = await scrollChatsToTop(p, nome);
             if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
             if (ok) {
               lastScrollToTop = Date.now();
@@ -1443,12 +1445,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const b = getBrowserFromPage(p);
               if (b && b._sendLock && b._sendLock.active) return;
             } catch {}
-            scrollChatsToTop(p);
+            scrollChatsToTop(p, nome);
           }, 800);
         }, 30000);
       }
       try {
-        const scrolled = await scrollChatsToTop(p);
+        const scrolled = await scrollChatsToTop(p, nome);
         if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL'); }
         if (scrolled) {
           lastScrollToTop = Date.now();
@@ -1460,7 +1462,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const b = getBrowserFromPage(p);
             if (b && b._sendLock && b._sendLock.active) return;
           } catch {}
-          scrollChatsToTop(p);
+          scrollChatsToTop(p, nome);
         }, 800);
       } catch {}
 
@@ -1530,14 +1532,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!running || !epochOk()) return;
         await garantirMarketplace(p, { timeoutMs: 25000 });
         try {
-          const ok = await scrollChatsToTop(p);
+          const ok = await scrollChatsToTop(p, nome);
           setTimeout(() => {
             if (!running || !epochOk()) return;
             try {
               const b = getBrowserFromPage(p);
               if (b && b._sendLock && b._sendLock.active) return;
             } catch {}
-            scrollChatsToTop(p);
+            scrollChatsToTop(p, nome);
           }, 800);
         } catch {}
         ready = true;
