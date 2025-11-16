@@ -190,17 +190,6 @@ module.exports = (app, workerClient, fileStore) => {
       return desired;
     });
 
-    // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
-    {
-      const freeMB = getAvailableMB();
-      const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
-      if (freeMB <= MIN_OPEN_MB) {
-        logger.warn('Ativação bloqueada por RAM', { nome, freeMB, minRequiredMB: MIN_OPEN_MB });
-        try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
-        return res.json({ ok: false, error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_OPEN_MB} MB)` });
-      }
-    }
-
     // BLOQUEIO de ativação por limit_posting
     // --- PATCH CIRÚRGICO: BLOCO REMOVIDO CONFORME INSTRUÇÃO ---
 
@@ -290,17 +279,6 @@ module.exports = (app, workerClient, fileStore) => {
       return res.json({ ok:false, error:e.message }); 
     }
     await issues.append(nome, 'admin_start_work_request', `by=${op}`);
-
-    // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
-    {
-      const freeMB = getAvailableMB();
-      const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
-      if (freeMB <= MIN_OPEN_MB) {
-        logger.warn('Start work bloqueado por RAM', { nome, freeMB, minRequiredMB: MIN_OPEN_MB });
-        try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
-        return res.json({ ok: false, error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_OPEN_MB} MB)` });
-      }
-    }
 
     try {
       await fileStore.withDesiredFileLockUpdate(desired => {

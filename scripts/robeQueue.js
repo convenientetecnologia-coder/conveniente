@@ -14,6 +14,9 @@
  * robeQueue.activeCount() — quantidade de ativação simultânea (sempre 0 ou 1).
  * robeQueue.queueList() — retorna array dos nomes na fila de espera (ordem).
  * robeQueue.clear() — limpa toda a fila, inclusive ativa.
+ * robeQueue.cancelActive(nome) — ativa sinal de cancelamento para o Robe ativo com esse nome.
+ * robeQueue.isCanceled(nome) — retorna true/false se cb do Robe com esse nome foi sinalizado para cancel.
+ * robeQueue.clearCancel(nome) — limpa sinalização de cancelamento depois que callback detectou e retornou.
  *
  * ATENÇÃO: Em cenário multi-worker/sharding, instanciar a fila unicamente no master/shard supervisor,
  * ou converter queue para fila distribuída/coordenada.
@@ -29,6 +32,7 @@ class RobeQueue {
     this.fila = [];            // [ { nome, cb, timestampQueue } ]
     this.executando = null;    // { nome, cb, startedAt }
     this._tickRunning = false;
+    this._cancelMap = new Set();   // nomes sinalizados para cancelamento cooperativo
   }
 
   enqueue(nome, cb) {
@@ -46,12 +50,9 @@ class RobeQueue {
 
   skip(nome) {
     // Remove da fila se ainda não foi executado
-    // Nenhum callback ou código externo pode mexer diretamente na fila
     this.fila = this.fila.filter(ent => ent.nome !== nome);
     // Não remove se já está "executando"
-    if (this.executando && this.executando.nome === nome) {
-      // Opcional: cancelar execução ativa? (Depende do Robe trabalhar com timeout/cancelamento)
-    }
+    // Cancelamento real é cooperativo (via cancelActive/isCanceled)
   }
 
   inQueue(nome) {
@@ -63,9 +64,6 @@ class RobeQueue {
   }
 
   activeCount() {
-    // INVARIANTE: Nunca haverá mais de uma execução ativa da Robe no sistema.
-    // (Só 1 Robe postando a qualquer momento!)
-    // Garantia reforçada: só pode retornar 0 ou 1.
     return this.executando ? 1 : 0;
   }
 
@@ -76,21 +74,42 @@ class RobeQueue {
   }
 
   clear() {
-    // Toda alteração de fila/executando ocorre APENAS via métodos oficiais!
     this.fila = [];
     this.executando = null;
+    this._cancelMap.clear();
+  }
+
+  /**
+   * Sinaliza para o Robe ativo com esse nome que ele deve cancelar (cooperativo).
+   */
+  cancelActive(nome) {
+    if (this.executando && this.executando.nome === nome) {
+      this._cancelMap.add(nome);
+    }
+  }
+
+  /**
+   * Retorna true se este Robe ativo está sinalizado para cancelar, false caso contrário.
+   */
+  isCanceled(nome) {
+    return this._cancelMap.has(nome);
+  }
+
+  /**
+   * Limpa sinalização de cancelamento para esse nome (deve ser chamada pelo callback ao sair).
+   */
+  clearCancel(nome) {
+    this._cancelMap.delete(nome);
   }
 
   tick() {
-    if (this._tickRunning) return; // Impede execução concorrente
+    if (this._tickRunning) return;
     this._tickRunning = true;
 
     setImmediate(async () => {
       try {
-        // INVARIANTE: Nunca haverá mais de uma execução ativa da Robe no sistema.
-        // O tick só avança após cb finalizar.
+        // Exclusão: só 1 Robe ativo
         if (!this.executando && this.fila.length > 0) {
-          // Pega o próximo da fila
           const next = this.fila.shift();
           this.executando = { nome: next.nome, startedAt: Date.now() };
           if (process.env.ROBEQUEUE_DEBUG === '1') {
@@ -99,12 +118,10 @@ class RobeQueue {
           try {
             await Promise.resolve(next.cb());
           } catch (e) {
-            // O callback do Robe sempre precisa dar catch aos próprios erros!
             try { console.warn('[ROBE-QUEUE] erro no cb', e && e.message); } catch {}
           }
-          // Sempre set executando = null; antes de chamar novo tick!
           this.executando = null;
-          // Chama tick recursivo para partir para o próximo (se houver)
+          this._cancelMap.delete(next.nome);
           this._tickRunning = false;
           this.tick();
           return;

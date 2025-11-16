@@ -830,14 +830,6 @@ async function activateOnce(nome, source = '') {
           return { ok:false, error: 'manifest_incomplete' };
         }
 
-        {
-          const freeMB = getAvailableMB();
-          if (freeMB <= OPEN_MIN_FREE_MB) {
-            await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
-            throw new Error('ram_insuficiente_para_ativar');
-          }
-        }
-
         const browser = await browserHelper.openBrowser(manifest);
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
@@ -1211,6 +1203,9 @@ async function recycleMessengerPage(nome) {
   }
 }
 
+const RAM_CPU_TICK_MIN_MS = parseInt(process.env.RAM_CPU_TICK_MIN_MS || '3500', 10);
+const RAM_CPU_TICK_MAX_MS = parseInt(process.env.RAM_CPU_TICK_MAX_MS || '8000', 10);
+
 async function ramCpuMonitorTick() {
   const perfisArr = loadPerfisJson();
   const nomeByUserDir = {};
@@ -1533,7 +1528,9 @@ async function ramCpuMonitorTick() {
 
   await snapshotStatusAndWrite();
 
-  ramMonitorInterval = setTimeout(ramCpuMonitorTick, 3500 + Math.floor(Math.random()*1000));
+  const alive = controllers.size;
+  const next = alive > 200 ? RAM_CPU_TICK_MAX_MS : (alive > 80 ? 6000 : RAM_CPU_TICK_MIN_MS);
+  ramMonitorInterval = setTimeout(ramCpuMonitorTick, next);
 }
 
 function normalizePath(x) { return String(x||'').replace(/\\/g,'/'); }
@@ -1576,6 +1573,11 @@ async function robeTickGlobal() {
     logger.info('[WORKER][robeTickGlobal] Enfileirando', { nome, cooldown: await normalizeCooldown(nome), inQueue: robeQueue.inQueue(nome), isActive: robeQueue.isActive(nome) });
 
     robeQueue.enqueue(nome, async () => {
+      if (robeQueue.isCanceled && robeQueue.isCanceled(nome)) {
+        robeUpdateMeta(nome, { emExecucao: false });
+        robeQueue.clearCancel(nome);
+        return;
+      }
 
       robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
@@ -1767,6 +1769,7 @@ function attachBrowserLifecycle(nome, browser) {
 browser.once('disconnected', async () => {
 try {
 logger.info('[WORKER][BROWSER] disconnected', { nome });
+try { if (robeQueue.cancelActive) robeQueue.cancelActive(nome); } catch {}
 try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 
 const ctrl = controllers.get(nome);
@@ -2278,6 +2281,11 @@ const handlers = {
       if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
         robeUpdateMeta(nome, { emFila: true });
         robeQueue.enqueue(nome, async () => {
+          if (robeQueue.isCanceled && robeQueue.isCanceled(nome)) {
+            robeUpdateMeta(nome, { emExecucao: false });
+            robeQueue.clearCancel(nome);
+            return;
+          }
 
           robeUpdateMeta(nome, { emExecucao: true, emFila: false });
 
@@ -2810,9 +2818,9 @@ const NURSE_CFG = {
   PAGE_EVAL_TIMEOUT_MS: 5000
 };
 
-const MAX_OPEN_CONCURRENCY = 1;
+const MAX_OPEN_CONCURRENCY = parseInt(process.env.MAX_OPEN_CONCURRENCY || '2', 10); // ou ajuste para mais se ficarvel em RAM
 let slotsInUse = 0;
-const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
+const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '300', 10);
 
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,
