@@ -19,7 +19,7 @@ const pathStatusJson = path.join(__dirname, '..', 'dados', 'status.json');
 // INÍCIO PATCH ESTABILIDADE/RATE-LIMIT E CPU QUENTE ==========================
 const OPEN_RATE_MS = parseInt(process.env.SUP_OPEN_RATE_MS || '1500', 10);
 const MAX_CPU = parseInt(process.env.SUP_CPU_MAX_OPEN || '85', 10);
-state.lastGrantAt = state.lastGrantAt || 0;
+// state.lastGrantAt = state.lastGrantAt || 0; // REMOVIDO CONFORME ORIENTAÇÃO
 // FIM PATCH ================================================================
 
 /**
@@ -64,6 +64,9 @@ let state = {
   cooldownDynamic: 0,
   erroJaRetornado: false
 };
+
+// ADICIONAR CONFORME PEDIDO
+state.lastGrantAt = state.lastGrantAt || 0;
 
 /** Cooldowns individuais por perfil */
 let cooldownPerAcc = new Map(); // perfil => timestamp until
