@@ -10,7 +10,7 @@ const logger = require('./logger.js');
 const fotos = require('./fotos.js'); // ADICIONADO
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
-const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '60000', 10); // 60s recomendado
+const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 

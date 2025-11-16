@@ -521,7 +521,6 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
         if (mainPage && p === mainPage) continue;
         if (!mainPage && pages[0] && p === pages[0]) continue;
         let u = ''; try { u = p.url(); } catch {}
-        if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
         if (!u || u === 'about:blank') {
           await p.close({ runBeforeUnload: false }).catch(()=>{});
         }
@@ -562,7 +561,7 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
 
 // ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
 function installOneTabGuard(browser, nome, {
-  allow = () => false,              // função externa que diz se “más de 1 aba” é permitido
+  allow = () => false,              // função externa que diz se “mais de 1 aba” é permitido
   maxPagesWhenAllow = 2,            // máximo permitido quando allow() é true (Robe/config)
   onNumPages = null,                // callback para atualizar robeMeta[nome].numPages
   log = (m,ctx)=>{ try{require('./logger.js').info(m,ctx);}catch{} }
@@ -804,11 +803,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
     browser = browserTry;
 
-    // PATCH: Set protocol timeout GLOBAL para 180s/CDP
+    // 1. PATCH: Set protocol timeout GLOBAL para 60s
     try {
       const conn = browser && browser._connection;
       if (conn && typeof conn.setProtocolTimeout === 'function') {
-        conn.setProtocolTimeout(180000); // 180s para operações CDP
+        conn.setProtocolTimeout(60000); // 60s para operações CDP
       }
     } catch {}
 
@@ -822,14 +821,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       await safeCloseBrowser(browser);
       throw e;
     }
-
-    // AUMENTO DE TIMEOUTS NAS PÁGINAS INICIAIS
-    try {
-      for (const p of (pages||[])) {
-        if (typeof p.setDefaultNavigationTimeout === "function") p.setDefaultNavigationTimeout(90000);
-        if (typeof p.setDefaultTimeout === "function") p.setDefaultTimeout(60000);
-      }
-    } catch {}
 
     // 1.1) Inicialmente NÃO execute prune nem arme timer de prune durante abertura/configuração.
     // Só rode pruning/timer após entrar realmente em modo de produção (Virtus ON/start_work).
@@ -853,8 +844,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try {
       const setDefaults = async (p) => {
         try {
-          p.setDefaultTimeout(60000); // 60s ações padrão
-          p.setDefaultNavigationTimeout(90000); // 90s navegação
+          p.setDefaultTimeout(30000); // 30s ações padrão
+          p.setDefaultNavigationTimeout(45000); // 45s navegação
           p.on('dialog', async (dlg) => {
             try {
               const t = dlg.type && dlg.type();
@@ -2000,7 +1991,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           const u = page.url ? page.url() : '';
           if (!u || u === 'about:blank') {
             try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-            try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch{}
+            try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
           }
         } finally {
           clearTimer(key);

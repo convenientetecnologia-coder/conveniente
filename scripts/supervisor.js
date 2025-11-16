@@ -16,12 +16,6 @@ const { getAvailableMB } = require('./utils.js'); // ADICIONADO CONFORME INSTRU�
 
 const pathStatusJson = path.join(__dirname, '..', 'dados', 'status.json');
 
-// INÍCIO PATCH ESTABILIDADE/RATE-LIMIT E CPU QUENTE ==========================
-const OPEN_RATE_MS = parseInt(process.env.SUP_OPEN_RATE_MS || '1500', 10);
-const MAX_CPU = parseInt(process.env.SUP_CPU_MAX_OPEN || '85', 10);
-// state.lastGrantAt = state.lastGrantAt || 0; // REMOVIDO CONFORME ORIENTAÇÃO
-// FIM PATCH ================================================================
-
 /**
  * Checa se kill_guard_until está ativo no status para o perfil solicitado.
  * Se ativo e timestamp > now, retorna true (bloqueará a abertura do slot).
@@ -64,9 +58,6 @@ let state = {
   cooldownDynamic: 0,
   erroJaRetornado: false
 };
-
-// ADICIONAR CONFORME PEDIDO
-state.lastGrantAt = state.lastGrantAt || 0;
 
 /** Cooldowns individuais por perfil */
 let cooldownPerAcc = new Map(); // perfil => timestamp until
@@ -143,45 +134,26 @@ function canProbe() {
 
 /** Decide se pode abrir um novo slot agora */
 function podeAbrirNovoSlot(perfil) {
-
-  // PATCH: BLOQUEIO GERAL PÓS ERRO
-  if(state.openBlockedUntil && state.openBlockedUntil > Date.now()) {
-    return { ok:false, reason:'blocked_cooldown', waitMs: state.openBlockedUntil - Date.now() };
-  }
-
-  // PATCH: NOVO BLOCO LIMITADOR
   const now = Date.now();
   const freeMB = getFreeMB();
-
-  // CPU GUARD - Lê do status.json agregado, se disponível
-  try {
-    const stPath = path.join(__dirname, '..', 'dados', 'status.json');
-    if (fs.existsSync(stPath)) {
-      const st = JSON.parse(fs.readFileSync(stPath, 'utf8'));
-      const c = (st && st.sys && typeof st.sys.cpuApprox === 'number') ? st.sys.cpuApprox : null;
-      if (c != null && c >= MAX_CPU) {
-        pushEvent({type:"denied", reason:"cpu_hot", cpuApprox:c, perfil});
-        return { ok:false, reason:"cpu_hot", cpuApprox: c };
-      }
-    }
-  } catch {}
-
+  // Checagem de RAM
   if (freeMB <= MIN_FREE_RAM_MB) {
     pushEvent({type: "denied", reason: "ram_low", freeMB, perfil});
     return {ok: false, reason: "ram_low", freeMB};
   }
-
+  // Cooldown PER-PERFIL (novo)
   const cooldownUntil = cooldownPerAcc.get(perfil) || 0;
   if (cooldownUntil > now) {
     pushEvent({type: "denied", reason: "cooldown_account", perfil, until: cooldownUntil});
     return {ok: false, reason: "cooldown", waitMs: cooldownUntil-now, perfil};
   }
+  // (ANTIGO global - pode remover ou restringir para edge-cases de hard fault, mas por now deixamos sem efeito)
+  // if (state.openBlockedUntil > now) { ... }
 
-  // PATCH: cap inicial de slots = 1 (se maxSlots==null)
-  const cap = (state.maxSlots == null ? 1 : state.maxSlots); 
-  if (state.slotsAbertos >= cap) {
-    pushEvent({type:"denied", reason:"slots", maxSlots:cap, slotsAbertos: state.slotsAbertos, perfil});
-    return {ok: false, reason: "slots", maxSlots:cap};
+  // Limitador por slots (mantém igual)
+  if (state.maxSlots && state.slotsAbertos >= state.maxSlots) {
+    pushEvent({type:"denied", reason:"slots", maxSlots:state.maxSlots, slotsAbertos: state.slotsAbertos, perfil});
+    return {ok: false, reason: "slots", maxSlots: state.maxSlots};
   }
   return {ok: true, freeMB};
 }
@@ -192,17 +164,6 @@ function podeAbrirNovoSlot(perfil) {
 // Era /requestOpen: POST body {perfil}
 // AGORA: function requestOpen(perfil)
 function requestOpen(perfil) {
-
-  // Rate-limit global open (impede avalanche)
-  if (Date.now() - (state.lastGrantAt || 0) < OPEN_RATE_MS) {
-    const waitMs = OPEN_RATE_MS - (Date.now() - state.lastGrantAt);
-    pushEvent({type: "denied", reason: "rate_limit", waitMs, perfil});
-    return { ok:false, reason:'rate_limit', waitMs };
-  }
-
-  // Cap inicial de slots
-  if (state.maxSlots == null) state.maxSlots = 1;
-
   if (killGuardActiveForPerfil && killGuardActiveForPerfil(perfil)) {
     pushEvent({type:"denied", reason:"kill_guard_until", perfil});
     return { ok: false, reason: "kill_guard_until", msg: "Slot bloqueado por kill_guard_until (bloqueio anti-flapback)" };
@@ -215,8 +176,6 @@ function requestOpen(perfil) {
     state.nextProbeAt = Date.now() + 8 * 60 * 1000; // 8 min
     ativos.set(perfil, { openAt: Date.now(), probe: true });
     pushEvent({type:"open_granted_probe", perfil});
-    // PATCH: MARCA CONCESSÃO DE SLOT
-    state.lastGrantAt = Date.now();
     saveState();
     return { ok:true, probe:true, nextSlot: state.slotsAbertos };
   }
@@ -226,8 +185,6 @@ function requestOpen(perfil) {
   state.tempoUltAbertura = Date.now();
   ativos.set(perfil, { openAt: Date.now() });
   pushEvent({type:"open_granted", perfil});
-  // PATCH: MARCA CONCESSÃO DE SLOT
-  state.lastGrantAt = Date.now();
   saveState();
   return { ok:true, nextSlot: state.slotsAbertos };
 }
@@ -251,8 +208,6 @@ function notifyOpened(perfil, resultado = "ok") {
     cooldownPerAcc.set(perfil, until); // SÓ aplica cooldown para este perfil
     state.maxSlots = Math.max(1, (state.maxSlots||1) -1);
     pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots, cooldownUntil:until});
-    // PATCH: BLOQUEIO GERAL 60s PÓS ERRO
-    state.openBlockedUntil = Date.now() + 60000; // 60s de bloqueio geral pós erro
   }
 
   // INSTRUÇÃO 2: BUGFIX DE PROBE EM notifyOpened

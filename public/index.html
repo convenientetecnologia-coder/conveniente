@@ -1627,6 +1627,70 @@
     window.electronAPI.listPerfis = () =>
       fetch('/api/perfis').then(r => r.json()).catch(() => null);
 
+    async function startAllSequential() {
+      if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
+      if (stopAllLock)  { alertMassActionRunning(); return; }
+      startAllLock = true;
+      setGlobalActionButtonsDisabled(true);
+      const startBtn = document.getElementById('startAllBtn');
+      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
+      try {
+        // ALTERAÇÃO: usar /api/perfis para enumerar TODOS os perfis cadastrados
+        let perfis = [];
+        const lp = await window.electronAPI.listPerfis();
+        if (lp && lp.ok && Array.isArray(lp.perfis)) {
+          perfis = lp.perfis;
+        } else {
+          // fallback caso /api/perfis indisponível (dev/edge/backward)
+          const st = await window.electronAPI.getStatus();
+          perfis = st?.perfis || [];
+        }
+        // Ordem: como retornado por /api/perfis
+        for (let i = 0; i < perfis.length; i++) {
+          const p = perfis[i];
+          // Re-checa status a cada iteração (robusto)
+          try {
+            await ensureResourcesOk({ minFreeMB: 3072 }); // ALTERAÇÃO: SEMPRE usa 3GB militar
+
+            // Ativar navegador se necessário
+            if (!p.active) {
+              await window.electronAPI.activate(p.nome);
+              // Espera ficar ativo
+              await waitUntil(async () => {
+                const st2 = await window.electronAPI.getStatus();
+                const cur = (st2.perfis || []).find(x => x.nome === p.nome);
+                return cur && cur.active;
+              }, { timeoutMs: 60000, intervalMs: 400 });
+              // Pausa pequena entre aberturas
+              await sleep(1500);
+            }
+
+            // Start work (Virtus/24h)
+            await window.electronAPI.startWork(p.nome);
+            // Aguarda “trabalhando” refletir (tolerante)
+            await waitUntil(async () => {
+              const st3 = await window.electronAPI.getStatus();
+              const cur = (st3.perfis || []).find(x => x.nome === p.nome);
+              return cur && cur.trabalhando;
+            }, { timeoutMs: 30000, intervalMs: 400 });
+
+            // Resgata lista atualizada para próximo ciclo via /api/perfis (NÃO usar /api/status)
+            const lpNext = await window.electronAPI.listPerfis();
+            const nextList = Array.isArray(lpNext) ? lpNext : (lpNext && Array.isArray(lpNext.perfis) ? lpNext.perfis : []);
+            perfis.splice(0, perfis.length, ...(nextList || []));
+          } catch (e) {
+            console.warn('[StartAll] Falha em', p && p.nome, e && e.message || e);
+          }
+        }
+      } catch (e) {
+        alert('Falha na sequência: ' + (e && e.message || e));
+      } finally {
+        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir 24h'; }
+        setGlobalActionButtonsDisabled(false);
+        startAllLock = false;
+        reloadPerfis();
+      }
+    }
     // ======================= FIM ALTERAÇÃO BLOQUEIO RAM "ABRIR TODOS" ========================
 
     // ====== Funções e binds NOVAS para loading, Fechar Todos, Invocar Humano, Start 24h ======
@@ -1758,15 +1822,7 @@
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
       if (!btn) return;
-      btn.onclick = async () => {
-        btn.disabled = true; btn.textContent = 'Iniciando...';
-        try {
-          const ok = await fetch('/api/perfis/open-all-24h', { method:'POST' }).then(r=>r.json());
-          if (!ok || ok.ok !== true) alert('Falha ao abrir todos: ' + ((ok && ok.error) || ''));
-        } finally {
-          btn.disabled = false; btn.textContent = 'Abrir Todos 24h';
-        }
-      };
+      btn.onclick = startAllSequential;
     })();
 
     // Robe 24h (todos)
@@ -1870,7 +1926,7 @@
     })();
 
     reloadPerfis();
-    setInterval(reloadPerfis, 8000);
+    setInterval(reloadPerfis, 3000);
 
     // Chamada inicial das métricas:
     updateSysMetrics();

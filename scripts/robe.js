@@ -1078,22 +1078,14 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
     let p = null;
     try {
       p = await browser.newPage();
-      // SUPRESSOR para o killer de about:blank durante patchPage+goto (40s de guarda)
+      // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
       const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
-      guard[nome] = Date.now() + 40000;
+      guard[nome] = Date.now() + 20000;
 
       await ensureXPathPolyfill(p);
       await patchPage(nome, p, coords);
-
-      // INÍCIO BLOCO PATCH: aumentar default navigation timeout
-      try {
-        await p.setDefaultNavigationTimeout(90000);
-      } catch {}
-      // FIM BLOCO PATCH
-
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
-
-      await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 90000 });
+      await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       return p; // sucesso
     } catch (e) {
       lastError = e;
@@ -1530,11 +1522,14 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // GUARDA ULTRA-RÁPIDO: Detecta <span>Limite atingido</span> e ABORTA na hora
     // Aguarda DOM básico sem fragilidade, com fallback
     const waitBody = async () => {
-      const ok = await page.waitForFunction(() => !!(document && document.body), { timeout: 30000 }).catch(()=>false);
+      const ok = await page.waitForFunction(() => !!(document && document.body), { timeout: 15000 }).catch(()=>false);
       if (ok) return true;
-      if (typeof page.isClosed === 'function' && page.isClosed()) throw new Error('page_closed_before_body');
-      try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }); } catch {}
-      return await page.waitForFunction(() => !!(document && document.body), { timeout: 10000 }).catch(()=>false) || false;
+      // Se a página fechou, classifique explicitamente
+      if (typeof page.isClosed === 'function' && page.isClosed()) {
+        throw new Error('page_closed_before_body');
+      }
+      try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 }); } catch {}
+      return await page.waitForFunction(() => !!(document && document.body), { timeout: 5000 }).catch(()=>false) || false;
     };
     const hasBody = await waitBody();
     if (!hasBody) throw new Error('create_body_not_available');
