@@ -627,6 +627,32 @@ const controllers = new Map();
 
 const robeMeta = {};
 
+// IEC helper: Isolate Execution Context guard
+function inIEC(nome, reason) {
+  try {
+    const ctrl = controllers.get(nome);
+    const rm = robeMeta[nome] || {};
+    const sendLock = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
+    const isIEC = !!(
+      (ctrl && (ctrl.humanControl === true || ctrl.configurando === true))
+      || (rm && rm.emExecucao === true)
+      || sendLock
+      || (rm.recoveryHysteresisUntil && rm.recoveryHysteresisUntil > Date.now())
+      || (rm.blockHysteresisUntil && rm.blockHysteresisUntil > Date.now())
+    );
+    // Debounce de log (1/min)
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].iecDebounce = robeMeta[nome].iecDebounce || {};
+    const k = 'iec'+(reason||'');
+    const last = robeMeta[nome].iecDebounce[k] || 0;
+    if (isIEC && (Date.now() - last) > 60000) {
+      robeMeta[nome].iecDebounce[k] = Date.now();
+      issues.append(nome, 'mil_action', `iec_skip:${reason||''}`);
+    }
+    return isIEC;
+  } catch { return true; }
+}
+
 function memorySweep() {
   try {
     const nomesValidos = new Set(loadPerfisJson().map(p => p.nome));
@@ -1139,6 +1165,52 @@ function stopPruneLoop(nome) {
 
 let ramMonitorInterval = null;
 
+// Soft reload helper for intermediate RAM levels
+async function trySoftReloadForHighRam(nome) {
+  try {
+    const ctrl = controllers.get(nome);
+    if (!ctrl || !ctrl.browser || !ctrl.mainPage) return false;
+    if (inIEC(nome, 'soft_reload_ram')) return false;
+
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow || [];
+    robeMeta[nome].reloadAttemptsWindow = robeMeta[nome].reloadAttemptsWindow.filter(ts => Date.now() - ts < 60000);
+    if (robeMeta[nome].reloadAttemptsWindow.length >= 2) return false; // 2 por minuto
+
+    robeMeta[nome].reloadAttemptsWindow.push(Date.now());
+    await ctrl.mainPage.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+    try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome).catch(()=>{}); } catch {}
+    await new Promise(r=>setTimeout(r, 1500));
+    issues.append(nome, 'mil_action', 'soft_reload_due_high_ram').catch(()=>{});
+    return true;
+  } catch { return false; }
+}
+
+// Recycle renderer by creating a new page and closing the old one
+async function recycleMessengerPage(nome) {
+  const ctrl = controllers.get(nome);
+  if (!ctrl || !ctrl.browser) return false;
+  if (inIEC(nome, 'recycle_renderer')) return false;
+  try {
+    const np = await ctrl.browser.newPage();
+    const man = await manifestStore.read(nome).catch(()=>null);
+    await browserHelper.patchPage(nome, np, utils.getCoords((man && man.cidade) || ''));
+    await np.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+    const old = ctrl.mainPage;
+    ctrl.mainPage = np;
+    await wirePageObservers(nome, np);
+    try { await old && old.close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
+    try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome).catch(()=>{}); } catch {}
+    robeMeta[nome].ramHist = [];
+    robeMeta[nome].cpuHistory = [];
+    await issues.append(nome, 'mil_action', 'recycle_renderer:mem');
+    return true;
+  } catch (e) {
+    await issues.append(nome, 'mil_action', 'recycle_renderer_fail:' + ((e && e.message) || e));
+    return false;
+  }
+}
+
 async function ramCpuMonitorTick() {
   const perfisArr = loadPerfisJson();
   const nomeByUserDir = {};
@@ -1298,6 +1370,10 @@ async function ramCpuMonitorTick() {
           const last5 = hist.slice(-5);
           const allHigh = last5.every(h => h.p >= 150);
           if (allHigh) {
+            // IEC: nunca atuar em humano/config/robe/sendlock
+            if (inIEC(nome, 'cpu_breaker')) {
+              return;
+            }
             const ctrl = controllers.get(nome);
             if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) return;
 
@@ -1324,6 +1400,11 @@ async function ramCpuMonitorTick() {
   for (const nome of Object.keys(robeMeta)) {
     if (!controllers.has(nome)) continue;
 
+    // IEC: nunca atuar em humano/config/robe/sendlock
+    if (inIEC(nome, 'ram_breaker')) {
+      continue;
+    }
+
     const now = Date.now();
     if (robeMeta[nome]?.ramKillHysteresisUntil && robeMeta[nome].ramKillHysteresisUntil > now) {
       await issues.append(nome, 'ram_hysteresis_skip', `skip_until=${robeMeta[nome].ramKillHysteresisUntil}`);
@@ -1339,6 +1420,12 @@ async function ramCpuMonitorTick() {
     if (vivos <= 1) continue;
 
     const RAM_KILL_MB_LOCAL = process.platform === 'win32' ? 2200 : 1600;
+
+    // Soft reload em patamar intermediário (>=720MB e < hard kill)
+    if (ramMB != null && ramMB >= 720 && ramMB < RAM_KILL_MB_LOCAL) {
+      await trySoftReloadForHighRam(nome);
+      continue; // dá chance de estabilizar; não mistura com kill
+    }
 
     const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
     hist.push({ t: Date.now(), mb: ramMB });
@@ -1421,6 +1508,12 @@ async function ramCpuMonitorTick() {
           await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
           logger.info('[BREAKER][RAM] guard_skip', { nome });
           continue;
+        }
+
+        // Antes do kill, tenta reciclar renderer (só fora IEC)
+        if (!inIEC(nome, 'ram_breaker_recycle') && await recycleMessengerPage(nome)) {
+          await issues.append(nome, 'mil_action', 'ram_recycle_prevented_kill');
+          continue; // reciclagem OK, aborta o kill
         }
 
         logger.warn('[BREAKER][RAM] acionado', { nome, ramMB, allHigh, slopeOK });
@@ -1789,6 +1882,10 @@ async function start_work({ nome }) {
 
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
       ctrl.trabalhando = true;
+
+      // Toggle messenger images off when starting automation
+      if (ctrl && ctrl.browser) ctrl.browser._allowMessengerImages = false;
+
       try {
         await browserHelper.forceCloseExtras(ctrl.browser);
         const ps = await ctrl.browser.pages();
@@ -2001,6 +2098,9 @@ const handlers = {
       }
       ctrl.configurando = true;
 
+      // Allow messenger images in configuration mode
+      if (ctrl && ctrl.browser) ctrl.browser._allowMessengerImages = true;
+
       try { await stopVirtus(nome); } catch {}
 
       try {
@@ -2083,6 +2183,9 @@ const handlers = {
 
       try { freezeCooldownIfNotWorking(nome); } catch {}
 
+      // Allow images for human operation
+      if (ctrl && ctrl.browser) ctrl.browser._allowMessengerImages = true;
+
       await snapshotStatusAndWrite();
 
       logger.info('[HANDLER] invoke_human ok', { nome });
@@ -2139,6 +2242,9 @@ const handlers = {
           return desired;
         });
       } catch {}
+
+      // Disable images after resuming automation
+      if (ctrl && ctrl.browser) ctrl.browser._allowMessengerImages = false;
 
       return { ok:true };
     });
