@@ -15,6 +15,28 @@ const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
 
+// ==== Orçamento global de recoveries e kills (budget tokens worker-wide) ====
+const _budget = {
+  reloadTokens: 2, // Máx. 2 recoveries (reload/nav/newPage) concorrentes por worker/5s
+  killTokens: 1,   // Máx. 1 deactivate/kill/ramKill/cpuKill/virtus_block no worker/5s
+  refilling: false
+};
+function refillBudget() {
+  if (_budget.refilling) return;
+  _budget.refilling = true;
+  setInterval(() => {
+    _budget.reloadTokens = Math.min(_budget.reloadTokens + 1, 2);
+    _budget.killTokens   = Math.min(_budget.killTokens + 1, 1);
+  }, 5000);
+}
+refillBudget();
+function takeReload() { if (_budget.reloadTokens > 0) { _budget.reloadTokens--; return true; } return false; }
+function takeKill()   { if (_budget.killTokens > 0)   { _budget.killTokens--;   return true; } return false; }
+
+const STATUS_WRITE_MIN_INTERVAL_MS = parseInt(process.env.STATUS_WRITE_MIN_INTERVAL_MS || '2000', 10);
+let _statusWriteScheduled = false;
+let _lastStatusWriteAt = 0;
+
 const _profileOpLocks = new Map();
 async function lockProfileAction(nome, fn) {
   if (!nome) return fn();
@@ -1207,6 +1229,13 @@ const RAM_CPU_TICK_MIN_MS = parseInt(process.env.RAM_CPU_TICK_MIN_MS || '3500', 
 const RAM_CPU_TICK_MAX_MS = parseInt(process.env.RAM_CPU_TICK_MAX_MS || '8000', 10);
 
 async function ramCpuMonitorTick() {
+  // PATCH 6 — RAM/CPU MONITOR TICKEADO SÓ EM UM WORKER (EM WINDOWS)
+  if (process.platform === 'win32' && String(process.env.RAM_CPU_MONITOR_LEADER || '1') !== '1') {
+    const next = RAM_CPU_TICK_MIN_MS;
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, next);
+    return;
+  }
+
   const perfisArr = loadPerfisJson();
   const nomeByUserDir = {};
   for (const p of perfisArr) {
@@ -1379,6 +1408,7 @@ async function ramCpuMonitorTick() {
             }
 
             logger.warn('[BREAKER][CPU] acionado', { nome, last5: last5.map(h => h.p) });
+            if (!takeKill()) { return; } // só pode 1 kill por janela
             await handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'});
             setKillGuard(nome);
             await reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
@@ -1506,12 +1536,14 @@ async function ramCpuMonitorTick() {
         }
 
         // Antes do kill, tenta reciclar renderer (só fora IEC)
+        if (!takeReload()) continue; // se orçamento exausto, não tente reciclar agora
         if (!inIEC(nome, 'ram_breaker_recycle') && await recycleMessengerPage(nome)) {
           await issues.append(nome, 'mil_action', 'ram_recycle_prevented_kill');
           continue; // reciclagem OK, aborta o kill
         }
 
         logger.warn('[BREAKER][RAM] acionado', { nome, ramMB, allHigh, slopeOK });
+        if (!takeKill()) { continue; } // só pode 1 kill por janela
         await handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' });
         setKillGuard(nome);
         await reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK}) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
@@ -1980,6 +2012,18 @@ const handlers = {
   async deactivate({ nome, reason, policy }) {
   return lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
+  // PATCH 3 — DEACTIVATE GUARD PER-PERFIL (início da função)
+  robeMeta[nome] = robeMeta[nome] || {};
+  if (robeMeta[nome].deactivateGuardUntil && robeMeta[nome].deactivateGuardUntil > Date.now()) {
+    await issues.append(nome, 'guard_skip', 'Ação suprimida por deactivateGuardUntil');
+    // finally clear schedule
+    setTimeout(() => {
+      if (robeMeta[nome]) delete robeMeta[nome].deactivateGuardUntil;
+    }, 12000);
+    return { ok: true };
+  }
+  robeMeta[nome].deactivateGuardUntil = Date.now() + 12000;
+
   const preserve = (policy === 'preserveDesired');
   let reopenDelayMs = 0;
   if (preserve) {
@@ -2013,6 +2057,10 @@ const handlers = {
     }
     await snapshotStatusAndWrite();
     logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
+    // PATCH 3 — clear guard after 12s
+    setTimeout(() => {
+      if (robeMeta[nome]) delete robeMeta[nome].deactivateGuardUntil;
+    }, 12000);
     return { ok: true };
   }
   try {
@@ -2077,6 +2125,10 @@ const handlers = {
   }
   await snapshotStatusAndWrite();
   logger.info('[HANDLER] deactivate concluído', { nome, reason, policy });
+  // PATCH 3 — clear guard after 12s
+  setTimeout(() => {
+    if (robeMeta[nome]) delete robeMeta[nome].deactivateGuardUntil;
+  }, 12000);
   return { ok: true };
   });
 },
@@ -2583,7 +2635,7 @@ const handlers = {
     return {
       perfis,
       robes,
-      robeQueue: robeQueueList,
+      robeQueue,
       autoMode,
       sys
     };
@@ -2659,7 +2711,14 @@ const handlers = {
 };
 
 async function snapshotStatusAndWrite() {
-_statusLock = _statusLock.then(async () => {
+  if (_statusWriteScheduled) return _statusLock;
+  const now = Date.now();
+  const delay = Math.max(0, STATUS_WRITE_MIN_INTERVAL_MS - (now - _lastStatusWriteAt));
+  _statusWriteScheduled = true;
+  setTimeout(async () => {
+    _statusWriteScheduled = false;
+    _lastStatusWriteAt = Date.now();
+    _statusLock = _statusLock.then(async () => {
 try {
 try {
   for (const n of Object.keys(robeMeta)) {
@@ -2799,7 +2858,8 @@ try { logger.warn('[WORKER][statusWrite] erro', { error: e && e.message || e });
 }
 });
 try { supervisorClient.sendTelemetria({ type: 'hb', alive: controllers.size }); } catch {}
-return _statusLock;
+  }, delay);
+  return _statusLock;
 }
 
 async function appendIssueNurseDebounced(nome, type, message, key) {
@@ -2818,7 +2878,7 @@ const NURSE_CFG = {
   PAGE_EVAL_TIMEOUT_MS: 5000
 };
 
-const MAX_OPEN_CONCURRENCY = parseInt(process.env.MAX_OPEN_CONCURRENCY || '2', 10); // ou ajuste para mais se ficarvel em RAM
+const MAX_OPEN_CONCURRENCY = Math.min(2, parseInt(process.env.MAX_OPEN_CONCURRENCY || '2', 10)); // ou ajuste para mais se ficarvel em RAM
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '300', 10);
 
@@ -3160,6 +3220,7 @@ async function nurseTick() {
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_nopages`, `Strikes=${robeMeta[nome].noPagesStrikes}`, 'action_nurse_kill_nopages');
             await registerFailure(nome, 'no_pages', 'external');
+            if (!takeKill()) { continue; } // budget de kill
             await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
             setKillGuard(nome);
             robeMeta[nome].noPagesStrikes = 0;
@@ -3228,6 +3289,7 @@ async function nurseTick() {
             robeMeta[nome].closingReason = 'virtus_block';
           }
           await registerFailure(nome, 'messenger_temp_block', 'external');
+          if (!takeKill()) { continue; } // budget de kill
           await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
           setKillGuard(nome);
           await snapshotStatusAndWrite();
@@ -3363,6 +3425,7 @@ async function nurseTick() {
             // PATCH P1 END
             await appendIssueNurseDebounced(nome, `action_nurse_kill_page_zombie`, `Strike=${robeMeta[nome].zombieStrikes}`, 'action_nurse_kill_page_zombie');
             try { registerFailure(nome, 'zombie', 'external'); } catch {}
+            if (!takeKill()) { continue; } // budget de kill
             await handlers.deactivate({ nome, reason: 'nurse_zombie', policy: 'preserveDesired' });
             setKillGuard(nome);
             robeMeta[nome].zombieStrikes = 0;
@@ -3431,7 +3494,7 @@ async function trySwapOpen(target) {
       configurando: controllers.get(n)?.configurando,
       humanControl: controllers.get(n)?.humanControl
     }))
-    .filter(c => !c.configurando && !c.emExecucao && !c.humanControl && c.mb >= (process.platform==='win32' ? 900 : 700))
+    .filter(c => !c.configurando && !c.emExecucao && !c.humanControl && c.mb >= (process.platform==='win32' ? 1100 : 850))
     .sort((a, b) => b.mb - a.mb);
 
   for (const cand of candidates) {
@@ -3515,6 +3578,7 @@ async function recoveryStep(nome, page, step) {
   const st = getHealth(nome);
   const now = Date.now();
   if (st.nextTryAt && st.nextTryAt > now) return false;
+  if (!takeReload()) { st.nextTryAt = Date.now() + 3000; return false; }
   if (step === 'reload') {
     st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
     if (st.counters.softReloads10m.length >= HEALTH_CFG.MAX_SOFT_RELOADS_10MIN) return false;
@@ -3563,15 +3627,17 @@ async function recoveryStep(nome, page, step) {
   return false;
 }
 async function escalateToReopen(nome, reason='health_reopen') {
-  const ctrl = controllers.get(nome);
+  const st = getHealth(nome);
+  const rm = (robeMeta[nome] = robeMeta[nome] || {});
+  setKillGuard(nome);
+  rm.healthReopenHoldUntil = Date.now() + 30000; // 30s hold pós-reopen
   try { await issues.append(nome, 'mil_action', `health_escalate:${reason}`); } catch {}
   if (killGuardActive(nome)) {
     await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
     return;
   }
+  if (!takeKill()) return;
   await handlers.deactivate({ nome, reason, policy: 'preserveDesired' });
-  setKillGuard(nome);
-  const st = getHealth(nome);
   st.stage = 'reopen';
   st.nextTryAt = Date.now() + 60000;
 }
@@ -3581,6 +3647,12 @@ async function healthTick() {
   for (const [nome, ctrl] of controllers) {
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
     if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) continue;
+
+    const rm = robeMeta[nome] || {};
+    if (rm.healthReopenHoldUntil && rm.healthReopenHoldUntil > Date.now()) continue;
+    // Jitter por nome — para espalhar recoveries e evitar sincronia:
+    const h = Math.abs(require('crypto').createHash('md5').update(nome).digest()[0]);
+    if ((Date.now() % HEALTH_CFG.TICK_MS) < (h % 500)) { continue; }
 
     if (!ctrl || !ctrl.browser) continue;
     if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
@@ -3628,6 +3700,7 @@ async function healthTick() {
           await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until (block)');
           continue;
         }
+        if (!takeKill()) { continue; }
         await handlers.deactivate({ nome, reason: 'virtus_block', policy: 'preserveDesired' });
         setKillGuard(nome);
         await snapshotStatusAndWrite();

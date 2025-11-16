@@ -1575,11 +1575,21 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     filaManagerLoop();
 
     // Timer preventivo de reload por tempo
+    const getVirtusJitter = (nome) => {
+      const crypto = require('crypto');
+      try {
+        const h = crypto.createHash('md5').update(nome).digest()[0];
+        return (h % 300000); // 0–5min jitter ms
+      } catch {
+        return Math.floor(Math.random() * 300000);
+      }
+    };
     setInterval(async () => {
       if (!running || !epochOk()) return;
       try {
         const now = Date.now();
-        if ((now - lastPreventiveReloadAt) < RELOAD_EVERY_MS) return;
+        // PATCH: Adiciona jitter no reload de Virtus para dessincronizar reloads
+        if ((now - lastPreventiveReloadAt) < (RELOAD_EVERY_MS + getVirtusJitter(nome))) return;
         const p = await ensurePage();
         if (!p || isVirtusLocked(nome) || (getBrowserFromPage(p)?._sendLock?.active)) return;
         await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
