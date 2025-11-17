@@ -22,9 +22,6 @@ const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 
-// Janela máxima de varredura do feed (horas)
-const MAX_FEED_HOURS = parseInt(process.env.VIRTUS_MAX_FEED_HOURS || '6', 10);
-
 // Locks por perfil de input
 const VIRTUS_INPUT_LOCKS = new Map();
 function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
@@ -180,25 +177,30 @@ async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
 }
 
 // Classificadores de tempo
-function isVelhoHoras(tempoLabel, limitH = MAX_FEED_HOURS) {
+function isVelho24h(tempoLabel) {
   if (!tempoLabel) return false;
-  const t = String(tempoLabel).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  const t = String(tempoLabel)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim();
   if (/\b(ontem|yesterday)\b/.test(t)) return true;
+  if (/\b(\d+)\s*(seman|sem|weeks?|w)\b/.test(t)) return true;
   const mDias = t.match(/\b(\d+)\s*(d|dias?)\b/);
-  if (mDias) return true;
+  if (mDias) { if (parseInt(mDias[1],10) >= 1) return true; }
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) return parseInt(mH[1],10) >= limitH;
+  if (mH) { if (parseInt(mH[1],10) >= 24) return true; }
   return false;
 }
 function isChatRecente(tempoLabel) {
   if (!tempoLabel) return false;
-  const t = String(tempoLabel).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-  if (isVelhoHoras(t, MAX_FEED_HOURS)) return false;
+  const t = String(tempoLabel)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim();
+  if (isVelho24h(t)) return false;
   if (/\b(agora|now)\b/.test(t)) return true;
   if (/\b\d+\s*(s|seg|secs?|seconds?)\b/.test(t)) return true;
   if (/\b\d+\s*(min|m|mins?|minutes?)\b/.test(t)) return true;
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) return parseInt(mH[1],10) < MAX_FEED_HOURS;
+  if (mH) { if (parseInt(mH[1],10) < 24) return true; }
   return false;
 }
 
@@ -538,12 +540,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     failCounts.set(chatId, n);
   }
-
-  // Variáveis de reload preventivo por contagem/tempo
-  let chatsDesdeReload = 0;
-  const RELOAD_EVERY_CHATS = parseInt(process.env.VIRTUS_RELOAD_EVERY_CHATS || '4', 10);
-  const RELOAD_EVERY_MS = parseInt(process.env.VIRTUS_RELOAD_EVERY_MS || '7200000', 10); // 2h
-  let lastPreventiveReloadAt = Date.now();
 
   // Persistência segura no Windows
   async function salvaHistorico() {
@@ -939,7 +935,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         p.waitForSelector('div[role="row"] span', { timeout: 8000 })
       ]);
     } catch {}
-    try { await scrollListaAteLimiteHoras(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
+    try { await scrollListaAte24h(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
     const todos = await coletaChatsMarketplaceTodos(p);
     const recentes = todos.filter(c => isChatRecente(c.tempo));
     const agora = agoraEpoch();
@@ -951,7 +947,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     log(`[SNAPSHOT] Concluído. ${recentes.length} chats <24h marcados como respondidos no primeiro boot.`);
   }
 
-  async function scrollListaAteLimiteHoras(page, { maxMs = 90000, quietLoops = 3 } = {}) {
+  async function scrollListaAte24h(page, { maxMs = 90000, quietLoops = 3 } = {}) {
     const t0 = Date.now();
     let semNovos = 0;
     let vistos = new Set();
@@ -961,7 +957,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       let houveNovo = false, viuAntigo = false;
       for (const c of todos) {
         if (!vistos.has(c.id)) { vistos.add(c.id); houveNovo = true; }
-        if (isVelhoHoras(c.tempo, MAX_FEED_HOURS)) viuAntigo = true;
+        if (isVelho24h(c.tempo)) viuAntigo = true;
       }
       if (viuAntigo) break;
       if (!houveNovo) {
@@ -1290,21 +1286,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         ultimoAtendimento = tsNow;
         await salvaHistorico();
 
-        // Reload preventivo por contagem de chats atendidos
-        chatsDesdeReload++;
-        if (chatsDesdeReload >= RELOAD_EVERY_CHATS) {
-          try {
-            const p2 = await ensurePage();
-            if (p2 && !isVirtusLocked(nome) && !(getBrowserFromPage(p2)?._sendLock?.active)) {
-              await p2.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-              await garantirMarketplace(p2).catch(()=>{});
-              await scrollChatsToTop(p2, nome).catch(()=>{});
-              lastPreventiveReloadAt = Date.now();
-            }
-          } catch {}
-          chatsDesdeReload = 0;
-        }
-
       } catch (err) {
         const msgErr = (err && err.message) ? err.message : String(err);
         // Se alvo fechou, classificar corretamente e sair silenciosamente
@@ -1573,21 +1554,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     await initHistoricoSePreciso();
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
-
-    // Timer preventivo de reload por tempo
-    setInterval(async () => {
-      if (!running || !epochOk()) return;
-      try {
-        const now = Date.now();
-        if ((now - lastPreventiveReloadAt) < RELOAD_EVERY_MS) return;
-        const p = await ensurePage();
-        if (!p || isVirtusLocked(nome) || (getBrowserFromPage(p)?._sendLock?.active)) return;
-        await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-        await garantirMarketplace(p).catch(()=>{});
-        await scrollChatsToTop(p, nome).catch(()=>{});
-        lastPreventiveReloadAt = Date.now();
-      } catch {}
-    }, 60000);
   }
 
   runner();

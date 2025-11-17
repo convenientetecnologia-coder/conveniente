@@ -199,10 +199,6 @@ async function patchPage(nome, page, coords) {
     });
   } catch {} // nunca deixa travar
 
-  // O worker controla browser._allowMessengerImages:
-  // - false = automação (Virtus ativo) => bloqueia images
-  // - true = humano/config => libera images
-
   // GUARDA: Virtus Messenger asset interception (apenas Messenger, nunca Marketplace Create)
   const url = typeof page.url === "function" ? page.url() : "";
   let interceptionConfigured = false;
@@ -223,10 +219,6 @@ async function patchPage(nome, page, coords) {
     try {
       // EVITAR MÚLTIPLOS setRequestInterception/listeners:
       if (!page._virtusIntercepted) {
-        // [A/B] Log do estado allowImages no momento de armar a interceptação
-        const allowImages = !!(page.browser && page.browser()._allowMessengerImages);
-        if (process.env.BROWSER_DEBUG === '1') logger.debug('[BROWSER][INTERCEPT] Messenger interception armado; allowImages=' + (allowImages ? 'true':'false'));
-
         await page.setRequestInterception(true);
         page.on('request', (req) => {
           const u = req.url();
@@ -243,14 +235,11 @@ async function patchPage(nome, page, coords) {
             if (/favicon\.ico$/i.test(u) && type === 'image') return req.continue();
             return req.continue();
           }
-          // NOVA LÓGICA CONDICIONAL PARA IMAGENS (automation vs humano/config)
-          const allowImages = !!(page.browser && page.browser()._allowMessengerImages);
-          // Imagens só são carregadas quando _allowMessengerImages === true, caso contrário, aborto.
-          if (type === 'image') {
-            return allowImages ? req.continue() : req.abort();
-          }
           if (type === 'media' || type === 'font') {
             return req.abort();
+          }
+          if (type === 'image') {
+            return req.continue();
           }
           return req.continue();
         });
@@ -273,16 +262,8 @@ async function patchPage(nome, page, coords) {
 
 // Minimização suave
 async function ensureMinimizedWindowForPage(page) {
-  try {
-    const browser = page && page.browser && page.browser();
-    if (!browser) return;
-    // Minimiza APENAS quando imagens estão bloqueadas (ou seja, automação)
-    if (browser._allowMessengerImages === false) {
-      const client = await page.target().createCDPSession();
-      const { windowId } = await client.send('Browser.getWindowForTarget');
-      await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-    }
-  } catch {}
+  // GUARDA: A função minimize é inerte para steady-state (só uso manual/debug)
+  return;
 }
 
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
