@@ -357,6 +357,13 @@
           <select id="cidadeSel"></select>
         </div>
         <div class="form-row">
+          <label>UA Preset</label>
+          <select id="uaPresetSel">
+            <option value="auto">Automático</option>
+          </select>
+          <div id="uaPreview" style="margin-top:6px; font-size:12px; color:#9fb2cf; border:1px dashed var(--pill-border); border-radius:8px; padding:8px; background:#0b1322;">Carregando presets de UA...</div>
+        </div>
+        <div class="form-row">
           <label>Cookies Originais</label>
           <textarea id="cookiesCampo" placeholder="Cole aqui os cookies exportados da conta"></textarea>
         </div>
@@ -378,6 +385,59 @@
         sel.append(opt);
       });
 
+      // --- UA Presets (criação) ---
+      const uaSel = box.querySelector('#uaPresetSel');
+      const uaPrev = box.querySelector('#uaPreview');
+      let uaPresetsCache = [];
+      function findUaPreset(val) {
+        const v = String(val);
+        return uaPresetsCache.find(p =>
+          String(p.id ?? p.presetId ?? p.slug ?? p.key ?? p.name ?? p.value) === v
+        );
+      }
+      function updateUaPreview() {
+        const v = uaSel.value;
+        if (v === 'auto' || v === '' || v == null) {
+          uaPrev.textContent = 'Automático: o sistema escolherá um User-Agent apropriado para a conta e cidade selecionadas.';
+          return;
+        }
+        const preset = findUaPreset(v);
+        const uaStr = preset && (preset.uaString || preset.ua || preset.string || '');
+        const label = preset && (preset.label || preset.name || v);
+        uaPrev.textContent = uaStr
+          ? `Preset: ${label}\nUser-Agent: ${uaStr}`
+          : `Preset selecionado: ${label}`;
+      }
+      uaSel.addEventListener('change', updateUaPreview);
+      (async () => {
+        try {
+          if (window.api && typeof window.api.getUaPresets === 'function') {
+            const res = await window.api.getUaPresets();
+            let arr = [];
+            if (Array.isArray(res)) arr = res;
+            else if (res && Array.isArray(res.presets)) arr = res.presets;
+            else if (res && res.ok && Array.isArray(res.data)) arr = res.data;
+            uaPresetsCache = arr || [];
+            // Popular select
+            uaSel.innerHTML = `<option value="auto">Automático</option>`;
+            uaPresetsCache.forEach(preset => {
+              const id = (preset.id ?? preset.presetId ?? preset.slug ?? preset.key ?? preset.name ?? preset.value);
+              const label = (preset.label || preset.name || String(id));
+              if (id == null) return;
+              const opt = document.createElement('option');
+              opt.value = String(id);
+              opt.textContent = label;
+              uaSel.appendChild(opt);
+            });
+            updateUaPreview();
+          } else {
+            uaPrev.textContent = 'Não foi possível carregar os presets de UA (API indisponível).';
+          }
+        } catch (e) {
+          uaPrev.textContent = 'Falha ao carregar os presets de UA.';
+        }
+      })();
+
       const msgEl = box.querySelector('#criarContaMsg');
       const cancelarBtn = box.querySelector('#cancelarBtn');
       const confirmarBtn = box.querySelector('#confirmarBtn');
@@ -386,6 +446,7 @@
       function setDisabled(dis) {
         cancelarBtn.disabled = dis;
         sel.disabled = dis;
+        uaSel.disabled = dis;
         cookiesEl.disabled = dis;
       }
 
@@ -394,6 +455,7 @@
       confirmarBtn.onclick = async () => {
         const cidade = sel.value;
         const cookies = cookiesEl.value.trim();
+        const uaPresetId = (uaSel && uaSel.value) ? uaSel.value : 'auto';
         if (!cidade) { alert('Selecione uma cidade.'); return; }
         if (!cookies) { alert('Cole os cookies originais.'); return; }
 
@@ -416,7 +478,7 @@
         // ========================== FIM ALTERAÇÃO RAM MILITAR ==========================
 
         try {
-          const res = await window.electronAPI.criarPerfil({ cidade, cookies });
+          const res = await window.electronAPI.criarPerfil({ cidade, cookies, uaPresetId });
           if (!res || !res.ok) {
             msgEl.className = 'pill bad';
             msgEl.textContent = 'Falha ao criar: ' + ((res && res.error) || 'erro desconhecido');
@@ -453,6 +515,21 @@
       box.innerHTML = `
         <h2>Configurações — ${nomeAtual}</h2>
         <div class="form-row">
+          <label>Cidade</label>
+          <select id="cfgCidadeSel"></select>
+        </div>
+        <div class="form-row">
+          <label>UA Preset</label>
+          <select id="cfgUaPresetSel">
+            <option value="auto">Automático</option>
+          </select>
+          <div id="cfgUaPreview" style="margin-top:6px; font-size:12px; color:#9fb2cf; border:1px dashed var(--pill-border); border-radius:8px; padding:8px; background:#0b1322;">Carregando UA atual...</div>
+        </div>
+        <div class="form-row">
+          <label>Fingerprint atual</label>
+          <div id="cfgFpPreview" style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12px; color:#cfe1ff; border:1px dashed var(--pill-border); border-radius:8px; padding:8px; background:#0b1322;">Carregando fingerprint...</div>
+        </div>
+        <div class="form-row">
           <label>Nome exibido (label)</label>
           <input type="text" id="labelInput" placeholder="Ex.: Nome do Facebook" value="${labelAtual.replace(/"/g,'&quot;')}"/>
         </div>
@@ -486,19 +563,158 @@
       `;
       overlay.append(box);
 
-      // Carrega os campos customVirtusMessage do manifest
+      // Campos adicionados
+      const cfgCidadeSel = box.querySelector('#cfgCidadeSel');
+      const cfgUaSel = box.querySelector('#cfgUaPresetSel');
+      const cfgUaPrev = box.querySelector('#cfgUaPreview');
+      const cfgFpPrev = box.querySelector('#cfgFpPreview');
+
+      // Helpers UA/Fingerprint
+      let currentUaPresetId = 'auto';
+      let currentUaString = '';
+      let uaPresetsCache = [];
+
+      function findUaPreset(val) {
+        const v = String(val);
+        return uaPresetsCache.find(p =>
+          String(p.id ?? p.presetId ?? p.slug ?? p.key ?? p.name ?? p.value) === v
+        );
+      }
+      function updateCfgUaPreview() {
+        const selVal = cfgUaSel ? cfgUaSel.value : 'auto';
+        const selectedPreset = findUaPreset(selVal);
+        const lines = [];
+        lines.push(`UA atual (manifest): ${currentUaString || '—'}`);
+        if (selVal === 'auto' || !selectedPreset) {
+          lines.push(`Selecionado: Automático`);
+        } else {
+          const uaStr = selectedPreset.uaString || selectedPreset.ua || selectedPreset.string || '';
+          const label = selectedPreset.label || selectedPreset.name || selVal;
+          lines.push(`Selecionado: ${label}`);
+          if (uaStr) lines.push(`UA do preset: ${uaStr}`);
+        }
+        cfgUaPrev.textContent = lines.join('\n');
+      }
+      if (cfgUaSel) cfgUaSel.addEventListener('change', updateCfgUaPreview);
+
+      function compactFingerprint(fp) {
+        try {
+          if (!fp) return '—';
+          // Tenta extrair alguns campos conhecidos
+          const parts = [];
+          const g = (k, d='—') => (fp && (fp[k] ?? d));
+          const maybe = (label, val) => {
+            if (val == null || val === '' || (typeof val === 'object' && Object.keys(val).length === 0)) return;
+            parts.push(`${label}: ${Array.isArray(val) ? val.join(',') : String(val)}`);
+          };
+          maybe('Platform', g('platform') || g('navigatorPlatform'));
+          maybe('SO', g('os') || g('osName'));
+          maybe('Lang', g('language') || (Array.isArray(g('languages')) ? g('languages').join(',') : ''));
+          maybe('Hardware', g('hardwareConcurrency'));
+          maybe('Memória', g('deviceMemory'));
+          maybe('Timezone', g('timezone') || g('timeZone') || g('timezoneOffset'));
+          maybe('Canvas', g('canvas'));
+          maybe('WebGL', g('webglVendor') ? `${g('webglVendor')} / ${g('webglRenderer') || ''}` : '');
+          maybe('Plugins', Array.isArray(g('plugins')) ? g('plugins').length : g('plugins'));
+          if (!parts.length) {
+            // Fallback compacto em JSON limitado
+            const json = JSON.stringify(fp);
+            return json.length > 420 ? json.slice(0, 420) + '…' : json;
+          }
+          return parts.join(' • ');
+        } catch {
+          return '—';
+        }
+      }
+
+      // Carrega os campos customVirtusMessage do manifest + UA/FingerPrint
       (async () => {
         try {
           const r = await fetch(`/api/perfis/${encodeURIComponent(perfil.nome)}/manifest`).then(r=>r.json()).catch(()=>null);
           if (r && r.ok === true && r.manifest) {
+            // Virtus
             box.querySelector('#customVirtusMsgCk').checked = !!r.manifest.customVirtusMessageEnabled;
             box.querySelector('#customVirtusMsg').value = r.manifest.customVirtusMessage || '';
             const rm = (r.manifest.robeMode || 'itens');
             const isVeiculos = (String(rm).toLowerCase() === 'veiculos');
             const modeCk = box.querySelector('#modeVeiculosCk');
             if (modeCk) modeCk.checked = isVeiculos;
+
+            // UA atual / preset atual
+            currentUaPresetId = r.manifest.uaPresetId || (r.manifest.ua && r.manifest.ua.presetId) || r.manifest.uaPreset || 'auto';
+            currentUaString = r.manifest.uaString || (r.manifest.ua && (r.manifest.ua.uaString || r.manifest.ua.string || r.manifest.ua.userAgent)) || r.manifest.userAgent || '';
+
+            if (cfgUaPrev) {
+              cfgUaPrev.textContent = `UA atual (manifest): ${currentUaString || '—'}`;
+            }
+
+            // Fingerprint atual
+            const fp = r.manifest.fingerprint || r.manifest.fp || r.manifest.fingerPrint || null;
+            if (cfgFpPrev) {
+              cfgFpPrev.textContent = compactFingerprint(fp);
+            }
           }
         } catch {}
+
+        // Carregar UA presets após conhecer o preset atual
+        try {
+          if (window.api && typeof window.api.getUaPresets === 'function') {
+            const res = await window.api.getUaPresets();
+            let arr = [];
+            if (Array.isArray(res)) arr = res;
+            else if (res && Array.isArray(res.presets)) arr = res.presets;
+            else if (res && res.ok && Array.isArray(res.data)) arr = res.data;
+            uaPresetsCache = arr || [];
+            // Popular select
+            if (cfgUaSel) {
+              cfgUaSel.innerHTML = `<option value="auto">Automático</option>`;
+              uaPresetsCache.forEach(preset => {
+                const id = (preset.id ?? preset.presetId ?? preset.slug ?? preset.key ?? preset.name ?? preset.value);
+                const label = (preset.label || preset.name || String(id));
+                if (id == null) return;
+                const opt = document.createElement('option');
+                opt.value = String(id);
+                opt.textContent = label;
+                cfgUaSel.appendChild(opt);
+              });
+              // Define seleção padrão = corrente
+              const cur = (currentUaPresetId != null) ? String(currentUaPresetId) : 'auto';
+              const found = Array.from(cfgUaSel.options).some(o => String(o.value) === cur);
+              cfgUaSel.value = found ? cur : 'auto';
+              updateCfgUaPreview();
+            }
+          } else {
+            if (cfgUaPrev) cfgUaPrev.textContent = (cfgUaPrev.textContent || '') + '\n(UA presets indisponíveis no momento)';
+          }
+        } catch (e) {
+          if (cfgUaPrev) cfgUaPrev.textContent = (cfgUaPrev.textContent || '') + '\n(Falha ao carregar UA presets)';
+        }
+      })();
+
+      // Popular lista de cidades (seleção padrão = cidade atual)
+      (async () => {
+        if (!cfgCidadeSel) return;
+        cfgCidadeSel.innerHTML = '';
+        let lista = [];
+        try { lista = await window.electronAPI.listarCidades(); } catch { lista = []; }
+        const set = new Set();
+        if (perfil.cidade) set.add(String(perfil.cidade));
+        (lista || []).forEach(c => set.add(typeof c === 'string' ? c : (c.nome || c.label || c.id || '')));
+        // Monta options
+        set.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c;
+          opt.textContent = c;
+          if (String(c) === String(perfil.cidade || '')) opt.selected = true;
+          cfgCidadeSel.appendChild(opt);
+        });
+        // Se não houver cidade atual nem lista, adiciona placeholder
+        if (!cfgCidadeSel.options.length) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'Selecione uma cidade';
+          cfgCidadeSel.appendChild(opt);
+        }
       })();
 
       document.body.append(overlay);
@@ -508,6 +724,38 @@
         const novoLabel = box.querySelector('#labelInput').value.trim();
         const renameSlug = box.querySelector('#renameSlugCk').checked && !ativo;
         if (!novoLabel) { alert('Informe um nome exibido.'); return; }
+
+        // 0) Patches de Cidade e UA (se alterados)
+        try {
+          const novaCidade = cfgCidadeSel ? (cfgCidadeSel.value || '') : (perfil.cidade || '');
+          if (novaCidade && novaCidade !== (perfil.cidade || '')) {
+            if (window.api && typeof window.api.patchCidade === 'function') {
+              try {
+                // Preferimos formato objeto; se falhar, tentamos (nome, cidade)
+                await window.api.patchCidade({ nome: nomeAtual, cidade: novaCidade });
+              } catch {
+                await window.api.patchCidade(nomeAtual, novaCidade);
+              }
+            }
+          }
+        } catch (e) {
+          alert('Falha ao atualizar a cidade: ' + (e && e.message || e));
+        }
+        try {
+          const novoUa = cfgUaSel ? (cfgUaSel.value || 'auto') : 'auto';
+          if (novoUa !== String(currentUaPresetId || 'auto')) {
+            if (window.api && typeof window.api.patchUa === 'function') {
+              try {
+                await window.api.patchUa({ nome: nomeAtual, uaPresetId: novoUa });
+              } catch {
+                await window.api.patchUa(nomeAtual, novoUa);
+              }
+            }
+          }
+        } catch (e) {
+          alert('Falha ao atualizar o UA: ' + (e && e.message || e));
+        }
+
         // 1) Salva a mensagem personalizada Virtus
         try {
           const enabled = box.querySelector('#customVirtusMsgCk').checked;

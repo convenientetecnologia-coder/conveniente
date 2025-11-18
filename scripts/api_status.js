@@ -1,6 +1,8 @@
 // api_status
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
+const manifestStore = require('./manifestStore.js');
+
 module.exports = (app, workerClient, fileStore) => {
 // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
 // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
@@ -317,6 +319,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     label: p.label || null,
     cidade: p.cidade,
     uaPresetId: p.uaPresetId,
+    uaString: p.uaString,
+    uaCh: p.uaCh,
+    fp: p.fp,
     active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
     ramMB: null, cpuPercent: null, numPages: null, robeEstado: null, robeCooldownSec: null,
     robeFrozenUntil: null, frozenReason: null, frozenAt: null, frozenSetBy: null,
@@ -351,8 +356,32 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     warningINST = overlayINST.warning;
   }
 
-  // 3) Monte array final de perfis SEMPRE do baseline (com overlay) e retorne shape original
-  const perfisFinalINST = Array.from(baseMap.values());
+  // 3) Monte array final e cheque DRIFT (cidade/UA/FP)
+  let perfisFinalINST = Array.from(baseMap.values());
+
+  // Drift-check: compara baseline com manifest em campos críticos (cidade, uaPresetId, uaString, uaCh, fp)
+  try {
+    const checked = await Promise.all(perfisFinalINST.map(async p => {
+      try {
+        const man = await manifestStore.read(p.nome).catch(()=>null);
+        if (!man) return p;
+        let drift = false;
+        const sameCidade = String(p.cidade || '') === String(man.cidade || '');
+        const sameUaPresetId = String(p.uaPresetId || '') === String(man.uaPresetId || '');
+        const sameUaString = String(p.uaString || '') === String(man.uaString || '');
+        const sameUaCh = JSON.stringify(p.uaCh || {}) === JSON.stringify(man.uaCh || {});
+        const sameFp = JSON.stringify(p.fp || {}) === JSON.stringify(man.fp || {});
+        if (!sameCidade || !sameUaPresetId || !sameUaString || !sameUaCh || !sameFp) drift = true;
+        if (drift) {
+          p.problem = true;
+          p.manifestStatus = 'drift';
+        }
+        return p;
+      } catch { return p; }
+    }));
+    perfisFinalINST = checked;
+  } catch {}
+
   res.json({
     perfis: perfisFinalINST,
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
@@ -383,6 +412,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       label: perfil.label,
       cidade: perfil.cidade,
       uaPresetId: perfil.uaPresetId,
+      uaString: perfil.uaString,
+      uaCh: perfil.uaCh,
+      fp: perfil.fp,
       active: false,
       trabalhando: false,
       configurando: false,

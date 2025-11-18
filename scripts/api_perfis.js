@@ -44,6 +44,28 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // ===== PATCH — GET /api/ua-presets =====
+  // GET /api/ua-presets — lista de presets de UA disponíveis
+  app.get('/api/ua-presets', (req, res) => {
+    try {
+      const presetsPath = path.join(fileStore.dadosDir, 'ua_presets.json');
+      if (!fs.existsSync(presetsPath)) {
+        return res.json({ ok: true, presets: [] });
+      }
+      const arr = JSON.parse(fs.readFileSync(presetsPath, 'utf8'));
+      const out = (arr || []).map(p => ({
+        id: p.id,
+        name: p.name || p.id,
+        uaString: p.uaString || '',
+        uaCh: p.uaCh || {},
+        fp: p.fp || {}
+      }));
+      res.json({ ok: true, presets: out });
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // ===== PASSO 2 — Adicionar endpoint GET /api/perfis/:nome/manifest =====
   // GET /api/perfis/:nome/manifest — devolve manifest.json do perfil
   app.get('/api/perfis/:nome/manifest', async (req, res) => {
@@ -64,7 +86,8 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis', async (req, res) => {
     logger.info('POST /api/perfis chamada', {});
     try {
-      const { cidade, cookies } = req.body || {};
+      // Recebe uaPresetId também e decide o preset
+      const { cidade, cookies, uaPresetId } = req.body || {};
       if (!cidade || !cookies) {
         logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade });
         return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
@@ -101,8 +124,17 @@ module.exports = (app, workerClient, fileStore) => {
       let nome = require('./utils').slugify(cidade) + '-' + Date.now();
       while (fileStore.existsDir(path.join(fileStore.perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-      // UA com fallback
-      const preset = fileStore.pickUaPreset() || {};
+      // UA com fallback/preset PATCH
+      let preset = null;
+      if (uaPresetId && uaPresetId !== 'auto') {
+        try {
+          const presets = fileStore.readJsonSafe(path.join(fileStore.dadosDir, 'ua_presets.json'), []);
+          preset = (presets || []).find(p => p && p.id === uaPresetId) || null;
+        } catch {}
+      }
+      if (!preset) {
+        preset = fileStore.pickUaPreset() || {};
+      }
 
       const cookiesArr = require('./utils').normalizeCookies(cookies);
       if (
@@ -134,17 +166,23 @@ module.exports = (app, workerClient, fileStore) => {
       const perfilObj = {
         nome, cidade,
         uaPresetId: preset.id || 'default',
-        uaString: preset.uaString,
+        uaString: preset.uaString || '',
         uaCh: preset.uaCh || {},
         fp: {
-          viewport: preset.viewport || { width: 1366, height: 768 },
-          dpr: preset.dpr || 1,
-          hardwareConcurrency: preset.hardwareConcurrency || 4
+          viewport: (preset.fp && preset.fp.viewport) || { width: 1366, height: 768 },
+          dpr: (preset.fp && preset.fp.dpr) || 1,
+          hardwareConcurrency: (preset.fp && preset.fp.hardwareConcurrency) || 4
         },
         cookies: cookiesArr,
         robeCooldownUntil: 0,
         configuredAt: null,
-        userDataDir // <- AGORA dentro do User Data do Chrome
+        userDataDir
+      };
+      perfilObj.uaDecision = {
+        mode: uaPresetId && uaPresetId !== 'auto' ? 'manual' : 'auto',
+        by: 'admin',
+        ts: Date.now(),
+        presetId: preset.id || null
       };
 
       // Atualiza perfis.json
@@ -538,6 +576,121 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
   // *** FIM DA ALTERAÇÃO SOLICITADA ***
+
+  // ===== PATCH — PATCH /api/perfis/:nome/cidade =====
+  // PATCH /api/perfis/:nome/cidade
+  app.patch('/api/perfis/:nome/cidade', async (req, res) => {
+    const nome = req.params.nome;
+    const { novaCidade } = req.body || {};
+    if (!nome || !novaCidade || typeof novaCidade !== 'string' || !novaCidade.trim()) {
+      return res.json({ ok: false, error: 'Parâmetros inválidos' });
+    }
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      return res.json({ ok:false, error:e.message });
+    }
+    try {
+      // Atualiza perfis.json
+      const perfisArr = fileStore.loadPerfisJson();
+      const idx = perfisArr.findIndex(p => p && p.nome === nome);
+      if (idx < 0) return res.json({ ok:false, error:'perfil inexistente' });
+      const oldCidade = perfisArr[idx].cidade || '';
+      perfisArr[idx].cidade = novaCidade;
+      fileStore.savePerfisJson(perfisArr);
+      // Atualiza manifest.json
+      await manifestStore.update(nome, man => {
+        man = man || {};
+        man.cidade = novaCidade;
+        return man;
+      });
+      // Log
+      try { await issues.append(nome, 'admin_city_change', `from="${oldCidade}" to="${novaCidade}" by=admin`); } catch {}
+      return res.json({ ok: true });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // ===== PATCH — PATCH /api/perfis/:nome/ua =====
+  // PATCH /api/perfis/:nome/ua
+  app.patch('/api/perfis/:nome/ua', async (req, res) => {
+    const nome = req.params.nome;
+    const { uaPresetId, uaString, uaCh, fp } = req.body || {};
+    if (!nome) return res.json({ ok:false, error:'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      return res.json({ ok:false, error:e.message });
+    }
+    try {
+      const perfisArr = fileStore.loadPerfisJson();
+      const idx = perfisArr.findIndex(p => p && p.nome === nome);
+      if (idx < 0) return res.json({ ok:false, error:'perfil inexistente' });
+      const old = {
+        uaPresetId: perfisArr[idx].uaPresetId || null,
+        uaString: perfisArr[idx].uaString || '',
+        uaCh: JSON.stringify(perfisArr[idx].uaCh || {}),
+        fp: JSON.stringify(perfisArr[idx].fp || {})
+      };
+      let newPreset = null;
+      let newUaString = uaString;
+      let newUaCh = uaCh;
+      let newFp = fp;
+      let decided = { mode: 'manual', by: 'admin', ts: Date.now(), presetId: null };
+      if (uaPresetId && uaPresetId === 'auto') {
+        newPreset = fileStore.pickUaPreset() || {};
+        newUaString = newPreset.uaString || '';
+        newUaCh = newPreset.uaCh || {};
+        newFp = newPreset.fp || {};
+        decided.mode = 'auto';
+        decided.presetId = newPreset.id || null;
+      } else if (uaPresetId) {
+        const presetsPath = path.join(fileStore.dadosDir, 'ua_presets.json');
+        const arr = fileStore.readJsonSafe(presetsPath, []);
+        newPreset = (arr || []).find(p => p && p.id === uaPresetId) || null;
+        if (!newPreset) return res.json({ ok:false, error:'uaPresetId inválido' });
+        newUaString = newPreset.uaString || '';
+        newUaCh = newPreset.uaCh || {};
+        newFp = newPreset.fp || {};
+        decided.mode = 'manual';
+        decided.presetId = newPreset.id || null;
+      } else {
+        if (!newUaString || typeof newUaString !== 'string') return res.json({ ok:false, error:'uaString inválido' });
+        if (typeof newUaCh !== 'object' || newUaCh == null) return res.json({ ok:false, error:'uaCh inválido' });
+        if (typeof newFp !== 'object' || newFp == null) return res.json({ ok:false, error:'fp inválido' });
+        decided.mode = 'manual';
+        decided.presetId = null;
+      }
+      perfisArr[idx].uaPresetId = (newPreset && newPreset.id) || (uaPresetId || 'custom');
+      perfisArr[idx].uaString = newUaString;
+      perfisArr[idx].uaCh = newUaCh;
+      perfisArr[idx].fp = newFp;
+      perfisArr[idx].uaDecision = decided;
+      fileStore.savePerfisJson(perfisArr);
+      await manifestStore.update(nome, man => {
+        man = man || {};
+        man.uaPresetId = (newPreset && newPreset.id) || (uaPresetId || 'custom');
+        man.uaString = newUaString;
+        man.uaCh = newUaCh;
+        man.fp = newFp;
+        man.uaDecision = decided;
+        return man;
+      });
+      try {
+        const after = {
+          uaPresetId: perfisArr[idx].uaPresetId,
+          uaString: newUaString,
+          uaCh: JSON.stringify(newUaCh || {}),
+          fp: JSON.stringify(newFp || {})
+        };
+        await issues.append(
+          nome,
+          'admin_ua_change',
+          `before=${JSON.stringify(old)} after=${JSON.stringify(after)} by=admin`
+        );
+      } catch {}
+      return res.json({ ok: true });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
 
   // Retomar trabalho (desabilita controle humano e religa virtus/robe)
   // ***** MODIFICADO CONFORME INSTRUÇÃO *****
