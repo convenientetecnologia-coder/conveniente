@@ -463,6 +463,12 @@
           </label>
         </div>
         <div class="form-row">
+          <label>
+            <input type="checkbox" id="modeVeiculosCk" />
+            Postar no Marketplace: Veículos
+          </label>
+        </div>
+        <div class="form-row">
           <label>Mensagem personalizada Virtus</label>
           <textarea id="customVirtusMsg" placeholder="Exemplo: Olá, como posso ajudar?"></textarea>
         </div>
@@ -487,6 +493,10 @@
           if (r && r.ok === true && r.manifest) {
             box.querySelector('#customVirtusMsgCk').checked = !!r.manifest.customVirtusMessageEnabled;
             box.querySelector('#customVirtusMsg').value = r.manifest.customVirtusMessage || '';
+            const rm = (r.manifest.robeMode || 'itens');
+            const isVeiculos = (String(rm).toLowerCase() === 'veiculos');
+            const modeCk = box.querySelector('#modeVeiculosCk');
+            if (modeCk) modeCk.checked = isVeiculos;
           }
         } catch {}
       })();
@@ -510,6 +520,17 @@
         } catch (e) {
           alert('Falha ao salvar a mensagem personalizada: ' + (e && e.message || e));
           // prossegue com label para não travar fluxo
+        }
+        try {
+          const isVeiculos = !!box.querySelector('#modeVeiculosCk').checked;
+          const mode = isVeiculos ? 'veiculos' : 'itens';
+          await fetch(`/api/perfis/${encodeURIComponent(nomeAtual)}/robe-mode`, {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ mode })
+          });
+        } catch (e) {
+          alert('Falha ao salvar o modo do Robe: ' + (e && e.message || e));
         }
         try {
           await window.electronAPI.renamePerfil({ nome: nomeAtual, novoLabel, renameSlug });
@@ -982,6 +1003,8 @@
         // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
         titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
+        if (p.robeMode === 'veiculos') titleRow.append(buildPill('Modo: Veículos', 'info'));
+        else titleRow.append(buildPill('Modo: Itens', 'info'));
         // PILL: Mensagem Personalizada Virtus
         if (
           p.customVirtusMessageEnabled &&

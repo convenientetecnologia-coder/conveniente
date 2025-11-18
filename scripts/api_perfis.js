@@ -513,6 +513,32 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // *** INÍCIO DA ALTERAÇÃO SOLICITADA ***
+  // Define o modo do Robe por perfil ('itens' ou 'veiculos')
+  app.post('/api/perfis/:nome/robe-mode', async (req, res) => {
+    const nome = req.params.nome;
+    const { mode } = req.body || {};
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      return res.json({ ok:false, error:e.message });
+    }
+    const m = String(mode || '').toLowerCase();
+    if (m !== 'itens' && m !== 'veiculos') {
+      return res.json({ ok: false, error: 'mode inválido (use "itens" ou "veiculos")' });
+    }
+    try {
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.robeMode = m;
+        return man;
+      });
+      res.json({ ok:true });
+    } catch (e) {
+      res.json({ ok:false, error: (e && e.message) || String(e) });
+    }
+  });
+  // *** FIM DA ALTERAÇÃO SOLICITADA ***
+
   // Retomar trabalho (desabilita controle humano e religa virtus/robe)
   // ***** MODIFICADO CONFORME INSTRUÇÃO *****
   app.post('/api/perfis/:nome/human-resume', async (req, res) => {

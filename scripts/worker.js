@@ -1082,7 +1082,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         try {
           if (mainPage && p === mainPage) continue;
           if (!mainPage && pages[0] && p === pages[0]) continue;
-          let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+          let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
             await p.close({ runBeforeUnload: false }).catch(()=>{});
             closed++;
@@ -1453,6 +1453,49 @@ function extractUserDataDir(cmd) {
 
 setTimeout(ramCpuMonitorTick, 5000);
 
+// ====== Robe dinâmico (itens vs veiculos) ======
+async function getRobeModuleFor(nome) {
+  try {
+    const man = await manifestStore.read(nome).catch(()=>null);
+    const mode = (man && man.robeMode) ? String(man.robeMode) : 'itens';
+    if (mode === 'veiculos') {
+      return require('./robeVeiculos.js');
+    }
+    return require('./robe.js');
+  } catch {
+    return require('./robe.js');
+  }
+}
+
+// Wrapper: startRobeDynamic (substitui hook global robeHelper.startRobe)
+async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
+  let manifest = null;
+  try { manifest = await manifestStore.read(nome); } catch{}
+  if (!manifest) {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+    await reportAction(nome, 'mil_action', 'robe_abort_manifest_unavailable (no freeze)');
+    return { ok: false, error: 'manifest_unavailable' };
+  }
+  if (!manifest.cookies || !manifest.fp) {
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].activationHeldUntil = Date.now() + 15000;
+    await reportAction(nome, 'mil_action', 'robe_abort_manifest_incomplete (no freeze)');
+    return { ok: false, error: 'manifest_incomplete' };
+  }
+  const now = Date.now();
+  if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > now) {
+    return { ok: false, error: 'ram_backoff' };
+  }
+  try {
+    const mod = await getRobeModuleFor(nome);
+    return await mod.startRobe(browser, nome, robePauseMs, workingNow);
+  } catch (e) {
+    await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão (15–30min) será aplicado pelo módulo.`);
+    return { ok: false, error: String(e&&e.message||e) };
+  }
+}
+
 async function robeTickGlobal() {
 
   const perfisArr = loadPerfisJson();
@@ -1526,7 +1569,7 @@ async function robeTickGlobal() {
 
         let res;
         try {
-          res = await robeHelper.startRobe(ctrl.browser, nome, robePauseMs, workingNow);
+          res = await startRobeDynamic(ctrl.browser, nome, robePauseMs, workingNow);
         } catch (e) {
           if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
             robeMeta[nome] = robeMeta[nome] || {};
@@ -2213,7 +2256,7 @@ const handlers = {
 
             let res;
             try {
-              res = await robeHelper.startRobe(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
+              res = await startRobeDynamic(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
             } catch (e) {
               if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
                 robeMeta[nome] = robeMeta[nome] || {};
@@ -2380,6 +2423,8 @@ const handlers = {
       const problem = man
         ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
         : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
+      const man0 = await manifestStore.read(nome).catch(()=>null);
+      const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
       perfis.push({
         nome,
@@ -2415,7 +2460,8 @@ const handlers = {
         banned,
         bannedAt,
         bannedText,
-        problem
+        problem,
+        robeMode
       });
     }
     const robes = {};
@@ -2587,6 +2633,8 @@ const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || n
 const problem = man
   ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
   : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
+const man0 = await manifestStore.read(nome).catch(()=>null);
+const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
 perfis.push({
   nome,
@@ -2620,7 +2668,8 @@ perfis.push({
   banned,
   bannedAt,
   bannedText,
-  problem
+  problem,
+  robeMode
 });
 }
 const robes = {};
@@ -3587,34 +3636,6 @@ async function healthTick() {
 }
 setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
-
-const _startRobeOrig = robeHelper.startRobe;
-robeHelper.startRobe = async function(browser, nome, robePauseMs, workingNow) {
-  let manifest = null;
-  try { manifest = await manifestStore.read(nome); } catch{}
-  if (!manifest) {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].activationHeldUntil = Date.now() + 15000;
-    await reportAction(nome, 'mil_action', 'robe_abort_manifest_unavailable (no freeze)');
-    return { ok: false, error: 'manifest_unavailable' };
-  }
-  if (!manifest.cookies || !manifest.fp) {
-    robeMeta[nome] = robeMeta[nome] || {};
-    robeMeta[nome].activationHeldUntil = Date.now() + 15000;
-    await reportAction(nome, 'mil_action', 'robe_abort_manifest_incomplete (no freeze)');
-    return { ok: false, error: 'manifest_incomplete' };
-  }
-  const now = Date.now();
-  if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > now) {
-    return { ok: false, error: 'ram_backoff' };
-  }
-  try {
-    return await _startRobeOrig.apply(this, arguments);
-  } catch (e) {
-    await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão (15–30min) será aplicado por robe.js`);
-    return { ok: false, error: String(e&&e.message||e) };
-  }
-};
 
 setInterval(() => {
   const now = Date.now();
