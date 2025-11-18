@@ -992,9 +992,6 @@ async function waitForCreateItemReady(page, { timeout = 3500 } = {}) {
 
 // Preenche Localização via ciclo global (locais.js) e retorna a localização usada
 async function preencherLocalizacao(page, cidade) {
-  const okMaisDetalhes = await ensureMaisDetalhesAberto(page, 8000);
-  if (!okMaisDetalhes) throw new Error('Não foi possível expandir “Mais detalhes”.');
-
   let inp = await findInputByLabel(page, 'Localização', 6000);
   if (!inp) inp = await page.$('input[aria-label="Localização"]');
   if (!inp) {
@@ -1846,6 +1843,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_type_ok', value: tipoVeiculo });
     await sleep(jitter(120, 220));
 
+    // LOCALIZAÇÃO (preenchida imediatamente após Tipo de veículo)
+    cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
+    localUsada = await preencherLocalizacao(page, cidadePerfil);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
+    await sleep(jitter(120, 220));
+
     // Ano: random [atual-10..atual]
     const anoVeiculo = await selecionarAnoVeiculo(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_year_ok', value: anoVeiculo });
@@ -1860,11 +1863,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     const precoInt = 1 + Math.floor(Math.random() * 3000);
     await preencherPrecoVeiculo(page, precoInt);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_price_ok', value: precoInt });
-
-    // LOCALIZAÇÃO
-    cidadePerfil = manifest.cidade || manifest.localizacao || manifest['localização'] || 'São Paulo';
-    localUsada = await preencherLocalizacao(page, cidadePerfil);
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
 
     // "Título" não existe em veículos — PARA COMPATIBILIDADE das verificações, geramos um pseudo-título
     const titulo = `${fabricante} ${modelo} ${anoVeiculo}`.trim();
