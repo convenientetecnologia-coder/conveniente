@@ -1220,12 +1220,6 @@ function ensureMetricsLeader() {
 async function ramCpuMonitorTick() {
   const INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // ~8–10s
 
-  // Apenas o líder executa o monitor pesado
-  if (!(await ensureMetricsLeader())) {
-    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-    return;
-  }
-
   // Se não há nenhum controller ativo, não há o que monitorar — evita work desnecessário
   if (!controllers || controllers.size === 0) {
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
