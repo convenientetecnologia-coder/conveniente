@@ -1855,11 +1855,40 @@
         const st = await window.electronAPI.getStatus();
         const perfis = st?.perfis || [];
         
-        // NOVO: Fechar em PARALELO com limite de concorrência (20 simultâneos) - RÁPIDO e CONFIÁVEL
-        const CONCURRENCY_LIMIT = 20; // Fecha 20 navegadores simultaneamente
+        // NOVO: Fechar em PARALELO com limite de concorrência (10 simultâneos) + RETRY automático - SEGURO e CONFIÁVEL
+        const CONCURRENCY_LIMIT = 10; // Fecha 10 navegadores simultaneamente (mais seguro)
+        const MAX_RETRIES = 2; // Máximo 2 retries por perfil (total: 3 tentativas)
+        const RETRY_DELAY_MS = 500; // Espera 500ms entre retries
         let active = 0;
         let completed = 0;
         const total = perfis.length;
+        const failed = []; // Rastreia falhas para retry
+        
+        const deactivateWithRetry = async (p, retryCount = 0) => {
+          try {
+            await window.electronAPI.deactivate(p.nome);
+            completed++;
+            if (stopBtn && total > 0) {
+              stopBtn.textContent = `Fechando... ${completed}/${total}`;
+            }
+            return true; // Sucesso
+          } catch (e) {
+            if (retryCount < MAX_RETRIES) {
+              // Retry após delay
+              await sleep(RETRY_DELAY_MS);
+              return await deactivateWithRetry(p, retryCount + 1);
+            } else {
+              // Esgotou retries - marca como falha
+              console.warn('[Fechar todos] falha após retries', p && p.nome, e && e.message || e);
+              failed.push(p.nome);
+              completed++;
+              if (stopBtn && total > 0) {
+                stopBtn.textContent = `Fechando... ${completed}/${total}`;
+              }
+              return false; // Falhou após retries
+            }
+          }
+        };
         
         const deactivateWithLimit = async (p) => {
           while (active >= CONCURRENCY_LIMIT) {
@@ -1867,14 +1896,7 @@
           }
           active++;
           try {
-            await window.electronAPI.deactivate(p.nome);
-            completed++;
-            if (stopBtn && total > 0) {
-              stopBtn.textContent = `Fechando... ${completed}/${total}`;
-            }
-          } catch (e) {
-            console.warn('[Fechar todos] falha desativando', p && p.nome, e && e.message || e);
-            completed++;
+            await deactivateWithRetry(p);
           } finally {
             active--;
           }
@@ -1882,6 +1904,19 @@
         
         // Dispara todas as desativações em paralelo (limitado por concorrência)
         await Promise.all(perfis.map(p => deactivateWithLimit(p)));
+        
+        // Se houve falhas, tenta uma última vez (sequencial, mais lento mas mais seguro)
+        if (failed.length > 0) {
+          console.warn('[Fechar todos] Tentando fechar novamente', failed.length, 'perfis que falharam');
+          for (const nome of failed) {
+            try {
+              await window.electronAPI.deactivate(nome);
+              failed.splice(failed.indexOf(nome), 1);
+            } catch (e) {
+              console.error('[Fechar todos] Falha final em', nome, e && e.message || e);
+            }
+          }
+        }
         
         // Aguarda convergência global: todos inativos e robeQueue vazia (timeout reduzido para 30s)
         const ok = await waitUntil(async () => {
