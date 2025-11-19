@@ -399,19 +399,9 @@ async function killProcessTreeByRootPid(pid) {
   try {
     if (process.platform === 'win32') {
       const { execFile } = require('child_process');
-      await new Promise(res=>{
-        execFile('powershell.exe', ['-NoProfile','-Command', `
-$parent = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; 
-if ($parent) {
-  $queue = @($parent);
-  for ($i=0; $i -lt $queue.Count; $i++) {
-    $cur = $queue[$i];
-    $children = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $cur.ProcessId };
-    $queue += $children;
-  }
-  $queue | Sort-Object -Property ProcessId -Descending | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
-}
-        `], {stdio:'ignore'}, ()=>res());
+      // Versão sem WMI: usa taskkill para matar o processo raiz e toda a árvore.
+      await new Promise((res) => {
+        execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }, () => res());
       });
     } else {
       return;
@@ -1219,6 +1209,25 @@ function ensureMetricsLeader() {
 
 async function ramCpuMonitorTick() {
   const INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // ~8–10s
+
+  // MODO WINDOWS SAFE: não coletar métricas por perfil via pidusage (evita uso implícito de WMI/WMIC)
+  // Em Windows, apenas limpamos métricas antigas e saímos — RAM/CPU por perfil ficam como null,
+  // e os breakers de RAM/CPU não são acionados. Abertura continua protegida via getAvailableMB()
+  // (que usa os.freemem()), sem depender de WMI.
+  if (process.platform === 'win32') {
+    try {
+      for (const nome of Object.keys(robeMeta)) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].ramMB = null;
+        robeMeta[nome].cpuPercent = null;
+        robeMeta[nome].ramHist = [];
+        robeMeta[nome].cpuHistory = [];
+      }
+      await snapshotStatusAndWrite();
+    } catch {}
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
+    return;
+  }
 
   // Se não há nenhum controller ativo, não há o que monitorar — evita work desnecessário
   if (!controllers || controllers.size === 0) {

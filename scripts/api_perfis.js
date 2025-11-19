@@ -247,14 +247,19 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro ao patchDesired durante desativação', { nome, rota: '/api/perfis/:nome/deactivate', error: e && e.message }, e);
     }
-    // Chama worker para desativar imediatamente:
+    // Chama worker para desativar imediatamente e propaga resultado real para o frontend
     try {
-      await workerClient.sendWorkerCommand('deactivate', { nome, reason: 'admin', policy: null }, { timeoutMs: 20000 });
+      const resp = await workerClient.sendWorkerCommand('deactivate', { nome, reason: 'admin', policy: null }, { timeoutMs: 60000 });
+      if (!resp || resp.ok !== true) {
+        logger.error('Falha ao desativar perfil (worker respondeu NOK)', { nome, resp });
+        return res.json({ ok: false, error: (resp && resp.error) || 'deactivate_failed' });
+      }
+      logger.info('Perfil desativado por API', { nome });
+      return res.json({ ok: true });
     } catch (e) {
       logger.error('Erro ao enviar comando deactivate ao worker', { nome, rota: '/api/perfis/:nome/deactivate', error: e && e.message }, e);
+      return res.json({ ok: false, error: (e && e.message) || 'deactivate_failed' });
     }
-    logger.info('Perfil desativado por API', { nome });
-    return res.json({ ok: true });
   });
 
   // Configurar/injetar cookies

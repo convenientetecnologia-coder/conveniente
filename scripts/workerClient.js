@@ -96,14 +96,30 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
   let perfilNome = payload && (payload.nome || payload.name || payload.perfil || payload.profile || '');
   if (perfilNome) perfilNome = String(perfilNome);
 
-  if (
-    ['open','activate','startWork'].includes(type)
-  ) {
-    // *** TODOS os comandos que envolvem ativação do mesmo perfil compartilham lock ***
-    opKey = `@@PROFILE_OP_LOCK@@::${perfilNome}`;
-  } else if (type === 'get-status') {
+  // Conjunto de comandos que são por perfil (devem ter lock por perfil, não global)
+  const perProfileOps = new Set([
+    'open',
+    'activate',
+    'deactivate',
+    'configure',
+    'start_work',
+    'invoke_human',
+    'human-resume',
+    'robe-play',
+    'apply-city',
+    'unfreeze'
+  ]);
+
+  if (type === 'get-status') {
+    // Comando global, 1 em voo por vez
     opKey = 'get-status';
+  } else if (perfilNome && perProfileOps.has(type)) {
+    // Todos os comandos por perfil compartilham um lock por perfil,
+    // evitando flood/reentrância para a MESMA conta, mas permitindo
+    // comandos independentes para contas diferentes.
+    opKey = `@@PROFILE_OP_LOCK@@::${perfilNome}`;
   } else {
+    // Demais comandos (globais ou sem nome), lock por tipo
     opKey = `${type}`;
   }
 

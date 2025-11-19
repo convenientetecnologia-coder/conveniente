@@ -315,6 +315,11 @@ function cleanupUserDataLocks(userDataDir) {
  */
 function killChromeProfileProcesses(userDataDir, openingMap) {
   if (process.platform !== 'win32') return;
+  // NOVO: por padrão, evita usar WMI/WMIC para matar processos de perfil.
+  // Só executa o modo pesado baseado em WMI se CHROME_PROFILE_KILL_MODE === 'wmi'.
+  if (process.env.CHROME_PROFILE_KILL_MODE !== 'wmi') {
+    return;
+  }
   try {
     // Nunca mate Chromes associados ao map de perfis em abertura (openingMap[nome] = true).
     // Isso protege contra race de avalanche/init!
