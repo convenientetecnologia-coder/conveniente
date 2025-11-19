@@ -1221,7 +1221,7 @@ async function ramCpuMonitorTick() {
   const INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // ~8–10s
 
   // Apenas o líder executa o monitor pesado
-  if (!ensureMetricsLeader()) {
+  if (!(await ensureMetricsLeader())) {
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
     return;
   }
@@ -1232,89 +1232,19 @@ async function ramCpuMonitorTick() {
     return;
   }
 
-  const perfisArr = loadPerfisJson();
-  const nomeByUserDir = {};
-  for (const p of perfisArr) {
-    if (p.userDataDir) {
-      nomeByUserDir[normalizePath(p.userDataDir)] = p.nome;
-    }
-  }
-  const assocPerPid = {};
   const pidsByNome = {};
-  const pidsMeta = {};
-  let psProcs = [];
-  let winData = null;
   let erroMonitor = false;
-  const cpuPercentHistory = {};
   try {
-    if (process.platform === 'win32') {
-      await new Promise((resolve) => {
-        let settled = false;
-        const child = require('child_process').exec(
-          'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'chrome.exe\' or Name=\'chrome.exe*\' or Name=\'msedge.exe\'\\" | Select-Object ProcessId,WorkingSetSize,CommandLine | ConvertTo-Json -Compress"',
-          {timeout: 5000},
-          (err, stdout) => {
-            if (settled) return;
-            settled = true;
-            if (!err && stdout) {
-              try { winData = JSON.parse(stdout); } catch {}
-            }
-            resolve();
-          }
-        );
-        setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 5000);
-      });
-      let allData = [];
-      if (winData) {
-        allData = Array.isArray(winData) ? winData : [winData];
-      }
-      for (const wproc of allData) {
-        const pid = Number(wproc.ProcessId);
-        if (!pid) continue;
-        const cmd = wproc.CommandLine || '';
-        const memBytes = Number(wproc.WorkingSetSize) || 0;
-        const userDir = extractUserDataDir(cmd);
-        let nome = userDir ? nomeByUserDir[normalizePath(userDir)] : null;
-        if (nome) {
-          assocPerPid[pid] = nome;
-          pidsByNome[nome] = pidsByNome[nome] = (pidsByNome[nome] || []);
-          pidsByNome[nome].push(pid);
-        }
-        pidsMeta[pid] = { cmd, memBytes };
-      }
-    } else {
-      try {
-        psProcs = await psList();
-        for (const proc of psProcs) {
-          const pid = Number(proc.pid);
-          if (!pid) continue;
-          let cmd = proc.cmd || proc.command || '';
-          if (!/chrome|chromium/i.test(cmd)) continue;
-          let userDir = extractUserDataDir(cmd);
-          let nome = userDir ? nomeByUserDir[normalizePath(userDir)] : null;
-          if (nome) {
-            assocPerPid[pid] = nome;
-            pidsByNome[nome] = pidsByNome[nome] || [];
-            pidsByNome[nome].push(pid);
-          }
-          pidsMeta[pid] = { cmd, memBytes: null };
-        }
-      } catch {
-        erroMonitor = true;
-      }
-    }
-
-    try {
-      for (const [nome, pids] of Object.entries(pidsByNome)) {
-        if (!controllers.has(nome) && Array.isArray(pids) && pids.length) {
-          await milLog('mil_action', `stray_detected: ${nome} pids=${pids.join(',')} — killing`);
-          await killPids(pids);
-        }
-      }
-    } catch {}
-
-    if (process.env.METRICS_DEBUG === '1') {
-      logger.info('[METRICS] pidsByNome', { nomes: Object.keys(pidsByNome), exampleCommand: Object.values(pidsMeta)[0]?.cmd || '' });
+    // NOVO: Monitor orientado por rootPid por perfil, sem varredura WMI global
+    // Em vez de chamar Get-CimInstance Win32_Process para toda a máquina,
+    // usamos o pid raiz capturado em activateOnce (browser.process().pid).
+    for (const [nome, ctrl] of controllers.entries()) {
+      if (!ctrl || !ctrl.browser) continue;
+      const meta = robeMeta[nome] || {};
+      const rootPid = meta.rootPid;
+      if (!rootPid || typeof rootPid !== 'number') continue;
+      if (!pidsByNome[nome]) pidsByNome[nome] = [];
+      pidsByNome[nome].push(rootPid);
     }
 
     try {
@@ -1347,13 +1277,6 @@ async function ramCpuMonitorTick() {
             countValid++;
           }
         } catch {
-        }
-        const memSumBytes = (pids || []).reduce((acc, pid) => acc + (pidsMeta[pid]?.memBytes || 0), 0);
-        if (!countValid && memSumBytes > 0) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = Math.round(memSumBytes / 1024 / 1024);
-          robeMeta[nome].cpuPercent = null;
-          return;
         }
         if (!countValid) {
           robeMeta[nome] = robeMeta[nome] || {};
