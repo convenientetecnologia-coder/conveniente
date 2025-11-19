@@ -360,7 +360,14 @@ const AUTO_CFG = {
   RAM_WARN_MB: 700
 };
 
-const OPEN_MIN_FREE_MB = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10);
+// NOVO: RAM mínima dinâmica - 2GB base + 500MB por node ativo (garante que robes possam trabalhar simultaneamente)
+function getOpenMinFreeMB() {
+  const baseMB = 2048; // 2GB base
+  const activeNodes = robeQueue.activeCount(); // 0 ou 1 atualmente (pode aumentar no futuro)
+  const perNodeMB = 500; // 500MB por node ativo
+  return baseMB + (activeNodes * perNodeMB);
+}
+const OPEN_MIN_FREE_MB_STATIC = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10); // Mantido para compatibilidade
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
 
@@ -806,8 +813,9 @@ async function activateOnce(nome, source = '') {
 
         {
           const freeMB = getAvailableMB();
-          if (freeMB <= OPEN_MIN_FREE_MB) {
-            await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${OPEN_MIN_FREE_MB}MB (gate)`);
+          const minFreeMB = getOpenMinFreeMB(); // NOVO: RAM mínima dinâmica
+          if (freeMB <= minFreeMB) {
+            await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${minFreeMB}MB (gate, activeNodes=${robeQueue.activeCount()})`);
             throw new Error('ram_insuficiente_para_ativar');
           }
         }
@@ -1338,7 +1346,17 @@ async function ramCpuMonitorTick() {
     if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue;
     if (vivos <= 1) continue;
 
-    const RAM_KILL_MB_LOCAL = process.platform === 'win32' ? 2200 : 1600;
+    // NOVO: Ignorar verificação de RAM se Robe está trabalhando (Robe é temporário, apenas Virtus acumula RAM)
+    const ctrl = controllers.get(nome);
+    const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true) || 
+                        !!(ctrl && ctrl.browser && ctrl.browser._robeActiveFor === nome);
+    if (robeRunning) {
+      // Se Robe está trabalhando, não verifica RAM (Robe abre/fecha rapidamente, não acumula RAM)
+      continue;
+    }
+
+    // NOVO: Limite reduzido para 800MB quando apenas Virtus está ativo (Virtus sozinho normalmente usa 400-600MB)
+    const RAM_KILL_MB_LOCAL = 800;
 
     const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
     hist.push({ t: Date.now(), mb: ramMB });
@@ -1404,7 +1422,8 @@ async function ramCpuMonitorTick() {
             const dMin2 = Math.max(0.5, elapsedMs2/60000);
             const slope2 = (B2.mb - A2.mb) / dMin2;
             const avg2 = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
-            slopeOK2 = (elapsedMs2 >= 120000) && (slope2 > 50) && (avg2 > 800);
+            // Ajustado para novo limite de 800MB
+            slopeOK2 = (elapsedMs2 >= 120000) && (slope2 > 50) && (avg2 > 600);
           }
 
           if (!(allHigh2 || slopeOK2)) {
@@ -1414,7 +1433,7 @@ async function ramCpuMonitorTick() {
           }
         } catch {}
 
-        const ctrl = controllers.get(nome);
+        // ctrl já foi obtido acima, reutilizar
         if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) continue;
 
         if (killGuardActive(nome)) {
@@ -2806,7 +2825,7 @@ const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,
   RELOAD_TIMEOUT_MS: 10000,
   RELOAD_POST_WAIT_MS: 250,
-  REOPEN_DELAY_SHORT_MS: 60000,
+  REOPEN_DELAY_SHORT_MS: 5000, // NOVO: Reduzido de 60s para 5s (reabertura quase imediata, supervisor controla velocidade)
   REOPEN_DELAY_RAMCPU_MS: 60000,
   FAIL_WINDOW_MS: 3*60*60*1000,
   FAIL_FREEZE_AFTER: 5,
@@ -3080,18 +3099,19 @@ async function nurseTick() {
 
                 if (!swapped) {
                   robeMeta[nome] = robeMeta[nome] || {};
-                  const prevBackoff = robeMeta[nome].openBackoffMs || 15000;
-                  const curBackoff = Math.min(300000, prevBackoff*2);
+                  // NOVO: Backoff fixo de 3s ao invés de escalonado (supervisor já controla velocidade)
+                  const curBackoff = 3000;
                   robeMeta[nome].openBackoffMs = curBackoff;
                   robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
-                  await issues.append(nome, 'mil_action', `open_backoff escalated to ${Math.floor(curBackoff/1000)}s`);
-                  logger.warn('[SWAP] open_backoff escalated', { nome, backoffMs: curBackoff, reason: err });
+                  await issues.append(nome, 'mil_action', `open_backoff set to ${Math.floor(curBackoff/1000)}s (fixed)`);
+                  logger.warn('[SWAP] open_backoff set', { nome, backoffMs: curBackoff, reason: err });
                 } else {
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
               }
             } else {
-              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 15000;
+              // NOVO: Backoff fixo de 3s ao invés de 15s
+              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
               logger.info('[NURSE] activateOnce ok', { nome });
             }
           } catch { }
@@ -3681,6 +3701,92 @@ async function healthTick() {
 }
 setInterval(() => { healthTick().catch(()=>{}); }, HEALTH_CFG.TICK_MS);
 setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
+
+// ====== LIMPEZA PERIÓDICA DE ABAS ABOUT:BLANK ÓRFÃS ======
+// Varre todos os navegadores ativos e fecha abas about:blank que estão órfãs
+// (criadas mas abandonadas quando Robe aborta/abandona postagem)
+// Roda a cada 3 minutos - não agressivo, apenas limpa o que ficou esquecido
+async function periodicAboutBlankCleanup() {
+  try {
+    const issues = require('./issues.js');
+    let totalClosed = 0;
+
+    for (const [nome, ctrl] of controllers.entries()) {
+      try {
+        if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
+
+        // Proteções: não limpa se Robe está ativo, configurando, ou em modo humano
+        const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
+        const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
+        const inConfig = ctrl.configurando === true;
+        const inHuman = ctrl.humanControl === true;
+
+        if (inRobe || sendLockActive || inConfig || inHuman) continue;
+
+        // Varre todas as páginas procurando about:blank órfãs
+        const pages = await ctrl.browser.pages().catch(() => []);
+        if (!Array.isArray(pages) || pages.length <= 1) continue;
+
+        const mainPage = ctrl.mainPage || pages[0];
+        
+        // Proteção extra: verifica se há create item aberto (só verifica uma vez)
+        const hasCreateItem = pages.some(pg => {
+          try {
+            const u = pg.url ? pg.url() : '';
+            return /facebook\.com\/marketplace\/create\/item/i.test(u);
+          } catch { return false; }
+        });
+        
+        // Se há create item, não limpa (pode ser que o Robe esteja prestes a usar)
+        if (hasCreateItem) continue;
+
+        let closed = 0;
+
+        for (const p of pages) {
+          try {
+            // Nunca fecha a página principal
+            if (p === mainPage) continue;
+            if (!mainPage && p === pages[0]) continue;
+
+            // Verifica se é about:blank
+            let url = '';
+            try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+            if (!url || url !== 'about:blank') continue;
+
+            // Fecha a aba about:blank órfã
+            // (já verificamos que não há Robe ativo e não há create item)
+            await p.close({ runBeforeUnload: false }).catch(() => {});
+            closed++;
+          } catch {}
+        }
+
+        if (closed > 0) {
+          totalClosed += closed;
+          try {
+            await issues.append(nome, 'mil_action', `periodic_cleanup_aboutblank n=${closed}`);
+          } catch {}
+        }
+      } catch (e) {
+        if (process.env.PRUNE_DEBUG === '1') {
+          logger.warn('[PERIODIC_CLEANUP] Erro em perfil', { nome, error: e && e.message || e });
+        }
+      }
+    }
+
+    if (totalClosed > 0) {
+      logger.info('[PERIODIC_CLEANUP] Fechou abas about:blank órfãs', { total: totalClosed });
+    }
+  } catch (e) {
+    if (process.env.PRUNE_DEBUG === '1') {
+      logger.warn('[PERIODIC_CLEANUP] Erro geral', { error: e && e.message || e });
+    }
+  }
+}
+
+// Roda a cada 3 minutos (180000ms) - não agressivo, apenas limpa o que ficou esquecido
+setInterval(() => { periodicAboutBlankCleanup().catch(() => {}); }, 3 * 60 * 1000);
+// Primeira execução após 30 segundos (dá tempo para sistema inicializar)
+setTimeout(() => { periodicAboutBlankCleanup().catch(() => {}); }, 30000);
 
 setInterval(() => {
   const now = Date.now();

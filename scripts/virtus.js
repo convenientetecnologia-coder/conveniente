@@ -177,7 +177,8 @@ async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
 }
 
 // Classificadores de tempo
-function isVelho24h(tempoLabel) {
+// NOVO: Reduzido de 24h para 8h (menos scroll = menos RAM consumida)
+function isVelho8h(tempoLabel) {
   if (!tempoLabel) return false;
   const t = String(tempoLabel)
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
@@ -187,15 +188,19 @@ function isVelho24h(tempoLabel) {
   const mDias = t.match(/\b(\d+)\s*(d|dias?)\b/);
   if (mDias) { if (parseInt(mDias[1],10) >= 1) return true; }
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) { if (parseInt(mH[1],10) >= 24) return true; }
+  if (mH) { if (parseInt(mH[1],10) >= 8) return true; } // NOVO: 8h ao invés de 24h
   return false;
+}
+// Mantido para compatibilidade (mas não usado mais)
+function isVelho24h(tempoLabel) {
+  return isVelho8h(tempoLabel); // Usa a nova função
 }
 function isChatRecente(tempoLabel) {
   if (!tempoLabel) return false;
   const t = String(tempoLabel)
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .toLowerCase().trim();
-  if (isVelho24h(t)) return false;
+  if (isVelho8h(t)) return false; // NOVO: Usa isVelho8h
   if (/\b(agora|now)\b/.test(t)) return true;
   if (/\b\d+\s*(s|seg|secs?|seconds?)\b/.test(t)) return true;
   if (/\b\d+\s*(min|m|mins?|minutes?)\b/.test(t)) return true;
@@ -935,7 +940,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         p.waitForSelector('div[role="row"] span', { timeout: 8000 })
       ]);
     } catch {}
-    try { await scrollListaAte24h(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
+    try { await scrollListaAte8h(p, { maxMs: 90000, quietLoops: 3 }); } catch {} // NOVO: Usa scrollListaAte8h
     const todos = await coletaChatsMarketplaceTodos(p);
     const recentes = todos.filter(c => isChatRecente(c.tempo));
     const agora = agoraEpoch();
@@ -947,7 +952,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     log(`[SNAPSHOT] Concluído. ${recentes.length} chats <24h marcados como respondidos no primeiro boot.`);
   }
 
-  async function scrollListaAte24h(page, { maxMs = 90000, quietLoops = 3 } = {}) {
+  // NOVO: Reduzido de 24h para 8h (menos scroll = menos RAM consumida)
+  async function scrollListaAte8h(page, { maxMs = 90000, quietLoops = 3 } = {}) {
     const t0 = Date.now();
     let semNovos = 0;
     let vistos = new Set();
@@ -957,7 +963,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       let houveNovo = false, viuAntigo = false;
       for (const c of todos) {
         if (!vistos.has(c.id)) { vistos.add(c.id); houveNovo = true; }
-        if (isVelho24h(c.tempo)) viuAntigo = true;
+        if (isVelho8h(c.tempo)) viuAntigo = true; // NOVO: Usa isVelho8h
       }
       if (viuAntigo) break;
       if (!houveNovo) {
