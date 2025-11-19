@@ -76,15 +76,15 @@ function timeoutFetch(url, { timeoutMs = 3000, ...opt } = {}) {
 
 // Nova função: vê API, fallback para arquivos locais - PATCH CIRÚRGICO!
 async function readAggregatedStatus() {
-  // (1) HTTP local COM TIMEOUT (3s)
+  // NOVO: HTTP local COM TIMEOUT aumentado para 15s (multi-node precisa de mais tempo)
   try {
-    const res = await timeoutFetch(`http://127.0.0.1:${httpPort}/api/status`, { timeoutMs: 3000 });
+    const res = await timeoutFetch(`http://127.0.0.1:${httpPort}/api/status`, { timeoutMs: 15000 });
     if (res && res.ok) {
       const st = await res.json();
       if (st && typeof st === 'object') return st;
     }
   } catch {
-    logger && logger.warn && logger.warn('[DASH][TICK] api/status timeout, using fallback');
+    logger && logger.warn && logger.warn('[DASH][TICK] api/status timeout (15s), using fallback');
   }
   // (2) Local status.json
   try {

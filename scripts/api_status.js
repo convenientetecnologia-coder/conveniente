@@ -335,9 +335,10 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   let erroMsgINST = undefined;
 
   // 2) Tente overlay do workerClient (cluster), mas nunca trunque a lista do baseline!
+  // NOVO: Timeout aumentado para 15s (multi-node precisa de mais tempo)
   let overlayINST = null;
   try {
-    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+    overlayINST = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 15000 });
   } catch (e) {
     warningINST = 'status temporarily unavailable';
   }
@@ -451,9 +452,10 @@ app.get('/api/sys', async (req, res) => {
   try {
     const os = require('os');
     // 1) Tenta overlay agregado do cluster (get-status)
+    // NOVO: Timeout aumentado para 15s (multi-node precisa de mais tempo)
     let overlay = null;
     try {
-      overlay = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 8000 });
+      overlay = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 15000 });
     } catch {}
 
     // 2) Se overlay OK, compute CPU a partir de overlay.robes[*].cpuPercent

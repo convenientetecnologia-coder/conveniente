@@ -1843,7 +1843,7 @@
       }
     }
 
-    // 4.4) Fechar todos sequencialmente com feedback
+    // 4.4) Fechar todos em PARALELO com limite de concorrência (RÁPIDO e CONFIÁVEL)
     async function stopAllSequential() {
       if (stopAllLock) { alert('Fechamento em massa já está em andamento.'); return; }
       if (startAllLock) { alertMassActionRunning(); return; }
@@ -1854,25 +1854,51 @@
       try {
         const st = await window.electronAPI.getStatus();
         const perfis = st?.perfis || [];
-        // NOVO: desativa TODOS, não só ativos
-        for (const p of perfis) {
+        
+        // NOVO: Fechar em PARALELO com limite de concorrência (20 simultâneos) - RÁPIDO e CONFIÁVEL
+        const CONCURRENCY_LIMIT = 20; // Fecha 20 navegadores simultaneamente
+        let active = 0;
+        let completed = 0;
+        const total = perfis.length;
+        
+        const deactivateWithLimit = async (p) => {
+          while (active >= CONCURRENCY_LIMIT) {
+            await sleep(50); // Espera 50ms antes de verificar novamente
+          }
+          active++;
           try {
             await window.electronAPI.deactivate(p.nome);
+            completed++;
+            if (stopBtn && total > 0) {
+              stopBtn.textContent = `Fechando... ${completed}/${total}`;
+            }
           } catch (e) {
             console.warn('[Fechar todos] falha desativando', p && p.nome, e && e.message || e);
+            completed++;
+          } finally {
+            active--;
           }
-        }
-        // Aguarda convergência global: todos inativos e robeQueue vazia
+        };
+        
+        // Dispara todas as desativações em paralelo (limitado por concorrência)
+        await Promise.all(perfis.map(p => deactivateWithLimit(p)));
+        
+        // Aguarda convergência global: todos inativos e robeQueue vazia (timeout reduzido para 30s)
         const ok = await waitUntil(async () => {
           const st2 = await window.electronAPI.getStatus();
           return (
             (st2.perfis||[]).every(x => !x.active) &&
             ((st2.robeQueue||[]).length === 0)
           );
-        }, { timeoutMs: 120000, intervalMs: 600 });
-        // Sentinela: aguarda após convergência (6s)
-        await sleep(6000);
-        if (!ok) alert('Nem todos foram fechados após 2 minutos — verifique manualmente possíveis stucks.');
+        }, { timeoutMs: 30000, intervalMs: 500 }); // NOVO: timeout reduzido de 120s para 30s, intervalo de 500ms
+        if (!ok) {
+          // Verifica quantos ainda estão ativos
+          const st3 = await window.electronAPI.getStatus();
+          const stillActive = (st3.perfis||[]).filter(x => x.active).length;
+          if (stillActive > 0) {
+            alert(`Atenção: ${stillActive} navegador(es) ainda ativo(s) após 30s. Verifique manualmente.`);
+          }
+        }
       } catch (e) {
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {
