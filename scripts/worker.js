@@ -1150,6 +1150,15 @@ function stopPruneLoop(nome) {
 let ramMonitorInterval = null;
 
 async function ramCpuMonitorTick() {
+  // Se não há nenhum controller ativo, não há o que monitorar — evita work desnecessário
+  if (!controllers || controllers.size === 0) {
+    ramMonitorInterval = setTimeout(
+      ramCpuMonitorTick,
+      15000 + Math.floor(Math.random() * 2000) // intervalo mais longo e com jitter leve
+    );
+    return;
+  }
+
   const perfisArr = loadPerfisJson();
   const nomeByUserDir = {};
   for (const p of perfisArr) {
@@ -1461,7 +1470,11 @@ async function ramCpuMonitorTick() {
 
   await snapshotStatusAndWrite();
 
-  ramMonitorInterval = setTimeout(ramCpuMonitorTick, 3500 + Math.floor(Math.random()*1000));
+  // Intervalo aumentado de ~3.5s para ~15–17s (jitter), reduzindo carga de monitoramento
+  ramMonitorInterval = setTimeout(
+    ramCpuMonitorTick,
+    15000 + Math.floor(Math.random() * 2000)
+  );
 }
 
 function normalizePath(x) { return String(x||'').replace(/\\/g,'/'); }

@@ -259,13 +259,20 @@ function getCoords(cidade) {
 }
 
 /**
- * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos:
- * Linux: MemAvailable em /proc/meminfo
- * Windows: FreePhysicalMemory no Win32_OperatingSystem
- * Fallback: os.freemem()
+ * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos.
+ *
+ * NOVO DESENHO (ULTRA ROBUSTO, CROSS-PLATFORM):
+ * - Evita completamente WMI / Get-CimInstance (WmiPrvSE.exe) no Windows.
+ * - Usa apenas fontes leves e nativas:
+ *   - Linux: MemAvailable em /proc/meminfo (se disponível).
+ *   - Demais casos (inclui Windows): os.freemem() do Node.js.
+ *
+ * Isso garante:
+ * - Mesma semântica de "memória física livre" para o gate de abertura.
+ * - Zero dependência de WMI, reduzindo carga no WmiPrvSE.exe em todos os servidores.
  */
 function getAvailableMB() {
-  // Linux (via /proc/meminfo)
+  // Linux (via /proc/meminfo) — mantém caminho otimizado já existente
   if (process.platform === 'linux') {
     try {
       const txt = fs.readFileSync('/proc/meminfo','utf8');
@@ -273,19 +280,14 @@ function getAvailableMB() {
       if (m) return Math.round(parseInt(m[1],10)/1024);
     } catch {}
   }
-  // Windows (via powershell)
-  if (process.platform === 'win32') {
-    try {
-      const out = execSync(
-        'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"',
-        {stdio:['ignore','pipe','ignore']}
-      ).toString().trim();
-      const kb = parseInt(out,10);
-      if (!isNaN(kb)) return Math.round(kb/1024);
-    } catch {}
+
+  // Demais plataformas (inclui Windows): usa apenas os.freemem()
+  try {
+    return Math.round(os.freemem()/(1024*1024));
+  } catch {
+    // Fallback extremo: se até os.freemem falhar, retorna 0 (gate de segurança)
+    return 0;
   }
-  // Fallback: Node.js standard
-  return Math.round(os.freemem()/(1024*1024));
 }
 
 module.exports = {
