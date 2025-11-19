@@ -362,7 +362,9 @@ async function applyCommands(cmds = []) {
 // ===== ALTERAÇÃO FIM ===============================================
 
 async function tick() {
-  logger.info('[DASH][TICK] start: ' + new Date().toISOString());
+  if (process.env.DASHBOARD_DEBUG === '1') {
+    logger.info('[DASH][TICK] start: ' + new Date().toISOString());
+  }
   const start = Date.now();
 
   if (inFlight) return; // anti-overlap
@@ -372,7 +374,9 @@ async function tick() {
     const [status, hostId] = await Promise.all([readAggregatedStatus(), getOrCreateHostId()]);
     hostIdCache = hostId;
     // ===== FIM ======
-    logger.info(`[DASH][TICK] got status in ${Date.now() - start}ms`);
+    if (process.env.DASHBOARD_DEBUG === '1') {
+      logger.info(`[DASH][TICK] got status in ${Date.now() - start}ms`);
+    }
 
     const quick = buildQuickSnapshot(status);
 
@@ -390,7 +394,9 @@ async function tick() {
     if (resp && Array.isArray(resp.commands) && resp.commands.length) {
       await applyCommands(resp.commands);
     }
-    logger.info(`[DASH][TICK] post finish in ${Date.now() - start}ms`);
+    if (process.env.DASHBOARD_DEBUG === '1') {
+      logger.info(`[DASH][TICK] post finish in ${Date.now() - start}ms`);
+    }
 
   } catch (e) {
     const m = e && e.message ? e.message : String(e);

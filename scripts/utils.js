@@ -259,20 +259,16 @@ function getCoords(cidade) {
 }
 
 /**
- * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos.
+ * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos:
+ * - Linux: MemAvailable em /proc/meminfo
+ * - Windows: FreePhysicalMemory no Win32_OperatingSystem (via WMI, Get-CimInstance)
+ * - Fallback: os.freemem()
  *
- * NOVO DESENHO (ULTRA ROBUSTO, CROSS-PLATFORM):
- * - Evita completamente WMI / Get-CimInstance (WmiPrvSE.exe) no Windows.
- * - Usa apenas fontes leves e nativas:
- *   - Linux: MemAvailable em /proc/meminfo (se disponível).
- *   - Demais casos (inclui Windows): os.freemem() do Node.js.
- *
- * Isso garante:
- * - Mesma semântica de "memória física livre" para o gate de abertura.
- * - Zero dependência de WMI, reduzindo carga no WmiPrvSE.exe em todos os servidores.
+ * OBS: Mantemos WMI no Windows para máxima precisão/compatibilidade com o restante
+ * do sistema, mas SEM exagerar na frequência de chamadas a esta função.
  */
 function getAvailableMB() {
-  // Linux (via /proc/meminfo) — mantém caminho otimizado já existente
+  // Linux (via /proc/meminfo)
   if (process.platform === 'linux') {
     try {
       const txt = fs.readFileSync('/proc/meminfo','utf8');
@@ -280,12 +276,23 @@ function getAvailableMB() {
       if (m) return Math.round(parseInt(m[1],10)/1024);
     } catch {}
   }
-
-  // Demais plataformas (inclui Windows): usa apenas os.freemem()
+  // Windows (via WMI / FreePhysicalMemory)
+  if (process.platform === 'win32') {
+    try {
+      const out = execSync(
+        'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"',
+        {stdio:['ignore','pipe','ignore']}
+      ).toString().trim();
+      const kb = parseInt(out,10);
+      if (!isNaN(kb)) return Math.round(kb/1024);
+    } catch {
+      // Se WMI falhar por qualquer motivo, cai no fallback abaixo
+    }
+  }
+  // Fallback: Node.js standard (todas as plataformas, inclusive Windows)
   try {
     return Math.round(os.freemem()/(1024*1024));
   } catch {
-    // Fallback extremo: se até os.freemem falhar, retorna 0 (gate de segurança)
     return 0;
   }
 }

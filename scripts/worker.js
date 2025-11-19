@@ -1149,13 +1149,86 @@ function stopPruneLoop(nome) {
 
 let ramMonitorInterval = null;
 
+// ====== ELEIÇÃO DE LÍDER DE MÉTRICAS (UM POR HOST) ======
+// Somente o líder executa o monitor pesado de RAM/CPU (WMI/pidusage).
+// Demais workers apenas aguardam e consomem os dados via robeMeta/status.json.
+const METRICS_LEADER_FILE = path.join(__dirname, '..', 'dados', 'metrics_leader.lock');
+const METRICS_LEADER_STALE_MS = 60 * 1000; // 60s
+let isMetricsLeaderFlag = false;
+
+function ensureMetricsLeader() {
+  try {
+    const now = Date.now();
+
+    // Se já somos líder, apenas atualiza o heartbeat no arquivo
+    if (isMetricsLeaderFlag) {
+      try {
+        fs.writeFileSync(
+          METRICS_LEADER_FILE,
+          JSON.stringify({ pid: process.pid, ts: now }),
+          'utf8'
+        );
+      } catch {}
+      return true;
+    }
+
+    // Tenta adquirir lock criando o arquivo em modo exclusivo
+    try {
+      const fd = fs.openSync(METRICS_LEADER_FILE, 'wx');
+      try {
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, ts: now }), 'utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+      isMetricsLeaderFlag = true;
+      return true;
+    } catch {
+      // Arquivo já existe — verificar se está STALE
+      let data = null;
+      try {
+        const raw = fs.readFileSync(METRICS_LEADER_FILE, 'utf8');
+        data = JSON.parse(raw);
+      } catch {
+        data = null;
+      }
+      const ts = data && typeof data.ts === 'number' ? data.ts : 0;
+      if (!ts || (now - ts) > METRICS_LEADER_STALE_MS) {
+        // Considera líder anterior como morto/stale — tenta assumir
+        try { fs.unlinkSync(METRICS_LEADER_FILE); } catch {}
+        try {
+          const fd = fs.openSync(METRICS_LEADER_FILE, 'wx');
+          try {
+            fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, ts: now }), 'utf8');
+          } finally {
+            fs.closeSync(fd);
+          }
+          isMetricsLeaderFlag = true;
+          return true;
+        } catch {
+          // Outro processo venceu a corrida — não somos líder
+          return false;
+        }
+      }
+      // Arquivo recente: outro worker é o líder
+      return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
 async function ramCpuMonitorTick() {
+  const INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // ~8–10s
+
+  // Apenas o líder executa o monitor pesado
+  if (!ensureMetricsLeader()) {
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
+    return;
+  }
+
   // Se não há nenhum controller ativo, não há o que monitorar — evita work desnecessário
   if (!controllers || controllers.size === 0) {
-    ramMonitorInterval = setTimeout(
-      ramCpuMonitorTick,
-      15000 + Math.floor(Math.random() * 2000) // intervalo mais longo e com jitter leve
-    );
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
     return;
   }
 
@@ -1470,11 +1543,7 @@ async function ramCpuMonitorTick() {
 
   await snapshotStatusAndWrite();
 
-  // Intervalo aumentado de ~3.5s para ~15–17s (jitter), reduzindo carga de monitoramento
-  ramMonitorInterval = setTimeout(
-    ramCpuMonitorTick,
-    15000 + Math.floor(Math.random() * 2000)
-  );
+  ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
 }
 
 function normalizePath(x) { return String(x||'').replace(/\\/g,'/'); }
