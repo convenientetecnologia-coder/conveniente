@@ -793,4 +793,72 @@ module.exports = (app, workerClient, fileStore) => {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
+
+  // ====== PATCH — trocar cidade do perfil (atômico + apply em runtime) ======
+  app.patch('/api/perfis/:nome/cidade', async (req, res) => {
+    const nome = req.params.nome;
+    const { novaCidade } = req.body || {};
+    const op = String(req.headers['x-operator'] || 'unknown');
+
+    try {
+      if (!nome) return res.json({ ok:false, error:'nome ausente' });
+
+      if (!novaCidade || typeof novaCidade !== 'string' || !novaCidade.trim()) {
+        return res.json({ ok:false, error:'novaCidade ausente' });
+      }
+
+      assertPerfilExists(fileStore, nome);
+
+      // Validação de coordenadas — não aceite cidades sem coords
+      const utils = require('./utils.js');
+      const coords = utils.getCoords(novaCidade);
+
+      if (!coords || !coords.latitude || !coords.longitude) {
+        return res.json({ ok:false, error:'cidade_sem_coordenadas' });
+      }
+
+      // Leitura de perfis.json e manifest
+      const perfisArr = fileStore.loadPerfisJson();
+      const idx = perfisArr.findIndex(p => p && p.nome === nome);
+
+      if (idx < 0) return res.json({ ok:false, error:'perfil inexistente' });
+
+      const oldCidade = perfisArr[idx].cidade || '';
+
+      if (oldCidade === novaCidade) {
+        await issues.append(nome, 'mil_action', `admin_update_city_noop old=${oldCidade||''}`);
+        return res.json({ ok:true, changed:false });
+      }
+
+      // 1) Atualiza manifest primeiro (fonte de verdade para flows)
+      await manifestStore.update(nome, (m) => {
+        m = m || {};
+        m.cidade = String(novaCidade);
+        return m;
+      });
+
+      // 2) Atualiza perfis.json (baseline do status e UI)
+      perfisArr[idx].cidade = String(novaCidade);
+      fileStore.savePerfisJson(perfisArr);
+
+      await issues.append(nome, 'mil_action', `admin_update_city from="${oldCidade||''}" to="${novaCidade}" by=${op}`);
+
+      // 3) Se navegador está ativo, aplica geolocalização imediatamente
+      let applied = false;
+      try {
+        const st = await workerClient.sendWorkerCommand('apply-city', { nome }, { timeoutMs: 12000 });
+        applied = !!(st && st.ok);
+        if (applied) await issues.append(nome, 'mil_action', `admin_update_city_apply_runtime coords=${coords.latitude},${coords.longitude}`);
+        else await issues.append(nome, 'mil_action', `admin_update_city_apply_runtime_failed`);
+      } catch (e) {
+        await issues.append(nome, 'mil_action', `admin_update_city_apply_runtime_error ${e && e.message || e}`);
+      }
+
+      return res.json({ ok:true, changed:true, applied });
+
+    } catch (e) {
+      await issues.append(nome || 'system', 'mil_action', `admin_update_city_ERROR ${e && e.message || e}`);
+      return res.json({ ok:false, error: e && e.message || String(e) });
+    }
+  });
 };

@@ -17,6 +17,12 @@ const api = {
   renamePerfil:    ({nome,novoLabel,renameSlug}) => renameSlug
                        ? fetch(`/api/perfis/${encodeURIComponent(nome)}/rename`, { method:'POST', headers: { 'Content-Type':'application/json' }, body:JSON.stringify({novoLabel}) }).then(r => r.json())
                        : fetch(`/api/perfis/${encodeURIComponent(nome)}/label`, { method:'PATCH', headers: { 'Content-Type':'application/json' }, body:JSON.stringify({novoLabel}) }).then(r => r.json()),
+  updatePerfilCidade: (nome, novaCidade) =>
+    fetch(`/api/perfis/${encodeURIComponent(nome)}/cidade`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ novaCidade })
+    }).then(r => r.json()),
   getSysMetrics:   () => fetch('/api/sys').then(r => r.json()),
   getFotosCount:   () => fetch('/api/fotos/count').then(r => r.json()),
   getIssues:       (nome) => fetch(`/api/perfis/${encodeURIComponent(nome)}/issues`).then(r => r.json()),

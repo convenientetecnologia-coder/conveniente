@@ -2382,6 +2382,51 @@ const handlers = {
     return { ok: true };
   },
 
+  // ====== HANDLER apply-city - aplica coordenadas da nova cidade em runtime ======
+  async ['apply-city']({ nome }) {
+    return lockProfileAction(nome, async () => {
+      const ctrl = controllers.get(nome);
+
+      // Se navegador não está ativo para este perfil, não há o que aplicar!
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        await issues.append(nome, 'mil_action', 'apply_city_runtime_skip_not_active');
+
+        return { ok: true, active: false };
+      }
+
+      try {
+        const man = await manifestStore.read(nome).catch(()=>null);
+        const cidade = man && man.cidade || '';
+        const coords = require('./utils.js').getCoords(cidade || '');
+
+        if (!coords || !coords.latitude || !coords.longitude) {
+          await issues.append(nome, 'mil_action', `apply_city_skip coords_unavailable cidade="${cidade||''}"`);
+
+          return { ok: false, error: 'coords_unavailable' };
+        }
+
+        const pages = await ctrl.browser.pages().catch(()=>[]);
+        let applied = 0;
+
+        for (const p of (pages||[])) {
+          try { await p.setGeolocation(coords); applied++; } catch {}
+        }
+
+        await issues.append(nome, 'mil_action', `apply_city_runtime_ok cidade="${cidade}" pages=${applied}`);
+
+        // Optionally: update status snapshot
+        try { await snapshotStatusAndWrite(); } catch {}
+
+        return { ok: true, appliedPages: applied, cidade };
+
+      } catch (e) {
+        await issues.append(nome, 'mil_action', `apply_city_runtime_error ${(e&&e.message)||e}`);
+
+        return { ok: false, error: (e && e.message) || String(e) };
+      }
+    });
+  },
+
   async ['get-status']() {
     try {
       for (const n of Object.keys(robeMeta)) {
