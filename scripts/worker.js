@@ -1208,52 +1208,20 @@ function ensureMetricsLeader() {
 }
 
 async function ramCpuMonitorTick() {
-  const INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // ~8–10s
+  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '25000', 10);
+  const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // 8–10s
+  const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
 
-  // MODO WINDOWS SAFE: não coletar métricas por perfil via pidusage (evita uso implícito de WMI/WMIC)
-  // Em Windows, apenas limpamos métricas antigas e saímos — RAM/CPU por perfil ficam como null,
-  // e os breakers de RAM/CPU não são acionados. Abertura continua protegida via getAvailableMB()
-  // (que usa os.freemem()), sem depender de WMI.
-  if (process.platform === 'win32') {
-    try {
-      for (const nome of Object.keys(robeMeta)) {
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].ramMB = null;
-        robeMeta[nome].cpuPercent = null;
-        robeMeta[nome].ramHist = [];
-        robeMeta[nome].cpuHistory = [];
-      }
-      await snapshotStatusAndWrite();
-    } catch {}
-    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-    return;
-  }
-
-  // Se não há nenhum controller ativo, não há o que monitorar — evita work desnecessário
-  if (!controllers || controllers.size === 0) {
-    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-    return;
-  }
-
-  const pidsByNome = {};
-  let erroMonitor = false;
   try {
-    // NOVO: Monitor orientado por rootPid por perfil, sem varredura WMI global
-    // Em vez de chamar Get-CimInstance Win32_Process para toda a máquina,
-    // usamos o pid raiz capturado em activateOnce (browser.process().pid).
-    for (const [nome, ctrl] of controllers.entries()) {
-      if (!ctrl || !ctrl.browser) continue;
-      const meta = robeMeta[nome] || {};
-      const rootPid = meta.rootPid;
-      if (!rootPid || typeof rootPid !== 'number') continue;
-      if (!pidsByNome[nome]) pidsByNome[nome] = [];
-      pidsByNome[nome].push(rootPid);
+    if (!controllers || controllers.size === 0) {
+      ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
+      return;
     }
 
     try {
-      const nomesComPid = new Set(Object.keys(pidsByNome || {}));
+      const vivos = new Set(Array.from(controllers.keys()));
       for (const nome of Object.keys(robeMeta)) {
-        if (!nomesComPid.has(nome)) {
+        if (!vivos.has(nome)) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = null;
           robeMeta[nome].cpuPercent = null;
@@ -1262,214 +1230,189 @@ async function ramCpuMonitorTick() {
         }
       }
     } catch {}
-    const nomes = Object.keys(pidsByNome);
-    const promises = [];
-    for (const nome of nomes) {
-      const pids = pidsByNome[nome];
-      if (!pids || !pids.length) continue;
-      promises.push((async () => {
-        let somaRam = 0, somaCpu = 0;
-        let countValid = 0;
-        try {
-          const statsObj = await pidusage(pids);
-          for (const pid of pids) {
-            const st = statsObj[pid];
-            if (!st) continue;
-            if (typeof st.memory === "number") somaRam += st.memory;
-            if (typeof st.cpu === "number") somaCpu += st.cpu;
-            countValid++;
-          }
-        } catch {
-        }
-        if (!countValid) {
+
+    if (process.platform === 'win32') {
+      const windowsPT = (() => { try { return require('windows-process-tree'); } catch { return null; } })();
+      if (!windowsPT || typeof windowsPT.getProcessTree !== 'function') {
+        for (const [nome] of controllers.entries()) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = null;
           robeMeta[nome].cpuPercent = null;
-        } else {
+        }
+        await snapshotStatusAndWrite();
+        ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
+        return;
+      }
+
+      function toMBFromUnknown(v) {
+        const n = Number(v || 0);
+        if (!Number.isFinite(n) || n <= 0) return 0;
+        if (n < 1024 * 1024) return Math.max(0, Math.round(n / 1024));
+        return Math.max(0, Math.round(n / (1024 * 1024)));
+      }
+
+      function sumTreeMemoryMB(node) {
+        if (!node) return 0;
+        let cur = 0;
+        if (node.memory != null) cur += toMBFromUnknown(node.memory);
+        else if (node.workingSetKb != null) cur += toMBFromUnknown(node.workingSetKb);
+        else if (node.workingSet != null) cur += toMBFromUnknown(node.workingSet);
+        else if (node.privateBytes != null) cur += toMBFromUnknown(node.privateBytes);
+        const kids = Array.isArray(node.children) ? node.children : [];
+        for (const c of kids) cur += sumTreeMemoryMB(c);
+        return cur;
+      }
+
+      function getTreeMemoryMB(rootPid) {
+        return new Promise((resolve) => {
+          try {
+            windowsPT.getProcessTree(rootPid, (tree) => {
+              try {
+                if (!tree) return resolve(null);
+                const mb = sumTreeMemoryMB(tree);
+                return resolve(Number.isFinite(mb) ? mb : null);
+              } catch { return resolve(null); }
+            });
+          } catch { resolve(null); }
+        });
+      }
+
+      for (const [nome, ctrl] of controllers.entries()) {
+        try {
+          if (!ctrl || !ctrl.browser) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].ramMB = null;
+            robeMeta[nome].cpuPercent = null;
+            continue;
+          }
+          const rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+          if (!rootPid || !Number.isFinite(rootPid)) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].ramMB = null;
+            robeMeta[nome].cpuPercent = null;
+            continue;
+          }
+          const mb = await getTreeMemoryMB(rootPid);
           robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = typeof somaRam === "number" ? Math.round(somaRam/1024/1024) : null;
-          robeMeta[nome].cpuPercent = typeof somaCpu === "number" ? Math.round(somaCpu) : null;
+          robeMeta[nome].ramMB = (typeof mb === 'number' && mb >= 0) ? mb : null;
+          robeMeta[nome].cpuPercent = null;
+
+          if (typeof robeMeta[nome].ramMB === 'number') {
+            const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
+            rh.push({ t: Date.now(), mb: robeMeta[nome].ramMB });
+            while (robeMeta[nome].ramHist.length > 8) robeMeta[nome].ramHist.shift();
+          }
+        } catch {
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].ramMB = null;
+            robeMeta[nome].cpuPercent = null;
+          } catch {}
         }
+      }
 
-        if (typeof robeMeta[nome].cpuPercent === "number") {
-          const ch = robeMeta[nome].cpuHistory || (robeMeta[nome].cpuHistory = []);
-          ch.push({ t: Date.now(), p: robeMeta[nome].cpuPercent });
-          while (robeMeta[nome].cpuHistory.length > 8) robeMeta[nome].cpuHistory.shift();
-        }
+      await snapshotStatusAndWrite();
+      ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
+      return;
+    }
 
-        if (typeof robeMeta[nome].cpuPercent === 'number' && robeMeta[nome].cpuPercent < 120) {
-          const ch = robeMeta[nome].cpuHistory || [];
-          if (ch.length >= 2 && ch.slice(-2).every(h => h.p < 120)) robeMeta[nome].cpuHistory = [];
-        }
-        if (typeof robeMeta[nome].ramMB === 'number' && robeMeta[nome].ramMB < 800) {
-          const rh = robeMeta[nome].ramHist || [];
-          if (rh.length >= 2 && rh.slice(-2).every(h => h.mb < 800)) robeMeta[nome].ramHist = [];
-        }
+    let allProcs = [];
+    try { allProcs = await psList(); } catch { allProcs = []; }
 
-        const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
-        const actAt = robeMeta[nome]?.activatedAt || 0;
-        if (!actAt || (Date.now() - actAt) < 180000) return;
-        if (vivos <= 1) return;
+    const childrenByPPID = new Map();
+    for (const p of (allProcs || [])) {
+      const ppid = Number(p && p.ppid);
+      const pid = Number(p && p.pid);
+      if (!Number.isFinite(ppid) || !Number.isFinite(pid)) continue;
+      if (!childrenByPPID.has(ppid)) childrenByPPID.set(ppid, []);
+      childrenByPPID.get(ppid).push(pid);
+    }
 
-        const hist = robeMeta[nome].cpuHistory || [];
-        if (hist.length >= 5) {
-          const last5 = hist.slice(-5);
-          const allHigh = last5.every(h => h.p >= 150);
-          if (allHigh) {
-            const ctrl = controllers.get(nome);
-            if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) return;
+    function collectSubtreePids(rootPid) {
+      const set = new Set();
+      const stack = [rootPid];
+      while (stack.length) {
+        const cur = stack.pop();
+        if (set.has(cur)) continue;
+        set.add(cur);
+        const kids = childrenByPPID.get(cur) || [];
+        for (const k of kids) stack.push(k);
+      }
+      return Array.from(set);
+    }
 
-            if (killGuardActive(nome)) {
-              await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
-              logger.info('[BREAKER][CPU] guard_skip', { nome });
-              return;
+    const jobs = [];
+    for (const [nome, ctrl] of controllers.entries()) {
+      jobs.push((async () => {
+        try {
+          if (!ctrl || !ctrl.browser) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].ramMB = null;
+            robeMeta[nome].cpuPercent = null;
+            return;
+          }
+          const rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+          if (!rootPid || !Number.isFinite(rootPid)) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].ramMB = null;
+            robeMeta[nome].cpuPercent = null;
+            return;
+          }
+          const pids = collectSubtreePids(rootPid);
+          if (!pids || !pids.length) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].ramMB = null;
+            robeMeta[nome].cpuPercent = null;
+            return;
+          }
+          let somaRam = 0, somaCpu = 0, valid = 0;
+          try {
+            const statsObj = await pidusage(pids);
+            for (const pid of pids) {
+              const st = statsObj[pid];
+              if (!st) continue;
+              if (typeof st.memory === 'number') somaRam += st.memory;
+              if (typeof st.cpu === 'number') somaCpu += st.cpu;
+              valid++;
             }
+          } catch {}
 
-            logger.warn('[BREAKER][CPU] acionado', { nome, last5: last5.map(h => h.p) });
-            await handlers.deactivate({nome, reason:'cpuKill', policy:'preserveDesired'});
-            setKillGuard(nome);
-            await reportAction(nome, 'cpu_memory_spike', `CPU breaker acionado (>=150% por 5 rodadas) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
+          robeMeta[nome] = robeMeta[nome] || {};
+          if (valid > 0) {
+            robeMeta[nome].ramMB = Math.round(somaRam / 1024 / 1024);
+            robeMeta[nome].cpuPercent = Math.round(somaCpu);
+          } else {
+            robeMeta[nome].ramMB = null;
             robeMeta[nome].cpuPercent = null;
           }
+
+          if (typeof robeMeta[nome].cpuPercent === 'number') {
+            const ch = robeMeta[nome].cpuHistory || (robeMeta[nome].cpuHistory = []);
+            ch.push({ t: Date.now(), p: robeMeta[nome].cpuPercent });
+            while (robeMeta[nome].cpuHistory.length > 8) robeMeta[nome].cpuHistory.shift();
+          }
+          if (typeof robeMeta[nome].ramMB === 'number') {
+            const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
+            rh.push({ t: Date.now(), mb: robeMeta[nome].ramMB });
+            while (robeMeta[nome].ramHist.length > 8) robeMeta[nome].ramHist.shift();
+          }
+        } catch {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].ramMB = null;
+          robeMeta[nome].cpuPercent = null;
         }
       })());
     }
-    await Promise.all(promises);
-  } catch {
-    erroMonitor = true;
+
+    await Promise.all(jobs);
+    await snapshotStatusAndWrite();
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
+    return;
+  } catch (e) {
+    try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
+    try { await snapshotStatusAndWrite(); } catch {}
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, 16000);
   }
-
-  for (const nome of Object.keys(robeMeta)) {
-    if (!controllers.has(nome)) continue;
-
-    const now = Date.now();
-    if (robeMeta[nome]?.ramKillHysteresisUntil && robeMeta[nome].ramKillHysteresisUntil > now) {
-      await issues.append(nome, 'ram_hysteresis_skip', `skip_until=${robeMeta[nome].ramKillHysteresisUntil}`);
-      logger.info('[BREAKER][RAM] hysteresis_skip', { nome, until: robeMeta[nome].ramKillHysteresisUntil });
-      continue;
-    }
-
-    const ramMB = (typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
-    if (ramMB == null) continue;
-
-    const vivos = Array.from(controllers.values()).filter(c => !!(c && c.browser && c.trabalhando)).length;
-    if (!robeMeta[nome].activatedAt || Date.now() - robeMeta[nome].activatedAt < 180000) continue;
-    if (vivos <= 1) continue;
-
-    // NOVO: Ignorar verificação de RAM se Robe está trabalhando (Robe é temporário, apenas Virtus acumula RAM)
-    const ctrl = controllers.get(nome);
-    const robeRunning = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true) || 
-                        !!(ctrl && ctrl.browser && ctrl.browser._robeActiveFor === nome);
-    if (robeRunning) {
-      // Se Robe está trabalhando, não verifica RAM (Robe abre/fecha rapidamente, não acumula RAM)
-      continue;
-    }
-
-    // NOVO: Limite reduzido para 800MB quando apenas Virtus está ativo (Virtus sozinho normalmente usa 400-600MB)
-    const RAM_KILL_MB_LOCAL = 800;
-
-    const hist = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
-    hist.push({ t: Date.now(), mb: ramMB });
-    while (hist.length > 8) hist.shift();
-
-    if (typeof robeMeta[nome].cpuPercent === 'number' && robeMeta[nome].cpuPercent < 120) {
-      const ch = robeMeta[nome].cpuHistory || [];
-      if (ch.length >= 2 && ch.slice(-2).every(h => h.p < 120)) robeMeta[nome].cpuHistory = [];
-    }
-    if (typeof robeMeta[nome].ramMB === 'number' && robeMeta[nome].ramMB < 800) {
-      const rh = robeMeta[nome].ramHist || [];
-      if (rh.length >= 2 && rh.slice(-2).every(h => h.mb < 800)) robeMeta[nome].ramHist = [];
-    }
-
-    if (ramMB >= AUTO_CFG.RAM_WARN_MB && ramMB < RAM_KILL_MB_LOCAL) {
-      if (!robeMeta[nome].lastWarn || (Date.now() - robeMeta[nome].lastWarn) > 600000) {
-        try { await reportAction(nome, 'chrome_memory_warn', `RAM alta: ${ramMB} MB (>=${AUTO_CFG.RAM_WARN_MB})`); } catch {}
-        logger.warn('[BREAKER][RAM] warning_high_usage', { nome, ramMB, warnThreshold: AUTO_CFG.RAM_WARN_MB });
-        robeMeta[nome].lastWarn = Date.now();
-      }
-    }
-
-    if (hist.length >= 5) {
-      const recent = hist.slice(-5);
-      const allHigh = recent.every(h => h.mb >= RAM_KILL_MB_LOCAL);
-      let slopeOK = false;
-      if (!allHigh) {
-        const A = hist[0], B = hist[hist.length-1];
-        const elapsedMs = (B.t - A.t);
-        const dMin = Math.max(0.5, elapsedMs/60000);
-        const slope = (B.mb - A.mb) / dMin;
-        const avg = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
-        slopeOK = (elapsedMs >= 120000) && (slope > 50) && (avg > 800);
-      }
-      if (allHigh || slopeOK) {
-        try {
-          await new Promise(r=>setTimeout(r,1500));
-          let newStats = null;
-          const pids = (pidsByNome && pidsByNome[nome]) || [];
-          let ramMB2 = null;
-          if (Array.isArray(pids) && pids.length) {
-            try {
-              newStats = await pidusage(pids);
-              let somaRam2 = 0, count2 = 0;
-              for (const pid of pids) {
-                const st2 = newStats[pid];
-                if (!st2) continue;
-                if (typeof st2.memory === 'number') { somaRam2 += st2.memory; count2++; }
-              }
-              if (count2 > 0) ramMB2 = Math.round(somaRam2/1024/1024);
-            } catch {}
-          }
-          if (typeof ramMB2 === 'number') {
-            hist.push({ t: Date.now(), mb: ramMB2 });
-            while (hist.length > 8) hist.shift();
-          }
-          const last5 = hist.slice(-5);
-          const allHigh2 = last5.every(h => h.mb >= RAM_KILL_MB_LOCAL);
-          let slopeOK2 = false;
-          {
-            const A2 = hist[0], B2 = hist[hist.length-1];
-            const elapsedMs2 = (B2.t - A2.t);
-            const dMin2 = Math.max(0.5, elapsedMs2/60000);
-            const slope2 = (B2.mb - A2.mb) / dMin2;
-            const avg2 = hist.reduce((a,b)=>a+b.mb,0)/hist.length;
-            // Ajustado para novo limite de 800MB
-            slopeOK2 = (elapsedMs2 >= 120000) && (slope2 > 50) && (avg2 > 600);
-          }
-
-          if (!(allHigh2 || slopeOK2)) {
-            await issues.append(nome, 'ram_double_sample_clear', `skip=${ramMB2!=null?ramMB2:'n/a'}MB`);
-            logger.info('[BREAKER][RAM] double_sample_clear', { nome, sampleMB: ramMB2 });
-            continue;
-          }
-        } catch {}
-
-        // ctrl já foi obtido acima, reutilizar
-        if (ctrl && (ctrl.configurando === true || ctrl.humanControl === true)) continue;
-
-        if (killGuardActive(nome)) {
-          await issues.append(nome, 'guard_skip', 'Ação suprimida por kill_guard_until');
-          logger.info('[BREAKER][RAM] guard_skip', { nome });
-          continue;
-        }
-
-        logger.warn('[BREAKER][RAM] acionado', { nome, ramMB, allHigh, slopeOK });
-        await handlers.deactivate({ nome, reason:'ramKill', policy:'preserveDesired' });
-        setKillGuard(nome);
-        await reportAction(nome, 'chrome_memory_spike', `RAM breaker acionado (mb=${ramMB}, allHigh=${allHigh}, slopeOK=${slopeOK}) reloadsIn60s=${robeMeta[nome]?.reloadAttemptsWindow?.length||0}`);
-
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].ramKillHysteresisUntil = Date.now() + 180000;
-        robeMeta[nome].ramKilledAt = Date.now();
-      }
-    }
-  }
-
-  for (const nome of Object.keys(robeMeta)) {
-  }
-
-  await snapshotStatusAndWrite();
-
-  ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
 }
 
 function normalizePath(x) { return String(x||'').replace(/\\/g,'/'); }
