@@ -246,7 +246,9 @@ async function postPayload(url, payload) {
       throw err;
     }
     try { body = await resp.json(); } catch { body = { ok: true }; }
-    logger.info('[DASHBOARD] enviado com sucesso para ' + url);
+    if (process.env.DASHBOARD_DEBUG === '1') {
+      logger.info('[DASHBOARD] enviado com sucesso para ' + url);
+    }
     return body;
   } finally {
     clearTimeout(t);
