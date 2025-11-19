@@ -204,7 +204,8 @@ function notifyOpened(perfil, resultado = "ok") {
     if (state.maxSlots > state.maxEver) state.maxEver = state.maxSlots;
     cooldownPerAcc.delete(perfil); // Limpa cooldown ativo (robustez extra)
   } else {
-    const until = Date.now() + 15000;
+    // NOVO: Reduzido de 15s para 5s (reabertura quase imediata, mas ainda controlada)
+    const until = Date.now() + 5000;
     cooldownPerAcc.set(perfil, until); // SÓ aplica cooldown para este perfil
     state.maxSlots = Math.max(1, (state.maxSlots||1) -1);
     pushEvent({type:"abrir_err", perfil, maxSlots:state.maxSlots, cooldownUntil:until});

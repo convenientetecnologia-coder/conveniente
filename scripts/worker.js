@@ -782,8 +782,9 @@ async function activateOnce(nome, source = '') {
     const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
       robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].activationHeldUntil = Date.now() + 30000;
-      await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'}`);
+      // NOVO: Reduzido de 30s para 5s (supervisor já controla velocidade via cooldowns)
+      robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+      await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'}`); 
       return { ok:false, error: `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}` };
     }
     _supervisorSlotGranted = true;
@@ -901,8 +902,9 @@ async function activateOnce(nome, source = '') {
         try { await reportAction(nome, 'activate_failed', 'Falha ao abrir navegador: ' + (e && e.message)); } catch {}
         if (e && /ram_insuficiente_para_ativar|headroom_below_min_after_open/.test(String(e && e.message || e))) {
           robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].activationHeldUntil = Date.now() + 15000;
-          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 15s (activateOnce)'); } catch {}
+          // NOVO: Reduzido de 15s para 5s (supervisor já controla velocidade)
+          robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+          try { await reportAction(nome, 'mil_action', 'activation_hold_due_ram 5s (activateOnce)'); } catch {}
         }
         logger.error('[WORKER][activateOnce] fail', { nome, source, err: e && e.message || e }, e);
         if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
@@ -1780,7 +1782,8 @@ try {
       robeMeta[nome].reopenAt = now + ULTRA_RECOVERY.REOPEN_DELAY_SHORT_MS;
       robeMeta[nome].closingReason = 'disconnected';
       issues.append(nome, 'mil_action', 'nurse_reopen_scheduled(disconnected)').catch(()=>{});
-      setKillGuard(nome, 30000);
+      // NOVO: Reduzido de 30s para 5s (reabertura quase imediata, supervisor controla velocidade)
+      setKillGuard(nome, 5000);
     } else {
       issues.append(nome, 'mil_action', 'reopen_preserved_existing(disconnected)').catch(()=>{});
     }
