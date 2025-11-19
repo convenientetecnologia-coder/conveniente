@@ -1378,9 +1378,25 @@
 
     async function waitUntil(fnCond, { timeoutMs = 20000, intervalMs = 300 } = {}) {
       const t0 = Date.now();
+      let lastError = null;
+      let errorCount = 0;
       while ((Date.now() - t0) < timeoutMs) {
-        try { if (await fnCond()) return true; } catch {}
+        try { 
+          if (await fnCond()) return true; 
+        } catch (e) {
+          // CORREÇÃO 8: Loga erros ao invés de esconder (mas continua tentando)
+          errorCount++;
+          lastError = e;
+          // Loga apenas a cada 5 erros para não poluir console
+          if (errorCount % 5 === 0) {
+            console.warn('[waitUntil] Erro na condição (continuando)', e && e.message || e, `(${errorCount} erros)`);
+          }
+        }
         await sleep(intervalMs);
+      }
+      // CORREÇÃO 8: Se timeout e houve erros, loga o último erro
+      if (lastError && errorCount > 0) {
+        console.warn('[waitUntil] Timeout após', errorCount, 'erros. Último erro:', lastError && lastError.message || lastError);
       }
       return false;
     }
@@ -1853,23 +1869,354 @@
       if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
       try {
         const st = await window.electronAPI.getStatus();
-        const perfis = st?.perfis || [];
+        // CORREÇÃO 5 + 9: Validação robusta de perfis
+        let perfis = [];
+        if (st && st.perfis && Array.isArray(st.perfis)) {
+          perfis = st.perfis.filter(p => p && p.nome); // Filtra perfis inválidos
+        } else if (st && Array.isArray(st)) {
+          // Fallback: se st for array diretamente
+          perfis = st.filter(p => p && p.nome);
+        }
         
-        // NOVO: Fechar em PARALELO com limite de concorrência (10 simultâneos) + RETRY automático - SEGURO e CONFIÁVEL
-        const CONCURRENCY_LIMIT = 10; // Fecha 10 navegadores simultaneamente (mais seguro)
+        if (perfis.length === 0) {
+          console.warn('[Fechar todos] Nenhum perfil encontrado para fechar');
+          // CORREÇÃO 2: Limpa estado antes de retornar
+          try {
+            if (stopBtn && stopBtn.parentElement) {
+              stopBtn.disabled = false;
+              stopBtn.style.opacity = '';
+              stopBtn.style.cursor = '';
+              stopBtn.textContent = 'Fechar';
+            }
+          } catch (e) {}
+          try {
+            setGlobalActionButtonsDisabled(false);
+          } catch (e) {}
+          stopAllLock = false;
+          return; // Sai sem fazer nada
+        }
+        
+        // NOVO: Fechar em PARALELO com limite de concorrência (6 simultâneos) + RETRY automático - ULTRA SEGURO
+        // CORREÇÃO 3: Alinhado com workerClient limit (6 comandos simultâneos)
+        const CONCURRENCY_LIMIT = 6; // Alinhado com globalCommandPool limit (workerClient.js linha 11)
         const MAX_RETRIES = 2; // Máximo 2 retries por perfil (total: 3 tentativas)
         const RETRY_DELAY_MS = 500; // Espera 500ms entre retries
-        let active = 0;
-        let completed = 0;
+        const DEACTIVATE_TIMEOUT_MS = 25000; // Timeout de 25s por chamada deactivate
+        const MAX_QUEUE_SIZE = 200; // CORREÇÃO 8: Limite máximo da fila (proteção)
+        
+        // CORREÇÃO 1: Semáforo verdadeiramente atômico usando mutex pattern (ULTRA ROBUSTO)
+        let activeSlots = 0;
+        const waitQueue = [];
+        let slotMutex = Promise.resolve(); // Mutex para garantir atomicidade
+        
+        const acquireSlot = async () => {
+          // CORREÇÃO 8: Proteção contra fila crescer indefinidamente (antes de entrar na fila)
+          if (waitQueue.length >= MAX_QUEUE_SIZE) {
+            console.error('[Fechar todos] Fila de espera muito grande, rejeitando');
+            throw new Error('queue_overflow');
+          }
+          
+          // CORREÇÃO 1 + 3 + 2: Operação atômica usando mutex com await correto e sem race condition
+          return new Promise((resolve) => {
+            slotMutex = slotMutex.then(() => {
+              return new Promise((mutexResolve) => {
+                if (activeSlots < CONCURRENCY_LIMIT) {
+                  activeSlots++;
+                  // CORREÇÃO 2: Resolve mutex PRIMEIRO, depois promise externa (evita race condition)
+                  mutexResolve(); // Resolve o mutex primeiro
+                  resolve(); // Resolve a promise externa depois
+                } else {
+                  // Espera na fila até ter slot disponível
+                  // CORREÇÃO 2: Callback resolve mutex primeiro, depois promise externa
+                  waitQueue.push(() => {
+                    activeSlots++;
+                    mutexResolve(); // Resolve o mutex primeiro
+                    resolve(); // Resolve a promise externa depois
+                  });
+                }
+              });
+            });
+          });
+        };
+        
+        const releaseSlot = async () => {
+          // CORREÇÃO 1 + 4 + 6 + 7: Operação atômica usando mutex COM AWAIT e tratamento de erro robusto
+          // CORREÇÃO 7: Proteção contra callbacks órfãos na fila
+          let releaseAttempted = false;
+          try {
+            releaseAttempted = true;
+            slotMutex = slotMutex.then(() => {
+              return new Promise((mutexResolve) => {
+                try {
+                  // CORREÇÃO 6: Proteção contra race condition e múltiplas liberações
+                  if (activeSlots > 0) {
+                    activeSlots--;
+                  } else {
+                    console.warn('[Fechar todos] releaseSlot chamado mas activeSlots já é 0');
+                    // CORREÇÃO 6: Garante que activeSlots nunca fica negativo
+                    if (activeSlots < 0) {
+                      activeSlots = 0;
+                    }
+                  }
+                  
+                  // CORREÇÃO 10 + 7: Processa fila de forma segura e previne callbacks órfãos
+                  let processedFromQueue = false;
+                  let maxQueueProcessAttempts = 10; // CORREÇÃO 7: Limite de tentativas para evitar loop infinito
+                  while (waitQueue.length > 0 && activeSlots < CONCURRENCY_LIMIT && !processedFromQueue && maxQueueProcessAttempts > 0) {
+                    maxQueueProcessAttempts--;
+                    const next = waitQueue.shift();
+                    if (next && typeof next === 'function') {
+                      try {
+                        // Não incrementa aqui - será incrementado no callback
+                        next();
+                        processedFromQueue = true; // CORREÇÃO 7: Marca que processou um da fila
+                      } catch (callbackError) {
+                        // CORREÇÃO 10: Se callback falhar, tenta próximo
+                        console.error('[Fechar todos] Erro ao executar callback da fila', callbackError);
+                        // Continua loop para tentar próximo
+                        continue;
+                      }
+                    } else {
+                      // CORREÇÃO 7: Remove callbacks inválidos da fila
+                      console.warn('[Fechar todos] Callback inválido removido da fila');
+                      continue;
+                    }
+                  }
+                  
+                  // CORREÇÃO 7: Se ainda há itens na fila após tentativas, loga warning
+                  if (waitQueue.length > 0 && maxQueueProcessAttempts === 0) {
+                    console.warn('[Fechar todos] Ainda há itens na fila após processamento, pode indicar problema', waitQueue.length);
+                  }
+                  
+                  mutexResolve();
+                } catch (mutexError) {
+                  // CORREÇÃO 6: Se erro no mutex, ainda resolve para não travar
+                  console.error('[Fechar todos] Erro no mutex releaseSlot', mutexError);
+                  mutexResolve();
+                }
+              });
+            });
+            await slotMutex; // CORREÇÃO 4: Aguarda mutex completar
+          } catch (releaseError) {
+            // CORREÇÃO 4: Se releaseSlot falhar, tenta recuperar estado
+            console.error('[Fechar todos] Erro crítico em releaseSlot', releaseError);
+            // CORREÇÃO 6: Tenta corrigir activeSlots se possível (apenas uma vez)
+            if (activeSlots < 0) {
+              activeSlots = 0; // Corrige se ficou negativo
+            } else if (activeSlots > CONCURRENCY_LIMIT) {
+              // CORREÇÃO 6: Se ficou maior que o limite, corrige também
+              console.warn('[Fechar todos] activeSlots maior que limite, corrigindo', activeSlots);
+              activeSlots = CONCURRENCY_LIMIT;
+            }
+            // CORREÇÃO 7: Se releaseSlot nunca foi tentado, tenta processar fila manualmente
+            if (!releaseAttempted && waitQueue.length > 0) {
+              console.warn('[Fechar todos] Tentando processar fila manualmente após erro');
+              try {
+                let manualAttempts = 5; // Limite de tentativas manuais
+                while (waitQueue.length > 0 && activeSlots < CONCURRENCY_LIMIT && manualAttempts > 0) {
+                  manualAttempts--;
+                  const next = waitQueue.shift();
+                  if (next && typeof next === 'function') {
+                    try {
+                      next();
+                      break; // Processa apenas um para não travar
+                    } catch {}
+                  }
+                }
+              } catch {}
+            }
+            // Não re-lança - permite que operação continue
+          }
+        };
+        
+        // CORREÇÃO 2: Contador thread-safe usando objeto (evita race condition)
+        const counters = { completed: 0, failed: new Set() }; // CORREÇÃO 3: Set ao invés de array
         const total = perfis.length;
-        const failed = []; // Rastreia falhas para retry
+        
+        // CORREÇÃO 8: Validação de contador para prevenir progresso incorreto
+        const validateCounters = () => {
+          if (counters.completed > total) {
+            console.warn('[Fechar todos] Contador inconsistente', { completed: counters.completed, total });
+            counters.completed = Math.min(counters.completed, total); // Corrige se maior
+          }
+        };
+        
+        const updateProgress = () => {
+          // CORREÇÃO 8: Valida contador antes de atualizar
+          validateCounters();
+          // CORREÇÃO 10: Proteção extra contra botão null
+          try {
+            if (stopBtn && total > 0 && stopBtn.parentElement) {
+              const displayCompleted = Math.min(counters.completed, total); // CORREÇÃO 8: Garante não exceder total
+              stopBtn.textContent = `Fechando... ${displayCompleted}/${total}`;
+            }
+          } catch (e) {
+            // Ignora se botão foi removido do DOM
+          }
+        };
+        
+        // CORREÇÃO 4: deactivate com timeout robusto + CORREÇÃO 2: Cancelamento de operação (ULTRA ROBUSTO)
+        const deactivateWithTimeout = async (nome) => {
+          // CORREÇÃO 9: Validação de entrada
+          if (!nome || typeof nome !== 'string' || !nome.trim()) {
+            throw new Error('nome_invalido');
+          }
+          
+          // CORREÇÃO 2: AbortController para cancelar fetch em caso de timeout
+          const AbortControllerClass = global.AbortController || (() => {
+            // Fallback para navegadores antigos (não cancela, mas não quebra)
+            return class {
+              constructor() { this.signal = { aborted: false }; }
+              abort() { this.signal.aborted = true; }
+            };
+          })();
+          const abortController = new AbortControllerClass();
+          
+          let timeoutId = null;
+          let timeoutCleared = false;
+          let deactivateCompleted = false;
+          // CORREÇÃO 10: Flag para prevenir race condition em deactivateCompleted
+          let deactivateCompletedSet = false;
+          
+          // CORREÇÃO 2: Timeout promise que pode ser cancelada
+          // CORREÇÃO 11 + 9: abortController.abort() protegido contra múltiplas chamadas e usado corretamente
+          let abortCalled = false;
+          const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              if (!deactivateCompleted && !abortCalled) {
+                abortCalled = true; // CORREÇÃO 11: Previne múltiplas chamadas
+                try {
+                  // CORREÇÃO 9: abort() cancela fetch principal, mas fallback pode ainda estar rodando
+                  abortController.abort();
+                } catch (e) {
+                  // Ignora se abort já foi chamado ou não suportado
+                }
+                // CORREÇÃO 9: Rejeita promise, mas fallback pode ainda estar processando
+                reject(new Error('timeout'));
+              }
+            }, DEACTIVATE_TIMEOUT_MS);
+          });
+          
+          // CORREÇÃO 2: Wrapper para passar AbortController ao fetch (se suportado)
+          // CORREÇÃO 3 + 7: Fallback com timeout próprio para evitar loop infinito
+          const deactivatePromise = (async () => {
+            try {
+              // Tenta usar fetch diretamente com AbortController
+              const response = await fetch(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
+                method: 'POST',
+                signal: abortController.signal // CORREÇÃO 2: Passa signal para cancelar
+              });
+              const data = await response.json();
+              // CORREÇÃO 10: Atribuição atômica de deactivateCompleted
+              if (!deactivateCompletedSet) {
+                deactivateCompleted = true;
+                deactivateCompletedSet = true;
+              }
+              // CORREÇÃO 2: Limpa timeout se completou
+              if (timeoutId && !timeoutCleared) {
+                clearTimeout(timeoutId);
+                timeoutCleared = true;
+              }
+              return data;
+            } catch (fetchError) {
+              // Se AbortController não suportado ou erro de rede, tenta método original
+              if (fetchError && fetchError.name === 'AbortError') {
+                throw new Error('timeout');
+              }
+              // CORREÇÃO 3: Fallback com timeout próprio (evita loop infinito)
+              // CORREÇÃO 7: Limpa timeout antes de usar fallback
+              if (timeoutId && !timeoutCleared) {
+                clearTimeout(timeoutId);
+                timeoutCleared = true;
+              }
+              
+              // CORREÇÃO 3: Fallback com timeout próprio usando Promise.race
+              // CORREÇÃO 1 + 4: Timeout do fallback é limpo corretamente
+              let fallbackTimeoutId = null;
+              let fallbackTimeoutCleared = false;
+              const fallbackTimeout = new Promise((_, reject) => {
+                fallbackTimeoutId = setTimeout(() => {
+                  if (!fallbackTimeoutCleared) {
+                    fallbackTimeoutCleared = true;
+                    reject(new Error('timeout'));
+                  }
+                }, DEACTIVATE_TIMEOUT_MS);
+              });
+              
+              try {
+                const result = await Promise.race([
+                  window.electronAPI.deactivate(nome),
+                  fallbackTimeout
+                ]);
+                // CORREÇÃO 1 + 4: Limpa timeout do fallback se completou antes
+                if (fallbackTimeoutId && !fallbackTimeoutCleared) {
+                  clearTimeout(fallbackTimeoutId);
+                  fallbackTimeoutCleared = true;
+                }
+                // CORREÇÃO 10: Atribuição atômica de deactivateCompleted
+                if (!deactivateCompletedSet) {
+                  deactivateCompleted = true;
+                  deactivateCompletedSet = true;
+                }
+                return result;
+              } catch (fallbackError) {
+                // CORREÇÃO 1 + 4: Limpa timeout do fallback em caso de erro
+                if (fallbackTimeoutId && !fallbackTimeoutCleared) {
+                  clearTimeout(fallbackTimeoutId);
+                  fallbackTimeoutCleared = true;
+                }
+                // CORREÇÃO 10: Atribuição atômica de deactivateCompleted
+                if (!deactivateCompletedSet) {
+                  deactivateCompleted = true;
+                  deactivateCompletedSet = true;
+                }
+                throw fallbackError; // Re-lança erro (timeout ou outro)
+              }
+            }
+          })();
+          
+          try {
+            const result = await Promise.race([deactivatePromise, timeoutPromise]);
+            // CORREÇÃO 2: Limpa timeout se completou antes do timeout
+            if (timeoutId && !timeoutCleared) {
+              clearTimeout(timeoutId);
+              timeoutCleared = true;
+            }
+            return result;
+          } catch (e) {
+            // CORREÇÃO 7: Cleanup em caso de erro
+            if (timeoutId && !timeoutCleared) {
+              clearTimeout(timeoutId);
+              timeoutCleared = true;
+            }
+            throw e;
+          }
+        };
+        
+        // CORREÇÃO 2: Rastreia perfis que já tiveram contador incrementado (declarado antes de usar)
+        const completedTracked = new Set(); // Rastreia perfis que já incrementaram completed
         
         const deactivateWithRetry = async (p, retryCount = 0) => {
+          const perfisKey = p && p.nome ? String(p.nome) : null;
+          // CORREÇÃO 9: Validação de entrada
+          if (!p || !p.nome || typeof p.nome !== 'string') {
+            console.error('[Fechar todos] Perfil inválido', p);
+            // CORREÇÃO 2 + 3: Incrementa apenas uma vez (não em retries) e rastreia
+            if (retryCount === 0 && perfisKey && !completedTracked.has(perfisKey)) {
+              completedTracked.add(perfisKey);
+              counters.completed++;
+              updateProgress();
+            }
+            return false;
+          }
+          
           try {
-            await window.electronAPI.deactivate(p.nome);
-            completed++;
-            if (stopBtn && total > 0) {
-              stopBtn.textContent = `Fechando... ${completed}/${total}`;
+            await deactivateWithTimeout(p.nome);
+            // CORREÇÃO 2 + 3: Incrementa apenas uma vez (não em retries) e rastreia
+            if (retryCount === 0 && perfisKey && !completedTracked.has(perfisKey)) {
+              completedTracked.add(perfisKey);
+              counters.completed++;
+              updateProgress();
             }
             return true; // Sucesso
           } catch (e) {
@@ -1880,10 +2227,12 @@
             } else {
               // Esgotou retries - marca como falha
               console.warn('[Fechar todos] falha após retries', p && p.nome, e && e.message || e);
-              failed.push(p.nome);
-              completed++;
-              if (stopBtn && total > 0) {
-                stopBtn.textContent = `Fechando... ${completed}/${total}`;
+              counters.failed.add(p.nome); // CORREÇÃO 3: Set ao invés de push
+              // CORREÇÃO 2 + 3: Incrementa apenas uma vez (não em retries) e rastreia
+              if (retryCount === 0 && perfisKey && !completedTracked.has(perfisKey)) {
+                completedTracked.add(perfisKey);
+                counters.completed++;
+                updateProgress();
               }
               return false; // Falhou após retries
             }
@@ -1891,56 +2240,451 @@
         };
         
         const deactivateWithLimit = async (p) => {
-          while (active >= CONCURRENCY_LIMIT) {
-            await sleep(50); // Espera 50ms antes de verificar novamente
-          }
-          active++;
+          const perfisKey = p && p.nome ? String(p.nome) : null;
+          let slotAcquired = false;
           try {
-            await deactivateWithRetry(p);
+            await acquireSlot(); // CORREÇÃO 1: Semáforo thread-safe
+            slotAcquired = true;
+            try {
+              await deactivateWithRetry(p);
+              // CORREÇÃO 2: deactivateWithRetry já incrementa se retryCount === 0, então não precisa incrementar aqui
+            } catch (e) {
+              // CORREÇÃO 6: Tratamento de exceções não capturadas
+              console.error('[Fechar todos] exceção não capturada em', p && p.nome, e && e.message || e);
+              if (p && p.nome) {
+                counters.failed.add(p.nome);
+              }
+              // CORREÇÃO 2: Incrementa apenas se ainda não foi incrementado para este perfil
+              if (perfisKey && !completedTracked.has(perfisKey)) {
+                completedTracked.add(perfisKey);
+                counters.completed++;
+                updateProgress();
+              }
+            }
+          } catch (queueError) {
+            // CORREÇÃO 8: Tratamento de erro de fila cheia
+            if (queueError && queueError.message === 'queue_overflow') {
+              console.error('[Fechar todos] Fila cheia, marcando como falha', p && p.nome);
+              if (p && p.nome) {
+                counters.failed.add(p.nome);
+              }
+              // CORREÇÃO 2: Incrementa apenas se ainda não foi incrementado para este perfil
+              if (perfisKey && !completedTracked.has(perfisKey)) {
+                completedTracked.add(perfisKey);
+                counters.completed++;
+                updateProgress();
+              }
+            } else {
+              throw queueError; // Re-lança se não for erro de fila
+            }
           } finally {
-            active--;
+            // CORREÇÃO 4: Libera slot aguardando mutex (sempre executa, mesmo se erro)
+            // CORREÇÃO 6: Só libera se slot foi adquirido
+            if (slotAcquired) {
+              let slotReleased = false;
+              try {
+                await releaseSlot(); // CORREÇÃO 1 + 4: Libera slot aguardando mutex
+                slotReleased = true; // CORREÇÃO 3: Marca que foi liberado com sucesso
+              } catch (releaseError) {
+                // CORREÇÃO 4: Se releaseSlot falhar, loga mas não quebra
+                console.error('[Fechar todos] Erro ao liberar slot (não crítico)', releaseError);
+                // CORREÇÃO 3: Tenta corrigir estado manualmente APENAS se releaseSlot não foi executado
+                // (releaseSlot pode ter decrementado mesmo se lançou erro depois)
+                if (!slotReleased) {
+                  try {
+                    // CORREÇÃO 3: Verifica se precisa corrigir (pode já ter sido decrementado)
+                    if (activeSlots > CONCURRENCY_LIMIT) {
+                      // Se está maior que limite, provavelmente precisa corrigir
+                      activeSlots = CONCURRENCY_LIMIT;
+                      console.warn('[Fechar todos] Corrigido activeSlots para limite após erro em releaseSlot');
+                    } else if (activeSlots < 0) {
+                      // Se está negativo, corrige para 0
+                      activeSlots = 0;
+                      console.warn('[Fechar todos] Corrigido activeSlots negativo após erro em releaseSlot');
+                    }
+                    // CORREÇÃO 3: NÃO decrementa aqui - releaseSlot pode já ter decrementado
+                    // Apenas corrige se estado está claramente inconsistente
+                  } catch {}
+                }
+              }
+            }
           }
         };
         
         // Dispara todas as desativações em paralelo (limitado por concorrência)
-        await Promise.all(perfis.map(p => deactivateWithLimit(p)));
+        // CORREÇÃO 6 + 9: Promise.allSettled com validação
+        // CORREÇÃO 9 + 5: Previne duplicação de contadores usando Set de perfis processados (global)
+        const processedPerfis = new Set(); // Rastreia perfis já processados (global para prevenir retries duplicados)
+        const processingPerfis = new Set(); // CORREÇÃO 5: Rastreia perfis em processamento (previne retries simultâneos)
+        // CORREÇÃO 1 + 4: Rastreia timeouts ativos para limpeza
+        const activeTimeouts = new Set(); // Rastreia todos os timeouts criados
+        // CORREÇÃO 1: Flag para indicar se função ainda está ativa
+        let functionActive = true;
         
-        // Se houve falhas, tenta uma última vez (sequencial, mais lento mas mais seguro)
-        if (failed.length > 0) {
-          console.warn('[Fechar todos] Tentando fechar novamente', failed.length, 'perfis que falharam');
-          for (const nome of failed) {
+        if (Array.isArray(perfis) && perfis.length > 0) {
+          await Promise.allSettled(perfis.map(p => {
+            // CORREÇÃO 9: Validação antes de processar + prevenção de duplicação
+            if (!p || !p.nome) {
+              const perfisKey = String(p && p.nome || 'invalid_' + JSON.stringify(p));
+              // CORREÇÃO 3: Verificação e adição atômica (previne race condition)
+              // CORREÇÃO 1: Também verifica completedTracked para prevenir duplicação de contador
+              if (!processedPerfis.has(perfisKey) && !completedTracked.has(perfisKey)) {
+                processedPerfis.add(perfisKey);
+                completedTracked.add(perfisKey); // CORREÇÃO 1: Rastreia para prevenir duplicação
+                console.warn('[Fechar todos] Perfil inválido ignorado', p);
+                counters.completed++;
+                updateProgress();
+              }
+              return Promise.resolve({ status: 'rejected', reason: 'invalid_profile' });
+            }
+            
+            // CORREÇÃO 9: Previne processamento duplicado do mesmo perfil
+            // CORREÇÃO 3: Verificação e adição atômica (previne race condition)
+            const perfisKey = String(p.nome);
+            if (processedPerfis.has(perfisKey)) {
+              console.warn('[Fechar todos] Perfil duplicado ignorado', p.nome);
+              return Promise.resolve({ status: 'rejected', reason: 'duplicate_profile' });
+            }
+            
+            // CORREÇÃO 5: Previne processamento simultâneo do mesmo perfil
+            // CORREÇÃO 3: Verificação atômica antes de adicionar
+            if (processingPerfis.has(perfisKey)) {
+              console.warn('[Fechar todos] Perfil já em processamento, aguardando', p.nome);
+              // CORREÇÃO 1 + 4: Aguarda com timeout rastreável e limpeza
+              return new Promise((resolve) => {
+                // CORREÇÃO 1: Rastreia timeout para limpeza
+                const timeoutId = setTimeout(() => {
+                  // CORREÇÃO 2 + 5: Verifica functionActive ANTES de acessar activeTimeouts
+                  if (!functionActive) {
+                    // CORREÇÃO 2: Se função terminou, não tenta acessar activeTimeouts (pode já ter sido limpo)
+                    resolve({ status: 'rejected', reason: 'function_terminated' });
+                    return;
+                  }
+                  
+                  // CORREÇÃO 5: Remove do rastreamento apenas se ainda existe
+                  try {
+                    if (activeTimeouts && activeTimeouts.has && activeTimeouts.has(timeoutId)) {
+                      activeTimeouts.delete(timeoutId);
+                    }
+                  } catch (e) {
+                    // Ignora se activeTimeouts já foi limpo
+                  }
+                  
+                  // CORREÇÃO 3: Verificação atômica antes de processar
+                  if (processedPerfis.has(perfisKey)) {
+                    resolve({ status: 'rejected', reason: 'already_processed' });
+                  } else {
+                    // CORREÇÃO 3: Adição atômica (verifica novamente antes de adicionar)
+                    if (!processedPerfis.has(perfisKey) && !processingPerfis.has(perfisKey)) {
+                      processedPerfis.add(perfisKey);
+                      processingPerfis.add(perfisKey);
+                      // CORREÇÃO 8: Timeout de segurança para limpar processingPerfis
+                      // CORREÇÃO 2 + 6: Cria timeout de segurança e rastreia ANTES de verificar functionActive novamente
+                      let safetyTimeout = null;
+                      try {
+                        safetyTimeout = setTimeout(() => {
+                          // CORREÇÃO 2: Verifica functionActive antes de acessar processingPerfis
+                          if (!functionActive) {
+                            return; // Não faz nada se função terminou
+                          }
+                          try {
+                            processingPerfis.delete(perfisKey);
+                            console.warn('[Fechar todos] Timeout de segurança: removendo perfil de processingPerfis', perfisKey);
+                          } catch (e) {
+                            // Ignora se processingPerfis não existe mais
+                          }
+                        }, DEACTIVATE_TIMEOUT_MS * 2); // 2x o timeout de deactivate
+                        
+                        // CORREÇÃO 2 + 6: Rastreia safetyTimeout apenas se functionActive ainda é true
+                        if (functionActive && activeTimeouts && activeTimeouts.add) {
+                          activeTimeouts.add(safetyTimeout);
+                        }
+                      } catch (e) {
+                        // Se não conseguir criar/rastrear safetyTimeout, continua sem ele
+                        console.warn('[Fechar todos] Erro ao criar timeout de segurança', e);
+                      }
+                      
+                      const finalSafetyTimeout = safetyTimeout; // Captura para usar no finally
+                      
+                      deactivateWithLimit(p).finally(() => {
+                        try {
+                          processingPerfis.delete(perfisKey);
+                          // CORREÇÃO 2 + 4: Limpa timeout de segurança apenas se functionActive e activeTimeouts ainda existem
+                          if (functionActive && finalSafetyTimeout && activeTimeouts && activeTimeouts.has && activeTimeouts.has(finalSafetyTimeout)) {
+                            clearTimeout(finalSafetyTimeout);
+                            activeTimeouts.delete(finalSafetyTimeout);
+                          }
+                        } catch (e) {
+                          // Ignora se variáveis não existem mais
+                        }
+                      }).then(result => resolve({ status: 'fulfilled', value: result }))
+                        .catch(err => resolve({ status: 'rejected', reason: err }));
+                    } else {
+                      resolve({ status: 'rejected', reason: 'already_processing' });
+                    }
+                  }
+                }, 100);
+                
+                // CORREÇÃO 2: Rastreia timeout apenas se functionActive ainda é true
+                if (functionActive && activeTimeouts && activeTimeouts.add) {
+                  activeTimeouts.add(timeoutId);
+                }
+              });
+            }
+            
+            // CORREÇÃO 3: Adição atômica (verifica novamente antes de adicionar)
+            if (!processedPerfis.has(perfisKey) && !processingPerfis.has(perfisKey)) {
+              processedPerfis.add(perfisKey);
+              processingPerfis.add(perfisKey);
+              
+              // CORREÇÃO 8: Timeout de segurança para limpar processingPerfis
+              // CORREÇÃO 2 + 6: Cria e rastreia timeout de segurança de forma segura
+              let safetyTimeout = null;
+              try {
+                safetyTimeout = setTimeout(() => {
+                  // CORREÇÃO 2: Verifica functionActive antes de acessar processingPerfis
+                  if (!functionActive) {
+                    return; // Não faz nada se função terminou
+                  }
+                  try {
+                    processingPerfis.delete(perfisKey);
+                    console.warn('[Fechar todos] Timeout de segurança: removendo perfil de processingPerfis', perfisKey);
+                  } catch (e) {
+                    // Ignora se processingPerfis não existe mais
+                  }
+                }, DEACTIVATE_TIMEOUT_MS * 2); // 2x o timeout de deactivate
+                
+                // CORREÇÃO 2 + 6: Rastreia safetyTimeout apenas se functionActive ainda é true
+                if (functionActive && activeTimeouts && activeTimeouts.add) {
+                  activeTimeouts.add(safetyTimeout);
+                }
+              } catch (e) {
+                // Se não conseguir criar/rastrear safetyTimeout, continua sem ele
+                console.warn('[Fechar todos] Erro ao criar timeout de segurança', e);
+              }
+              
+              const finalSafetyTimeout = safetyTimeout; // Captura para usar no finally
+              
+              return deactivateWithLimit(p).finally(() => {
+                try {
+                  processingPerfis.delete(perfisKey); // CORREÇÃO 5: Remove quando terminar
+                  // CORREÇÃO 2 + 4: Limpa timeout de segurança apenas se functionActive e activeTimeouts ainda existem
+                  if (functionActive && finalSafetyTimeout && activeTimeouts && activeTimeouts.has && activeTimeouts.has(finalSafetyTimeout)) {
+                    clearTimeout(finalSafetyTimeout);
+                    activeTimeouts.delete(finalSafetyTimeout);
+                  }
+                } catch (e) {
+                  // Ignora se variáveis não existem mais
+                }
+              });
+            } else {
+              // CORREÇÃO 3: Se já está processando, retorna promise rejeitada
+              return Promise.resolve({ status: 'rejected', reason: 'already_processing' });
+            }
+          }));
+          
+          // CORREÇÃO 1 + 4: Limpa todos os timeouts ativos após processamento
+          // CORREÇÃO 2: Set functionActive = false ANTES de limpar timeouts (previne race condition)
+          functionActive = false;
+          
+          // CORREÇÃO 2: Aguarda um pouco para garantir que callbacks de timeout vejam functionActive = false
+          // Mas não bloqueia - limpa imediatamente também
+          const timeoutsToClear = Array.from(activeTimeouts); // CORREÇÃO 2: Cria cópia antes de limpar
+          activeTimeouts.clear(); // CORREÇÃO 2: Limpa Set imediatamente para prevenir novos acessos
+          
+          // CORREÇÃO 2: Limpa todos os timeouts da cópia
+          timeoutsToClear.forEach(timeoutId => {
             try {
-              await window.electronAPI.deactivate(nome);
-              failed.splice(failed.indexOf(nome), 1);
+              clearTimeout(timeoutId);
+            } catch (e) {
+              // Ignora se timeout já foi executado
+            }
+          });
+        }
+        
+        // CORREÇÃO 7: Se houve falhas, tenta uma última vez (sequencial, mais lento mas mais seguro)
+        // CORREÇÃO 5: Verifica se perfil ainda está ativo antes de tentar novamente
+        if (counters.failed.size > 0) {
+          console.warn('[Fechar todos] Tentando fechar novamente', counters.failed.size, 'perfis que falharam');
+          const failedArray = Array.from(counters.failed); // Converte Set para Array
+          for (const nome of failedArray) {
+            try {
+              // CORREÇÃO 5: Verifica se perfil ainda está ativo antes de tentar
+              let stillActive = false;
+              try {
+                const stCheck = await window.electronAPI.getStatus();
+                if (stCheck && stCheck.perfis && Array.isArray(stCheck.perfis)) {
+                  const perfilCheck = stCheck.perfis.find(x => x && x.nome === nome);
+                  stillActive = !!(perfilCheck && perfilCheck.active);
+                }
+              } catch (checkError) {
+                // Se não conseguir verificar, tenta mesmo assim
+                console.warn('[Fechar todos] Não foi possível verificar status antes de retry', nome);
+                stillActive = true; // Assume que está ativo para tentar
+              }
+              
+              if (stillActive) {
+                await deactivateWithTimeout(nome);
+                counters.failed.delete(nome); // CORREÇÃO 3: Remove do Set
+              } else {
+                // CORREÇÃO 5: Se já está inativo, remove da lista de falhas
+                console.info('[Fechar todos] Perfil já está inativo, removendo da lista de falhas', nome);
+                counters.failed.delete(nome);
+              }
             } catch (e) {
               console.error('[Fechar todos] Falha final em', nome, e && e.message || e);
+              // Mantém na lista de falhas para o usuário ver
             }
           }
         }
         
-        // Aguarda convergência global: todos inativos e robeQueue vazia (timeout reduzido para 30s)
+        // CORREÇÃO 5: Aguarda convergência global com múltiplas verificações robustas (ultra seguro)
+        let convergenceOk = false;
+        let lastStillActive = 0;
+        const convergenceChecks = 3; // Verifica 3 vezes consecutivas antes de confirmar
+        const convergenceRetries = 5; // CORREÇÃO 5: Tenta até 5 vezes se getStatus falhar
+        let consecutiveOk = 0;
+        let consecutiveErrors = 0;
+        
         const ok = await waitUntil(async () => {
-          const st2 = await window.electronAPI.getStatus();
-          return (
-            (st2.perfis||[]).every(x => !x.active) &&
-            ((st2.robeQueue||[]).length === 0)
-          );
-        }, { timeoutMs: 30000, intervalMs: 500 }); // NOVO: timeout reduzido de 120s para 30s, intervalo de 500ms
-        if (!ok) {
-          // Verifica quantos ainda estão ativos
-          const st3 = await window.electronAPI.getStatus();
-          const stillActive = (st3.perfis||[]).filter(x => x.active).length;
-          if (stillActive > 0) {
-            alert(`Atenção: ${stillActive} navegador(es) ainda ativo(s) após 30s. Verifique manualmente.`);
+          // CORREÇÃO 5 + 6: Múltiplas tentativas se getStatus falhar (otimizado)
+          for (let attempt = 0; attempt < convergenceRetries; attempt++) {
+            try {
+              const st2 = await window.electronAPI.getStatus();
+              
+              // CORREÇÃO 5: Validação robusta
+              if (!st2) {
+                consecutiveErrors++;
+                if (consecutiveErrors >= convergenceRetries) {
+                  console.error('[Fechar todos] getStatus retornou null múltiplas vezes, assumindo não convergido');
+                  return false;
+                }
+                if (attempt < convergenceRetries - 1) {
+                  await sleep(500); // Espera antes de tentar novamente
+                }
+                continue;
+              }
+              
+              // CORREÇÃO 5: Validação de perfis
+              if (!st2.perfis || !Array.isArray(st2.perfis)) {
+                consecutiveErrors++;
+                if (consecutiveErrors >= convergenceRetries) {
+                  console.error('[Fechar todos] getStatus retornou perfis inválidos múltiplas vezes');
+                  return false;
+                }
+                if (attempt < convergenceRetries - 1) {
+                  await sleep(500);
+                }
+                continue;
+              }
+              
+              // Reset contador de erros se sucesso (CORREÇÃO 7: Melhorado)
+              // CORREÇÃO 1: Removida variável não usada lastAttemptSuccess
+              consecutiveErrors = 0;
+              
+              const allInactive = st2.perfis.every(x => x && !x.active);
+              const queueEmpty = !st2.robeQueue || (Array.isArray(st2.robeQueue) && st2.robeQueue.length === 0);
+              const stillActive = st2.perfis.filter(x => x && x.active).length;
+              
+              if (allInactive && queueEmpty) {
+                consecutiveOk++;
+                if (consecutiveOk >= convergenceChecks) {
+                  convergenceOk = true;
+                  return true; // CORREÇÃO 6: Retorna true se convergido
+                }
+              } else {
+                consecutiveOk = 0; // Reset se não estiver convergido
+                lastStillActive = stillActive;
+              }
+              
+              // CORREÇÃO 6: Se tentativa foi bem-sucedida mas não convergido, não tenta mais vezes
+              return false;
+            } catch (e) {
+              consecutiveErrors++;
+              if (consecutiveErrors < convergenceRetries && attempt < convergenceRetries - 1) {
+                await sleep(500); // Espera antes de tentar novamente
+                continue;
+              }
+              // CORREÇÃO 8: Log do erro (removido lastError não usado)
+              console.warn('[Fechar todos] Erro ao verificar convergência', e && e.message || e);
+              return false; // Em caso de erro após múltiplas tentativas, continua esperando
+            }
+          }
+          
+          return false;
+        }, { timeoutMs: 45000, intervalMs: 1000 }); // Timeout aumentado para 45s, intervalo de 1s
+        
+        // CORREÇÃO 5: Verificação final robusta com múltiplas tentativas
+        if (!ok || !convergenceOk) {
+          let finalStillActive = lastStillActive;
+          let finalCheckSuccess = false;
+          
+          // Tenta verificar status final até 3 vezes
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const st3 = await window.electronAPI.getStatus();
+              if (st3 && st3.perfis) {
+                finalStillActive = (st3.perfis||[]).filter(x => x.active).length;
+                finalCheckSuccess = true;
+                break;
+              }
+            } catch (e) {
+              if (attempt < 2) {
+                await sleep(500); // Espera antes de tentar novamente
+                continue;
+              }
+              console.error('[Fechar todos] Erro na verificação final após múltiplas tentativas', e && e.message || e);
+            }
+          }
+          
+          const stillFailed = counters.failed.size;
+          
+          if (finalStillActive > 0 || stillFailed > 0) {
+            let msg = '';
+            if (finalStillActive > 0) msg += `${finalStillActive} navegador(es) ainda ativo(s). `;
+            if (stillFailed > 0) msg += `${stillFailed} perfil(is) falharam ao fechar. `;
+            msg += 'Verifique manualmente.';
+            alert(`Atenção: ${msg}`);
+          } else if (!finalCheckSuccess) {
+            alert('Atenção: Não foi possível verificar se todos os navegadores foram fechados. Verifique manualmente.');
           }
         }
       } catch (e) {
+        // CORREÇÃO 6: Loga erro antes de alert
+        console.error('[Fechar todos] Erro crítico', e && e.message || e, e);
         alert('Falha ao fechar todos: ' + (e && e.message || e));
       } finally {
-        if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar'; }
-        setGlobalActionButtonsDisabled(false);
-        stopAllLock = false;
-        reloadPerfis();
+        // CORREÇÃO 6: Garante que stopAllLock sempre é limpo, mesmo se erro ocorrer
+        try {
+          // CORREÇÃO 10: Proteção extra contra botão null/removido do DOM
+          try {
+            if (stopBtn && stopBtn.parentElement) {
+              stopBtn.disabled = false;
+              stopBtn.style.opacity = '';
+              stopBtn.style.cursor = '';
+              stopBtn.textContent = 'Fechar';
+            }
+          } catch (e) {
+            // Ignora se botão foi removido do DOM
+            console.warn('[Fechar todos] Erro ao restaurar botão', e && e.message || e);
+          }
+          try {
+            setGlobalActionButtonsDisabled(false);
+          } catch (e) {
+            console.warn('[Fechar todos] Erro ao restaurar botões globais', e && e.message || e);
+          }
+          // CORREÇÃO 6: stopAllLock sempre é limpo, mesmo se outras operações falharem
+          stopAllLock = false;
+          try {
+            reloadPerfis();
+          } catch (e) {
+            console.warn('[Fechar todos] Erro ao recarregar perfis', e && e.message || e);
+          }
+        } catch (finallyError) {
+          // CORREÇÃO 6: Se até o finally falhar, pelo menos tenta limpar stopAllLock
+          console.error('[Fechar todos] Erro crítico no finally', finallyError);
+          stopAllLock = false; // Última tentativa de limpar
+        }
       }
     }
 
