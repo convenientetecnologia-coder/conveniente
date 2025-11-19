@@ -259,13 +259,14 @@ function getCoords(cidade) {
 }
 
 /**
- * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos:
- * - Linux: MemAvailable em /proc/meminfo
- * - Windows: FreePhysicalMemory no Win32_OperatingSystem (via WMI, Get-CimInstance)
- * - Fallback: os.freemem()
+ * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos.
  *
- * OBS: Mantemos WMI no Windows para máxima precisão/compatibilidade com o restante
- * do sistema, mas SEM exagerar na frequência de chamadas a esta função.
+ * Objetivo principal: ser LEVE e ESTÁVEL em todos os hosts.
+ *
+ * - Linux: usa MemAvailable em /proc/meminfo (sem WMI, custo muito baixo).
+ * - Windows: usa diretamente os.freemem() (API nativa do kernel, sem WMI / PowerShell).
+ * - Opcionalmente, se USE_WMI_RAM=1 estiver setado no ambiente, ainda permite
+ *   um caminho WMI de alta precisão como fallback manual, mas desativado por padrão.
  */
 function getAvailableMB() {
   // Linux (via /proc/meminfo)
@@ -276,8 +277,15 @@ function getAvailableMB() {
       if (m) return Math.round(parseInt(m[1],10)/1024);
     } catch {}
   }
-  // Windows (via WMI / FreePhysicalMemory)
-  if (process.platform === 'win32') {
+
+  // Windows e demais plataformas: usa os.freemem() como fonte principal
+  try {
+    const mb = Math.round(os.freemem()/(1024*1024));
+    if (mb > 0) return mb;
+  } catch {}
+
+  // OPCIONAL: WMI como fallback explícito (desativado por padrão)
+  if (process.platform === 'win32' && process.env.USE_WMI_RAM === '1') {
     try {
       const out = execSync(
         'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"',
@@ -286,10 +294,11 @@ function getAvailableMB() {
       const kb = parseInt(out,10);
       if (!isNaN(kb)) return Math.round(kb/1024);
     } catch {
-      // Se WMI falhar por qualquer motivo, cai no fallback abaixo
+      // Se WMI falhar por qualquer motivo, cai no fallback final abaixo
     }
   }
-  // Fallback: Node.js standard (todas as plataformas, inclusive Windows)
+
+  // Fallback final extremamente defensivo
   try {
     return Math.round(os.freemem()/(1024*1024));
   } catch {
