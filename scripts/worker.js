@@ -1456,17 +1456,17 @@ function extractUserDataDir(cmd) {
 
 // Função para obter Private Working Set no Windows (evita duplicação de memória compartilhada)
 // REMOVIDO: WMI/PowerShell completamente (causava 20-30% CPU a cada 10 segundos)
-// Usa apenas pidusage (leve) com fator de correção 0.5 (baseado em testes - 0.6 foi o mais próximo, testando 0.5)
+// Usa apenas pidusage (leve) com fator de correção 0.55 (ponto médio entre 0.5 e 0.6)
 async function getPidPrivateWSBytes(pids) {
   if (!Array.isArray(pids) || pids.length === 0) return {};
 
   try {
     const out = await pidusage(pids);
     const ret = {};
-    // Windows: pidusage -> Working Set (aprox). Private WS ~ 0.5 * WS
-    // Fator ajustado: 0.5 (teste baseado em que 0.6 foi o mais próximo)
+    // Windows: pidusage -> Working Set (aprox). Private WS ~ 0.55 * WS
+    // Fator ajustado: 0.55 (ponto médio - 0.6 fica acima, 0.5 fica abaixo)
     // Linux/macOS: usa o valor direto (RSS/aprox).
-    const CF = (process.platform === 'win32') ? 0.5 : 1;
+    const CF = (process.platform === 'win32') ? 0.55 : 1;
     for (const pid of pids) {
       const st = out && out[pid];
       if (st && typeof st.memory === 'number') {
