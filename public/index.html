@@ -1862,6 +1862,12 @@
     // 4.4) Fechar todos em PARALELO com limite de concorrência (RÁPIDO e CONFIÁVEL)
     async function stopAllSequential() {
       if (stopAllLock) { alert('Fechamento em massa já está em andamento.'); return; }
+      if (startAllLock) { alertMassActionRunning(); return; }
+      stopAllLock = true;
+      setGlobalActionButtonsDisabled(true);
+      const stopBtn = document.getElementById('stopAllBtn');
+      if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
+
       try {
         const st = await window.electronAPI.getStatus();
         let perfis = Array.isArray(st && st.perfis) ? st.perfis.filter(p => p && p.nome && p.active) : [];
@@ -1874,61 +1880,23 @@
           return;
         }
 
-        // Limite de concorrência: 6 (igual ao workerClient.js)
-        const LIMIT = 6;
-        let idx = 0;
+        // Versão simples sequencial para testar
         let completed = 0;
-        const failed = [];
-
-        function updateProgress() {
-          if (stopBtn) stopBtn.textContent = `Fechando... ${Math.min(completed, total)}/${total}`;
-        }
-
-        async function worker() {
-          while (true) {
-            const i = idx++;
-            if (i >= total) return;
-            const p = perfis[i];
-            try {
-              // Usa API oficial, com timeout guardado pelo backend
-              const r = await window.electronAPI.deactivate(p.nome);
-              if (!r || r.ok !== true) failed.push(p.nome);
-            } catch (e) {
-              failed.push(p.nome);
-            } finally {
-              completed++;
-              updateProgress();
-            }
+        for (const p of perfis) {
+          try {
+            await window.electronAPI.deactivate(p.nome);
+            completed++;
+            if (stopBtn) stopBtn.textContent = `Fechando... ${completed}/${total}`;
+          } catch (e) {
+            console.warn('Falha ao fechar', p.nome, e.message);
           }
         }
 
-        // Dispara até 6 workers
-        const runners = [];
-        for (let k = 0; k < Math.min(LIMIT, total); k++) runners.push(worker());
-        await Promise.all(runners);
+        // Pequena pausa para estabilizar
+        await new Promise(r => setTimeout(r, 2000));
 
-        // Convergência: aguarda até zerar ativos ou timeout
-        const ok = await waitUntil(async () => {
-          const now = await window.electronAPI.getStatus();
-          const stillActive = (now && now.perfis || []).filter(x => x && x.active).length;
-          return stillActive === 0;
-        }, { timeoutMs: 45000, intervalMs: 1000 });
-
-        if (!ok || failed.length > 0) {
-          // Ajuste final (uma última tentativa para os que falharam e ainda estiverem ativos)
-          const now = await window.electronAPI.getStatus();
-          const ativosRem = (now && now.perfis || []).filter(x => x && x.active).map(x => x.nome);
-          const retry = failed.filter(n => ativosRem.includes(n));
-          for (const nome of retry) {
-            try { await window.electronAPI.deactivate(nome); } catch {}
-          }
-
-          const after = await window.electronAPI.getStatus();
-          const aindaAtivos = (after && after.perfis || []).filter(x => x && x.active).length;
-          if (aindaAtivos > 0) {
-            alert(`Atenção: ${aindaAtivos} navegador(es) ainda ativo(s). Verifique manualmente.`);
-          }
-        }
+        // Recarregar perfis
+        reloadPerfis();
 
       } catch (e) {
         console.error('[Fechar todos] Erro crítico', e && e.message || e, e);
@@ -1937,7 +1905,6 @@
         if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar Todos'; }
         setGlobalActionButtonsDisabled(false);
         stopAllLock = false;
-        try { reloadPerfis(); } catch {}
       }
     }
       try {
