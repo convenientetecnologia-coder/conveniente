@@ -1328,34 +1328,51 @@ async function ramCpuMonitorTick() {
         // Filtro: só Chrome/Chromium e que pertencem ao userDataDir (ou o rootPid)
         function isChromeLike(p) {
           if (!p) return false;
-          const name = (p.name || '').toLowerCase();
-          return name.includes('chrome') || name.includes('chromium');
+          const name = String(p.name || '').toLowerCase();
+          const cmd = normalizePathLower(p.cmd || p.command || p.exe || p.path || '');
+          if (name.includes('chrome') || name.includes('chromium')) return true;
+          // Robustez extra pelo caminho/exec:
+          if (cmd.includes('/chrome.exe') || cmd.includes('\\chrome.exe')) return true;
+          if (cmd.includes('/google chrome') || cmd.includes('\\google chrome')) return true;
+          return false;
         }
 
         function belongsToProfile(p) {
           if (!p) return false;
-          if (!udir) return true; // fallback se manifest não tiver userDataDir
-          const cmd = normalizePathLower(p.cmd || p.command || '');
-          return cmd.includes(udir);
+          if (!udir) return true; // se não existe userDataDir no manifest, não filtramos
+          const cmdFull = normalizePathLower(p.cmd || p.command || p.exe || p.path || '');
+          if (!cmdFull) return false;
+          if (cmdFull.includes(udir)) return true;
+          // Tenta extrair --user-data-dir=... do cmd e compara normalizado:
+          const extracted = extractUserDataDir(cmdFull);
+          return extracted ? normalizePathLower(extracted).includes(udir) : false;
         }
 
         // 2a) PIDs no subtree do root
+        // Se está no subtree E é Chrome-like, incluir SEM verificar userDataDir
+        // (processos filhos herdam pertencimento ao perfil do rootPid)
         for (const pid of subtree) {
           const pr = procMap.get(pid);
           if (!pr) continue;
-          if (pid === rootPid) { candidatePids.add(pid); continue; }
-          if (isChromeLike(pr) && belongsToProfile(pr)) candidatePids.add(pid);
+          if (pid === rootPid) {
+            candidatePids.add(pid);
+            continue;
+          }
+          // Inclui todo processo Chrome-like que esteja no subtree, sem exigir userDataDir no cmd:
+          if (isChromeLike(pr)) {
+            candidatePids.add(pid);
+          }
         }
 
         // 2b) PIDs "soltos" que pertencem ao userDataDir (casos raros de parent errado)
+        // Usa belongsToProfile para identificar processos fora do subtree que pertencem ao perfil
         if (udir) {
           for (const p of allProcs) {
             const pid = Number(p && p.pid);
             if (!Number.isFinite(pid)) continue;
             if (candidatePids.has(pid)) continue; // já incluso
             if (!isChromeLike(p)) continue;
-            const cmd = normalizePathLower(p.cmd || p.command || '');
-            if (cmd.includes(udir)) candidatePids.add(pid);
+            if (belongsToProfile(p)) candidatePids.add(pid);
           }
         }
 
