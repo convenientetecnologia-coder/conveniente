@@ -171,6 +171,8 @@ async function detectFbLimitInAnyPage(ctrl) {
 const pidusage = null;
 const psList = null;
 
+const { execFile } = require('child_process');
+
 const supervisorClient = require('./supervisorClient.js');
 const { getAvailableMB } = utils;
 
@@ -1197,24 +1199,140 @@ function ensureMetricsLeader() {
       }
     }
 
+// Helpers para coleta de memória por PID — sem WMI/PowerShell
+async function getWinTasklistMap() {
+  return new Promise((resolve) => {
+    execFile('tasklist', ['/FO','CSV','/NH'], { windowsHide: true, maxBuffer: 10*1024*1024 }, (err, stdout) => {
+      if (err || !stdout) return resolve({});
+      const map = {};
+      const lines = stdout.toString('utf8').split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        // CSV: "Image Name","PID","Session Name","Session#","Mem Usage"
+        let s = line.trim();
+        if (s.startsWith('"') && s.endsWith('"')) s = s.slice(1, -1);
+        const cols = s.split('","'); // simples e robusto p/ tasklist
+        if (cols.length < 5) continue;
+        const pidStr = cols[1].trim();
+        const memStr = cols[4].trim(); // ex.: "123.456 K" (com separador)
+        const pid = parseInt(pidStr, 10);
+        if (!Number.isFinite(pid)) continue;
+        const memKB = parseInt(memStr.replace(/[^\d]/g, ''), 10); // remove pontos/virgulas/K
+        if (!Number.isFinite(memKB)) continue;
+        const memMB = Math.round(memKB / 1024);
+        map[pid] = memMB;
+      }
+      resolve(map);
+    });
+  });
+}
+
+async function getPosixPsMap() {
+  // Linux/macOS: ps -o pid=,rss= (rss em KB)
+  // macOS usa 'ps -axo pid=,rss=' e Linux também aceita 'ps -o pid=,rss='
+  const args = process.platform === 'darwin'
+    ? ['-axo','pid=,rss=']
+    : ['-o','pid=,rss=','-A'];
+  return new Promise((resolve) => {
+    execFile('ps', args, { maxBuffer: 10*1024*1024 }, (err, stdout) => {
+      if (err || !stdout) return resolve({});
+      const map = {};
+      const lines = stdout.toString('utf8').split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 2) continue;
+        const pid = parseInt(parts[0], 10);
+        const rssKB = parseInt(parts[1], 10);
+        if (!Number.isFinite(pid) || !Number.isFinite(rssKB)) continue;
+        const memMB = Math.round(rssKB / 1024);
+        map[pid] = memMB;
+      }
+      resolve(map);
+    });
+  });
+}
+
+// Pequeno lock para evitar overlap de ticks
+let _ramTickBusy = false;
+
 async function ramCpuMonitorTick() {
-  // Intervalo mais rápido e configurável (default 10s no Windows)
-  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '10000', 10);
-  const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // 8–10s
+  if (_ramTickBusy) {
+    // agenda próximo tick mesmo se estiver ocupada (anti overlap)
+    const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '10000', 10);
+    const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000);
+    const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
+    return;
+  }
+
+  _ramTickBusy = true;
+  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '12000', 10); // 12s padrão Windows
+  const NIX_INTERVAL_MS = 9000 + Math.floor(Math.random() * 2000); // ~9–11s POSIX
   const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
 
   try {
-    // 110% sem WMI/PowerShell — zera métricas per-PID (front lida com null e mostra "—")
-    // Front já é null-aware e Virtus não depende dessas métricas
-    for (const nome of controllers.keys()) {
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].ramMB = null;
-      robeMeta[nome].cpuPercent = null;
+    // Se não há nenhum browser ativo neste worker, não gasta CPU
+    if (!controllers || controllers.size === 0) {
+      for (const nome of Object.keys(robeMeta)) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].ramMB = null;
+        robeMeta[nome].cpuPercent = null;
+      }
+      await snapshotStatusAndWrite();
+      return;
     }
+
+    // Tira um snapshot do OS (uma chamada só por tick, leve)
+    const pidMemMap = process.platform === 'win32'
+      ? await getWinTasklistMap()
+      : await getPosixPsMap();
+
+    // Atualiza todos os perfis controlados por este worker
+    for (const [nome, ctrl] of controllers.entries()) {
+      try {
+        if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].ramMB = null;
+          robeMeta[nome].cpuPercent = null;
+          continue;
+        }
+
+        // Captura rootPid se ainda não existir
+        robeMeta[nome] = robeMeta[nome] || {};
+        if (!robeMeta[nome].rootPid) {
+          try {
+            const proc = ctrl.browser.process && ctrl.browser.process();
+            if (proc && proc.pid) {
+              robeMeta[nome].rootPid = proc.pid;
+            }
+          } catch {}
+        }
+
+        const pid = robeMeta[nome].rootPid || null;
+        if (!pid || !Number.isFinite(pid)) {
+          robeMeta[nome].ramMB = null;
+          robeMeta[nome].cpuPercent = null;
+          continue;
+        }
+
+        const memMB = pidMemMap[pid];
+        robeMeta[nome].ramMB = (typeof memMB === 'number' && memMB >= 0) ? memMB : null;
+        // CPU por perfil permanece null (sem WMI/PowerShell). O frontend já é null-aware
+        robeMeta[nome].cpuPercent = null;
+
+      } catch {
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].ramMB = null;
+          robeMeta[nome].cpuPercent = null;
+        } catch {}
+      }
+    }
+
     await snapshotStatusAndWrite();
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
   } finally {
+    _ramTickBusy = false;
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
   }
 }
