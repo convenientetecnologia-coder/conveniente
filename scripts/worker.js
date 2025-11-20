@@ -1403,6 +1403,8 @@ async function ramCpuMonitorTick() {
         }
 
         // NOVO: soma de root + filhos (pelo CDP Tracing) + tasklist/ps
+        // Aplica fator de correção para aproximar Private Working Set (evita duplicação de memória compartilhada)
+        const RAM_CORRECTION_FACTOR = parseFloat(process.env.RAM_CORRECTION_FACTOR || '0.45'); // 0.45 = ~45% (ajuste fino)
         const pids = await getControllerPidsCached(nome, ctrl, { forceRefresh: false });
         let totalMB = 0;
         if (Array.isArray(pids) && pids.length) {
@@ -1410,11 +1412,19 @@ async function ramCpuMonitorTick() {
             const v = pidMemMap[pid];
             if (typeof v === 'number' && v >= 0) totalMB += v;
           }
+          // Aplica fator de correção para aproximar Private Working Set (Windows: Working Set inclui memória compartilhada)
+          if (process.platform === 'win32' && RAM_CORRECTION_FACTOR > 0 && RAM_CORRECTION_FACTOR <= 1) {
+            totalMB = Math.round(totalMB * RAM_CORRECTION_FACTOR);
+          }
         } else {
           // fallback duro (só rootPid) se cache vazio
           const root = robeMeta[nome].rootPid || null;
           if (root && Number.isFinite(root) && typeof pidMemMap[root] === 'number') {
             totalMB = pidMemMap[root];
+            // Aplica fator de correção também no fallback
+            if (process.platform === 'win32' && RAM_CORRECTION_FACTOR > 0 && RAM_CORRECTION_FACTOR <= 1) {
+              totalMB = Math.round(totalMB * RAM_CORRECTION_FACTOR);
+            }
           } else {
             totalMB = 0;
           }
