@@ -121,7 +121,13 @@ async function readAggregatedStatus() {
         const perf = Array.isArray(j.perfis) ? j.perfis : [];
         for (const o of perf) {
           const dst = baseMap.get(o && o.nome);
-          if (dst) Object.assign(dst, o);
+          if (!dst) continue;
+          const ramBefore = dst.ramMB;
+          const cpuBefore = dst.cpuPercent;
+          Object.assign(dst, o);
+          // Se o overlay atual não trouxe número, mantenha o valor numérico já presente
+          if (typeof o.ramMB !== 'number' && typeof ramBefore === 'number') dst.ramMB = ramBefore;
+          if (typeof o.cpuPercent !== 'number' && typeof cpuBefore === 'number') dst.cpuPercent = cpuBefore;
         }
         if (j.robes && typeof j.robes === 'object') {
           combinedRobes = Object.assign(combinedRobes, j.robes);

@@ -1032,6 +1032,11 @@
         // Militar: null-aware, badge neutra se RAM/CPU desconhecida
         // RAM por conta (campo .ramMB): mostra RAM: NNN MB, warn (>700MB pill vermelho), warn amarelo >500MB, badge neutra se null
         const ramPill = buildRamPill(p.ramMB); // RAM por conta
+        if (p.ramMB === null || p.ramMB === undefined) {
+          console.warn('[FRONTEND] ramMB é null/undefined para perfil', { nome: p.nome, ramMB: p.ramMB, p });
+        } else {
+          console.log('[FRONTEND] ramMB exibido', { nome: p.nome, ramMB: p.ramMB });
+        }
 
         // Exibir CPU percent (com null-aware)
         const cpuPill = buildCpuPill(p.cpuPercent);
@@ -1868,36 +1873,77 @@
       const stopBtn = document.getElementById('stopAllBtn');
       if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
 
-      try {
-        const st = await window.electronAPI.getStatus();
-        let perfis = Array.isArray(st && st.perfis) ? st.perfis.filter(p => p && p.nome && p.active) : [];
+      function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-        const total = perfis.length;
-        if (total === 0) {
-          if (stopBtn) stopBtn.textContent = 'Fechar';
-          setGlobalActionButtonsDisabled(false);
+      async function gatherActives() {
+        const st = await window.electronAPI.getStatus().catch(()=>null);
+        const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
+        return arr.filter(p => p && p.nome && p.active === true).map(p => ({ nome: p.nome }));
+      }
+
+      try {
+        // PASSO 1 — Coleta inicial de ativos (active: true)
+        let ativos = await gatherActives();
+        const totalInicial = ativos.length;
+        let closed = 0, failed = 0;
+
+        if (totalInicial === 0) {
+          if (stopBtn) stopBtn.textContent = 'Fechar Todos';
           stopAllLock = false;
+          setGlobalActionButtonsDisabled(false);
           return;
         }
 
-        // Versão simples sequencial para testar
-        let completed = 0;
-        for (const p of perfis) {
+        // PASSO 2 — 1ª passada sequencial: fecha todos encontrados como ativos
+        for (const { nome } of ativos) {
           try {
-            await window.electronAPI.deactivate(p.nome);
-            completed++;
-            if (stopBtn) stopBtn.textContent = `Fechando... ${completed}/${total}`;
-            // pausa leve para aliviar pressão no backend/IPC
-            await new Promise(r => setTimeout(r, 100));
+            const r = await window.electronAPI.deactivate(nome);
+            if (!r || r.ok !== true) {
+              failed++;
+            } else {
+              closed++;
+            }
           } catch (e) {
-            console.warn('Falha ao fechar', p.nome, e.message);
+            failed++;
+            console.warn('[Fechar todos] falha ao fechar', nome, e && e.message || e);
+          }
+          if (stopBtn) stopBtn.textContent = `Fechando... ${closed + failed}/${totalInicial}`;
+          await sleep(80);
+        }
+
+        // Pausa curta para estabilização de estados
+        await sleep(1200);
+
+        // PASSO 3 — 2ª passada (revarredura): fecha os que eventualmente permaneceram ativos
+        let rem = await gatherActives();
+        if (rem.length > 0) {
+          for (const { nome } of rem) {
+            try {
+              const r = await window.electronAPI.deactivate(nome);
+              if (!r || r.ok !== true) {
+                failed++;
+              } else {
+                closed++;
+              }
+            } catch (e) {
+              failed++;
+              console.warn('[Fechar todos][retry] falha ao fechar', nome, e && e.message || e);
+            }
+            if (stopBtn) stopBtn.textContent = `Fechando... ${closed + failed}/${totalInicial}`;
+            await sleep(100);
           }
         }
 
-        // Pequena pausa para estabilizar
-        await new Promise(r => setTimeout(r, 2000));
+        // PASSO 4 — Verificação final: quantos permanecem ativos?
+        const aindaAtivos = await gatherActives();
+        if (aindaAtivos.length > 0) {
+          console.warn('[Fechar todos] perfis ainda ativos após 2 passadas:', aindaAtivos.map(x => x.nome));
+          alert('Atenção: ' + aindaAtivos.length + ' perfil(is) ainda está(ão) ativo(s). Execute novamente para forçar o fechamento.');
+        } else {
+          console.log('[Fechar todos] Concluído. Encerrados:', closed, 'Falhas:', failed);
+        }
 
-        // Recarregar perfis
+        await sleep(600);
         reloadPerfis();
 
       } catch (e) {

@@ -215,7 +215,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
             : null;
 
         // Complete shape, overlay por prioridade, depois fields herdados
-        return {
+        const merged = {
           ...b,
           ...overlay,
           ...robeMeta,
@@ -268,6 +268,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
           swapCooldown,
           whyNotOpen,
         };
+        // NUNCA permita que active:true vire false por sobreposição
+        merged.active = !!(overlay && overlay.active) || !!b.active;
+        return merged;
       })();
     }
     // Sem overlay: volta skeleton (só baseline, shape correto)
@@ -346,7 +349,20 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     // Overlay de status/metrics apenas nos que existem no baseline
     for (const o of overlayINST.perfis) {
       const b = baseMap.get(o.nome);
-      if (b) Object.assign(b, o);
+      if (!b) continue;
+      const prevActive = !!b.active;
+      const prevRam = b.ramMB;
+      const prevCpu = b.cpuPercent;
+      Object.assign(b, o);
+      // Blindagem: nunca deixe "active" voltar a false se alguma fonte já marcou como true
+      b.active = !!o.active || prevActive;
+      // Se overlay do perfil não trouxe RAM/CPU, usa o dado de robes[nome]
+      if (typeof b.ramMB !== 'number' && overlayINST.robes && overlayINST.robes[o.nome] && typeof overlayINST.robes[o.nome].ramMB === 'number') {
+        b.ramMB = overlayINST.robes[o.nome].ramMB;
+      }
+      if (typeof b.cpuPercent !== 'number' && overlayINST.robes && overlayINST.robes[o.nome] && typeof overlayINST.robes[o.nome].cpuPercent === 'number') {
+        b.cpuPercent = overlayINST.robes[o.nome].cpuPercent;
+      }
     }
   } else if (overlayINST && overlayINST.warning) {
     warningINST = overlayINST.warning;

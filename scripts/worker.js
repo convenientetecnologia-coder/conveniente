@@ -819,6 +819,9 @@ async function activateOnce(nome, source = '') {
         if (proc && proc.pid) {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].rootPid = proc.pid;
+          logger.info('[WORKER][activateOnce] rootPid setado', { nome, rootPid: proc.pid });
+        } else {
+          logger.warn('[WORKER][activateOnce] rootPid NÃO setado', { nome, hasProcessFn: !!(browser.process), pid: proc && proc.pid });
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
@@ -1232,17 +1235,16 @@ async function ramCpuMonitorTick() {
     } catch {}
 
     if (process.platform === 'win32') {
-      const windowsPT = (() => { try { return require('windows-process-tree'); } catch { return null; } })();
-      if (!windowsPT || typeof windowsPT.getProcessTree !== 'function') {
-        for (const [nome] of controllers.entries()) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = null;
-          robeMeta[nome].cpuPercent = null;
+      const windowsPT = (() => {
+        try {
+          const mod = require('windows-process-tree');
+          logger.info('[RAM-TICK][WIN] windows-process-tree carregado', { hasGetProcessTree: typeof mod.getProcessTree === 'function' });
+          return mod;
+        } catch (e) {
+          logger.error('[RAM-TICK][WIN] windows-process-tree FALHOU ao carregar', { error: e && e.message || String(e) });
+          return null;
         }
-        await snapshotStatusAndWrite();
-        ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-        return;
-      }
+      })();
 
       function toMBFromUnknown(v) {
         const n = Number(v || 0);
@@ -1268,13 +1270,76 @@ async function ramCpuMonitorTick() {
           try {
             windowsPT.getProcessTree(rootPid, (tree) => {
               try {
-                if (!tree) return resolve(null);
+                if (!tree) {
+                  logger.warn('[RAM-TICK][WIN] getProcessTree retornou null', { rootPid });
+                  return resolve(null);
+                }
                 const mb = sumTreeMemoryMB(tree);
+                logger.info('[RAM-TICK][WIN] RAM coletada', { rootPid, mb });
                 return resolve(Number.isFinite(mb) ? mb : null);
-              } catch { return resolve(null); }
+              } catch (e) {
+                logger.error('[RAM-TICK][WIN] Erro ao processar tree', { rootPid, error: e && e.message || String(e) });
+                return resolve(null);
+              }
             });
-          } catch { resolve(null); }
+          } catch (e) {
+            logger.error('[RAM-TICK][WIN] Erro ao chamar getProcessTree', { rootPid, error: e && e.message || String(e) });
+            resolve(null);
+          }
         });
+      }
+
+      async function getTreeMemoryMBFallback(ctrl, nome) {
+        try {
+          let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+          if (!Number.isFinite(rootPid) && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
+            const proc = ctrl.browser.process();
+            if (proc && proc.pid) {
+              robeMeta[nome] = robeMeta[nome] || {};
+              robeMeta[nome].rootPid = proc.pid;
+              rootPid = proc.pid;
+              logger.info('[RAM-TICK][WIN] rootPid recapturado (fallback)', { nome, rootPid });
+            }
+          }
+          if (!Number.isFinite(rootPid)) return null;
+          const all = await psList().catch(() => []);
+          const childrenByPPID = new Map();
+          for (const p of all || []) {
+            const pid = Number(p && p.pid);
+            const ppid = Number(p && p.ppid);
+            if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
+            if (!childrenByPPID.has(ppid)) childrenByPPID.set(ppid, []);
+            childrenByPPID.get(ppid).push(pid);
+          }
+          function collectSubtreePids(rp) {
+            const set = new Set();
+            const stack = [rp];
+            while (stack.length) {
+              const cur = stack.pop();
+              if (set.has(cur)) continue;
+              set.add(cur);
+              const kids = childrenByPPID.get(cur) || [];
+              for (const k of kids) stack.push(k);
+            }
+            return Array.from(set);
+          }
+          const pids = collectSubtreePids(rootPid);
+          if (!pids.length) return null;
+          const statsObj = await pidusage(pids).catch(() => ({}));
+          let soma = 0, valid = 0;
+          for (const pid of pids) {
+            const st = statsObj[pid];
+            if (!st) continue;
+            if (typeof st.memory === 'number') { soma += st.memory; valid++; }
+          }
+          if (!valid) return null;
+          const mb = Math.max(0, Math.round(soma / 1024 / 1024));
+          logger.info('[RAM-TICK][WIN][FALLBACK] RAM coletada', { nome, rootPid, mb });
+          return mb;
+        } catch (e) {
+          logger.warn('[RAM-TICK][WIN][FALLBACK] erro', { nome, error: e && e.message || String(e) });
+          return null;
+        }
       }
 
       for (const [nome, ctrl] of controllers.entries()) {
@@ -1285,14 +1350,29 @@ async function ramCpuMonitorTick() {
             robeMeta[nome].cpuPercent = null;
             continue;
           }
-          const rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
-          if (!rootPid || !Number.isFinite(rootPid)) {
+          let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+          if (!Number.isFinite(rootPid) && ctrl.browser && typeof ctrl.browser.process === 'function') {
+            const proc = ctrl.browser.process();
+            if (proc && proc.pid) {
+              robeMeta[nome] = robeMeta[nome] || {};
+              robeMeta[nome].rootPid = proc.pid;
+              rootPid = proc.pid;
+              logger.info('[RAM-TICK][WIN] rootPid recapturado', { nome, rootPid });
+            }
+          }
+          if (!Number.isFinite(rootPid)) {
+            logger.warn('[RAM-TICK][WIN] rootPid ausente ou inválido', { nome, rootPid });
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].ramMB = null;
             robeMeta[nome].cpuPercent = null;
             continue;
           }
-          const mb = await getTreeMemoryMB(rootPid);
+          let mb = null;
+          if (windowsPT && typeof windowsPT.getProcessTree === 'function') {
+            mb = await getTreeMemoryMB(rootPid);
+          } else {
+            mb = await getTreeMemoryMBFallback(ctrl, nome);
+          }
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = (typeof mb === 'number' && mb >= 0) ? mb : null;
           robeMeta[nome].cpuPercent = null;
@@ -1300,14 +1380,12 @@ async function ramCpuMonitorTick() {
           if (typeof robeMeta[nome].ramMB === 'number') {
             const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
             rh.push({ t: Date.now(), mb: robeMeta[nome].ramMB });
-            while (robeMeta[nome].ramHist.length > 8) robeMeta[nome].ramHist.shift();
+            while (robeMeta[nome].ramHist.length > 8) rh.shift();
           }
         } catch {
-          try {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-          } catch {}
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].ramMB = null;
+          robeMeta[nome].cpuPercent = null;
         }
       }
 
@@ -1351,8 +1429,18 @@ async function ramCpuMonitorTick() {
             robeMeta[nome].cpuPercent = null;
             return;
           }
-          const rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
-          if (!rootPid || !Number.isFinite(rootPid)) {
+          let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+          if (!Number.isFinite(rootPid) && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
+            const proc = ctrl.browser.process();
+            if (proc && proc.pid) {
+              robeMeta[nome] = robeMeta[nome] || {};
+              robeMeta[nome].rootPid = proc.pid;
+              rootPid = proc.pid;
+              logger.info('[RAM-TICK] rootPid recapturado (Linux/Gen)', { nome, rootPid });
+            }
+          }
+          if (!Number.isFinite(rootPid)) {
+            logger.warn('[RAM-TICK] rootPid ausente ou inválido', { nome, rootPid });
             robeMeta[nome] = robeMeta[nome] || {};
             robeMeta[nome].ramMB = null;
             robeMeta[nome].cpuPercent = null;
@@ -2462,7 +2550,12 @@ const handlers = {
         humanControl: !!(controllers.get(nome)?.humanControl),
         humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
         issuesCount,
-        ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
+        ramMB: (() => {
+          const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
+          if (v === null) logger.warn('[GET-STATUS] ramMB null/undefined', { nome, hasRobeMeta: !!robeMeta[nome] });
+          else logger.info('[GET-STATUS] ramMB retornado', { nome, ramMB: v });
+          return v;
+        })(),
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
         numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
@@ -2500,7 +2593,12 @@ const handlers = {
         ultimaPostagem: robeMeta[nome]?.ultimaPostagem || null,
         emFila: !!robeMeta[nome]?.emFila,
         emExecucao: !!robeMeta[nome]?.emExecucao,
-        ramMB: typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null,
+        ramMB: (() => {
+          const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
+          if (v === null) logger.warn('[GET-STATUS] ramMB null/undefined', { nome, hasRobeMeta: !!robeMeta[nome] });
+          else logger.info('[GET-STATUS] ramMB retornado', { nome, ramMB: v });
+          return v;
+        })(),
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
         numPages: typeof robeMeta[nome]?.numPages === "number" ? robeMeta[nome].numPages : null,
         robeFrozenUntil: robeMeta[nome]?.frozenUntil || null,
