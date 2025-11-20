@@ -1232,7 +1232,8 @@ function ensureMetricsLeader() {
     }
 
 async function ramCpuMonitorTick() {
-  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '25000', 10);
+  // Intervalo mais rápido e configurável (default 10s no Windows)
+  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '10000', 10);
   const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000); // 8–10s
   const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
 
@@ -1255,221 +1256,18 @@ async function ramCpuMonitorTick() {
       }
     } catch {}
 
-    if (process.platform === 'win32') {
-      const windowsPT = (() => {
-        try {
-          const mod = require('windows-process-tree');
-          logger.info('[RAM-TICK][WIN] windows-process-tree carregado', { hasGetProcessTree: typeof mod.getProcessTree === 'function' });
-          return mod;
-        } catch (e) {
-          logger.error('[RAM-TICK][WIN] windows-process-tree FALHOU ao carregar', { error: e && e.message || String(e) });
-          return null;
-        }
-      })();
-
-      function toMBFromUnknown(v) {
-        const n = Number(v || 0);
-        if (!Number.isFinite(n) || n <= 0) return 0;
-        if (n < 1024 * 1024) return Math.max(0, Math.round(n / 1024));
-        return Math.max(0, Math.round(n / (1024 * 1024)));
-      }
-
-      function sumTreeMemoryMB(node) {
-        if (!node) return 0;
-        let cur = 0;
-
-        // 1) Campos mais comuns — tenta todos
-        if (node.memory != null) cur += toMBFromUnknown(node.memory); // pode ser bytes ou KB
-        else if (node.workingSetSize != null) cur += toMBFromUnknown(node.workingSetSize); // bytes
-        else if (node.workingSet64 != null) cur += toMBFromUnknown(node.workingSet64); // bytes
-        else if (node.rss != null) cur += toMBFromUnknown(node.rss); // bytes
-        else if (node.residentSet != null) cur += toMBFromUnknown(node.residentSet); // bytes
-        else if (node.pagefileUsage != null) cur += toMBFromUnknown(node.pagefileUsage); // bytes
-        else if (node.privateBytes != null) cur += toMBFromUnknown(node.privateBytes); // bytes
-        else if (node.workingSetKb != null) cur += toMBFromUnknown(node.workingSetKb); // KB
-        else if (node.workingSet != null) cur += toMBFromUnknown(node.workingSet); // KB?
-        else if (node.PrivatePageCount != null) cur += Math.max(0, Math.round((Number(node.PrivatePageCount) || 0) * 4096 / (1024 * 1024))); // páginas4KB
-        else if (node.privatePageCount != null) cur += Math.max(0, Math.round((Number(node.privatePageCount) || 0) * 4096 / (1024 * 1024))); // páginas4KB
-
-        // 2) Fallback genérico — pega o primeiro campo numérico que "parece memória"
-        if (cur === 0) {
-          try {
-            for (const key of Object.keys(node)) {
-              const k = key.toLowerCase();
-              if (k.includes('memory') || k.includes('working') || k.includes('page') || k.includes('rss') || k.includes('resident')) {
-                const val = node[key];
-                if (typeof val === 'number' && val > 0) {
-                  cur += toMBFromUnknown(val);
-                  break;
-                }
-              }
-            }
-          } catch {}
-        }
-
-        const kids = Array.isArray(node.children) ? node.children : [];
-        for (const c of kids) cur += sumTreeMemoryMB(c);
-        return cur;
-      }
-
-      function getTreeMemoryMB(rootPid) {
-        return new Promise((resolve) => {
-          try {
-            windowsPT.getProcessTree(rootPid, (tree) => {
-              try {
-                if (!tree) {
-                  logger.warn('[RAM-TICK][WIN] getProcessTree retornou null', { rootPid });
-                  return resolve(null);
-                }
-                // LOG DE DIAGNÓSTICO — chaves do nó raiz + amostra
-                try {
-                  const keys = Object.keys(tree || {});
-                  const sample = JSON.stringify(tree || {}).slice(0, 200);
-                  logger.info('[RAM-TICK][WIN] Estrutura do nó raiz', { rootPid, keys, sample });
-                } catch {}
-
-                const mb = sumTreeMemoryMB(tree);
-                logger.info('[RAM-TICK][WIN] RAM coletada', { rootPid, mb });
-                return resolve(Number.isFinite(mb) ? mb : null);
-              } catch (e) {
-                logger.error('[RAM-TICK][WIN] Erro ao processar tree', { rootPid, error: e && e.message || String(e) });
-                return resolve(null);
-              }
-            });
-          } catch (e) {
-            logger.error('[RAM-TICK][WIN] Erro ao chamar getProcessTree', { rootPid, error: e && e.message || String(e) });
-            resolve(null);
-          }
-        });
-      }
-
-      async function getTreeMemoryMBFallback(ctrl, nome) {
-        try {
-          let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
-          if (!Number.isFinite(rootPid) && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
-            const proc = ctrl.browser.process();
-            if (proc && proc.pid) {
-              robeMeta[nome] = robeMeta[nome] || {};
-              robeMeta[nome].rootPid = proc.pid;
-              rootPid = proc.pid;
-              logger.info('[RAM-TICK][WIN] rootPid recapturado (fallback)', { nome, rootPid });
-            }
-          }
-          if (!Number.isFinite(rootPid)) return null;
-          const all = psList ? await psList().catch(() => []) : [];
-          const childrenByPPID = new Map();
-          for (const p of all || []) {
-            const pid = Number(p && p.pid);
-            const ppid = Number(p && p.ppid);
-            if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
-            if (!childrenByPPID.has(ppid)) childrenByPPID.set(ppid, []);
-            childrenByPPID.get(ppid).push(pid);
-          }
-          function collectSubtreePids(rp) {
-            const set = new Set();
-            const stack = [rp];
-            while (stack.length) {
-              const cur = stack.pop();
-              if (set.has(cur)) continue;
-              set.add(cur);
-              const kids = childrenByPPID.get(cur) || [];
-              for (const k of kids) stack.push(k);
-            }
-            return Array.from(set);
-          }
-          const pids = collectSubtreePids(rootPid);
-          if (!pids.length) return null;
-          const statsObj = await pidusage(pids).catch(() => ({}));
-          let soma = 0, valid = 0;
-          for (const pid of pids) {
-            const st = statsObj[pid];
-            if (!st) continue;
-            if (typeof st.memory === 'number') { soma += st.memory; valid++; }
-          }
-          if (!valid) return null;
-          const mb = Math.max(0, Math.round(soma / 1024 / 1024));
-          logger.info('[RAM-TICK][WIN][FALLBACK] RAM coletada', { nome, rootPid, mb });
-          return mb;
-        } catch (e) {
-          logger.warn('[RAM-TICK][WIN][FALLBACK] erro', { nome, error: e && e.message || String(e) });
-          return null;
-        }
-      }
-
-      for (const [nome, ctrl] of controllers.entries()) {
-        try {
-          if (!ctrl || !ctrl.browser) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = null;
-          robeMeta[nome].cpuPercent = null;
-            continue;
-          }
-          let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
-          if (!Number.isFinite(rootPid) && ctrl.browser && typeof ctrl.browser.process === 'function') {
-            const proc = ctrl.browser.process();
-            if (proc && proc.pid) {
-          robeMeta[nome] = robeMeta[nome] || {};
-              robeMeta[nome].rootPid = proc.pid;
-              rootPid = proc.pid;
-              logger.info('[RAM-TICK][WIN] rootPid recapturado', { nome, rootPid });
-        }
-          }
-          if (!Number.isFinite(rootPid)) {
-            logger.warn('[RAM-TICK][WIN] rootPid ausente ou inválido', { nome, rootPid });
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-            continue;
-          }
-          let mb = null;
-          if (windowsPT && typeof windowsPT.getProcessTree === 'function') {
-            mb = await getTreeMemoryMB(rootPid);
-            if (!Number.isFinite(mb) || mb <= 0) {
-              const mbFallback = await getTreeMemoryMBFallback(ctrl, nome);
-              if (Number.isFinite(mbFallback) && mbFallback >= 0) {
-                mb = mbFallback;
-              }
-            }
-          } else {
-            mb = await getTreeMemoryMBFallback(ctrl, nome);
-          }
-
-          robeMeta[nome] = robeMeta[nome] || {};
-          if (typeof mb === 'number' && !Number.isNaN(mb) && mb >= 0) {
-            robeMeta[nome].ramMB = mb;
-          } else {
-            logger.warn('[RAM-TICK][WIN] RAM rejeitada (não é número válido)', { nome, rootPid, mb, type: typeof mb });
-            robeMeta[nome].ramMB = null;
-          }
-          robeMeta[nome].cpuPercent = null;
-
-          if (typeof robeMeta[nome].ramMB === 'number') {
-            const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
-            rh.push({ t: Date.now(), mb: robeMeta[nome].ramMB });
-            while (robeMeta[nome].ramHist.length > 8) rh.shift();
-          }
-        } catch {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-          }
-        }
-
-      await snapshotStatusAndWrite();
-      ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-      return;
-    }
-
-    let allProcs = [];
-    try { allProcs = psList ? await psList() : []; } catch { allProcs = []; }
-
+    // 1) Coletar todos os processos uma única vez (para todos os perfis)
+    const allProcs = psList ? await psList().catch(() => []) : [];
+    const procMap = new Map();
     const childrenByPPID = new Map();
-    for (const p of (allProcs || [])) {
-      const ppid = Number(p && p.ppid);
+    for (const p of allProcs) {
       const pid = Number(p && p.pid);
-      if (!Number.isFinite(ppid) || !Number.isFinite(pid)) continue;
-      if (!childrenByPPID.has(ppid)) childrenByPPID.set(ppid, []);
-      childrenByPPID.get(ppid).push(pid);
+      const ppid = Number(p && p.ppid);
+      if (Number.isFinite(pid)) procMap.set(pid, p);
+      if (Number.isFinite(pid) && Number.isFinite(ppid)) {
+        if (!childrenByPPID.has(ppid)) childrenByPPID.set(ppid, []);
+        childrenByPPID.get(ppid).push(pid);
+      }
     }
 
     function collectSubtreePids(rootPid) {
@@ -1485,81 +1283,124 @@ async function ramCpuMonitorTick() {
       return Array.from(set);
     }
 
-    const jobs = [];
+    function normalizePathLower(s) {
+      return String(s || '').replace(/\\/g, '/').toLowerCase();
+    }
+
+    // Deduplicação global por tick — evita contar o mesmo processo duas vezes entre perfis
+    const countedGlobal = new Set();
+
+    // 2) Para cada perfil ativo: filtrar apenas Chrome/Chromium que pertençam ao userDataDir do perfil
     for (const [nome, ctrl] of controllers.entries()) {
-      jobs.push((async () => {
-        try {
-          if (!ctrl || !ctrl.browser) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-            return;
-          }
-          let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
-          if (!Number.isFinite(rootPid) && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
-            const proc = ctrl.browser.process();
-            if (proc && proc.pid) {
-              robeMeta[nome] = robeMeta[nome] || {};
-              robeMeta[nome].rootPid = proc.pid;
-              rootPid = proc.pid;
-              logger.info('[RAM-TICK] rootPid recapturado (Linux/Gen)', { nome, rootPid });
-            }
-          }
-          if (!Number.isFinite(rootPid)) {
-            logger.warn('[RAM-TICK] rootPid ausente ou inválido', { nome, rootPid });
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-            return;
-          }
-          const pids = collectSubtreePids(rootPid);
-          if (!pids || !pids.length) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-            return;
-          }
-          let somaRam = 0, somaCpu = 0, valid = 0;
-          try {
-            const statsObj = await pidusage(pids);
-              for (const pid of pids) {
-              const st = statsObj[pid];
-              if (!st) continue;
-              if (typeof st.memory === 'number') somaRam += st.memory;
-              if (typeof st.cpu === 'number') somaCpu += st.cpu;
-              valid++;
-          }
-        } catch {}
-
+      try {
+        if (!ctrl || !ctrl.browser) {
           robeMeta[nome] = robeMeta[nome] || {};
-          if (valid > 0) {
-            robeMeta[nome].ramMB = Math.round(somaRam / 1024 / 1024);
-            robeMeta[nome].cpuPercent = Math.round(somaCpu);
-          } else {
-            robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-          }
-
-          if (typeof robeMeta[nome].cpuPercent === 'number') {
-            const ch = robeMeta[nome].cpuHistory || (robeMeta[nome].cpuHistory = []);
-            ch.push({ t: Date.now(), p: robeMeta[nome].cpuPercent });
-            while (robeMeta[nome].cpuHistory.length > 8) robeMeta[nome].cpuHistory.shift();
-          }
-          if (typeof robeMeta[nome].ramMB === 'number') {
-            const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
-            rh.push({ t: Date.now(), mb: robeMeta[nome].ramMB });
-            while (robeMeta[nome].ramHist.length > 8) robeMeta[nome].ramHist.shift();
-          }
-        } catch {
-        robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = null;
           robeMeta[nome].cpuPercent = null;
-      }
-      })());
-  }
+          continue;
+        }
 
-    await Promise.all(jobs);
-  await snapshotStatusAndWrite();
+        // rootPid (browser process)
+        let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+        if (!Number.isFinite(rootPid) && ctrl.browser && typeof ctrl.browser.process === 'function') {
+          const proc = ctrl.browser.process();
+          if (proc && proc.pid) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].rootPid = proc.pid;
+            rootPid = proc.pid;
+          }
+        }
+
+        if (!Number.isFinite(rootPid)) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].ramMB = null;
+          robeMeta[nome].cpuPercent = null;
+          continue;
+        }
+
+        // userDataDir do perfil (para filtrar apenas processos do perfil)
+        const man = await manifestStore.read(nome).catch(() => null);
+        const udir = man && man.userDataDir ? normalizePathLower(man.userDataDir) : '';
+
+        const subtree = collectSubtreePids(rootPid);
+        const candidatePids = new Set();
+
+        // Filtro: só Chrome/Chromium e que pertencem ao userDataDir (ou o rootPid)
+        function isChromeLike(p) {
+          if (!p) return false;
+          const name = (p.name || '').toLowerCase();
+          return name.includes('chrome') || name.includes('chromium');
+        }
+
+        function belongsToProfile(p) {
+          if (!p) return false;
+          if (!udir) return true; // fallback se manifest não tiver userDataDir
+          const cmd = normalizePathLower(p.cmd || p.command || '');
+          return cmd.includes(udir);
+        }
+
+        // 2a) PIDs no subtree do root
+        for (const pid of subtree) {
+          const pr = procMap.get(pid);
+          if (!pr) continue;
+          if (pid === rootPid) { candidatePids.add(pid); continue; }
+          if (isChromeLike(pr) && belongsToProfile(pr)) candidatePids.add(pid);
+        }
+
+        // 2b) PIDs "soltos" que pertencem ao userDataDir (casos raros de parent errado)
+        if (udir) {
+          for (const p of allProcs) {
+            const pid = Number(p && p.pid);
+            if (!Number.isFinite(pid)) continue;
+            if (candidatePids.has(pid)) continue; // já incluso
+            if (!isChromeLike(p)) continue;
+            const cmd = normalizePathLower(p.cmd || p.command || '');
+            if (cmd.includes(udir)) candidatePids.add(pid);
+          }
+        }
+
+        const unique = Array.from(candidatePids).filter(pid => !countedGlobal.has(pid));
+
+        if (unique.length === 0) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].ramMB = 0;
+          robeMeta[nome].cpuPercent = null;
+          continue;
+        }
+
+        // 3) pidusage => memory em bytes (Working Set/RSS). Somamos apenas os PIDs filtrados.
+        let somaBytes = 0;
+        let valid = 0;
+        const statsObj = await pidusage(unique).catch(() => ({}));
+        for (const pid of unique) {
+          const st = statsObj[pid];
+          if (!st) continue;
+          if (typeof st.memory === 'number' && st.memory > 0) {
+            somaBytes += st.memory;
+            valid++;
+            countedGlobal.add(pid); // evita duplicação cross-perfis
+          }
+        }
+
+        const mb = valid ? Math.max(0, Math.round(somaBytes / 1024 / 1024)) : 0;
+
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].ramMB = mb;
+        robeMeta[nome].cpuPercent = null;
+
+        // Histórico curto (8 pontos)
+        const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
+        rh.push({ t: Date.now(), mb: robeMeta[nome].ramMB });
+        while (rh.length > 8) rh.shift();
+
+      } catch (e) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].ramMB = null;
+        robeMeta[nome].cpuPercent = null;
+      }
+    }
+
+    await snapshotStatusAndWrite();
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
     return;
   } catch (e) {
