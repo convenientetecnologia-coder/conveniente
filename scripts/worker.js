@@ -167,7 +167,13 @@ async function detectFbLimitInAnyPage(ctrl) {
 }
 
 const pidusage = require('pidusage');
-const psList = require('ps-list');
+let psList;
+try {
+  const mod = require('ps-list');
+  psList = (typeof mod === 'function') ? mod : (mod && mod.default ? mod.default : null);
+} catch {
+  psList = null;
+}
 
 const supervisorClient = require('./supervisorClient.js');
 const { getAvailableMB } = utils;
@@ -419,7 +425,7 @@ async function killStrayChromes() {
     for (const p of perfisArr) {
       if (p && p.nome && p.userDataDir) nomeByDir[normalizePath(p.userDataDir)] = p.nome;
     }
-    const procs = await psList().catch(()=>[]);
+    const procs = psList ? await psList().catch(()=>[]) : [];
     const group = {};
     for (const proc of procs) {
       const cmd = proc.cmd || proc.command || '';
@@ -1350,7 +1356,7 @@ async function ramCpuMonitorTick() {
             }
           }
           if (!Number.isFinite(rootPid)) return null;
-          const all = await psList().catch(() => []);
+          const all = psList ? await psList().catch(() => []) : [];
           const childrenByPPID = new Map();
           for (const p of all || []) {
             const pid = Number(p && p.pid);
@@ -1418,13 +1424,10 @@ async function ramCpuMonitorTick() {
           let mb = null;
           if (windowsPT && typeof windowsPT.getProcessTree === 'function') {
             mb = await getTreeMemoryMB(rootPid);
-            // FALLBACK: se coletou 0MB e já passou >10s desde a ativação, tenta ps-list + pidusage
-            if (mb === 0 && robeMeta[nome]?.activatedAt && (Date.now() - robeMeta[nome].activatedAt) > 10000) {
-              logger.warn('[RAM-TICK][WIN] RAM coletada como 0MB, tentando fallback', { nome, rootPid, activatedAgoMs: Date.now() - robeMeta[nome].activatedAt });
+            if (!Number.isFinite(mb) || mb <= 0) {
               const mbFallback = await getTreeMemoryMBFallback(ctrl, nome);
-              if (typeof mbFallback === 'number' && mbFallback > 0) {
+              if (Number.isFinite(mbFallback) && mbFallback >= 0) {
                 mb = mbFallback;
-                logger.info('[RAM-TICK][WIN] Fallback coletou RAM com sucesso', { nome, rootPid, ramMB: mb });
               }
             }
           } else {
@@ -1432,13 +1435,8 @@ async function ramCpuMonitorTick() {
           }
 
           robeMeta[nome] = robeMeta[nome] || {};
-          if (typeof mb === 'number' && mb >= 0 && !Number.isNaN(mb)) {
-            robeMeta[nome].ramMB = mb; // 0 é válido!
-            if (mb === 0) {
-              logger.warn('[RAM-TICK][WIN] RAM coletada como 0MB (pode indicar problema na coleta)', { nome, rootPid, mb });
-            } else {
-              logger.info('[RAM-TICK][WIN] RAM setada', { nome, rootPid, ramMB: mb });
-            }
+          if (typeof mb === 'number' && !Number.isNaN(mb) && mb >= 0) {
+            robeMeta[nome].ramMB = mb;
           } else {
             logger.warn('[RAM-TICK][WIN] RAM rejeitada (não é número válido)', { nome, rootPid, mb, type: typeof mb });
             robeMeta[nome].ramMB = null;
@@ -1463,7 +1461,7 @@ async function ramCpuMonitorTick() {
     }
 
     let allProcs = [];
-    try { allProcs = await psList(); } catch { allProcs = []; }
+    try { allProcs = psList ? await psList() : []; } catch { allProcs = []; }
 
     const childrenByPPID = new Map();
     for (const p of (allProcs || [])) {
