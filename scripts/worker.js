@@ -1337,23 +1337,37 @@ async function ramCpuMonitorTick() {
           return false;
         }
 
+        // NOVO: Comparação exata de caminho (não substring) para evitar falsos positivos
+        function equalsPathInsensitive(a, b) {
+          try {
+            const path = require('path');
+            const pa = normalizePathLower(path.resolve(String(a)));
+            const pb = normalizePathLower(path.resolve(String(b)));
+            return pa === pb;
+          } catch {
+            return normalizePathLower(String(a)) === normalizePathLower(String(b));
+          }
+        }
+
         function belongsToProfile(p) {
           if (!p) return false;
           if (!udir) return true; // se não existe userDataDir no manifest, não filtramos
           const cmdFull = normalizePathLower(p.cmd || p.command || p.exe || p.path || '');
           if (!cmdFull) return false;
-          if (cmdFull.includes(udir)) return true;
-          // Tenta extrair --user-data-dir=... do cmd e compara normalizado:
+          // NOVO: Extrai --user-data-dir e compara por igualdade exata (não substring)
           const extracted = extractUserDataDir(cmdFull);
-          return extracted ? normalizePathLower(extracted).includes(udir) : false;
+          if (!extracted) return false; // sem --user-data-dir no cmd => não é "solto" deste perfil
+          return equalsPathInsensitive(extracted, udir);
         }
 
-        // 2a) PIDs no subtree do root
+        // 2a) PIDs no subtree do root (blindado com countedGlobal)
         // Se está no subtree E é Chrome-like, incluir SEM verificar userDataDir
         // (processos filhos herdam pertencimento ao perfil do rootPid)
         for (const pid of subtree) {
           const pr = procMap.get(pid);
           if (!pr) continue;
+          // NOVO: Verifica countedGlobal ANTES de adicionar (previne duplicação cross-perfis)
+          if (countedGlobal.has(pid)) continue; // já contado globalmente neste tick
           if (pid === rootPid) {
             candidatePids.add(pid);
             continue;
@@ -1364,13 +1378,15 @@ async function ramCpuMonitorTick() {
           }
         }
 
-        // 2b) PIDs "soltos" que pertencem ao userDataDir (casos raros de parent errado)
+        // 2b) PIDs "soltos" que pertencem ao userDataDir (blindado)
         // Usa belongsToProfile para identificar processos fora do subtree que pertencem ao perfil
         if (udir) {
           for (const p of allProcs) {
             const pid = Number(p && p.pid);
             if (!Number.isFinite(pid)) continue;
-            if (candidatePids.has(pid)) continue; // já incluso
+            if (candidatePids.has(pid)) continue;  // já incluso do subtree
+            // NOVO: Verifica countedGlobal ANTES de adicionar (previne duplicação cross-perfis)
+            if (countedGlobal.has(pid)) continue;  // já contado em outro perfil neste tick
             if (!isChromeLike(p)) continue;
             if (belongsToProfile(p)) candidatePids.add(pid);
           }
@@ -1385,17 +1401,20 @@ async function ramCpuMonitorTick() {
           continue;
         }
 
-        // 3) pidusage => memory em bytes (Working Set/RSS). Somamos apenas os PIDs filtrados.
+        // 3) getPidPrivateWSBytes => memory em bytes (Private Working Set no Windows, RSS no Linux/macOS)
+        // NOVO: Usa WorkingSetPrivate no Windows para evitar duplicação de memória compartilhada
         let somaBytes = 0;
         let valid = 0;
-        const statsObj = await pidusage(unique).catch(() => ({}));
+        const memMap = await getPidPrivateWSBytes(unique).catch(() => ({}));
         for (const pid of unique) {
-          const st = statsObj[pid];
-          if (!st) continue;
-          if (typeof st.memory === 'number' && st.memory > 0) {
-            somaBytes += st.memory;
+          const bytes = memMap[pid];
+          if (typeof bytes === 'number' && bytes > 0) {
+            // NOVO: Blindagem extra - verifica countedGlobal ANTES de somar
+            if (countedGlobal.has(pid)) continue; // blindagem extra
+            // NOVO: Marca countedGlobal ANTES de somar (previne race condition)
+            countedGlobal.add(pid); // marca ANTES
+            somaBytes += bytes;
             valid++;
-            countedGlobal.add(pid); // evita duplicação cross-perfis
           }
         }
 
@@ -1433,6 +1452,67 @@ function extractUserDataDir(cmd) {
   if (!cmd) return null;
   const m = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))/i.exec(cmd);
   return m ? (m[1] || m[2] || m[3]) : null;
+}
+
+// NOVO: Função para obter Private Working Set no Windows (evita duplicação de memória compartilhada)
+async function getPidPrivateWSBytes(pids) {
+  if (!Array.isArray(pids) || pids.length === 0) return {};
+
+  // Linux/macOS: mantém pidusage (RSS). Em geral não há a mesma duplicação massiva de memória compartilhada do Windows
+  if (process.platform !== 'win32') {
+    try {
+      const out = await pidusage(pids);
+      const ret = {};
+      for (const pid of pids) {
+        const st = out && out[pid];
+        if (st && typeof st.memory === 'number') ret[pid] = st.memory; // bytes
+      }
+      return ret;
+    } catch {
+      return {};
+    }
+  }
+
+  // Windows: usar WorkingSetPrivate (KB) via Win32_PerfFormattedData_PerfProc_Process
+  try {
+    const idsArg = pids.filter(Number.isFinite).map(n => String(n)).join(',');
+    const psCmd = `
+      $ids = "${idsArg}".Split(',') | ForEach-Object { [int]$_ };
+      $q = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process;
+      $r = @();
+      foreach ($p in $q) {
+        if ($ids -contains $p.IDProcess) {
+          $r += [PSCustomObject]@{
+            PID   = [int]$p.IDProcess;
+            Bytes = [long]($p.WorkingSetPrivate * 1024)
+          };
+        }
+      }
+      $r | ConvertTo-Json -Compress
+    `;
+    const execFile = require('child_process').execFile;
+    const json = await new Promise((resolve) => {
+      execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
+        { encoding: 'utf8', maxBuffer: 3 * 1024 * 1024 },
+        (err, stdout) => {
+          if (err || !stdout) return resolve('[]');
+          resolve(stdout);
+        });
+    });
+    let arr = [];
+    try { arr = JSON.parse(json); } catch { arr = []; }
+    const ret = {};
+    if (Array.isArray(arr)) {
+      for (const it of arr) {
+        const pid = Number(it && it.PID);
+        const bytes = Number(it && it.Bytes);
+        if (Number.isFinite(pid) && Number.isFinite(bytes)) ret[pid] = bytes;
+      }
+    }
+    return ret;
+  } catch {
+    return {};
+  }
 }
 
 setTimeout(ramCpuMonitorTick, 5000);
