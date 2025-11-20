@@ -19,6 +19,7 @@
     "ps-list": "^8.1.1",
     "puppeteer": "^24.22.0",
     "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "windows-process-tree": "^0.2.5"
   }
 }

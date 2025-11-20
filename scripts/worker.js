@@ -1233,6 +1233,8 @@ async function ramCpuMonitorTick() {
 
     if (process.platform === 'win32') {
       const windowsPT = (() => { try { return require('windows-process-tree'); } catch { return null; } })();
+      const psList = (() => { try { return require('ps-list'); } catch { return null; } })();
+      const pidusage = (() => { try { return require('pidusage'); } catch { return null; } })();
       if (!windowsPT || typeof windowsPT.getProcessTree !== 'function') {
         for (const [nome] of controllers.entries()) {
           robeMeta[nome] = robeMeta[nome] || {};
@@ -1285,17 +1287,94 @@ async function ramCpuMonitorTick() {
             robeMeta[nome].cpuPercent = null;
             continue;
           }
-          const rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+          // 1) Root PID (primário)
+          let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
+
+          // 2) Fallback: descobre rootPid pelo userDataDir (via ps-list) se necessário
           if (!rootPid || !Number.isFinite(rootPid)) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-            continue;
+            try {
+              const man = await manifestStore.read(nome).catch(()=>null);
+              const udir = man && man.userDataDir;
+              if (udir && psList) {
+                const procs = await psList().catch(()=>[]);
+                // Filtra chrome.exe cujo command line inclua o userDataDir
+                const needle = udir.replace(/\\/g, '\\\\');
+                const matches = procs.filter(p =>
+                  p && /chrome\.exe$/i.test(p.name || '') &&
+                  typeof p.cmd === 'string' &&
+                  p.cmd.includes(needle)
+                );
+                // Escolhe o pai (ppid==0 ou com mais filhos) como root
+                if (matches.length) {
+                  // Heurística: pega o com menor ppid (>0) ou o primeiro
+                  const m = matches.sort((a,b) => (a.ppid||0) - (b.ppid||0))[0];
+                  if (m && m.pid) {
+                    rootPid = Number(m.pid);
+                    robeMeta[nome] = robeMeta[nome] || {};
+                    robeMeta[nome].rootPid = rootPid; // cacheia
+                  }
+                }
+              }
+            } catch {}
           }
-          const mb = await getTreeMemoryMB(rootPid);
+          // 3) Coleta RAM (árvore) via windows-process-tree, senão fallback por userDataDir
+          let mb = null;
+          if (windowsPT && Number.isFinite(rootPid)) {
+            mb = await getTreeMemoryMB(rootPid);
+          }
+          if (mb === null) {
+            // Fallback por userDataDir: soma mem dos PIDs que contêm o userDataDir no command line
+            try {
+              const man = await manifestStore.read(nome).catch(()=>null);
+              const udir = man && man.userDataDir;
+              if (udir && psList && pidusage) {
+                const procs = await psList().catch(()=>[]);
+                const needle = udir.replace(/\\/g, '\\\\');
+                const pids = procs
+                  .filter(p => p && /chrome\.exe$/i.test(p.name || '') && typeof p.cmd === 'string' && p.cmd.includes(needle))
+                  .map(p => Number(p.pid))
+                  .filter(Boolean);
+                if (pids.length) {
+                  const stats = await pidusage(pids).catch(()=> ({}));
+                  let sum = 0;
+                  for (const pid of pids) {
+                    const st = stats[pid];
+                    if (st && typeof st.memory === 'number') sum += st.memory;
+                  }
+                  mb = Math.round(sum / 1024 / 1024);
+                }
+              }
+            } catch {}
+          }
+
+          // 4) CPU opcional (bonificação): soma cpu dos PIDs do userDataDir
+          let cpuPct = null;
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            const udir = man && man.userDataDir;
+            if (udir && psList && pidusage) {
+              const procs = await psList().catch(()=>[]);
+              const needle = udir.replace(/\\/g, '\\\\');
+              const pids = procs
+                .filter(p => p && /chrome\.exe$/i.test(p.name || '') && typeof p.cmd === 'string' && p.cmd.includes(needle))
+                .map(p => Number(p.pid))
+                .filter(Boolean);
+              if (pids.length) {
+                const stats = await pidusage(pids).catch(()=> ({}));
+                let sumCpu = 0;
+                for (const pid of pids) {
+                  const st = stats[pid];
+                  if (st && typeof st.cpu === 'number') sumCpu += st.cpu;
+                }
+                cpuPct = Math.round(sumCpu);
+              }
+            }
+          } catch {}
+
+          // 5) Atualiza robeMeta
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = (typeof mb === 'number' && mb >= 0) ? mb : null;
-          robeMeta[nome].cpuPercent = null;
+          robeMeta[nome].cpuPercent = (typeof cpuPct === 'number' && cpuPct >= 0) ? cpuPct : null;
 
           if (typeof robeMeta[nome].ramMB === 'number') {
             const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);

@@ -1862,11 +1862,84 @@
     // 4.4) Fechar todos em PARALELO com limite de concorrência (RÁPIDO e CONFIÁVEL)
     async function stopAllSequential() {
       if (stopAllLock) { alert('Fechamento em massa já está em andamento.'); return; }
-      if (startAllLock) { alertMassActionRunning(); return; }
-      stopAllLock = true;
-      setGlobalActionButtonsDisabled(true);
-      const stopBtn = document.getElementById('stopAllBtn');
-      if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
+      try {
+        const st = await window.electronAPI.getStatus();
+        let perfis = Array.isArray(st && st.perfis) ? st.perfis.filter(p => p && p.nome && p.active) : [];
+
+        const total = perfis.length;
+        if (total === 0) {
+          if (stopBtn) stopBtn.textContent = 'Fechar';
+          setGlobalActionButtonsDisabled(false);
+          stopAllLock = false;
+          return;
+        }
+
+        // Limite de concorrência: 6 (igual ao workerClient.js)
+        const LIMIT = 6;
+        let idx = 0;
+        let completed = 0;
+        const failed = [];
+
+        function updateProgress() {
+          if (stopBtn) stopBtn.textContent = `Fechando... ${Math.min(completed, total)}/${total}`;
+        }
+
+        async function worker() {
+          while (true) {
+            const i = idx++;
+            if (i >= total) return;
+            const p = perfis[i];
+            try {
+              // Usa API oficial, com timeout guardado pelo backend
+              const r = await window.electronAPI.deactivate(p.nome);
+              if (!r || r.ok !== true) failed.push(p.nome);
+            } catch (e) {
+              failed.push(p.nome);
+            } finally {
+              completed++;
+              updateProgress();
+            }
+          }
+        }
+
+        // Dispara até 6 workers
+        const runners = [];
+        for (let k = 0; k < Math.min(LIMIT, total); k++) runners.push(worker());
+        await Promise.all(runners);
+
+        // Convergência: aguarda até zerar ativos ou timeout
+        const ok = await waitUntil(async () => {
+          const now = await window.electronAPI.getStatus();
+          const stillActive = (now && now.perfis || []).filter(x => x && x.active).length;
+          return stillActive === 0;
+        }, { timeoutMs: 45000, intervalMs: 1000 });
+
+        if (!ok || failed.length > 0) {
+          // Ajuste final (uma última tentativa para os que falharam e ainda estiverem ativos)
+          const now = await window.electronAPI.getStatus();
+          const ativosRem = (now && now.perfis || []).filter(x => x && x.active).map(x => x.nome);
+          const retry = failed.filter(n => ativosRem.includes(n));
+          for (const nome of retry) {
+            try { await window.electronAPI.deactivate(nome); } catch {}
+          }
+
+          const after = await window.electronAPI.getStatus();
+          const aindaAtivos = (after && after.perfis || []).filter(x => x && x.active).length;
+          if (aindaAtivos > 0) {
+            alert(`Atenção: ${aindaAtivos} navegador(es) ainda ativo(s). Verifique manualmente.`);
+          }
+        }
+
+      } catch (e) {
+        console.error('[Fechar todos] Erro crítico', e && e.message || e, e);
+        alert('Falha ao fechar todos: ' + (e && e.message || e));
+      } finally {
+        if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar Todos'; }
+        setGlobalActionButtonsDisabled(false);
+        stopAllLock = false;
+        try { reloadPerfis(); } catch {}
+      }
+    }
       try {
         const st = await window.electronAPI.getStatus();
         // CORREÇÃO 5 + 9: Validação robusta de perfis
@@ -1904,128 +1977,19 @@
         const DEACTIVATE_TIMEOUT_MS = 25000; // Timeout de 25s por chamada deactivate
         const MAX_QUEUE_SIZE = 200; // CORREÇÃO 8: Limite máximo da fila (proteção)
         
-        // CORREÇÃO 1: Semáforo verdadeiramente atômico usando mutex pattern (ULTRA ROBUSTO)
+        // AUDITORIA 2025: Semáforo simplificado - evita complexidade que pode causar travamento
         let activeSlots = 0;
-        const waitQueue = [];
-        let slotMutex = Promise.resolve(); // Mutex para garantir atomicidade
-        
+
         const acquireSlot = async () => {
-          // CORREÇÃO 8: Proteção contra fila crescer indefinidamente (antes de entrar na fila)
-          if (waitQueue.length >= MAX_QUEUE_SIZE) {
-            console.error('[Fechar todos] Fila de espera muito grande, rejeitando');
-            throw new Error('queue_overflow');
+          while (activeSlots >= CONCURRENCY_LIMIT) {
+            await sleep(100); // Espera 100ms se cheio
           }
-          
-          // CORREÇÃO 1 + 3 + 2: Operação atômica usando mutex com await correto e sem race condition
-          return new Promise((resolve) => {
-            slotMutex = slotMutex.then(() => {
-              return new Promise((mutexResolve) => {
-                if (activeSlots < CONCURRENCY_LIMIT) {
-                  activeSlots++;
-                  // CORREÇÃO 2: Resolve mutex PRIMEIRO, depois promise externa (evita race condition)
-                  mutexResolve(); // Resolve o mutex primeiro
-                  resolve(); // Resolve a promise externa depois
-                } else {
-                  // Espera na fila até ter slot disponível
-                  // CORREÇÃO 2: Callback resolve mutex primeiro, depois promise externa
-                  waitQueue.push(() => {
-                    activeSlots++;
-                    mutexResolve(); // Resolve o mutex primeiro
-                    resolve(); // Resolve a promise externa depois
-                  });
-                }
-              });
-            });
-          });
+          activeSlots++;
         };
-        
+
         const releaseSlot = async () => {
-          // CORREÇÃO 1 + 4 + 6 + 7: Operação atômica usando mutex COM AWAIT e tratamento de erro robusto
-          // CORREÇÃO 7: Proteção contra callbacks órfãos na fila
-          let releaseAttempted = false;
-          try {
-            releaseAttempted = true;
-            slotMutex = slotMutex.then(() => {
-              return new Promise((mutexResolve) => {
-                try {
-                  // CORREÇÃO 6: Proteção contra race condition e múltiplas liberações
-                  if (activeSlots > 0) {
-                    activeSlots--;
-                  } else {
-                    console.warn('[Fechar todos] releaseSlot chamado mas activeSlots já é 0');
-                    // CORREÇÃO 6: Garante que activeSlots nunca fica negativo
-                    if (activeSlots < 0) {
-                      activeSlots = 0;
-                    }
-                  }
-                  
-                  // CORREÇÃO 10 + 7: Processa fila de forma segura e previne callbacks órfãos
-                  let processedFromQueue = false;
-                  let maxQueueProcessAttempts = 10; // CORREÇÃO 7: Limite de tentativas para evitar loop infinito
-                  while (waitQueue.length > 0 && activeSlots < CONCURRENCY_LIMIT && !processedFromQueue && maxQueueProcessAttempts > 0) {
-                    maxQueueProcessAttempts--;
-                    const next = waitQueue.shift();
-                    if (next && typeof next === 'function') {
-                      try {
-                        // Não incrementa aqui - será incrementado no callback
-                        next();
-                        processedFromQueue = true; // CORREÇÃO 7: Marca que processou um da fila
-                      } catch (callbackError) {
-                        // CORREÇÃO 10: Se callback falhar, tenta próximo
-                        console.error('[Fechar todos] Erro ao executar callback da fila', callbackError);
-                        // Continua loop para tentar próximo
-                        continue;
-                      }
-                    } else {
-                      // CORREÇÃO 7: Remove callbacks inválidos da fila
-                      console.warn('[Fechar todos] Callback inválido removido da fila');
-                      continue;
-                    }
-                  }
-                  
-                  // CORREÇÃO 7: Se ainda há itens na fila após tentativas, loga warning
-                  if (waitQueue.length > 0 && maxQueueProcessAttempts === 0) {
-                    console.warn('[Fechar todos] Ainda há itens na fila após processamento, pode indicar problema', waitQueue.length);
-                  }
-                  
-                  mutexResolve();
-                } catch (mutexError) {
-                  // CORREÇÃO 6: Se erro no mutex, ainda resolve para não travar
-                  console.error('[Fechar todos] Erro no mutex releaseSlot', mutexError);
-                  mutexResolve();
-                }
-              });
-            });
-            await slotMutex; // CORREÇÃO 4: Aguarda mutex completar
-          } catch (releaseError) {
-            // CORREÇÃO 4: Se releaseSlot falhar, tenta recuperar estado
-            console.error('[Fechar todos] Erro crítico em releaseSlot', releaseError);
-            // CORREÇÃO 6: Tenta corrigir activeSlots se possível (apenas uma vez)
-            if (activeSlots < 0) {
-              activeSlots = 0; // Corrige se ficou negativo
-            } else if (activeSlots > CONCURRENCY_LIMIT) {
-              // CORREÇÃO 6: Se ficou maior que o limite, corrige também
-              console.warn('[Fechar todos] activeSlots maior que limite, corrigindo', activeSlots);
-              activeSlots = CONCURRENCY_LIMIT;
-            }
-            // CORREÇÃO 7: Se releaseSlot nunca foi tentado, tenta processar fila manualmente
-            if (!releaseAttempted && waitQueue.length > 0) {
-              console.warn('[Fechar todos] Tentando processar fila manualmente após erro');
-              try {
-                let manualAttempts = 5; // Limite de tentativas manuais
-                while (waitQueue.length > 0 && activeSlots < CONCURRENCY_LIMIT && manualAttempts > 0) {
-                  manualAttempts--;
-                  const next = waitQueue.shift();
-                  if (next && typeof next === 'function') {
-                    try {
-                      next();
-                      break; // Processa apenas um para não travar
-                    } catch {}
-                  }
-                }
-              } catch {}
-            }
-            // Não re-lança - permite que operação continue
+          if (activeSlots > 0) {
+            activeSlots--;
           }
         };
         
@@ -2055,141 +2019,49 @@
           }
         };
         
-        // CORREÇÃO 4: deactivate com timeout robusto + CORREÇÃO 2: Cancelamento de operação (ULTRA ROBUSTO)
+        // AUDITORIA 2025: deactivate simplificado e robusto - foco na confiabilidade
         const deactivateWithTimeout = async (nome) => {
-          // CORREÇÃO 9: Validação de entrada
+          // Validação simples
           if (!nome || typeof nome !== 'string' || !nome.trim()) {
             throw new Error('nome_invalido');
           }
-          
-          // CORREÇÃO 2: AbortController para cancelar fetch em caso de timeout
-          const AbortControllerClass = global.AbortController || (() => {
-            // Fallback para navegadores antigos (não cancela, mas não quebra)
-            return class {
-              constructor() { this.signal = { aborted: false }; }
-              abort() { this.signal.aborted = true; }
-            };
-          })();
-          const abortController = new AbortControllerClass();
-          
-          let timeoutId = null;
-          let timeoutCleared = false;
-          let deactivateCompleted = false;
-          // CORREÇÃO 10: Flag para prevenir race condition em deactivateCompleted
-          let deactivateCompletedSet = false;
-          
-          // CORREÇÃO 2: Timeout promise que pode ser cancelada
-          // CORREÇÃO 11 + 9: abortController.abort() protegido contra múltiplas chamadas e usado corretamente
-          let abortCalled = false;
+
+          // Timeout aumentado para 60s (era 25s, pode ser insuficiente para alguns casos)
+          const DEACTIVATE_TIMEOUT_MS_SIMPLIFIED = 60000;
+
+          // Método direto: usa electronAPI primeiro (mais confiável que fetch)
+          const electronPromise = window.electronAPI.deactivate(nome);
+
+          // Timeout simples
           const timeoutPromise = new Promise((_, reject) => {
-            timeoutId = setTimeout(() => {
-              if (!deactivateCompleted && !abortCalled) {
-                abortCalled = true; // CORREÇÃO 11: Previne múltiplas chamadas
-                try {
-                  // CORREÇÃO 9: abort() cancela fetch principal, mas fallback pode ainda estar rodando
-                  abortController.abort();
-                } catch (e) {
-                  // Ignora se abort já foi chamado ou não suportado
-                }
-                // CORREÇÃO 9: Rejeita promise, mas fallback pode ainda estar processando
-                reject(new Error('timeout'));
-              }
-            }, DEACTIVATE_TIMEOUT_MS);
+            setTimeout(() => reject(new Error('timeout')), DEACTIVATE_TIMEOUT_MS_SIMPLIFIED);
           });
-          
-          // CORREÇÃO 2: Wrapper para passar AbortController ao fetch (se suportado)
-          // CORREÇÃO 3 + 7: Fallback com timeout próprio para evitar loop infinito
-          const deactivatePromise = (async () => {
-            try {
-              // Tenta usar fetch diretamente com AbortController
-              const response = await fetch(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
-                method: 'POST',
-                signal: abortController.signal // CORREÇÃO 2: Passa signal para cancelar
-              });
-              const data = await response.json();
-              // CORREÇÃO 10: Atribuição atômica de deactivateCompleted
-              if (!deactivateCompletedSet) {
-                deactivateCompleted = true;
-                deactivateCompletedSet = true;
-              }
-              // CORREÇÃO 2: Limpa timeout se completou
-              if (timeoutId && !timeoutCleared) {
-                clearTimeout(timeoutId);
-                timeoutCleared = true;
-              }
-              return data;
-            } catch (fetchError) {
-              // Se AbortController não suportado ou erro de rede, tenta método original
-              if (fetchError && fetchError.name === 'AbortError') {
-                throw new Error('timeout');
-              }
-              // CORREÇÃO 3: Fallback com timeout próprio (evita loop infinito)
-              // CORREÇÃO 7: Limpa timeout antes de usar fallback
-              if (timeoutId && !timeoutCleared) {
-                clearTimeout(timeoutId);
-                timeoutCleared = true;
-              }
-              
-              // CORREÇÃO 3: Fallback com timeout próprio usando Promise.race
-              // CORREÇÃO 1 + 4: Timeout do fallback é limpo corretamente
-              let fallbackTimeoutId = null;
-              let fallbackTimeoutCleared = false;
-              const fallbackTimeout = new Promise((_, reject) => {
-                fallbackTimeoutId = setTimeout(() => {
-                  if (!fallbackTimeoutCleared) {
-                    fallbackTimeoutCleared = true;
-                    reject(new Error('timeout'));
-                  }
-                }, DEACTIVATE_TIMEOUT_MS);
-              });
-              
-              try {
-                const result = await Promise.race([
-                  window.electronAPI.deactivate(nome),
-                  fallbackTimeout
-                ]);
-                // CORREÇÃO 1 + 4: Limpa timeout do fallback se completou antes
-                if (fallbackTimeoutId && !fallbackTimeoutCleared) {
-                  clearTimeout(fallbackTimeoutId);
-                  fallbackTimeoutCleared = true;
-                }
-                // CORREÇÃO 10: Atribuição atômica de deactivateCompleted
-                if (!deactivateCompletedSet) {
-                  deactivateCompleted = true;
-                  deactivateCompletedSet = true;
-                }
-                return result;
-              } catch (fallbackError) {
-                // CORREÇÃO 1 + 4: Limpa timeout do fallback em caso de erro
-                if (fallbackTimeoutId && !fallbackTimeoutCleared) {
-                  clearTimeout(fallbackTimeoutId);
-                  fallbackTimeoutCleared = true;
-                }
-                // CORREÇÃO 10: Atribuição atômica de deactivateCompleted
-                if (!deactivateCompletedSet) {
-                  deactivateCompleted = true;
-                  deactivateCompletedSet = true;
-                }
-                throw fallbackError; // Re-lança erro (timeout ou outro)
-              }
-            }
-          })();
-          
+
+          // Promise.race: primeiro que resolver ganha
           try {
-            const result = await Promise.race([deactivatePromise, timeoutPromise]);
-            // CORREÇÃO 2: Limpa timeout se completou antes do timeout
-            if (timeoutId && !timeoutCleared) {
-              clearTimeout(timeoutId);
-              timeoutCleared = true;
-            }
+            const result = await Promise.race([electronPromise, timeoutPromise]);
             return result;
           } catch (e) {
-            // CORREÇÃO 7: Cleanup em caso de erro
-            if (timeoutId && !timeoutCleared) {
-              clearTimeout(timeoutId);
-              timeoutCleared = true;
+            // Se timeout ou erro, tenta fetch direto como fallback (sem AbortController complexo)
+            console.warn('[Fechar todos] electronAPI falhou, tentando fetch direto', nome, e.message);
+
+            try {
+              const response = await fetch(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}) // body vazio, mas define Content-Type
+              });
+
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+              }
+
+              const data = await response.json();
+              return data;
+            } catch (fetchError) {
+              console.error('[Fechar todos] fetch também falhou', nome, fetchError.message);
+              throw fetchError; // Re-lança erro do fetch
             }
-            throw e;
           }
         };
         
@@ -2311,54 +2183,20 @@
           }
         };
         
-        // Dispara todas as desativações em paralelo (limitado por concorrência)
-        // CORREÇÃO 6 + 9: Promise.allSettled com validação
-        // CORREÇÃO 9 + 5: Previne duplicação de contadores usando Set de perfis processados (global)
-        const processedPerfis = new Set(); // Rastreia perfis já processados (global para prevenir retries duplicados)
-        const processingPerfis = new Set(); // CORREÇÃO 5: Rastreia perfis em processamento (previne retries simultâneos)
-        // CORREÇÃO 1 + 4: Rastreia timeouts ativos para limpeza
-        const activeTimeouts = new Set(); // Rastreia todos os timeouts criados
-        // CORREÇÃO 1: Flag para indicar se função ainda está ativa
-        let functionActive = true;
-        
+        // AUDITORIA 2025: Processamento simplificado - direto e confiável
         if (Array.isArray(perfis) && perfis.length > 0) {
-          await Promise.allSettled(perfis.map(p => {
-            // CORREÇÃO 9: Validação antes de processar + prevenção de duplicação
+          const promises = perfis.map(p => {
             if (!p || !p.nome) {
-              const perfisKey = String(p && p.nome || 'invalid_' + JSON.stringify(p));
-              // CORREÇÃO 3: Verificação e adição atômica (previne race condition)
-              // CORREÇÃO 1: Também verifica completedTracked para prevenir duplicação de contador
-              if (!processedPerfis.has(perfisKey) && !completedTracked.has(perfisKey)) {
-                processedPerfis.add(perfisKey);
-                completedTracked.add(perfisKey); // CORREÇÃO 1: Rastreia para prevenir duplicação
-                console.warn('[Fechar todos] Perfil inválido ignorado', p);
-                counters.completed++;
-                updateProgress();
-              }
-              return Promise.resolve({ status: 'rejected', reason: 'invalid_profile' });
+              console.warn('[Fechar todos] Perfil inválido ignorado', p);
+              counters.completed++;
+              updateProgress();
+              return Promise.resolve();
             }
-            
-            // CORREÇÃO 9: Previne processamento duplicado do mesmo perfil
-            // CORREÇÃO 3: Verificação e adição atômica (previne race condition)
-            const perfisKey = String(p.nome);
-            if (processedPerfis.has(perfisKey)) {
-              console.warn('[Fechar todos] Perfil duplicado ignorado', p.nome);
-              return Promise.resolve({ status: 'rejected', reason: 'duplicate_profile' });
-            }
-            
-            // CORREÇÃO 5: Previne processamento simultâneo do mesmo perfil
-            // CORREÇÃO 3: Verificação atômica antes de adicionar
-            if (processingPerfis.has(perfisKey)) {
-              console.warn('[Fechar todos] Perfil já em processamento, aguardando', p.nome);
-              // CORREÇÃO 1 + 4: Aguarda com timeout rastreável e limpeza
-              return new Promise((resolve) => {
-                // CORREÇÃO 1: Rastreia timeout para limpeza
-                const timeoutId = setTimeout(() => {
-                  // CORREÇÃO 2 + 5: Verifica functionActive ANTES de acessar activeTimeouts
-                  if (!functionActive) {
-                    // CORREÇÃO 2: Se função terminou, não tenta acessar activeTimeouts (pode já ter sido limpo)
-                    resolve({ status: 'rejected', reason: 'function_terminated' });
-                    return;
+
+            return deactivateWithLimit(p);
+          });
+
+          await Promise.allSettled(promises);
                   }
                   
                   // CORREÇÃO 5: Remove do rastreamento apenas se ainda existe
