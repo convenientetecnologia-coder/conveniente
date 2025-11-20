@@ -2520,8 +2520,7 @@ const handlers = {
         issuesCount,
         ramMB: (() => {
           const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
-          if (v === null) logger.warn('[GET-STATUS] ramMB null/undefined', { nome, hasRobeMeta: !!robeMeta[nome] });
-          else logger.info('[GET-STATUS] ramMB retornado', { nome, ramMB: v });
+          // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
           return v;
         })(),
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
@@ -2563,8 +2562,7 @@ const handlers = {
         emExecucao: !!robeMeta[nome]?.emExecucao,
         ramMB: (() => {
           const v = typeof robeMeta[nome]?.ramMB === "number" ? robeMeta[nome].ramMB : null;
-          if (v === null) logger.warn('[GET-STATUS] ramMB null/undefined', { nome, hasRobeMeta: !!robeMeta[nome] });
-          else logger.info('[GET-STATUS] ramMB retornado', { nome, ramMB: v });
+          // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
           return v;
         })(),
         cpuPercent: typeof robeMeta[nome]?.cpuPercent === "number" ? robeMeta[nome].cpuPercent : null,
@@ -2821,11 +2819,12 @@ const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: 
 
 // LOGS DE DIAGNÓSTICO DA RAM — somente quando estiver null/undefined
 try {
-  for (const ent of perfis) {
-    if (!(typeof ent.ramMB === 'number')) {
-      logger.warn('[STATUS-WRITE] ramMB é null/undefined', { nome: ent.nome, ramMB: ent.ramMB, hasRobeMeta: !!robeMeta[ent.nome] });
-    }
-  }
+  // Logs removidos para evitar poluição do terminal (ramMB null é normal para perfis inativos)
+  // for (const ent of perfis) {
+  //   if (!(typeof ent.ramMB === 'number')) {
+  //     logger.warn('[STATUS-WRITE] ramMB é null/undefined', { nome: ent.nome, ramMB: ent.ramMB, hasRobeMeta: !!robeMeta[ent.nome] });
+  //   }
+  // }
 } catch {}
 
 const ok = writeJsonAtomic(statusPath, statusObj);

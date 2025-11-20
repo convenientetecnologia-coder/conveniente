@@ -1032,11 +1032,7 @@
         // Militar: null-aware, badge neutra se RAM/CPU desconhecida
         // RAM por conta (campo .ramMB): mostra RAM: NNN MB, warn (>700MB pill vermelho), warn amarelo >500MB, badge neutra se null
         const ramPill = buildRamPill(p.ramMB); // RAM por conta
-        if (p.ramMB === null || p.ramMB === undefined) {
-          console.warn('[FRONTEND] ramMB é null/undefined para perfil', { nome: p.nome, ramMB: p.ramMB, p });
-        } else {
-          console.log('[FRONTEND] ramMB exibido', { nome: p.nome, ramMB: p.ramMB });
-        }
+        // Logs removidos para evitar poluição do console (ramMB null é normal para perfis inativos)
 
         // Exibir CPU percent (com null-aware)
         const cpuPill = buildCpuPill(p.cpuPercent);
