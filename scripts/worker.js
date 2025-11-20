@@ -1251,6 +1251,92 @@ async function getPosixPsMap() {
   });
 }
 
+// === INÍCIO: PID discovery via CDP/Tracing (sem WMI) ===
+const PIDS_CACHE_TTL_MS = parseInt(process.env.RAM_PIDS_CACHE_TTL_MS || '30000', 10); // 30s
+const PIDS_TRACE_MS     = parseInt(process.env.RAM_PIDS_TRACE_MS || '240', 10);       // ~240ms
+const PIDS_REFRESH_PER_TICK = parseInt(process.env.RAM_PIDS_REFRESH_PER_TICK || '2', 10);
+
+async function readIOStreamChunks(session, stream) {
+  const chunks = [];
+  while (true) {
+    const chunk = await session.send('IO.read', { handle: stream, size: 1 << 20 }).catch(()=>null);
+    if (!chunk) break;
+    if (chunk.data) chunks.push(chunk.data);
+    if (chunk.eof) break;
+  }
+  try { await session.send('IO.close', { handle: stream }).catch(()=>{}); } catch {}
+  return chunks.join('');
+}
+
+async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS } = {}) {
+  try {
+    if (!browser || !browser.isConnected || (browser.isConnected && browser.isConnected() === false)) return [];
+    const target = browser.target();
+    if (!target || !target.createCDPSession) return [];
+    const session = await target.createCDPSession();
+    const pids = new Set();
+    const tracingComplete = new Promise((resolve) => {
+      const onComplete = async (ev) => {
+        try {
+          const stream = ev && ev.stream;
+          if (!stream) return resolve([]);
+          const data = await readIOStreamChunks(session, stream);
+          // data é um JSON com traceEvents
+          try {
+            const obj = JSON.parse(data);
+            const arr = Array.isArray(obj && obj.traceEvents) ? obj.traceEvents : [];
+            for (const e of arr) {
+              if (e && typeof e.pid === 'number') pids.add(e.pid);
+            }
+          } catch {} 
+        } finally {
+          resolve(Array.from(pids));
+        }
+      };
+      session.on('Tracing.tracingComplete', onComplete);
+    });
+    // Start Tracing com memory-infra (rápido e leve)
+    await session.send('Tracing.start', {
+      categories: 'disabled-by-default-memory-infra',
+      transferMode: 'ReturnAsStream',
+      options: 'record-as-much-as-possible'
+    }).catch(()=>{});
+    // Aguarda um pequeno sampling
+    await new Promise(r => setTimeout(r, Math.max(120, sampleMs)));
+    // Stop
+    try { await session.send('Tracing.end').catch(()=>{}); } catch {}
+    const res = await tracingComplete;
+    try { await session.detach && session.detach().catch(()=>{}); } catch {}
+    return Array.isArray(res) ? res : [];
+  } catch {
+    return [];
+  }
+}
+
+async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}) {
+  try {
+    if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) return [];
+    robeMeta[nome] = robeMeta[nome] || {};
+    const cache = robeMeta[nome]._pidCache || { pids: [], ts: 0 };
+    const expired = (Date.now() - cache.ts) > PIDS_CACHE_TTL_MS;
+    if (!forceRefresh && !expired && Array.isArray(cache.pids) && cache.pids.length) {
+      return cache.pids.slice(0);
+    }
+    // Força refresh (tranquilo: curto e leve)
+    const pids = await collectChromePidsViaTracing(ctrl.browser).catch(()=>[]);
+    // Garante incluir o rootPid (fallback)
+    const root = robeMeta[nome].rootPid || null;
+    const set = new Set(Array.isArray(pids) ? pids : []);
+    if (root && Number.isFinite(root)) set.add(root);
+    const arr = Array.from(set);
+    robeMeta[nome]._pidCache = { pids: arr, ts: Date.now() };
+    return arr.slice(0);
+  } catch {
+    return [];
+  }
+}
+// === FIM: PID discovery via CDP/Tracing (sem WMI) ===
+
 // Pequeno lock para evitar overlap de ticks
 let _ramTickBusy = false;
 
@@ -1286,6 +1372,15 @@ async function ramCpuMonitorTick() {
       ? await getWinTasklistMap()
       : await getPosixPsMap();
 
+    // Refrescamos no máximo N perfis por tick (demais usam cache)
+    const entries = Array.from(controllers.entries());
+    const refreshBudget = Math.min(PIDS_REFRESH_PER_TICK, entries.length);
+    for (let i = 0; i < refreshBudget; i++) {
+      const [n, c] = entries[(i + (ramCpuMonitorTick._rr || 0)) % entries.length];
+      try { await getControllerPidsCached(n, c, { forceRefresh: true }); } catch {}
+    }
+    ramCpuMonitorTick._rr = ((ramCpuMonitorTick._rr || 0) + refreshBudget) % Math.max(1, entries.length);
+
     // Atualiza todos os perfis controlados por este worker
     for (const [nome, ctrl] of controllers.entries()) {
       try {
@@ -1307,15 +1402,24 @@ async function ramCpuMonitorTick() {
           } catch {}
         }
 
-        const pid = robeMeta[nome].rootPid || null;
-        if (!pid || !Number.isFinite(pid)) {
-          robeMeta[nome].ramMB = null;
-          robeMeta[nome].cpuPercent = null;
-          continue;
+        // NOVO: soma de root + filhos (pelo CDP Tracing) + tasklist/ps
+        const pids = await getControllerPidsCached(nome, ctrl, { forceRefresh: false });
+        let totalMB = 0;
+        if (Array.isArray(pids) && pids.length) {
+          for (const pid of pids) {
+            const v = pidMemMap[pid];
+            if (typeof v === 'number' && v >= 0) totalMB += v;
+          }
+        } else {
+          // fallback duro (só rootPid) se cache vazio
+          const root = robeMeta[nome].rootPid || null;
+          if (root && Number.isFinite(root) && typeof pidMemMap[root] === 'number') {
+            totalMB = pidMemMap[root];
+          } else {
+            totalMB = 0;
+          }
         }
-
-        const memMB = pidMemMap[pid];
-        robeMeta[nome].ramMB = (typeof memMB === 'number' && memMB >= 0) ? memMB : null;
+        robeMeta[nome].ramMB = totalMB || null;
         // CPU por perfil permanece null (sem WMI/PowerShell). O frontend já é null-aware
         robeMeta[nome].cpuPercent = null;
 
