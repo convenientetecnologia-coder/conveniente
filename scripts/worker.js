@@ -1703,7 +1703,14 @@ async function fotosGcTick() {
       logger.info('[FOTOS][GC] resultado', { deletedFiles: res.deletedFiles, removedIndex: res.removedIndex, resetGens: res.resetGens });
     }
   } catch (e) {
-    logger.warn('[FOTOS][GC] erro', { error: e && e.message || e });
+    // index_lock_timeout é esperado quando há contenção (muitas operações simultâneas)
+    // Não é crítico, apenas indica que o GC será tentado novamente no próximo ciclo
+    const msg = (e && e.message) || String(e);
+    if (msg.includes('index_lock_timeout')) {
+      // Silencioso: timeout de lock é normal em alta contenção
+    } else {
+      logger.warn('[FOTOS][GC] erro', { error: msg });
+    }
   }
 }
 setInterval(fotosGcTick, 90_000);

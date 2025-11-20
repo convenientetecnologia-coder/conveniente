@@ -17,19 +17,23 @@ const INDEX_LOCK_FILE = INDEX_FILE + '.lock';
 async function acquireIndexLock(retries = 200, delayMs = 15) {
   for (let i = 0; i < retries; i++) {
     try {
-      // [item 6]: Verifica stale lock antes de tentar abrir
+      // Verifica stale lock antes de tentar abrir (locks órfãos >60s são removidos)
       if (fs.existsSync(INDEX_LOCK_FILE)) {
         try {
           const st = fs.statSync(INDEX_LOCK_FILE);
-          if (Date.now() - st.mtimeMs > 60 * 1000) {
-            fs.unlinkSync(INDEX_LOCK_FILE);
+          const age = Date.now() - st.mtimeMs;
+          if (age > 60 * 1000) {
+            // Lock órfão (>60s) - remove silenciosamente
+            try { fs.unlinkSync(INDEX_LOCK_FILE); } catch {}
           }
         } catch {}
       }
       const fd = fs.openSync(INDEX_LOCK_FILE, 'wx');
       return fd;
-    } catch {}
-    await new Promise(r => setTimeout(r, delayMs));
+    } catch {
+      // Lock ocupado - aguarda e tenta novamente
+      await new Promise(r => setTimeout(r, delayMs));
+    }
   }
   throw new Error('index_lock_timeout');
 }

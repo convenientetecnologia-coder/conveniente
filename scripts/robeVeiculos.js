@@ -1578,27 +1578,77 @@ async function selecionarAnoVeiculo(page) {
   return alvo;
 }
 
-// Preenche Fabricante e Modelo via JSON
-async function preencherFabricanteModelo(page) {
-  const fabricantes = readJsonSafe(path.join(__dirname, '..', 'dados', 'fabricante.json'), []);
-  const modelos = readJsonSafe(path.join(__dirname, '..', 'dados', 'modelo.json'), []);
-  const fabricante = fabricantes.length ? fabricantes[Math.floor(Math.random() * fabricantes.length)] : 'Outro';
-  const modelo = modelos.length ? modelos[Math.floor(Math.random() * modelos.length)] : 'Modelo';
-
-  // Fabricante
+// Preenche Fabricante e Modelo via JSON (nova estrutura: dados/veiculos/MODELO.json)
+async function preencherFabricanteModelo(page, modeloKey) {
+  // Tenta nova estrutura: dados/veiculos/MODELO.json => array de strings (fabricantes/títulos)
+  function readJsonSafe(file, fb) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fb; } }
+  
+  const baseDir = path.join(__dirname, '..', 'dados', 'veiculos');
+  let fabricante = null;
+  let modelo = null;
+  
+  if (modeloKey) {
+    const modelFile = path.join(baseDir, `${String(modeloKey).toLowerCase()}.json`);
+    const j = readJsonSafe(modelFile, null);
+    if (j && Array.isArray(j) && j.length) {
+      // Arquivo é array de strings (fabricantes/títulos do modelo)
+      // Seleciona um item aleatório do array
+      const itemSelecionado = String(j[Math.floor(Math.random() * j.length)] || '').trim();
+      // Extrai fabricante (primeira palavra, ex: "Volkswagen" de "Volkswagen Gol Oferta Especial")
+      const palavras = itemSelecionado.split(/\s+/).filter(Boolean);
+      if (palavras.length > 0) {
+        // Primeira palavra é geralmente o fabricante (Volkswagen, Renault, Toyota)
+        fabricante = palavras[0];
+        // Modelo é o modeloKey capitalizado (ex: "gol" -> "Gol", "kwid" -> "Kwid")
+        const modeloKeyStr = String(modeloKey || '');
+        modelo = modeloKeyStr.charAt(0).toUpperCase() + modeloKeyStr.slice(1).toLowerCase();
+      } else {
+        fabricante = itemSelecionado || 'Outro';
+        modelo = String(modeloKey || 'Modelo');
+      }
+    } else if (j && typeof j === 'object') {
+      // Se for objeto (estrutura alternativa)
+      if (j.fabricante && j.modelo) {
+        fabricante = String(j.fabricante);
+        modelo = String(j.modelo);
+      } else if (Array.isArray(j.fabricantes) && j.fabricantes.length) {
+        fabricante = String(j.fabricantes[Math.floor(Math.random() * j.fabricantes.length)]);
+      } else if (Array.isArray(j.modelos) && j.modelos.length) {
+        modelo = String(j.modelos[Math.floor(Math.random() * j.modelos.length)]);
+      }
+    }
+  }
+  
+  // Fallback com estrutura antiga (não quebra legado)
+  if (!fabricante) {
+    const fabricantesAnt = readJsonSafe(path.join(__dirname, '..', 'dados', 'fabricante.json'), []);
+    const arr = Array.isArray(fabricantesAnt) ? fabricantesAnt : [];
+    if (arr.length) fabricante = String(arr[Math.floor(Math.random() * arr.length)]);
+  }
+  
+  if (!modelo) {
+    const modelosAnt = readJsonSafe(path.join(__dirname, '..', 'dados', 'modelo.json'), []);
+    const arr = Array.isArray(modelosAnt) ? modelosAnt : [];
+    if (arr.length) modelo = String(arr[Math.floor(Math.random() * arr.length)]);
+  }
+  
+  // Fallback final
+  fabricante = fabricante || 'Outro';
+  modelo = modelo || (modeloKey ? String(modeloKey) : 'Modelo');
+  
+  // Preenche Fabricante e Modelo (combobox/inputs)
   const okFabInput = await tryTypeInLabeledInput(page, 'Fabricante', fabricante, { pressEnter: true });
   if (!okFabInput) {
     await trySelectComboboxByTyping(page, 'Fabricante', fabricante, { fallbackArrowTimes: 2 }).catch(()=>{});
   }
   await sleep(jitter(220, 380));
-
-  // Modelo
+  
   const okModInput = await tryTypeInLabeledInput(page, 'Modelo', modelo, { pressEnter: true });
   if (!okModInput) {
     await trySelectComboboxByTyping(page, 'Modelo', modelo, { fallbackArrowTimes: 2 }).catch(()=>{});
   }
   await sleep(jitter(220, 380));
-
+  
   return { fabricante, modelo };
 }
 
@@ -1616,6 +1666,63 @@ async function preencherPrecoVeiculo(page, valorInt) {
   const got = await page.evaluate(el => el.value, inp).catch(()=> '');
   if (!got || !/\d/.test(got)) throw new Error('Falha ao preencher Preço do veículo.');
   return val;
+}
+
+// Helper: localizar textarea por label
+async function findTextareaByLabel(page, labelText, timeout = 8000) {
+  const started = Date.now();
+  const xpaths = [
+    `//div[.//span[normalize-space()="${labelText}"]]//textarea`,
+    `//label[.//span[normalize-space()="${labelText}"]]//textarea`,
+    `//span[normalize-space()="${labelText}"]/ancestor::*[self::div or self::label][1]//textarea`,
+    `//textarea[@aria-label="${labelText}"]`,
+    `//textarea[contains(@aria-label,"${labelText}")]`
+  ];
+  while (Date.now() - started < timeout) {
+    for (const xp of xpaths) {
+      try {
+        const els = await page.$x(xp);
+        if (els && els[0]) return els[0];
+      } catch {}
+    }
+    await sleep(180);
+  }
+  return null;
+}
+
+// Função NOVA: preencher descrição (dados/descricaoVeiculos.json)
+async function preencherDescricaoVeiculo(page, modeloKey) {
+  function readJsonSafe(file, fb) { try { return JSON.parse(fs.readFileSync(file,'utf8')); } catch { return fb; } }
+  
+  const arquivo = path.join(__dirname, '..', 'dados', 'descricaoVeiculos.json');
+  const arr = readJsonSafe(arquivo, []);
+  let descricao = '';
+  
+  if (Array.isArray(arr) && arr.length) {
+    descricao = String(arr[Math.floor(Math.random() * arr.length)]);
+  } else {
+    // fallback, caso arquivo ausente
+    descricao = 'Veículo em ótimo estado. Contate para mais detalhes.';
+  }
+  
+  const tx = await findTextareaByLabel(page, 'Descrição', 7000);
+  if (!tx) {
+    // fallback: busca por qualquer textarea visível
+    const any = await page.$('textarea').catch(()=>null);
+    const el = tx || any;
+    if (!el) return false;
+    try { await el.click({ clickCount: 1 }); } catch {}
+    await sleep(jitter(100, 180));
+    try { await el.type(descricao, { delay: jitter(4, 9) }); } catch {}
+    await sleep(jitter(80, 160));
+    return true;
+  }
+  
+  try { await tx.click({ clickCount: 1 }); } catch {}
+  await sleep(jitter(100, 180));
+  await tx.type(descricao, { delay: jitter(4, 9) });
+  await sleep(jitter(120, 220));
+  return true;
 }
 
 /**
@@ -1813,6 +1920,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
     fotoPath = pick.absPath;
     fotoNome = pick.file;
+    // MODELO selecionado a partir da pasta
+    const modeloSelecionado = pick.model || (fotoNome && fotoNome.includes('/') ? fotoNome.split('/')[0] : null) || null;
 
     // Upload - procurar no documento e em frames
     let inputFoto = await page.$('input[type="file"][accept*="image"], input[type="file"]');
@@ -1854,15 +1963,19 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_year_ok', value: anoVeiculo });
     await sleep(jitter(120, 220));
 
-    // Fabricante / Modelo
-    const { fabricante, modelo } = await preencherFabricanteModelo(page);
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_make_model_ok', fabricante, modelo });
+    // Fabricante / Modelo — AGORA por modeloSelecionado
+    const { fabricante, modelo } = await preencherFabricanteModelo(page, modeloSelecionado);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_make_model_ok', fabricante, modelo, modeloSelecionado });
     await sleep(jitter(120, 220));
 
     // Preço: random 1..3000
     const precoInt = 1 + Math.floor(Math.random() * 3000);
     await preencherPrecoVeiculo(page, precoInt);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_price_ok', value: precoInt });
+    
+    // DESCRIÇÃO — NOVO: preenche após o preço
+    await preencherDescricaoVeiculo(page, modeloSelecionado);
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'vehicle_description_ok' });
 
     // "Título" não existe em veículos — PARA COMPATIBILIDADE das verificações, geramos um pseudo-título
     const titulo = `${fabricante} ${modelo} ${anoVeiculo}`.trim();
@@ -1931,6 +2044,21 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       } catch (e) {
         stepLogArr.push(`[${nome}] markPostedAndMaybeDelete no catch/erro: ${e && e.message || e}`);
       }
+      
+      // Atualiza o ciclo VEICULAR com o modelo usado
+      try {
+        if (modeloSelecionado) {
+          await manifestStore.update(nome, (m) => {
+            m = m || {};
+            m.veiculosCiclo = m.veiculosCiclo || {};
+            const arr = Array.isArray(m.veiculosCiclo.postados) ? m.veiculosCiclo.postados : [];
+            const set = new Set(arr.map(s => String(s || '').toLowerCase()));
+            set.add(String(modeloSelecionado).toLowerCase());
+            m.veiculosCiclo.postados = Array.from(set);
+            return m;
+          });
+        }
+      } catch {}
     }
 
     // IMPORTANTE: Grava ultimaPostagemRobe via manifestStore
