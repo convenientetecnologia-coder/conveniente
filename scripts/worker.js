@@ -1404,7 +1404,7 @@ async function ramCpuMonitorTick() {
 
         // NOVO: soma de root + filhos (pelo CDP Tracing) + tasklist/ps
         // Aplica fator de correção para aproximar Private Working Set (evita duplicação de memória compartilhada)
-        const RAM_CORRECTION_FACTOR = parseFloat(process.env.RAM_CORRECTION_FACTOR || '0.45'); // 0.45 = ~45% (ajuste fino)
+        const RAM_CORRECTION_FACTOR = parseFloat(process.env.RAM_CORRECTION_FACTOR || '0.435'); // 0.435 = ~43.5% (ajuste fino)
         const pids = await getControllerPidsCached(nome, ctrl, { forceRefresh: false });
         let totalMB = 0;
         if (Array.isArray(pids) && pids.length) {
