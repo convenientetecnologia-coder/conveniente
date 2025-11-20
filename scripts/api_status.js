@@ -356,6 +356,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       Object.assign(b, o);
       // Blindagem: nunca deixe "active" voltar a false se alguma fonte já marcou como true
       b.active = !!o.active || prevActive;
+      // Se overlay trouxe null/undefined para RAM/CPU, preserva valores numéricos anteriores
+      if (typeof o.ramMB !== 'number' && typeof prevRam === 'number') {
+        b.ramMB = prevRam;
+      }
+      if (typeof o.cpuPercent !== 'number' && typeof prevCpu === 'number') {
+        b.cpuPercent = prevCpu;
+      }
       // Se overlay do perfil não trouxe RAM/CPU, usa o dado de robes[nome]
       if (typeof b.ramMB !== 'number' && overlayINST.robes && overlayINST.robes[o.nome] && typeof overlayINST.robes[o.nome].ramMB === 'number') {
         b.ramMB = overlayINST.robes[o.nome].ramMB;
