@@ -1580,63 +1580,60 @@ async function selecionarAnoVeiculo(page) {
 
 // Preenche Fabricante e Modelo via JSON (nova estrutura: dados/veiculos/MODELO.json)
 async function preencherFabricanteModelo(page, modeloKey) {
-  // Tenta nova estrutura: dados/veiculos/MODELO.json => array de strings (fabricantes/títulos)
   function readJsonSafe(file, fb) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fb; } }
   
-  const baseDir = path.join(__dirname, '..', 'dados', 'veiculos');
+  const dadosDir = path.join(__dirname, '..', 'dados');
+  const veiculosDir = path.join(dadosDir, 'veiculos');
   let fabricante = null;
   let modelo = null;
   
+  // Sinalizador: se o arquivo dados/veiculos/MODELO.json existe
+  let modeloFileExists = false;
+  
+  // 1) FABRICANTE — usa o TÍTULO COMPLETO de dados/veiculos/MODELO.json
   if (modeloKey) {
-    const modelFile = path.join(baseDir, `${String(modeloKey).toLowerCase()}.json`);
-    const j = readJsonSafe(modelFile, null);
-    if (j && Array.isArray(j) && j.length) {
-      // Arquivo é array de strings (fabricantes/títulos do modelo)
-      // Seleciona um item aleatório do array
-      const itemSelecionado = String(j[Math.floor(Math.random() * j.length)] || '').trim();
-      // Extrai fabricante (primeira palavra, ex: "Volkswagen" de "Volkswagen Gol Oferta Especial")
-      const palavras = itemSelecionado.split(/\s+/).filter(Boolean);
-      if (palavras.length > 0) {
-        // Primeira palavra é geralmente o fabricante (Volkswagen, Renault, Toyota)
-        fabricante = palavras[0];
-        // Modelo é o modeloKey capitalizado (ex: "gol" -> "Gol", "kwid" -> "Kwid")
-        const modeloKeyStr = String(modeloKey || '');
-        modelo = modeloKeyStr.charAt(0).toUpperCase() + modeloKeyStr.slice(1).toLowerCase();
-      } else {
-        fabricante = itemSelecionado || 'Outro';
-        modelo = String(modeloKey || 'Modelo');
+    const modelFile = path.join(veiculosDir, `${String(modeloKey).toLowerCase()}.json`);
+    try {
+      if (fs.existsSync(modelFile)) {
+        modeloFileExists = true;
+        const j = readJsonSafe(modelFile, null);
+        if (Array.isArray(j) && j.length) {
+          // Seleciona um título COMPLETO (string) do array.
+          fabricante = String(j[Math.floor(Math.random() * j.length)] || '').trim();
+        } else if (j && typeof j === 'object') {
+          // Tolerância caso alguém mude estrutura: achata valores string/arrays e escolhe um
+          const raw = Object.values(j).flatMap(v => Array.isArray(v) ? v : [v]);
+          const strings = raw.map(s => String(s || '').trim()).filter(Boolean);
+          if (strings.length) fabricante = strings[Math.floor(Math.random() * strings.length)];
+        }
       }
-    } else if (j && typeof j === 'object') {
-      // Se for objeto (estrutura alternativa)
-      if (j.fabricante && j.modelo) {
-        fabricante = String(j.fabricante);
-        modelo = String(j.modelo);
-      } else if (Array.isArray(j.fabricantes) && j.fabricantes.length) {
-        fabricante = String(j.fabricantes[Math.floor(Math.random() * j.fabricantes.length)]);
-      } else if (Array.isArray(j.modelos) && j.modelos.length) {
-        modelo = String(j.modelos[Math.floor(Math.random() * j.modelos.length)]);
+    } catch {}
+  }
+  
+  // Se arquivo do modelo NÃO existe, cai no fallback fabricante.json.
+  // Se existe mas vazio/ruim, NUNCA usa fabricante.json (garantia do requisito).
+  if (!fabricante) {
+    if (!modeloFileExists) {
+      const fabList = readJsonSafe(path.join(dadosDir, 'fabricante.json'), []);
+      if (Array.isArray(fabList) && fabList.length) {
+        fabricante = String(fabList[Math.floor(Math.random() * fabList.length)] || '').trim();
       }
     }
   }
   
-  // Fallback com estrutura antiga (não quebra legado)
-  if (!fabricante) {
-    const fabricantesAnt = readJsonSafe(path.join(__dirname, '..', 'dados', 'fabricante.json'), []);
-    const arr = Array.isArray(fabricantesAnt) ? fabricantesAnt : [];
-    if (arr.length) fabricante = String(arr[Math.floor(Math.random() * arr.length)]);
-  }
+  if (!fabricante) fabricante = 'Outro';
   
-  if (!modelo) {
-    const modelosAnt = readJsonSafe(path.join(__dirname, '..', 'dados', 'modelo.json'), []);
-    const arr = Array.isArray(modelosAnt) ? modelosAnt : [];
-    if (arr.length) modelo = String(arr[Math.floor(Math.random() * arr.length)]);
-  }
+  // 2) MODELO — SEMPRE vem de dados/modelo.json (universal). Sem usar nome de pasta.
+  try {
+    const modelosArr = readJsonSafe(path.join(dadosDir, 'modelo.json'), []);
+    if (Array.isArray(modelosArr) && modelosArr.length) {
+      modelo = String(modelosArr[Math.floor(Math.random() * modelosArr.length)] || '').trim();
+    }
+  } catch {}
   
-  // Fallback final
-  fabricante = fabricante || 'Outro';
-  modelo = modelo || (modeloKey ? String(modeloKey) : 'Modelo');
+  if (!modelo) modelo = 'Modelo';
   
-  // Preenche Fabricante e Modelo (combobox/inputs)
+  // 3) Preenche os campos no Facebook, usando o conteúdo definido acima.
   const okFabInput = await tryTypeInLabeledInput(page, 'Fabricante', fabricante, { pressEnter: true });
   if (!okFabInput) {
     await trySelectComboboxByTyping(page, 'Fabricante', fabricante, { fallbackArrowTimes: 2 }).catch(()=>{});
