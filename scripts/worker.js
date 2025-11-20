@@ -1703,6 +1703,13 @@ try { freezeCooldownIfNotWorking(nome); } catch {}
 
 controllers.delete(nome);
 
+// LIMPA rootPid para evitar consultas em PIDs órfãos (WMI-free+ps-tree)
+try {
+  if (robeMeta[nome]) {
+    robeMeta[nome].rootPid = null;
+  }
+} catch {}
+
 try { healthState.delete(nome); } catch {}
 try { profileFailures.delete(nome); } catch {}
 try {

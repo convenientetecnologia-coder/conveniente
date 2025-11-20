@@ -329,7 +329,7 @@ module.exports = (app, workerClient, fileStore) => {
         const st = fs.existsSync(statusPath) ? JSON.parse(fs.readFileSync(statusPath, 'utf8')) : null;
         if (st && Array.isArray(st.perfis)) {
           const ent = st.perfis.find(p => p && p.nome === nome);
-          if (ent) ent.activationHeldUntil = Date.now() + 60000;
+          if (ent) ent.activationHeldUntil = Date.now() + 5000;
           fileStore.writeJsonAtomic && fileStore.writeJsonAtomic(statusPath, st);
         }
       } catch (e) {
@@ -342,14 +342,14 @@ module.exports = (app, workerClient, fileStore) => {
       return null;
     });
     if (!r2 || r2.ok !== true) {
-      // PATCH — se falhar, segure activationHeldUntil 60s
+      // PATCH — se falhar, segure activationHeldUntil 5s (alinhado com padrão do sistema)
       logger.error('Falha ao start_work', { nome, error: (r2 && r2.error) || 'start_work_failed' });
       try {
         const statusPath = fileStore.statusPath || path.join(__dirname, '../dados/status.json');
         const st = fs.existsSync(statusPath) ? JSON.parse(fs.readFileSync(statusPath, 'utf8')) : null;
         if (st && Array.isArray(st.perfis)) {
           const ent = st.perfis.find(p => p && p.nome === nome);
-          if (ent) ent.activationHeldUntil = Date.now() + 60000;
+          if (ent) ent.activationHeldUntil = Date.now() + 5000;
           fileStore.writeJsonAtomic && fileStore.writeJsonAtomic(statusPath, st);
         }
       } catch (e) {

@@ -1887,6 +1887,8 @@
             await window.electronAPI.deactivate(p.nome);
             completed++;
             if (stopBtn) stopBtn.textContent = `Fechando... ${completed}/${total}`;
+            // pausa leve para aliviar pressão no backend/IPC
+            await new Promise(r => setTimeout(r, 100));
           } catch (e) {
             console.warn('Falha ao fechar', p.nome, e.message);
           }
@@ -1995,93 +1997,6 @@
       };
     })();
 
-    // Bind do botão "Fechar todos"
-    (function bindStopAllBtn(){
-      const btn = document.getElementById('stopAllBtn');
-      if (!btn) return;
-      btn.onclick = stopAllSequential;
-    })();
-
-    // Bind do botão "Abrir Todos e Iniciar 24h"
-    (function bindStartAllBtn(){
-      const btn = document.getElementById('startAllBtn');
-      if (!btn) return;
-      btn.onclick = startAllSequential;
-    })();
-
-    // Robe 24h (todos)
-    (function bindRobeAll(){
-      const btn24 = document.getElementById('robe24AllBtn');
-      if (btn24) {
-        btn24.onclick = async () => {
-          if (isMassActionRunning()) { alertMassActionRunning(); return; }
-          if (!btn24.dataset.idleTxt) btn24.dataset.idleTxt = btn24.textContent;
-          btn24.disabled = true; btn24.style.opacity='0.7'; btn24.textContent='Pausando 24h...';
-          try { await window.electronAPI.robesPause24hAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
-          catch(e){ alert('Falha ao pausar 24h todos: ' + (e&&e.message||e)); }
-          finally { btn24.disabled=false; btn24.style.opacity=''; btn24.textContent=btn24.dataset.idleTxt; }
-        };
-      }
-      const btnRel = document.getElementById('robeReleaseAllBtn');
-      if (btnRel) {
-        btnRel.onclick = async () => {
-          if (isMassActionRunning()) { alertMassActionRunning(); return; }
-          if (!btnRel.dataset.idleTxt) btnRel.dataset.idleTxt = btnRel.textContent;
-          btnRel.disabled = true; btnRel.style.opacity='0.7'; btnRel.textContent='Liberando...';
-          try { await window.electronAPI.robesReleaseAll(); await new Promise(r=>setTimeout(r,300)); reloadPerfis(); }
-          catch(e){ alert('Falha ao liberar Robe: ' + (e&&e.message||e)); }
-          finally { btnRel.disabled=false; btnRel.style.opacity=''; btnRel.textContent=btnRel.dataset.idleTxt; }
-        };
-      }
-    })();
-
-    // Toolbar: botão "Descongelar todos"
-    (function bindUnfreezeAllBtn(){
-      const btn = document.getElementById('unfreezeAllBtn');
-      if (!btn) return;
-      btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
-        if (!confirm('Descongelar todos os perfis agora?')) return;
-        btn.disabled = true; btn.textContent = 'Descongelando...';
-        try {
-          const r = await fetch('/api/perfis/unfreeze-all', { method: 'POST' }).then(r=>r.json());
-          if (!r || !r.ok) alert('Falha ao descongelar todos: ' + ((r && r.error) || ''));
-          await new Promise(r=>setTimeout(r, 600));
-          reloadPerfis();
-        } catch (e) {
-          alert('Erro ao descongelar todos: ' + (e && e.message || e));
-        } finally {
-          btn.disabled = false;
-          btn.textContent = 'Descongelar';
-        }
-      };
-    })();
-
-    // Bind do botão "Invocar Tudo"
-    (function bindInvokeAllBtn(){
-      const btn = document.getElementById('invokeAllBtn');
-      if (!btn) return;
-      btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
-        const idleTxt = btn.textContent;
-        btn.disabled = true; btn.style.opacity='0.7'; btn.textContent='Invocando...';
-        setGlobalActionButtonsDisabled(true, { exclude: ['invokeAllBtn'] });
-        try {
-          const r = await window.electronAPI.invokeHumanAllActive();
-          if (!r || !r.ok) {
-            alert('Falha ao invocar humano em massa: ' + ((r && r.error) || ''));
-          }
-          await new Promise(r=>setTimeout(r,500));
-          reloadPerfis();
-        } catch (e) {
-          alert('Erro no Invocar Tudo: ' + (e && e.message || e));
-        } finally {
-          btn.disabled = false; btn.style.opacity=''; btn.textContent = idleTxt;
-          setGlobalActionButtonsDisabled(false);
-        }
-      };
-    })();
-
     // Bind do botão "Retomar Tudo"
     (function bindResumeAllBtn(){
       const btn = document.getElementById('resumeAllBtn');
@@ -2110,7 +2025,7 @@
     })();
 
     reloadPerfis();
-    setInterval(reloadPerfis, 3000);
+    setInterval(reloadPerfis, 5000);
 
     // Chamada inicial das métricas:
     updateSysMetrics();
