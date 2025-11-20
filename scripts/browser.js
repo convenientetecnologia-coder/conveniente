@@ -312,78 +312,92 @@ function cleanupUserDataLocks(userDataDir) {
 
 /**
  * Mata processos do Chrome usando ESTE userDataDir (Windows).
+ * REMOVIDO: WMI/PowerShell completamente (usa ps-list + taskkill, muito mais leve)
  */
 function killChromeProfileProcesses(userDataDir, openingMap) {
   if (process.platform !== 'win32') return;
-  // NOVO: por padrão, evita usar WMI/WMIC para matar processos de perfil.
-  // Só executa o modo pesado baseado em WMI se CHROME_PROFILE_KILL_MODE === 'wmi'.
-  if (process.env.CHROME_PROFILE_KILL_MODE !== 'wmi') {
-    return;
-  }
+  
   try {
-    // Nunca mate Chromes associados ao map de perfis em abertura (openingMap[nome] = true).
-    // Isso protege contra race de avalanche/init!
+    // opening guard — preserva o perfil que está sendo aberto
     if (openingMap && typeof openingMap === 'object' && userDataDir) {
       let nomePerfil = null;
-
-      // 1) Tenta ler manifest.json dentro do próprio userDataDir
+      
       try {
         const manifestPath = path.join(userDataDir, 'manifest.json');
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         if (manifest && manifest.nome) nomePerfil = String(manifest.nome);
       } catch {}
-
-      // 2) Tenta resolver via dados/perfis.json
+      
       if (!nomePerfil) {
         try {
           const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-          if (Array.isArray(perfisArr)) {
-            const perfil = perfisArr.find(p =>
-              p && p.userDataDir &&
-              path.normalize(String(p.userDataDir)) === path.normalize(String(userDataDir))
-            );
-            if (perfil && perfil.nome) nomePerfil = String(perfil.nome);
-          }
+          const perfil = perfisArr.find(p =>
+            p && p.userDataDir &&
+            path.normalize(String(p.userDataDir)) === path.normalize(String(userDataDir))
+          );
+          if (perfil && perfil.nome) nomePerfil = String(perfil.nome);
         } catch {}
       }
-
-      // 3) Fallback: tenta basenome do diretório
+      
       if (!nomePerfil) {
-        try {
-          const base = path.basename(userDataDir);
-          if (base && base.length && base !== 'Conveniente' && base !== 'User Data') {
-            nomePerfil = base;
-          }
-        } catch {}
+        try { nomePerfil = path.basename(userDataDir); } catch {}
       }
-
+      
       if (nomePerfil && openingMap[nomePerfil] === true) {
         if (process.env.BROWSER_DEBUG === '1') {
           logger.debug(`[BROWSER] SKIP KILL, nome em opening: ${nomePerfil}`);
         }
-        return; // Proteção: não mata processos deste perfil enquanto está em abertura
+        return;
       }
     }
 
-    const { execFileSync } = require('child_process');
-    const dirForPs = userDataDir.replace(/\\/g, '\\\\').replace(/"/g, '""');
-    const psCmd = `
-      $p = [regex]::Escape("${dirForPs}");
-      Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" |
-        Where-Object { $_.CommandLine -match $p } |
-        ForEach-Object {
-          try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+    const norm = s => String(s || '').replace(/\\/g, '/').toLowerCase();
+    const target = norm(userDataDir);
+
+    (async () => {
+      try {
+        // Importa ps-list dinamicamente (pode não estar disponível)
+        let psList;
+        try {
+          const psListMod = require('ps-list');
+          psList = (typeof psListMod === 'function') ? psListMod : (psListMod && psListMod.default) || null;
+        } catch {
+          psList = null;
         }
-    `;
-    execFileSync('powershell.exe', ['-NoProfile','-ExecutionPolicy','-Bypass','-Command', psCmd], { stdio: 'ignore' });
-  } catch (e) {
-    try {
-      const { execFileSync } = require('child_process');
-      const needle = userDataDir.replace(/\\/g, '\\\\');
-      const query = `name='chrome.exe' and CommandLine like '%${needle}%'`;
-      execFileSync('wmic', ['process', 'where', query, 'call', 'terminate'], { stdio: 'ignore' });
-    } catch {}
-  }
+        
+        if (!psList) return; // Se ps-list não estiver disponível, não faz nada
+        
+        const list = await psList();
+        const toKill = [];
+
+        for (const p of list) {
+          const name = String(p.name || '').toLowerCase();
+          if (!/chrome|chromium/.test(name)) continue;
+
+          const cmd = norm(p.cmd || p.command || p.exe || p.path || '');
+          if (!cmd) continue;
+
+          // Tenta primeiro --user-data-dir=
+          const m = cmd.match(/--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))/i);
+          if (m) {
+            const dir = norm(m[1] || m[2] || m[3] || '');
+            if (dir && dir === target) toKill.push(Number(p.pid));
+          } else if (cmd.includes(target)) {
+            toKill.push(Number(p.pid)); // fallback: match bruto
+          }
+        }
+
+        for (const pid of toKill) {
+          try {
+            const { execFile } = require('child_process');
+            execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }, () => {});
+          } catch {
+            try { process.kill(pid, 'SIGKILL'); } catch {}
+          }
+        }
+      } catch {}
+    })();
+  } catch {}
 }
 
 /**

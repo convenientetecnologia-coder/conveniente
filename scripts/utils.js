@@ -3,7 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+// Removido: execSync não é mais necessário (WMI removido)
+// const { execSync } = require('child_process');
 const logger = require('./logger.js');
 
 function slugify(str) {
@@ -265,8 +266,7 @@ function getCoords(cidade) {
  *
  * - Linux: usa MemAvailable em /proc/meminfo (sem WMI, custo muito baixo).
  * - Windows: usa diretamente os.freemem() (API nativa do kernel, sem WMI / PowerShell).
- * - Opcionalmente, se USE_WMI_RAM=1 estiver setado no ambiente, ainda permite
- *   um caminho WMI de alta precisão como fallback manual, mas desativado por padrão.
+ * - REMOVIDO: WMI completamente (causava consumo de CPU desnecessário).
  */
 function getAvailableMB() {
   // Linux (via /proc/meminfo)
@@ -283,20 +283,6 @@ function getAvailableMB() {
     const mb = Math.round(os.freemem()/(1024*1024));
     if (mb > 0) return mb;
   } catch {}
-
-  // OPCIONAL: WMI como fallback explícito (desativado por padrão)
-  if (process.platform === 'win32' && process.env.USE_WMI_RAM === '1') {
-    try {
-      const out = execSync(
-        'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"',
-        {stdio:['ignore','pipe','ignore']}
-      ).toString().trim();
-      const kb = parseInt(out,10);
-      if (!isNaN(kb)) return Math.round(kb/1024);
-    } catch {
-      // Se WMI falhar por qualquer motivo, cai no fallback final abaixo
-    }
-  }
 
   // Fallback final extremamente defensivo
   try {
