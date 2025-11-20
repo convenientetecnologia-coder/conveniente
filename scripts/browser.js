@@ -316,87 +316,10 @@ function cleanupUserDataLocks(userDataDir) {
  */
 function killChromeProfileProcesses(userDataDir, openingMap) {
   if (process.platform !== 'win32') return;
-  
   try {
-    // opening guard — preserva o perfil que está sendo aberto
-    if (openingMap && typeof openingMap === 'object' && userDataDir) {
-      let nomePerfil = null;
-      
-      try {
-        const manifestPath = path.join(userDataDir, 'manifest.json');
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        if (manifest && manifest.nome) nomePerfil = String(manifest.nome);
-      } catch {}
-      
-      if (!nomePerfil) {
-        try {
-          const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-          const perfil = perfisArr.find(p =>
-            p && p.userDataDir &&
-            path.normalize(String(p.userDataDir)) === path.normalize(String(userDataDir))
-          );
-          if (perfil && perfil.nome) nomePerfil = String(perfil.nome);
-        } catch {}
-      }
-      
-      if (!nomePerfil) {
-        try { nomePerfil = path.basename(userDataDir); } catch {}
-      }
-      
-      if (nomePerfil && openingMap[nomePerfil] === true) {
-        if (process.env.BROWSER_DEBUG === '1') {
-          logger.debug(`[BROWSER] SKIP KILL, nome em opening: ${nomePerfil}`);
-        }
-        return;
-      }
-    }
-
-    const norm = s => String(s || '').replace(/\\/g, '/').toLowerCase();
-    const target = norm(userDataDir);
-
-    (async () => {
-      try {
-        // Importa ps-list dinamicamente (pode não estar disponível)
-        let psList;
-        try {
-          const psListMod = require('ps-list');
-          psList = (typeof psListMod === 'function') ? psListMod : (psListMod && psListMod.default) || null;
-        } catch {
-          psList = null;
-        }
-        
-        if (!psList) return; // Se ps-list não estiver disponível, não faz nada
-        
-        const list = await psList();
-        const toKill = [];
-
-        for (const p of list) {
-          const name = String(p.name || '').toLowerCase();
-          if (!/chrome|chromium/.test(name)) continue;
-
-          const cmd = norm(p.cmd || p.command || p.exe || p.path || '');
-          if (!cmd) continue;
-
-          // Tenta primeiro --user-data-dir=
-          const m = cmd.match(/--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))/i);
-          if (m) {
-            const dir = norm(m[1] || m[2] || m[3] || '');
-            if (dir && dir === target) toKill.push(Number(p.pid));
-          } else if (cmd.includes(target)) {
-            toKill.push(Number(p.pid)); // fallback: match bruto
-          }
-        }
-
-        for (const pid of toKill) {
-          try {
-            const { execFile } = require('child_process');
-            execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }, () => {});
-          } catch {
-            try { process.kill(pid, 'SIGKILL'); } catch {}
-          }
-        }
-      } catch {}
-    })();
+    // No-op deliberado: removemos ps-list e evitamos WMI/PowerShell.
+    // Mantemos apenas o cleanup de locks via cleanupUserDataLocks().
+    // O fechamento correto já é feito via taskkill pelo rootPid em deactivate.
   } catch {}
 }
 

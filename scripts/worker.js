@@ -166,14 +166,10 @@ async function detectFbLimitInAnyPage(ctrl) {
   return false;
 }
 
-const pidusage = require('pidusage');
-let psList;
-try {
-  const mod = require('ps-list');
-  psList = (typeof mod === 'function') ? mod : (mod && mod.default ? mod.default : null);
-} catch {
-  psList = null;
-}
+// REMOVIDO: pidusage e ps-list usam WMI/PowerShell internamente no Windows
+// Placeholders explícitos para garantir que nunca haverá uso em runtime
+const pidusage = null;
+const psList = null;
 
 const supervisorClient = require('./supervisorClient.js');
 const { getAvailableMB } = utils;
@@ -416,38 +412,8 @@ async function killProcessTreeByRootPid(pid) {
 }
 
 async function killStrayChromes() {
-  try {
-    if (process.platform !== 'win32') {
-      return;
-    }
-    const perfisArr = loadPerfisJson();
-    const nomeByDir = {};
-    for (const p of perfisArr) {
-      if (p && p.nome && p.userDataDir) nomeByDir[normalizePath(p.userDataDir)] = p.nome;
-    }
-    const procs = psList ? await psList().catch(()=>[]) : [];
-    const group = {};
-    for (const proc of procs) {
-      const cmd = proc.cmd || proc.command || '';
-      if (!/chrome|chromium/i.test(cmd)) continue;
-      const userDir = extractUserDataDir(cmd);
-      if (!userDir) continue;
-      const nome = nomeByDir[normalizePath(userDir)];
-      if (!nome) continue;
-      if (controllers.has(nome)) continue;
-      if (!group[nome]) group[nome] = [];
-      group[nome].push(Number(proc.pid));
-    }
-    for (const [nome, pidList] of Object.entries(group)) {
-      if (opening[nome]) {
-        await milLog('mil_action', `stray_skip_opening: ${nome} pids=${pidList.join(',')}`);
-        continue;
-      }
-      if (!pidList || !pidList.length) continue;
-      await milLog('mil_action', `stray_kill: ${nome} pids=${pidList.join(',')}`);
-      await killPids(pidList);
-    }
-  } catch {}
+  // Intencionalmente no-op: 110% sem WMI/PowerShell e sem ps-list
+  return;
 }
 
 try {
@@ -1238,211 +1204,18 @@ async function ramCpuMonitorTick() {
   const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
 
   try {
-    if (!controllers || controllers.size === 0) {
-      ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-      return;
+    // 110% sem WMI/PowerShell — zera métricas per-PID (front lida com null e mostra "—")
+    // Front já é null-aware e Virtus não depende dessas métricas
+    for (const nome of controllers.keys()) {
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].ramMB = null;
+      robeMeta[nome].cpuPercent = null;
     }
-
-    try {
-      const vivos = new Set(Array.from(controllers.keys()));
-      for (const nome of Object.keys(robeMeta)) {
-        if (!vivos.has(nome)) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = null;
-          robeMeta[nome].cpuPercent = null;
-          robeMeta[nome].ramHist = [];
-          robeMeta[nome].cpuHistory = [];
-        }
-      }
-    } catch {}
-
-    // 1) Coletar todos os processos uma única vez (para todos os perfis)
-    const allProcs = psList ? await psList().catch(() => []) : [];
-    const procMap = new Map();
-    const childrenByPPID = new Map();
-    for (const p of allProcs) {
-      const pid = Number(p && p.pid);
-      const ppid = Number(p && p.ppid);
-      if (Number.isFinite(pid)) procMap.set(pid, p);
-      if (Number.isFinite(pid) && Number.isFinite(ppid)) {
-        if (!childrenByPPID.has(ppid)) childrenByPPID.set(ppid, []);
-        childrenByPPID.get(ppid).push(pid);
-      }
-    }
-
-    function collectSubtreePids(rootPid) {
-      const set = new Set();
-      const stack = [rootPid];
-      while (stack.length) {
-        const cur = stack.pop();
-        if (set.has(cur)) continue;
-        set.add(cur);
-        const kids = childrenByPPID.get(cur) || [];
-        for (const k of kids) stack.push(k);
-      }
-      return Array.from(set);
-    }
-
-    function normalizePathLower(s) {
-      return String(s || '').replace(/\\/g, '/').toLowerCase();
-    }
-
-    // Deduplicação global por tick — evita contar o mesmo processo duas vezes entre perfis
-    const countedGlobal = new Set();
-
-    // 2) Para cada perfil ativo: filtrar apenas Chrome/Chromium que pertençam ao userDataDir do perfil
-    for (const [nome, ctrl] of controllers.entries()) {
-      try {
-        if (!ctrl || !ctrl.browser) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = null;
-          robeMeta[nome].cpuPercent = null;
-          continue;
-        }
-
-        // rootPid (browser process)
-        let rootPid = robeMeta[nome] && robeMeta[nome].rootPid;
-        if (!Number.isFinite(rootPid) && ctrl.browser && typeof ctrl.browser.process === 'function') {
-          const proc = ctrl.browser.process();
-          if (proc && proc.pid) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].rootPid = proc.pid;
-            rootPid = proc.pid;
-          }
-        }
-
-        if (!Number.isFinite(rootPid)) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = null;
-          robeMeta[nome].cpuPercent = null;
-          continue;
-        }
-
-        // userDataDir do perfil (para filtrar apenas processos do perfil)
-        const man = await manifestStore.read(nome).catch(() => null);
-        const udir = man && man.userDataDir ? normalizePathLower(man.userDataDir) : '';
-
-        const subtree = collectSubtreePids(rootPid);
-        const candidatePids = new Set();
-
-        // Filtro: só Chrome/Chromium e que pertencem ao userDataDir (ou o rootPid)
-        function isChromeLike(p) {
-          if (!p) return false;
-          const name = String(p.name || '').toLowerCase();
-          const cmd = normalizePathLower(p.cmd || p.command || p.exe || p.path || '');
-          if (name.includes('chrome') || name.includes('chromium')) return true;
-          // Robustez extra pelo caminho/exec:
-          if (cmd.includes('/chrome.exe') || cmd.includes('\\chrome.exe')) return true;
-          if (cmd.includes('/google chrome') || cmd.includes('\\google chrome')) return true;
-          return false;
-        }
-
-        // NOVO: Comparação exata de caminho (não substring) para evitar falsos positivos
-        function equalsPathInsensitive(a, b) {
-          try {
-            const path = require('path');
-            const pa = normalizePathLower(path.resolve(String(a)));
-            const pb = normalizePathLower(path.resolve(String(b)));
-            return pa === pb;
-          } catch {
-            return normalizePathLower(String(a)) === normalizePathLower(String(b));
-          }
-        }
-
-        function belongsToProfile(p) {
-          if (!p) return false;
-          if (!udir) return true; // se não existe userDataDir no manifest, não filtramos
-          const cmdFull = normalizePathLower(p.cmd || p.command || p.exe || p.path || '');
-          if (!cmdFull) return false;
-          // NOVO: Extrai --user-data-dir e compara por igualdade exata (não substring)
-          const extracted = extractUserDataDir(cmdFull);
-          if (!extracted) return false; // sem --user-data-dir no cmd => não é "solto" deste perfil
-          return equalsPathInsensitive(extracted, udir);
-        }
-
-        // 2a) PIDs no subtree do root (blindado com countedGlobal)
-        // Se está no subtree E é Chrome-like, incluir SEM verificar userDataDir
-        // (processos filhos herdam pertencimento ao perfil do rootPid)
-        for (const pid of subtree) {
-          const pr = procMap.get(pid);
-          if (!pr) continue;
-          // NOVO: Verifica countedGlobal ANTES de adicionar (previne duplicação cross-perfis)
-          if (countedGlobal.has(pid)) continue; // já contado globalmente neste tick
-          if (pid === rootPid) {
-            candidatePids.add(pid);
-            continue;
-          }
-          // Inclui todo processo Chrome-like que esteja no subtree, sem exigir userDataDir no cmd:
-          if (isChromeLike(pr)) {
-            candidatePids.add(pid);
-          }
-        }
-
-        // 2b) PIDs "soltos" que pertencem ao userDataDir (blindado)
-        // Usa belongsToProfile para identificar processos fora do subtree que pertencem ao perfil
-        if (udir) {
-          for (const p of allProcs) {
-            const pid = Number(p && p.pid);
-            if (!Number.isFinite(pid)) continue;
-            if (candidatePids.has(pid)) continue;  // já incluso do subtree
-            // NOVO: Verifica countedGlobal ANTES de adicionar (previne duplicação cross-perfis)
-            if (countedGlobal.has(pid)) continue;  // já contado em outro perfil neste tick
-            if (!isChromeLike(p)) continue;
-            if (belongsToProfile(p)) candidatePids.add(pid);
-          }
-        }
-
-        const unique = Array.from(candidatePids).filter(pid => !countedGlobal.has(pid));
-
-        if (unique.length === 0) {
-          robeMeta[nome] = robeMeta[nome] || {};
-          robeMeta[nome].ramMB = 0;
-          robeMeta[nome].cpuPercent = null;
-          continue;
-        }
-
-        // 3) getPidPrivateWSBytes => memory em bytes (Private Working Set no Windows, RSS no Linux/macOS)
-        // NOVO: Usa WorkingSetPrivate no Windows para evitar duplicação de memória compartilhada
-        let somaBytes = 0;
-        let valid = 0;
-        const memMap = await getPidPrivateWSBytes(unique).catch(() => ({}));
-        for (const pid of unique) {
-          const bytes = memMap[pid];
-          if (typeof bytes === 'number' && bytes > 0) {
-            // NOVO: Blindagem extra - verifica countedGlobal ANTES de somar
-            if (countedGlobal.has(pid)) continue; // blindagem extra
-            // NOVO: Marca countedGlobal ANTES de somar (previne race condition)
-            countedGlobal.add(pid); // marca ANTES
-            somaBytes += bytes;
-            valid++;
-          }
-        }
-
-        const mb = valid ? Math.max(0, Math.round(somaBytes / 1024 / 1024)) : 0;
-
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].ramMB = mb;
-        robeMeta[nome].cpuPercent = null;
-
-        // Histórico curto (8 pontos)
-        const rh = robeMeta[nome].ramHist || (robeMeta[nome].ramHist = []);
-        rh.push({ t: Date.now(), mb: robeMeta[nome].ramMB });
-        while (rh.length > 8) rh.shift();
-
-      } catch (e) {
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].ramMB = null;
-        robeMeta[nome].cpuPercent = null;
-      }
-    }
-
     await snapshotStatusAndWrite();
-    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-    return;
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
-    try { await snapshotStatusAndWrite(); } catch {}
-    ramMonitorInterval = setTimeout(ramCpuMonitorTick, 16000);
+  } finally {
+    ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
   }
 }
 
@@ -1455,28 +1228,10 @@ function extractUserDataDir(cmd) {
 }
 
 // Função para obter Private Working Set no Windows (evita duplicação de memória compartilhada)
-// REMOVIDO: WMI/PowerShell completamente (causava 20-30% CPU a cada 10 segundos)
-// Usa apenas pidusage (leve) com fator de correção 0.515 (ajuste fino - variações são normais devido a timing)
+// 110% sem WMI/PowerShell — não coleta nada (pidusage e ps-list usam WMI internamente)
 async function getPidPrivateWSBytes(pids) {
-  if (!Array.isArray(pids) || pids.length === 0) return {};
-
-  try {
-    const out = await pidusage(pids);
-    const ret = {};
-    // Windows: pidusage -> Working Set (aprox). Private WS ~ 0.515 * WS
-    // Fator ajustado: 0.515 (ajuste fino - variações pequenas são normais devido a timing de atualização)
-    // Linux/macOS: usa o valor direto (RSS/aprox).
-    const CF = (process.platform === 'win32') ? 0.515 : 1;
-    for (const pid of pids) {
-      const st = out && out[pid];
-      if (st && typeof st.memory === 'number') {
-        ret[pid] = Math.round(st.memory * CF);
-      }
-    }
-    return ret;
-  } catch {
-    return {};
-  }
+  // 110% sem WMI/PowerShell — não coleta nada
+  return {};
 }
 
 setTimeout(ramCpuMonitorTick, 5000);
