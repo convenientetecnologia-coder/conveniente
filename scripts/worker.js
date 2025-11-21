@@ -10,6 +10,7 @@ const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
 const utils        = require('./utils.js');
 const fotos        = require('./fotos.js');
+const reloadManager = require('./reloadManager.js');
 
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
@@ -3490,6 +3491,9 @@ async function trySwapOpen(target) {
 
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
+
+// Inicializa reloadManager após todos os sistemas estarem prontos
+reloadManager.startReloadManager(controllers, robeMeta);
 
 async function wirePageObservers(nome, page) {
   const st = getHealth(nome);

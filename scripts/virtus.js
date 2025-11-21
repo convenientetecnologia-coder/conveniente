@@ -527,12 +527,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
 
   let lastScrollToTop = 0;
-  let lastRamCheck = 0;
 
   // trackers
-  const RELOAD_IDLE_SEC = parseInt(process.env.VIRTUS_RELOAD_IDLE_SEC || '7200', 10); // 2 horas
-  let lastReloadAt = 0;
-  let ultimoAtendimento = agoraEpoch();
   let saveChain = Promise.resolve();
   let filaLoopBusy = false;
   let recoverBackoffMs = 0;
@@ -803,85 +799,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch (err) {
       logger.error('Erro ao coletar chats', { nome }, err);
       return [];
-    }
-  }
-
-  async function reloadUltraRobusto() {
-    if (!running || !epochOk()) return;
-    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
-    let manifestFrozenUntil = 0;
-    try {
-      const manifest = await manifestStore.read(nome);
-      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
-    } catch {}
-    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
-      return;
-    }
-    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
-
-    // === INÍCIO GUARD DE VIDA ===
-    if (!browser || browser.isConnected?.() === false) {
-      logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
-      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      return;
-    }
-    // Fim guard de vida browser
-    let p = await ensurePage();
-    if (!p || (p.isClosed && p.isClosed())) {
-      logger.error(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`, { nome });
-      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      return;
-    }
-    // === FIM GUARD DE VIDA ===
-    try {
-      logger.info('Reload ultra robusto (2h sem responder).', { nome });
-      p = await ensurePage();
-      if (!p) { bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); return; }
-      const client = await p.target().createCDPSession();
-      try { await client.send('Network.clearBrowserCache'); } catch {}
-      if (!running || !epochOk()) return;
-      try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
-      if (!running || !epochOk()) return;
-      await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-      try { await ensureMinimizedWindowForPage(p); } catch {}
-      await Promise.race([
-        p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 15000 }),
-        p.waitForSelector('div[role="row"] span', { timeout: 15000 })
-      ]).catch(()=>{});
-      resetRecoverBackoff();
-      logger.info('Reload ultra robusto concluído.', { nome });
-      // Chama scrollChatsToTop após reload ultra robusto
-      try {
-        const ok = await scrollChatsToTop(p, nome);
-        if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'Scroll OK' : 'Scroll DEU RUIM'); }
-      } catch {}
-      // Reforce após 800ms
-      setTimeout(() => {
-        if (!running || !epochOk()) return;
-        try {
-          const b = getBrowserFromPage(p);
-          if (b && b._sendLock && b._sendLock.active) return;
-        } catch {}
-        scrollChatsToTop(p, nome);
-      }, 800);
-      lastScrollToTop = Date.now();
-    } catch (e) {
-      logger.error('Erro no reload ultra robusto', { nome }, e);
-      bumpRecoverBackoff();
-      if (recoverBackoffMs) await sleep(recoverBackoffMs);
     }
   }
 
@@ -1289,7 +1206,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const tsNow = agoraEpoch();
         historico[chatId] = tsNow;
         setResponded(chatId, tsNow);
-        ultimoAtendimento = tsNow;
         await salvaHistorico();
 
       } catch (err) {
@@ -1367,19 +1283,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-      // === RAM — monitoramento e shutdown individual por perfil ===
-      let ramMB = 0;
-      try { ramMB = 0; } catch {}
-      lastRamCheck = Date.now();
-      if (ramMB > 700) {
-        await logIssue(nome, "chrome_memory_spike", `RAM acima de 700MB (${ramMB} MB). shutdown temporário`);
-        logger.warn('[GUARD][RAM] RAM acima de 700MB, shutdown/restart', { nome, ramMB });
-        running = false;
-        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-        return;
-      }
 
       // ======= INSTRUÇÃO: REMOVER BLOCO REVIVE AQUI =======
       /*
@@ -1418,17 +1321,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       if (limpaHistoricoVelho()) await salvaHistorico();
-
-      const nowEpoch = agoraEpoch();
-      if ((nowEpoch - ultimoAtendimento) >= RELOAD_IDLE_SEC) {
-        if (!running || !epochOk()) return;
-        await reloadUltraRobusto();
-        lastReloadAt = nowEpoch;
-        ultimoAtendimento = agoraEpoch(); // Reinicia a janela de 2h imediatamente após reload!
-        if (issues) try {
-          await logIssue(nome, 'mil_action', `virtus_reload_idle2h after ${nowEpoch - ultimoAtendimento} sec idle`);
-        } catch {}
-      }
 
       await atualizaFila();
       scheduleNextIfIdle();
