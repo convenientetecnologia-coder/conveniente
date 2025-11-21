@@ -215,21 +215,22 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         if (!rec.reservedBy || typeof rec.reservedBy !== 'object') rec.reservedBy = {};
       }
       if (changed) saveIndex(idx);
-      // 3) Determina "modelos disponíveis para esta conta" (há pelo menos 1 foto não postada/reservada)
+      // 3) Agrupa fotos por modelo (somente modelos com fotos disponíveis)
       const byModel = new Map();
       for (const it of all) {
         const rec = idx[it.rel];
         const postedBySet = new Set((rec && Array.isArray(rec.postedBy) ? rec.postedBy : []).map(canonName));
         const reservedCount = rec && rec.reservedBy ? Object.keys(rec.reservedBy).length : 0;
-        if (postedBySet.has(nomeConta)) continue;
-        if (reservedCount > 0) continue;
         const model = it.model || null;
         if (!model) continue; // ignorar fotos na raiz sem modelo
+        if (postedBySet.has(nomeConta)) continue; // esta conta já postou esta foto
+        if (reservedCount > 0) continue; // foto reservada por outra conta
         if (!byModel.has(model)) byModel.set(model, []);
         byModel.get(model).push(it);
       }
+      // Lista de modelos disponíveis (com pelo menos 1 foto candidatas)
       const allAvailableModels = Array.from(byModel.keys()).sort((a,b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
-      // 4) Lê ciclo (manifest.veiculosCiclo.postados) e aplica rotação
+      // 4) Lê o ciclo do manifest (postados) desta conta
       let postedSet = new Set();
       try {
         const man = await manifestStore.read(nomeConta).catch(() => null);
@@ -237,13 +238,32 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
           postedSet = new Set(man.veiculosCiclo.postados.map(s => String(s || '').toLowerCase()));
         }
       } catch {}
-      // Limpa modelos do ciclo que não existem mais
+      // Remove do ciclo modelos que já não existem mais
       postedSet = new Set(Array.from(postedSet).filter(m => allAvailableModels.includes(m)));
-      // Modelos restantes no ciclo atual
-      const modelsLeft = allAvailableModels.filter(m => !postedSet.has(m));
-      // Se nenhum modelo restou (ciclo completo ou sem disponibilidade), reseta o ciclo e usa todos novamente
-      const targetModels = (modelsLeft.length > 0 ? modelsLeft : allAvailableModels);
-      // 5) Escolhe foto do primeiro modelo disponível no alvo
+      // Determina modelos restantes a postar neste ciclo
+      let modelsLeft = allAvailableModels.filter(m => !postedSet.has(m));
+      // RESET do ciclo no manifest quando completo (antes de selecionar)
+      if (modelsLeft.length === 0 && allAvailableModels.length > 0) {
+        try {
+          await manifestStore.update(nomeConta, (m) => {
+            m = m || {};
+            m.veiculosCiclo = m.veiculosCiclo || {};
+            // Zera o ciclo de modelos postados
+            m.veiculosCiclo.postados = [];
+            return m;
+          });
+          // Zera localmente também
+          postedSet = new Set();
+          modelsLeft = allAvailableModels.slice();
+          // Log opcional
+          logger.info('[FOTOSV][ROT] ciclo resetado (veículos)', { conta: nomeConta, modelos: allAvailableModels });
+        } catch (e) {
+          logger.warn('[FOTOSV][ROT] falha ao resetar ciclo no manifest', { conta: nomeConta, err: (e && e.message) || e });
+        }
+      }
+      // Agora os alvos a selecionar são exatamente os modelos restantes deste ciclo
+      const targetModels = modelsLeft;
+      // 5) Tenta reservar a primeira foto do primeiro modelo disponível respeitando a rotação
       for (const model of targetModels) {
         const candidates = (byModel.get(model) || []);
         for (const it of candidates) {
@@ -251,14 +271,30 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
           const postedBySet = new Set((rec && Array.isArray(rec.postedBy) ? rec.postedBy : []).map(canonName));
           if (postedBySet.has(nomeConta)) continue;
           if (rec && rec.reservedBy && Object.keys(rec.reservedBy).length > 0) continue;
-          // Reserva e marca esta conta como postada (mantém a política de nunca duplicar por conta)
+          // Reserva a foto para esta conta e marca no índice
           rec.reservedBy[nomeConta] = { ts: Date.now() };
           if (!postedBySet.has(nomeConta)) rec.postedBy.push(nomeConta);
           saveIndex(idx);
+          // Atualiza o manifest com o modelo selecionado (antes de retornar)
+          try {
+            await manifestStore.update(nomeConta, (m) => {
+              m = m || {};
+              m.veiculosCiclo = m.veiculosCiclo || {};
+              const arr = Array.isArray(m.veiculosCiclo.postados) ? m.veiculosCiclo.postados : [];
+              const set = new Set(arr.map(s => String(s || '').toLowerCase()));
+              set.add(String(model).toLowerCase());
+              m.veiculosCiclo.postados = Array.from(set);
+              return m;
+            });
+            // Log opcional
+            logger.info('[FOTOSV][ROT] modelo selecionado e marcado no manifest', { conta: nomeConta, modelo: model });
+          } catch (e) {
+            logger.warn('[FOTOSV][ROT] falha ao marcar modelo no manifest', { conta: nomeConta, modelo: model, err: (e && e.message) || e });
+          }
           return { ok: true, file: it.rel, absPath: it.abs, model };
         }
       }
-      // 6) Fallback: se nada disponível por modelo, tenta qualquer remanescente (com/sem pasta)
+      // 6) Fallback: caso não encontre por modelo (ex.: corrida), tenta qualquer foto livre por ordem de mtime
       for (const it of all) {
         const rec = idx[it.rel];
         const postedBySet = new Set((rec && Array.isArray(rec.postedBy) ? rec.postedBy : []).map(canonName));
@@ -268,6 +304,23 @@ async function pickPhotoForAccount(nomeConta, workingNames = []) {
         if (!postedBySet.has(nomeConta)) rec.postedBy.push(nomeConta);
         saveIndex(idx);
         const model = it.model || null;
+        // Atualiza o manifest também neste fallback (se houver modelo)
+        if (model) {
+          try {
+            await manifestStore.update(nomeConta, (m) => {
+              m = m || {};
+              m.veiculosCiclo = m.veiculosCiclo || {};
+              const arr = Array.isArray(m.veiculosCiclo.postados) ? m.veiculosCiclo.postados : [];
+              const set = new Set(arr.map(s => String(s || '').toLowerCase()));
+              set.add(String(model).toLowerCase());
+              m.veiculosCiclo.postados = Array.from(set);
+              return m;
+            });
+            logger.info('[FOTOSV][ROT] modelo (fallback) selecionado e marcado no manifest', { conta: nomeConta, modelo: model });
+          } catch (e) {
+            logger.warn('[FOTOSV][ROT] falha ao marcar modelo (fallback) no manifest', { conta: nomeConta, modelo: model, err: (e && e.message) || e });
+          }
+        }
         return { ok: true, file: it.rel, absPath: it.abs, model };
       }
       // Limpeza de índices para arquivos ausentes
