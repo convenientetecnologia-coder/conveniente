@@ -92,30 +92,283 @@ async function logIssue(nome, type, message) {
   }
 }
 
-// Carrega JSON de atendimento.json (array de respostas randomizáveis)
-let mensagensAtendimento = [];
-(async () => {
+// ====== INÍCIO: Auxiliares Notificador/Messenger ======
+function getSetAguardando(nomePerfil) {
+  if (!aguardandoRespostaMap.has(nomePerfil)) aguardandoRespostaMap.set(nomePerfil, new Set());
+  return aguardandoRespostaMap.get(nomePerfil);
+}
+
+async function identificarTipoServico(nomePerfil) {
   try {
-    const file = await fs.readFile(path.join(__dirname, '../dados/atendimento.json'), 'utf8');
-    const data = JSON.parse(file);
-    if (Array.isArray(data)) {
-      mensagensAtendimento = data;
-    } else if (Array.isArray(data.messages)) {
-      mensagensAtendimento = data.messages;
-    } else {
-      mensagensAtendimento = [];
-    }
-  } catch (e) {
-    logger.error('[VIRTUS] ERRO ao carregar atendimento.json', {}, e);
-    mensagensAtendimento = [];
+    const man = await manifestStore.read(nomePerfil).catch(()=>null);
+    // Se tiver flags específicas:
+    if (man && man.automoveis === true) return 'automoveis';
+    if (man && man.imoveis === true) return 'imoveis';
+    // Se usa robeMode 'veiculos' => mapeia para automoveis
+    if (man && String(man.robeMode || '').toLowerCase() === 'veiculos') return 'automoveis';
+    return 'fretes';
+  } catch {
+    return 'fretes';
   }
-})();
+}
+
+async function fazerHandshakeNotificador(nomePerfil) {
+  if (handshakesFeitos.has(nomePerfil)) return;
+  const tipoServico = await identificarTipoServico(nomePerfil);
+  try {
+    await fetch(`${NOTIFICADOR_URL}/api/virtus/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        servidor: NOTIFICADOR_SERVIDOR,
+        tipo_servico: tipoServico,
+        perfil: nomePerfil
+      })
+    });
+    logger.info('[NOTIFICADOR] Handshake realizado', { nomePerfil, tipoServico });
+    handshakesFeitos.add(nomePerfil);
+  } catch (e) {
+    logger.error('[NOTIFICADOR] Erro no handshake', { nomePerfil, error: e && e.message || e });
+  }
+}
+
+function adicionarChatParaEnvio(nomePerfil, dadosChat) {
+  if (!filaEnviarNotificador.has(nomePerfil)) {
+    filaEnviarNotificador.set(nomePerfil, []);
+  }
+  filaEnviarNotificador.get(nomePerfil).push(dadosChat);
+
+  const aguard = getSetAguardando(nomePerfil);
+  try { aguard.add(dadosChat.chatId); } catch {}
+
+  // agenda envio em lote
+  setTimeout(() => enviarLoteNotificador(nomePerfil), NOTIFICADOR_ENVIO_LOTE_MS);
+}
+
+async function enviarLoteNotificador(nomePerfil) {
+  const fila = filaEnviarNotificador.get(nomePerfil) || [];
+  if (fila.length === 0) return;
+  const lote = fila.splice(0); // pega todos
+
+  await Promise.all(lote.map(async (dadosChat) => {
+    try {
+      await fetch(`${NOTIFICADOR_URL}/api/virtus/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            servidor: NOTIFICADOR_SERVIDOR,
+            chat_id: dadosChat.chatId,
+            perfil: nomePerfil,
+            tipo_servico: dadosChat.tipoServico,
+            mensagem: dadosChat.mensagem,
+            localizacao: dadosChat.localizacao, // Formato: "Cidade (UF)" - ex: "Florianopolis (SC)"
+            url_classificado: dadosChat.urlClassificado,
+            timestamp: new Date().toISOString()
+          })
+      });
+      logger.info('[NOTIFICADOR] Chat enviado', { nomePerfil, chatId: dadosChat.chatId });
+    } catch (e) {
+      logger.error('[NOTIFICADOR] Falha ao enviar chat', { nomePerfil, chatId: dadosChat.chatId, error: e && e.message || e });
+      // requeue se falha
+      fila.push(dadosChat);
+    }
+  }));
+
+  // Se ainda tem mais, agenda próximo lote
+  if (filaEnviarNotificador.get(nomePerfil).length > 0) {
+    setTimeout(() => enviarLoteNotificador(nomePerfil), NOTIFICADOR_ENVIO_LOTE_MS);
+  }
+}
+
+function iniciarPollingRespostas(nomePerfil) {
+  if (pollingIntervals.has(nomePerfil)) return;
+  const id = setInterval(async () => {
+    try {
+      const response = await fetch(`${NOTIFICADOR_URL}/api/virtus/respostas?servidor=${encodeURIComponent(NOTIFICADOR_SERVIDOR)}&perfil=${encodeURIComponent(nomePerfil)}`);
+      const data = await response.json().catch(()=>null);
+      if (data && data.ok === true && Array.isArray(data.respostas)) {
+        for (const resp of data.respostas) {
+          if (!filaRespostas.has(nomePerfil)) filaRespostas.set(nomePerfil, []);
+          filaRespostas.get(nomePerfil).push(resp);
+          // Empilha para envio no Messenger
+          if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
+          filaEnvioMessenger.get(nomePerfil).push({ chatId: resp.chat_id, resposta: resp.resposta });
+        }
+      }
+    } catch (e) {
+      logger.error('[NOTIFICADOR] Erro no polling', { nomePerfil, error: e && e.message || e });
+    }
+  }, NOTIFICADOR_POLLING_MS);
+  pollingIntervals.set(nomePerfil, id);
+}
+
+function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, marcarRespondidoFn) {
+  if (filaEnvioTimers.has(nomePerfil)) return;
+
+  const id = setInterval(async () => {
+    const fila = filaEnvioMessenger.get(nomePerfil) || [];
+    if (fila.length === 0) return;
+
+    const agora = Date.now();
+    const ultima = ultimaRespostaMessenger.get(nomePerfil) || 0;
+    const intervaloAleatorio = MESSENGER_INTERVALO_MIN_MS + Math.floor(Math.random() * (MESSENGER_INTERVALO_MAX_MS - MESSENGER_INTERVALO_MIN_MS));
+    const tempoDesdeUltima = agora - ultima;
+    if (tempoDesdeUltima < intervaloAleatorio) return;
+
+    const proximo = fila.shift();
+    if (!proximo) return;
+
+    try {
+      // envia de forma segura (abre chat, pega composer, envia)
+      if (enviarRespostaMessengerSeguraFn) {
+        await enviarRespostaMessengerSeguraFn(proximo.chatId, proximo.resposta);
+      }
+      ultimaRespostaMessenger.set(nomePerfil, Date.now());
+
+      // marca histórico respondido (somente agora!)
+      if (marcarRespondidoFn) {
+        await marcarRespondidoFn(proximo.chatId);
+      } else {
+        await marcarRespondido(nomePerfil, proximo.chatId);
+      }
+      // remove do set aguardando
+      try { const setA = getSetAguardando(nomePerfil); setA.delete(proximo.chatId); } catch {}
+
+      logger.info('[MESSENGER] Resposta enviada', { nomePerfil, chatId: proximo.chatId });
+    } catch (e) {
+      logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
+      // opcional: se falhar, pode reempilhar uma vez
+    }
+  }, 2000);
+
+  filaEnvioTimers.set(nomePerfil, id);
+}
+
+// enviarRespostaMessengerSegura será implementada dentro do contexto do startVirtus
+
+async function marcarRespondido(nomePerfil, chatId) {
+  try {
+    const agoraTs = agoraEpoch();
+    const HIST_FILE = HIST_JSON_NAME(nomePerfil);
+    let historicoLocal = {};
+    try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
+    historicoLocal[chatId] = agoraTs;
+    await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
+    // Nota: setResponded só está disponível dentro do contexto do Virtus
+    // Esta função é um fallback genérico
+  } catch (e) {
+    logger.error('[VIRTUS] marcarRespondido error', { nomePerfil, chatId, error: e && e.message || e });
+  }
+}
+
+// Extrai a URL do classificado diretamente da pagina do chat
+async function extrairUrlClassificado(page, chatId) {
+  try {
+    const url = await page.evaluate(() => {
+      const fixAbsolute = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
+      const anchors = Array.from(document.querySelectorAll('a'));
+      // Prioriza /marketplace/item/
+      for (const a of anchors) {
+        const href = a.getAttribute('href') || a.href || '';
+        if (href && href.includes('/marketplace/item/')) {
+          if (!href.includes('/marketplace/t/')) return fixAbsolute(href);
+        }
+      }
+      // Fallback: links do marketplace que não são t/ e não são profile
+      for (const a of anchors) {
+        const href = a.getAttribute('href') || a.href || '';
+        if (href && href.includes('/marketplace/') && !href.includes('/marketplace/t/') && !href.includes('/marketplace/profile/')) {
+          return fixAbsolute(href);
+        }
+      }
+      return null;
+    });
+    return url || null;
+  } catch { return null; }
+}
+
+// Extrai a última mensagem do cliente (não enviada por "você")
+async function extrairUltimaMensagemCliente(page) {
+  try {
+    const txt = await page.evaluate(() => {
+      const norm = (s) => (s||'').toLowerCase();
+      // Pega últimas 80 linhas e tenta filtrar bolhas do cliente
+      const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-80);
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const r = rows[i];
+        const t = (r.innerText || r.textContent || '').trim();
+        const tn = norm(t);
+        // heurística: ignorar mensagens enviadas por você/You
+        if (/\b(v[oô]c[êe]\s+enviou|you\s+sent)\b/.test(tn)) continue;
+        // ignora "Mensagem não lida", cabeçalhos, etc
+        if (/mensagem\s+n[aã]o\s+lida|messag\w+\s+unread/.test(tn)) continue;
+        // texto útil pega a primeira linha maior que 1-2 chars
+        if (t && t.length > 1) return t;
+      }
+      return '';
+    });
+    return txt || '';
+  } catch { return ''; }
+}
+
+// Formata localização no padrão "Cidade (UF)" para a planilha Google
+function formatarLocalizacaoParaPlanilha(localizacao) {
+  if (!localizacao) return null;
+  
+  // Se já está no formato correto (string "Cidade (UF)"), retorna como está
+  if (typeof localizacao === 'string') {
+    return localizacao;
+  }
+  
+  // Se é objeto { cidade, estado }
+  if (localizacao && typeof localizacao === 'object') {
+    const cidade = (localizacao.cidade || '').trim();
+    const estado = (localizacao.estado || '').trim().toUpperCase();
+    
+    if (cidade && estado) {
+      // Formata: "Cidade (UF)"
+      return `${cidade} (${estado})`;
+    }
+    
+    // Se só tem cidade, retorna cidade
+    if (cidade) return cidade;
+    
+    // Se só tem estado, retorna estado
+    if (estado) return estado;
+  }
+  
+  return null;
+}
+// ====== FIM: Auxiliares Notificador/Messenger ======
+
+// Carrega JSON de atendimento.json (array de respostas randomizáveis)
+// IGNORADO: Respostas agora vêm do Notificador
+let mensagensAtendimento = [];
 
 function agoraEpoch() {
   return Math.floor(Date.now() / 1000);
 }
 
 const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_respondidos.json');
+
+// ====== INÍCIO: Config Notificador e Filas ======
+const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io';
+const NOTIFICADOR_SERVIDOR = process.env.SERVIDOR_NOME || 'servidor1';
+
+const NOTIFICADOR_ENVIO_LOTE_MS = parseInt(process.env.NOTIFICADOR_ENVIO_LOTE_MS || '10000', 10); // 10s
+const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '5000', 10);       // 5s
+const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '30000', 10); // 30s
+const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '60000', 10); // 60s
+
+const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
+const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
+const filaEnvioMessenger = new Map();     // nomePerfil -> [ { chatId, resposta } ]
+const ultimaRespostaMessenger = new Map();// nomePerfil -> timestamp
+const aguardandoRespostaMap = new Map();  // nomePerfil -> Set(chatId)
+const pollingIntervals = new Map();       // nomePerfil -> intervalId
+const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
+const handshakesFeitos = new Set();       // Set(nomePerfil)
+// ====== FIM: Config Notificador e Filas ======
 
 // ======= ADIÇÃO: Pending Ledger Helpers & Heurística =======
 const PENDING_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_pending.json');
@@ -915,14 +1168,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const chatsNovos = await coletaChatsMarketplaceRecentes();
     let novosAti = 0;
     const agora = agoraEpoch();
+    const aguard = getSetAguardando(nome);
 
     chatsNovos.forEach(c => {
       const ts = respondedCache.get(c.id) || Number(historico[c.id] || 0);
       const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
       if (!jaRespondido && !fila.includes(c.id)) {
-        fila.push(c.id);
-        novosAti++;
-        log(`NOVO chat em Fila: ${c.id} (${c.tempo})`);
+        if (!aguard.has(c.id)) {
+          fila.push(c.id);
+          novosAti++;
+          log(`NOVO chat em Fila: ${c.id} (${c.tempo})`);
+        }
       }
     });
 
@@ -1163,50 +1419,47 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         resetFail(chatId);
 
-        // 1) Verifica customização por manifest (mensagem personalizada Virtus)
-        let msg = null;
-        try {
-          const man = await manifestStore.read(nome).catch(()=>null);
-          if (man && man.customVirtusMessageEnabled && String(man.customVirtusMessage || '').trim()) {
-            msg = String(man.customVirtusMessage).trim();
-          }
-        } catch {}
+        // 1. Extrai URL do classificado
+        const urlClassificado = await extrairUrlClassificado(p, chatId);
 
-        // 2) Se não houver custom, cai no atendimento.json como hoje
-        if (!msg) {
-          if (!Array.isArray(mensagensAtendimento) || !mensagensAtendimento.length) {
-            logger.error('atendimento.json vazio. Não será enviada resposta!', { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-          msg = mensagensAtendimento[randomBetween(0, mensagensAtendimento.length - 1)];
-          if (Array.isArray(msg)) msg = msg.join('\n');
-          if (typeof msg !== 'string') msg = String(msg);
-        }
+        // 2. Adiciona na fila GLOBAL de busca de localização
+        const localizacao = await new Promise((resolve) => {
+          try {
+            const buscador = (global && global.__buscaLocalizacaoVirtus) ? global.__buscaLocalizacaoVirtus : null;
+            if (buscador && typeof buscador.adicionarBuscaLocalizacao === 'function' && urlClassificado) {
+              buscador.adicionarBuscaLocalizacao(chatId, urlClassificado, nome, resolve);
+            } else {
+              resolve(null);
+            }
+          } catch { resolve(null); }
+        });
 
-        if (!running) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
-        if (!browser || browser.isConnected?.() === false) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
-        if (!p || p.isClosed?.()) { try { await pendingDel(nome, chatId); } catch {} chatAtivo = null; return; }
+        // 3. Identifica tipo de serviço
+        const tipoServico = await identificarTipoServico(nome);
 
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_prepare', chatId });
-        try { await campo.focus(); } catch {}
-        const isFocused = await p.evaluate((el)=> document.activeElement===el, campo).catch(()=>false);
-        if (!isFocused) { try { await campo.focus(); } catch {} }
+        // 4. Coleta a última mensagem do cliente
+        const mensagemCliente = await extrairUltimaMensagemCliente(p);
 
-        // -------- SUBSTITUIR PELO USO sendMessageSafe --------
-        await sendMessageSafe(p, campo, msg, nome, chatId);
-        // -----------------------------------------------------
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'send_ok', chatId });
+        // 5. Formata localização no padrão "Cidade (UF)" para a planilha Google
+        const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
 
-        log(`Mensagem enviada para chat ${chatId}`);
-        // Ledger: remove pending ANTES de gravar responded (commit)
+        // 6. Adiciona na fila de envio para o notificador
+        adicionarChatParaEnvio(nome, {
+          chatId,
+          tipoServico,
+          mensagem: mensagemCliente,
+          localizacao: localizacaoFormatada,
+          urlClassificado
+        });
+
+        // 6. Não envia mensagem aqui; aguarda a resposta do Notificador (polling + fila no Messenger)
+        //    Mantém o chat na fila aguardando a resposta inteligente, sem spam.
+        //    O histórico será marcado "respondido" quando o envio real ocorrer.
+
+        // Ledger: remove pending (chat foi processado e enviado para notificador)
         try { await pendingDel(nome, chatId); } catch {}
-        const tsNow = agoraEpoch();
-        historico[chatId] = tsNow;
-        setResponded(chatId, tsNow);
-        await salvaHistorico();
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
 
       } catch (err) {
         const msgErr = (err && err.message) ? err.message : String(err);
@@ -1450,6 +1703,61 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     if (!running || !epochOk()) return;
     await initHistoricoSePreciso();
+    
+    // Inicialização do Notificador
+    try {
+      await fazerHandshakeNotificador(nome);
+      iniciarPollingRespostas(nome);
+      
+      // Implementa enviarRespostaMessengerSegura dentro do contexto do Virtus
+      async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
+        let p = await ensurePage().catch(()=>null);
+        if (!p) throw new Error('page_unavailable');
+        try {
+          await garantirMarketplace(p);
+        } catch {}
+        try {
+          // navega diretamente pro chat
+          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
+        } catch {}
+        
+        let campo = await waitForComposer(p, 10000);
+        if (!campo) {
+          // fallback leve
+          try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{}); } catch {}
+          campo = await waitForComposer(p, 8000);
+        }
+        if (!campo) throw new Error('composer_missing');
+        
+        if (!(await assertOnChat(p, chatId, { timeoutMs: 500 }))) {
+          await logIssue(nome, 'mil_action', `virtus_context_abort: messenger_queue before_send (chat ${chatId})`);
+          throw new Error('context_switched');
+        }
+        
+        await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+      }
+      
+      // Implementa marcarRespondido dentro do contexto do Virtus
+      async function marcarRespondidoLocal(chatId) {
+        try {
+          const agoraTs = agoraEpoch();
+          let historicoLocal = {};
+          try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
+          historicoLocal[chatId] = agoraTs;
+          await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
+          // atualiza cache local do Virtus
+          setResponded(chatId, agoraTs);
+          await salvaHistorico();
+        } catch (e) {
+          logger.error('[VIRTUS] marcarRespondido error', { nome, chatId, error: e && e.message || e });
+        }
+      }
+      
+      iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+    } catch (e) {
+      logger.warn('[NOTIFICADOR] falha init filas/handshake (continuando)', { nome, error: e && e.message || e });
+    }
+    
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
   }

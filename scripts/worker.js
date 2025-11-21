@@ -5,6 +5,129 @@ const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 const browserHelper = require('./browser.js');
+
+// ====== INÍCIO: FILA GLOBAL DE BUSCA DE LOCALIZAÇÃO (sem ciclo) ======
+const filaBuscaLocalizacao = [];
+let processandoBuscaLocalizacao = false;
+
+// Registra no global para uso pelo Virtus (sem require de worker.js)
+global.__buscaLocalizacaoVirtus = {
+  adicionarBuscaLocalizacao: (chatId, urlClassificado, nomePerfil, callback) => {
+    try {
+      filaBuscaLocalizacao.push({ chatId, urlClassificado, nomePerfil, callback });
+      processarFilaBuscaLocalizacao();
+    } catch (e) {
+      logger.error('[LOCALIZACAO] Falha ao enfileirar', { chatId, error: e && e.message || e });
+      try { callback && callback(null); } catch {}
+    }
+  }
+};
+
+async function processarFilaBuscaLocalizacao() {
+  if (processandoBuscaLocalizacao) return;
+  if (filaBuscaLocalizacao.length === 0) return;
+
+  processandoBuscaLocalizacao = true;
+  const item = filaBuscaLocalizacao.shift();
+
+  try {
+    const localizacao = await buscarLocalizacaoClassificado(
+      item.chatId,
+      item.urlClassificado,
+      item.nomePerfil
+    );
+    try { item.callback(localizacao || null); } catch {}
+  } catch (e) {
+    logger.error('[LOCALIZACAO] Erro ao buscar localização', { chatId: item.chatId, error: e && e.message || e });
+    try { item.callback(null); } catch {}
+  } finally {
+    processandoBuscaLocalizacao = false;
+    setTimeout(() => processarFilaBuscaLocalizacao(), 2000); // 2s entre buscas
+  }
+}
+
+async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil) {
+  try {
+    if (!urlClassificado || typeof urlClassificado !== 'string') return null;
+  } catch { return null; }
+
+  // NOTA: 'controllers' será declarado mais adiante no arquivo. A função só será executada
+  // depois que 'controllers' existir (quando Virtus chamar a fila). Isso é seguro.
+  const ctrl = (global && global.controllers) ? global.controllers.get(nomePerfil) : null;
+  // fallback para variável local quando controllers existe no escopo local:
+  try {
+    if (!ctrl) {
+      // tenta a variável local controllers se global não estiver setado
+      // (controllers é definido mais abaixo neste arquivo)
+      // eslint-disable-next-line no-undef
+      if (typeof controllers !== 'undefined') {
+        // eslint-disable-next-line no-undef
+        const ctrlLocal = controllers.get(nomePerfil);
+        if (ctrlLocal) { return await _execBusca(ctrlLocal); }
+      }
+      return null;
+    }
+    return await _execBusca(ctrl);
+  } catch { return null; }
+
+  async function _execBusca(controller) {
+    if (!controller || !controller.browser) return null;
+    const novaAba = await controller.browser.newPage();
+    try {
+      await novaAba.goto(urlClassificado, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      const localizacao = await novaAba.evaluate(() => {
+        try {
+          const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+          // 1) Tenta achar diretamente "Cidade, UF"
+          const fullText = (document.body && (document.body.innerText || document.body.textContent) || '');
+          const m = fullText.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+),\s*([A-Z]{2})/);
+          if (m) {
+            return { cidade: m[1].trim(), estado: (m[2] || '').trim().toUpperCase() };
+          }
+
+          // 2) Tenta achar no mapa ou bloco "Anunciado em ..."
+          const spans = Array.from(document.querySelectorAll('span,a')).slice(0, 2000);
+          for (const s of spans) {
+            const t = norm((s.innerText || s.textContent || '').trim());
+            if (/^[A-Za-zÀ-ÿ\s]+,\s*[A-Z]{2}$/i.test(s.innerText || s.textContent || '')) {
+              const parts = (s.innerText || s.textContent || '').split(',');
+              if (parts.length >= 2) {
+                return { cidade: parts[0].trim(), estado: parts[1].trim().toUpperCase() };
+              }
+            }
+          }
+
+          // 3) Fallback: varredura por texto normalizado
+          const textCandidates = fullText.split(/\n+/).map(x => x.trim()).filter(Boolean);
+          for (const t of textCandidates) {
+            const mm = t.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+),\s*([A-Z]{2})/);
+            if (mm) {
+              return { cidade: mm[1].trim(), estado: (mm[2] || '').trim().toUpperCase() };
+            }
+          }
+
+          return null;
+        } catch { return null; }
+      });
+
+      return localizacao;
+    } finally {
+      try { await novaAba.close({ runBeforeUnload: false }); } catch {}
+    }
+  }
+}
+
+// expõe no module.exports para ambientes que realmente façam require deste arquivo
+module.exports = module.exports || {};
+module.exports.adicionarBuscaLocalizacao = global.__buscaLocalizacaoVirtus.adicionarBuscaLocalizacao;
+module.exports.processarFilaBuscaLocalizacao = processarFilaBuscaLocalizacao;
+module.exports.buscarLocalizacaoClassificado = buscarLocalizacaoClassificado;
+
+// também deixa controllers acessível via global para a função acima
+// (será atualizado quando controllers for definido mais abaixo no arquivo)
+// ====== FIM: FILA GLOBAL DE BUSCA DE LOCALIZAÇÃO ======
+
 const virtusHelper = require('./virtus.js');
 const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
@@ -596,6 +719,8 @@ await issues.append(nome, type, msg);
 }
 
 const controllers = new Map();
+// Atualiza global.controllers para uso pela fila de busca de localização
+global.controllers = controllers;
 
 const robeMeta = {};
 
