@@ -828,6 +828,11 @@ const CHAT_STATES = Object.freeze({
 const SENT_COOLDOWN_MS = 60 * 1000; // mínimo de 60s
 // === FIM: CONTROLE DE ESTADO DE CHAT ===
 
+// ====== INÍCIO: Config Probe e TTL de Revalidação ======
+const PROBE_RECHECK_MIN_MS = parseInt(process.env.VIRTUS_PROBE_RECHECK_MIN_MS || '60000', 10);  // mínimo entre enfileiramentos (anti-flood), default 60s
+const PROBE_FORCE_OPEN_MS  = parseInt(process.env.VIRTUS_PROBE_FORCE_OPEN_MS  || '300000', 10); // forçar abertura do chat após X ms, default 5min
+// ====== FIM: Config Probe e TTL de Revalidação ======
+
 // ====== INÍCIO: Config Notificador e Filas ======
 const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io';
 const NOTIFICADOR_SERVIDOR = process.env.SERVIDOR_NOME || 'servidor1';
@@ -1966,8 +1971,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // Cooldown local de re-probe
       const last = lastProbeMap.get(id) || 0;
-      if ((agoraMs - last) < 60000) {
-        logger.debug(`[FILA][${nome}] skip ${id} — re-probe <60s`);
+      if ((agoraMs - last) < PROBE_RECHECK_MIN_MS) {
+        logger.debug(`[FILA][${nome}] skip ${id} — re-probe <${PROBE_RECHECK_MIN_MS}ms`);
         continue;
       }
 
@@ -1979,10 +1984,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.debug(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
         continue;
       }
-      if (st && typeof st.lastCLIts === 'number' && typeof st.ultimoProbeCLIts === 'number' && st.lastCLIts === st.ultimoProbeCLIts) {
-        // nenhum avanço desde último probe
+      // TTL de força: mesmo sem mudança aparente, forçar abertura do chat após X minutos
+      const lastProbeAt = (st && typeof st.lastProbeAt === 'number') ? st.lastProbeAt : 0;
+      const forceOpen = (!st) || (agoraMs - lastProbeAt >= PROBE_FORCE_OPEN_MS);
+      
+      if (
+        !forceOpen &&
+        st &&
+        typeof st.lastCLIts === 'number' &&
+        typeof st.ultimoProbeCLIts === 'number' &&
+        st.lastCLIts === st.ultimoProbeCLIts
+      ) {
+        // nenhum avanço desde último probe E ainda não bateu o TTL de força
         lastProbeMap.set(id, agoraMs);
-        logger.debug(`[FILA][${nome}] skip ${id} — sem avanço de timestamp de cliente (lastCLIts==ultimoProbeCLIts)`);
+        logger.debug(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
         continue;
       }
       if (st && st.state === 'erro_envio') {
@@ -2004,7 +2019,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try {
         await setChatState(nome, id, {
           state: CHAT_STATES.PENDENTE,
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          lastProbeAt: Date.now() // NOVO: registramos a última sondagem
         });
       } catch {}
 
@@ -2122,6 +2138,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       _chatLockAcquired = true;
+      
+      // NOVO: Registra lastProbeAt no início (antes de qualquer navegação)
+      try {
+        await setChatState(nome, chatId, { lastProbeAt: Date.now() });
+      } catch {}
+      lastProbeMap.set(chatId, Date.now());
       
       logger.info('[CONTEXTO] Iniciando processamento', { nome, chatId });
       stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
@@ -2351,7 +2373,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!ultimaCliente) {
           log(`[SKIP] Chat ${chatId}: sem mensagem do cliente`);
           try {
-            await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastIATs: tsIA || 0 });
+            await setChatState(nome, chatId, { 
+              state: CHAT_STATES.AGUARDANDO, 
+              lastIATs: tsIA || 0,
+              lastProbeAt: Date.now() // NOVO: atualiza lastProbeAt
+            });
           } catch {}
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
@@ -2371,6 +2397,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const curHash = hashResposta(ultimaMsgAtual);
           if (estadoAnteriorChat.ultimaMsgErroHash && estadoAnteriorChat.ultimaMsgErroHash === curHash) {
             log(`[SKIP] Chat ${chatId}: já marcado como erro_envio para esta mesma mensagem. Não tentar novamente.`);
+            try { 
+              await setChatState(nome, chatId, { lastProbeAt: Date.now() }); // NOVO: atualiza lastProbeAt
+            } catch {}
             try { await pendingDel(nome, chatId); } catch {}
             fila = fila.filter(id => id !== chatId);
             chatAtivo = null;
@@ -2387,7 +2416,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await setChatState(nome, chatId, {
               state: CHAT_STATES.AGUARDANDO,
               lastIATs: tsIA || 0,
-              ultimoProbeCLIts: tsCLI || 0
+              ultimoProbeCLIts: tsCLI || 0,
+              lastProbeAt: Date.now() // NOVO: atualiza lastProbeAt
             });
           } catch {}
           try { await pendingDel(nome, chatId); } catch {}
@@ -2493,7 +2523,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               await setChatState(nome, chatId, {
                 ultimaMensagemClienteProcessada: ultimaMsgAtual,
                 ultimoProbeCLIts: tsCLI || 0,
-                lastIATs: Date.now()
+                lastIATs: Date.now(),
+                lastProbeAt: Date.now() // NOVO: atualiza lastProbeAt após sucesso
               });
             } catch {}
 
@@ -2562,6 +2593,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { await pendingDel(nome, chatId); } catch {}
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
+        
+        // NOVO: atualiza lastProbeAt no final do processamento (sucesso)
+        try { 
+          await setChatState(nome, chatId, { lastProbeAt: Date.now() }); 
+        } catch {}
 
       } catch (err) {
         const msgErr = (err && err.message) ? err.message : String(err);
@@ -2574,6 +2610,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.error('Erro ao responder chat', { nome, chatId }, err);
         // Rollback pending em caso de erro
         try { await pendingDel(nome, chatId); } catch {}
+        // NOVO: atualiza lastProbeAt mesmo em caso de erro
+        try { 
+          await setChatState(nome, chatId, { lastProbeAt: Date.now() }); 
+        } catch {}
       }
 
       fila = fila.filter(id => id !== chatId);
