@@ -134,31 +134,34 @@ CONTEXTO DA CONVERSA:
 - NUNCA diga "Olá novamente" ou "Olá" se já houve mensagens anteriores. Vá direto ao ponto, de forma humana.
 - Se já existe histórico, dê continuidade ao tema da última mensagem do cliente.
 
-Objetivo nº 1: coletar o WhatsApp do cliente (telefone com DDD) o mais rápido possível, de forma natural.
+INTELIGÊNCIA E NATURALIDADE:
+- NUNCA repita o que o cliente disse. Seja direto e inteligente.
+- Confirme sem repetir. Ex.: Se o cliente disse "preciso levar 2 camas e algumas sacolas", NÃO responda "Você precisa levar 2 camas e poucas sacolas, é isso?". Em vez disso, responda: "Ah, entendi, levo sim! Só preciso do WhatsApp para continuar o atendimento 🚚📲".
+- Evite redundâncias. Responda de forma prática e natural, como um humano experiente faria.
 
-Objetivo nº 2: depois do telefone, coletar informações adicionais ("cereja do bolo"):
+ESTRATÉGIA DE PEDIR WHATSAPP:
+- Seu objetivo nº 1 é pegar o telefone (WhatsApp com DDD) de forma natural.
+- Sempre dê a razão: "pra eu entender melhor e te passar o orçamento".
+- Deixe claro que você é o atendente e "o meu motorista já vai te chamar" — isso cria urgência positiva. Exemplo: "Perfeito! Pra eu entender melhor e te passar o orçamento, me passa seu WhatsApp que o meu motorista já vai te chamar 🚚📲"
+
+Objetivo nº 2: depois do telefone, colete rapidamente:
   - Precisa de ajudante?
   - Saída: casa ou apartamento? Com ou sem elevador?
   - Destino: casa ou apartamento? Com ou sem elevador?
-  - Bairro de saída?
-  - Bairro de destino?
+  - Bairro de saída e de destino?
   - Itens/quantidade a transportar?
 
-Regras:
-- Na primeira mensagem apenas (quando não houver histórico anterior), cumprimente com entusiasmo e mencione a cidade do cliente se fizer sentido.
-- Nas mensagens subsequentes (quando já houver histórico), NÃO repita a cidade nem faça saudação inicial.
+Regras gerais:
 - Responda dúvidas e emende pedindo o zap de forma fluida.
 - Se o cliente mandar telefone em qualquer formato, extraia imediatamente (com DDD).
 - Após pegar o telefone, colete as informações adicionais de forma natural (uma ou duas por vez).
-- Seja natural e humano. Evite repetir informações que o cliente já sabe.
+- Seja natural e humano. Não repita o que o cliente acabou de dizer.
 
 REGRA ABSOLUTA:
-- Se o cliente enviou uma mensagem nova (mesmo que não contenha telefone), você DEVE SEMPRE responder.
-- Se o cliente mencionou itens, bairros, ajudante, ou outras informações, confirme essas informações e continue pedindo o telefone de forma natural.
-- NUNCA fique em silêncio esperando apenas o telefone.
-- Seja proativo e inteligente: reconheça informações parciais e responda adequadamente.
+- Se o cliente enviou uma mensagem nova (mesmo sem telefone), VOCÊ DEVE responder — sempre.
+- Se o cliente mencionou itens, bairros, ajudante, ou outras informações, reconheça/avance e continue pedindo o WhatsApp para fechar o orçamento.
 
-Formato JSON esperado:
+Formato JSON esperado (sem markdown, sem texto adicional):
 {
   "resposta": "texto exato para enviar ao cliente",
   "telefone_extraido": "11999999999" ou null,
@@ -176,7 +179,7 @@ Formato JSON esperado:
 }
 
 - "finalizado" = true apenas quando houver telefone válido com DDD.
-- Sempre retorne SOMENTE o JSON (sem markdown).
+- Retorne SOMENTE o JSON.
 `.trim();
 
 function montarPromptUser(cidade, historico) {
@@ -1206,6 +1209,15 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
   } catch {}
   if (!campo) throw new Error('composer_missing');
 
+  // Valida URL antes de começar a digitar (hard check)
+  try {
+    const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+    if (!urlNow.includes(`/marketplace/t/${chatId}/`)) {
+      await logIssue(nome, 'mil_action', `virtus_context_abort: url_mismatch_before_type chat=${chatId} url="${urlNow}"`);
+      return; // aborta o envio neste chat
+    }
+  } catch {}
+
   // Verificar contexto antes de digitar
   if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
     await logIssue(nome, 'mil_action', `virtus_context_abort: before_type (chat ${chatId})`);
@@ -1235,6 +1247,16 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
     // Digita uma única vez (sem execCommand/insertText)
     await p.keyboard.type(String(msg || ''), { delay: 0 });
+
+    // Revalida URL antes de pressionar Enter (hard check)
+    try {
+      const urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
+      if (!urlNow2.includes(`/marketplace/t/${chatId}/`)) {
+        await clearComposerIfAny(p, campo);
+        await logIssue(nome, 'mil_action', `virtus_context_abort: url_mismatch_before_enter chat=${chatId} url="${urlNow2}"`);
+        return; // aborta o envio neste chat
+      }
+    } catch {}
 
     // Revalidar contexto antes do Enter
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
@@ -1893,14 +1915,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!fila.length) return;
 
     const next = fila[0];
-    log(`[FILA] Atendendo chat ${next} agora`);
+    const delayMs = parseInt(process.env.VIRTUS_NEXT_CHAT_DELAY_MS || '2000', 10);
+    logger.info('[FILA] Aguardando delay antes de processar próximo chat', { nome, chatId: next, delay: delayMs });
     filaChatTimer = setTimeout(async () => {
-      if (!running || !epochOk()) return;
-      stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
-      filaChatTimer = null;
-      await responderChat(next);
-      scheduleNextIfIdle();
-    }, 0);
+      try {
+        if (!running || !epochOk()) return;
+        // Revalida: se alguém setou chatAtivo nesse meio tempo, aborta e agenda novamente
+        if (chatAtivo) {
+          filaChatTimer = null;
+          return scheduleNextIfIdle();
+        }
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
+        filaChatTimer = null;
+        await responderChat(next);
+        // Gap adicional para estabilidade entre chats
+        setTimeout(scheduleNextIfIdle, Math.max(500, delayMs));
+      } catch (e) {
+        filaChatTimer = null;
+        logger.error('[FILA] Erro no timer de atendimento', { nome, error: e && e.message || e });
+        setTimeout(scheduleNextIfIdle, Math.max(500, delayMs));
+      }
+    }, delayMs);
   }
 
   async function responderChat(chatId) {
@@ -1958,6 +1993,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       _chatLockAcquired = true;
+      
+      logger.info('[CONTEXTO] Iniciando processamento', { nome, chatId });
       stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
 
       // Marcar estado como PENDENTE (APENAS disco)
@@ -2237,6 +2274,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // NOVO: fluxo direto Groq (se DIRECT_GROQ ativo)
         if (DIRECT_GROQ) {
           try {
+            logger.info('[CONTEXTO] Chamando Groq API', {
+              nome,
+              chatId,
+              historicoLength: Array.isArray(historicoConversa) ? historicoConversa.length : 0
+            });
+            
             // Cidade preferencial: manifest.cidade > localizacao.cidade > null
             let cidadePreferida = null;
             try {
@@ -2268,13 +2311,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const pAtual = await ensurePage().catch(() => null);
             if (!pAtual) throw new Error('page_unavailable_for_send');
 
-            const jaNoChat = await assertOnChat(pAtual, chatId, { timeoutMs: 1000 });
-            if (!jaNoChat) {
+            const okChat = await assertOnChat(pAtual, chatId, { timeoutMs: 1000 });
+            if (!okChat) {
               const url0 = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
               if (!/\/marketplace\/t\//.test(url0)) {
                 await pAtual.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
                 await assertOnChat(pAtual, chatId, { timeoutMs: 5000 });
               }
+            }
+
+            // VALIDAÇÃO HARD: checa URL explícita
+            const urlAtual = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
+            if (!urlAtual.includes(`/marketplace/t/${chatId}/`)) {
+              await logIssue(nome, 'mil_action', `context_mismatch_before_send url="${urlAtual}" chatId=${chatId}`);
+              throw new Error('context_mismatch_before_send');
             }
 
             // Tente usar o composer já obtido anteriormente; se não existir, espere um pouco mais
