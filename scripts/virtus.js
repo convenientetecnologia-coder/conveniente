@@ -297,6 +297,24 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
       
+      // NOVO: Enviar ACK ao Notificador após confirmação de envio
+      try {
+        await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            servidor: NOTIFICADOR_SERVIDOR,
+            perfil: nomePerfil,
+            chat_id: proximo.chatId
+          })
+        });
+        logger.info('[NOTIFICADOR] ACK enviado', { nomePerfil, chatId: proximo.chatId });
+      } catch (e) {
+        logger.warn('[NOTIFICADOR] Falha ao enviar ACK (será reofertado após TTL do lock)', {
+          nomePerfil, chatId: proximo.chatId, error: e && e.message || e
+        });
+      }
+      
       // remove do set aguardando
       try { const setA = getSetAguardando(nomePerfil); setA.delete(proximo.chatId); } catch {}
 
@@ -830,28 +848,48 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     // Envia (um único Enter)
     await p.keyboard.press('Enter');
 
-    // Aguarda confirmação: bolha “Você enviou” ou composer vazio
+    // NOVO: Confirmação robusta de envio (verificar "Você enviou" OU texto do bubble)
+    const expected = String(msg || '').trim().toLowerCase();
     const sent = await Promise.race([
+      // Confirmação por label "Você enviou/You sent"
       (async () => {
         try {
           return await p.waitForFunction(() => {
             const norm = s => String(s||'').toLowerCase();
-            const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
-            return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
-          }, { timeout: 7000 }).then(()=>true).catch(()=>false);
+            const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-30);
+            return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText || el.textContent || '')));
+          }, { timeout: 10000 }).then(() => true).catch(() => false);
         } catch { return false; }
       })(),
+      // NOVO: Confirmação por texto do último bubble (quase infalível)
       (async () => {
         try {
-          return await p.waitForFunction((el) => ((el.innerText || el.textContent || '').trim().length === 0), { timeout: 7000 }, campo)
-            .then(()=>true).catch(()=>false);
+          if (!expected) return false;
+          return await p.waitForFunction((expected) => {
+            const bubbles = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-20);
+            const norm = s => String(s||'').trim().toLowerCase();
+            for (let i = bubbles.length - 1; i >= 0; i--) {
+              const t = norm(bubbles[i].innerText || bubbles[i].textContent || '');
+              if (t && t.includes(expected)) return true;
+            }
+            return false;
+          }, { timeout: 10000 }, expected).then(() => true).catch(() => false);
         } catch { return false; }
+      })(),
+      // Timeout de segurança
+      (async () => {
+        await p.waitForTimeout(12000);
+        return false;
       })()
     ]);
 
     if (!sent) {
+      logger.error('[MESSENGER] ❌ FALHA: Mensagem NÃO confirmada como enviada', { nome, chatId });
       await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout (no re-enter)');
+      throw new Error('send_not_confirmed');
     }
+
+    logger.info('[MESSENGER] ✅ Mensagem confirmada como enviada', { nome, chatId });
 
   } finally {
     setVirtusInputLock(nome, false);
@@ -1936,29 +1974,53 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Implementa enviarRespostaMessengerSegura dentro do contexto do Virtus
       async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
         let p = await ensurePage().catch(()=>null);
-        if (!p) throw new Error('page_unavailable');
+        if (!p) {
+          logger.error('[MESSENGER] Page não disponível', { nome, chatId });
+          throw new Error('page_unavailable');
+        }
+        
         try {
-          await garantirMarketplace(p);
-        } catch {}
-        try {
-          // navega diretamente pro chat
+          logger.debug('[MESSENGER] Abrindo chat', { nome, chatId });
           await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
-        } catch {}
-        
-        let campo = await waitForComposer(p, 10000);
-        if (!campo) {
-          // fallback leve
-          try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{}); } catch {}
-          campo = await waitForComposer(p, 8000);
+          
+          const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
+          if (!okOn) {
+            logger.error('[MESSENGER] Falha ao abrir chat', { nome, chatId });
+            throw new Error('chat_not_opened');
+          }
+          logger.debug('[MESSENGER] Chat aberto', { nome, chatId });
+          
+          logger.debug('[MESSENGER] Aguardando composer', { nome, chatId });
+          let campo = await waitForComposer(p, 10000);
+          if (!campo) {
+            // fallback leve
+            try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{}); } catch {}
+            campo = await waitForComposer(p, 8000);
+          }
+          if (!campo) {
+            logger.error('[MESSENGER] Composer não disponível', { nome, chatId });
+            throw new Error('composer_not_available');
+          }
+          logger.debug('[MESSENGER] Composer disponível', { nome, chatId });
+          
+          // Focar composer explicitamente
+          try { await campo.focus(); await p.waitForTimeout(200); } catch {}
+          
+          if (!(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
+            logger.error('[MESSENGER] Contexto perdido antes de enviar', { nome, chatId });
+            throw new Error('context_lost');
+          }
+          
+          // Enviar mensagem com confirmação robusta
+          await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+          
+          logger.info('[MESSENGER] ✅✅✅ Mensagem ENVIADA E CONFIRMADA com sucesso', { nome, chatId });
+          return true;
+        } catch (err) {
+          const msgErr = (err && err.message) ? err.message : String(err);
+          logger.error('[MESSENGER] ❌ Erro ao enviar mensagem', { nome, chatId, error: msgErr }, err);
+          throw err;
         }
-        if (!campo) throw new Error('composer_missing');
-        
-        if (!(await assertOnChat(p, chatId, { timeoutMs: 500 }))) {
-          await logIssue(nome, 'mil_action', `virtus_context_abort: messenger_queue before_send (chat ${chatId})`);
-          throw new Error('context_switched');
-        }
-        
-        await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
       }
       
       // Implementa marcarRespondido dentro do contexto do Virtus
