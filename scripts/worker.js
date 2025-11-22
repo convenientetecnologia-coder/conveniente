@@ -101,43 +101,174 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
       const localizacao = await novaAba.evaluate(() => {
         try {
-          const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-          const fullText = (document.body && (document.body.innerText || document.body.textContent) || '');
-          const m = fullText.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+),\s*([A-Z]{2})/);
-          if (m) {
-            return { cidade: m[1].trim(), estado: (m[2] || '').trim().toUpperCase() };
+          // Helpers
+          const CITYUF_EXACT_RE = /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'´.\-\s]{1,60}?),\s*([A-Z]{2})$/;
+          const CITYUF_FIND_RE = /([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'´.-\s]{1,60}?),\s*([A-Z]{2})/g;
+
+          function limparEValidarCidade(cidade) {
+            if (!cidade || typeof cidade !== 'string') return null;
+            let s = String(cidade).trim();
+            // Remove prefixos e lixo mais comuns (SUPER abrangente)
+            s = s
+              .replace(/^(uma\s+hora\s+em|há\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|a\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|em\s+|de\s+|para\s+|até\s+)/i, '')
+              .replace(/^\s+|\s+$/g, '');
+            // rejeita conteúdos obviamente inválidos
+            if (/\d+/.test(s)) return null;
+            if (!/^[A-Za-zÀ-ÿ]/.test(s)) return null;
+            if (s.length < 2 || s.length > 60) return null;
+            // não deve começar por palavras temporais/destino
+            if (/^(uma\s+hora|há|a\s+\d+|em|de|para|até)/i.test(s)) return null;
+            return s;
           }
 
-          const spans = Array.from(document.querySelectorAll('span,a')).slice(0, 2000);
-          for (const s of spans) {
-            const txtOrig = (s.innerText || s.textContent || '').trim();
-            if (/^[A-Za-zÀ-ÿ\s]+,\s*[A-Z]{2}$/i.test(txtOrig)) {
-              const parts = txtOrig.split(',');
-              if (parts.length >= 2) {
-                return { cidade: parts[0].trim(), estado: parts[1].trim().toUpperCase() };
+          function isVisible(el) {
+            try {
+              const st = window.getComputedStyle(el);
+              if (!st) return false;
+              if (st.visibility === 'hidden' || st.display === 'none') return false;
+              const r = el.getBoundingClientRect();
+              return !!(r && r.width > 0 && r.height > 0);
+            } catch { return false; }
+          }
+
+          function candidateFromText(txt) {
+            const t = (txt || '').trim();
+            const m = CITYUF_EXACT_RE.exec(t);
+            if (!m) return null;
+            const cidade = limparEValidarCidade(m[1] || '');
+            const uf = (m[2] || '').toUpperCase();
+            if (!cidade || !/^[A-Z]{2}$/.test(uf)) return null;
+            return { cidade, estado: uf };
+          }
+
+          // Estratégia 1 — Anchor de localização do Marketplace: /marketplace/<localId>/, não /t/ (chat) e não /item/
+          {
+            const anchors = Array.from(document.querySelectorAll('a[role="link"][href^="/marketplace/"], a[href^="/marketplace/"]'))
+              .filter(a => {
+                const href = (a.getAttribute('href') || '').trim();
+                return href && !/\/t\//i.test(href) && !/\/item\//i.test(href);
+              });
+            for (const a of anchors) {
+              if (!isVisible(a)) continue;
+              // Tenta texto do anchor e dos spans internos
+              const texts = [
+                (a.innerText || a.textContent || '').trim(),
+                ...Array.from(a.querySelectorAll('span')).map(s => (s.innerText || s.textContent || '').trim())
+              ].filter(Boolean);
+              for (const t of texts) {
+                const cand = candidateFromText(t);
+                if (cand) return cand;
+              }
+              // Se vier dentro de frase ("… em Cidade, UF"), extrai o "Cidade, UF"
+              const big = (a.innerText || a.textContent || '').trim();
+              if (big) {
+                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
+                while ((mm = CITYUF_FIND_RE.exec(big)) !== null) last = mm;
+                if (last) {
+                  const c2 = candidateFromText(last[0]);
+                  if (c2) return c2;
+                }
               }
             }
           }
 
-          const textCandidates = fullText.split(/\n+/).map(x => x.trim()).filter(Boolean);
-          for (const t of textCandidates) {
-            const mm = t.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+),\s*([A-Z]{2})/);
-            if (mm) {
-              return { cidade: mm[1].trim(), estado: (mm[2] || '').trim().toUpperCase() };
+          // Estratégia 2 — Spans e Divs visíveis com texto "Cidade, UF" exato
+          {
+            const nodes = Array.from(document.querySelectorAll('span,div'));
+            for (const el of nodes) {
+              if (!isVisible(el)) continue;
+              const txt = (el.innerText || el.textContent || '').trim();
+              if (!txt) continue;
+              // Caso "... em Cidade, UF", extrai apenas a parte final
+              if (/\sem\s/i.test(txt)) {
+                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
+                while ((mm = CITYUF_FIND_RE.exec(txt)) !== null) last = mm;
+                if (last) {
+                  const c2 = candidateFromText(last[0]);
+                  if (c2) return c2;
+                }
+              }
+              const cand = candidateFromText(txt);
+              if (cand) return cand;
+            }
+          }
+
+          // Estratégia 3 — Cabeçalhos/regiões principais (header, role=main, data-pagelet Marketplace)
+          {
+            const regs = [
+              document.querySelector('header'),
+              document.querySelector('[role="main"]'),
+              document.querySelector('[data-pagelet*="Marketplace"]')
+            ].filter(Boolean);
+            for (const r of regs) {
+              const lines = ((r.innerText || r.textContent || '') || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
+              for (const ln of lines) {
+                const cand = candidateFromText(ln);
+                if (cand) return cand;
+                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
+                while ((mm = CITYUF_FIND_RE.exec(ln)) !== null) last = mm;
+                if (last) {
+                  const c2 = candidateFromText(last[0]);
+                  if (c2) return c2;
+                }
+              }
+            }
+          }
+
+          // Estratégia 4 — Último recurso: fullText (linha a linha) pegando SOMENTE "Cidade, UF"
+          {
+            const full = (document.body && (document.body.innerText || document.body.textContent) || '');
+            if (full) {
+              const parts = full.split(/\n+/).map(x => x.trim()).filter(Boolean);
+              for (const t of parts) {
+                const cand = candidateFromText(t);
+                if (cand) return cand;
+                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
+                while ((mm = CITYUF_FIND_RE.exec(t)) !== null) last = mm;
+                if (last) {
+                  const c2 = candidateFromText(last[0]);
+                  if (c2) return c2;
+                }
+              }
             }
           }
 
           return null;
-        } catch { return null; }
+        } catch {
+          return null;
+        }
       });
 
+      // Validação dupla no Node (fora do evaluate) para blindagem extra
+      function limparEValidarCidadeNode(cidade) {
+        if (!cidade || typeof cidade !== 'string') return null;
+        let s = cidade.trim();
+        // Remove prefixos e lixo
+        s = s
+          .replace(/^(uma\s+hora\s+em|há\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|a\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|em\s+|de\s+|para\s+|até\s+)/i, '')
+          .replace(/^\s+|\s+$/g, '');
+        if (/\d+/.test(s)) return null;
+        if (!/^[A-Za-zÀ-ÿ]/.test(s)) return null;
+        if (s.length < 2 || s.length > 60) return null;
+        if (/^(uma\s+hora|há|a\s+\d+|em|de|para|até)/i.test(s)) return null;
+        return s;
+      }
+
+      let finalLocal = null;
+      if (localizacao && localizacao.cidade && localizacao.estado && /^[A-Z]{2}$/.test(localizacao.estado)) {
+        const cidadeLimpa = limparEValidarCidadeNode(localizacao.cidade);
+        if (cidadeLimpa) {
+          finalLocal = { cidade: cidadeLimpa, estado: localizacao.estado.toUpperCase() };
+        }
+      }
+
       // Log detalhado sobre resultado da busca
-      if (localizacao && localizacao.cidade && localizacao.estado) {
+      if (finalLocal && finalLocal.cidade && finalLocal.estado) {
         logger.info('[LOCALIZACAO] Localização encontrada no classificado', { 
           nomePerfil, 
           chatId, 
-          cidade: localizacao.cidade, 
-          estado: localizacao.estado,
+          cidade: finalLocal.cidade, 
+          estado: finalLocal.estado,
           urlClassificado
         });
       } else {
@@ -148,7 +279,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
         });
       }
 
-      return localizacao;
+      return finalLocal;
     } finally {
       // Remoção da flag global e fechamento da aba – SOMENTE AQUI (após concluir)
       try { await novaAba.close({ runBeforeUnload: false }); } catch {}

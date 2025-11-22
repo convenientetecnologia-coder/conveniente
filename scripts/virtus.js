@@ -163,21 +163,32 @@ async function enviarLoteNotificador(nomePerfil) {
         timestamp: new Date().toISOString()
       };
       
+      const urlCompleta = `${NOTIFICADOR_URL}/api/virtus/chat`;
+      
       logger.info('[NOTIFICADOR] Enviando chat', { 
         nomePerfil, 
         chatId: dadosChat.chatId,
         historicoSize: payload.historico.length,
         localizacao: payload.localizacao,
-        tipoServico: payload.tipo_servico
+        tipoServico: payload.tipo_servico,
+        url: urlCompleta,
+        servidor: payload.servidor
       });
       
-      const response = await fetch(`${NOTIFICADOR_URL}/api/virtus/chat`, {
+      const response = await fetch(urlCompleta, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
       
-      const responseData = await response.json().catch(() => null);
+      // Lê response uma única vez (body só pode ser lido uma vez)
+      const responseText = await response.text().catch(() => '');
+      let responseData = null;
+      try {
+        responseData = responseText ? JSON.parse(responseText) : null;
+      } catch {
+        responseData = null;
+      }
       
       if (response.ok && responseData && responseData.ok === true) {
         logger.info('[NOTIFICADOR] Chat enviado com sucesso', { nomePerfil, chatId: dadosChat.chatId });
@@ -186,7 +197,10 @@ async function enviarLoteNotificador(nomePerfil) {
           nomePerfil, 
           chatId: dadosChat.chatId, 
           status: response.status,
-          response: responseData 
+          statusText: response.statusText,
+          url: urlCompleta,
+          response: responseData,
+          responseText: responseText.substring(0, 500) // Primeiros 500 chars
         });
         // requeue se falha
         fila.push(dadosChat);
