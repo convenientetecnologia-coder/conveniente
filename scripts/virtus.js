@@ -12,6 +12,13 @@ Arquitetura:
 - Anti-duplicação por ID com TTL de 24h (não usa DOM para decidir).
 */
 
+// Carregar variáveis de ambiente PRIMEIRO (antes de qualquer verificação)
+try {
+  require('dotenv').config();
+} catch (e) {
+  // dotenv pode não estar instalado, mas tentamos carregar mesmo assim
+}
+
 const fs = require('fs/promises');
 const fsRaw = require('fs'); // Necessário para uso síncrono dentro de getPerfilManifest
 const path = require('path');
@@ -25,15 +32,33 @@ const manifestStore = require('./manifestStore.js');
 // === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-if (!GROQ_API_KEY) {
-  logger.error('[GROQ] GROQ_API_KEY não configurada! Configure no arquivo .env');
-  throw new Error('GROQ_API_KEY não configurada. Crie arquivo .env com GROQ_API_KEY=sua_chave');
+// Verificação da chave será feita apenas quando necessário (lazy check)
+// Isso evita erro no boot se o .env ainda não estiver configurado
+let GROQ_API_KEY = null;
+let GROQ_MODEL = null;
+let GROQ_API_URL = null;
+
+function verificarConfigGroq() {
+  if (!GROQ_API_KEY) {
+    GROQ_API_KEY = process.env.GROQ_API_KEY;
+    GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
+    
+    if (!GROQ_API_KEY) {
+      logger.error('[GROQ] GROQ_API_KEY não configurada! Configure no arquivo .env');
+      throw new Error('GROQ_API_KEY não configurada. Crie arquivo .env com GROQ_API_KEY=sua_chave');
+    }
+  }
+  return { GROQ_API_KEY, GROQ_MODEL, GROQ_API_URL };
 }
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
 
 async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retries = 2 } = {}) {
+  // Verificar configuração antes de usar
+  const config = verificarConfigGroq();
+  const apiKey = config.GROQ_API_KEY;
+  const model = config.GROQ_MODEL;
+  const apiUrl = config.GROQ_API_URL;
+  
   let lastErr = null;
 
   for (let i = 0; i <= retries; i++) {
@@ -47,14 +72,14 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
     const t = ac ? setTimeout(() => { try { if (ac) ac.abort(); } catch {} }, timeoutMs) : null;
 
     try {
-      const resp = await fetch(GROQ_API_URL, {
+      const resp = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${GROQ_API_KEY}`
+          'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify({
-          model: GROQ_MODEL,
+          model: model,
           messages: [
             { role: 'system', content: promptSystem },
             { role: 'user', content: promptUser }
