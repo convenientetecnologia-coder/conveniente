@@ -506,14 +506,23 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
 
 // ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
 function installOneTabGuard(browser, nome, {
-  allow = () => false,              // função externa que diz se “mais de 1 aba” é permitido
-  maxPagesWhenAllow = 2,            // máximo permitido quando allow() é true (Robe/config)
-  onNumPages = null,                // callback para atualizar robeMeta[nome].numPages
+  allow = () => false,
+  maxPagesWhenAllow = 2,
+  onNumPages = null,
   log = (m,ctx)=>{ try{require('./logger.js').info(m,ctx);}catch{} }
 } = {}) {
   try {
     if (!browser || browser._oneTabGuardInstalled) return;
     browser._oneTabGuardInstalled = true;
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function waitIfBuscaAtiva() {
+      try {
+        if (browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
+          await delay(250); // margem segura para marcação por page ser aplicada
+        }
+      } catch {}
+    }
 
     async function reportNum() {
       try {
@@ -521,8 +530,14 @@ function installOneTabGuard(browser, nome, {
         if (onNumPages) onNumPages(Array.isArray(pages) ? pages.length : 0);
       } catch {}
     }
+
     async function enforceHardCap() {
-      if (browser && browser._robeActiveFor === nome) return; // nunca prune se Robe ativo para este perfil
+      // Se o Robe estiver ativo para este perfil, não prune
+      if (browser && browser._robeActiveFor === nome) return;
+      
+      // Proteção: se há busca de localização ativa em qualquer aba, aguarde um pouco
+      await waitIfBuscaAtiva();
+
       try {
         const now = Date.now();
         const pages = await browser.pages();
@@ -533,10 +548,11 @@ function installOneTabGuard(browser, nome, {
           for (let i = pages.length - 1; i >= 1; i--) {
             if (pages.length <= lim) break;
             const p = pages[i];
-            if (isProtectedBuscaLocalizacao(p, now)) continue; // PROTEÇÃO
+            // PROTEÇÃO: nunca feche página marcada como buscaLocalizacao (até 60s)
+            if (isProtectedBuscaLocalizacao(p, now)) continue;
             let u = '';
             try { u = await p.url().catch(()=>''); } catch {}
-            if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // Nunca fechar create item
+            if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // Não fecha tela de criar item
             try { await p.close({ runBeforeUnload: false }).catch(()=>{}); }
             catch {}
           }
@@ -556,6 +572,8 @@ function installOneTabGuard(browser, nome, {
       try {
         if (t && t.type && t.type() !== 'page') return;
       } catch {}
+      // Se há busca ativa, aguarde uma micro-janela para a marcação por page ser aplicada
+      await waitIfBuscaAtiva();
       await enforceHardCap();
     });
 
@@ -566,7 +584,6 @@ function installOneTabGuard(browser, nome, {
       await reportNum();
     });
 
-    // Varredura inicial
     setTimeout(enforceHardCap, 400);
 
   } catch {}

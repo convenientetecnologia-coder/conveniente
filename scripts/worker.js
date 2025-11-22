@@ -72,9 +72,20 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
   async function _execBusca(controller) {
     if (!controller || !controller.browser) return null;
+    
+    // FLAG GLOBAL NO BROWSER — Proteção pré-criação da aba (elimina race)
+    let buscaId = '';
+    try {
+      if (!controller.browser._buscasLocalizacaoAtivas) {
+        controller.browser._buscasLocalizacaoAtivas = new Set();
+      }
+      buscaId = `busca_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      controller.browser._buscasLocalizacaoAtivas.add(buscaId);
+    } catch {}
+    
     const novaAba = await controller.browser.newPage();
     
-    // MARCAÇÃO DE PROTEÇÃO — não deixar o pruner fechar por até 60s
+    // MARCAÇÃO IMEDIATA NA ABA (SEM AWAIT ANTES) — crítico!
     try {
       novaAba._buscaLocalizacao = true;
       novaAba._buscaLocalizacaoSince = Date.now();
@@ -118,7 +129,8 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
       return localizacao;
     } finally {
-      // Remover marcação antes de fechar
+      // Remoção da flag global e da marcação — blindagem final
+      try { if (controller.browser._buscasLocalizacaoAtivas) controller.browser._buscasLocalizacaoAtivas.delete(buscaId); } catch {}
       try { delete novaAba._buscaLocalizacao; } catch {}
       try { delete novaAba._buscaLocalizacaoSince; } catch {}
       try { delete novaAba._buscaLocalizacaoChatId; } catch {}
