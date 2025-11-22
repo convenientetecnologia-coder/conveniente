@@ -878,7 +878,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       })(),
       // Timeout de segurança
       (async () => {
-        await p.waitForTimeout(12000);
+        await new Promise(resolve => setTimeout(resolve, 12000));
         return false;
       })()
     ]);
@@ -2004,7 +2004,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.debug('[MESSENGER] Composer disponível', { nome, chatId });
           
           // Focar composer explicitamente
-          try { await campo.focus(); await p.waitForTimeout(200); } catch {}
+          try { await campo.focus(); await new Promise(resolve => setTimeout(resolve, 200)); } catch {}
           
           if (!(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
             logger.error('[MESSENGER] Contexto perdido antes de enviar', { nome, chatId });
