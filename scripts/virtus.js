@@ -760,8 +760,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
   const POLL_INTERVAL_MS = 30_000; // polling de novos chats
-  const MIN_REPLY_DELAY_MS = 60_000;
-  const MAX_REPLY_DELAY_MS = 120_000;
+  const MIN_REPLY_DELAY_MS = 0;
+  const MAX_REPLY_DELAY_MS = 0;
 
   // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
@@ -1209,15 +1209,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!fila.length) return;
 
     const next = fila[0];
-    const delay = randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
-    log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
+    log(`[FILA] Atendendo chat ${next} agora`);
     filaChatTimer = setTimeout(async () => {
       if (!running || !epochOk()) return;
-      stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next, in: delay });
+      stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
       filaChatTimer = null;
       await responderChat(next);
       scheduleNextIfIdle();
-    }, delay);
+    }, 0);
   }
 
   async function responderChat(chatId) {

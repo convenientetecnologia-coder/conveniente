@@ -73,32 +73,37 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
   async function _execBusca(controller) {
     if (!controller || !controller.browser) return null;
     const novaAba = await controller.browser.newPage();
+    
+    // MARCAÇÃO DE PROTEÇÃO — não deixar o pruner fechar por até 60s
+    try {
+      novaAba._buscaLocalizacao = true;
+      novaAba._buscaLocalizacaoSince = Date.now();
+      novaAba._buscaLocalizacaoChatId = chatId;
+    } catch {}
+    
     try {
       await novaAba.goto(urlClassificado, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
       const localizacao = await novaAba.evaluate(() => {
         try {
           const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-          // 1) Tenta achar diretamente "Cidade, UF"
           const fullText = (document.body && (document.body.innerText || document.body.textContent) || '');
           const m = fullText.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+),\s*([A-Z]{2})/);
           if (m) {
             return { cidade: m[1].trim(), estado: (m[2] || '').trim().toUpperCase() };
           }
 
-          // 2) Tenta achar no mapa ou bloco "Anunciado em ..."
           const spans = Array.from(document.querySelectorAll('span,a')).slice(0, 2000);
           for (const s of spans) {
-            const t = norm((s.innerText || s.textContent || '').trim());
-            if (/^[A-Za-zÀ-ÿ\s]+,\s*[A-Z]{2}$/i.test(s.innerText || s.textContent || '')) {
-              const parts = (s.innerText || s.textContent || '').split(',');
+            const txtOrig = (s.innerText || s.textContent || '').trim();
+            if (/^[A-Za-zÀ-ÿ\s]+,\s*[A-Z]{2}$/i.test(txtOrig)) {
+              const parts = txtOrig.split(',');
               if (parts.length >= 2) {
                 return { cidade: parts[0].trim(), estado: parts[1].trim().toUpperCase() };
               }
             }
           }
 
-          // 3) Fallback: varredura por texto normalizado
           const textCandidates = fullText.split(/\n+/).map(x => x.trim()).filter(Boolean);
           for (const t of textCandidates) {
             const mm = t.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+),\s*([A-Z]{2})/);
@@ -113,6 +118,10 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
       return localizacao;
     } finally {
+      // Remover marcação antes de fechar
+      try { delete novaAba._buscaLocalizacao; } catch {}
+      try { delete novaAba._buscaLocalizacaoSince; } catch {}
+      try { delete novaAba._buscaLocalizacaoChatId; } catch {}
       try { await novaAba.close({ runBeforeUnload: false }); } catch {}
     }
   }
@@ -1186,6 +1195,8 @@ function getWorkingProfileNames() {
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
+    const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000; // 60s de proteção
+    const now = Date.now();
     const pages = await browser.pages();
     let closed = 0;
 
@@ -1195,11 +1206,27 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman = ctrl && ctrl.humanControl === true;
 
+    function isProtectedBusca(p) {
+      try {
+        if (p._buscaLocalizacao === true) {
+          const age = now - (p._buscaLocalizacaoSince || 0);
+          if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) return true; // protegido
+          // muito velho -> limpar marcação e não proteger
+          try { delete p._buscaLocalizacao; } catch {}
+          try { delete p._buscaLocalizacaoSince; } catch {}
+          try { delete p._buscaLocalizacaoChatId; } catch {}
+        }
+      } catch {}
+      return false;
+    }
+
+    // 1) Fecha about:blank extras (sem tocar na main) — respeitando a proteção da busca
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       for (const p of pages) {
         try {
           if (mainPage && p === mainPage) continue;
           if (!mainPage && pages[0] && p === pages[0]) continue;
+          if (isProtectedBusca(p)) continue;
           let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
             await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1209,15 +1236,19 @@ async function closeExtraPages(browser, mainPage, nome) {
       }
     }
 
+    // 2) Fecha outras extras que não sejam a main e nem create item — respeitando a proteção
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       const again = await browser.pages();
       for (const p of again) {
-        if (mainPage && p === mainPage) continue;
-        if (!mainPage && again[0] && p === again[0]) continue;
-        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-        if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
-        await p.close({ runBeforeUnload: false }).catch(()=>{});
-        closed++;
+        try {
+          if (mainPage && p === mainPage) continue;
+          if (!mainPage && again[0] && p === again[0]) continue;
+          if (isProtectedBusca(p)) continue;
+          let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+          if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
+          await p.close({ runBeforeUnload: false }).catch(()=>{});
+          closed++;
+        } catch {}
       }
     }
 
@@ -1238,6 +1269,16 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
     try {
+      const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
+      const now = Date.now();
+      try {
+        const pages = await browser.pages();
+        const hasBusca = Array.isArray(pages) && pages.some(p => p._buscaLocalizacao === true && (now - (p._buscaLocalizacaoSince || 0)) < MAX_BUSCA_LOCALIZACAO_AGE_MS);
+        if (hasBusca) {
+          // Se há busca em andamento recentíssima, não fecha nada nessa passada.
+          return;
+        }
+      } catch {}
       await closeExtraPages(browser, mainPage, nome);
     } catch (e) {
       if (process.env.PRUNE_DEBUG === '1') {
@@ -3868,13 +3909,14 @@ setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
 async function periodicAboutBlankCleanup() {
   try {
     const issues = require('./issues.js');
+    const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
+    const now = Date.now();
     let totalClosed = 0;
 
     for (const [nome, ctrl] of controllers.entries()) {
       try {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
 
-        // Proteções: não limpa se Robe está ativo, configurando, ou em modo humano
         const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
         const inConfig = ctrl.configurando === true;
@@ -3882,40 +3924,36 @@ async function periodicAboutBlankCleanup() {
 
         if (inRobe || sendLockActive || inConfig || inHuman) continue;
 
-        // Varre todas as páginas procurando about:blank órfãs
         const pages = await ctrl.browser.pages().catch(() => []);
         if (!Array.isArray(pages) || pages.length <= 1) continue;
 
         const mainPage = ctrl.mainPage || pages[0];
-        
-        // Proteção extra: verifica se há create item aberto (só verifica uma vez)
+
+        // nunca fechar create item
         const hasCreateItem = pages.some(pg => {
-          try {
-            const u = pg.url ? pg.url() : '';
-            return /facebook\.com\/marketplace\/create\/item/i.test(u);
-          } catch { return false; }
+          try { const u = pg.url ? pg.url() : ''; return /facebook\.com\/marketplace\/create\/item/i.test(u); }
+          catch { return false; }
         });
-        
-        // Se há create item, não limpa (pode ser que o Robe esteja prestes a usar)
+
         if (hasCreateItem) continue;
 
         let closed = 0;
 
         for (const p of pages) {
           try {
-            // Nunca fecha a página principal
             if (p === mainPage) continue;
-            if (!mainPage && p === pages[0]) continue;
 
-            // Verifica se é about:blank
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-            if (!url || url !== 'about:blank') continue;
 
-            // Fecha a aba about:blank órfã
-            // (já verificamos que não há Robe ativo e não há create item)
-            await p.close({ runBeforeUnload: false }).catch(() => {});
-            closed++;
+            if (p._buscaLocalizacao === true && (now - (p._buscaLocalizacaoSince || 0)) < MAX_BUSCA_LOCALIZACAO_AGE_MS) {
+              continue; // protegido
+            }
+
+            if (url === 'about:blank') {
+              await p.close({ runBeforeUnload: false }).catch(() => {});
+              closed++;
+            }
           } catch {}
         }
 
