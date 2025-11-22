@@ -72,26 +72,30 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
   async function _execBusca(controller) {
     if (!controller || !controller.browser) return null;
-    
-    // FLAG GLOBAL NO BROWSER — Proteção pré-criação da aba (elimina race)
+
+    const logger = require('./logger.js');
+    const browser = controller.browser;
+
+    // Flag global ANTES de newPage
     let buscaId = '';
     try {
-      if (!controller.browser._buscasLocalizacaoAtivas) {
-        controller.browser._buscasLocalizacaoAtivas = new Set();
+      if (!browser._buscasLocalizacaoAtivas) {
+        browser._buscasLocalizacaoAtivas = new Set();
       }
       buscaId = `busca_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      controller.browser._buscasLocalizacaoAtivas.add(buscaId);
+      browser._buscasLocalizacaoAtivas.add(buscaId);
+      logger.info('[LOCALIZACAO] Flag adicionada', { nomePerfil, buscaId, flagSize: browser._buscasLocalizacaoAtivas.size });
     } catch {}
-    
-    const novaAba = await controller.browser.newPage();
-    
-    // MARCAÇÃO IMEDIATA NA ABA (SEM AWAIT ANTES) — crítico!
+
+    const novaAba = await browser.newPage();
+
+    // Marcação imediata na aba (SEM await antes dela) – crítico
     try {
       novaAba._buscaLocalizacao = true;
       novaAba._buscaLocalizacaoSince = Date.now();
       novaAba._buscaLocalizacaoChatId = chatId;
     } catch {}
-    
+
     try {
       await novaAba.goto(urlClassificado, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
@@ -129,12 +133,17 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
       return localizacao;
     } finally {
-      // Remoção da flag global e da marcação — blindagem final
-      try { if (controller.browser._buscasLocalizacaoAtivas) controller.browser._buscasLocalizacaoAtivas.delete(buscaId); } catch {}
+      // Remoção da flag global e fechamento da aba – SOMENTE AQUI (após concluir)
+      try { await novaAba.close({ runBeforeUnload: false }); } catch {}
+      try { if (browser._buscasLocalizacaoAtivas) browser._buscasLocalizacaoAtivas.delete(buscaId); } catch {}
       try { delete novaAba._buscaLocalizacao; } catch {}
       try { delete novaAba._buscaLocalizacaoSince; } catch {}
       try { delete novaAba._buscaLocalizacaoChatId; } catch {}
-      try { await novaAba.close({ runBeforeUnload: false }); } catch {}
+      try {
+        logger.info('[LOCALIZACAO] Flag removida/aba fechada', {
+          nomePerfil, buscaId, flagSize: (browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size) || 0
+        });
+      } catch {}
     }
   }
 }
@@ -1209,6 +1218,14 @@ async function closeExtraPages(browser, mainPage, nome) {
     const issues = require('./issues.js');
     const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000; // 60s de proteção
     const now = Date.now();
+
+    // BLOQUEIO CRÍTICO: Flag global ativa => nunca fechar
+    try {
+      if (browser && browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
+        return;
+      }
+    } catch {}
+
     const pages = await browser.pages();
     let closed = 0;
 
@@ -1216,14 +1233,13 @@ async function closeExtraPages(browser, mainPage, nome) {
     const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
     const inRobe = (browser && browser._robeActiveFor === nome) || (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true);
     const inConfig = ctrl && ctrl.configurando === true;
-    const inHuman = ctrl && ctrl.humanControl === true;
+    const inHuman  = ctrl && ctrl.humanControl === true;
 
     function isProtectedBusca(p) {
       try {
         if (p._buscaLocalizacao === true) {
           const age = now - (p._buscaLocalizacaoSince || 0);
-          if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) return true; // protegido
-          // muito velho -> limpar marcação e não proteger
+          if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) return true;
           try { delete p._buscaLocalizacao; } catch {}
           try { delete p._buscaLocalizacaoSince; } catch {}
           try { delete p._buscaLocalizacaoChatId; } catch {}
@@ -1232,7 +1248,6 @@ async function closeExtraPages(browser, mainPage, nome) {
       return false;
     }
 
-    // 1) Fecha about:blank extras (sem tocar na main) — respeitando a proteção da busca
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       for (const p of pages) {
         try {
@@ -1248,13 +1263,18 @@ async function closeExtraPages(browser, mainPage, nome) {
       }
     }
 
-    // 2) Fecha outras extras que não sejam a main e nem create item — respeitando a proteção
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       const again = await browser.pages();
       for (const p of again) {
         try {
           if (mainPage && p === mainPage) continue;
           if (!mainPage && again[0] && p === again[0]) continue;
+          // PROTEÇÃO DUPLA: flag global + marcação
+          try {
+            if (browser && browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
+              continue;
+            }
+          } catch {}
           if (isProtectedBusca(p)) continue;
           let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
           if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
@@ -3929,6 +3949,11 @@ async function periodicAboutBlankCleanup() {
       try {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
 
+        // BLOQUEIO: flag global ativa
+        try {
+          if (ctrl.browser._buscasLocalizacaoAtivas && ctrl.browser._buscasLocalizacaoAtivas.size > 0) continue;
+        } catch {}
+
         const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
         const inConfig = ctrl.configurando === true;
@@ -3939,9 +3964,21 @@ async function periodicAboutBlankCleanup() {
         const pages = await ctrl.browser.pages().catch(() => []);
         if (!Array.isArray(pages) || pages.length <= 1) continue;
 
+        // Se há qualquer aba marcada nesta janela, também aborta
+        const hasMarked = pages.some(p => {
+          try {
+            if (p._buscaLocalizacao === true) {
+              const age = now - (p._buscaLocalizacaoSince || 0);
+              return age < MAX_BUSCA_LOCALIZACAO_AGE_MS;
+            }
+          } catch {}
+          return false;
+        });
+
+        if (hasMarked) continue;
+
         const mainPage = ctrl.mainPage || pages[0];
 
-        // nunca fechar create item
         const hasCreateItem = pages.some(pg => {
           try { const u = pg.url ? pg.url() : ''; return /facebook\.com\/marketplace\/create\/item/i.test(u); }
           catch { return false; }
@@ -3954,15 +3991,9 @@ async function periodicAboutBlankCleanup() {
         for (const p of pages) {
           try {
             if (p === mainPage) continue;
-
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-
-            if (p._buscaLocalizacao === true && (now - (p._buscaLocalizacaoSince || 0)) < MAX_BUSCA_LOCALIZACAO_AGE_MS) {
-              continue; // protegido
-            }
-
-            if (url === 'about:blank') {
+            if (!url || url === 'about:blank') {
               await p.close({ runBeforeUnload: false }).catch(() => {});
               closed++;
             }
@@ -3971,9 +4002,7 @@ async function periodicAboutBlankCleanup() {
 
         if (closed > 0) {
           totalClosed += closed;
-          try {
-            await issues.append(nome, 'mil_action', `periodic_cleanup_aboutblank n=${closed}`);
-          } catch {}
+          try { await issues.append(nome, 'mil_action', `periodic_cleanup_aboutblank n=${closed}`); } catch {}
         }
       } catch (e) {
         if (process.env.PRUNE_DEBUG === '1') {

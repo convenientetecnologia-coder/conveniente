@@ -890,10 +890,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             page = null;
           }
         }
-        // HARD GUARD: nunca feche abas durante o ciclo do Robe desta conta
+        // NÃO FECHAR EXTRAS se há busca ativa (BLOQUEIO CRÍTICO)
+        try {
+          if (browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
+            // apenas retorna a main page disponível
+            return page;
+          }
+        } catch {}
+
         try {
           if (browser && browser._robeActiveFor === nome) {
-            // Robe ativo — não fecha nada
+            // nada
           } else {
             const allPages = await browser.pages();
             if (Array.isArray(allPages) && allPages.length > 1) {
@@ -901,7 +908,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const now = Date.now();
               for (let i = allPages.length - 1; i >= 1; i--) {
                 const p = allPages[i];
-                // PROTEÇÃO: não fecha abas de busca de localização
                 try {
                   if (p._buscaLocalizacao === true) {
                     const age = now - (p._buscaLocalizacaoSince || 0);
