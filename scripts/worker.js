@@ -131,6 +131,23 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
         } catch { return null; }
       });
 
+      // Log detalhado sobre resultado da busca
+      if (localizacao && localizacao.cidade && localizacao.estado) {
+        logger.info('[LOCALIZACAO] Localização encontrada no classificado', { 
+          nomePerfil, 
+          chatId, 
+          cidade: localizacao.cidade, 
+          estado: localizacao.estado,
+          urlClassificado
+        });
+      } else {
+        logger.warn('[LOCALIZACAO] Localização NÃO encontrada no classificado', { 
+          nomePerfil, 
+          chatId, 
+          urlClassificado 
+        });
+      }
+
       return localizacao;
     } finally {
       // Remoção da flag global e fechamento da aba – SOMENTE AQUI (após concluir)

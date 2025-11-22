@@ -152,21 +152,45 @@ async function enviarLoteNotificador(nomePerfil) {
 
   await Promise.all(lote.map(async (dadosChat) => {
     try {
-      await fetch(`${NOTIFICADOR_URL}/api/virtus/chat`, {
+      const payload = {
+        servidor: NOTIFICADOR_SERVIDOR,
+        chat_id: dadosChat.chatId,
+        perfil: nomePerfil,
+        tipo_servico: dadosChat.tipoServico,
+        historico: dadosChat.historico || [], // TODO o histórico da conversa
+        localizacao: dadosChat.localizacao, // Formato: "Cidade (UF)" - ex: "Florianopolis (SC)"
+        url_classificado: dadosChat.urlClassificado,
+        timestamp: new Date().toISOString()
+      };
+      
+      logger.info('[NOTIFICADOR] Enviando chat', { 
+        nomePerfil, 
+        chatId: dadosChat.chatId,
+        historicoSize: payload.historico.length,
+        localizacao: payload.localizacao,
+        tipoServico: payload.tipo_servico
+      });
+      
+      const response = await fetch(`${NOTIFICADOR_URL}/api/virtus/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            servidor: NOTIFICADOR_SERVIDOR,
-            chat_id: dadosChat.chatId,
-            perfil: nomePerfil,
-            tipo_servico: dadosChat.tipoServico,
-            mensagem: dadosChat.mensagem,
-            localizacao: dadosChat.localizacao, // Formato: "Cidade (UF)" - ex: "Florianopolis (SC)"
-            url_classificado: dadosChat.urlClassificado,
-            timestamp: new Date().toISOString()
-          })
+        body: JSON.stringify(payload)
       });
-      logger.info('[NOTIFICADOR] Chat enviado', { nomePerfil, chatId: dadosChat.chatId });
+      
+      const responseData = await response.json().catch(() => null);
+      
+      if (response.ok && responseData && responseData.ok === true) {
+        logger.info('[NOTIFICADOR] Chat enviado com sucesso', { nomePerfil, chatId: dadosChat.chatId });
+      } else {
+        logger.error('[NOTIFICADOR] Erro ao enviar chat', { 
+          nomePerfil, 
+          chatId: dadosChat.chatId, 
+          status: response.status,
+          response: responseData 
+        });
+        // requeue se falha
+        fila.push(dadosChat);
+      }
     } catch (e) {
       logger.error('[NOTIFICADOR] Falha ao enviar chat', { nomePerfil, chatId: dadosChat.chatId, error: e && e.message || e });
       // requeue se falha
@@ -287,28 +311,49 @@ async function extrairUrlClassificado(page, chatId) {
   } catch { return null; }
 }
 
-// Extrai a última mensagem do cliente (não enviada por "você")
-async function extrairUltimaMensagemCliente(page) {
+// Extrai TODO o histórico da conversa (mensagens do cliente e da IA)
+async function extrairHistoricoConversa(page) {
   try {
-    const txt = await page.evaluate(() => {
+    const historico = await page.evaluate(() => {
       const norm = (s) => (s||'').toLowerCase();
-      // Pega últimas 80 linhas e tenta filtrar bolhas do cliente
-      const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-80);
-      for (let i = rows.length - 1; i >= 0; i--) {
-        const r = rows[i];
-        const t = (r.innerText || r.textContent || '').trim();
-        const tn = norm(t);
-        // heurística: ignorar mensagens enviadas por você/You
-        if (/\b(v[oô]c[êe]\s+enviou|you\s+sent)\b/.test(tn)) continue;
-        // ignora "Mensagem não lida", cabeçalhos, etc
-        if (/mensagem\s+n[aã]o\s+lida|messag\w+\s+unread/.test(tn)) continue;
-        // texto útil pega a primeira linha maior que 1-2 chars
-        if (t && t.length > 1) return t;
+      const mensagens = [];
+      
+      // Pega todas as mensagens visíveis no chat
+      const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]'));
+      
+      for (const r of rows) {
+        try {
+          const t = (r.innerText || r.textContent || '').trim();
+          if (!t || t.length < 1) continue;
+          
+          const tn = norm(t);
+          
+          // Ignora cabeçalhos e mensagens de sistema
+          if (/mensagem\s+n[aã]o\s+lida|messag\w+\s+unread|você\s+enviou|you\s+sent/i.test(tn)) continue;
+          
+          // Tenta identificar se é mensagem do cliente ou da IA
+          // Heurística: mensagens com "você enviou" são da IA, outras são do cliente
+          const isIA = /\b(v[oô]c[êe]\s+enviou|you\s+sent)\b/.test(tn);
+          
+          // Remove prefixos de "você enviou" se for mensagem da IA
+          const textoLimpo = t.replace(/^(você\s+enviou|you\s+sent)[:\s]*/i, '').trim();
+          
+          if (textoLimpo && textoLimpo.length > 0) {
+            mensagens.push({
+              texto: textoLimpo,
+              autor: isIA ? 'ia' : 'cliente',
+              timestamp: Date.now() // Poderia extrair timestamp real se disponível
+            });
+          }
+        } catch {}
       }
-      return '';
+      
+      return mensagens;
     });
-    return txt || '';
-  } catch { return ''; }
+    
+    // Retorna array de mensagens ordenado cronologicamente
+    return Array.isArray(historico) ? historico : [];
+  } catch { return []; }
 }
 
 // Formata localização no padrão "Cidade (UF)" para a planilha Google
@@ -1454,20 +1499,40 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           } catch { resolve(null); }
         });
 
+        // Log detalhado sobre localização
+        if (localizacao && localizacao.cidade && localizacao.estado) {
+          logger.info('[LOCALIZACAO] Localização encontrada', { 
+            nome, 
+            chatId, 
+            cidade: localizacao.cidade, 
+            estado: localizacao.estado 
+          });
+        } else {
+          logger.warn('[LOCALIZACAO] Localização NÃO encontrada', { nome, chatId, urlClassificado });
+        }
+
         // 3. Identifica tipo de serviço
         const tipoServico = await identificarTipoServico(nome);
 
-        // 4. Coleta a última mensagem do cliente
-        const mensagemCliente = await extrairUltimaMensagemCliente(p);
+        // 4. Coleta TODO o histórico da conversa (mensagens do cliente e da IA)
+        const historicoConversa = await extrairHistoricoConversa(p);
+        
+        logger.info('[CHAT] Histórico coletado', { 
+          nome, 
+          chatId, 
+          totalMensagens: historicoConversa.length,
+          mensagensCliente: historicoConversa.filter(m => m.autor === 'cliente').length,
+          mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
+        });
 
         // 5. Formata localização no padrão "Cidade (UF)" para a planilha Google
         const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
 
-        // 6. Adiciona na fila de envio para o notificador
+        // 6. Adiciona na fila de envio para o notificador com TODO o histórico
         adicionarChatParaEnvio(nome, {
           chatId,
           tipoServico,
-          mensagem: mensagemCliente,
+          historico: historicoConversa, // TODO o histórico da conversa
           localizacao: localizacaoFormatada,
           urlClassificado
         });
