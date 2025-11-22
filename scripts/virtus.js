@@ -124,46 +124,36 @@ Personalidade:
 - Super educado, gentil e caloroso
 - Confiante e motivado
 - Inteligente e rápido
-- Gírias leves naturais do BR
-- Positivo, animado e cria urgência boa
-- Usa emojis na medida certa (😄🚚📲✨)
+- Gírias leves do BR, natural
+- Positivo, cria urgência boa
+- Usa emojis com moderação (😄🚚📲✨)
 - Persistente agradável (sem ser chato)
 
-CONTEXTO DA CONVERSA:
-- Esta é uma conversa em andamento. Continue naturalmente, sem cumprimentos repetidos.
-- NUNCA diga "Olá novamente" ou "Olá" se já houve mensagens anteriores. Vá direto ao ponto, de forma humana.
-- Se já existe histórico, dê continuidade ao tema da última mensagem do cliente.
+Contexto:
+- Conversa em andamento. Continue naturalmente.
+- NUNCA repita cumprimentos (nada de "Olá" de novo).
+- NUNCA repita o que o cliente acabou de dizer. Avance o assunto.
 
-INTELIGÊNCIA E NATURALIDADE:
-- NUNCA repita o que o cliente disse. Seja direto e inteligente.
-- Confirme sem repetir. Ex.: Se o cliente disse "preciso levar 2 camas e algumas sacolas", NÃO responda "Você precisa levar 2 camas e poucas sacolas, é isso?". Em vez disso, responda: "Ah, entendi, levo sim! Só preciso do WhatsApp para continuar o atendimento 🚚📲".
-- Evite redundâncias. Responda de forma prática e natural, como um humano experiente faria.
-
-ESTRATÉGIA DE PEDIR WHATSAPP:
-- Seu objetivo nº 1 é pegar o telefone (WhatsApp com DDD) de forma natural.
-- Sempre dê a razão: "pra eu entender melhor e te passar o orçamento".
-- Deixe claro que você é o atendente e "o meu motorista já vai te chamar" — isso cria urgência positiva. Exemplo: "Perfeito! Pra eu entender melhor e te passar o orçamento, me passa seu WhatsApp que o meu motorista já vai te chamar 🚚📲"
-
-Objetivo nº 2: depois do telefone, colete rapidamente:
+Objetivos:
+- Objetivo #1: pegar o WhatsApp com DDD (telefone válido).
+  - Sempre dê a razão: "pra eu entender melhor e te passar o orçamento"
+  - Crie urgência: "o meu motorista já vai te chamar"
+- Objetivo #2: coletar detalhes para o pedido (um ou dois por vez, de forma natural):
   - Precisa de ajudante?
   - Saída: casa ou apartamento? Com ou sem elevador?
   - Destino: casa ou apartamento? Com ou sem elevador?
-  - Bairro de saída e de destino?
-  - Itens/quantidade a transportar?
+  - Bairros (saída e destino)
+  - Itens/quantidades (ex.: 2 camas, 10 sacolas)
 
-Regras gerais:
-- Responda dúvidas e emende pedindo o zap de forma fluida.
-- Se o cliente mandar telefone em qualquer formato, extraia imediatamente (com DDD).
-- Após pegar o telefone, colete as informações adicionais de forma natural (uma ou duas por vez).
-- Seja natural e humano. Não repita o que o cliente acabou de dizer.
+Inteligência:
+- Se o cliente já trouxe informações (ex.: "de São José para Florianópolis", "apartamento com elevador", "preciso de ajudante"), aproveite e preencha.
+- Se houver telefone no histórico, extraia.
+- Nunca reescreva o que o cliente disse; responda de forma direta e humana.
+- Seja sucinto, sem redundâncias, e sempre avance pedindo o WhatsApp se ainda não tiver.
 
-REGRA ABSOLUTA:
-- Se o cliente enviou uma mensagem nova (mesmo sem telefone), VOCÊ DEVE responder — sempre.
-- Se o cliente mencionou itens, bairros, ajudante, ou outras informações, reconheça/avance e continue pedindo o WhatsApp para fechar o orçamento.
-
-Formato JSON esperado (sem markdown, sem texto adicional):
+Formato de retorno (somente JSON, sem markdown, sem explicações):
 {
-  "resposta": "texto exato para enviar ao cliente",
+  "resposta": "texto a ser enviado ao cliente",
   "telefone_extraido": "11999999999" ou null,
   "finalizado": true/false,
   "dados": {
@@ -178,13 +168,14 @@ Formato JSON esperado (sem markdown, sem texto adicional):
   }
 }
 
-- "finalizado" = true apenas quando houver telefone válido com DDD.
-- Retorne SOMENTE o JSON.
+Regras:
+- "finalizado": true somente se telefone DDD válido for identificado.
+- Não repita o que o cliente falou; responda e avance (ex.: peça o WhatsApp).
+- Retorne APENAS o JSON.
 `.trim();
 
 function montarPromptUser(cidade, historico) {
   const cid = cidade || 'não informada';
-  const temHistorico = Array.isArray(historico) && historico.length > 0;
   const cabecalho = [
     `Contexto do atendimento:`,
     `- Cidade (referência): ${cid}`,
@@ -201,7 +192,8 @@ function montarPromptUser(cidade, historico) {
   }
   const rodape = [
     ``,
-    `Gere a próxima resposta seguindo as regras e o formato JSON especificado.`
+    `Gere a próxima resposta seguindo as regras e o formato JSON especificado.`,
+    `Se o histórico já contiver um número de WhatsApp, retorne em "telefone_extraido".`
   ];
   return [...cabecalho, ...linhas, ...rodape].join('\n');
 }
@@ -233,6 +225,27 @@ function parsearRespostaGroq(respostaTexto) {
     logger.error('[GROQ] Erro ao parsear JSON', { error: e && e.message || e, raw: String(respostaTexto).slice(0, 300) });
     throw e;
   }
+}
+
+// Fallback robusto de telefone (BR). Extrai do texto bruto
+function extrairTelefoneFallback(texto) {
+  try {
+    const clean = String(texto || '').replace(/[^\d+]/g, ' ').replace(/\s+/g, ' ');
+    // Formatos comuns: +55 11 98888-7777 | 11 98888 7777 | 11988887777
+    const REG = /(?:\+?55\s*)?(?:(\d{2})\s*)?(\d{5}|\d{4})\s*[- ]?\s*(\d{4})/g;
+    let best = null; let m;
+    while ((m = REG.exec(clean)) !== null) {
+      const ddd = m[1] || '';
+      const part1 = m[2] || '';
+      const part2 = m[3] || '';
+      const d = (ddd + part1 + part2).replace(/\D/g, '');
+      if (d.length >= 10 && d.length <= 11) {
+        best = d.length === 11 ? d : (d.startsWith('9') ? '0'+d : d); // heurit.
+        if (best.length >= 10) return best;
+      }
+    }
+    return best;
+  } catch { return null; }
 }
 
 // Locks por perfil de input
@@ -981,11 +994,12 @@ function extraiIdDoHref(href) {
 
 async function coletaChatsMarketplaceTodos(page) {
   try {
-    const items = await page.$$eval('a[href^="/marketplace/t/"]', els => {
+    const items = await page.$$eval('a[href], a[role="link"]', els => {
       function _extraiId(href) {
         try {
           const s = String(href || '');
           const pos = s.indexOf('/marketplace/t/');
+          if (pos < 0) return null;
           const rest = s.slice(pos + '/marketplace/t/'.length);
           const id = rest.split(/[/?#]/)[0];
           return id && /^\d+$/.test(id) ? id : null;
@@ -993,14 +1007,21 @@ async function coletaChatsMarketplaceTodos(page) {
       }
       function _extraiTempo(row) {
         if (!row) return '';
+        const pickAbbr = () => {
+          try {
+            const abbr = row.querySelector('abbr[aria-label]');
+            if (abbr) {
+              const t1 = (abbr.innerText || '').trim();
+              if (t1) return t1;
+              const t2 = (abbr.getAttribute('aria-label') || '').trim();
+              if (t2) return t2;
+            }
+          } catch {}
+          return '';
+        };
+        const ab = pickAbbr();
+        if (ab) return ab;
         try {
-          const abbr = row.querySelector('abbr[aria-label]');
-          if (abbr) {
-            const t1 = (abbr.innerText || '').trim();
-            if (t1) return t1;
-            const t2 = (abbr.getAttribute('aria-label') || '').trim();
-            if (t2) return t2;
-          }
           const spans = Array.from(row.querySelectorAll('span'));
           for (const s of spans) {
             const txt = (s.innerText || s.textContent || '').trim();
@@ -1011,10 +1032,14 @@ async function coletaChatsMarketplaceTodos(page) {
         } catch {}
         return '';
       }
-      const arr = els.map(el => {
-        const href = el.getAttribute('href') || el.href || '';
+      const anchors = els.filter(a => {
+        const href = a.getAttribute('href') || a.href || '';
+        return !!href && href.includes('/marketplace/t/');
+      });
+      const arr = anchors.map(a => {
+        const href = a.getAttribute('href') || a.href || '';
         const id = _extraiId(href);
-        const row = el.closest('div[role="row"]') || el.parentElement;
+        const row = a.closest('div[role="row"]') || a.parentElement;
         const tempo = _extraiTempo(row);
         return { id, tempo, href };
       }).filter(o => o.id);
@@ -1769,8 +1794,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function initHistoricoSePreciso() {
     if (!running || !epochOk()) return;
     
-    // NOVO: Desabilitar snapshot agressivo por padrão (pode habilitar via env var)
-    const FIRST_BOOT_SNAPSHOT = process.env.VIRTUS_FIRST_BOOT_SNAPSHOT === '1';
+    // NOVO: Habilitar snapshot por padrão (pode desabilitar via env var)
+    const FIRST_BOOT_SNAPSHOT = (process.env.VIRTUS_FIRST_BOOT_SNAPSHOT ?? '1') === '1';
     
     try {
       await fs.access(HIST_FILE);
@@ -1915,8 +1940,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!fila.length) return;
 
     const next = fila[0];
-    const delayMs = parseInt(process.env.VIRTUS_NEXT_CHAT_DELAY_MS || '2000', 10);
-    logger.info('[FILA] Aguardando delay antes de processar próximo chat', { nome, chatId: next, delay: delayMs });
+    // Primeira execução SEM delay; próximas respeitam o env (default 0)
+    const delayMs = (() => {
+      const env = process.env.VIRTUS_NEXT_CHAT_DELAY_MS;
+      if (typeof scheduleNextIfIdle._firstRun === 'undefined') {
+        scheduleNextIfIdle._firstRun = false;
+        return 0; // roda o primeiro chat imediatamente
+      }
+      const parsed = parseInt(env, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    })();
+    logger.info('[FILA] Preparando atendimento do próximo chat', { nome, chatId: next, delay: delayMs });
     filaChatTimer = setTimeout(async () => {
       try {
         if (!running || !epochOk()) return;
@@ -1928,12 +1962,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
         filaChatTimer = null;
         await responderChat(next);
-        // Gap adicional para estabilidade entre chats
-        setTimeout(scheduleNextIfIdle, Math.max(500, delayMs));
+        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       } catch (e) {
         filaChatTimer = null;
         logger.error('[FILA] Erro no timer de atendimento', { nome, error: e && e.message || e });
-        setTimeout(scheduleNextIfIdle, Math.max(500, delayMs));
+        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       }
     }, delayMs);
   }
@@ -2294,6 +2327,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const txt = await chamarGroqAPI(PROMPT_SYSTEM, promptUser);
             const parsed = parsearRespostaGroq(txt);
 
+            // fallback de telefone quando LLM não retornar
+            if (!parsed.telefone_extraido) {
+              const textoHistorico = (historicoConversa || []).map(m => m && m.texto || '').join(' ');
+              const fone = extrairTelefoneFallback(textoHistorico);
+              if (fone) {
+                parsed.telefone_extraido = fone;
+              }
+            }
+
             // Atualiza dados coletados locais (cidade, telefone, cereja)
             atualizarDadosColetados(chatId, {
               cidade: cidadePreferida || null,
@@ -2458,6 +2500,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // ========================
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
+    logger.debug(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`);
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -2628,6 +2671,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (dados && dados[k] != null) cur[k] = dados[k];
     }
     dadosColetados.set(chatId, cur);
+    try { enviarPedidoParcialSeHabilitado(chatId); } catch {}
   }
 
   function iniciarTimerFechamento(chatId, telefone) {
@@ -2660,24 +2704,51 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  async function enviarPedidoParaNotificador(chatId, dados) {
-    if (!pedidosEnviados || pedidosEnviados.has(chatId)) return; // Enviar apenas 1x
-    const payload = {
+  function estruturarPedidoCompleto(nomePerfil, chatId, dados = {}) {
+    const cidade = (dados && dados.cidade) || null;
+    return {
       servidor: NOTIFICADOR_SERVIDOR || 'servidor1',
-      perfil: nome,
+      perfil: nomePerfil,
       chat_id: chatId,
-      cidade: dados.cidade || null,
-      telefone: dados.telefone || null,
-      ajudante: dados.ajudante || null,
-      saida_tipo: dados.saida_tipo || null,
-      saida_elevador: dados.saida_elevador || null,
-      destino_tipo: dados.destino_tipo || null,
-      destino_elevador: dados.destino_elevador || null,
-      bairro_saida: dados.bairro_saida || null,
-      bairro_destino: dados.bairro_destino || null,
-      itens: dados.itens || null,
+      cidade: cidade,
+      telefone: dados && dados.telefone || null,
+      itens: dados && dados.itens || null,
+      bairro_saida: dados && dados.bairro_saida || null,
+      bairro_destino: dados && dados.bairro_destino || null,
+      saida_tipo: dados && dados.saida_tipo || null,
+      saida_elevador: dados && dados.saida_elevador || null,
+      destino_tipo: dados && dados.destino_tipo || null,
+      destino_elevador: dados && dados.destino_elevador || null,
+      ajudante: dados && dados.ajudante || null,
       timestamp: Date.now()
     };
+  }
+
+  // envio parcial opcional: NOTIFICADOR_ENVIAR_PARCIAL=1
+  const _parcialCooldown = new Map(); // chatId -> lastSent
+  async function enviarPedidoParcialSeHabilitado(chatId) {
+    try {
+      if (String(process.env.NOTIFICADOR_ENVIAR_PARCIAL || '0') !== '1') return;
+      const now = Date.now();
+      const last = _parcialCooldown.get(chatId) || 0;
+      if ((now - last) < 5000) return; // 5s de cooldown
+      const dados = dadosColetados && dadosColetados.get(chatId) || {};
+      const payload = estruturarPedidoCompleto(nome, chatId, dados);
+      payload.parcial = true;
+      const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
+      await fetch(urlFinal, {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(payload)
+      }).catch(()=>{});
+      _parcialCooldown.set(chatId, now);
+      logger.info('[NOTIFICADOR] Pedido parcial enviado', { chatId, perfil: nome });
+    } catch {}
+  }
+
+  async function enviarPedidoParaNotificador(chatId, dados) {
+    if (!pedidosEnviados || pedidosEnviados.has(chatId)) return; // evita duplicar
+    const payload = estruturarPedidoCompleto(nome, chatId, dados);
     const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
     const resp = await fetch(urlFinal, {
       method: 'POST',
