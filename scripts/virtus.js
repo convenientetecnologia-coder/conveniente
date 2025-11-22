@@ -919,6 +919,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
   const respondedCache = new Map();
 
+  // ====== INÍCIO: Cooldown de Prova e Detecção de Novas Mensagens ======
+  // Caches para evitar "martelar" o mesmo chat a cada loop
+  const lastProbeMap = new Map(); // chatId -> Date.now() da última prova/checagem
+  const lastClientTsMap = new Map(); // chatId -> ms do último cliente visto (memória local, opcional)
+
+  function tsNum(x) {
+    if (!x) return 0;
+    const n = typeof x === 'number' ? x : Date.parse(x);
+    return Number.isFinite(n) ? n : 0;
+  }
+  // ====== FIM: Cooldown de Prova e Detecção de Novas Mensagens ======
+
   // MILITAR: Timers unificados
   let filaInterval = null;
   let filaChatTimer = null;
@@ -1256,6 +1268,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function initHistoricoSePreciso() {
     if (!running || !epochOk()) return;
+    
+    // NOVO: Desabilitar snapshot agressivo por padrão (pode habilitar via env var)
+    const FIRST_BOOT_SNAPSHOT = process.env.VIRTUS_FIRST_BOOT_SNAPSHOT === '1';
+    
     try {
       await fs.access(HIST_FILE);
       await carregaHistorico();
@@ -1264,6 +1280,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     } catch {}
 
+    // Snapshot agressivo desabilitado por padrão para não "matar" primeira onda de mensagens
+    if (!FIRST_BOOT_SNAPSHOT) {
+      log('[SNAPSHOT] Modo seguro: não marcando recents como respondidos no primeiro boot. (Defina VIRTUS_FIRST_BOOT_SNAPSHOT=1 para habilitar)');
+      await carregaHistorico();
+      await reconcilePendingsIfAny();
+      return;
+    }
+
+    // Código antigo mantido apenas se FIRST_BOOT_SNAPSHOT estiver habilitado
     log('[SNAPSHOT] Primeiro boot sem histórico. Marcando <24h atuais como respondidos.');
     if (!running || !epochOk()) return;
     const p = await ensurePage();
@@ -1276,7 +1301,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         p.waitForSelector('div[role="row"] span', { timeout: 8000 })
       ]);
     } catch {}
-    try { await scrollListaAte8h(p, { maxMs: 90000, quietLoops: 3 }); } catch {} // NOVO: Usa scrollListaAte8h
+    try { await scrollListaAte8h(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
     const todos = await coletaChatsMarketplaceTodos(p);
     const recentes = todos.filter(c => isChatRecente(c.tempo));
     const agora = agoraEpoch();
@@ -1333,37 +1358,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     let mudancaFila = false;
     const chatsNovos = await coletaChatsMarketplaceRecentes();
     let novosAti = 0;
-    const agora = agoraEpoch();
+    const agoraMs = Date.now();
     const aguard = getSetAguardando(nome);
 
-    chatsNovos.forEach(c => {
-      const ts = respondedCache.get(c.id) || Number(historico[c.id] || 0);
-      const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
-      if (!jaRespondido && !fila.includes(c.id)) {
-        if (!aguard.has(c.id)) {
-          fila.push(c.id);
-          novosAti++;
-          log(`NOVO chat em Fila: ${c.id} (${c.tempo})`);
-        }
-      }
-    });
-
-    const filaAnt = fila.slice(0);
-    fila = fila.filter(id => {
-      const ts = respondedCache.get(id) || Number(historico[id] || 0);
-      return !(ts && (agora - ts) < NO_REPEAT_WINDOW_SEC);
-    });
-    filaAnt.forEach(id => {
-      const ts = respondedCache.get(id);
-      if (ts && (agora - ts) < NO_REPEAT_WINDOW_SEC) {
-        log(`[FILA] Chat ${id} removido da fila (já respondido <24h)`);
+    // NOVO: Usa cooldown de prova (60s) ao invés de gating por respondedCache
+    // Isso permite que chats já respondidos sejam "provados" novamente para verificar novas mensagens
+    for (const c of chatsNovos) {
+      const id = c.id;
+      
+      // Cooldown de prova de 60s por chat para não "martelar"
+      const last = lastProbeMap.get(id) || 0;
+      if ((agoraMs - last) < 60000) continue;
+      
+      if (!aguard.has(id) && !fila.includes(id)) {
+        fila.push(id);
+        lastProbeMap.set(id, agoraMs);
+        novosAti++;
+        log(`[FILA] Candidato ${id} enfileirado para inspeção de novas mensagens (${c.tempo})`);
         mudancaFila = true;
       }
-    });
+    }
 
     if (novosAti > 0) {
       log(`[FILA] Atualizada: ${fila.length} chats pendentes para resposta.`);
-      mudancaFila = true;
     }
     return mudancaFila;
   }
@@ -1459,14 +1476,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
         await garantirMarketplace(p);
 
-        const tsPrev = respondedCache.get(chatId) || Number(historico[chatId] || 0);
-        if (tsPrev && (agoraEpoch() - tsPrev) < NO_REPEAT_WINDOW_SEC) {
-          log(`[GUARD-ID] Já respondido (ID ${chatId}) <24h. Pulando envio.`);
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
+        // NOVO: Não bloquear baseado apenas em respondedCache
+        // A verificação de "novas mensagens" será feita após coletar o histórico
+        // Mantém apenas verificação de cooldown de prova (já feito em atualizaFila)
 
         let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
         await scrollChatsToTop(p, nome).catch(()=>{});
@@ -1570,17 +1582,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatAtivo = null;
           return;
         }
-// REVALIDAÇÃO FINAL DE TTL: aborta se alguém marcou este chat < janela
-{
-  const tsPrev2 = respondedCache.get(chatId) || Number(historico[chatId] || 0);
-  if (tsPrev2 && (agoraEpoch() - tsPrev2) < NO_REPEAT_WINDOW_SEC) {
-    try { await pendingDel(nome, chatId); } catch {}
-    fila = fila.filter(id => id !== chatId);
-    chatAtivo = null;
-    await logIssue(nome, 'mil_action', `virtus_ttl_recheck_abort: chat ${chatId} dentro da janela final`);
-    return;
-  }
-}
+// REVALIDAÇÃO FINAL: verificação será feita após coletar histórico
+// A lógica de "novas mensagens" substitui o gating por respondedCache
 
         resetFail(chatId);
 
@@ -1624,6 +1627,42 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           mensagensCliente: historicoConversa.filter(m => m.autor === 'cliente').length,
           mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
         });
+
+        // NOVO: Verificar se há mensagens novas do cliente após última resposta da IA
+        // Determine última do cliente vs última da IA
+        const ultimaIA = (() => {
+          const iaMsgs = historicoConversa.filter(m => m.autor === 'ia');
+          return iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
+        })();
+
+        const ultimaCliente = (() => {
+          const cli = historicoConversa.filter(m => m.autor === 'cliente');
+          return cli.length ? cli[cli.length - 1] : null;
+        })();
+
+        const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
+        const tsCLI = tsNum(ultimaCliente && ultimaCliente.timestamp);
+
+        // Se não há cliente, não há o que fazer
+        if (!ultimaCliente) {
+          log(`[SKIP] Chat ${chatId}: sem mensagem do cliente`);
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        // Se cliente não é mais novo que nossa última IA, não reabrir/enviar
+        if (tsIA && (tsCLI <= tsIA)) {
+          log(`[SKIP] Chat ${chatId}: sem novidade (cliente ${new Date(tsCLI).toLocaleString()} <= IA ${new Date(tsIA).toLocaleString()})`);
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        // OK: há novidade do cliente; enviar ao notificador com TODO histórico
+        log(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`);
 
         // 5. Formata localização no padrão "Cidade (UF)" para a planilha Google
         const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
@@ -1974,4 +2013,5 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
 module.exports = {
   startVirtus
+};
 };
