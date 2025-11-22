@@ -146,6 +146,12 @@ Regras:
 - Após pegar o telefone, colete as informações adicionais de forma natural (uma ou duas por vez).
 - Responda SEMPRE apenas um JSON puro, SEM texto antes/depois.
 
+REGRA ABSOLUTA:
+- Se o cliente enviou uma mensagem nova (mesmo que não contenha telefone), você DEVE SEMPRE responder.
+- Se o cliente mencionou itens, bairros, ajudante, ou outras informações, confirme essas informações e continue pedindo o telefone de forma natural.
+- NUNCA fique em silêncio esperando apenas o telefone.
+- Seja proativo e inteligente: reconheça informações parciais e responda adequadamente.
+
 Formato JSON esperado:
 {
   "resposta": "texto exato para enviar ao cliente",
@@ -1831,6 +1837,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           lastProbeMap.set(id, agoraMs);
           continue;
         }
+
+        // INÍCIO PATCH: verificação persistida (disco) para evitar reenfileiramento sem novidade
+        if (st && typeof st.lastCLIts === 'number' && typeof st.ultimoProbeCLIts === 'number' && st.lastCLIts === st.ultimoProbeCLIts) {
+          // Sem mudança no último timestamp do cliente desde o último probe: NÃO enfileira
+          lastProbeMap.set(id, agoraMs);
+          continue;
+        }
+        // FIM PATCH
       } catch {}
 
       if (!aguard.has(id) && !fila.includes(id)) {
@@ -2058,17 +2072,44 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // 1. Extrai URL do classificado
         const urlClassificado = await extrairUrlClassificado(p, chatId);
 
-        // 2. Adiciona na fila GLOBAL de busca de localização
-        const localizacao = await new Promise((resolve) => {
-          try {
-            const buscador = (global && global.__buscaLocalizacaoVirtus) ? global.__buscaLocalizacaoVirtus : null;
-            if (buscador && typeof buscador.adicionarBuscaLocalizacao === 'function' && urlClassificado) {
-              buscador.adicionarBuscaLocalizacao(chatId, urlClassificado, nome, resolve);
-            } else {
-              resolve(null);
+        // 2. INÍCIO PATCH: Cache de localização por chat (persistida em disco)
+        let localizacao = null;
+        try {
+          const stLoc = await getChatState(nome, chatId);
+          if (stLoc && stLoc.cidade && stLoc.estado) {
+            // Já temos cache persistido: NÃO buscar novamente
+            localizacao = { cidade: stLoc.cidade, estado: stLoc.estado };
+            logger.info('[LOCALIZACAO] Localização recuperada do cache', { 
+              nome, 
+              chatId, 
+              cidade: localizacao.cidade, 
+              estado: localizacao.estado 
+            });
+          } else {
+            // Buscar apenas se não houver cache
+            localizacao = await new Promise((resolve) => {
+              try {
+                const buscador = (global && global.__buscaLocalizacaoVirtus) ? global.__buscaLocalizacaoVirtus : null;
+                if (buscador && typeof buscador.adicionarBuscaLocalizacao === 'function' && urlClassificado) {
+                  buscador.adicionarBuscaLocalizacao(chatId, urlClassificado, nome, resolve);
+                } else {
+                  resolve(null);
+                }
+              } catch { resolve(null); }
+            });
+            if (localizacao && localizacao.cidade && localizacao.estado) {
+              try {
+                await setChatState(nome, chatId, {
+                  cidade: localizacao.cidade,
+                  estado: localizacao.estado
+                });
+              } catch {}
             }
-          } catch { resolve(null); }
-        });
+          }
+        } catch {
+          localizacao = null;
+        }
+        // FIM PATCH
 
         // Log detalhado sobre localização
         if (localizacao && localizacao.cidade && localizacao.estado) {
@@ -2136,17 +2177,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // Se cliente não é mais novo que nossa última IA, não reabrir/enviar
-        if (tsIA && (tsCLI <= tsIA)) {
-          log(`[SKIP] Chat ${chatId}: sem novidade (cliente ${new Date(tsCLI).toLocaleString()} <= IA ${new Date(tsIA).toLocaleString()})`);
+        // INÍCIO PATCH: Comparação de timestamps + conteúdo (persistida em disco)
+        // Leitura do estado atual (persistido) para comparar conteúdo
+        let estadoAnteriorChat = null;
+        try { estadoAnteriorChat = await getChatState(nome, chatId); } catch {}
+        const ultimaMsgAnterior = (estadoAnteriorChat && estadoAnteriorChat.ultimaMensagemClienteProcessada) || '';
+        const ultimaMsgAtual = (ultimaCliente && ultimaCliente.texto) ? String(ultimaCliente.texto) : '';
+        const haNovidadePorTimestamp = (!tsIA) || (tsCLI > tsIA);
+        const haNovidadePorConteudo = (tsCLI >= (tsIA || 0)) && (ultimaMsgAtual && ultimaMsgAtual !== ultimaMsgAnterior);
+
+        if (!(haNovidadePorTimestamp || haNovidadePorConteudo)) {
+          log(`[SKIP] Chat ${chatId}: sem novidade por ts/conteúdo (tsCLI=${tsCLI} tsIA=${tsIA})`);
           try {
-            await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastIATs: tsIA || 0 });
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              lastIATs: tsIA || 0,
+              ultimoProbeCLIts: tsCLI || 0
+            });
           } catch {}
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
         }
+        // FIM PATCH
 
         // OK: há novidade do cliente
         log(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`);
@@ -2206,6 +2260,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             await marcarRespondido(nome, chatId);
 
+            // INÍCIO PATCH: Gravar última mensagem do cliente processada (persistida em disco)
+            try {
+              await setChatState(nome, chatId, {
+                ultimaMensagemClienteProcessada: ultimaMsgAtual,
+                ultimoProbeCLIts: tsCLI || 0,
+                lastIATs: Date.now()
+              });
+            } catch {}
+            // FIM PATCH
+
             logger.info('[GROQ] Resposta enviada com sucesso', { chatId, finalizado: parsed.finalizado, tel: parsed.telefone_extraido });
           } catch (e) {
             logger.error('[GROQ] Falha no fluxo direto', { chatId, error: e && e.message || e });
@@ -2223,6 +2287,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             localizacao: localizacaoFormatada,
             urlClassificado
           });
+
+          // INÍCIO PATCH: Gravar última mensagem do cliente processada (persistida em disco) - caminho Notificador
+          try {
+            await setChatState(nome, chatId, {
+              ultimaMensagemClienteProcessada: ultimaMsgAtual,
+              ultimoProbeCLIts: tsCLI || 0
+            });
+          } catch {}
+          // FIM PATCH
         }
 
         // Ledger: remove pending (chat foi processado)
