@@ -1,7 +1,9 @@
 # Arquivos de ambiente (contêm chaves de API)
-.env
+# .env.modelo NÃO será commitado (fica só na pasta de desenvolvimento)
+.env.modelo
 .env.local
 .env.*.local
+# .env vazio SERÁ commitado (para servidores novos terem o arquivo)
 
 # Node modules
 node_modules/
