@@ -22,6 +22,168 @@ const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 
+// === Groq Direct Mode (Virtus → Groq API → Virtus) ===
+const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+if (!GROQ_API_KEY) {
+  logger.error('[GROQ] GROQ_API_KEY não configurada! Configure no arquivo .env');
+  throw new Error('GROQ_API_KEY não configurada. Crie arquivo .env com GROQ_API_KEY=sua_chave');
+}
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
+
+async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retries = 2 } = {}) {
+  let lastErr = null;
+
+  for (let i = 0; i <= retries; i++) {
+    let ac = null;
+    try {
+      ac = new (global.AbortController || (() => {
+        try { return require('abort-controller').AbortController; } catch { return null; }
+      })())();
+    } catch {}
+    
+    const t = ac ? setTimeout(() => { try { if (ac) ac.abort(); } catch {} }, timeoutMs) : null;
+
+    try {
+      const resp = await fetch(GROQ_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${GROQ_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: GROQ_MODEL,
+          messages: [
+            { role: 'system', content: promptSystem },
+            { role: 'user', content: promptUser }
+          ],
+          temperature: 0.7,
+          max_tokens: 700
+        }),
+        signal: ac ? ac.signal : undefined
+      });
+
+      if (t) clearTimeout(t);
+
+      if (!resp.ok) {
+        lastErr = new Error(`Groq API error: ${resp.status} ${resp.statusText}`);
+        continue;
+      }
+
+      const data = await resp.json();
+      const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '';
+
+      if (!content || !String(content).trim()) {
+        lastErr = new Error('Groq API retornou resposta vazia');
+        continue;
+      }
+
+      return content.trim();
+    } catch (e) {
+      if (t) clearTimeout(t);
+      lastErr = e;
+    }
+  }
+
+  logger.error('[GROQ] Erro ao chamar API', { error: (lastErr && lastErr.message) || String(lastErr) });
+  throw lastErr || new Error('groq_error');
+}
+
+// Prompt system (personalidade)
+const PROMPT_SYSTEM = `
+Você é o melhor atendente de mudanças e fretes do Brasil.
+
+Personalidade:
+- Super educado, gentil e caloroso
+- Confiante e motivado
+- Inteligente e rápido
+- Gírias leves naturais do BR
+- Positivo, animado e cria urgência boa
+- Usa emojis na medida certa (😄🚚📲✨)
+- Persistente agradável (sem ser chato)
+
+Objetivo nº 1: coletar o WhatsApp do cliente (telefone com DDD) o mais rápido possível, de forma natural.
+
+Objetivo nº 2: depois do telefone, coletar informações adicionais ("cereja do bolo"):
+  - Precisa de ajudante?
+  - Saída: casa ou apartamento? Com ou sem elevador?
+  - Destino: casa ou apartamento? Com ou sem elevador?
+  - Bairro de saída?
+  - Bairro de destino?
+  - Itens/quantidade a transportar?
+
+Regras:
+- Sempre cumprimente com entusiasmo e mencione a cidade do cliente.
+- Responda dúvidas e emende pedindo o zap de forma fluida.
+- Se o cliente mandar telefone em qualquer formato, extraia imediatamente (com DDD).
+- Após pegar o telefone, colete as informações adicionais de forma natural (uma ou duas por vez).
+- Responda SEMPRE apenas um JSON puro, SEM texto antes/depois.
+
+Formato JSON esperado:
+{
+  "resposta": "texto exato para enviar ao cliente",
+  "telefone_extraido": "11999999999" ou null,
+  "finalizado": true/false,
+  "dados": {
+    "ajudante": null|"...",
+    "saida_tipo": null|"casa"|"apartamento",
+    "saida_elevador": null|"sim"|"nao",
+    "destino_tipo": null|"casa"|"apartamento",
+    "destino_elevador": null|"sim"|"nao",
+    "bairro_saida": null|"...",
+    "bairro_destino": null|"...",
+    "itens": null|"..."
+  }
+}
+
+- "finalizado" = true apenas quando houver telefone válido com DDD.
+- Sempre retorne SOMENTE o JSON (sem markdown).
+`.trim();
+
+function montarPromptUser(cidade, historico) {
+  const cid = cidade || 'não informada';
+  let linhas = [`Contexto do atendimento:`, `- Cidade: ${cid}`, ``, `Histórico completo (ordem temporal, autor: texto):`];
+
+  for (const msg of (historico || [])) {
+    const autor = (msg.autor === 'ia' || msg.autor === 'sistema') ? 'Atendente' : 'Cliente';
+    linhas.push(`${autor}: ${msg.texto}`);
+  }
+
+  linhas.push(``, `Gere a próxima resposta seguindo as regras e o formato JSON especificado.`);
+  return linhas.join('\n');
+}
+
+function parsearRespostaGroq(respostaTexto) {
+  try {
+    const match = String(respostaTexto || '').match(/\{[\s\S]*\}$/);
+    if (!match) throw new Error('JSON não encontrado na resposta');
+
+    const obj = JSON.parse(match[0]);
+    const safeDados = obj.dados && typeof obj.dados === 'object' ? obj.dados : {};
+
+    return {
+      resposta: obj.resposta || '',
+      telefone_extraido: obj.telefone_extraido || null,
+      finalizado: obj.finalizado === true,
+      dados: {
+        ajudante: safeDados.ajudante ?? null,
+        saida_tipo: safeDados.saida_tipo ?? null,
+        saida_elevador: safeDados.saida_elevador ?? null,
+        destino_tipo: safeDados.destino_tipo ?? null,
+        destino_elevador: safeDados.destino_elevador ?? null,
+        bairro_saida: safeDados.bairro_saida ?? null,
+        bairro_destino: safeDados.bairro_destino ?? null,
+        itens: safeDados.itens ?? null
+      }
+    };
+  } catch (e) {
+    logger.error('[GROQ] Erro ao parsear JSON', { error: e && e.message || e, raw: String(respostaTexto).slice(0, 300) });
+    throw e;
+  }
+}
+
 // Locks por perfil de input
 const VIRTUS_INPUT_LOCKS = new Map();
 function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
@@ -1801,26 +1963,77 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // OK: há novidade do cliente; enviar ao notificador com TODO histórico
+        // OK: há novidade do cliente
         log(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`);
 
-        // 5. Formata localização no padrão "Cidade (UF)" para a planilha Google
-        const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
+        // NOVO: fluxo direto Groq (se DIRECT_GROQ ativo)
+        if (DIRECT_GROQ) {
+          try {
+            // Cidade preferencial: manifest.cidade > localizacao.cidade > null
+            let cidadePreferida = null;
+            try {
+              const man = await manifestStore.read(nome).catch(()=>null);
+              cidadePreferida = (man && man.cidade) ? man.cidade : null;
+            } catch {}
+            if (!cidadePreferida && localizacao && localizacao.cidade) {
+              cidadePreferida = localizacao.cidade;
+            }
 
-        // 6. Adiciona na fila de envio para o notificador com TODO o histórico
-        adicionarChatParaEnvio(nome, {
-          chatId,
-          tipoServico,
-          historico: historicoConversa, // TODO o histórico da conversa
-          localizacao: localizacaoFormatada,
-          urlClassificado
-        });
+            const promptUser = montarPromptUser(cidadePreferida, historicoConversa);
+            const txt = await chamarGroqAPI(PROMPT_SYSTEM, promptUser);
+            const parsed = parsearRespostaGroq(txt);
 
-        // 6. Não envia mensagem aqui; aguarda a resposta do Notificador (polling + fila no Messenger)
-        //    Mantém o chat na fila aguardando a resposta inteligente, sem spam.
-        //    O histórico será marcado "respondido" quando o envio real ocorrer.
+            // Atualiza dados coletados locais (cidade, telefone, cereja)
+            atualizarDadosColetados(chatId, {
+              cidade: cidadePreferida || null,
+              telefone: parsed.telefone_extraido || null,
+              dados: parsed.dados || {}
+            });
 
-        // Ledger: remove pending (chat foi processado e enviado para notificador)
+            // Inicia timer se capturou telefone pela primeira vez
+            const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
+            if (!jaTinhaTimer && parsed.telefone_extraido) {
+              iniciarTimerFechamento(chatId, parsed.telefone_extraido);
+            }
+
+            // Envia a resposta no Messenger
+            const pAtual = await ensurePage().catch(() => null);
+            if (!pAtual) throw new Error('page_unavailable_for_send');
+
+            await pAtual.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
+            const onOk = await assertOnChat(pAtual, chatId, { timeoutMs: 5000 });
+            if (!onOk) throw new Error('chat_not_opened_for_send');
+
+            let campo = await waitForComposer(pAtual, 10000);
+            if (!campo) {
+              await pAtual.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{});
+              campo = await waitForComposer(pAtual, 8000);
+            }
+            if (!campo) throw new Error('composer_not_available_for_send');
+
+            await sendMessageSafe(pAtual, campo, parsed.resposta, nome, chatId);
+            await marcarRespondido(nome, chatId);
+
+            logger.info('[GROQ] Resposta enviada com sucesso', { chatId, finalizado: parsed.finalizado, tel: parsed.telefone_extraido });
+          } catch (e) {
+            logger.error('[GROQ] Falha no fluxo direto', { chatId, error: e && e.message || e });
+          }
+        } else {
+          // Fluxo antigo: Notificador
+          // 5. Formata localização no padrão "Cidade (UF)" para a planilha Google
+          const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
+
+          // 6. Adiciona na fila de envio para o notificador com TODO o histórico
+          adicionarChatParaEnvio(nome, {
+            chatId,
+            tipoServico,
+            historico: historicoConversa, // TODO o histórico da conversa
+            localizacao: localizacaoFormatada,
+            urlClassificado
+          });
+        }
+
+        // Ledger: remove pending (chat foi processado)
         try { await pendingDel(nome, chatId); } catch {}
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
@@ -2011,6 +2224,109 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // ==== FIM BLOCO MODIFICADO ====
 
   async function runner() {
+    const attId = stepLog.attemptId();
+    
+    // Controle de timer e dados por chat (escopo do perfil) - APENAS SE DIRECT_GROQ
+    const timersFechamento = DIRECT_GROQ ? new Map() : null; // chatId -> { inicio, telefone, expirado }
+    const dadosColetados = DIRECT_GROQ ? new Map() : null;   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
+    const pedidosEnviados = DIRECT_GROQ ? new Set() : null;  // chatId já enviados
+
+    function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
+      if (!dadosColetados) return;
+      if (!dadosColetados.has(chatId)) dadosColetados.set(chatId, {});
+      const cur = dadosColetados.get(chatId);
+      if (cidade && !cur.cidade) cur.cidade = cidade;
+      if (telefone) cur.telefone = telefone;
+      // dados cereja
+      const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens'];
+      for (const k of keys) {
+        if (dados && dados[k] != null) cur[k] = dados[k];
+      }
+      dadosColetados.set(chatId, cur);
+    }
+
+    function iniciarTimerFechamento(chatId, telefone) {
+      if (!timersFechamento) return;
+      if (timersFechamento.has(chatId)) return; // não reinicia
+      timersFechamento.set(chatId, { inicio: Date.now(), telefone, expirado: false });
+      // 10 minutos depois, verifica
+      setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
+      logger.info('[TIMER] Timer de 10min iniciado', { chatId, telefone });
+    }
+
+    async function verificarTimerExpirado(chatId) {
+      if (!timersFechamento) return;
+      const t = timersFechamento.get(chatId);
+      if (!t || t.expirado) return;
+      const decorrido = Date.now() - t.inicio;
+      if (decorrido >= 10 * 60 * 1000) {
+        t.expirado = true;
+        timersFechamento.set(chatId, t);
+        logger.info('[TIMER] Timer expirado — fechando pedido', { chatId });
+        const dados = dadosColetados ? (dadosColetados.get(chatId) || {}) : {};
+        try {
+          await enviarPedidoParaNotificador(chatId, dados);
+          if (pedidosEnviados) pedidosEnviados.add(chatId);
+          await enviarMensagemFinal(chatId);
+          await marcarRespondido(nome, chatId); // marca local
+        } catch (e) {
+          logger.error('[TIMER] Falha ao fechar pedido', { chatId, error: e && e.message || e });
+        }
+      }
+    }
+
+    async function enviarPedidoParaNotificador(chatId, dados) {
+      if (!pedidosEnviados || pedidosEnviados.has(chatId)) return; // Enviar apenas 1x
+      const payload = {
+        servidor: NOTIFICADOR_SERVIDOR || 'servidor1',
+        perfil: nome,
+        chat_id: chatId,
+        cidade: dados.cidade || null,
+        telefone: dados.telefone || null,
+        ajudante: dados.ajudante || null,
+        saida_tipo: dados.saida_tipo || null,
+        saida_elevador: dados.saida_elevador || null,
+        destino_tipo: dados.destino_tipo || null,
+        destino_elevador: dados.destino_elevador || null,
+        bairro_saida: dados.bairro_saida || null,
+        bairro_destino: dados.bairro_destino || null,
+        itens: dados.itens || null,
+        timestamp: Date.now()
+      };
+      const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
+      const resp = await fetch(urlFinal, {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        const txt = await resp.text().catch(()=> '');
+        throw new Error(`Notificador error ${resp.status}: ${txt}`);
+      }
+      logger.info('[NOTIFICADOR] Pedido final enviado', { chatId, perfil: nome });
+    }
+
+    async function enviarMensagemFinal(chatId) {
+      const mensagem = 'Perfeito! Recebi todas as informações. Já vou processar seu pedido e te chamar no WhatsApp. Obrigado pela confiança! 🙌\n\nSiga nosso Instagram: @seu_instagram';
+      let p = await ensurePage().catch(() => null);
+      if (!p) return;
+      try {
+        await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
+        const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
+        if (!okOn) return;
+        let campo = await waitForComposer(p, 8000);
+        if (!campo) {
+          await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{});
+          campo = await waitForComposer(p, 8000);
+        }
+        if (!campo) return;
+        await sendMessageSafe(p, campo, mensagem, nome, chatId);
+        logger.info('[MESSENGER] Mensagem final enviada', { chatId });
+      } catch (e) {
+        logger.warn('[MESSENGER] Falha ao enviar mensagem final', { chatId, error: e && e.message || e });
+      }
+    }
+
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -2068,13 +2384,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!running || !epochOk()) return;
     await initHistoricoSePreciso();
     
-    // Inicialização do Notificador
-    try {
-      await fazerHandshakeNotificador(nome);
-      iniciarPollingRespostas(nome);
-      
-      // Implementa enviarRespostaMessengerSegura dentro do contexto do Virtus
-      async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
+    // Inicialização do Notificador (apenas se não estiver em modo DIRECT_GROQ)
+    if (!DIRECT_GROQ) {
+      try {
+        await fazerHandshakeNotificador(nome);
+        iniciarPollingRespostas(nome);
+        
+        // Implementa enviarRespostaMessengerSegura dentro do contexto do Virtus
+        async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
         const MAX_TRIES = 2;
         let lastErr = null;
         
@@ -2167,9 +2484,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       }
       
-      iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
-    } catch (e) {
-      logger.warn('[NOTIFICADOR] falha init filas/handshake (continuando)', { nome, error: e && e.message || e });
+        iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      } catch (e) {
+        logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
+      }
+    } else {
+      // Modo DIRECT_GROQ: nada a fazer aqui (responderChat envia diretamente no Messenger)
+      logger.info('[GROQ] Modo DIRECT_GROQ ativo', { nome });
     }
     
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
