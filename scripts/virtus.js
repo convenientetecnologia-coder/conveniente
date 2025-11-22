@@ -575,49 +575,108 @@ async function extrairUrlClassificado(page, chatId) {
   } catch { return null; }
 }
 
-// Extrai TODO o histórico da conversa (mensagens do cliente e da IA)
+// Extrai TODO o histórico da conversa (mensagens do cliente e da IA) - VERSÃO CORRIGIDA
 async function extrairHistoricoConversa(page) {
   try {
     const historico = await page.evaluate(() => {
-      const norm = (s) => (s||'').toLowerCase();
-      const mensagens = [];
-      
-      // Pega todas as mensagens visíveis no chat
-      const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]'));
-      
+      function norm(s) {
+        try {
+          return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      }
+
+      function parseAbbrToTs(el) {
+        try {
+          const raw = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
+          const t = norm(raw);
+          const now = Date.now();
+
+          if (!t) return 0;
+          if (/\bagora\b|just now|now/i.test(raw)) return now;
+          
+          let m = t.match(/\b(\d+)\s*(s|seg|second|seconds?)\b/);
+          if (m) return now - (parseInt(m[1], 10) * 1000);
+          
+          m = t.match(/\b(\d+)\s*(min|mins?|minute|minuto)\b/);
+          if (m) return now - (parseInt(m[1], 10) * 60000);
+          
+          m = t.match(/\b(\d+)\s*(h|hora|horas|hour|hours?)\b/);
+          if (m) return now - (parseInt(m[1], 10) * 3600000);
+          
+          m = t.match(/\b(\d+)\s*(d|dia|dias|day|days)\b/);
+          if (m) return now - (parseInt(m[1], 10) * 86400000);
+          
+          if (/\bontem\b|yesterday\b/.test(t)) return now - 86400000;
+          
+          const dp = Date.parse(raw);
+          if (Number.isFinite(dp)) return dp;
+          
+          return 0;
+        } catch {
+          return 0;
+        }
+      }
+
+      const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-200);
+      const out = [];
+
       for (const r of rows) {
         try {
-          const t = (r.innerText || r.textContent || '').trim();
-          if (!t || t.length < 1) continue;
-          
-          const tn = norm(t);
-          
-          // Ignora cabeçalhos e mensagens de sistema
-          if (/mensagem\s+n[aã]o\s+lida|messag\w+\s+unread|você\s+enviou|you\s+sent/i.test(tn)) continue;
-          
-          // Tenta identificar se é mensagem do cliente ou da IA
-          // Heurística: mensagens com "você enviou" são da IA, outras são do cliente
-          const isIA = /\b(v[oô]c[êe]\s+enviou|you\s+sent)\b/.test(tn);
-          
-          // Remove prefixos de "você enviou" se for mensagem da IA
-          const textoLimpo = t.replace(/^(você\s+enviou|you\s+sent)[:\s]*/i, '').trim();
-          
-          if (textoLimpo && textoLimpo.length > 0) {
-            mensagens.push({
-              texto: textoLimpo,
-              autor: isIA ? 'ia' : 'cliente',
-              timestamp: Date.now() // Poderia extrair timestamp real se disponível
-            });
-          }
+          const txt = (r.innerText || r.textContent || '').trim();
+          if (!txt) continue;
+
+          // Heurística robusta: se for bolha do próprio usuário => alinhamento à direita/flex-end
+          let isMine = false;
+          try {
+            const st = window.getComputedStyle(r);
+            if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) {
+              isMine = true;
+            }
+          } catch {}
+
+          // Fallback textual
+          const n = norm(txt);
+          if (/\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(n)) isMine = true;
+
+          // Timestamp real pelo abbr mais próximo
+          let ts = 0;
+          try {
+            const ab = r.querySelector('abbr[aria-label]');
+            if (ab) ts = parseAbbrToTs(ab);
+            if (!ts) {
+              const sps = Array.from(r.querySelectorAll('span')).slice(0, 10);
+              for (const s of sps) {
+                const ab2 = s.querySelector('abbr[aria-label]');
+                if (ab2) {
+                  ts = parseAbbrToTs(ab2);
+                  if (ts) break;
+                }
+              }
+            }
+          } catch {}
+
+          const textoLimpo = txt.replace(/^(você\s+enviou|you\s+sent)[:\s]*/i, '').trim();
+          if (!textoLimpo) continue;
+
+          out.push({
+            texto: textoLimpo,
+            autor: isMine ? 'ia' : 'cliente',
+            timestamp: ts || Date.now()
+          });
         } catch {}
       }
-      
-      return mensagens;
+
+      // Ordena por timestamp ascendente
+      out.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      return out;
     });
-    
-    // Retorna array de mensagens ordenado cronologicamente
+
     return Array.isArray(historico) ? historico : [];
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 // Formata localização no padrão "Cidade (UF)" para a planilha Google
@@ -659,6 +718,76 @@ function agoraEpoch() {
 }
 
 const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_respondidos.json');
+
+// === INÍCIO: CONTROLE DE ESTADO DE CHAT (persistido APENAS em disco) ===
+const CHAT_STATE_FILE = (perfil) => path.join(__dirname, '../dados/perfis', perfil, 'chats_state.json');
+
+async function readJsonFsyncSafe(file, fb = {}) {
+  try {
+    const content = await fs.readFile(file, 'utf8');
+    return JSON.parse(content);
+  } catch {
+    return fb;
+  }
+}
+
+async function writeJsonFsyncAtomic(file, obj) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  const fd = await fsRaw.openSync(tmp, 'w');
+  try {
+    fsRaw.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+    fsRaw.fsyncSync(fd);
+  } finally {
+    fsRaw.closeSync(fd);
+  }
+  try {
+    if (fsRaw.existsSync(file)) fsRaw.unlinkSync(file);
+  } catch {}
+  try {
+    fsRaw.renameSync(tmp, file);
+  } catch {
+    try {
+      fsRaw.copyFileSync(tmp, file);
+      try { fsRaw.unlinkSync(tmp); } catch {}
+    } catch {}
+  }
+  return true;
+}
+
+async function loadChatState(perfil) {
+  return await readJsonFsyncSafe(CHAT_STATE_FILE(perfil), {});
+}
+
+async function saveChatState(perfil, st) {
+  return await writeJsonFsyncAtomic(CHAT_STATE_FILE(perfil), st || {});
+}
+
+async function getChatState(perfil, chatId) {
+  const st = await loadChatState(perfil);
+  return st[chatId] || null;
+}
+
+async function setChatState(perfil, chatId, patch) {
+  const st = await loadChatState(perfil);
+  const prev = st[chatId] || {};
+  st[chatId] = Object.assign({}, prev, patch || {}, { updatedAt: Date.now() });
+  await saveChatState(perfil, st);
+}
+
+// Estados aceitos:
+const CHAT_STATES = Object.freeze({
+  PENDENTE: 'pendente',
+  COLETANDO: 'coletando_localizacao',
+  GERANDO: 'gerando_resposta',
+  ENVIANDO: 'enviando',
+  ENVIADO: 'enviado',
+  AGUARDANDO: 'aguardando_cliente',
+  FINALIZADO: 'finalizado'
+});
+
+const SENT_COOLDOWN_MS = 60 * 1000; // mínimo de 60s
+// === FIM: CONTROLE DE ESTADO DE CHAT ===
 
 // ====== INÍCIO: Config Notificador e Filas ======
 const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io';
@@ -1100,67 +1229,57 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     await p.keyboard.press('Enter');
     logger.debug('[MESSENGER] Enter pressionado, aguardando confirmação robusta', { nome, chatId });
 
-    // NOVO: Confirmação ROBUSTA - verificar que número de bolhas aumentou + texto coincide + timestamp "agora"
+    // NOVO: Confirmação ROBUSTA - verificar que número de bolhas aumentou + texto coincide (SEM whenRecent)
+    function normalizeMsg(s) {
+      try {
+        return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+      } catch {
+        return String(s || '').trim().toLowerCase();
+      }
+    }
+
+    const expectedNorm = normalizeMsg(expected);
     const sent = await p.waitForFunction(
-      (beforeCount, expectedRaw) => {
-        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-        
-        function getMySnap() {
+      (beforeCount, expectedNorm) => {
+        function getSnap() {
           const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]'));
-          let total = 0, lastText = '', lastWhen = '';
-          
+          let total = 0, lastText = '';
+
           for (let i = 0; i < rows.length; i++) {
             const el = rows[i];
             const txt = (el.innerText || el.textContent || '').trim();
-            const isMine = /\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(txt);
-            
+            if (!txt) continue;
+
+            // considera "minhas" bolhas por alinhamento à direita ou presença do rótulo textual
+            let isMine = false;
+            try {
+              const st = window.getComputedStyle(el);
+              if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) isMine = true;
+            } catch {}
+
+            const n = String(txt).toLowerCase();
+            if (/\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(n)) isMine = true;
+
             if (isMine) {
               total++;
               lastText = txt;
-              
-              try {
-                const abbr = el.querySelector('abbr[aria-label]');
-                if (abbr) lastWhen = (abbr.getAttribute('aria-label') || abbr.innerText || abbr.textContent || '').trim();
-              } catch {}
-              
-              if (!lastWhen) {
-                // fallback: procurar spans pequenos com "agora", "1 min", etc.
-                const spans = el ? Array.from(el.querySelectorAll('span')) : [];
-                for (const s of spans) {
-                  const t = (s.innerText || s.textContent || '').trim();
-                  if (/\b(agora|now|\d+\s*(s|seg|secs?|seconds?|min|mins?|minutes?))\b/i.test(t)) {
-                    lastWhen = t;
-                    break;
-                  }
-                }
-              }
             }
           }
-          
-          return { total, lastText, lastWhen };
+
+          return { total, lastText };
         }
-        
-        const snap = getMySnap();
-        
-        // Verificação 1: número de bolhas aumentou
+
+        const snap = getSnap();
         if (snap.total <= beforeCount) return false;
-        
-        // Verificação 2: última bolha contém texto esperado
-        const lastOkText = norm(snap.lastText).includes(norm(expectedRaw));
-        if (!lastOkText) return false;
-        
-        // Verificação 3: timestamp é "agora" ou muito recente
-        const when = (snap.lastWhen || '').toLowerCase();
-        const whenRecent =
-          /\bagora\b|\bnow\b/.test(when) ||
-          /\b\d+\s*(s|seg|secs?|seconds?)\b/.test(when) ||
-          /\b1\s*(min|minute|minuto)\b/.test(when);
-        
-        return whenRecent;
+
+        const lastNorm = String(snap.lastText || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+        // confirmação: contagem aumentou E último texto contém (normalizado) o esperado
+        return lastNorm.includes(expectedNorm);
       },
       { timeout: 12000 },
       before.total,
-      expected
+      expectedNorm
     ).catch(() => false);
 
     if (!sent) {
@@ -1173,12 +1292,21 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       throw new Error('send_not_confirmed_robust');
     }
 
-    logger.info('[MESSENGER] ✅ Mensagem confirmada (robusta)', { 
-      nome, 
+    logger.info('[MESSENGER] ✅ Mensagem confirmada (robusta)', {
+      nome,
       chatId,
       beforeTotal: before.total,
-      metodo: 'contagem_aumentou_texto_coincide_timestamp_agora'
+      metodo: 'contagem_aumentou_texto_coincide'
     });
+
+    // Marcar estado após envio bem-sucedido (APENAS disco)
+    try {
+      await setChatState(nome, chatId, {
+        state: CHAT_STATES.AGUARDANDO,
+        lastIATs: Date.now(),
+        cooldownUntil: Date.now() + SENT_COOLDOWN_MS
+      });
+    } catch {}
 
   } finally {
     setVirtusInputLock(nome, false);
@@ -1688,15 +1816,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const agoraMs = Date.now();
     const aguard = getSetAguardando(nome);
 
-    // NOVO: Usa cooldown de prova (60s) ao invés de gating por respondedCache
-    // Isso permite que chats já respondidos sejam "provados" novamente para verificar novas mensagens
     for (const c of chatsNovos) {
       const id = c.id;
-      
-      // Cooldown de prova de 60s por chat para não "martelar"
+
+      // Cooldown de 60s entre probes visuais
       const last = lastProbeMap.get(id) || 0;
       if ((agoraMs - last) < 60000) continue;
-      
+
+      // Não re-enfileirar se o chat está marcado como "aguardando_cliente" e cooldown ainda vigente
+      try {
+        const st = await getChatState(nome, id);
+        if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
+          // está sob cooldown pós-envio; não enfileirar
+          lastProbeMap.set(id, agoraMs);
+          continue;
+        }
+      } catch {}
+
       if (!aguard.has(id) && !fila.includes(id)) {
         fila.push(id);
         lastProbeMap.set(id, agoraMs);
@@ -1785,6 +1921,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       _chatLockAcquired = true;
       stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
+
+      // Marcar estado como PENDENTE (APENAS disco)
+      try {
+        await setChatState(nome, chatId, { state: CHAT_STATES.PENDENTE });
+      } catch {}
 
       // Ledger: adiciona pending imediatamente após adquirir lock
       const attemptId2 = stepLog.attemptId();
@@ -1944,6 +2085,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // 3. Identifica tipo de serviço
         const tipoServico = await identificarTipoServico(nome);
 
+        // Marcar estado como GERANDO antes de coletar histórico
+        try {
+          await setChatState(nome, chatId, { state: CHAT_STATES.GERANDO });
+        } catch {}
+
         // 4. Coleta TODO o histórico da conversa (mensagens do cliente e da IA)
         const historicoConversa = await extrairHistoricoConversa(p);
         
@@ -1970,9 +2116,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         const tsCLI = tsNum(ultimaCliente && ultimaCliente.timestamp);
 
+        // Atualizar timestamps no estado (APENAS disco)
+        try {
+          await setChatState(nome, chatId, {
+            lastIATs: tsIA || 0,
+            lastCLIts: tsCLI || 0
+          });
+        } catch {}
+
         // Se não há cliente, não há o que fazer
         if (!ultimaCliente) {
           log(`[SKIP] Chat ${chatId}: sem mensagem do cliente`);
+          try {
+            await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastIATs: tsIA || 0 });
+          } catch {}
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -1982,6 +2139,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Se cliente não é mais novo que nossa última IA, não reabrir/enviar
         if (tsIA && (tsCLI <= tsIA)) {
           log(`[SKIP] Chat ${chatId}: sem novidade (cliente ${new Date(tsCLI).toLocaleString()} <= IA ${new Date(tsIA).toLocaleString()})`);
+          try {
+            await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastIATs: tsIA || 0 });
+          } catch {}
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -2036,7 +2196,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
             if (!campo) throw new Error('composer_not_available_for_send');
 
+            // Marcar estado como ENVIANDO antes de enviar
+            try {
+              await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
+            } catch {}
+
             await sendMessageSafe(pAtual, campo, parsed.resposta, nome, chatId);
+            // sendMessageSafe já marca AGUARDANDO após confirmação bem-sucedida
+            
             await marcarRespondido(nome, chatId);
 
             logger.info('[GROQ] Resposta enviada com sucesso', { chatId, finalizado: parsed.finalizado, tel: parsed.telefone_extraido });
