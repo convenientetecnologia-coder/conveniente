@@ -782,6 +782,65 @@ async function scrollChatsToTop(page, nome) {
 // ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
 
 // ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
+// Helpers para confirmação robusta de envio
+function normalize(s) {
+  try {
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  } catch {
+    return String(s || '').trim().toLowerCase();
+  }
+}
+
+async function getMySentSnapshot(p) {
+  try {
+    return await p.evaluate(() => {
+      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]'));
+      let total = 0, lastText = '', lastWhen = '', lastIdx = -1;
+      
+      for (let i = 0; i < rows.length; i++) {
+        const el = rows[i];
+        const txt = (el.innerText || el.textContent || '').trim();
+        const tnorm = norm(txt);
+        const isMine = /\b(you\s+sent|voc[eê]\s+enviou)\b/.test(tnorm);
+        
+        if (isMine) {
+          total++;
+          lastText = txt;
+          lastIdx = i;
+        }
+      }
+      
+      if (lastIdx >= 0) {
+        // tenta pegar "quando" em abbr/aria-label
+        const lastEl = rows[lastIdx];
+        let when = '';
+        try {
+          const abbr = lastEl.querySelector('abbr[aria-label]');
+          if (abbr) when = (abbr.getAttribute('aria-label') || abbr.innerText || abbr.textContent || '').trim();
+        } catch {}
+        
+        if (!when) {
+          // fallback: procurar spans pequenos com "agora", "1 min", etc.
+          const spans = lastEl ? Array.from(lastEl.querySelectorAll('span')) : [];
+          for (const s of spans) {
+            const t = (s.innerText || s.textContent || '').trim();
+            if (/\b(agora|now|\d+\s*(s|seg|secs?|seconds?|min|mins?|minutes?))\b/i.test(t)) {
+              when = t;
+              break;
+            }
+          }
+        }
+        lastWhen = when;
+      }
+      
+      return { total, lastText, lastWhen };
+    });
+  } catch {
+    return { total: 0, lastText: '', lastWhen: '' };
+  }
+}
+
 async function sendMessageSafe(p, campo, msg, nome, chatId) {
   // 0) Reobtenha o composer se campo for ausente ou suspeito
   try {
@@ -845,51 +904,94 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       return;
     }
 
+    // NOVO: Confirmação ROBUSTA - tirar snapshot ANTES de enviar
+    const expected = String(msg || '').trim();
+    const before = await getMySentSnapshot(p);
+    logger.debug('[MESSENGER] Snapshot antes do envio', { nome, chatId, beforeTotal: before.total });
+
     // Envia (um único Enter)
     await p.keyboard.press('Enter');
+    logger.debug('[MESSENGER] Enter pressionado, aguardando confirmação robusta', { nome, chatId });
 
-    // NOVO: Confirmação robusta de envio (verificar "Você enviou" OU texto do bubble)
-    const expected = String(msg || '').trim().toLowerCase();
-    const sent = await Promise.race([
-      // Confirmação por label "Você enviou/You sent"
-      (async () => {
-        try {
-          return await p.waitForFunction(() => {
-            const norm = s => String(s||'').toLowerCase();
-            const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-30);
-            return nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText || el.textContent || '')));
-          }, { timeout: 10000 }).then(() => true).catch(() => false);
-        } catch { return false; }
-      })(),
-      // NOVO: Confirmação por texto do último bubble (quase infalível)
-      (async () => {
-        try {
-          if (!expected) return false;
-          return await p.waitForFunction((expected) => {
-            const bubbles = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-20);
-            const norm = s => String(s||'').trim().toLowerCase();
-            for (let i = bubbles.length - 1; i >= 0; i--) {
-              const t = norm(bubbles[i].innerText || bubbles[i].textContent || '');
-              if (t && t.includes(expected)) return true;
+    // NOVO: Confirmação ROBUSTA - verificar que número de bolhas aumentou + texto coincide + timestamp "agora"
+    const sent = await p.waitForFunction(
+      (beforeCount, expectedRaw) => {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+        
+        function getMySnap() {
+          const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]'));
+          let total = 0, lastText = '', lastWhen = '';
+          
+          for (let i = 0; i < rows.length; i++) {
+            const el = rows[i];
+            const txt = (el.innerText || el.textContent || '').trim();
+            const isMine = /\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(txt);
+            
+            if (isMine) {
+              total++;
+              lastText = txt;
+              
+              try {
+                const abbr = el.querySelector('abbr[aria-label]');
+                if (abbr) lastWhen = (abbr.getAttribute('aria-label') || abbr.innerText || abbr.textContent || '').trim();
+              } catch {}
+              
+              if (!lastWhen) {
+                // fallback: procurar spans pequenos com "agora", "1 min", etc.
+                const spans = el ? Array.from(el.querySelectorAll('span')) : [];
+                for (const s of spans) {
+                  const t = (s.innerText || s.textContent || '').trim();
+                  if (/\b(agora|now|\d+\s*(s|seg|secs?|seconds?|min|mins?|minutes?))\b/i.test(t)) {
+                    lastWhen = t;
+                    break;
+                  }
+                }
+              }
             }
-            return false;
-          }, { timeout: 10000 }, expected).then(() => true).catch(() => false);
-        } catch { return false; }
-      })(),
-      // Timeout de segurança
-      (async () => {
-        await new Promise(resolve => setTimeout(resolve, 12000));
-        return false;
-      })()
-    ]);
+          }
+          
+          return { total, lastText, lastWhen };
+        }
+        
+        const snap = getMySnap();
+        
+        // Verificação 1: número de bolhas aumentou
+        if (snap.total <= beforeCount) return false;
+        
+        // Verificação 2: última bolha contém texto esperado
+        const lastOkText = norm(snap.lastText).includes(norm(expectedRaw));
+        if (!lastOkText) return false;
+        
+        // Verificação 3: timestamp é "agora" ou muito recente
+        const when = (snap.lastWhen || '').toLowerCase();
+        const whenRecent =
+          /\bagora\b|\bnow\b/.test(when) ||
+          /\b\d+\s*(s|seg|secs?|seconds?)\b/.test(when) ||
+          /\b1\s*(min|minute|minuto)\b/.test(when);
+        
+        return whenRecent;
+      },
+      { timeout: 12000 },
+      before.total,
+      expected
+    ).catch(() => false);
 
     if (!sent) {
-      logger.error('[MESSENGER] ❌ FALHA: Mensagem NÃO confirmada como enviada', { nome, chatId });
-      await logIssue(nome, 'virtus_send_failed', 'send_confirmation_timeout (no re-enter)');
-      throw new Error('send_not_confirmed');
+      logger.error('[MESSENGER] ❌ FALHA ROBUSTA: nova bolha não confirmada', { 
+        nome, 
+        chatId,
+        beforeTotal: before.total
+      });
+      await logIssue(nome, 'virtus_send_failed', 'send_confirmation_robust_timeout');
+      throw new Error('send_not_confirmed_robust');
     }
 
-    logger.info('[MESSENGER] ✅ Mensagem confirmada como enviada', { nome, chatId });
+    logger.info('[MESSENGER] ✅ Mensagem confirmada (robusta)', { 
+      nome, 
+      chatId,
+      beforeTotal: before.total,
+      metodo: 'contagem_aumentou_texto_coincide_timestamp_agora'
+    });
 
   } finally {
     setVirtusInputLock(nome, false);
@@ -1973,54 +2075,80 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
       // Implementa enviarRespostaMessengerSegura dentro do contexto do Virtus
       async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
-        let p = await ensurePage().catch(()=>null);
-        if (!p) {
-          logger.error('[MESSENGER] Page não disponível', { nome, chatId });
-          throw new Error('page_unavailable');
+        const MAX_TRIES = 2;
+        let lastErr = null;
+        
+        for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+          let p = await ensurePage().catch(() => null);
+          if (!p) {
+            lastErr = new Error('page_unavailable');
+            if (attempt === MAX_TRIES) break;
+            await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
+            continue;
+          }
+          
+          try {
+            logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
+            
+            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+            
+            const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
+            if (!okOn) {
+              throw new Error('chat_not_opened');
+            }
+            
+            let campo = await waitForComposer(p, 10000);
+            if (!campo) {
+              try {
+                await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
+              } catch {}
+              campo = await waitForComposer(p, 8000);
+            }
+            
+            if (!campo) {
+              throw new Error('composer_not_available');
+            }
+            
+            await campo.focus();
+            await new Promise(r => setTimeout(r, 120));
+            
+            if (!(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
+              throw new Error('context_lost');
+            }
+            
+            await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+            
+            logger.info('[MESSENGER] ✅✅✅ Enviada (robusta)', { nome, chatId, attempt });
+            return true;
+          } catch (err) {
+            lastErr = err;
+            const msgErr = (err && err.message) ? err.message : String(err);
+            logger.warn('[MESSENGER] Tentativa falhou', { 
+              nome, 
+              chatId, 
+              attempt, 
+              maxTries: MAX_TRIES,
+              error: msgErr 
+            });
+            
+            if (attempt < MAX_TRIES) {
+              // Aguardar antes de retry
+              await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
+            }
+          }
         }
         
-        try {
-          logger.debug('[MESSENGER] Abrindo chat', { nome, chatId });
-          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
-          
-          const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
-          if (!okOn) {
-            logger.error('[MESSENGER] Falha ao abrir chat', { nome, chatId });
-            throw new Error('chat_not_opened');
-          }
-          logger.debug('[MESSENGER] Chat aberto', { nome, chatId });
-          
-          logger.debug('[MESSENGER] Aguardando composer', { nome, chatId });
-          let campo = await waitForComposer(p, 10000);
-          if (!campo) {
-            // fallback leve
-            try { await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{}); } catch {}
-            campo = await waitForComposer(p, 8000);
-          }
-          if (!campo) {
-            logger.error('[MESSENGER] Composer não disponível', { nome, chatId });
-            throw new Error('composer_not_available');
-          }
-          logger.debug('[MESSENGER] Composer disponível', { nome, chatId });
-          
-          // Focar composer explicitamente
-          try { await campo.focus(); await new Promise(resolve => setTimeout(resolve, 200)); } catch {}
-          
-          if (!(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
-            logger.error('[MESSENGER] Contexto perdido antes de enviar', { nome, chatId });
-            throw new Error('context_lost');
-          }
-          
-          // Enviar mensagem com confirmação robusta
-          await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
-          
-          logger.info('[MESSENGER] ✅✅✅ Mensagem ENVIADA E CONFIRMADA com sucesso', { nome, chatId });
-          return true;
-        } catch (err) {
-          const msgErr = (err && err.message) ? err.message : String(err);
-          logger.error('[MESSENGER] ❌ Erro ao enviar mensagem', { nome, chatId, error: msgErr }, err);
-          throw err;
+        if (lastErr) {
+          const msgErr = (lastErr && lastErr.message) ? lastErr.message : String(lastErr);
+          logger.error('[MESSENGER] ❌ Erro ao enviar mensagem após todas as tentativas', { 
+            nome, 
+            chatId, 
+            error: msgErr 
+          }, lastErr);
+          throw lastErr;
         }
+        
+        return false;
       }
       
       // Implementa marcarRespondido dentro do contexto do Virtus
