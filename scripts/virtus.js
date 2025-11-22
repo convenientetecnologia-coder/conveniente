@@ -225,12 +225,36 @@ function iniciarPollingRespostas(nomePerfil) {
       const response = await fetch(`${NOTIFICADOR_URL}/api/virtus/respostas?servidor=${encodeURIComponent(NOTIFICADOR_SERVIDOR)}&perfil=${encodeURIComponent(nomePerfil)}`);
       const data = await response.json().catch(()=>null);
       if (data && data.ok === true && Array.isArray(data.respostas)) {
+        const perfilKeySet = getPendingSet(nomePerfil);
+        
         for (const resp of data.respostas) {
+          // Sanitiza resposta antes de processar
+          const respostaSan = sanitizarResposta(resp.resposta || '');
+          
+          // Gera chave única para deduplicação
+          const key = `${resp.chat_id}||${hashResposta(respostaSan)}`;
+          
+          // Dedup: se já em fila/pendente, ignore
+          if (perfilKeySet.has(key)) {
+            logger.debug('[NOTIFICADOR] Resposta duplicada ignorada', { nomePerfil, chatId: resp.chat_id, key });
+            continue;
+          }
+          
           if (!filaRespostas.has(nomePerfil)) filaRespostas.set(nomePerfil, []);
           filaRespostas.get(nomePerfil).push(resp);
-          // Empilha para envio no Messenger
+          
+          // Empilha para envio no Messenger, sanitizando e incluindo key
           if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
-          filaEnvioMessenger.get(nomePerfil).push({ chatId: resp.chat_id, resposta: resp.resposta });
+          filaEnvioMessenger.get(nomePerfil).push({ 
+            chatId: resp.chat_id, 
+            resposta: respostaSan, 
+            key 
+          });
+          
+          // Marca como pendente local (anti-duplicado)
+          perfilKeySet.add(key);
+          
+          logger.debug('[NOTIFICADOR] Resposta adicionada à fila', { nomePerfil, chatId: resp.chat_id, key });
         }
       }
     } catch (e) {
@@ -257,9 +281,12 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     if (!proximo) return;
 
     try {
+      // Sanitiza resposta antes de enviar (garantia extra)
+      const respostaFinal = sanitizarResposta(proximo.resposta);
+      
       // envia de forma segura (abre chat, pega composer, envia)
       if (enviarRespostaMessengerSeguraFn) {
-        await enviarRespostaMessengerSeguraFn(proximo.chatId, proximo.resposta);
+        await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
       }
       ultimaRespostaMessenger.set(nomePerfil, Date.now());
 
@@ -269,13 +296,31 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       } else {
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
+      
       // remove do set aguardando
       try { const setA = getSetAguardando(nomePerfil); setA.delete(proximo.chatId); } catch {}
+
+      // Libera a chave pending dedup (permite reprocessar se houver nova resposta diferente)
+      try {
+        if (proximo.key) {
+          const setPend = getPendingSet(nomePerfil);
+          setPend.delete(proximo.key);
+          logger.debug('[MESSENGER] Chave dedup liberada', { nomePerfil, chatId: proximo.chatId, key: proximo.key });
+        }
+      } catch {}
 
       logger.info('[MESSENGER] Resposta enviada', { nomePerfil, chatId: proximo.chatId });
     } catch (e) {
       logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
-      // opcional: se falhar, pode reempilhar uma vez
+      
+      // Mesmo em erro, libere a chave para permitir reprocessar em próxima iteração
+      try {
+        if (proximo.key) {
+          const setPend = getPendingSet(nomePerfil);
+          setPend.delete(proximo.key);
+          logger.debug('[MESSENGER] Chave dedup liberada após erro', { nomePerfil, chatId: proximo.chatId, key: proximo.key });
+        }
+      } catch {}
     }
   }, 2000);
 
@@ -421,12 +466,53 @@ const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_
 
 const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
 const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
-const filaEnvioMessenger = new Map();     // nomePerfil -> [ { chatId, resposta } ]
+const filaEnvioMessenger = new Map();     // nomePerfil -> [ { chatId, resposta, key } ]
 const ultimaRespostaMessenger = new Map();// nomePerfil -> timestamp
 const aguardandoRespostaMap = new Map();  // nomePerfil -> Set(chatId)
 const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
+
+// ====== INÍCIO: Deduplicação e Sanitização ======
+// Dedup por perfil: chave = ${chatId}||${hashResposta}
+const pendingKeysPorPerfil = new Map(); // nomePerfil -> Set(keys)
+
+function getPendingSet(perfil) {
+  if (!pendingKeysPorPerfil.has(perfil)) pendingKeysPorPerfil.set(perfil, new Set());
+  return pendingKeysPorPerfil.get(perfil);
+}
+
+function hashResposta(s) {
+  try { 
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(String(s || '')).digest('hex');
+  } catch { 
+    return String(s || ''); 
+  }
+}
+
+function sanitizarResposta(texto) {
+  if (!texto || typeof texto !== 'string') return '';
+  let t = texto;
+  
+  // Corrige encoding mojibake (OlÃ¡ -> Olá)
+  if (/[ÃÂ]/.test(t)) {
+    try {
+      const fixed = Buffer.from(t, 'latin1').toString('utf8');
+      if (/[áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ]/.test(fixed)) t = fixed;
+    } catch {}
+  }
+  
+  // Colapsa duplicatas excessivas de caracteres (OOlláá -> Ollá)
+  t = t.replace(/(.)\1{2,}/g, '$1$1');
+  
+  // Remove espaços múltiplos
+  t = t.replace(/\s{2,}/g, ' ');
+  
+  return t.trim();
+}
+// ====== FIM: Deduplicação e Sanitização ======
+
 // ====== FIM: Config Notificador e Filas ======
 
 // ======= ADIÇÃO: Pending Ledger Helpers & Heurística =======
