@@ -761,37 +761,98 @@ const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_re
 // === INÍCIO: CONTROLE DE ESTADO DE CHAT (persistido APENAS em disco) ===
 const CHAT_STATE_FILE = (perfil) => path.join(__dirname, '../dados/perfis', perfil, 'chats_state.json');
 
+// Lock de arquivo (com .lck)
+const fileLocks = new Map(); // file -> { pid, timestamp }
+
+async function acquireFileLock(file, timeoutMs = 5000) {
+  const lockFile = file + '.lck';
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const fd = fsRaw.openSync(lockFile, 'wx'); // cria se não existe, falha se existe
+      const pid = process.pid;
+      const timestamp = Date.now();
+      fsRaw.writeFileSync(fd, JSON.stringify({ pid, timestamp }), 'utf8');
+      fsRaw.fsyncSync(fd);
+      fsRaw.closeSync(fd);
+      fileLocks.set(file, { pid, timestamp });
+      return true;
+    } catch (e) {
+      // Lock já existe, verifica se está stale (>30s)
+      try {
+        const lockContent = fsRaw.readFileSync(lockFile, 'utf8');
+        const lockData = JSON.parse(lockContent);
+        if (Date.now() - lockData.timestamp > 30000) {
+          // Lock stale, remove
+          try { fsRaw.unlinkSync(lockFile); } catch {}
+          continue;
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 100)); // espera 100ms antes de tentar novamente
+    }
+  }
+  return false;
+}
+
+async function releaseFileLock(file) {
+  const lockFile = file + '.lck';
+  try {
+    if (fileLocks.has(file)) {
+      fileLocks.delete(file);
+    }
+    if (fsRaw.existsSync(lockFile)) {
+      fsRaw.unlinkSync(lockFile);
+    }
+  } catch {}
+}
+
 async function readJsonFsyncSafe(file, fb = {}) {
+  const lockAcquired = await acquireFileLock(file, 5000);
+  if (!lockAcquired) {
+    logger.warn(`[LOCK] Timeout ao adquirir lock para ${file}`);
+    return fb;
+  }
   try {
     const content = await fs.readFile(file, 'utf8');
     return JSON.parse(content);
   } catch {
     return fb;
+  } finally {
+    await releaseFileLock(file);
   }
 }
 
 async function writeJsonFsyncAtomic(file, obj) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = file + '.tmp';
-  const fd = await fsRaw.openSync(tmp, 'w');
-  try {
-    fsRaw.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
-    fsRaw.fsyncSync(fd);
-  } finally {
-    fsRaw.closeSync(fd);
+  const lockAcquired = await acquireFileLock(file, 5000);
+  if (!lockAcquired) {
+    logger.warn(`[LOCK] Timeout ao adquirir lock para escrita em ${file}`);
+    return false;
   }
   try {
-    if (fsRaw.existsSync(file)) fsRaw.unlinkSync(file);
-  } catch {}
-  try {
-    fsRaw.renameSync(tmp, file);
-  } catch {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    const fd = fsRaw.openSync(tmp, 'w');
     try {
-      fsRaw.copyFileSync(tmp, file);
-      try { fsRaw.unlinkSync(tmp); } catch {}
+      fsRaw.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+      fsRaw.fsyncSync(fd);
+    } finally {
+      fsRaw.closeSync(fd);
+    }
+    try {
+      if (fsRaw.existsSync(file)) fsRaw.unlinkSync(file);
     } catch {}
+    try {
+      fsRaw.renameSync(tmp, file);
+    } catch {
+      try {
+        fsRaw.copyFileSync(tmp, file);
+        try { fsRaw.unlinkSync(tmp); } catch {}
+      } catch {}
+    }
+    return true;
+  } finally {
+    await releaseFileLock(file);
   }
-  return true;
 }
 
 async function loadChatState(perfil) {
@@ -897,19 +958,35 @@ function sanitizarResposta(texto) {
 const PENDING_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_pending.json');
 
 async function readJson(file, fb={}) {
+  const lockAcquired = await acquireFileLock(file, 5000);
+  if (!lockAcquired) {
+    logger.warn(`[LOCK] Timeout ao adquirir lock para ${file}`);
+    return fb;
+  }
   try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return fb; }
+  finally { await releaseFileLock(file); }
 }
 async function writeJsonAtomicFsync(file, obj){
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = file + '.tmp';
-  const fd = await fs.open(tmp, 'w');
+  const lockAcquired = await acquireFileLock(file, 5000);
+  if (!lockAcquired) {
+    logger.warn(`[LOCK] Timeout ao adquirir lock para escrita em ${file}`);
+    return false;
+  }
   try {
-    await fd.writeFile(JSON.stringify(obj, null, 2), 'utf8');
-    await fd.sync();
-  } finally { await fd.close(); }
-  try { await fs.unlink(file); } catch {}
-  try { await fs.rename(tmp, file); }
-  catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp);} catch{} }
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    const fd = await fs.open(tmp, 'w');
+    try {
+      await fd.writeFile(JSON.stringify(obj, null, 2), 'utf8');
+      await fd.sync();
+    } finally { await fd.close(); }
+    try { await fs.unlink(file); } catch {}
+    try { await fs.rename(tmp, file); }
+    catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp);} catch{} }
+    return true;
+  } finally {
+    await releaseFileLock(file);
+  }
 }
 async function pendingAdd(perfil, chatId, attemptId) {
   const file = PENDING_JSON_NAME(perfil);
@@ -2189,33 +2266,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         await p.evaluate((sel) => {
           const el = document.querySelector(sel);
-          if (el) {
-            el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-            el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-          }
+          if (el) el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
         }, anchorSel);
-
-        let attempts = 0;
-        let achou = false;
-        let urlAtual = '';
-        while (attempts < 8) {
-          urlAtual = await p.evaluate(() => location.pathname);
-          if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
-            achou = true;
-            break;
+        await Promise.race([
+          p.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
+          (async () => { await p.$eval(anchorSel, el => el.click()); })()
+        ]);
+        const okNav = await assertOnChat(p, chatId, { timeoutMs: 6000 });
+        if (!okNav) {
+          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          const okNav2 = await assertOnChat(p, chatId, { timeoutMs: 8000 });
+          if (!okNav2) {
+            logger.warn(`Chat ${chatId} não abriu após clique e goto — pulando.`, { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
           }
-          await sleep(250);
-          attempts++;
-        }
-        if (!achou) {
-          logger.error(`Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId });
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
         }
 
         // Ativa send-guard imediatamente após confirmar navegação correta
@@ -2391,6 +2458,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { estadoAnteriorChat = await getChatState(nome, chatId); } catch {}
         const ultimaMsgAnterior = (estadoAnteriorChat && estadoAnteriorChat.ultimaMensagemClienteProcessada) || '';
         const ultimaMsgAtual = (ultimaCliente && ultimaCliente.texto) ? String(ultimaCliente.texto) : '';
+        const lastClientHash = hashResposta(ultimaMsgAtual);
+        const lastClientHashAnterior = (estadoAnteriorChat && estadoAnteriorChat.lastClientHash) || null;
+        
+        // Verificação de hash: só responde se hash mudou (garante 1 resposta por input)
+        if (lastClientHashAnterior && lastClientHash === lastClientHashAnterior) {
+          log(`[SKIP] Chat ${chatId}: hash da última mensagem do cliente não mudou (já respondido)`);
+          try {
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              lastIATs: tsIA || 0,
+              lastProbeAt: Date.now()
+            });
+          } catch {}
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
         
         // Não tentar novamente se estiver marcado como erro_envio para a mesma mensagem do cliente
         if (estadoAnteriorChat && estadoAnteriorChat.state === 'erro_envio') {
@@ -2479,37 +2564,87 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const pAtual = await ensurePage().catch(() => null);
             if (!pAtual) throw new Error('page_unavailable_for_send');
 
-            const okChat = await assertOnChat(pAtual, chatId, { timeoutMs: 1000 });
-            if (!okChat) {
-              const url0 = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
-              if (!/\/marketplace\/t\//.test(url0)) {
-                await pAtual.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
-                await assertOnChat(pAtual, chatId, { timeoutMs: 5000 });
+            const expectedPath = `/marketplace/t/${chatId}/`;
+            let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
+            if (!urlNow.includes(expectedPath)) {
+              await pAtual.goto(`https://www.messenger.com${expectedPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+              const ok = await assertOnChat(pAtual, chatId, { timeoutMs: 5000 });
+              if (!ok) {
+                // Tenta novamente forçando navegação
+                await pAtual.goto(`https://www.messenger.com${expectedPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+                const ok2 = await assertOnChat(pAtual, chatId, { timeoutMs: 8000 });
+                if (!ok2) {
+                  await logIssue(nome, 'mil_action', `virtus_context_abort: cannot reach chat ${chatId} after forced nav`);
+                  // Reenfileira com cooldown breve, sem erro_envio permanente
+                  const prev = await getChatState(nome, chatId).catch(()=>null);
+                  const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+                  await setChatState(nome, chatId, {
+                    state: CHAT_STATES.AGUARDANDO,
+                    sendAttempts: attempts,
+                    cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+                    ultimoProbeCLIts: tsCLI || 0,
+                    lastProbeAt: Date.now()
+                  });
+                  try { await pendingDel(nome, chatId); } catch {}
+                  fila = fila.filter(id => id !== chatId);
+                  chatAtivo = null;
+                  return;
+                }
               }
-            }
-
-            // VALIDAÇÃO HARD: checa URL explícita
-            const urlAtual = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
-            if (!urlAtual.includes(`/marketplace/t/${chatId}/`)) {
-              await logIssue(nome, 'mil_action', `context_mismatch_before_send url="${urlAtual}" chatId=${chatId}`);
-              throw new Error('context_mismatch_before_send');
             }
 
             // Tente usar o composer já obtido anteriormente; se não existir, espere um pouco mais
             let campoEnvio = await waitForComposer(pAtual, 15000);
             if (!campoEnvio) {
-              // sem reload automático — apenas mais um pequeno grace e tentativa de scroll
+              // Tentativa 1: scroll
               try { await pAtual.evaluate(() => window.scrollBy(0, 100)); } catch {}
               campoEnvio = await waitForComposer(pAtual, 5000);
             }
 
             if (!campoEnvio) {
-              // último grace, sem reload
-              await sleep(3000);
-              campoEnvio = await waitForComposer(pAtual, 3000);
+              // Tentativa 2: reload
+              await pAtual.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+              campoEnvio = await waitForComposer(pAtual, 8000);
             }
 
-            if (!campoEnvio) throw new Error('composer_not_available_for_send');
+            if (!campoEnvio) {
+              // Tentativa 3: goto novamente
+              await pAtual.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+              campoEnvio = await waitForComposer(pAtual, 8000);
+            }
+
+            if (!campoEnvio) {
+              // Última tentativa: nova aba (fallback)
+              try {
+                const novaAba = await pAtual.browser().newPage();
+                await novaAba.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+                campoEnvio = await waitForComposer(novaAba, 8000);
+                if (campoEnvio) {
+                  // Usa nova aba para envio
+                  pAtual = novaAba;
+                } else {
+                  await novaAba.close().catch(()=>{});
+                }
+              } catch {}
+            }
+
+            if (!campoEnvio) {
+              // Não marca erro_envio permanente, apenas cooldown leve
+              logger.warn(`[COMPOSER] Composer indisponível após todas tentativas — aguardando cooldown`, { nome, chatId });
+              const prev = await getChatState(nome, chatId).catch(()=>null);
+              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+              await setChatState(nome, chatId, {
+                state: CHAT_STATES.AGUARDANDO,
+                sendAttempts: attempts,
+                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+                ultimoProbeCLIts: tsCLI || 0,
+                lastProbeAt: Date.now()
+              });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
 
             try {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
@@ -2524,7 +2659,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 ultimaMensagemClienteProcessada: ultimaMsgAtual,
                 ultimoProbeCLIts: tsCLI || 0,
                 lastIATs: Date.now(),
-                lastProbeAt: Date.now() // NOVO: atualiza lastProbeAt após sucesso
+                lastProbeAt: Date.now(), // NOVO: atualiza lastProbeAt após sucesso
+                lastClientHash: lastClientHash // NOVO: salva hash da mensagem respondida
               });
             } catch {}
 
@@ -2795,7 +2931,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const dadosColetados = DIRECT_GROQ ? new Map() : null;   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
   const pedidosEnviados = DIRECT_GROQ ? new Set() : null;  // chatId já enviados
 
-  function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
+  async function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
     if (!dadosColetados) return;
     if (!dadosColetados.has(chatId)) dadosColetados.set(chatId, {});
     const cur = dadosColetados.get(chatId);
@@ -2807,13 +2943,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (dados && dados[k] != null) cur[k] = dados[k];
     }
     dadosColetados.set(chatId, cur);
+    // Persiste em disco
+    try {
+      await setChatState(nome, chatId, {
+        dadosColetados: cur,
+        updatedAt: Date.now()
+      });
+    } catch {}
     try { enviarPedidoParcialSeHabilitado(chatId); } catch {}
   }
 
-  function iniciarTimerFechamento(chatId, telefone) {
+  async function iniciarTimerFechamento(chatId, telefone) {
     if (!timersFechamento) return;
     if (timersFechamento.has(chatId)) return; // não reinicia
-    timersFechamento.set(chatId, { inicio: Date.now(), telefone, expirado: false });
+    const inicio = Date.now();
+    const expiraEm = inicio + (10 * 60 * 1000); // 10 minutos
+    timersFechamento.set(chatId, { inicio, telefone, expirado: false, expiraEm });
+    // Persiste em disco
+    try {
+      await setChatState(nome, chatId, {
+        timerStartedAt: inicio,
+        timerExpiresAt: expiraEm,
+        timerTelefone: telefone,
+        updatedAt: Date.now()
+      });
+    } catch {}
     // 10 minutos depois, verifica
     setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
     logger.info('[TIMER] Timer de 10min iniciado', { chatId, telefone });
@@ -2837,6 +2991,40 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       } catch (e) {
         logger.error('[TIMER] Falha ao fechar pedido', { chatId, error: e && e.message || e });
       }
+    }
+  }
+
+  // Resume timers após reboot/startVirtus
+  async function resumeTimers() {
+    if (!DIRECT_GROQ || !timersFechamento) return;
+    try {
+      const allStates = await loadChatState(nome);
+      const agora = Date.now();
+      for (const [chatId, state] of Object.entries(allStates)) {
+        if (!state || !state.timerExpiresAt) continue;
+        const expiraEm = state.timerExpiresAt;
+        if (expiraEm <= agora) {
+          // Timer já expirado, processa imediatamente
+          await verificarTimerExpirado(chatId);
+        } else {
+          // Reprograma timer
+          const restante = expiraEm - agora;
+          timersFechamento.set(chatId, {
+            inicio: state.timerStartedAt || (agora - (10 * 60 * 1000 - restante)),
+            telefone: state.timerTelefone || null,
+            expirado: false,
+            expiraEm
+          });
+          setTimeout(() => verificarTimerExpirado(chatId), restante);
+          logger.info('[TIMER] Timer restaurado', { chatId, restante: Math.round(restante / 1000) + 's' });
+        }
+        // Restaura dados coletados
+        if (state.dadosColetados && dadosColetados) {
+          dadosColetados.set(chatId, state.dadosColetados);
+        }
+      }
+    } catch (e) {
+      logger.warn('[TIMER] Erro ao restaurar timers', { error: e && e.message || e });
     }
   }
 
@@ -3086,6 +3274,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } else {
       // Modo DIRECT_GROQ: nada a fazer aqui (responderChat envia diretamente no Messenger)
       logger.info('[GROQ] Modo DIRECT_GROQ ativo', { nome });
+    // Restaura timers e dados coletados do disco
+    await resumeTimers();
     }
     
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);

@@ -14,7 +14,10 @@ function key(perfil, chatId) {
   return path.join(LOCK_DIR, `${perfil}__${chatId}.lock`);
 }
 
-const STALE_MS = 30 * 60 * 1000; // 30min
+// Armazenamento dos FDs abertos para cada lock ativo
+const openFDs = new Map(); // chave é o caminho do arquivo de lock
+
+const STALE_MS = 30 * 60 * 1000; // 30min (apenas para detecção de zumbi/crash)
 
 function isStale(fp) {
   try {
@@ -24,22 +27,25 @@ function isStale(fp) {
 }
 
 function acquire(perfil, chatId) {
+  ensureDir();
   const f = key(perfil, chatId);
   try {
-    const fd = fs.openSync(f, 'wx'); // atômico
-    try {
-      fs.writeFileSync(fd, String(Date.now()));
-      fs.fsyncSync(fd);
-    } finally { fs.closeSync(fd); }
+    const fd = fs.openSync(f, 'wx'); // lock de disco, atômico
+    fs.writeFileSync(fd, String(Date.now()));
+    fs.fsyncSync(fd);
+    // NÃO fecha o FD - mantém aberto durante toda execução
+    openFDs.set(f, fd);
     return true;
   } catch (e) {
-    // Já existe? Verifique stale
-    if (fs.existsSync(f) && isStale(f)) {
+    // Arquivo existe; só reforce "stale" SE não está na listagem do Map
+    if (fs.existsSync(f) && isStale(f) && !openFDs.has(f)) {
       try { fs.unlinkSync(f); } catch {}
       try {
         const fd2 = fs.openSync(f, 'wx');
-        try { fs.writeFileSync(fd2, String(Date.now())); fs.fsyncSync(fd2); }
-        finally { fs.closeSync(fd2); }
+        fs.writeFileSync(fd2, String(Date.now()));
+        fs.fsyncSync(fd2);
+        // NÃO fecha o FD - mantém aberto durante toda execução
+        openFDs.set(f, fd2);
         return true;
       } catch {}
     }
@@ -48,10 +54,18 @@ function acquire(perfil, chatId) {
 }
 
 function release(perfil, chatId) {
-  try {
-    const f = key(perfil, chatId);
-    if (fs.existsSync(f)) fs.unlinkSync(f);
-  } catch {}
+  const f = key(perfil, chatId);
+  const fd = openFDs.get(f);
+  if (typeof fd === 'number') {
+    try { fs.closeSync(fd); } catch {}
+    openFDs.delete(f);
+  }
+  try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {}
 }
 
-module.exports = { acquire, release };
+function touch(perfil, chatId) {
+  const f = key(perfil, chatId);
+  try { fs.utimesSync(f, new Date(), new Date()); } catch {}
+}
+
+module.exports = { acquire, release, touch };

@@ -1093,6 +1093,22 @@ async function activateOnce(nome, source = '') {
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
         }
+
+        // PÓS-ACTIVATE: CHECK DE HEADROOM (RAM) IMEDIATAMENTE DEPOIS DE ABRIR PERFIL
+        if (HEADROOM_AFTER_OPEN_MB > 0) {
+          const freeMB = getAvailableMB();
+          if (freeMB < HEADROOM_AFTER_OPEN_MB) {
+            try { browser && browser.close && await browser.close(); } catch {}
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+            setKillGuard(nome, 30000);
+            await reportAction(nome, 'open_rollback_memory', `Memória livre após abrir perfil caiu abaixo do headroom (${freeMB}MB < ${HEADROOM_AFTER_OPEN_MB}MB)`);
+            logger.warn(`[OPEN] rollback por swap/headroom`, { nome, freeMB, limit:HEADROOM_AFTER_OPEN_MB });
+            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+            return { ok:false, error:'headroom_below_min_after_open', freeMB, limit:HEADROOM_AFTER_OPEN_MB };
+          }
+        }
+
         const proc = browser.process && browser.process();
         if (proc && proc.pid && Number.isFinite(proc.pid)) {
           robeMeta[nome] = robeMeta[nome] || {};

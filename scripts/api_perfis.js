@@ -764,35 +764,72 @@ module.exports = (app, workerClient, fileStore) => {
         try { await issues.append(p.nome, 'mil_action', 'human_hold=false (bulk_open_all)'); } catch {}
       }
 
-      // 2) Loop de abertura + start-work (sequencial)
+      // 2) Loop de abertura + start-work (sequencial) com checagem de recursos
       const results = [];
+      let recursosOk = true;
+
       for (const p of perfisArr) {
         const nome = p.nome;
         let okActivate = false, okStart = false, err = null;
 
+        // 1) Cheque recursos via worker status/supervisor antes de cada activate
         try {
-          const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 });
-          okActivate = !!(r1 && r1.ok);
+          const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 25000 });
+          const sys = st && st.sys;
+          const minMB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
+
+          if (!sys || !sys.mem || sys.mem.freeMB < minMB || (sys.cpu && sys.cpu.percent >= 90)) {
+            recursosOk = false;
+            err = `RAM/CPU insuficientes (RAM livre: ${sys && sys.mem ? sys.mem.freeMB : 'N/A'}MB, CPU: ${sys && sys.cpu ? sys.cpu.percent : 'N/A'}%)`;
+            return res.json({ ok: false, error: 'RAM/CPU insuficientes para continuar', perfil: nome, sys, reason: err });
+          }
         } catch (e) {
+          recursosOk = false;
           err = (e && e.message) || String(e);
+          return res.json({ ok: false, error: 'Falha ao verificar recursos', perfil: nome, reason: err });
         }
 
+        // 2) Ative cada perfil individual e check resultado
+        try {
+          const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 });
+          if (!r1 || !r1.ok) {
+            err = (r1 && r1.error) || 'activate_failed';
+            recursosOk = false;
+            return res.json({ ok: false, error: 'Ativação negada pelo supervisor', perfil: nome, reason: err });
+          }
+          okActivate = true;
+        } catch (e) {
+          err = (e && e.message) || String(e);
+          recursosOk = false;
+          return res.json({ ok: false, error: 'Ativação negada', perfil: nome, reason: err });
+        }
+
+        // 3) SÓ se ativou com sucesso, chame start_work
         if (okActivate) {
           try {
             const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 });
-            okStart = !!(r2 && r2.ok);
+            if (!r2 || !r2.ok) {
+              err = (r2 && r2.error) || 'start_failed';
+              recursosOk = false;
+              return res.json({ ok: false, error: 'Start work negado', perfil: nome, reason: err });
+            }
+            okStart = true;
           } catch (e) {
             err = (e && e.message) || String(e);
+            recursosOk = false;
+            return res.json({ ok: false, error: 'Start work falhou', perfil: nome, reason: err });
           }
         }
 
         results.push({ nome, activate: okActivate, start: okStart, error: err || null });
 
-        // pequeno respiro (igual ao front local)
-        await new Promise(r => setTimeout(r, 800));
+        // Aguarda ~1s entre cada perfil
+        await new Promise(r => setTimeout(r, 1000));
       }
 
-      return res.json({ ok: true, total: perfisArr.length, results });
+      if (recursosOk) {
+        return res.json({ ok: true, total: perfisArr.length, results });
+      }
 
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });

@@ -21,7 +21,7 @@ const COLOR = {
 
 const LOG_TO_FILE = !!process.env.LOG_TO_FILE; // Para logar também num arquivo (append)
 const LOG_FILE = path.join(__dirname, '..', 'dados', 'logger.log');
-const DEBUG_MODE = process.env.DEBUG || process.env.LOG_DEBUG || '1';
+const DEBUG_MODE = process.env.DEBUG || process.env.LOG_DEBUG || '0';
 
 function shouldLog(level) {
   // Exibe DEBUG somente se ativado
