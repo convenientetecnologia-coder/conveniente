@@ -2248,109 +2248,110 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
   // ==== FIM BLOCO MODIFICADO ====
 
+  // Controle de timer e dados por chat (escopo do perfil) - APENAS SE DIRECT_GROQ
+  // Definido ANTES de responderChat() para estar acessível
+  const timersFechamento = DIRECT_GROQ ? new Map() : null; // chatId -> { inicio, telefone, expirado }
+  const dadosColetados = DIRECT_GROQ ? new Map() : null;   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
+  const pedidosEnviados = DIRECT_GROQ ? new Set() : null;  // chatId já enviados
+
+  function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
+    if (!dadosColetados) return;
+    if (!dadosColetados.has(chatId)) dadosColetados.set(chatId, {});
+    const cur = dadosColetados.get(chatId);
+    if (cidade && !cur.cidade) cur.cidade = cidade;
+    if (telefone) cur.telefone = telefone;
+    // dados cereja
+    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens'];
+    for (const k of keys) {
+      if (dados && dados[k] != null) cur[k] = dados[k];
+    }
+    dadosColetados.set(chatId, cur);
+  }
+
+  function iniciarTimerFechamento(chatId, telefone) {
+    if (!timersFechamento) return;
+    if (timersFechamento.has(chatId)) return; // não reinicia
+    timersFechamento.set(chatId, { inicio: Date.now(), telefone, expirado: false });
+    // 10 minutos depois, verifica
+    setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
+    logger.info('[TIMER] Timer de 10min iniciado', { chatId, telefone });
+  }
+
+  async function verificarTimerExpirado(chatId) {
+    if (!timersFechamento) return;
+    const t = timersFechamento.get(chatId);
+    if (!t || t.expirado) return;
+    const decorrido = Date.now() - t.inicio;
+    if (decorrido >= 10 * 60 * 1000) {
+      t.expirado = true;
+      timersFechamento.set(chatId, t);
+      logger.info('[TIMER] Timer expirado — fechando pedido', { chatId });
+      const dados = dadosColetados ? (dadosColetados.get(chatId) || {}) : {};
+      try {
+        await enviarPedidoParaNotificador(chatId, dados);
+        if (pedidosEnviados) pedidosEnviados.add(chatId);
+        await enviarMensagemFinal(chatId);
+        await marcarRespondido(nome, chatId); // marca local
+      } catch (e) {
+        logger.error('[TIMER] Falha ao fechar pedido', { chatId, error: e && e.message || e });
+      }
+    }
+  }
+
+  async function enviarPedidoParaNotificador(chatId, dados) {
+    if (!pedidosEnviados || pedidosEnviados.has(chatId)) return; // Enviar apenas 1x
+    const payload = {
+      servidor: NOTIFICADOR_SERVIDOR || 'servidor1',
+      perfil: nome,
+      chat_id: chatId,
+      cidade: dados.cidade || null,
+      telefone: dados.telefone || null,
+      ajudante: dados.ajudante || null,
+      saida_tipo: dados.saida_tipo || null,
+      saida_elevador: dados.saida_elevador || null,
+      destino_tipo: dados.destino_tipo || null,
+      destino_elevador: dados.destino_elevador || null,
+      bairro_saida: dados.bairro_saida || null,
+      bairro_destino: dados.bairro_destino || null,
+      itens: dados.itens || null,
+      timestamp: Date.now()
+    };
+    const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
+    const resp = await fetch(urlFinal, {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(()=> '');
+      throw new Error(`Notificador error ${resp.status}: ${txt}`);
+    }
+    logger.info('[NOTIFICADOR] Pedido final enviado', { chatId, perfil: nome });
+  }
+
+  async function enviarMensagemFinal(chatId) {
+    const mensagem = 'Perfeito! Recebi todas as informações. Já vou processar seu pedido e te chamar no WhatsApp. Obrigado pela confiança! 🙌\n\nSiga nosso Instagram: @seu_instagram';
+    let p = await ensurePage().catch(() => null);
+    if (!p) return;
+    try {
+      await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
+      const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
+      if (!okOn) return;
+      let campo = await waitForComposer(p, 8000);
+      if (!campo) {
+        await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{});
+        campo = await waitForComposer(p, 8000);
+      }
+      if (!campo) return;
+      await sendMessageSafe(p, campo, mensagem, nome, chatId);
+      logger.info('[MESSENGER] Mensagem final enviada', { chatId });
+    } catch (e) {
+      logger.warn('[MESSENGER] Falha ao enviar mensagem final', { chatId, error: e && e.message || e });
+    }
+  }
+
   async function runner() {
     const attId = stepLog.attemptId();
-    
-    // Controle de timer e dados por chat (escopo do perfil) - APENAS SE DIRECT_GROQ
-    const timersFechamento = DIRECT_GROQ ? new Map() : null; // chatId -> { inicio, telefone, expirado }
-    const dadosColetados = DIRECT_GROQ ? new Map() : null;   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
-    const pedidosEnviados = DIRECT_GROQ ? new Set() : null;  // chatId já enviados
-
-    function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
-      if (!dadosColetados) return;
-      if (!dadosColetados.has(chatId)) dadosColetados.set(chatId, {});
-      const cur = dadosColetados.get(chatId);
-      if (cidade && !cur.cidade) cur.cidade = cidade;
-      if (telefone) cur.telefone = telefone;
-      // dados cereja
-      const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens'];
-      for (const k of keys) {
-        if (dados && dados[k] != null) cur[k] = dados[k];
-      }
-      dadosColetados.set(chatId, cur);
-    }
-
-    function iniciarTimerFechamento(chatId, telefone) {
-      if (!timersFechamento) return;
-      if (timersFechamento.has(chatId)) return; // não reinicia
-      timersFechamento.set(chatId, { inicio: Date.now(), telefone, expirado: false });
-      // 10 minutos depois, verifica
-      setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
-      logger.info('[TIMER] Timer de 10min iniciado', { chatId, telefone });
-    }
-
-    async function verificarTimerExpirado(chatId) {
-      if (!timersFechamento) return;
-      const t = timersFechamento.get(chatId);
-      if (!t || t.expirado) return;
-      const decorrido = Date.now() - t.inicio;
-      if (decorrido >= 10 * 60 * 1000) {
-        t.expirado = true;
-        timersFechamento.set(chatId, t);
-        logger.info('[TIMER] Timer expirado — fechando pedido', { chatId });
-        const dados = dadosColetados ? (dadosColetados.get(chatId) || {}) : {};
-        try {
-          await enviarPedidoParaNotificador(chatId, dados);
-          if (pedidosEnviados) pedidosEnviados.add(chatId);
-          await enviarMensagemFinal(chatId);
-          await marcarRespondido(nome, chatId); // marca local
-        } catch (e) {
-          logger.error('[TIMER] Falha ao fechar pedido', { chatId, error: e && e.message || e });
-        }
-      }
-    }
-
-    async function enviarPedidoParaNotificador(chatId, dados) {
-      if (!pedidosEnviados || pedidosEnviados.has(chatId)) return; // Enviar apenas 1x
-      const payload = {
-        servidor: NOTIFICADOR_SERVIDOR || 'servidor1',
-        perfil: nome,
-        chat_id: chatId,
-        cidade: dados.cidade || null,
-        telefone: dados.telefone || null,
-        ajudante: dados.ajudante || null,
-        saida_tipo: dados.saida_tipo || null,
-        saida_elevador: dados.saida_elevador || null,
-        destino_tipo: dados.destino_tipo || null,
-        destino_elevador: dados.destino_elevador || null,
-        bairro_saida: dados.bairro_saida || null,
-        bairro_destino: dados.bairro_destino || null,
-        itens: dados.itens || null,
-        timestamp: Date.now()
-      };
-      const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
-      const resp = await fetch(urlFinal, {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!resp.ok) {
-        const txt = await resp.text().catch(()=> '');
-        throw new Error(`Notificador error ${resp.status}: ${txt}`);
-      }
-      logger.info('[NOTIFICADOR] Pedido final enviado', { chatId, perfil: nome });
-    }
-
-    async function enviarMensagemFinal(chatId) {
-      const mensagem = 'Perfeito! Recebi todas as informações. Já vou processar seu pedido e te chamar no WhatsApp. Obrigado pela confiança! 🙌\n\nSiga nosso Instagram: @seu_instagram';
-      let p = await ensurePage().catch(() => null);
-      if (!p) return;
-      try {
-        await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
-        const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
-        if (!okOn) return;
-        let campo = await waitForComposer(p, 8000);
-        if (!campo) {
-          await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{});
-          campo = await waitForComposer(p, 8000);
-        }
-        if (!campo) return;
-        await sendMessageSafe(p, campo, mensagem, nome, chatId);
-        logger.info('[MESSENGER] Mensagem final enviada', { chatId });
-      } catch (e) {
-        logger.warn('[MESSENGER] Falha ao enviar mensagem final', { chatId, error: e && e.message || e });
-      }
-    }
 
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
