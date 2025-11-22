@@ -2014,4 +2014,3 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 module.exports = {
   startVirtus
 };
-};
