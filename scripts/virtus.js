@@ -954,12 +954,31 @@ function isVelho8h(tempoLabel) {
   const t = String(tempoLabel)
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .toLowerCase().trim();
-  if (/\b(ontem|yesterday)\b/.test(t)) return true;
-  if (/\b(\d+)\s*(seman|sem|weeks?|w)\b/.test(t)) return true;
-  const mDias = t.match(/\b(\d+)\s*(d|dias?)\b/);
-  if (mDias) { if (parseInt(mDias[1],10) >= 1) return true; }
+
+  // Semanas sempre velho
+  if (/\b(seman|sem|weeks?|w)\b/.test(t)) return true;
+
+  // Dias: >=1 velho
+  const mDias = t.match(/\b(\d+)\s*(d|dia|dias)\b/);
+  if (mDias) {
+    const n = parseInt(mDias[1], 10);
+    if (Number.isFinite(n) && n >= 1) return true;
+  }
+
+  // Horas: >=8 velho
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) { if (parseInt(mH[1],10) >= 8) return true; } // NOVO: 8h ao invés de 24h
+  if (mH) {
+    const n = parseInt(mH[1], 10);
+    if (Number.isFinite(n) && n >= 8) return true;
+    return false;
+  }
+
+  // Minutos/segundos/"agora" nunca velho
+  if (/\b(agora|now|just\snow)\b/.test(t)) return false;
+  if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return false;
+  if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return false;
+
+  // Fallback: NÃO marque como velho se não entender — considerar recente
   return false;
 }
 // Mantido para compatibilidade (mas não usado mais)
@@ -971,13 +990,24 @@ function isChatRecente(tempoLabel) {
   const t = String(tempoLabel)
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .toLowerCase().trim();
-  if (isVelho8h(t)) return false; // NOVO: Usa isVelho8h
-  if (/\b(agora|now)\b/.test(t)) return true;
-  if (/\b\d+\s*(s|seg|secs?|seconds?)\b/.test(t)) return true;
-  if (/\b\d+\s*(min|m|mins?|minutes?)\b/.test(t)) return true;
+
+  if (isVelho8h(t)) return false;
+
+  if (/\b(agora|now|just\snow)\b/.test(t)) return true;
+  if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return true;
+  if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return true;
+
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) { if (parseInt(mH[1],10) < 24) return true; }
-  return false;
+  if (mH) {
+    const n = parseInt(mH[1], 10);
+    if (Number.isFinite(n)) {
+      // <8h = recente (limite do sistema)
+      return n < 8;
+    }
+  }
+
+  // Fallback otimista: se não entendeu, considerar recente
+  return true;
 }
 
 // Extratores e coleta
@@ -1026,8 +1056,8 @@ async function coletaChatsMarketplaceTodos(page) {
           for (const s of spans) {
             const txt = (s.innerText || s.textContent || '').trim();
             if (!txt) continue;
-            if (/agora/i.test(txt)) return txt;
-            if (/\d+\s*(s|min|m|seg|h|hora|hour|minute|minuto|dia|dias|d|sem|seman|week|w)/i.test(txt)) return txt;
+            if (/agora|now|just\snow/i.test(txt)) return txt;
+            if (/\d+\s(s|seg|sec|secs?|seconds?|min|m|mins?|minutes?|hora|horas?|h|hours?|dia|dias?|d|seman|sem|weeks?|w)/i.test(txt)) return txt;
           }
         } catch {}
         return '';
@@ -1047,6 +1077,14 @@ async function coletaChatsMarketplaceTodos(page) {
       for (const it of arr) if (!map.has(it.id)) map.set(it.id, it);
       return Array.from(map.values());
     });
+    
+    if (process.env.VIRTUS_FEED_DEBUG === '1') {
+      try {
+        const sample = items.slice(0, 8).map(i => ({ id: i.id, tempo: i.tempo, href: i.href }));
+        console.log(`[VIRTUS][FEED_SAMPLE]`, sample);
+      } catch {}
+    }
+    
     return items;
   } catch (err) {
     if (VIRTUS_DETAILED_DEBUG) { logger.debug('[VIRTUS] Erro em coletaChatsMarketplaceTodos', { err: String(err) }); }
@@ -1082,7 +1120,11 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
     }, { timeout: timeoutMs }),
     page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: timeoutMs }).catch(() => null)
   ]);
-  if (!ok) throw new Error('Marketplace UI não ficou pronta a tempo');
+  if (!ok) {
+    logger.warn('[VIRTUS][garantirMarketplace] UI não ficou pronta a tempo');
+    throw new Error('Marketplace UI não ficou pronta a tempo');
+  }
+  logger.debug('[VIRTUS][garantirMarketplace] UI pronta');
 }
 
 // ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
@@ -1734,26 +1776,58 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     try {
       if (!running || !epochOk()) return [];
       const p = await ensurePage();
-      if (!p) return [];
-      try {
-        if (!running || !epochOk()) return [];
-        await garantirMarketplace(p);
-      } catch (err) {
-        logger.warn('Não está no Marketplace ou erro ao garantir Marketplace', { nome }, err);
-        await sleep(5000);
+      if (!p) {
+        logger.warn(`[VIRTUS][${nome}] ensurePage retornou null em coletaChatsMarketplaceRecentes()`);
         return [];
       }
+
+      // 1) Garantir Marketplace (com logs)
+      try {
+        await garantirMarketplace(p);
+      } catch (err) {
+        logger.warn(`[VIRTUS][${nome}] garantirMarketplace falhou: ${(err && err.message) || err}`);
+        await sleep(2000);
+        return [];
+      }
+
+      // 2) Espera mínima por elementos do feed
       try {
         await Promise.race([
-          p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 4000 }),
-          p.waitForSelector('div[role="row"] span', { timeout: 4000 }),
+          p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 5000 }),
+          p.waitForSelector('div[role="row"] span', { timeout: 5000 })
         ]);
-      } catch {}
-      const todos = await coletaChatsMarketplaceTodos(p);
-      const filtrados = todos.filter(c => c.id && isChatRecente(c.tempo));
+      } catch {
+        logger.debug(`[VIRTUS][${nome}] timeout curto aguardando anchors/rows`);
+      }
+
+      // 3) Coleta inicial
+      let todos = await coletaChatsMarketplaceTodos(p);
+      logger.debug(`[VIRTUS][${nome}] coletaTodos inicial: ${todos.length} itens`);
+
+      // 4) Se nada encontrado ou poucos itens/nenhum recente, tentar scroll até 8h e recolher
+      if (!todos || todos.length === 0) {
+        logger.debug(`[VIRTUS][${nome}] coleta vazia — ativando scrollListaAte8h()`);
+        try {
+          await scrollListaAte8h(p, { maxMs: 60000, quietLoops: 2 });
+        } catch (e) {
+          logger.warn(`[VIRTUS][${nome}] scrollListaAte8h falhou: ${(e && e.message) || e}`);
+        }
+        todos = await coletaChatsMarketplaceTodos(p);
+        logger.debug(`[VIRTUS][${nome}] coletaTodos após scroll: ${todos.length} itens`);
+      }
+
+      // 5) Filtra recentes (<=8h) com logs
+      const filtrados = (todos || []).filter(c => c.id && isChatRecente(c.tempo));
+      logger.debug(`[VIRTUS][${nome}] filtrados recentes: ${filtrados.length} / ${todos.length}`);
+      if (process.env.VIRTUS_FEED_DEBUG === '1') {
+        for (const it of (todos || [])) {
+          logger.debug(`[VIRTUS][${nome}] CHAT FEED: id=${it.id} tempo="${it.tempo}" recent=${isChatRecente(it.tempo)}`);
+        }
+      }
+
       return filtrados;
     } catch (err) {
-      logger.error('Erro ao coletar chats', { nome }, err);
+      logger.error(`[VIRTUS][${nome}] Erro em coletaChatsMarketplaceRecentes(): ${(err && err.message) || err}`, {}, err);
       return [];
     }
   }
@@ -1882,53 +1956,75 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function atualizaFila() {
     let mudancaFila = false;
     const chatsNovos = await coletaChatsMarketplaceRecentes();
-    let novosAti = 0;
-    const agoraMs = Date.now();
+    logger.debug(`[FILA][${nome}] recebidos da coleta: ${chatsNovos.length}`);
+
     const aguard = getSetAguardando(nome);
+    const agoraMs = Date.now();
 
     for (const c of chatsNovos) {
       const id = c.id;
 
-      // Cooldown de 60s entre probes visuais
+      // Cooldown local de re-probe
       const last = lastProbeMap.get(id) || 0;
-      if ((agoraMs - last) < 60000) continue;
+      if ((agoraMs - last) < 60000) {
+        logger.debug(`[FILA][${nome}] skip ${id} — re-probe <60s`);
+        continue;
+      }
 
-      // Não re-enfileirar se o chat está marcado como "aguardando_cliente" e cooldown ainda vigente
+      // Estados de chat — logs de decisão
+      let st = null;
+      try { st = await getChatState(nome, id); } catch {}
+      if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
+        lastProbeMap.set(id, agoraMs);
+        logger.debug(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
+        continue;
+      }
+      if (st && typeof st.lastCLIts === 'number' && typeof st.ultimoProbeCLIts === 'number' && st.lastCLIts === st.ultimoProbeCLIts) {
+        // nenhum avanço desde último probe
+        lastProbeMap.set(id, agoraMs);
+        logger.debug(`[FILA][${nome}] skip ${id} — sem avanço de timestamp de cliente (lastCLIts==ultimoProbeCLIts)`);
+        continue;
+      }
+      if (st && st.state === 'erro_envio') {
+        lastProbeMap.set(id, agoraMs);
+        logger.debug(`[FILA][${nome}] skip ${id} — marcado como erro_envio (aguardar nova mensagem)`);
+        continue;
+      }
+
+      if (aguard.has(id)) {
+        logger.debug(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
+        continue;
+      }
+      if (fila.includes(id)) {
+        logger.debug(`[FILA][${nome}] skip ${id} — já está na fila`);
+        continue;
+      }
+
+      // Registro mínimo imediato do chatId (robustez)
       try {
-        const st = await getChatState(nome, id);
-        if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
-          // está sob cooldown pós-envio; não enfileirar
-          lastProbeMap.set(id, agoraMs);
-          continue;
-        }
-
-        // INÍCIO PATCH: verificação persistida (disco) para evitar reenfileiramento sem novidade
-        if (st && typeof st.lastCLIts === 'number' && typeof st.ultimoProbeCLIts === 'number' && st.lastCLIts === st.ultimoProbeCLIts) {
-          // Sem mudança no último timestamp do cliente desde o último probe: NÃO enfileira
-          lastProbeMap.set(id, agoraMs);
-          continue;
-        }
-
-        // Não re-enfileirar chats em estado de erro_envio
-        if (st && st.state === 'erro_envio') {
-          // Não re-enfileira chats em estado de erro_envio (até que haja novidade real: nova mensagem do cliente)
-          lastProbeMap.set(id, agoraMs);
-          continue;
-        }
-        // FIM PATCH
+        await setChatState(nome, id, {
+          state: CHAT_STATES.PENDENTE,
+          createdAt: Date.now()
+        });
       } catch {}
 
-      if (!aguard.has(id) && !fila.includes(id)) {
-        fila.push(id);
-        lastProbeMap.set(id, agoraMs);
-        novosAti++;
-        log(`[FILA] Candidato ${id} enfileirado para inspeção de novas mensagens (${c.tempo})`);
-        mudancaFila = true;
-      }
+      // Registro de cidade do perfil (se disponível)
+      try {
+        const man = await manifestStore.read(nome).catch(()=>null);
+        const cid = man && man.cidade || null;
+        if (cid) {
+          await setChatState(nome, id, { perfilCidade: String(cid) });
+        }
+      } catch {}
+
+      fila.push(id);
+      lastProbeMap.set(id, agoraMs);
+      logger.info(`[FILA][${nome}] Candidato ${id} enfileirado (${c.tempo})`);
+      mudancaFila = true;
     }
 
-    if (novosAti > 0) {
-      log(`[FILA] Atualizada: ${fila.length} chats pendentes para resposta.`);
+    if (mudancaFila) {
+      logger.info(`[FILA][${nome}] Atualizada: ${fila.length} chats pendentes`);
     }
     return mudancaFila;
   }
