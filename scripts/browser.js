@@ -9,6 +9,24 @@ const logger = require('./logger.js');
 
 puppeteer.use(StealthPlugin());
 
+// Proteção central: abas de busca de localização (60s de proteção com limpeza de marcações órfãs)
+function isProtectedBuscaLocalizacao(page, now = Date.now()) {
+  const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
+  try {
+    if (page && page._buscaLocalizacao === true) {
+      const age = now - (page._buscaLocalizacaoSince || 0);
+      if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) {
+        return true; // protegido
+      }
+      // muito velho -> limpar marcação e não proteger
+      try { delete page._buscaLocalizacao; } catch {}
+      try { delete page._buscaLocalizacaoSince; } catch {}
+      try { delete page._buscaLocalizacaoChatId; } catch {}
+    }
+  } catch {}
+  return false;
+}
+
 /**
  * Traz a janela do navegador para frente e maximiza.
  * Use SOMENTE ao injetar cookies ou invocar humano.
@@ -435,14 +453,17 @@ function ensureChromeProfilePreferences(userDataDir) {
  * Após prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
-  // 1) Sempre fecha about:blank extras (nunca aguarda flags)
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const now = Date.now();
+
+  // 1) Fecha about:blank extras apenas se NÃO for aba protegida
   try {
     const pages = await browser.pages();
     for (const p of pages) {
       try {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && pages[0] && p === pages[0]) continue;
+        if (isProtectedBuscaLocalizacao(p, now)) continue;
         let u = ''; try { u = p.url(); } catch {}
         if (!u || u === 'about:blank') {
           await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -451,18 +472,18 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
     }
   } catch {}
 
-  // 2) Se em Robe/config/etc, não faz prune amplo
+  // 2) Não faz prune amplo se estiver em fluxo que exige preservação
   const isRobeActive = robeMeta && nome && robeMeta[nome] && robeMeta[nome].emExecucao === true;
   const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
-  const isConfig = ctrl && ctrl.configurando === true;
-  const isHuman = ctrl && ctrl.humanControl === true;
+  const isConfig      = ctrl && ctrl.configurando === true;
+  const isHuman       = ctrl && ctrl.humanControl === true;
   const robeActiveFor = (browser && browser._robeActiveFor === nome);
 
   if (isRobeActive || robeActiveFor || sendLockActive || isConfig || isHuman) {
     return;
   }
 
-  // 3) Prune amplo padrão (mais de 1 page)
+  // 3) Prune amplo padrão — NUNCA fechar abas protegidas nem create item
   const t0 = Date.now();
   while ((Date.now() - t0) < timeoutMs) {
     try {
@@ -471,6 +492,7 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
       for (const p of pages) {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && pages[0] && p === pages[0]) continue;
+        if (isProtectedBuscaLocalizacao(p)) continue; // proteção
         let u = ''; try { u = p.url(); } catch {}
         if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -500,17 +522,18 @@ function installOneTabGuard(browser, nome, {
       } catch {}
     }
     async function enforceHardCap() {
-      if (browser && browser._robeActiveFor === nome) return; // Nunca prune se Robe ativo para este perfil
+      if (browser && browser._robeActiveFor === nome) return; // nunca prune se Robe ativo para este perfil
       try {
+        const now = Date.now();
         const pages = await browser.pages();
         let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
         if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
         const lim = (allow && allow()) ? limOpt : 1;
         if (Array.isArray(pages) && pages.length > lim) {
-          // Mantenha a primeira (main) e feche todas as demais
           for (let i = pages.length - 1; i >= 1; i--) {
             if (pages.length <= lim) break;
             const p = pages[i];
+            if (isProtectedBuscaLocalizacao(p, now)) continue; // PROTEÇÃO
             let u = '';
             try { u = await p.url().catch(()=>''); } catch {}
             if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // Nunca fechar create item
@@ -879,8 +902,10 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       try {
         const pages = await browser.pages();
         if (pages && pages.length > 1) {
+          const now = Date.now();
           const mainPage = pages[0];
           for (const p of pages.slice(1)) {
+            if (isProtectedBuscaLocalizacao(p, now)) continue; // PROTEÇÃO
             let u = '';
             try { u = await p.url(); } catch {}
             if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
@@ -1910,8 +1935,9 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
           if (sup > Date.now()) return;
           if (page.isClosed && page.isClosed()) return;
-          // AQUI pode acessar page.url() pois mainFrame já existe
           const u = page.url ? page.url() : '';
+          // PROTEÇÃO: não matar aba about:blank protegida de busca (até 60s)
+          if (isProtectedBuscaLocalizacao(page)) return;
           if (!u || u === 'about:blank') {
             try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
             try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
@@ -2064,6 +2090,7 @@ module.exports = {
   clickContinuarComo,
   installOneTabGuard,
   installAboutBlankKiller,
+  isProtectedBuscaLocalizacao,
   // ==== NOVOS:
   detectLoginRequired,
   detectAccountSuspended

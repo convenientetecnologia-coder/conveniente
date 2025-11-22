@@ -893,15 +893,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // HARD GUARD: nunca feche abas durante o ciclo do Robe desta conta
         try {
           if (browser && browser._robeActiveFor === nome) {
-            // Em ciclo de postagem — não tocar em abas
+            // Robe ativo — não fecha nada
           } else {
             const allPages = await browser.pages();
             if (Array.isArray(allPages) && allPages.length > 1) {
+              const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
+              const now = Date.now();
               for (let i = allPages.length - 1; i >= 1; i--) {
+                const p = allPages[i];
+                // PROTEÇÃO: não fecha abas de busca de localização
+                try {
+                  if (p._buscaLocalizacao === true) {
+                    const age = now - (p._buscaLocalizacaoSince || 0);
+                    if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) {
+                      continue; // protegido
+                    }
+                    try { delete p._buscaLocalizacao; } catch {}
+                    try { delete p._buscaLocalizacaoSince; } catch {}
+                    try { delete p._buscaLocalizacaoChatId; } catch {}
+                  }
+                } catch {}
                 let u = '';
-                try { u = await allPages[i].url(); } catch {}
+                try { u = await p.url(); } catch {}
                 if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // NUNCA fechar create item
-                try { await allPages[i].close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
+                try { await p.close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
               }
             }
           }
