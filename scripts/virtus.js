@@ -129,6 +129,11 @@ Personalidade:
 - Usa emojis na medida certa (😄🚚📲✨)
 - Persistente agradável (sem ser chato)
 
+CONTEXTO DA CONVERSA:
+- Esta é uma conversa em andamento. Continue naturalmente, sem cumprimentos repetidos.
+- NUNCA diga "Olá novamente" ou "Olá" se já houve mensagens anteriores. Vá direto ao ponto, de forma humana.
+- Se já existe histórico, dê continuidade ao tema da última mensagem do cliente.
+
 Objetivo nº 1: coletar o WhatsApp do cliente (telefone com DDD) o mais rápido possível, de forma natural.
 
 Objetivo nº 2: depois do telefone, coletar informações adicionais ("cereja do bolo"):
@@ -140,11 +145,12 @@ Objetivo nº 2: depois do telefone, coletar informações adicionais ("cereja do
   - Itens/quantidade a transportar?
 
 Regras:
-- Sempre cumprimente com entusiasmo e mencione a cidade do cliente.
+- Na primeira mensagem apenas (quando não houver histórico anterior), cumprimente com entusiasmo e mencione a cidade do cliente se fizer sentido.
+- Nas mensagens subsequentes (quando já houver histórico), NÃO repita a cidade nem faça saudação inicial.
 - Responda dúvidas e emende pedindo o zap de forma fluida.
 - Se o cliente mandar telefone em qualquer formato, extraia imediatamente (com DDD).
 - Após pegar o telefone, colete as informações adicionais de forma natural (uma ou duas por vez).
-- Responda SEMPRE apenas um JSON puro, SEM texto antes/depois.
+- Seja natural e humano. Evite repetir informações que o cliente já sabe.
 
 REGRA ABSOLUTA:
 - Se o cliente enviou uma mensagem nova (mesmo que não contenha telefone), você DEVE SEMPRE responder.
@@ -175,15 +181,26 @@ Formato JSON esperado:
 
 function montarPromptUser(cidade, historico) {
   const cid = cidade || 'não informada';
-  let linhas = [`Contexto do atendimento:`, `- Cidade: ${cid}`, ``, `Histórico completo (ordem temporal, autor: texto):`];
-
+  const temHistorico = Array.isArray(historico) && historico.length > 0;
+  const cabecalho = [
+    `Contexto do atendimento:`,
+    `- Cidade (referência): ${cid}`,
+    ``,
+    `Esta é uma conversa em andamento. Continue naturalmente, sem cumprimentos repetidos,`,
+    `e sem repetir a cidade caso já exista histórico.`,
+    ``,
+    `Histórico completo (ordem temporal, autor: texto):`
+  ];
+  const linhas = [];
   for (const msg of (historico || [])) {
     const autor = (msg.autor === 'ia' || msg.autor === 'sistema') ? 'Atendente' : 'Cliente';
     linhas.push(`${autor}: ${msg.texto}`);
   }
-
-  linhas.push(``, `Gere a próxima resposta seguindo as regras e o formato JSON especificado.`);
-  return linhas.join('\n');
+  const rodape = [
+    ``,
+    `Gere a próxima resposta seguindo as regras e o formato JSON especificado.`
+  ];
+  return [...cabecalho, ...linhas, ...rodape].join('\n');
 }
 
 function parsearRespostaGroq(respostaTexto) {
@@ -1844,6 +1861,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           lastProbeMap.set(id, agoraMs);
           continue;
         }
+
+        // Não re-enfileirar chats em estado de erro_envio
+        if (st && st.state === 'erro_envio') {
+          // Não re-enfileira chats em estado de erro_envio (até que haja novidade real: nova mensagem do cliente)
+          lastProbeMap.set(id, agoraMs);
+          continue;
+        }
         // FIM PATCH
       } catch {}
 
@@ -2030,22 +2054,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let campo = await waitForComposer(p, 10000);
         if (!campo) {
-          logger.warn('Composer não encontrado. Fallback: goto direto e revalidar.', { nome, chatId });
-          try {
-            if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            await sleep(800);
-          } catch {}
-          if (await isChatBlocked(p)) {
-            logger.warn('Chat bloqueado no fallback, marcado respondido', { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            resetFail(chatId);
-            return;
-          }
+          // sem reload imediato — ampliar a espera e tentar foco/scroll leve
+          try { await p.evaluate(() => window.scrollBy(0, 120)); } catch {}
           campo = await waitForComposer(p, 8000);
+        }
+        if (!campo) {
+          // último grace curto — sem reload
+          await sleep(2000);
+          campo = await waitForComposer(p, 3000);
         }
 
         if (!campo) {
@@ -2183,6 +2199,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { estadoAnteriorChat = await getChatState(nome, chatId); } catch {}
         const ultimaMsgAnterior = (estadoAnteriorChat && estadoAnteriorChat.ultimaMensagemClienteProcessada) || '';
         const ultimaMsgAtual = (ultimaCliente && ultimaCliente.texto) ? String(ultimaCliente.texto) : '';
+        
+        // Não tentar novamente se estiver marcado como erro_envio para a mesma mensagem do cliente
+        if (estadoAnteriorChat && estadoAnteriorChat.state === 'erro_envio') {
+          const curHash = hashResposta(ultimaMsgAtual);
+          if (estadoAnteriorChat.ultimaMsgErroHash && estadoAnteriorChat.ultimaMsgErroHash === curHash) {
+            log(`[SKIP] Chat ${chatId}: já marcado como erro_envio para esta mesma mensagem. Não tentar novamente.`);
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+        }
+
         const haNovidadePorTimestamp = (!tsIA) || (tsCLI > tsIA);
         const haNovidadePorConteudo = (tsCLI >= (tsIA || 0)) && (ultimaMsgAtual && ultimaMsgAtual !== ultimaMsgAnterior);
 
@@ -2235,32 +2264,43 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               iniciarTimerFechamento(chatId, parsed.telefone_extraido);
             }
 
-            // Envia a resposta no Messenger
+            // Reaproveitar a página atual e evitar reload/goto desnecessário
             const pAtual = await ensurePage().catch(() => null);
             if (!pAtual) throw new Error('page_unavailable_for_send');
 
-            await pAtual.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
-            const onOk = await assertOnChat(pAtual, chatId, { timeoutMs: 5000 });
-            if (!onOk) throw new Error('chat_not_opened_for_send');
-
-            let campo = await waitForComposer(pAtual, 10000);
-            if (!campo) {
-              await pAtual.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{});
-              campo = await waitForComposer(pAtual, 8000);
+            const jaNoChat = await assertOnChat(pAtual, chatId, { timeoutMs: 1000 });
+            if (!jaNoChat) {
+              const url0 = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
+              if (!/\/marketplace\/t\//.test(url0)) {
+                await pAtual.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
+                await assertOnChat(pAtual, chatId, { timeoutMs: 5000 });
+              }
             }
-            if (!campo) throw new Error('composer_not_available_for_send');
 
-            // Marcar estado como ENVIANDO antes de enviar
+            // Tente usar o composer já obtido anteriormente; se não existir, espere um pouco mais
+            let campoEnvio = await waitForComposer(pAtual, 15000);
+            if (!campoEnvio) {
+              // sem reload automático — apenas mais um pequeno grace e tentativa de scroll
+              try { await pAtual.evaluate(() => window.scrollBy(0, 100)); } catch {}
+              campoEnvio = await waitForComposer(pAtual, 5000);
+            }
+
+            if (!campoEnvio) {
+              // último grace, sem reload
+              await sleep(3000);
+              campoEnvio = await waitForComposer(pAtual, 3000);
+            }
+
+            if (!campoEnvio) throw new Error('composer_not_available_for_send');
+
             try {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
             } catch {}
 
-            await sendMessageSafe(pAtual, campo, parsed.resposta, nome, chatId);
-            // sendMessageSafe já marca AGUARDANDO após confirmação bem-sucedida
-            
+            await sendMessageSafe(pAtual, campoEnvio, parsed.resposta, nome, chatId);
+
             await marcarRespondido(nome, chatId);
 
-            // INÍCIO PATCH: Gravar última mensagem do cliente processada (persistida em disco)
             try {
               await setChatState(nome, chatId, {
                 ultimaMensagemClienteProcessada: ultimaMsgAtual,
@@ -2268,11 +2308,43 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastIATs: Date.now()
               });
             } catch {}
-            // FIM PATCH
 
             logger.info('[GROQ] Resposta enviada com sucesso', { chatId, finalizado: parsed.finalizado, tel: parsed.telefone_extraido });
           } catch (e) {
             logger.error('[GROQ] Falha no fluxo direto', { chatId, error: e && e.message || e });
+            // Retry/backoff: registra tentativas e agenda reprocessamento
+            try {
+              const prev = await getChatState(nome, chatId);
+              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+              const baseMin = 2; // 2min base
+              const nextMs = Math.min(5 * 60 * 1000, Math.pow(2, attempts - 1) * baseMin * 60 * 1000); // max 5min
+
+              if (attempts >= 3) {
+                // Após 3 falhas, marca "erro_envio" e não tenta mais para esta mesma mensagem
+                const msgHash = hashResposta(ultimaMsgAtual || '');
+                await setChatState(nome, chatId, {
+                  state: 'erro_envio',
+                  sendAttempts: attempts,
+                  ultimaMsgErroHash: msgHash,
+                  ultimoProbeCLIts: tsCLI || 0
+                });
+                await logIssue(nome, 'virtus_send_failed', `erro_envio após ${attempts} tentativas (chat ${chatId})`);
+              } else {
+                // Backoff exponencial até 5min no estado AGUARDANDO
+                await setChatState(nome, chatId, {
+                  state: CHAT_STATES.AGUARDANDO,
+                  sendAttempts: attempts,
+                  cooldownUntil: Date.now() + nextMs,
+                  ultimoProbeCLIts: tsCLI || 0
+                });
+                await logIssue(nome, 'virtus_send_failed', `retry_schedule attempt=${attempts} in=${Math.round(nextMs/1000)}s chat=${chatId}`);
+              }
+            } catch {}
+            // encerra ciclo
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
           }
         } else {
           // Fluxo antigo: Notificador
