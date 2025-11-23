@@ -6,6 +6,9 @@ const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./brow
 
 const browserHelper = require('./browser.js');
 
+// Snapshot status throttle (evita overkill em ambientes multi-perfil)
+let _lastSnapAt = 0;
+
 // ====== INÍCIO: FILA GLOBAL DE BUSCA DE LOCALIZAÇÃO (sem ciclo) ======
 const filaBuscaLocalizacao = [];
 let processandoBuscaLocalizacao = false;
@@ -717,7 +720,7 @@ async function killProcessTreeByRootPid(pid) {
 
 async function killStrayChromes() {
   // Intencionalmente no-op: 110% sem WMI/PowerShell e sem ps-list
-  return;
+      return;
 }
 
 try {
@@ -1442,8 +1445,8 @@ async function closeExtraPages(browser, mainPage, nome) {
       const again = await browser.pages();
       for (const p of again) {
         try {
-          if (mainPage && p === mainPage) continue;
-          if (!mainPage && again[0] && p === again[0]) continue;
+        if (mainPage && p === mainPage) continue;
+        if (!mainPage && again[0] && p === again[0]) continue;
           // PROTEÇÃO DUPLA: flag global + marcação
           try {
             if (browser && browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
@@ -1451,10 +1454,10 @@ async function closeExtraPages(browser, mainPage, nome) {
             }
           } catch {}
           if (isProtectedBusca(p)) continue;
-          let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-          if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
-          await p.close({ runBeforeUnload: false }).catch(()=>{});
-          closed++;
+        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
+        if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
+        await p.close({ runBeforeUnload: false }).catch(()=>{});
+        closed++;
         } catch {}
       }
     }
@@ -1661,8 +1664,8 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
             const arr = Array.isArray(obj && obj.traceEvents) ? obj.traceEvents : [];
             for (const e of arr) {
               if (e && typeof e.pid === 'number') pids.add(e.pid);
-            }
-          } catch {} 
+      }
+    } catch {}
         } finally {
           resolve(Array.from(pids));
         }
@@ -1682,7 +1685,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
     const res = await tracingComplete;
     try { await session.detach && session.detach().catch(()=>{}); } catch {}
     return Array.isArray(res) ? res : [];
-  } catch {
+        } catch {
     return [];
   }
 }
@@ -1690,7 +1693,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
 async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}) {
   try {
     if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) return [];
-    robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome] = robeMeta[nome] || {};
     const cache = robeMeta[nome]._pidCache || { pids: [], ts: 0 };
     const expired = (Date.now() - cache.ts) > PIDS_CACHE_TTL_MS;
     if (!forceRefresh && !expired && Array.isArray(cache.pids) && cache.pids.length) {
@@ -1721,8 +1724,8 @@ async function ramCpuMonitorTick() {
     const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000);
     const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-    return;
-  }
+              return;
+            }
 
   _ramTickBusy = true;
   const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '12000', 10); // 12s padrão Windows
@@ -1735,8 +1738,8 @@ async function ramCpuMonitorTick() {
       for (const nome of Object.keys(robeMeta)) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].ramMB = null;
-        robeMeta[nome].cpuPercent = null;
-      }
+            robeMeta[nome].cpuPercent = null;
+          }
       await snapshotStatusAndWrite();
       return;
     }
@@ -1781,8 +1784,8 @@ async function ramCpuMonitorTick() {
         const RAM_CORRECTION_FACTOR = parseFloat(process.env.RAM_CORRECTION_FACTOR || '0.435'); // 0.435 = ~43.5% (ajuste fino)
         const pids = await getControllerPidsCached(nome, ctrl, { forceRefresh: false });
         let totalMB = 0;
-        if (Array.isArray(pids) && pids.length) {
-          for (const pid of pids) {
+          if (Array.isArray(pids) && pids.length) {
+              for (const pid of pids) {
             const v = pidMemMap[pid];
             if (typeof v === 'number' && v >= 0) totalMB += v;
           }
@@ -1809,14 +1812,14 @@ async function ramCpuMonitorTick() {
 
       } catch {
         try {
-          robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = null;
           robeMeta[nome].cpuPercent = null;
         } catch {}
       }
     }
 
-    await snapshotStatusAndWrite();
+  await snapshotStatusAndWrite();
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
   } finally {
@@ -2067,8 +2070,11 @@ async function robeTickGlobal() {
   }
 }
 
-setInterval(robeTickGlobal, 7000);
-setTimeout(robeTickGlobal, 3500);
+// Intervalo do robeTickGlobal controlável por env (padrão 3000ms para maior reatividade)
+const ROBE_TICK_INTERVAL_MS = parseInt(process.env.ROBE_TICK_INTERVAL_MS || '3000', 10);
+const ROBE_TICK_INITIAL_MS = Math.floor(ROBE_TICK_INTERVAL_MS / 2);
+setInterval(robeTickGlobal, ROBE_TICK_INTERVAL_MS);
+setTimeout(robeTickGlobal, ROBE_TICK_INITIAL_MS);
 
 async function fotosGcTick() {
   try {
@@ -3048,6 +3054,10 @@ const handlers = {
 };
 
 async function snapshotStatusAndWrite() {
+  // Throttle: limita frequência de writes (800ms mínimo entre writes)
+  if ((Date.now() - _lastSnapAt) < 800) return;
+  _lastSnapAt = Date.now();
+
 _statusLock = _statusLock.then(async () => {
 try {
 try {

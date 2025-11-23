@@ -292,27 +292,22 @@ function getAvailableMB() {
   }
 }
 
-// PATCH — Validação e extração de telefones BR (com DDD) ultra-rígido
-
+// Validação e extração ultra-rígida de telefone BR (com DDD)
 function normalizeBRPhone(raw) {
   const s = String(raw || '').replace(/[^\d+]/g, '');
-  // Remove DDI caso venha +55
   const noPlus = s.replace(/^\+/, '');
   const br = noPlus.replace(/^55/, '');
   return br;
 }
 
 function isValidBRPhoneWithDDD(digitsOnly) {
-  // Aceita 10 ou 11 dígitos: (DD) + (8 ou 9 com 9 na frente)
   const d = String(digitsOnly || '').replace(/\D/g, '');
   if (d.length === 11) {
-    // 11 dígitos: DDD + 9 + XXXX + XXXX
     const ddd = d.slice(0,2);
     const n9 = d[2] === '9';
     return /^[1-9]{2}$/.test(ddd) && n9;
   }
   if (d.length === 10) {
-    // 10 dígitos: DDD + número fixo
     const ddd = d.slice(0,2);
     const first = d[2];
     return /^[1-9]{2}$/.test(ddd) && /^[2-9]$/.test(first);
@@ -322,9 +317,7 @@ function isValidBRPhoneWithDDD(digitsOnly) {
 
 function extractPhonesBRStrict(text) {
   if (!text) return [];
-  // Aceita números com ou sem +55, tenta normalizar, exige DDD válido
   const cleaned = String(text).replace(/[^\d+]/g, ' ');
-  // Tenta capturar sequências 10-13 dígitos
   const candidates = cleaned.match(/(?:\+?55)?\s*\d{10,11}/g) || [];
   const out = [];
   const seen = new Set();
@@ -348,3 +341,8 @@ module.exports = {
   isValidBRPhoneWithDDD,
   extractPhonesBRStrict,
 };
+
+// Exportação explícita adicional (garantia de blindagem)
+module.exports.normalizeBRPhone = normalizeBRPhone;
+module.exports.isValidBRPhoneWithDDD = isValidBRPhoneWithDDD;
+module.exports.extractPhonesBRStrict = extractPhonesBRStrict;

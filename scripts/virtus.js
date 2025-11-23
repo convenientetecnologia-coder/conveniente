@@ -29,6 +29,118 @@ const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 
+// Batch (buffer) para I/O (logs, states)
+const CHAT_LOG_BUFFERS = new Map();  // file -> [line]
+let CHAT_LOG_FLUSH_TIMER = null;
+
+function scheduleChatLogFlush() {
+  if (CHAT_LOG_FLUSH_TIMER) return;
+  CHAT_LOG_FLUSH_TIMER = setTimeout(async () => {
+    const entries = Array.from(CHAT_LOG_BUFFERS.entries());
+    CHAT_LOG_BUFFERS.clear();
+    CHAT_LOG_FLUSH_TIMER = null;
+    for (const [file, lines] of entries) {
+      try {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        fsRaw.appendFileSync(file, lines.join(''), 'utf8');
+      } catch {}
+    }
+  }, 200);
+}
+
+const CHAT_STATE_PENDING = new Map(); // perfil -> { chatId -> patch acumulado }
+let CHAT_STATE_FLUSH_TIMER = null;
+function scheduleChatStateFlush() {
+  if (CHAT_STATE_FLUSH_TIMER) return;
+  CHAT_STATE_FLUSH_TIMER = setTimeout(async () => {
+    const copy = new Map(CHAT_STATE_PENDING);
+    CHAT_STATE_PENDING.clear();
+    CHAT_STATE_FLUSH_TIMER = null;
+    for (const [perfil, map] of copy.entries()) {
+      try {
+        const st = await readJsonFsyncSafe(CHAT_STATE_FILE(perfil), {});
+        for (const [chatId, patch] of map.entries()) {
+          st[chatId] = Object.assign({}, st[chatId] || {}, patch, { updatedAt: Date.now() });
+        }
+        await writeJsonFsyncAtomic(CHAT_STATE_FILE(perfil), st);
+      } catch {}
+    }
+  }, 200);
+}
+
+// MutationObserver para detectar novos chats em tempo real
+async function installChatFeedObserver(page, nome, onChat) {
+  if (!page || page._virtusChatObserverInstalled) return;
+  page._virtusChatObserverInstalled = true;
+
+  await page.exposeFunction('__virtusOnNewChat', (payload) => {
+    try {
+      if (!payload || !payload.id) return;
+      onChat && onChat(payload);
+    } catch {}
+  });
+
+  await page.evaluateOnNewDocument(() => {
+    (function(){
+      const seen = new Set();
+      function extractId(href) {
+        try {
+          const s = String(href || '');
+          const pos = s.indexOf('/marketplace/t/');
+          if (pos < 0) return null;
+          const rest = s.slice(pos + '/marketplace/t/'.length);
+          const id = rest.split(/[/?#]/)[0];
+          return id && /^\d+$/.test(id) ? id : null;
+        } catch { return null; }
+      }
+      function labelOf(row) {
+        try {
+          const abbr = row && row.querySelector && row.querySelector('abbr[aria-label]');
+          if (abbr) {
+            return (abbr.getAttribute('aria-label') || abbr.innerText || abbr.textContent || '').trim();
+          }
+          const sp = row && row.querySelector && row.querySelector('span');
+          if (sp) return (sp.innerText || sp.textContent || '').trim();
+        } catch {}
+        return '';
+      }
+      function scan(root) {
+        try {
+          const anchors = Array.from(root.querySelectorAll('a[href^="/marketplace/t/"]'));
+          for (const a of anchors) {
+            const id = extractId(a.getAttribute('href') || a.href || '');
+            if (!id) continue;
+            const row = a.closest('div[role="row"]') || a.parentElement || document.body;
+            const tempo = labelOf(row);
+            const key = id + '|' + tempo;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            (window.__virtusOnNewChat && window.__virtusOnNewChat({ id, tempo })) || null;
+          }
+        } catch {}
+      }
+      const obs = new MutationObserver((muts) => {
+        try {
+          for (const m of muts) {
+            if (m.addedNodes && m.addedNodes.length) {
+              m.addedNodes.forEach(n => {
+                if (n && n.querySelectorAll) scan(n);
+              });
+            }
+          }
+        } catch {}
+      });
+      window.addEventListener('DOMContentLoaded', () => {
+        try {
+          const root = document.querySelector('div[role="grid"]') || document.body;
+          if (root) scan(root);
+          obs.observe(document.body, { childList: true, subtree: true });
+        } catch {}
+      });
+    })();
+  });
+}
+
 // === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
 // === Pipeline de Perguntas (dominante, Groq só como fallback) ===
@@ -526,16 +638,16 @@ function chatLogPath(perfil, chatId) {
 async function appendChatHistoryLog(perfil, chatId, historicoArr) {
   try {
     const file = chatLogPath(perfil, chatId);
-    fsRaw.mkdirSync(path.dirname(file), { recursive: true });
     const st = await getChatState(perfil, chatId).catch(()=>null);
     const lastTs = st && st.chatLogLastTs || 0;
     const novos = (historicoArr||[]).filter(m => Number(m.timestamp||0) > lastTs);
     if (!novos.length) return;
-    const fd = fsRaw.openSync(file + '.tmp', 'a');
-    try { for (const m of novos) fsRaw.writeSync(fd, JSON.stringify(m) + '\n', 'utf8'); fsRaw.fsyncSync(fd); } finally { fsRaw.closeSync(fd); }
-    try { fsRaw.appendFileSync(file, fsRaw.readFileSync(file+'.tmp')); fsRaw.unlinkSync(file+'.tmp'); } catch { try { fsRaw.renameSync(file+'.tmp', file); } catch {} }
+    const buf = CHAT_LOG_BUFFERS.get(file) || [];
+    for (const m of novos) buf.push(JSON.stringify(m) + '\n');
+    CHAT_LOG_BUFFERS.set(file, buf);
     const maxTs = Math.max(...novos.map(m=>Number(m.timestamp||0)));
     await setChatState(perfil, chatId, { chatLogLastTs: maxTs || Date.now() });
+    scheduleChatLogFlush();
   } catch {}
 }
 
@@ -1415,10 +1527,13 @@ async function getChatState(perfil, chatId) {
 }
 
 async function setChatState(perfil, chatId, patch) {
-  const st = await loadChatState(perfil);
-  const prev = st[chatId] || {};
-  st[chatId] = Object.assign({}, prev, patch || {}, { updatedAt: Date.now() });
-  await saveChatState(perfil, st);
+  try {
+    if (!CHAT_STATE_PENDING.has(perfil)) CHAT_STATE_PENDING.set(perfil, new Map());
+    const m = CHAT_STATE_PENDING.get(perfil);
+    const cur = m.get(chatId) || {};
+    m.set(chatId, Object.assign(cur, patch || {}));
+    scheduleChatStateFlush();
+  } catch {}
 }
 
 // Estados aceitos:
@@ -1445,7 +1560,7 @@ const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0
 const NOTIFICADOR_SERVIDOR = process.env.SERVIDOR_NOME || 'servidor1';
 
 const NOTIFICADOR_ENVIO_LOTE_MS = parseInt(process.env.NOTIFICADOR_ENVIO_LOTE_MS || '10000', 10); // 10s
-const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '5000', 10);       // 5s
+const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '1100', 10);
 const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '30000', 10); // 30s
 const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '60000', 10); // 60s
 
@@ -1676,7 +1791,21 @@ function extraiIdDoHref(href) {
     const rest = s.slice(pos + '/marketplace/t/'.length);
     const id = rest.split(/[/?#]/)[0];
     return id && /^\d+$/.test(id) ? id : null;
-  } catch { return null; }
+  } catch { return null;   }
+}
+
+let lastGuaranteeAt = 0;
+async function maybeGuaranteeMarketplaceFast(page, nome) {
+  const url = (typeof page.url === 'function' ? page.url() : '') || '';
+  if (/messenger.com\/marketplace/i.test(url)) {
+    const ok = await page.evaluate(() => !!document.querySelector('a[href^="/marketplace/t/"]') || !!document.querySelector('div[role="row"]')).catch(()=>false);
+    if (ok) return true;
+  }
+  const now = Date.now();
+  if ((now - lastGuaranteeAt) < 8000) return true;
+  lastGuaranteeAt = now;
+  await garantirMarketplace(page, { nome, allowNavigate: true });
+  return true;
 }
 
 async function coletaChatsMarketplaceTodos(page) {
@@ -2248,7 +2377,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
-  const POLL_INTERVAL_MS = 30_000; // polling de novos chats (30s - versão estável)
+  const POLL_INTERVAL_MS = parseInt(process.env.VIRTUS_POLL_MS || '1000', 10);
   const MIN_REPLY_DELAY_MS = 0;
   const MAX_REPLY_DELAY_MS = 0;
 
@@ -2580,11 +2709,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return [];
       }
 
-      // 1) Garantir Marketplace (com logs)
+      // 1) Garantir Marketplace (com logs) - versão otimizada
       try {
-        await garantirMarketplace(p, { nome, allowNavigate: false });
+        await maybeGuaranteeMarketplaceFast(p, nome);
       } catch (err) {
-        logger.warn(`[VIRTUS][${nome}] garantirMarketplace falhou: ${(err && err.message) || err}`);
+        logger.warn(`[VIRTUS][${nome}] maybeGuaranteeMarketplaceFast falhou: ${(err && err.message) || err}`);
         await sleep(2000);
         return [];
       }
@@ -2695,7 +2824,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const p = await ensurePage();
     if (!p) { logger.warn('[SNAPSHOT] Falha ao garantir aba zero.', { nome }); return; }
     if (!running || !epochOk()) return;
-    await garantirMarketplace(p, { allowNavigate: false });
+    await maybeGuaranteeMarketplaceFast(p, nome);
+    await maybeGuaranteeMarketplaceFast(p, nome);
     try {
       await Promise.race([
         p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }),
@@ -2765,7 +2895,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const agoraMs = Date.now();
     const ERROR_TTL_MS = parseInt(process.env.VIRTUS_ERROR_TTL_MS || '1800000', 10); // 30min padrão
 
-    for (const c of chatsNovos) {
+    // Paralelização com p-limit
+    let pLimitImport;
+    try {
+      pLimitImport = require('p-limit');
+    } catch {
+      pLimitImport = null;
+    }
+    const pLimit = pLimitImport && (pLimitImport.default || pLimitImport);
+    const limit = pLimit ? pLimit(8) : (fn) => fn();
+
+    await Promise.all(chatsNovos.map(c => limit(async () => {
       const id = c.id;
 
       // Cooldown local de re-probe - mas sempre verificar chats que já foram respondidos (podem ter novas mensagens)
@@ -2779,16 +2919,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
       if ((agoraMs - last) < cooldownAplicavel) {
         logger.info(`[FILA][${nome}] skip ${id} — re-probe <${cooldownAplicavel}ms`);
-        continue;
+        return;
       }
 
       // NOVO: Não pular se está em AGUARDANDO - sempre verificar se há novas mensagens do cliente
       // O cooldown só serve para evitar spam de envio, não para bloquear verificação
-      // if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
-      //   lastProbeMap.set(id, agoraMs);
-      //   logger.info(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
-      //   continue;
-      // }
       // TTL de força: mesmo sem mudança aparente, forçar abertura do chat após X minutos
       const lastProbeAt = (st && typeof st.lastProbeAt === 'number') ? st.lastProbeAt : 0;
       const ttlAplicavel = jaFoiRespondido ? Math.min(PROBE_FORCE_OPEN_MS, 60000) : PROBE_FORCE_OPEN_MS; // 1min para chats já respondidos
@@ -2806,7 +2941,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!jaFoiRespondido) {
           lastProbeMap.set(id, agoraMs);
           logger.info(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${ttlAplicavel}ms`);
-          continue;
+          return;
         }
         // Se já foi respondido, não pular - sempre verificar se há novas mensagens
       }
@@ -2819,11 +2954,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       if (aguard.has(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
-        continue;
+        return;
       }
       if (fila.includes(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
-        continue;
+        return;
       }
 
       // Registro mínimo imediato do chatId (robustez)
@@ -2848,7 +2983,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       lastProbeMap.set(id, agoraMs);
       logger.info(`[FILA][${nome}] Candidato ${id} enfileirado (${c.tempo})`);
       mudancaFila = true;
-    }
+    })));
 
     if (mudancaFila) {
       logger.info(`[FILA][${nome}] Atualizada: ${fila.length} chats pendentes`);
@@ -2981,7 +3116,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
         logger.info('[NAVEGACAO] Garantindo Marketplace UI', { nome, chatId });
-        await garantirMarketplace(p, { nome, allowNavigate: false });
+        await maybeGuaranteeMarketplaceFast(p, nome);
         logger.info('[NAVEGACAO] Marketplace UI garantida', { nome, chatId });
 
         // NOVO: Não bloquear baseado apenas em respondedCache
@@ -3885,7 +4020,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
       }
-      await garantirMarketplace(p, { nome });
+      await maybeGuaranteeMarketplaceFast(p, nome);
 
       await atualizaFila();
       scheduleNextIfIdle();
@@ -4206,7 +4341,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         if (!running || !epochOk()) return;
-        await garantirMarketplace(p, { timeoutMs: 25000, nome, allowNavigate: true });
+        await maybeGuaranteeMarketplaceFast(p, nome);
         try {
           const ok = await scrollChatsToTop(p, nome);
           setTimeout(() => {
@@ -4220,6 +4355,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch {}
         ready = true;
         logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
+        
+        // Instalar MutationObserver para detectar novos chats em tempo real
+        let NEWCHAT_DEDUP = new Set();
+        function onNewChatDetected({ id, tempo }) {
+          const chatId = id;
+          const now = Date.now();
+          if (respondedCache && respondedCache.has(chatId)) return;
+          const last = lastProbeMap.get(chatId) || 0;
+          if ((now - last) < Math.min(PROBE_RECHECK_MIN_MS, 1000)) return;
+          lastProbeMap.set(chatId, now);
+          if (!fila.includes(chatId) && !aguardandoRespostaMap.get(nome)?.has(chatId)) {
+            fila.push(chatId);
+            scheduleNextIfIdle();
+          }
+        }
+        await installChatFeedObserver(p, nome, onNewChatDetected);
       } catch (err) {
         if (!running) return;
         logger.error('Falha ao garantir aba zero no startup Virtus', { nome }, err);
