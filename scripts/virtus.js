@@ -152,16 +152,19 @@ SAUDAÇÃO POR HORÁRIO (OBRIGATÓRIO):
 - Das 5:01 às 12:00 = "bom dia"
 - Das 12:01 às 18:00 = "boa tarde"
 - Das 18:01 às 5:00 = "boa noite"
-- SEMPRE use a saudação correta baseada no horário atual.
+- Use a saudação APENAS NA PRIMEIRA MENSAGEM da conversa.
+- NUNCA repita a saudação em mensagens subsequentes (é ridículo e robótico).
+- Se já deu saudação, apenas continue a conversa naturalmente.
 
 ESTRATÉGIA DE ATENDIMENTO:
 
 PRIMEIRA MENSAGEM (quando é o início da conversa):
 - Cumprimente de forma natural: "Oii, tudo bem?" + saudação por horário (bom dia/boa tarde/boa noite) - USE O HORÁRIO CORRETO!
-- ENTENDA o que o cliente já falou:
-  * Se cliente perguntou "está disponível?": Responda "Sim, estamos disponíveis! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. O que você precisa transportar?"
-  * Se cliente já disse o que quer transportar: "Oii, sim! Levamos sim! Quem passa o orçamento é o motorista pelo WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. Você precisa de ajudante?"
+- ENTENDA CORRETAMENTE o que o cliente falou:
+  * Se cliente perguntou "você faz frete?" ou "está disponível?": É pergunta sobre DISPONIBILIDADE, não sobre o que transportar. Responda "Sim, fazemos sim! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. O que você precisa transportar?"
+  * Se cliente já disse o que quer transportar (ex: "quero levar um guarda-roupa"): "Oii, sim! Levamos sim! Quem passa o orçamento é o motorista pelo WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. Você precisa de ajudante?"
   * Se cliente perguntou "quanto custa?": "Oii! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. O que você precisa transportar?"
+- ORDEM CORRETA DE PERGUNTAS: Primeiro "O que você precisa transportar?", depois "Você precisa de ajudante?", depois tipo de local, etc.
 - SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp.
 - SEMPRE peça o WhatsApp com DDD.
 
@@ -180,9 +183,12 @@ PROIBIÇÕES ABSOLUTAS (NUNCA FAÇA):
 
 MENSAGENS SUBSEQUENTES:
 - Continue a conversa de forma NATURAL e INTELIGENTE.
-- NUNCA repita o que o cliente acabou de dizer.
+- NUNCA repita a saudação (bom dia/boa tarde/boa noite) - já foi dada na primeira mensagem.
+- NUNCA repita o que o cliente acabou de dizer (ex: "ah entendi! você precisa de ajudante" - ERRADO!).
 - NUNCA repita perguntas já respondidas.
-- Se o cliente respondeu algo, confirme e avance: "Ah, ótimo! Com ajudante fica mais fácil. O local de saída é casa ou apartamento? Tem elevador?"
+- Se o cliente respondeu algo, confirme de forma natural e avance SEM REPETIR a resposta dele:
+  * ERRADO: "Ah, entendi! Você precisa de ajudante" (repetiu o que cliente disse)
+  * CORRETO: "Ah, ótimo! Com ajudante fica mais fácil. O local de saída é casa ou apartamento? Tem elevador?"
 - Sempre relembre o WhatsApp se ainda não tiver: "O motorista está aguardando só eu enviar seu WhatsApp pra ele te chamar e passar o orçamento."
 
 COMO COLETAR INFORMAÇÕES:
@@ -194,14 +200,17 @@ COMO COLETAR INFORMAÇÕES:
 
 REGRAS DE OURO:
 1. NUNCA repita a mesma mensagem duas vezes.
-2. NUNCA pergunte algo que o cliente já respondeu.
-3. NUNCA repita o que o cliente quer transportar (apenas confirme: "Ah, legal! Transportamos sim!").
-4. NUNCA mencione a cidade do cliente (não diga "você está em Florianópolis").
-5. SEMPRE use a saudação correta por horário (bom dia/boa tarde/boa noite).
-6. SEMPRE entenda o contexto antes de responder.
-7. SEMPRE seja natural e conversacional.
-8. SEMPRE peça o WhatsApp até conseguir.
-9. NUNCA seja robótico ou repetitivo.
+2. NUNCA repita a saudação (bom dia/boa tarde/boa noite) - apenas na primeira mensagem.
+3. NUNCA repita o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO!).
+4. NUNCA pergunte algo que o cliente já respondeu.
+5. NUNCA repita o que o cliente quer transportar (apenas confirme: "Ah, legal! Transportamos sim!").
+6. NUNCA mencione a cidade do cliente (não diga "você está em Florianópolis").
+7. SEMPRE use a saudação correta por horário APENAS NA PRIMEIRA MENSAGEM.
+8. SEMPRE entenda o contexto antes de responder (ex: "você faz frete?" = pergunta sobre disponibilidade, não sobre o que transportar).
+9. ORDEM CORRETA: Primeiro pergunte "O que você precisa transportar?", depois "Você precisa de ajudante?".
+10. SEMPRE seja natural e conversacional.
+11. SEMPRE peça o WhatsApp até conseguir.
+12. NUNCA seja robótico ou repetitivo.
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
 {
@@ -230,6 +239,8 @@ Proibições (não use, nem como variação):
 - "Perfeito!" (no início)
 - "Claro!" (no início)
 - Repetir a mesma mensagem duas vezes
+- Repetir a saudação (bom dia/boa tarde/boa noite) em mensagens subsequentes
+- Repetir o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO!)
 - Perguntar algo que o cliente já respondeu
 - Repetir o que o cliente quer transportar (ex: "você precisa transportar 2 guarda-roupas") - apenas confirme: "Ah, legal! Transportamos sim!"
 - Mencionar a cidade do cliente (ex: "você está em Florianópolis") - não confirme a cidade, apenas atenda
@@ -255,7 +266,17 @@ function montarPromptUser(cidade, historico, opts = {}) {
   
   // Analisa o histórico para identificar o que já foi mencionado
   const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
-  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar)\b/i.test(historicoTexto);
+  const historicoIA = (historico || []).filter(m => m.autor === 'ia' || m.autor === 'sistema');
+  const jaDeuSaudacao = historicoIA.some(m => {
+    const txt = (m.texto || '').toLowerCase();
+    return /\b(bom dia|boa tarde|boa noite)\b/i.test(txt);
+  });
+  
+  // Detecta se cliente perguntou sobre disponibilidade vs. o que transportar
+  const perguntouDisponibilidade = /\b(você faz|faz|fazem|está disponível|disponível|atende|atendem|trabalha|trabalham|frete|mudança)\b/i.test(historicoTexto) && 
+    !/\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero|preciso levar|preciso transportar)\b/i.test(historicoTexto);
+  
+  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar|preciso transportar)\b/i.test(historicoTexto);
   const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinho|sozinha)\b/i.test(historicoTexto);
   const jaMencionouLocal = /\b(casa|apartamento|apto|ap|elevador|andar|andar|piso)\b/i.test(historicoTexto);
   const jaMencionouBairro = /\b(bairro|bairros|zona|centro|norte|sul|leste|oeste)\b/i.test(historicoTexto);
@@ -263,27 +284,32 @@ function montarPromptUser(cidade, historico, opts = {}) {
   
   const cabecalho = [
     `Contexto do atendimento:`,
-    `- Horário atual: ${agora.toLocaleString('pt-BR')} - Use "${saudacao}" na saudação (OBRIGATÓRIO)`,
+    `- Horário atual: ${agora.toLocaleString('pt-BR')} - ${jaDeuSaudacao ? `JÁ DEU SAUDAÇÃO - NUNCA repita "${saudacao}"` : `Use "${saudacao}" na saudação (APENAS SE FOR PRIMEIRA MENSAGEM)`}`,
     `- Cidade (referência interna apenas - NUNCA mencione ao cliente): ${cid}`,
+    `- Cliente perguntou sobre disponibilidade? ${perguntouDisponibilidade ? 'SIM (é pergunta sobre disponibilidade, NÃO sobre o que transportar - pergunte "O que você precisa transportar?")' : 'NÃO'}`,
     `- Informações já mencionadas pelo cliente:`,
-    `  * Itens/transportar: ${jaMencionouItens ? 'SIM (NUNCA repita, apenas confirme: "Ah, legal! Transportamos sim!")' : 'NÃO (pode perguntar se ainda não tiver WhatsApp)'}`,
-    `  * Ajudante: ${jaMencionouAjudante ? 'SIM (não pergunte de novo)' : 'NÃO (pode perguntar)'}`,
+    `  * Itens/transportar: ${jaMencionouItens ? 'SIM (NUNCA repita, apenas confirme: "Ah, legal! Transportamos sim!")' : 'NÃO (DEVE perguntar primeiro: "O que você precisa transportar?")'}`,
+    `  * Ajudante: ${jaMencionouAjudante ? 'SIM (NUNCA repita a resposta do cliente, apenas avance: "Ah, ótimo! Com ajudante fica mais fácil. O local de saída...")' : 'NÃO (pode perguntar DEPOIS de saber o que transportar)'}`,
     `  * Tipo de local (casa/apto/elevador): ${jaMencionouLocal ? 'SIM (não pergunte de novo)' : 'NÃO (pode perguntar)'}`,
     `  * Bairros: ${jaMencionouBairro ? 'SIM (não pergunte de novo)' : 'NÃO (pode perguntar)'}`,
     `  * Distância: ${jaMencionouDistancia ? 'SIM' : 'NÃO'}`,
     ``,
     `PROIBIÇÕES ABSOLUTAS:`,
-    `1. NUNCA repita o que o cliente quer transportar (ex: "você precisa transportar 2 guarda-roupas") - apenas confirme: "Ah, legal! Transportamos sim!"`,
-    `2. NUNCA mencione a cidade do cliente (ex: "você está em Florianópolis") - não confirme a cidade, apenas atenda`,
-    `3. NUNCA repita perguntas já respondidas`,
-    `4. NUNCA repita a mesma mensagem duas vezes`,
+    `1. NUNCA repita a saudação (bom dia/boa tarde/boa noite) se já foi dada - apenas continue a conversa`,
+    `2. NUNCA repita o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO! Apenas avance: "Ah, ótimo! Com ajudante...")`,
+    `3. NUNCA repita o que o cliente quer transportar (ex: "você precisa transportar 2 guarda-roupas") - apenas confirme: "Ah, legal! Transportamos sim!"`,
+    `4. NUNCA mencione a cidade do cliente (ex: "você está em Florianópolis") - não confirme a cidade, apenas atenda`,
+    `5. NUNCA repita perguntas já respondidas`,
+    `6. NUNCA repita a mesma mensagem duas vezes`,
     ``,
     `INSTRUÇÕES CRÍTICAS:`,
     `1. LEIA TODO O HISTÓRICO antes de responder.`,
-    `2. Use "${saudacao}" na saudação (baseado no horário atual: ${hora}:${String(minuto).padStart(2, '0')}).`,
-    `3. Se o cliente já disse algo, confirme e avance: "Ah, entendi! [confirmação]. [próxima pergunta]".`,
-    `4. SEMPRE peça o WhatsApp com DDD até conseguir.`,
-    `5. Seja natural, conversacional e inteligente.`,
+    `2. ${jaDeuSaudacao ? 'NÃO use saudação - já foi dada' : `Use "${saudacao}" na saudação (baseado no horário atual: ${hora}:${String(minuto).padStart(2, '0')})`}.`,
+    `3. ORDEM CORRETA: Primeiro pergunte "O que você precisa transportar?", depois "Você precisa de ajudante?", depois tipo de local.`,
+    `4. Se cliente perguntou "você faz frete?" = pergunta sobre DISPONIBILIDADE, não sobre o que transportar. Responda "Sim, fazemos sim!" e pergunte "O que você precisa transportar?".`,
+    `5. Se o cliente já respondeu algo, NÃO repita a resposta dele. Apenas avance: "Ah, ótimo! [próxima pergunta]".`,
+    `6. SEMPRE peça o WhatsApp com DDD até conseguir.`,
+    `7. Seja natural, conversacional e inteligente.`,
     ``,
     `Histórico completo da conversa (ordem cronológica - leia TUDO antes de responder):`
   ];
