@@ -144,7 +144,7 @@ async function installChatFeedObserver(page, nome, onChat) {
 // === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
 // === Pipeline de Perguntas (dominante, Groq só como fallback) ===
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
 
 // Verificação da chave será feita apenas quando necessário (lazy check)
 // Isso evita erro no boot se o .env ainda não estiver configurado
@@ -333,20 +333,16 @@ SAUDAÇÃO POR HORÁRIO (OBRIGATÓRIO):
 
 ESTRATÉGIA DE ATENDIMENTO (UMA PERGUNTA POR VEZ):
 
-ORDEM FIXA E OBRIGATÓRIA (sempre nesta sequência, uma pergunta por vez):
-1. WhatsApp com DDD (PRIORIDADE ABSOLUTA - não avance sem ter)
-2. O que precisa transportar?
-3. Precisa de ajudante?
-4. Saída é casa ou apartamento?
-5. Destino é casa ou apartamento?
-6. Bairro de saída
-7. Bairro de destino
+ORDEM DE COLETA (uma por vez, mas com flexibilidade inteligente):
+- Se o cliente pediu preço/valor/orçamento: peça o WhatsApp com DDD e explique que o motorista passa os valores por lá (obrigatório).
+- Se o cliente NÃO pediu preço: atenda normalmente, responda o que ele disse e colete dados do frete (itens, ajudante, saída/destino, bairros). Peça o WhatsApp de forma amigável a cada 1–2 mensagens, sem travar a conversa.
 
 REGRAS CRÍTICAS:
 - SEMPRE faça UMA PERGUNTA POR VEZ (nunca 2 ou mais juntas).
 - NÃO avance para a próxima pergunta até coletar a resposta da atual.
 - Se cliente já respondeu uma pergunta, NÃO pergunte de novo - apenas avance para a próxima.
-- WhatsApp é PRIORIDADE #1 - não avance sem ter WhatsApp com DDD válido.
+- Para orçamento/valor: WhatsApp com DDD é obrigatório; peça e explique que o motorista passa os valores por lá.
+- Caso contrário: converse, responda, e colete dados. Peça o WhatsApp com DDD de forma amigável, mas não bloqueie o avanço das perguntas.
 - Se cliente enviou WhatsApp sem DDD, peça gentilmente o DDD, mas NÃO confirme o número digitado (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO!).
 - Varie as formas de pedir WhatsApp: "Me passa teu número com DDD?", "Qual seu WhatsApp com DDD?", "O motorista está aguardando seu WhatsApp com DDD para te chamar", etc.
 
@@ -363,7 +359,8 @@ PRIMEIRA MENSAGEM (quando é o início da conversa):
   * Se ainda não tem WhatsApp: "Me passa teu número com DDD que já peço pra ele te chamar." ou "Qual seu WhatsApp com DDD? O motorista está aguardando para te chamar." ou "Me passa teu número de WhatsApp com DDD que já peço pra ele te chamar e passar o orçamento."
   * Se já tem WhatsApp mas não sabe o que transportar: "O que você precisa transportar?" ou "O que você quer transportar?" ou "O que precisa levar?"
 - SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp (mas varie a forma de dizer).
-- SEMPRE peça o WhatsApp com DDD (primeira pergunta).
+- Se o cliente pedir preço/valor, peça o WhatsApp com DDD explicando que o motorista passa os valores por lá.
+- Caso contrário, confirme que fazemos e colete o que ele quer levar, ajudante, etc., pedindo o WhatsApp de forma gentil (sem travar a conversa).
 - NUNCA use a mesma frase duas vezes seguidas. Varie sempre!
 
 PROIBIÇÕES ABSOLUTAS (NUNCA FAÇA):
@@ -405,7 +402,7 @@ MENSAGENS SUBSEQUENTES:
 - Use emojis com moderação (😊📲✨🚚) para tornar a conversa mais amigável e calorosa.
 
 COMO COLETAR INFORMAÇÕES (UMA PERGUNTA POR VEZ):
-- WhatsApp com DDD: PRIORIDADE ABSOLUTA (sempre peça até ter, varie as formas)
+- WhatsApp com DDD: peça de forma inteligente e persistente; se o cliente não pediu preço, continue coletando dados do frete e reforce o pedido de WhatsApp a cada 1–2 mensagens.
 - O que precisa transportar: "O que você precisa transportar?" (apenas isso, sem outras perguntas)
 - Ajudante: "Você precisa de ajudante?" (apenas isso)
 - Tipo de saída: "O local de saída é casa ou apartamento?" (apenas isso, depois pergunte sobre elevador se necessário)
@@ -464,7 +461,7 @@ ANÁLISE DA RESPOSTA:
 - SEMPRE peça o WhatsApp até conseguir
 - NUNCA seja robótico ou repetitivo
 - VOCÊ DEVE FAZER EXATAMENTE 1 PERGUNTA POR MENSAGEM
-- SOMENTE peça o WhatsApp antes de avançar qualquer outro campo
+- REGRA DE OURO: 50% responder ao cliente + 50% avançar roteiro. Para preço/valor: WhatsApp obrigatório. Caso contrário, colete dados e peça WhatsApp com gentileza ao longo da conversa (1–2 mensagens), sem bloquear.
 - NUNCA confirme número enviado pelo cliente
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
@@ -700,16 +697,33 @@ function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b && b
 
 // Sanitização (IA) anti-clichê
 function sanitizeIAResponse(texto, historico) {
-  let t = String(texto||'').trim();
+  let t = String(texto || '').trim();
+  
+  // Detecta se já houve saudação anteriormente por parte da IA
+  const jaSaudou = Array.isArray(historico)
+    ? historico.some(m => m.autor === 'ia' && /\b(bom dia|boa tarde|boa noite|ol[áa]|oii?)\b/i.test(String(m.texto || '')))
+    : false;
+  
+  // Evita remover saudações amigáveis na primeira resposta
   const cliches = [
     /^sim[,!.\s]/i,
     /^ah[,!.\s]/i,
     /^ótimo[,!.\s]/i,
     /^perfeito[,!.\s]/i,
-    /^claro[,!.\s]/i,
-    /^ol[aá][,!.\s]/i
+    /^claro[,!.\s]/i
   ];
-  for (const rx of cliches) t = t.replace(rx, '').trim();
+  
+  for (const rx of cliches) {
+    t = t.replace(rx, '').trim();
+  }
+  
+  // Remova "olá/oi" apenas se já houve saudação anteriormente
+  if (jaSaudou) {
+    t = t.replace(/^ol[áa][,!.\s]/i, '').trim();
+    t = t.replace(/^oii?[,!.\s]/i, '').trim();
+  }
+  
+  // Dedupe: evita repetir exatamente a última resposta da IA
   t = t.replace(/\s{2,}/g, ' ').trim();
   const ultIA = Array.isArray(historico) ? historico.filter(m => m.autor==='ia').slice(-1)[0] : null;
   if (ultIA && typeof ultIA.texto === 'string') {
@@ -908,39 +922,38 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
 }
 
 function buildNaturalPrefix(ultimaDoCliente) {
-  if (!ultimaDoCliente) return 'Certo! ';
-  const t = ultimaDoCliente.trim().toLowerCase();
-  if (/tudo bem|td bem|como est[aá]/.test(t)) return 'Tudo ótimo! ';
+  if (!ultimaDoCliente) return 'Show! ';
+  const t = String(ultimaDoCliente || '').trim().toLowerCase();
+  if (/tudo bem|td bem|como est[aá]/i.test(t)) return 'Tudo ótimo, e você? ';
+  if (/bom dia|boa tarde|boa noite/i.test(t)) return 'Oi! ';
   if (/faz frete|fazem frete|dispon[ií]vel|voc[eê] faz|trabalha/i.test(t)) return 'Fazemos sim! ';
-  if (/pre[cç]o|quanto custa|or[çc]amento/i.test(t)) return 'O orçamento quem passa é o motorista pelo WhatsApp. ';
-  return 'Beleza! ';
+  if (/pre[cç]o|quanto custa|or[çc]amento|valor|custa/i.test(t)) return 'Eu te explico: orçamento é com o motorista pelo WhatsApp. ';
+  if (/cama|sof[aá]|guarda-?roupa|m[óo]vel|geladeira|fog[aã]o|mudan[çc]a/i.test(t)) return 'Entendi, transportamos sim! ';
+  return 'Certo! ';
 }
 
 async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
-  const flow = getOrInitFlowState(stPrev);
   const utils = require('./utils.js');
+  const flow = getOrInitFlowState(stPrev);
+  flow.meta = flow.meta || { askWhatsCount: 0, lastAskAt: 0 };
   applyExtractedAnswers(flow, historicoConversa, utils);
 
-  const next = pickNextMissingField(flow);
+  const textoCompleto = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
+  const pediuPreco = /\b(pre[cç]o|valor|or[çc]amento|custa|quanto)\b/i.test(textoCompleto);
+  const whatsappValido = utils.isValidBRPhoneWithDDD((flow.answered && flow.answered.telefone) || '');
 
-  if (!next) {
-    const tel = flow.answered.telefone;
-    const valid = utils.isValidBRPhoneWithDDD(tel || '');
-    return {
-      resposta: valid ? null : 'Faltou só seu WhatsApp com DDD para eu passar ao motorista. Me passa, por favor?',
-      telefone_extraido: valid ? tel : null,
-      finalizado: valid ? true : false,
-      dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
-      qaAnswered: flow.answered,
-      flow
-    };
-  }
-
-  if (next !== 'telefone' && !utils.isValidBRPhoneWithDDD(flow.answered.telefone || '')) {
+  // Se pediu preço: obrigar WhatsApp (com contagem de insistência variando a forma)
+  if (pediuPreco && !whatsappValido) {
+    flow.meta.askWhatsCount++;
+    flow.meta.lastAskAt = Date.now();
+    const variantes = [
+      'O orçamento é passado pelo motorista no WhatsApp. Pode me enviar seu número com DDD?',
+      'Te passo pro motorista te chamar por WhatsApp e passar os valores. Qual seu número (com DDD)?',
+      'O motorista informa os valores pelo Whats. Me passa teu WhatsApp com DDD?'
+    ];
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const msg = `${prefixo}${FIELD_PROMPTS.telefone}`;
+    const msg = `${prefixo}${variantes[flow.meta.askWhatsCount % variantes.length]}`;
     flow.asked.telefone = true;
     return {
       resposta: msg,
@@ -952,16 +965,86 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
       flow
     };
   }
-  // Uma UNICA pergunta
-  const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
-  const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-  const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
-  flow.asked[next] = true;
 
+  // Não pediu preço: avançar coleta de dados e pedir WhatsApp de forma amigável apenas a cada 1–2 mensagens
+  const next = pickNextMissingField(flow);
+  if (!whatsappValido && flow.meta.askWhatsCount < 2) {
+    // Primeiras insistências leves ao longo da conversa
+    flow.meta.askWhatsCount++;
+    flow.meta.lastAskAt = Date.now();
+    const variantes = [
+      'Se puder, me passa teu WhatsApp com DDD? Assim o motorista te chama rapidinho.',
+      'Me manda teu número de WhatsApp com DDD, por favor? O motorista chama por lá.'
+    ];
+    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
+    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const textoWhats = `${prefixo}${variantes[(flow.meta.askWhatsCount - 1) % variantes.length]}`;
+    
+    // Se já temos algo a coletar (next existe e não é telefone), encaixa só 1 pergunta
+    if (next && next !== 'telefone') {
+      flow.asked[next] = true;
+      const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
+      return {
+        resposta: `${textoWhats} ${pergunta}`,
+        telefone_extraido: null,
+        finalizado: false,
+        dados: flow.answered,
+        qaAsked: Object.keys(flow.asked),
+        qaAnswered: flow.answered,
+        flow
+      };
+    }
+    
+    // Senão, só reforce WhatsApp com leveza
+    return {
+      resposta: textoWhats,
+      telefone_extraido: null,
+      finalizado: false,
+      dados: flow.answered,
+      qaAsked: Object.keys(flow.asked),
+      qaAnswered: flow.answered,
+      flow
+    };
+  }
+
+  // Se já insistimos o suficiente, avance a conversa normalmente
+  if (next) {
+    flow.asked[next] = true;
+    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
+    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
+    return {
+      resposta: `${prefixo}${pergunta}`,
+      telefone_extraido: whatsappValido ? flow.answered.telefone : null,
+      finalizado: false,
+      dados: flow.answered,
+      qaAsked: Object.keys(flow.asked),
+      qaAnswered: flow.answered,
+      flow
+    };
+  }
+
+  // Caso esteja tudo coletado e não tenha whatsapp válido, peça com reforço final
+  if (!whatsappValido) {
+    flow.meta.askWhatsCount++;
+    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
+    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    return {
+      resposta: `${prefixo}Faltou só seu WhatsApp com DDD pra eu te passar pro motorista. Pode me enviar?`,
+      telefone_extraido: null,
+      finalizado: false,
+      dados: flow.answered,
+      qaAsked: Object.keys(flow.asked),
+      qaAnswered: flow.answered,
+      flow
+    };
+  }
+
+  // Tudo pronto e whatsapp OK
   return {
-    resposta: `${prefixo}${pergunta}`,
-    telefone_extraido: utils.isValidBRPhoneWithDDD(flow.answered.telefone || '') ? flow.answered.telefone : null,
-    finalizado: false,
+    resposta: null,
+    telefone_extraido: flow.answered.telefone || null,
+    finalizado: true,
     dados: flow.answered,
     qaAsked: Object.keys(flow.asked),
     qaAnswered: flow.answered,
@@ -978,10 +1061,11 @@ function stripPhoneConfirmation(txt) {
 
 function ensureSingleQuestion(txt) {
   let s = String(txt || '');
-  const parts = s.split('?');
-  if (parts.length <= 2) return s;
-  const lastQ = parts[parts.length - 2].trim();
-  return `${lastQ}?`;
+  const firstQ = s.indexOf('?');
+  if (firstQ < 0) return s;
+  const before = s.slice(0, firstQ + 1);
+  const after = s.slice(firstQ + 1).replace(/\?/g, '').trim(); // remove demais "?"
+  return after ? `${before} ${after}` : before;
 }
 
 function removeRepeatedGreeting(txt) {
@@ -3858,17 +3942,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
 
-        // CRÍTICO: Aguardar 15 segundos após identificar mensagem do cliente antes de gerar resposta
-        // Isso permite que o cliente termine de digitar todas as mensagens
-        const WAIT_BEFORE_GENERATE_MS = parseInt(process.env.VIRTUS_WAIT_BEFORE_GENERATE_MS || '15000', 10); // 15s padrão
-        logger.info(`[TIMING] Aguardando ${WAIT_BEFORE_GENERATE_MS}ms antes de gerar resposta...`, { nome, chatId });
-        await sleep(WAIT_BEFORE_GENERATE_MS);
+        // CRÍTICO: Para primeira resposta, não espera; para subsequentes, espera pequena se configurado
+        const WAIT_BEFORE_GENERATE_MS = parseInt(process.env.VIRTUS_WAIT_BEFORE_GENERATE_MS || '0', 10);
+        const isFirstReplyTiming = (idxUltIA < 0);
         
-        // Re-extrai histórico após espera para pegar todas as mensagens do cliente
-        try {
-          historicoConversa = await extrairHistoricoConversa(pAtual);
-          logger.info(`[TIMING] Histórico re-extraído após espera: ${historicoConversa.length} mensagens`, { nome, chatId });
-        } catch {}
+        // Para respostas subsequentes (não a primeira), uma pequena espera dinâmica:
+        if (!isFirstReplyTiming && WAIT_BEFORE_GENERATE_MS > 0) {
+          logger.info(`[TIMING] Aguardando ${WAIT_BEFORE_GENERATE_MS}ms antes de gerar resposta (subsequente)...`, { nome, chatId });
+          await sleep(WAIT_BEFORE_GENERATE_MS);
+          // Re-extrai histórico após espera para pegar todas as mensagens do cliente
+          try {
+            historicoConversa = await extrairHistoricoConversa(pAtual);
+            logger.info(`[TIMING] Histórico re-extraído após espera: ${historicoConversa.length} mensagens`, { nome, chatId });
+          } catch {}
+        } else {
+          logger.debug(`[TIMING] Primeira resposta: sem espera (WAIT_BEFORE_GENERATE_MS=${WAIT_BEFORE_GENERATE_MS}ms)`, { nome, chatId });
+        }
 
         // Pipeline de Perguntas (dominante) ou Groq (fallback)
         if (VIRTUS_USE_PIPELINE) {
