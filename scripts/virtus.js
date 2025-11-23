@@ -246,7 +246,7 @@ PERSONALIDADE:
 - Inteligente, rápido e perspicaz
 - Gírias leves do BR, natural e autêntico
 - Cria urgência boa sem ser chato
-- Usa emojis com moderação (😊📲✨🚚) para tornar a conversa mais calorosa e amigável
+- EMOJIS (REGRA DURA): Padrão: não use emoji. Use no máximo 1 emoji a cada 3 ou 4 mensagens, e nunca mais de 1 emoji na mesma mensagem. Não use emoji em mensagens muito curtas, confirmações ou quando a resposta já está polida. Se tiver dúvida: não use emoji.
 - Persistente agradável (sem ser invasivo)
 - SEMPRE ouve e responde ao cliente antes de fazer perguntas
 
@@ -255,6 +255,15 @@ CONTEXTO DO NEGÓCIO:
 - Você apenas faz o atendimento, anota o pedido e passa pro motorista.
 - O motorista chama o cliente no WhatsApp para passar o orçamento.
 - SEMPRE peça o WhatsApp com DDD - é ESSENCIAL para o motorista chamar o cliente.
+
+CONCISÃO (OBRIGATÓRIA):
+- Máximo 1–2 frases curtas por mensagem (ideal <= 20 palavras).
+- 1 pergunta por mensagem.
+- Nada de rodeios: responda, avance, finalize.
+
+NÃO ECOAR:
+- Nunca repita literalmente o que o cliente disse (ex.: 'sem ajudante', 'apto', 'duas camas').
+- Confirme de forma neutra (ex.: 'Entendido.'), e avance para a próxima pergunta.
 
 INTELIGÊNCIA CONTEXTUAL (CRÍTICO - REGRA DE OURO):
 ⚠️⚠️⚠️ ESTRUTURA OBRIGATÓRIA: 50% RESPONDER AO CLIENTE + 50% SEGUIR ROTEIRO ⚠️⚠️⚠️
@@ -399,7 +408,7 @@ MENSAGENS SUBSEQUENTES:
   * "Qual seu número de WhatsApp com DDD? O motorista já vai te chamar! 😊"
 - NÃO confirme o WhatsApp digitado pelo cliente (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO!).
 - Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"
-- Use emojis com moderação (😊📲✨🚚) para tornar a conversa mais amigável e calorosa.
+- EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).
 
 COMO COLETAR INFORMAÇÕES (UMA PERGUNTA POR VEZ):
 - WhatsApp com DDD: peça de forma inteligente e persistente; se o cliente não pediu preço, continue coletando dados do frete e reforce o pedido de WhatsApp a cada 1–2 mensagens.
@@ -457,7 +466,7 @@ ANÁLISE DA RESPOSTA:
 - SEMPRE use a saudação correta por horário APENAS NA PRIMEIRA MENSAGEM
 - SEMPRE entenda o contexto antes de responder
 - SEMPRE seja natural, conversacional, amigável, respeitoso, educado, cordial e motivacional
-- Use emojis com moderação (😊📲✨🚚)
+- EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji)
 - SEMPRE peça o WhatsApp até conseguir
 - NUNCA seja robótico ou repetitivo
 - VOCÊ DEVE FAZER EXATAMENTE 1 PERGUNTA POR MENSAGEM
@@ -609,7 +618,7 @@ function montarPromptUser(cidade, historico, opts = {}) {
     `5. Se cliente já respondeu algo, NÃO repita a resposta dele. Apenas confirme e avance: "Ah, ótimo! 😊 [próxima pergunta]".`,
     `6. Se ainda não tem WhatsApp com DDD, peça de forma variada, gentil e amigável (não confirme o número digitado).`,
     `7. Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"`,
-    `8. Use emojis com moderação (😊📲✨🚚) para tornar a conversa mais calorosa e amigável.`,
+    `8. EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).`,
     `9. Seja natural, conversacional, inteligente, amigável, respeitoso, educado, cordial e motivacional.`,
     `10. NUNCA "ataque" com perguntas sem primeiro responder ao cliente.`,
     ``,
@@ -729,9 +738,15 @@ function sanitizeIAResponse(texto, historico) {
   if (ultIA && typeof ultIA.texto === 'string') {
     const prev = ultIA.texto.trim().toLowerCase();
     const cur = t.trim().toLowerCase();
-    if (prev && cur && prev === cur) t = t + ' 😉';
+    if (prev && cur && prev === cur) {
+      // Evita repetir a mesma frase; faz variação mínima sem emoji nem ruído
+      t = t + '.';
+    }
   }
-  if (t.length < 6) t = t + ' :)';
+  if (t.length < 3) {
+    // Nunca força emoji em mensagem curta
+    t = 'Ok.';
+  }
   return t;
 }
 
@@ -892,22 +907,95 @@ function pickNextMissingField(flow) {
 }
 
 function applyExtractedAnswers(flow, historicoConversa, utils) {
-  const texto = (historicoConversa || []).map(m => m && m.texto || '').join(' ').toLowerCase();
+  const texto = (historicoConversa || []).map(m => (m && m.texto) || '').join(' ').toLowerCase();
+
+  // 1) Telefone — robusto: tenta extrair direto, depois combinar DDD + número soltos
   const phones = utils.extractPhonesBRStrict(texto);
   if (phones && phones.length) {
-    const best = phones[0];
-    flow.answered.telefone = best;
+    flow.answered.telefone = phones[0];
+  } else {
+    // Combina "ddd 48" + "91985634" ou "48 999999999" (ordem variável)
+    const t = texto.replace(/[^\d\s]/g, ' ');
+    // padrão: ddd + local
+    let m = t.match(/\b(?:ddd\s*)?([1-9]{2})\D*([2-9]\d{7,8})\b/);
+    if (!m) {
+      // local + ddd
+      m = t.match(/\b([2-9]\d{7,8})\D*(?:ddd\s*)?([1-9]{2})\b/);
+    }
+    if (m) {
+      const ddd = m[1].length === 2 ? m[1] : m[2];
+      const local = m[1].length >= 8 ? m[1] : m[2];
+      const combinado = ddd + local;
+      if (utils.isValidBRPhoneWithDDD(combinado)) {
+        flow.answered.telefone = combinado;
+      }
+    }
   }
-  // (as heurísticas dos outros campos você pode manter conforme já existe)
+
+  // 2) Contextual (pega última pergunta da IA e última resposta do cliente)
+  const iaMsgs = (historicoConversa || []).filter(m => m && (m.autor === 'ia' || m.autor === 'sistema'));
+  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+  const ultIA = iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
+  const ultCLI = cliMsgs.length ? cliMsgs[cliMsgs.length - 1] : null;
+  const iaTxt = (ultIA && String(ultIA.texto || '').toLowerCase()) || '';
+  const cliTxt = (ultCLI && String(ultCLI.texto || '').trim().toLowerCase()) || '';
+
+  // Helper: decide se resposta do cliente indica 'casa' ou 'apartamento'
+  const casaOuAp = (txt) => {
+    if (/\b(casa)\b/i.test(txt)) return 'casa';
+    if (/\b(apto|ap|apart|apartamento)\b/i.test(txt)) return 'apartamento';
+    return null;
+  };
+
+  // Helper: bairro plausível (1 a 3 palavras sem números, ex.: "pelotas", "aririu")
+  const talvezBairro = (txt) => {
+    const clean = txt.replace(/[^\p{L}\s-]/gu, '').trim(); // letras/hífens/espaços
+    if (!clean) return null;
+    const words = clean.split(/\s+/).filter(Boolean);
+    if (words.length >= 1 && words.length <= 3 && /^[\p{L}\s-]+$/u.test(clean)) {
+      return clean;
+    }
+    return null;
+  };
+
+  // 2a) Ajudante (se a última pergunta IA foi sobre ajudante)
+  if (/ajudante|precisa de ajuda/i.test(iaTxt)) {
+    if (/\b(sim|preciso|quero)\b/i.test(cliTxt)) flow.answered.ajudante = 'sim';
+    else if (/\b(n[aã]o|nao|sem)\b/i.test(cliTxt)) flow.answered.ajudante = 'não';
+  }
+
+  // 2b) Saída casa/apto
+  if (/sa[ií]da.*casa.apart/i.test(iaTxt) || /sa[ií]da.(casa|apto|apart)/i.test(iaTxt)) {
+    const val = casaOuAp(cliTxt);
+    if (val) flow.answered.saida_tipo = val;
+  }
+
+  // 2c) Destino casa/apto
+  if (/destino.*casa.apart/i.test(iaTxt) || /destino.(casa|apto|apart)/i.test(iaTxt)) {
+    const val = casaOuAp(cliTxt);
+    if (val) flow.answered.destino_tipo = val;
+  }
+
+  // 2d) Bairro (saída/destino) — se a última pergunta foi bairro de saída/destino e cliente respondeu texto curto
+  if (/bairro.*sa[ií]da/i.test(iaTxt)) {
+    const b = talvezBairro(cliTxt);
+    if (b) flow.answered.bairro_saida = b;
+  }
+  if (/bairro.*destino/i.test(iaTxt)) {
+    const b = talvezBairro(cliTxt);
+    if (b) flow.answered.bairro_destino = b;
+  }
+
+  // 3) Varreduras globais (fallbacks)
   if (/ajudante|ajuda/i.test(texto)) {
-    if (/\b(sim|preciso|quero)\b/i.test(texto)) flow.answered.ajudante = 'sim';
-    else if (/\b(n[aã]o|nao)\b/i.test(texto)) flow.answered.ajudante = 'não';
+    if (/\b(sim|precis[oa]|quero)\b/i.test(texto)) flow.answered.ajudante = flow.answered.ajudante || 'sim';
+    else if (/\b(n[aã]o|nao|sem)\b/i.test(texto)) flow.answered.ajudante = flow.answered.ajudante || 'não';
   }
-  if (/sa[ií]da.*(casa|apartamento|apto|ap)\b/i.test(texto)) {
-    flow.answered.saida_tipo = /casa/i.test(texto) ? 'casa' : 'apartamento';
+  if (/sa[ií]da.(casa|apartamento|apto|ap)\b/i.test(texto)) {
+    flow.answered.saida_tipo = flow.answered.saida_tipo || (/casa/i.test(texto) ? 'casa' : 'apartamento');
   }
-  if (/destino.*(casa|apartamento|apto|ap)\b/i.test(texto)) {
-    flow.answered.destino_tipo = /casa/i.test(texto) ? 'casa' : 'apartamento';
+  if (/destino.(casa|apartamento|apto|ap)\b/i.test(texto)) {
+    flow.answered.destino_tipo = flow.answered.destino_tipo || (/casa/i.test(texto) ? 'casa' : 'apartamento');
   }
   const bx = texto.match(/\bbairro(s)?\b[:\s]*([^,.\n]+)/i);
   if (bx) {
@@ -918,18 +1006,80 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
     const snippet = texto.slice(0, 180);
     flow.answered.itens = flow.answered.itens || snippet;
   }
+
+  // 4) Data/hora — sem nunca perguntar (apenas extrai)
+  const dataHora = extractDataHoraPTBR(texto);
+  flow.answered.data_hora = dataHora || flow.answered.data_hora || 'agora';
+
   return flow;
 }
 
+function extractDataHoraPTBR(texto) {
+  try {
+    const t = String(texto || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+
+    const hoje = new Date();
+    const dia = (d) => {
+      const dt = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() + d);
+      return `${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}`;
+    };
+
+    let diaRef = null;
+    if (/\bhoje\b/.test(t)) diaRef = dia(0);
+    else if (/\bagora\b/.test(t)) diaRef = dia(0);
+    else if (/\bamanh[ãa]\b/.test(t)) diaRef = dia(1);
+    else if (/\bdepois de amanh[ãa]\b/.test(t)) diaRef = dia(2);
+
+    // Hora: "14h", "14:00", "às 14", "as 14", "2 da tarde", "dua tarde", "de manha/demanha", "de noite"
+    let hora = null;
+    const mHora = t.match(/\b(\d{1,2})(?:[:h]\s?(\d{2}))?\b/);
+    if (mHora) {
+      let h = parseInt(mHora[1],10);
+      const mm = mHora[2] ? parseInt(mHora[2],10) : 0;
+      if (h >= 0 && h <= 23) {
+        hora = `${h}h`;
+        if (mm && mm > 0) hora = `${h}:${String(mm).padStart(2,'0')}`;
+      }
+      // "da tarde/noite" => normaliza para 24h
+      if ((/\bda tarde\b/.test(t) || /\btarde\b/.test(t)) && h >= 1 && h <= 11) hora = `${h+12}h`;
+      if ((/\bda noite\b/.test(t) || /\bnoite\b/.test(t)) && h >= 1 && h <= 11) hora = `${h+12}h`;
+    }
+
+    if (!hora) {
+      if (/\bde manh[ãa]\b|\bdemanha\b/.test(t)) hora = 'de manhã';
+      else if (/\bde tarde\b|\btarde\b/.test(t)) hora = 'de tarde';
+      else if (/\bde noite\b|\bnoite\b/.test(t)) hora = 'de noite';
+    }
+
+    if (!diaRef && !hora) return null;
+    if (!diaRef) diaRef = dia(0); // sem dia -> assume hoje
+    if (hora) return `${diaRef} - ${hora}`;
+    return `${diaRef}`;
+
+  } catch {
+    return null;
+  }
+}
+
 function buildNaturalPrefix(ultimaDoCliente) {
-  if (!ultimaDoCliente) return 'Show! ';
+  if (!ultimaDoCliente) return '';
   const t = String(ultimaDoCliente || '').trim().toLowerCase();
-  if (/tudo bem|td bem|como est[aá]/i.test(t)) return 'Tudo ótimo, e você? ';
-  if (/bom dia|boa tarde|boa noite/i.test(t)) return 'Oi! ';
-  if (/faz frete|fazem frete|dispon[ií]vel|voc[eê] faz|trabalha/i.test(t)) return 'Fazemos sim! ';
-  if (/pre[cç]o|quanto custa|or[çc]amento|valor|custa/i.test(t)) return 'Eu te explico: orçamento é com o motorista pelo WhatsApp. ';
-  if (/cama|sof[aá]|guarda-?roupa|m[óo]vel|geladeira|fog[aã]o|mudan[çc]a/i.test(t)) return 'Entendi, transportamos sim! ';
-  return 'Certo! ';
+
+  // Cumprimentos/estado
+  if (/tudo bem|td bem|como est[aá]/i.test(t)) return 'Tudo bem, sim. ';
+
+  // Evitar confirmar o mesmo termo (sem eco)
+  if (/faz frete|fazem frete|dispon[ií]vel|voc[eê] faz|trabalha/i.test(t)) return '';
+  if (/pre[cç]o|quanto custa|or[çc]amento|valor|custa/i.test(t)) return '';
+  if (/ajudante|ajuda/i.test(t)) return '';
+  if (/casa|apartamento|apto|ap\b/i.test(t)) return '';
+  if (/bairro/i.test(t)) return '';
+
+  // Mensagens sobre itens: evite repetir "transportamos"
+  if (/cama|sof[aá]|guarda-?roupa|m[óo]vel|geladeira|fog[aã]o|mudan[çc]a|itens|coisas/i.test(t)) return '';
+
+  // Caso genérico: confirme de forma neutra, sem eco
+  return 'Entendido. ';
 }
 
 async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
@@ -4710,7 +4860,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (cidade && !cur.cidade) cur.cidade = cidade;
     if (telefone) cur.telefone = telefone;
     // dados cereja
-    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens'];
+    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens','data_hora'];
     for (const k of keys) {
       if (dados && dados[k] != null) cur[k] = dados[k];
     }
