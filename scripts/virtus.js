@@ -155,12 +155,18 @@ let GROQ_API_URL = null;
 function verificarConfigGroq() {
   if (!GROQ_API_KEY) {
     GROQ_API_KEY = process.env.GROQ_API_KEY;
-    GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    // Modelo deve ser configurado no arquivo .env
+    GROQ_MODEL = process.env.GROQ_MODEL;
     GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
     
     if (!GROQ_API_KEY) {
       logger.error('[GROQ] GROQ_API_KEY não configurada! Configure no arquivo .env');
       throw new Error('GROQ_API_KEY não configurada. Crie arquivo .env com GROQ_API_KEY=sua_chave');
+    }
+    
+    if (!GROQ_MODEL) {
+      logger.error('[GROQ] GROQ_MODEL não configurada! Configure no arquivo .env');
+      throw new Error('GROQ_MODEL não configurada. Configure GROQ_MODEL=openai/gpt-oss-120b no arquivo .env');
     }
   }
   return { GROQ_API_KEY, GROQ_MODEL, GROQ_API_URL };
@@ -1377,6 +1383,191 @@ async function extrairHistoricoConversa(page) {
 }
 
 // Formata localização no padrão "Cidade (UF)" para a planilha Google
+// ====== FUNÇÕES AUXILIARES: BURST TIMER, PACE E DEDUP ======
+
+// Map para armazenar timers de quiet window por chat
+const quietWindowTimers = new Map(); // chatId -> { timer, lastReset }
+
+/**
+ * Aguarda uma janela de quietude (sem novas mensagens do cliente) antes de responder
+ * @param {string} nome - Nome do perfil
+ * @param {string} chatId - ID do chat
+ * @param {number} quietMs - Tempo de quietude necessário em ms (padrão 20000 = 20s)
+ * @param {object} opts - { page, getHistoricoFn }
+ * @returns {Promise<boolean>} - true se passou o período de quietude, false se foi interrompido
+ */
+async function waitQuietWindow(nome, chatId, quietMs = 20000, { page, getHistoricoFn } = {}) {
+  const key = `${nome}:${chatId}`;
+  const now = Date.now();
+  
+  // Captura timestamp da última mensagem do cliente no início
+  let lastClientTs = 0;
+  if (getHistoricoFn && page) {
+    try {
+      const historicoInicial = await getHistoricoFn();
+      const ultimaClienteInicial = historicoInicial && historicoInicial.filter(m => m.autor === 'cliente').pop();
+      if (ultimaClienteInicial && ultimaClienteInicial.timestamp) {
+        lastClientTs = ultimaClienteInicial.timestamp;
+      }
+    } catch {}
+  }
+  
+  // Se já existe um timer ativo, cancela e reseta
+  const existing = quietWindowTimers.get(key);
+  if (existing && existing.timer) {
+    clearTimeout(existing.timer);
+  }
+  
+  // Inicia novo timer com verificação periódica
+  return new Promise((resolve) => {
+    let checkInterval = null;
+    const timer = setTimeout(async () => {
+      if (checkInterval) clearInterval(checkInterval);
+      quietWindowTimers.delete(key);
+      resolve(true);
+    }, quietMs);
+    
+    // Verifica periodicamente se houve nova mensagem (a cada 2s)
+    checkInterval = setInterval(async () => {
+      if (getHistoricoFn && page) {
+        try {
+          const historicoAtual = await getHistoricoFn();
+          const ultimaCliente = historicoAtual && historicoAtual.filter(m => m.autor === 'cliente').pop();
+          if (ultimaCliente && ultimaCliente.timestamp) {
+            // Se houve nova mensagem após o início do timer, cancela e rejeita
+            if (ultimaCliente.timestamp > lastClientTs) {
+              if (checkInterval) clearInterval(checkInterval);
+              clearTimeout(timer);
+              quietWindowTimers.delete(key);
+              resolve(false);
+            }
+          }
+        } catch {}
+      }
+    }, 2000);
+    
+    quietWindowTimers.set(key, { timer, lastReset: now, checkInterval });
+  });
+}
+
+/**
+ * Calcula o pace (velocidade) do cliente baseado no histórico
+ * @param {Array} historico - Histórico de mensagens
+ * @returns {number} - Delay em ms (5-15s padrão, até 25s se cliente é lento)
+ */
+function calcularPaceCliente(historico) {
+  if (!historico || !Array.isArray(historico)) return randomBetween(5000, 15000);
+  
+  const mensagensCliente = historico.filter(m => m.autor === 'cliente');
+  if (mensagensCliente.length < 2) return randomBetween(5000, 15000);
+  
+  // Calcula intervalo médio entre mensagens do cliente
+  const intervalos = [];
+  for (let i = 1; i < mensagensCliente.length; i++) {
+    const prev = mensagensCliente[i - 1].timestamp || 0;
+    const curr = mensagensCliente[i].timestamp || 0;
+    if (curr > prev) intervalos.push(curr - prev);
+  }
+  
+  if (intervalos.length === 0) return randomBetween(5000, 15000);
+  
+  const mediaIntervalo = intervalos.reduce((a, b) => a + b, 0) / intervalos.length;
+  
+  // Se cliente responde rápido (< 10s), usa delay padrão (5-15s)
+  // Se cliente responde lento (> 30s), usa delay maior (15-25s)
+  if (mediaIntervalo < 10000) {
+    return randomBetween(5000, 15000);
+  } else if (mediaIntervalo > 30000) {
+    return randomBetween(15000, 25000);
+  } else {
+    // Interpolação linear entre 5-15s e 15-25s
+    const ratio = (mediaIntervalo - 10000) / 20000; // 0 a 1
+    const minDelay = 5000 + (ratio * 10000); // 5s a 15s
+    const maxDelay = 15000 + (ratio * 10000); // 15s a 25s
+    return randomBetween(minDelay, maxDelay);
+  }
+}
+
+/**
+ * Deduplicação rigorosa: verifica se a resposta é muito similar às últimas 3 respostas IA
+ * @param {string} respostaNova - Nova resposta gerada
+ * @param {Array} historico - Histórico de mensagens
+ * @returns {string} - Resposta ajustada se necessário (com variação forçada)
+ */
+function aplicarDedupResposta(respostaNova, historico) {
+  if (!historico || !Array.isArray(historico)) return respostaNova;
+  
+  const respostasIA = historico
+    .filter(m => m.autor === 'ia')
+    .slice(-3) // Últimas 3 respostas IA
+    .map(m => (m.texto || '').trim().toLowerCase());
+  
+  if (respostasIA.length === 0) return respostaNova;
+  
+  const respostaNorm = respostaNova.trim().toLowerCase();
+  
+  // Verifica similaridade (se > 80% similar, força variação)
+  for (const respAntiga of respostasIA) {
+    const similaridade = calcularSimilaridade(respostaNorm, respAntiga);
+    if (similaridade > 0.8) {
+      // Força variação: adiciona variações sutis
+      const variacoes = [
+        'Perfeito! ',
+        'Entendi! ',
+        'Ótimo! ',
+        'Certo! ',
+      ];
+      const variacao = variacoes[Math.floor(Math.random() * variacoes.length)];
+      return variacao + respostaNova;
+    }
+  }
+  
+  return respostaNova;
+}
+
+/**
+ * Calcula similaridade entre duas strings (0 a 1)
+ */
+function calcularSimilaridade(str1, str2) {
+  if (!str1 || !str2) return 0;
+  const longer = str1.length > str2.length ? str1 : str2;
+  const shorter = str1.length > str2.length ? str2 : str1;
+  if (longer.length === 0) return 1.0;
+  
+  // Distância de Levenshtein simplificada
+  const distancia = levenshteinDistance(str1, str2);
+  return 1 - (distancia / longer.length);
+}
+
+/**
+ * Calcula distância de Levenshtein entre duas strings
+ */
+function levenshteinDistance(str1, str2) {
+  const matrix = [];
+  for (let i = 0; i <= str2.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= str1.length; j++) {
+    matrix[0][j] = j;
+  }
+  for (let i = 1; i <= str2.length; i++) {
+    for (let j = 1; j <= str1.length; j++) {
+      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  return matrix[str2.length][str1.length];
+}
+
+// ====== FIM FUNÇÕES AUXILIARES ======
+
 function formatarLocalizacaoParaPlanilha(localizacao) {
   if (!localizacao) return null;
   
@@ -3418,7 +3609,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // OK: há novidade do cliente
+        // [BURST TIMER] Aguarde a janela de 20s sem nova mensagem antes de responder
+        const pAtual = await ensurePage().catch(()=>null);
+        const okQuiet = await waitQuietWindow(nome, chatId, 20000, {
+          page: pAtual,
+          getHistoricoFn: async () => await extrairHistoricoConversa(pAtual)
+        });
+        if (!okQuiet) {
+          logger.info('[BURST] Chat ' + chatId + ': nova mensagem durante quiet window, abortando', { nome });
+          try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }); } catch {}
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        // OK: há novidade do cliente e passou o período de quietude
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
 
@@ -3741,6 +3947,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
 
+            // Calcular pace do cliente e aplicar dedup
+            const paceDelay = calcularPaceCliente(historicoConversa);
+            logger.info('[PACE] Delay calculado: ' + paceDelay + 'ms', { nome, chatId });
+            
+            // Aplicar dedup rigoroso (últimas 3 respostas IA)
+            let respostaFinal = parsed.resposta;
+            respostaFinal = aplicarDedupResposta(respostaFinal, historicoConversa);
+            if (respostaFinal !== parsed.resposta) {
+              logger.info('[DEDUP] Resposta ajustada para evitar repetição', { nome, chatId });
+            }
+            
+            // Aguardar delay humano baseado no pace do cliente
+            await sleep(paceDelay);
+            
             try {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
             } catch {}
@@ -3750,7 +3970,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             try {
               // PROTEÇÃO: Verifica se a última mensagem enviada é igual à atual (evita duplicação)
               const ultimaIATexto = ultimaIA && ultimaIA.texto ? String(ultimaIA.texto).trim() : '';
-              const respostaAtual = String(parsed.resposta || '').trim();
+              const respostaAtual = String(respostaFinal || '').trim();
               if (ultimaIATexto && respostaAtual && ultimaIATexto === respostaAtual) {
                 logger.warn('[GROQ] Mensagem duplicada detectada - pulando envio', { nome, chatId, resposta: respostaAtual.substring(0, 50) });
                 await setChatState(nome, chatId, {
@@ -3767,7 +3987,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               // ENFORCEMENT: Aplicar regras de governança antes de enviar
               const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
               const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {} };
-              let respostaGov = enforceGovRulesOnText(parsed.resposta, { alreadyGreeted: !!flowPrev.greeted });
+              let respostaGov = enforceGovRulesOnText(respostaFinal, { alreadyGreeted: !!flowPrev.greeted });
               
               const utils = require('./utils.js');
               const telOk = utils.isValidBRPhoneWithDDD(parsed.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
