@@ -3317,11 +3317,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   function scheduleNextIfIdle() {
     if (!running) return;
-    if (chatAtivo) return;
-    if (filaChatTimer) return;
-    if (!fila.length) return;
+    if (chatAtivo) {
+      logger.debug('[FILA] Chat ativo, aguardando...', { nome, chatAtivo });
+      return;
+    }
+    if (filaChatTimer) {
+      logger.debug('[FILA] Timer já agendado, aguardando...', { nome });
+      return;
+    }
+    if (!fila.length) {
+      logger.debug('[FILA] Fila vazia', { nome });
+      return;
+    }
 
-    const next = fila[0];
+    // CRÍTICO: Remover o chat da fila ANTES de processar para evitar duplicação
+    const next = fila.shift(); // Remove da fila imediatamente
+    if (!next) return;
+
     // Primeira execução SEM delay; próximas respeitam o env (default 0)
     const delayMs = (() => {
       const env = process.env.VIRTUS_NEXT_CHAT_DELAY_MS;
@@ -3332,13 +3344,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const parsed = parseInt(env, 10);
       return Number.isFinite(parsed) ? parsed : 0;
     })();
-    logger.info('[FILA] Preparando atendimento do próximo chat', { nome, chatId: next, delay: delayMs });
+    logger.info('[FILA] Preparando atendimento do próximo chat', { nome, chatId: next, delay: delayMs, filaRestante: fila.length });
     filaChatTimer = setTimeout(async () => {
       try {
-        if (!running || !epochOk()) return;
-        // Revalida: se alguém setou chatAtivo nesse meio tempo, aborta e agenda novamente
-        if (chatAtivo) {
+        if (!running || !epochOk()) {
           filaChatTimer = null;
+          return;
+        }
+        // Revalida: se alguém setou chatAtivo nesse meio tempo, re-enfileira e agenda novamente
+        if (chatAtivo) {
+          fila.unshift(next); // Re-enfileira no início
+          filaChatTimer = null;
+          logger.info('[FILA] Chat ativo detectado, re-enfileirando', { nome, chatId: next });
           return scheduleNextIfIdle();
         }
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
@@ -3347,14 +3364,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       } catch (e) {
         filaChatTimer = null;
-        logger.error('[FILA] Erro no timer de atendimento', { nome, error: e && e.message || e });
+        logger.error('[FILA] Erro no timer de atendimento', { nome, chatId: next, error: e && e.message || e });
+        // Re-enfileira em caso de erro
+        fila.unshift(next);
         setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       }
     }, delayMs);
   }
 
   async function responderChat(chatId) {
-    if (!running || !epochOk()) return;
+    logger.info('[RESPONDER] Iniciando responderChat', { nome, chatId, filaLength: fila.length, chatAtivo });
+    if (!running || !epochOk()) {
+      logger.warn('[RESPONDER] Sistema não está rodando ou epoch inválido', { nome, chatId, running, epochOk: epochOk() });
+      return;
+    }
     const responderStartedAt = Date.now();
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
