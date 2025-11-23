@@ -494,17 +494,33 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     return true;
   });
   
-  // Se não há perguntas, retorna null (tudo coletado)
+  // Se não há perguntas, verifica se tem WhatsApp
   if (perguntasParaFazer.length === 0) {
-    logger.info('[PIPELINE] Todas as informações coletadas', { nome, chatId, qaAnswered: qaAnsweredUpdated });
-    return {
-      resposta: null,
-      telefone_extraido: telefone || qaAnsweredUpdated.telefone || null,
-      finalizado: !!telefone || !!qaAnsweredUpdated.telefone,
-      dados: qaAnsweredUpdated,
-      qaAsked: [...qaAsked],
-      qaAnswered: qaAnsweredUpdated
-    };
+    const temWhatsapp = !!(telefone || qaAnsweredUpdated.telefone);
+    if (temWhatsapp) {
+      // Tem WhatsApp e todas informações coletadas - pode finalizar
+      logger.info('[PIPELINE] Todas as informações coletadas (com WhatsApp)', { nome, chatId, qaAnswered: qaAnsweredUpdated });
+      return {
+        resposta: null,
+        telefone_extraido: telefone || qaAnsweredUpdated.telefone || null,
+        finalizado: true,
+        dados: qaAnsweredUpdated,
+        qaAsked: [...qaAsked],
+        qaAnswered: qaAnsweredUpdated
+      };
+    } else {
+      // NÃO TEM WHATSAPP - precisa pedir, mesmo que tenha outras informações
+      logger.info('[PIPELINE] Informações coletadas mas SEM WhatsApp - pedindo WhatsApp', { nome, chatId, qaAnswered: qaAnsweredUpdated });
+      const mensagem = 'Oii! Quase lá! Só falta o seu número de whatsapp com DDD pra eu passar pro motorista e ele te chamar. Me passa aí?';
+      return {
+        resposta: mensagem,
+        telefone_extraido: null,
+        finalizado: false,
+        dados: qaAnsweredUpdated,
+        qaAsked: [...qaAsked, 'whatsapp'],
+        qaAnswered: qaAnsweredUpdated
+      };
+    }
   }
   
   // Limita a 2 perguntas
@@ -512,22 +528,50 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     perguntasParaFazer = perguntasParaFazer.slice(0, 2);
   }
   
-  // Constrói mensagem
+  // Constrói mensagem HUMANIZADA em UMA ÚNICA mensagem (sem quebras que causem múltiplos envios)
   let mensagem = '';
   if (perguntasParaFazer.includes('whatsapp')) {
-    mensagem = 'Olá! Para eu entender melhor e te passar o orçamento, preciso do seu WhatsApp com DDD.';
+    // Primeira mensagem: humanizada, explicando o processo
+    mensagem = 'Oii, sim tudo bem! Quem passa o orçamento é o motorista, eu apenas anoto o pedido e passo pra ele, e ele te chama no whatsapp. Me passa teu número de whatsapp que já peço pra ele te chamar.';
     if (perguntasParaFazer.length > 1) {
       const outras = perguntasParaFazer.filter(q => q !== 'whatsapp');
       const outrasTextos = outras.map(q => {
-        if (q === 'itens') return 'Quais itens e quantidades você precisa transportar? (ex.: 2 camas, 10 sacolas)';
-        return FIELD_LABELS[q] || q;
+        if (q === 'itens') return 'o que você precisa transportar (ex.: 2 camas, 10 sacolas)';
+        // Humaniza os labels
+        const labelsHumanizados = {
+          'ajudante': 'se precisa de ajudante',
+          'saida_tipo': 'se a saída é casa ou apartamento',
+          'saida_elevador': 'se a saída tem elevador',
+          'destino_tipo': 'se o destino é casa ou apartamento',
+          'destino_elevador': 'se o destino tem elevador',
+          'bairro_saida': 'qual bairro de saída',
+          'bairro_destino': 'qual bairro de destino'
+        };
+        return labelsHumanizados[q] || FIELD_LABELS[q] || q;
       });
-      mensagem += '\n\nSe quiser adiantar, me passa também:\n' + outrasTextos.join('\n');
+      mensagem += ' Me diga também ' + outrasTextos.join(', ') + '.';
     }
   } else {
-    const textos = perguntasParaFazer.map(q => FIELD_LABELS[q] || q);
-    mensagem = 'Agora preciso de alguns detalhes pra fechar o orçamento:\n' + textos.join('\n');
+    // Mensagens subsequentes: humanizadas
+    const textos = perguntasParaFazer.map(q => {
+      const labelsHumanizados = {
+        'ajudante': 'Precisa de ajudante?',
+        'saida_tipo': 'Saída é casa ou apartamento?',
+        'saida_elevador': 'Saída tem elevador?',
+        'destino_tipo': 'Destino é casa ou apartamento?',
+        'destino_elevador': 'Destino tem elevador?',
+        'bairro_saida': 'Qual bairro de saída?',
+        'bairro_destino': 'Qual bairro de destino?',
+        'itens': 'O que você precisa transportar? (ex.: 2 camas, 10 sacolas)'
+      };
+      return labelsHumanizados[q] || FIELD_LABELS[q] || q;
+    });
+    mensagem = 'Agora preciso de alguns detalhes pra fechar o orçamento: ' + textos.join(', ') + '.';
   }
+  
+  // GARANTE: Remove TODAS as quebras de linha - mensagem deve ser UMA ÚNICA linha contínua
+  // Isso evita que o Messenger interprete como múltiplas mensagens
+  mensagem = mensagem.replace(/\n\n+/g, ' ').replace(/\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
   
   // Atualiza qaAsked
   const qaAskedUpdated = [...qaAsked, ...perguntasParaFazer];
@@ -2999,26 +3043,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const pipelineResult = await processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev);
             
             if (!pipelineResult || !pipelineResult.resposta) {
-              logger.info('[PIPELINE] Todas informações coletadas, finalizando', { nome, chatId });
-              // Todas informações coletadas, pode finalizar
+              // Pipeline retornou null - verifica se tem WhatsApp para finalizar
               const telefoneFinal = pipelineResult?.telefone_extraido || null;
-              if (telefoneFinal) {
+              if (telefoneFinal && pipelineResult?.finalizado) {
+                logger.info('[PIPELINE] Todas informações coletadas COM WhatsApp, finalizando', { nome, chatId });
                 const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
                 if (!jaTinhaTimer) {
                   iniciarTimerFechamento(chatId, telefoneFinal);
                 }
+                try {
+                  await setChatState(nome, chatId, {
+                    qaAsked: pipelineResult?.qaAsked || [],
+                    qaAnswered: pipelineResult?.qaAnswered || {},
+                    state: CHAT_STATES.FINALIZADO
+                  });
+                } catch {}
+                try { await pendingDel(nome, chatId); } catch {}
+                fila = fila.filter(id => id !== chatId);
+                chatAtivo = null;
+                return;
+              } else {
+                // Sem resposta do pipeline mas também sem WhatsApp - usar Groq como fallback
+                logger.info('[PIPELINE] Pipeline sem resposta e sem WhatsApp - usando Groq como fallback', { nome, chatId });
+                // Continua para o bloco DIRECT_GROQ abaixo
               }
-              try {
-                await setChatState(nome, chatId, {
-                  qaAsked: pipelineResult?.qaAsked || [],
-                  qaAnswered: pipelineResult?.qaAnswered || {},
-                  state: CHAT_STATES.FINALIZADO
-                });
-              } catch {}
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
             }
             
             // Atualiza state com qaAsked e qaAnswered
