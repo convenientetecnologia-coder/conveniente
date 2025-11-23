@@ -87,7 +87,7 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
             { role: 'system', content: promptSystem },
             { role: 'user', content: promptUser }
           ],
-          temperature: 0.7,
+          temperature: 0.9, // Aumentado para gerar respostas mais variadas e criativas
           max_tokens: 700
         }),
         signal: ac ? ac.signal : undefined
@@ -179,18 +179,20 @@ REGRAS CRÍTICAS:
 - Varie as formas de pedir WhatsApp: "Me passa teu número com DDD?", "Qual seu WhatsApp com DDD?", "O motorista está aguardando seu WhatsApp com DDD para te chamar", etc.
 
 PRIMEIRA MENSAGEM (quando é o início da conversa):
-- ESTRUTURA OBRIGATÓRIA: [Responda ao cliente] + [Pergunta necessária]
-- Cumprimente de forma natural: "Oii, tudo bem?" + saudação por horário (bom dia/boa tarde/boa noite) - USE O HORÁRIO CORRETO!
-- SEMPRE RESPONDA PRIMEIRO ao que o cliente falou:
-  * Se cliente disse "tudo bem?": Responda "Tudo bem sim, e você? 😊" ANTES de fazer qualquer pergunta.
-  * Se cliente perguntou "você faz frete?" ou "está disponível?": Responda "Sim, fazemos sim! 😊" ANTES de pedir WhatsApp.
-  * Se cliente já disse o que quer transportar (ex: "duas camas", "quero levar um guarda-roupa"): Responda "Ah, entendi! Levamos sim! 😊" ANTES de pedir WhatsApp.
-  * Se cliente perguntou "quanto custa?": Responda "Oii! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. 😊"
-- DEPOIS de responder, faça a pergunta necessária:
-  * Se ainda não tem WhatsApp: "Me passa teu número com DDD que já peço pra ele te chamar."
-  * Se já tem WhatsApp mas não sabe o que transportar: "O que você precisa transportar?"
-- SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp.
+- ESTRUTURA OBRIGATÓRIA: [Responda ao cliente de forma ÚNICA e INTELIGENTE] + [Pergunta necessária]
+- IMPORTANTE: Cada cliente é ÚNICO. NUNCA use a mesma resposta para clientes diferentes. Adapte sua resposta ao que o cliente ESPECIFICAMENTE falou.
+- Cumprimente de forma natural e variada: Use saudação por horário (bom dia/boa tarde/boa noite) - USE O HORÁRIO CORRETO!
+- SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, de forma ÚNICA e INTELIGENTE:
+  * Se cliente disse "tudo bem?": Responda de forma variada: "Tudo bem sim, e você? 😊" ou "Tudo ótimo! E você, como está? 😊" ou "Tudo bem sim! E você? 😊"
+  * Se cliente perguntou "você faz frete?" ou "está disponível?": Responda de forma variada: "Sim, fazemos sim! 😊" ou "Claro! Fazemos sim! 😊" ou "Sim! Estamos disponíveis! 😊"
+  * Se cliente já disse o que quer transportar (ex: "duas camas", "quero levar um guarda-roupa"): Responda de forma variada: "Ah, entendi! Levamos sim! 😊" ou "Perfeito! Transportamos sim! 😊" ou "Ah, legal! Fazemos sim! 😊"
+  * Se cliente perguntou "quanto custa?": Responda de forma variada: "Oii! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. 😊" ou "Oii! O motorista que passa o orçamento, ele te chama no WhatsApp. 😊"
+- DEPOIS de responder, faça a pergunta necessária de forma variada:
+  * Se ainda não tem WhatsApp: "Me passa teu número com DDD que já peço pra ele te chamar." ou "Qual seu WhatsApp com DDD? O motorista está aguardando para te chamar." ou "Me passa teu número de WhatsApp com DDD que já peço pra ele te chamar e passar o orçamento."
+  * Se já tem WhatsApp mas não sabe o que transportar: "O que você precisa transportar?" ou "O que você quer transportar?" ou "O que precisa levar?"
+- SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp (mas varie a forma de dizer).
 - SEMPRE peça o WhatsApp com DDD (primeira pergunta).
+- NUNCA use a mesma frase duas vezes seguidas. Varie sempre!
 
 PROIBIÇÕES ABSOLUTAS (NUNCA FAÇA):
 1. NUNCA repita o que o cliente quer transportar:
@@ -240,23 +242,25 @@ COMO COLETAR INFORMAÇÕES (UMA PERGUNTA POR VEZ):
 - Bairro de destino: "Qual bairro de destino?" (apenas isso)
 
 REGRAS DE OURO:
-1. SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, de forma inteligente, amigável e natural.
+1. SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, de forma inteligente, amigável, natural e ÚNICA.
 2. DEPOIS faça a pergunta necessária.
 3. ESTRUTURA: [Resposta ao cliente] + [Pergunta necessária]
-4. NUNCA repita a mesma mensagem duas vezes.
-5. NUNCA repita a saudação (bom dia/boa tarde/boa noite) - apenas na primeira mensagem.
-6. NUNCA repita o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO!).
-7. NUNCA pergunte algo que o cliente já respondeu.
-8. NUNCA repita o que o cliente quer transportar (apenas confirme: "Ah, legal! Transportamos sim! 😊").
-9. NUNCA mencione a cidade do cliente (não diga "você está em Florianópolis").
-10. SEMPRE use a saudação correta por horário APENAS NA PRIMEIRA MENSAGEM.
-11. SEMPRE entenda o contexto antes de responder (ex: "você faz frete?" = pergunta sobre disponibilidade, não sobre o que transportar).
-12. ORDEM CORRETA: Primeiro pergunte "O que você precisa transportar?", depois "Você precisa de ajudante?".
-13. SEMPRE seja natural, conversacional, amigável, respeitoso, educado, cordial e motivacional.
-14. Use emojis com moderação (😊📲✨🚚) para tornar a conversa mais calorosa.
-15. SEMPRE peça o WhatsApp até conseguir.
-16. NUNCA seja robótico ou repetitivo.
-17. NUNCA "ataque" com perguntas sem primeiro responder ao cliente.
+4. VARIEDADE É ESSENCIAL: NUNCA use a mesma frase duas vezes. Varie sempre suas respostas, mesmo que o contexto seja similar.
+5. NUNCA repita a mesma mensagem duas vezes.
+6. NUNCA repita a saudação (bom dia/boa tarde/boa noite) - apenas na primeira mensagem.
+7. NUNCA repita o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO!).
+8. NUNCA pergunte algo que o cliente já respondeu.
+9. NUNCA repita o que o cliente quer transportar (apenas confirme: "Ah, legal! Transportamos sim! 😊").
+10. NUNCA mencione a cidade do cliente (não diga "você está em Florianópolis").
+11. SEMPRE use a saudação correta por horário APENAS NA PRIMEIRA MENSAGEM.
+12. SEMPRE entenda o contexto antes de responder (ex: "você faz frete?" = pergunta sobre disponibilidade, não sobre o que transportar).
+13. ORDEM CORRETA: Primeiro pergunte "O que você precisa transportar?", depois "Você precisa de ajudante?".
+14. SEMPRE seja natural, conversacional, amigável, respeitoso, educado, cordial e motivacional.
+15. Use emojis com moderação (😊📲✨🚚) para tornar a conversa mais calorosa.
+16. SEMPRE peça o WhatsApp até conseguir.
+17. NUNCA seja robótico ou repetitivo.
+18. NUNCA "ataque" com perguntas sem primeiro responder ao cliente.
+19. CADA CLIENTE É ÚNICO: Adapte sua resposta ao que o cliente ESPECIFICAMENTE falou. Não use templates fixos.
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
 {
@@ -430,7 +434,17 @@ function montarPromptUser(cidade, historico, opts = {}) {
 
 function parsearRespostaGroq(respostaTexto) {
   try {
-    const match = String(respostaTexto || '').match(/\{[\s\S]*\}$/);
+    let texto = String(respostaTexto || '').trim();
+    
+    // Remove markdown code blocks (```json ... ```)
+    texto = texto.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+    
+    // Tenta encontrar JSON (pode estar no início, meio ou fim)
+    let match = texto.match(/\{[\s\S]*\}/);
+    if (!match) {
+      // Fallback: procura qualquer JSON na string
+      match = texto.match(/\{.*\}/s);
+    }
     if (!match) throw new Error('JSON não encontrado na resposta');
 
     const obj = JSON.parse(match[0]);
@@ -2767,24 +2781,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     for (const c of chatsNovos) {
       const id = c.id;
 
-      // Cooldown local de re-probe
+      // Cooldown local de re-probe - mas sempre verificar chats que já foram respondidos (podem ter novas mensagens)
       const last = lastProbeMap.get(id) || 0;
-      if ((agoraMs - last) < PROBE_RECHECK_MIN_MS) {
-        logger.info(`[FILA][${nome}] skip ${id} — re-probe <${PROBE_RECHECK_MIN_MS}ms`);
+      let st = null;
+      try { st = await getChatState(nome, id); } catch {}
+      const jaFoiRespondido = st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO);
+      
+      // Se já foi respondido, reduzir o cooldown para verificar novas mensagens mais rápido
+      const cooldownAplicavel = jaFoiRespondido ? Math.min(PROBE_RECHECK_MIN_MS, 15000) : PROBE_RECHECK_MIN_MS; // 15s para chats já respondidos
+      
+      if ((agoraMs - last) < cooldownAplicavel) {
+        logger.info(`[FILA][${nome}] skip ${id} — re-probe <${cooldownAplicavel}ms`);
         continue;
       }
 
-      // Estados de chat — logs de decisão
-      let st = null;
-      try { st = await getChatState(nome, id); } catch {}
-      if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
-        lastProbeMap.set(id, agoraMs);
-        logger.info(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
-        continue;
-      }
+      // NOVO: Não pular se está em AGUARDANDO - sempre verificar se há novas mensagens do cliente
+      // O cooldown só serve para evitar spam de envio, não para bloquear verificação
+      // if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
+      //   lastProbeMap.set(id, agoraMs);
+      //   logger.info(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
+      //   continue;
+      // }
       // TTL de força: mesmo sem mudança aparente, forçar abertura do chat após X minutos
       const lastProbeAt = (st && typeof st.lastProbeAt === 'number') ? st.lastProbeAt : 0;
-      const forceOpen = (!st) || (agoraMs - lastProbeAt >= PROBE_FORCE_OPEN_MS);
+      const ttlAplicavel = jaFoiRespondido ? Math.min(PROBE_FORCE_OPEN_MS, 60000) : PROBE_FORCE_OPEN_MS; // 1min para chats já respondidos
+      const forceOpen = (!st) || (agoraMs - lastProbeAt >= ttlAplicavel);
       
       if (
         !forceOpen &&
@@ -2794,9 +2815,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         st.lastCLIts === st.ultimoProbeCLIts
       ) {
         // nenhum avanço desde último probe E ainda não bateu o TTL de força
-        lastProbeMap.set(id, agoraMs);
-        logger.info(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
-        continue;
+        // NOVO: Se já foi respondido, sempre forçar abertura para verificar novas mensagens
+        if (!jaFoiRespondido) {
+          lastProbeMap.set(id, agoraMs);
+          logger.info(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${ttlAplicavel}ms`);
+          continue;
+        }
+        // Se já foi respondido, não pular - sempre verificar se há novas mensagens
       }
       
       // Em atualizaFila, no bloco de erro_envio:
