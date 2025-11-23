@@ -260,13 +260,22 @@ INTELIGÊNCIA CONTEXTUAL (CRÍTICO - REGRA DE OURO):
 1. SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, de forma inteligente, natural e amigável.
 2. DEPOIS faça a pergunta que precisa fazer.
 3. ESTRUTURA OBRIGATÓRIA: [Resposta ao cliente] + [Pergunta necessária]
-4. EXEMPLOS:
+4. EXEMPLOS (APENAS REFERÊNCIA DE ESTILO - NUNCA COPIE LITERALMENTE):
+   ⚠️ ATENÇÃO: Os exemplos abaixo são APENAS para você entender o ESTILO e a ESTRUTURA. 
+   NUNCA copie essas respostas literalmente. Crie SEMPRE respostas NOVAS, ÚNICAS e INTELIGENTES 
+   baseadas no que o cliente ESPECIFICAMENTE falou. Cada cliente é ÚNICO e merece uma resposta ÚNICA.
+   
+   Exemplo de ESTILO (não copie):
    - Cliente: "oi boa noite tudo bem? você faz frete para o jardim ana paula? duas camas"
-   - Resposta: "Oii, boa noite! Tudo bem sim, e você? 😊 Sim, fazemos sim! Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
+   - Estilo de resposta (referência): Responde ao cliente + menciona motorista/WhatsApp + pede WhatsApp
    - Cliente: "você faz frete?"
-   - Resposta: "Oii! Sim, fazemos sim! Quem passa o orçamento é o motorista pelo WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
+   - Estilo de resposta (referência): Responde positivamente + menciona motorista/WhatsApp + pede WhatsApp
+   
+   VOCÊ DEVE CRIAR respostas NOVAS baseadas nesse ESTILO, mas adaptadas ao que o cliente ESPECIFICAMENTE falou.
+   NUNCA use as mesmas palavras dos exemplos. Varie SEMPRE!
 5. SEJA CONVERSACIONAL: Responda ao que o cliente falou antes de fazer sua pergunta.
 6. NUNCA seja robótico: Não "ataque" com perguntas sem primeiro responder ao cliente.
+7. CRIE SEMPRE RESPOSTAS NOVAS: Os exemplos são apenas para entender o estilo. Cada resposta deve ser ÚNICA e criada especialmente para aquele cliente específico.
 
 SAUDAÇÃO POR HORÁRIO (OBRIGATÓRIO):
 - Das 5:01 às 12:00 = "bom dia"
@@ -2513,10 +2522,12 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     // Marcar estado após envio (apenas se realmente enviou)
     if (mensagemEnviada) {
       try {
+        // Atualiza lastIATs mas NÃO bloqueia com cooldown longo - permite continuidade da conversa
+        // O cooldown só serve para evitar spam, não para bloquear respostas subsequentes
         await setChatState(nome, chatId, {
           state: CHAT_STATES.AGUARDANDO,
-          lastIATs: Date.now(),
-          cooldownUntil: Date.now() + SENT_COOLDOWN_MS
+          lastIATs: Date.now()
+          // Removido cooldownUntil aqui - será aplicado apenas se necessário (evitar spam)
         });
       } catch {}
     }
@@ -3801,14 +3812,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               releaseSendGuard(pAtual);
             }
             
-            // Após envio bem-sucedido, persista:
+            // Após envio bem-sucedido, persista (CRÍTICO: atualiza ultimoProbeCLIts para permitir detecção de novas mensagens)
             try {
+              // Re-extrai histórico para pegar o timestamp mais recente do cliente
+              let tsCLIAtualizado = tsCLI || 0;
+              try {
+                const historicoAtualizado = await extrairHistoricoConversa(pAtual);
+                const ultimaClienteAtualizada = historicoAtualizado && historicoAtualizado.filter(m => m.autor === 'cliente').pop();
+                if (ultimaClienteAtualizada && ultimaClienteAtualizada.timestamp) {
+                  tsCLIAtualizado = tsNum(ultimaClienteAtualizada.timestamp);
+                }
+              } catch {}
+              
               await setChatState(nome, chatId, {
                 ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
-                ultimoProbeCLIts: tsCLI || 0,
+                ultimoProbeCLIts: tsCLIAtualizado, // Atualiza para permitir detecção de novas mensagens
                 lastIATs: Date.now(),
                 lastProbeAt: Date.now(),
-                lastClientHash
+                lastClientHash,
+                state: CHAT_STATES.AGUARDANDO // Garante que está aguardando resposta do cliente
               });
             } catch {}
             
@@ -4036,15 +4058,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               releaseSendGuard(pAtual);
             }
 
-            // Após envio bem-sucedido, persista:
+            // Após envio bem-sucedido, persista (CRÍTICO: atualiza ultimoProbeCLIts para permitir detecção de novas mensagens)
             try {
+              // Re-extrai histórico para pegar o timestamp mais recente do cliente
+              let tsCLIAtualizado = tsCLI || 0;
+              try {
+                const historicoAtualizado = await extrairHistoricoConversa(pAtual);
+                const ultimaClienteAtualizada = historicoAtualizado && historicoAtualizado.filter(m => m.autor === 'cliente').pop();
+                if (ultimaClienteAtualizada && ultimaClienteAtualizada.timestamp) {
+                  tsCLIAtualizado = tsNum(ultimaClienteAtualizada.timestamp);
+                }
+              } catch {}
+              
               await setChatState(nome, chatId, {
                 ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
-                ultimoProbeCLIts: tsCLI || 0,
+                ultimoProbeCLIts: tsCLIAtualizado, // Atualiza para permitir detecção de novas mensagens
                 lastIATs: Date.now(),
                 lastProbeAt: Date.now(),
                 lastClientHash,
-                ultimaRespostaEnviada: respostaAtual // Guarda a última resposta para evitar duplicação
+                ultimaRespostaEnviada: respostaAtual, // Guarda a última resposta para evitar duplicação
+                state: CHAT_STATES.AGUARDANDO // Garante que está aguardando resposta do cliente
               });
             } catch {}
 
