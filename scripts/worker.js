@@ -1134,6 +1134,30 @@ async function activateOnce(nome, source = '') {
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
+        // [NAV_INIT] garantir UI do Marketplace após abrir o browser (sem usar o chat ativo!)
+        function nowIso(){ try { return new Date().toISOString(); } catch { return String(Date.now()); } }
+        try {
+          const pages = await browser.pages().catch(()=>[]);
+          const main = pages && pages[0];
+          if (main) {
+            logger.info('[NAV_INIT] indo para marketplace (activateOnce)', { nome, ts: nowIso() });
+            try {
+              await main.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            } catch {}
+            try {
+              const okUi = await Promise.race([
+                main.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).then(()=>true).catch(()=>false),
+                main.waitForSelector('div[role="row"]', { timeout: 8000 }).then(()=>true).catch(()=>false)
+              ]);
+              logger.info('[NAV_INIT] UI marketplace ' + (okUi ? 'OK' : 'NOK'), { nome, url: (typeof main.url === 'function' ? main.url() : ''), ts: nowIso() });
+            } catch (e) {
+              logger.warn('[NAV_INIT] UI marketplace não validada', { nome, error: (e && e.message)||String(e), ts: nowIso() });
+            }
+          }
+        } catch (e) {
+          logger.warn('[NAV_INIT] falha ao preparar marketplace', { nome, error: (e && e.message)||String(e), ts: nowIso() });
+        }
+
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activatedAt = Date.now();
         robeMeta[nome].ramHist = [];

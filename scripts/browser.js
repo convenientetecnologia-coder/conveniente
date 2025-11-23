@@ -2135,6 +2135,36 @@ async function detectAccountSuspended(page) {
   return { banned: false };
 }
 
+/**
+ * Helper para navegação inicial obrigatória para Messenger Marketplace.
+ * Use após abrir o navegador, para garantir que a aba principal vai para marketplace de forma limpa — só seguir quando anchors/rows forem detectados.
+ * 
+ * Parâmetros:
+ * - page: objeto Page (do Puppeteer)
+ * - nome: nome do perfil (para log)
+ * - timeoutMs: tempo máximo de espera (default 30000ms)
+ * 
+ * Usage (em worker.js ou Virtus como preferir):
+ *   await browserHelper.gotoMessengerMarketplace(page, nome);
+ */
+async function gotoMessengerMarketplace(page, nome, timeoutMs=30000) {
+  try {
+    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+
+    const ok = await Promise.race([
+      page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).then(()=>true).catch(()=>false),
+      page.waitForSelector('div[role="row"]', { timeout: 8000 }).then(()=>true).catch(()=>false)
+    ]);
+
+    logger.info('[NAV_INIT][browser] ' + (ok ? 'OK' : 'NOK'), { nome, url: (typeof page.url === 'function'?page.url():''), ts: (new Date()).toISOString() });
+
+    return ok;
+  } catch (e) {
+    logger.warn('[NAV_INIT][browser] falha', { nome, error: (e&&e.message)||String(e) });
+    return false;
+  }
+}
+
 module.exports = {
   openBrowser,
   configureProfile,
@@ -2166,5 +2196,6 @@ module.exports = {
   isProtectedBuscaLocalizacao,
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended
+  detectAccountSuspended,
+  gotoMessengerMarketplace
 };

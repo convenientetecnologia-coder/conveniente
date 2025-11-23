@@ -129,27 +129,37 @@ Personalidade:
 - Usa emojis com moderação (😄🚚📲✨)
 - Persistente agradável (sem ser chato)
 
+Estratégia de Atendimento:
+
+PRIMEIRA MENSAGEM (quando secondary_already_asked = false):
+- Foque PRIMEIRO em obter o WhatsApp com DDD.
+- Se o cliente quiser adiantar, mencione: "se quiser adiantar, me passa também: precisa de ajudante? Saída e destino são casa ou apartamento? Com ou sem elevador? Quais bairros? E quais itens/quantidades?"
+- Mas o WhatsApp é PRIORIDADE #1.
+
+APÓS TER WHATSAPP (quando secondary_already_asked = false):
+- Em UMA ÚNICA MENSAGEM, peça TODOS os dados secundários de uma vez:
+  "Agora preciso de alguns detalhes pra fechar o orçamento:
+  - Precisa de ajudante?
+  - Saída: casa ou apartamento? Com ou sem elevador?
+  - Destino: casa ou apartamento? Com ou sem elevador?
+  - Bairros de saída e destino
+  - Itens e quantidades (ex.: 2 camas, 10 sacolas)"
+- NUNCA peça os dados secundários em várias mensagens separadas.
+
+QUANDO secondary_already_asked = true:
+- Continue a conversa normalmente, coletando as informações que faltam.
+- Não peça novamente os dados que já foram fornecidos.
+
 Contexto:
 - Conversa em andamento. Continue naturalmente.
 - NUNCA repita cumprimentos (nada de "Olá" de novo).
 - NUNCA repita o que o cliente acabou de dizer. Avance o assunto.
 
-Objetivos:
-- Objetivo #1: pegar o WhatsApp com DDD (telefone válido).
-  - Sempre dê a razão: "pra eu entender melhor e te passar o orçamento"
-  - Crie urgência: "o meu motorista já vai te chamar"
-- Objetivo #2: coletar detalhes para o pedido (um ou dois por vez, de forma natural):
-  - Precisa de ajudante?
-  - Saída: casa ou apartamento? Com ou sem elevador?
-  - Destino: casa ou apartamento? Com ou sem elevador?
-  - Bairros (saída e destino)
-  - Itens/quantidades (ex.: 2 camas, 10 sacolas)
-
 Inteligência:
 - Se o cliente já trouxe informações (ex.: "de São José para Florianópolis", "apartamento com elevador", "preciso de ajudante"), aproveite e preencha.
 - Se houver telefone no histórico, extraia.
 - Nunca reescreva o que o cliente disse; responda de forma direta e humana.
-- Seja sucinto, sem redundâncias, e sempre avance pedindo o WhatsApp se ainda não tiver.
+- Seja sucinto, sem redundâncias.
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
 {
@@ -181,16 +191,18 @@ Proibições (não use, nem como variação):
 Se surgir uma dessas no início, reescreva sem ela (responda direto ao ponto).
 `.trim();
 
-function montarPromptUser(cidade, historico) {
+function montarPromptUser(cidade, historico, opts = {}) {
   const cid = cidade || 'não informada';
+  const alreadyAsked = !!(opts && opts.secondaryAlreadyAsked);
   const cabecalho = [
     `Contexto do atendimento:`,
     `- Cidade (referência): ${cid}`,
+    `- secondary_already_asked: ${alreadyAsked ? 'true' : 'false'}`,
     ``,
-    `Esta é uma conversa em andamento. Continue naturalmente, sem cumprimentos repetidos,`,
-    `e sem repetir a cidade caso já exista histórico.`,
+    `Conversa em andamento (autor: texto). Continue naturalmente, sem cumprimentos repetidos;`,
+    `não repita o que o cliente acabou de dizer. Se já houver WhatsApp, colete os dados secundários em UMA SÓ MENSAGEM.`,
     ``,
-    `Histórico completo (ordem temporal, autor: texto):`
+    `Histórico (ordem cronológica):`
   ];
   const linhas = [];
   for (const msg of (historico || [])) {
@@ -199,8 +211,7 @@ function montarPromptUser(cidade, historico) {
   }
   const rodape = [
     ``,
-    `Gere a próxima resposta seguindo as regras e o formato JSON especificado.`,
-    `Se o histórico já contiver um número de WhatsApp, retorne em "telefone_extraido".`
+    `Gere a próxima resposta seguindo estritamente as regras e o formato JSON (apenas JSON).`
   ];
   return [...cabecalho, ...linhas, ...rodape].join('\n');
 }
@@ -2014,6 +2025,38 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     return null;
   }
 
+  async function refocusComposerNoReload(p, chatId, anchorSel) {
+    try {
+      logger.info('[COMPOSER] Tentando refocus sem reload', { nome, chatId });
+      // Tenta scroll leve e foco
+      try {
+        await p.evaluate(() => window.scrollBy(0, 120));
+        await sleep(500);
+      } catch {}
+      // Tenta clicar no anchor para garantir contexto
+      if (anchorSel) {
+        try {
+          const anchor = await p.$(anchorSel);
+          if (anchor) {
+            await anchor.click({ delay: 100 }).catch(()=>{});
+            await sleep(800);
+          }
+        } catch {}
+      }
+      // Tenta encontrar composer novamente
+      const campo = await waitForComposer(p, 5000);
+      if (campo) {
+        logger.info('[COMPOSER] Refocus bem-sucedido sem reload', { nome, chatId });
+        return campo;
+      }
+      logger.warn('[COMPOSER] Refocus falhou, composer ainda indisponível', { nome, chatId });
+      return null;
+    } catch (e) {
+      logger.warn('[COMPOSER] Erro no refocus', { nome, chatId, error: e && e.message || e });
+      return null;
+    }
+  }
+
   function incFail(chatId) {
     const n = (failCounts.get(chatId) || 0) + 1;
     setFailCount(chatId, n);
@@ -2418,18 +2461,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
+        logger.info('[NAVEGACAO] Garantindo Marketplace UI', { nome, chatId });
         await garantirMarketplace(p, { nome });
+        logger.info('[NAVEGACAO] Marketplace UI garantida', { nome, chatId });
 
         // NOVO: Não bloquear baseado apenas em respondedCache
         // A verificação de "novas mensagens" será feita após coletar o histórico
         // Mantém apenas verificação de cooldown de prova (já feito em atualizaFila)
 
         let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+        logger.info('[NAVEGACAO] Scroll para topo e busca de anchor', { nome, chatId, anchorSel });
         await scrollChatsToTop(p, nome).catch(()=>{});
         await sleep(300);
         let found = await p.$(anchorSel);
 
         if (!found) {
+          logger.info('[SKIP] Âncora do chatId não encontrada', { nome, chatId });
           logger.warn(`Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`, { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
@@ -2460,6 +2507,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
 
         if (await isChatBlocked(p)) {
+          logger.info('[SKIP] Chat bloqueado/indisponível', { nome, chatId });
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
           try { await pendingDel(nome, chatId); } catch {}
           try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
@@ -2480,31 +2528,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let campo = await waitForComposer(p, 10000);
         if (!campo) {
-          // sem reload imediato — ampliar a espera e tentar foco/scroll leve
-          try { await p.evaluate(() => window.scrollBy(0, 120)); } catch {}
-          campo = await waitForComposer(p, 8000);
-        }
-        if (!campo) {
-          // último grace curto — sem reload
-          await sleep(2000);
-          campo = await waitForComposer(p, 3000);
-        }
-
-        if (!campo) {
-          const fails = incFail(chatId);
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'composer_missing', chatId, failCount: fails });
-          logger.error(`Composer indisponível para chat ${chatId}. Tentativas: ${fails}`, { nome, chatId });
-          if (fails >= 2) {
-            logger.warn(`${chatId} falhou 2x. Marcando como respondido para não travar fila.`, { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            try { await logIssue(nome, 'virtus_no_composer', `composer ausente após 2 tentativas (chat ${chatId})`); } catch {}
-            resetFail(chatId);
+          // GARANTA: NUNCA RELOAD GOTO NA ABA PRINCIPAL DO CHAT
+          logger.info('[COMPOSER] Composer não encontrado, tentando refocus sem reload', { nome, chatId });
+          const campo2 = await refocusComposerNoReload(p, chatId, anchorSel);
+          if (campo2) {
+            campo = campo2;
+            logger.info('[COMPOSER] Refocus bem-sucedido', { nome, chatId });
           } else {
+            logger.warn('[COMPOSER] indisponível (sem reload) — agendando cooldown', { nome, chatId });
+            const prev = await getChatState(nome, chatId).catch(()=>null);
+            const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              sendAttempts: attempts,
+              cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+              ultimoProbeCLIts: tsCLI || 0,
+              lastProbeAt: Date.now()
+            });
             try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
           }
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
         }
 // REVALIDAÇÃO FINAL: verificação será feita após coletar histórico
 // A lógica de "novas mensagens" substitui o gating por respondedCache
@@ -2574,11 +2619,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch {}
 
         // 4. Coleta TODO o histórico da conversa (mensagens do cliente e da IA)
+        logger.info('[COLETA] Iniciando coleta de histórico', { nome, chatId });
         const historicoConversa = await extrairHistoricoConversa(p);
         
         await appendChatHistoryLog(nome, chatId, historicoConversa);
         
-        logger.info('[CHAT] Histórico coletado', { 
+        logger.info('[COLETA] Histórico coletado', { 
           nome, 
           chatId, 
           totalMensagens: historicoConversa.length,
@@ -2710,7 +2756,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
             
-            const promptUser = montarPromptUser(cidadePreferida, historicoConversa);
+            // PATCH LOGIC CHECKLIST "alreadyAsked"
+            const secondaryAlreadyAsked = !!(stPrev && stPrev.secondaryPrompted === true);
+            const promptUser = montarPromptUser(cidadePreferida, historicoConversa, { secondaryAlreadyAsked });
             const txt = await chamarGroqAPI(PROMPT_SYSTEM, promptUser);
             const parsed = parsearRespostaGroq(txt);
             
@@ -2835,6 +2883,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await sendMessageSafe(pAtual, campoEnvio, parsed.resposta, nome, chatId);
             
             await appendIaLine(nome, chatId, parsed.resposta);
+            
+            // Salvar secondaryPrompted após enviar resposta
+            try { await setChatState(nome, chatId, { secondaryPrompted: true }); } catch {}
 
             await marcarRespondido(nome, chatId);
 
