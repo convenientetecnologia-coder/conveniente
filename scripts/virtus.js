@@ -2251,11 +2251,10 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     } catch {}
   }
   
-  // Tenta as rotas em ordem
+  // Tenta as rotas em ordem (removida rota incorreta /marketplace/you/selling/messages)
   const rotas = [
-    '/marketplace/you/selling/messages',
-    '/marketplace/inbox',
-    '/marketplace'
+    '/marketplace',
+    '/marketplace/inbox'
   ];
   
   for (const rota of rotas) {
@@ -3239,21 +3238,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-      // Para chats novos, aplicar cooldown normal
-      // CRÍTICO: Não aplicar cooldown se o chat já está na fila (já foi enfileirado e está aguardando processamento)
-      const last = lastProbeMap.get(id) || 0;
-      const cooldownAplicavel = PROBE_RECHECK_MIN_MS;
-      
-      // Se o chat já está na fila, não aplicar cooldown - ele já foi enfileirado e está aguardando processamento
+      // CRÍTICO: Se o chat já está na fila, não fazer nada - ele já foi enfileirado e está aguardando processamento
+      // Não aplicar cooldown nem re-probe para chats já enfileirados
       if (fila.includes(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
         return;
       }
       
-      if ((agoraMs - last) < cooldownAplicavel) {
-        logger.info(`[FILA][${nome}] skip ${id} — re-probe <${cooldownAplicavel}ms`);
-        return;
-      }
+      // Para chats novos que ainda não estão na fila, verificar se já foi processado recentemente
+      // Mas apenas se não estiver na fila (já verificado acima)
+      const last = lastProbeMap.get(id) || 0;
+      // REMOVIDO: cooldown de re-probe que estava bloqueando chats novos
+      // Se o chat não está na fila e não foi processado, deve ser enfileirado
 
       // TTL de força: mesmo sem mudança aparente, forçar abertura do chat após X minutos
       const lastProbeAt = (st && typeof st.lastProbeAt === 'number') ? st.lastProbeAt : 0;
