@@ -32,8 +32,7 @@ const manifestStore = require('./manifestStore.js');
 // === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
 // === Pipeline de Perguntas (dominante, Groq só como fallback) ===
-// DESABILITADO: Usando Groq diretamente para atendimento inteligente
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
 
 // Verificação da chave será feita apenas quando necessário (lazy check)
 // Isso evita erro no boot se o .env ainda não estiver configurado
@@ -87,7 +86,7 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
             { role: 'system', content: promptSystem },
             { role: 'user', content: promptUser }
           ],
-          temperature: 0.9, // Aumentado para gerar respostas mais variadas e criativas
+          temperature: 0.7,
           max_tokens: 700
         }),
         signal: ac ? ac.signal : undefined
@@ -261,6 +260,9 @@ REGRAS DE OURO:
 17. NUNCA seja robótico ou repetitivo.
 18. NUNCA "ataque" com perguntas sem primeiro responder ao cliente.
 19. CADA CLIENTE É ÚNICO: Adapte sua resposta ao que o cliente ESPECIFICAMENTE falou. Não use templates fixos.
+20. VOCÊ DEVE FAZER EXATAMENTE 1 PERGUNTA POR MENSAGEM. NUNCA faça múltiplas perguntas juntas.
+21. SOMENTE peça o WhatsApp antes de avançar qualquer outro campo. WhatsApp é PRIORIDADE ABSOLUTA.
+22. NUNCA confirme número enviado pelo cliente. Se ele enviou WhatsApp, apenas avance para a próxima pergunta.
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
 {
@@ -472,24 +474,15 @@ function parsearRespostaGroq(respostaTexto) {
 }
 
 // Fallback robusto de telefone (BR). Extrai do texto bruto
+// ATUALIZADO: Usa extractPhonesBRStrict do utils.js para validação ultra-rígida
 function extrairTelefoneFallback(texto) {
   try {
-    const clean = String(texto || '').replace(/[^\d+]/g, ' ').replace(/\s+/g, ' ');
-    // Formatos comuns: +55 11 98888-7777 | 11 98888 7777 | 11988887777
-    const REG = /(?:\+?55\s*)?(?:(\d{2})\s*)?(\d{5}|\d{4})\s*[- ]?\s*(\d{4})/g;
-    let best = null; let m;
-    while ((m = REG.exec(clean)) !== null) {
-      const ddd = m[1] || '';
-      const part1 = m[2] || '';
-      const part2 = m[3] || '';
-      const d = (ddd + part1 + part2).replace(/\D/g, '');
-      if (d.length >= 10 && d.length <= 11) {
-        best = d.length === 11 ? d : (d.startsWith('9') ? '0'+d : d); // heurit.
-        if (best.length >= 10) return best;
-      }
-    }
-    return best;
-  } catch { return null; }
+    const phones = utils.extractPhonesBRStrict(texto);
+    // Retorna o primeiro telefone válido encontrado (ou null)
+    return phones.length > 0 ? phones[0] : null;
+  } catch {
+    return null;
+  }
 }
 
 // Locks por perfil de input
@@ -641,176 +634,167 @@ function extractAnswersFromHistory(historico) {
   return answers;
 }
 
-// Pipeline de Perguntas - Função principal
+// Pipeline de Perguntas - Função principal (VERSÃO ULTRA-BLINDADA)
+const FLOW_ORDER = [
+  'telefone',       // WhatsApp com DDD — prioridade absoluta
+  'itens',
+  'ajudante',
+  'saida_tipo',
+  'destino_tipo',
+  'bairro_saida',
+  'bairro_destino'
+];
+
+const FIELD_PROMPTS = {
+  telefone:        'Me passa teu WhatsApp com DDD? O motorista chama por lá.',
+  itens:           'O que você precisa transportar? (ex.: 2 camas, 10 sacolas)',
+  ajudante:        'Você precisa de ajudante?',
+  saída_tipo:      'O local de saída é casa ou apartamento?',
+  saida_tipo:      'O local de saída é casa ou apartamento?',
+  destino_tipo:    'O destino é casa ou apartamento?',
+  bairro_saida:    'Qual bairro de saída?',
+  bairro_destino:  'Qual bairro de destino?'
+};
+
+function getOrInitFlowState(stPrev) {
+  const fs = stPrev && stPrev.flow ? stPrev.flow : {
+    greeted: false,
+    asked: {},
+    answered: {}
+  };
+  fs.asked = fs.asked || {};
+  fs.answered = fs.answered || {};
+  return fs;
+}
+
+function pickNextMissingField(flow) {
+  for (const f of FLOW_ORDER) {
+    if (!flow.answered[f]) return f;
+  }
+  return null;
+}
+
+function applyExtractedAnswers(flow, historicoConversa, utils) {
+  const texto = (historicoConversa || []).map(m => m && m.texto || '').join(' ').toLowerCase();
+  const phones = utils.extractPhonesBRStrict(texto);
+  if (phones && phones.length) {
+    const best = phones[0];
+    flow.answered.telefone = best;
+  }
+  // (as heurísticas dos outros campos você pode manter conforme já existe)
+  if (/ajudante|ajuda/i.test(texto)) {
+    if (/\b(sim|preciso|quero)\b/i.test(texto)) flow.answered.ajudante = 'sim';
+    else if (/\b(n[aã]o|nao)\b/i.test(texto)) flow.answered.ajudante = 'não';
+  }
+  if (/sa[ií]da.*(casa|apartamento|apto|ap)\b/i.test(texto)) {
+    flow.answered.saida_tipo = /casa/i.test(texto) ? 'casa' : 'apartamento';
+  }
+  if (/destino.*(casa|apartamento|apto|ap)\b/i.test(texto)) {
+    flow.answered.destino_tipo = /casa/i.test(texto) ? 'casa' : 'apartamento';
+  }
+  const bx = texto.match(/\bbairro(s)?\b[:\s]*([^,.\n]+)/i);
+  if (bx) {
+    const clean = (bx[2] || '').trim();
+    if (clean && !flow.answered.bairro_saida) flow.answered.bairro_saida = clean;
+  }
+  if (/transportar|levar|itens?|coisas?|m[óo]veis?|mudan[çc]a/i.test(texto)) {
+    const snippet = texto.slice(0, 180);
+    flow.answered.itens = flow.answered.itens || snippet;
+  }
+  return flow;
+}
+
+function buildNaturalPrefix(ultimaDoCliente) {
+  if (!ultimaDoCliente) return 'Certo! ';
+  const t = ultimaDoCliente.trim().toLowerCase();
+  if (/tudo bem|td bem|como est[aá]/.test(t)) return 'Tudo ótimo! ';
+  if (/faz frete|fazem frete|dispon[ií]vel|voc[eê] faz|trabalha/i.test(t)) return 'Fazemos sim! ';
+  if (/pre[cç]o|quanto custa|or[çc]amento/i.test(t)) return 'O orçamento quem passa é o motorista pelo WhatsApp. ';
+  return 'Beleza! ';
+}
+
 async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
-  logger.info('[PIPELINE] Iniciando processamento', { nome, chatId });
-  
-  // Extrai respostas do histórico
-  const extractedAnswers = extractAnswersFromHistory(historicoConversa);
-  logger.info('[PIPELINE] Respostas extraídas do histórico', { nome, chatId, extractedAnswers });
-  
-  // Carrega state atual
-  const qaAsked = (stPrev && Array.isArray(stPrev.qaAsked)) ? stPrev.qaAsked : [];
-  const qaAnswered = (stPrev && stPrev.qaAnswered && typeof stPrev.qaAnswered === 'object') ? stPrev.qaAnswered : {};
-  
-  // Atualiza qaAnswered com respostas extraídas
-  const qaAnsweredUpdated = { ...qaAnswered };
-  for (const [field, value] of Object.entries(extractedAnswers)) {
-    if (value && !qaAnsweredUpdated[field]) {
-      qaAnsweredUpdated[field] = value;
-      logger.info('[PIPELINE] Resposta coletada', { nome, chatId, field, value });
-    }
+  const flow = getOrInitFlowState(stPrev);
+  const utils = require('./utils.js');
+  applyExtractedAnswers(flow, historicoConversa, utils);
+
+  const next = pickNextMissingField(flow);
+
+  if (!next) {
+    const tel = flow.answered.telefone;
+    const valid = utils.isValidBRPhoneWithDDD(tel || '');
+    return {
+      resposta: valid ? null : 'Faltou só seu WhatsApp com DDD para eu passar ao motorista. Me passa, por favor?',
+      telefone_extraido: valid ? tel : null,
+      finalizado: valid ? true : false,
+      dados: flow.answered,
+      qaAsked: Object.keys(flow.asked),
+      qaAnswered: flow.answered,
+      flow
+    };
   }
-  
-  // Extrai telefone do histórico
-  const textoHistorico = (historicoConversa || []).map(m => m && m.texto || '').join(' ');
-  const telefone = extrairTelefoneFallback(textoHistorico);
-  
-  // Determina próximas perguntas baseado na prioridade
-  let perguntasParaFazer = [];
-  const temWhatsapp = !!telefone || !!qaAnsweredUpdated.telefone;
-  const temItens = !!qaAnsweredUpdated.itens;
-  const temAjudante = !!qaAnsweredUpdated.ajudante;
-  
-  // Primeira mensagem: WhatsApp + itens
-  if (qaAsked.length === 0) {
-    perguntasParaFazer = ['whatsapp', 'itens'];
-    logger.info('[PIPELINE] Primeira mensagem: WhatsApp + itens', { nome, chatId });
+
+  if (next !== 'telefone' && !utils.isValidBRPhoneWithDDD(flow.answered.telefone || '')) {
+    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
+    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const msg = `${prefixo}${FIELD_PROMPTS.telefone}`;
+    flow.asked.telefone = true;
+    return {
+      resposta: msg,
+      telefone_extraido: null,
+      finalizado: false,
+      dados: flow.answered,
+      qaAsked: Object.keys(flow.asked),
+      qaAnswered: flow.answered,
+      flow
+    };
   }
-  // Se só um respondido, pergunta o outro + ajudante
-  else if ((temWhatsapp && !temItens) || (!temWhatsapp && temItens)) {
-    if (!temWhatsapp) perguntasParaFazer.push('whatsapp');
-    if (!temItens) perguntasParaFazer.push('itens');
-    if (!temAjudante) perguntasParaFazer.push('ajudante');
-    logger.info('[PIPELINE] Um respondido: perguntando outro + ajudante', { nome, chatId, temWhatsapp, temItens, temAjudante });
-  }
-  // Quando ambos (whatsapp, itens) respondidos, continue perguntando ajudante + outro secundário
-  else if (temWhatsapp && temItens && !temAjudante) {
-    const secundarios = choosePair(qaAsked, qaAnsweredUpdated);
-    perguntasParaFazer = ['ajudante'];
-    if (secundarios.length > 0) {
-      perguntasParaFazer.push(secundarios[0]);
-    }
-    logger.info('[PIPELINE] WhatsApp e itens OK: perguntando ajudante + secundário', { nome, chatId, perguntasParaFazer });
-  }
-  // Depois, sorteie secundários faltantes em pares de 2
-  else if (temWhatsapp && temItens && temAjudante) {
-    perguntasParaFazer = choosePair(qaAsked, qaAnsweredUpdated);
-    logger.info('[PIPELINE] Coleta secundários em pares', { nome, chatId, perguntasParaFazer });
-  }
-  
-  // Se não há perguntas determinadas, tenta escolher pares de secundários
-  if (perguntasParaFazer.length === 0) {
-    perguntasParaFazer = choosePair(qaAsked, qaAnsweredUpdated);
-    if (perguntasParaFazer.length > 0) {
-      logger.info('[PIPELINE] Nenhuma pergunta prioritária, escolhendo pares de secundários', { nome, chatId, perguntasParaFazer });
-    }
-  }
-  
-  // Remove duplicatas e já perguntadas/respostas
-  perguntasParaFazer = perguntasParaFazer.filter(q => {
-    const jaPerguntou = qaAsked.includes(q);
-    const jaRespondeu = !!qaAnsweredUpdated[q];
-    if (jaPerguntou || jaRespondeu) {
-      logger.info('[PIPELINE] Pulando pergunta já feita/respondida', { nome, chatId, q, jaPerguntou, jaRespondeu });
-      return false;
-    }
-    return true;
-  });
-  
-  // Se não há perguntas, verifica se tem WhatsApp
-  if (perguntasParaFazer.length === 0) {
-    const temWhatsapp = !!(telefone || qaAnsweredUpdated.telefone);
-    if (temWhatsapp) {
-      // Tem WhatsApp e todas informações coletadas - pode finalizar
-      logger.info('[PIPELINE] Todas as informações coletadas (com WhatsApp)', { nome, chatId, qaAnswered: qaAnsweredUpdated });
-      return {
-        resposta: null,
-        telefone_extraido: telefone || qaAnsweredUpdated.telefone || null,
-        finalizado: true,
-        dados: qaAnsweredUpdated,
-        qaAsked: [...qaAsked],
-        qaAnswered: qaAnsweredUpdated
-      };
-    } else {
-      // NÃO TEM WHATSAPP - precisa pedir, mesmo que tenha outras informações
-      logger.info('[PIPELINE] Informações coletadas mas SEM WhatsApp - pedindo WhatsApp', { nome, chatId, qaAnswered: qaAnsweredUpdated });
-      const mensagem = 'Oii! Quase lá! Só falta o seu número de whatsapp com DDD pra eu passar pro motorista e ele te chamar. Me passa aí?';
-      return {
-        resposta: mensagem,
-        telefone_extraido: null,
-        finalizado: false,
-        dados: qaAnsweredUpdated,
-        qaAsked: [...qaAsked, 'whatsapp'],
-        qaAnswered: qaAnsweredUpdated
-      };
-    }
-  }
-  
-  // Limita a 2 perguntas
-  if (perguntasParaFazer.length > 2) {
-    perguntasParaFazer = perguntasParaFazer.slice(0, 2);
-  }
-  
-  // Constrói mensagem HUMANIZADA em UMA ÚNICA mensagem (sem quebras que causem múltiplos envios)
-  let mensagem = '';
-  if (perguntasParaFazer.includes('whatsapp')) {
-    // Primeira mensagem: humanizada, explicando o processo
-    mensagem = 'Oii, sim tudo bem! Quem passa o orçamento é o motorista, eu apenas anoto o pedido e passo pra ele, e ele te chama no whatsapp. Me passa teu número de whatsapp que já peço pra ele te chamar.';
-    if (perguntasParaFazer.length > 1) {
-      const outras = perguntasParaFazer.filter(q => q !== 'whatsapp');
-      const outrasTextos = outras.map(q => {
-        if (q === 'itens') return 'o que você precisa transportar (ex.: 2 camas, 10 sacolas)';
-        // Humaniza os labels
-        const labelsHumanizados = {
-          'ajudante': 'se precisa de ajudante',
-          'saida_tipo': 'se a saída é casa ou apartamento',
-          'saida_elevador': 'se a saída tem elevador',
-          'destino_tipo': 'se o destino é casa ou apartamento',
-          'destino_elevador': 'se o destino tem elevador',
-          'bairro_saida': 'qual bairro de saída',
-          'bairro_destino': 'qual bairro de destino'
-        };
-        return labelsHumanizados[q] || FIELD_LABELS[q] || q;
-      });
-      mensagem += ' Me diga também ' + outrasTextos.join(', ') + '.';
-    }
-  } else {
-    // Mensagens subsequentes: humanizadas
-    const textos = perguntasParaFazer.map(q => {
-      const labelsHumanizados = {
-        'ajudante': 'Precisa de ajudante?',
-        'saida_tipo': 'Saída é casa ou apartamento?',
-        'saida_elevador': 'Saída tem elevador?',
-        'destino_tipo': 'Destino é casa ou apartamento?',
-        'destino_elevador': 'Destino tem elevador?',
-        'bairro_saida': 'Qual bairro de saída?',
-        'bairro_destino': 'Qual bairro de destino?',
-        'itens': 'O que você precisa transportar? (ex.: 2 camas, 10 sacolas)'
-      };
-      return labelsHumanizados[q] || FIELD_LABELS[q] || q;
-    });
-    mensagem = 'Agora preciso de alguns detalhes pra fechar o orçamento: ' + textos.join(', ') + '.';
-  }
-  
-  // GARANTE: Remove TODAS as quebras de linha - mensagem deve ser UMA ÚNICA linha contínua
-  // Isso evita que o Messenger interprete como múltiplas mensagens
-  mensagem = mensagem.replace(/\n\n+/g, ' ').replace(/\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
-  
-  // Atualiza qaAsked
-  const qaAskedUpdated = [...qaAsked, ...perguntasParaFazer];
-  
-  logger.info('[PIPELINE] Mensagem gerada', { nome, chatId, perguntasParaFazer, mensagem });
-  
+  // Uma UNICA pergunta
+  const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
+  const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+  const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
+  flow.asked[next] = true;
+
   return {
-    resposta: mensagem,
-    telefone_extraido: telefone || qaAnsweredUpdated.telefone || null,
+    resposta: `${prefixo}${pergunta}`,
+    telefone_extraido: utils.isValidBRPhoneWithDDD(flow.answered.telefone || '') ? flow.answered.telefone : null,
     finalizado: false,
-    dados: qaAnsweredUpdated,
-    qaAsked: qaAskedUpdated,
-    qaAnswered: qaAnsweredUpdated
+    dados: flow.answered,
+    qaAsked: Object.keys(flow.asked),
+    qaAnswered: flow.answered,
+    flow
   };
 }
+// Funções de enforcement (governança)
+function stripPhoneConfirmation(txt) {
+  let t = String(txt || '');
+  t = t.replace(/me\s+confirmou\s+o\s+whats(app)?\s+como.*\?/ig, '');
+  t = t.replace(/est[aá]\s+correto\s+seu\s+n[uú]mero.*\?/ig, '');
+  return t.trim();
+}
+
+function ensureSingleQuestion(txt) {
+  let s = String(txt || '');
+  const parts = s.split('?');
+  if (parts.length <= 2) return s;
+  const lastQ = parts[parts.length - 2].trim();
+  return `${lastQ}?`;
+}
+
+function removeRepeatedGreeting(txt) {
+  let t = String(txt || '').trim();
+  t = t.replace(/^(bom dia|boa tarde|boa noite)[,!\s-]*/i, '').trim();
+  return t;
+}
+
+function enforceGovRulesOnText(txt, { alreadyGreeted = true } = {}) {
+  let s = String(txt || '').trim();
+  s = stripPhoneConfirmation(s);
+  s = ensureSingleQuestion(s);
+  if (alreadyGreeted) s = removeRepeatedGreeting(s);
+  return s.trim();
+}
+
 async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
   while (true) {
@@ -2066,8 +2050,11 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       campo
     ).catch(()=>{});
 
-    // Digita uma única vez (sem execCommand/insertText)
-    await p.keyboard.type(String(msg || ''), { delay: 0 });
+    // Digita uma única vez (sem execCommand/insertText) - COM SANITIZAÇÃO
+    const stGreet = await getChatState(nome, chatId).catch(()=>null);
+    const greetedFlag = !!(stGreet && stGreet.flow && stGreet.flow.greeted);
+    const toSend = enforceGovRulesOnText(String(msg || ''), { alreadyGreeted: greetedFlag });
+    await p.keyboard.type(toSend, { delay: 0 });
 
     // Revalida URL antes de pressionar Enter (hard check)
     try {
@@ -3424,8 +3411,38 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // AQUISIÇÃO DO LOCK — "just-in-time locking"
             await acquireSendGuard(pAtual, chatId);
             try {
-              await sendMessageSafe(pAtual, campoEnvio, pipelineResult.resposta, nome, chatId);
-              await appendIaLine(nome, chatId, pipelineResult.resposta);
+              // ENFORCEMENT: Aplicar regras de governança antes de enviar
+              const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
+              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : (pipelineResult.flow || { greeted: false, asked: {}, answered: {} });
+              let respostaGov = enforceGovRulesOnText(pipelineResult.resposta, { alreadyGreeted: !!flowPrev.greeted });
+              
+              const utils = require('./utils.js');
+              const telOk = utils.isValidBRPhoneWithDDD(pipelineResult.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
+              if (!telOk) {
+                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+                  respostaGov = 'Me passa teu WhatsApp com DDD? O motorista chama por lá.';
+                }
+              }
+              
+              await setChatState(nome, chatId, {
+                flow: flowPrev,
+                ultimaRespostaEnviada: respostaGov,
+                lastProbeAt: Date.now()
+              });
+              
+              await sendMessageSafe(pAtual, campoEnvio, respostaGov, nome, chatId);
+              await appendIaLine(nome, chatId, respostaGov);
+              
+              // Garantir greeted=true após primeira resposta
+              try {
+                const st = await getChatState(nome, chatId).catch(()=>null);
+                const flowSt = (st && st.flow) ? st.flow : { greeted: false, asked: {}, answered: {} };
+                if (!flowSt.greeted) {
+                  flowSt.greeted = true;
+                  await setChatState(nome, chatId, { flow: flowSt, lastProbeAt: Date.now() });
+                }
+              } catch {}
+              
               await marcarRespondido(nome, chatId);
             } finally {
               // SEMPRE libera o lock, mesmo em caso de erro
@@ -3514,9 +3531,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // fallback de telefone quando LLM não retornar
             if (!parsed.telefone_extraido) {
               const textoHistorico = (historicoConversa || []).map(m => m && m.texto || '').join(' ');
-              const fone = extrairTelefoneFallback(textoHistorico);
-              if (fone) {
-                parsed.telefone_extraido = fone;
+              const utils = require('./utils.js');
+              const phones = utils.extractPhonesBRStrict(textoHistorico);
+              const telefone = (phones && phones.length) ? phones[0] : null;
+              if (telefone) {
+                parsed.telefone_extraido = telefone;
               }
             }
 
@@ -3610,8 +3629,37 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 return;
               }
 
-              await sendMessageSafe(pAtual, campoEnvio, parsed.resposta, nome, chatId);
-              await appendIaLine(nome, chatId, parsed.resposta);
+              // ENFORCEMENT: Aplicar regras de governança antes de enviar
+              const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
+              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {} };
+              let respostaGov = enforceGovRulesOnText(parsed.resposta, { alreadyGreeted: !!flowPrev.greeted });
+              
+              const utils = require('./utils.js');
+              const telOk = utils.isValidBRPhoneWithDDD(parsed.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
+              if (!telOk) {
+                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+                  respostaGov = 'Me passa teu WhatsApp com DDD? O motorista chama por lá.';
+                }
+              }
+              
+              await setChatState(nome, chatId, {
+                flow: flowPrev,
+                ultimaRespostaEnviada: respostaGov,
+                lastProbeAt: Date.now()
+              });
+              
+              await sendMessageSafe(pAtual, campoEnvio, respostaGov, nome, chatId);
+              await appendIaLine(nome, chatId, respostaGov);
+              
+              // Garantir greeted=true após primeira resposta
+              try {
+                const st = await getChatState(nome, chatId).catch(()=>null);
+                const flowSt = (st && st.flow) ? st.flow : { greeted: false, asked: {}, answered: {} };
+                if (!flowSt.greeted) {
+                  flowSt.greeted = true;
+                  await setChatState(nome, chatId, { flow: flowSt, lastProbeAt: Date.now() });
+                }
+              } catch {}
               
               // Salvar secondaryPrompted após enviar resposta
               try { await setChatState(nome, chatId, { secondaryPrompted: true }); } catch {}
@@ -3943,6 +3991,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function iniciarTimerFechamento(chatId, telefone) {
+    const utils = require('./utils.js');
+    if (!utils.isValidBRPhoneWithDDD(telefone || '')) {
+      logger.warn('[TIMER] Tentativa de iniciar timer sem WhatsApp válido — bloqueado', { chatId });
+      return;
+    }
     if (!timersFechamento) return;
     if (timersFechamento.has(chatId)) return; // não reinicia
     const inicio = Date.now();
