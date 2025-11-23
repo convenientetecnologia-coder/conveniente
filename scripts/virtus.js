@@ -204,8 +204,8 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
             { role: 'system', content: promptSystem },
             { role: 'user', content: promptUser }
           ],
-          temperature: 0.7,
-          max_tokens: 700
+          temperature: 0.9, // Aumentado para respostas mais naturais e variadas
+          max_tokens: 1200  // Aumentado para permitir respostas completas que respondam todas as perguntas
         }),
         signal: ac ? ac.signal : undefined
       });
@@ -262,29 +262,58 @@ INTELIGÊNCIA CONTEXTUAL (CRÍTICO - REGRA DE OURO):
 A SUA RESPOSTA DEVE SER DIVIDIDA EM 2 PARTES IGUAIS:
 
 PARTE 1 (50% da resposta) - RESPONDER AO CLIENTE:
-- Leia TUDO que o cliente falou na mensagem
+⚠️⚠️⚠️ CRÍTICO: RESPONDA A CADA PERGUNTA/AFIRMAÇÃO DO CLIENTE ⚠️⚠️⚠️
+
+- Leia TUDO que o cliente falou na mensagem (pode ter várias perguntas/afirmações)
 - Identifique TODAS as perguntas/afirmações do cliente:
-  * Se ele disse "boa tarde" → responda com "boa tarde" também
-  * Se ele perguntou "tudo bem?" → responda "tudo ótimo! e você?" (varie a forma)
-  * Se ele perguntou "você faz frete?" → responda "sim, fazemos sim!" (varie a forma)
-  * Se ele mencionou algo específico → responda a isso de forma inteligente
-- Crie uma resposta ÚNICA, NATURAL e INTELIGENTE para CADA coisa que o cliente falou
+  * Se ele disse "boa tarde" → você DEVE responder com "boa tarde" também
+  * Se ele perguntou "tudo bem?" → você DEVE responder "tudo ótimo! e você?" (varie a forma, mas SEMPRE responda)
+  * Se ele perguntou "você faz frete?" → você DEVE responder "sim, fazemos sim!" (varie a forma, mas SEMPRE responda)
+  * Se ele perguntou "qual valor?" ou "quanto custa?" → você DEVE responder sobre o orçamento/motorista
+  * Se ele disse "preciso levar uma cama" → você DEVE responder confirmando que transporta
+  * Se ele mencionou algo específico → você DEVE responder a isso de forma inteligente
+- Crie uma resposta ÚNICA, NATURAL, CALOROSA e INTELIGENTE para CADA coisa que o cliente falou
+- Se o cliente fez 3 perguntas, você DEVE responder as 3 perguntas
+- Se o cliente fez 5 perguntas, você DEVE responder as 5 perguntas
+- NUNCA pule nenhuma pergunta/afirmação do cliente
 - NUNCA pule esta parte! SEMPRE responda ao cliente primeiro!
+- Seja CALOROSO, AMIGÁVEL e NATURAL - não seja frio ou robótico
 
 PARTE 2 (50% da resposta) - SEGUIR ROTEIRO:
 - Depois de responder ao cliente, faça a pergunta necessária do roteiro
 - Se não tem WhatsApp: peça o WhatsApp com DDD
 - Se já tem WhatsApp: faça a próxima pergunta do roteiro
 
-EXEMPLO CORRETO:
-Cliente: "oi boa tarde tudo bem? você faz frete?"
-Resposta CORRETA: "Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
+EXEMPLO CORRETO DETALHADO:
+Cliente: "oi boa tarde tudo bem? você faz frete? preciso levar uma cama"
+
+ANÁLISE DO QUE O CLIENTE FALOU:
+- "oi" → cumprimento
+- "boa tarde" → saudação
+- "tudo bem?" → pergunta sobre como está
+- "você faz frete?" → pergunta sobre disponibilidade
+- "preciso levar uma cama" → informação sobre o que transportar
+
+RESPOSTA CORRETA (COMPLETA):
+"Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! Ah, entendi que você precisa levar uma cama, transportamos sim! 😊 Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
 
 ANÁLISE DA RESPOSTA CORRETA:
-- "Oi, boa tarde!" → respondeu ao "boa tarde" do cliente (PARTE 1)
-- "Tudo ótimo sim, e você? 😊" → respondeu ao "tudo bem?" do cliente (PARTE 1)
-- "Sim, fazemos sim!" → respondeu ao "você faz frete?" do cliente (PARTE 1)
-- "Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2)
+- "Oi, boa tarde!" → respondeu ao "oi" e "boa tarde" (PARTE 1 - 50%)
+- "Tudo ótimo sim, e você? 😊" → respondeu ao "tudo bem?" (PARTE 1 - 50%)
+- "Sim, fazemos sim!" → respondeu ao "você faz frete?" (PARTE 1 - 50%)
+- "Ah, entendi que você precisa levar uma cama, transportamos sim! 😊" → respondeu ao "preciso levar uma cama" (PARTE 1 - 50%)
+- "Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
+
+EXEMPLO 2 - Cliente pergunta sobre valor:
+Cliente: "qual valor?"
+
+RESPOSTA CORRETA:
+"Oii! O orçamento quem passa é o motorista, ele te chama no WhatsApp para passar o valor. 😊 Me passa teu número com DDD que já peço pra ele te chamar."
+
+ANÁLISE:
+- "Oii!" → cumprimento amigável (PARTE 1 - 50%)
+- "O orçamento quem passa é o motorista, ele te chama no WhatsApp para passar o valor. 😊" → respondeu ao "qual valor?" (PARTE 1 - 50%)
+- "Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
 
 ⚠️⚠️⚠️ PROIBIÇÃO ABSOLUTA ⚠️⚠️⚠️
 - NUNCA pule a PARTE 1 (responder ao cliente)
@@ -3733,6 +3762,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // OK: há novidade do cliente (passou quiet window ou é primeira resposta)
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
+
+        // CRÍTICO: Aguardar 15 segundos após identificar mensagem do cliente antes de gerar resposta
+        // Isso permite que o cliente termine de digitar todas as mensagens
+        const WAIT_BEFORE_GENERATE_MS = parseInt(process.env.VIRTUS_WAIT_BEFORE_GENERATE_MS || '15000', 10); // 15s padrão
+        logger.info(`[TIMING] Aguardando ${WAIT_BEFORE_GENERATE_MS}ms antes de gerar resposta...`, { nome, chatId });
+        await sleep(WAIT_BEFORE_GENERATE_MS);
+        
+        // Re-extrai histórico após espera para pegar todas as mensagens do cliente
+        try {
+          historicoConversa = await extrairHistoricoConversa(pAtual);
+          logger.info(`[TIMING] Histórico re-extraído após espera: ${historicoConversa.length} mensagens`, { nome, chatId });
+        } catch {}
 
         // Pipeline de Perguntas (dominante) ou Groq (fallback)
         if (VIRTUS_USE_PIPELINE) {
