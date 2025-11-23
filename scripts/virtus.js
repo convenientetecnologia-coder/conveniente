@@ -1063,9 +1063,38 @@ function isVelho8h(tempoLabel) {
   // Fallback: NÃO marque como velho se não entender — considerar recente
   return false;
 }
-// Mantido para compatibilidade (mas não usado mais)
+// Função corrigida para checar >=24h de fato
 function isVelho24h(tempoLabel) {
-  return isVelho8h(tempoLabel); // Usa a nova função
+  if (!tempoLabel) return false;
+  const t = String(tempoLabel)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase().trim();
+
+  // Semanas sempre velho
+  if (/\b(seman|sem|weeks?|w)\b/.test(t)) return true;
+
+  // Dias: >=1 velho
+  const mDias = t.match(/\b(\d+)\s*(d|dia|dias)\b/);
+  if (mDias) {
+    const n = parseInt(mDias[1], 10);
+    if (Number.isFinite(n) && n >= 1) return true;
+  }
+
+  // Horas: >=24 velho
+  const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
+  if (mH) {
+    const n = parseInt(mH[1], 10);
+    if (Number.isFinite(n) && n >= 24) return true;
+    return false;
+  }
+
+  // Minutos/segundos/"agora" nunca velho
+  if (/\b(agora|now|just\snow)\b/.test(t)) return false;
+  if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return false;
+  if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return false;
+
+  // Fallback: NÃO marque como velho se não entender — considerar recente
+  return false;
 }
 function isChatRecente(tempoLabel) {
   if (!tempoLabel) return false;
@@ -1177,36 +1206,80 @@ async function coletaChatsMarketplaceTodos(page) {
 // Messenger helpers
 async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
+  
+  // Função helper para tentar uma rota e verificar se está pronta
+  async function gotoInboxRobust(route) {
+    try {
+      logger.info(`[VIRTUS][garantirMarketplace] Tentando rota: ${route}`);
+      await page.goto(`https://www.messenger.com${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+      
+      // Cura fluxos de nonce/continuar
+      try {
+        const browserJs = require('./browser.js');
+        if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
+          await browserJs.resolveNonceIfPresent(page).catch(()=>{});
+        }
+        if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
+          await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
+        }
+      } catch {}
+      
+      // Verifica se encontrou anchor de thread ou rows
+      const ok = await Promise.race([
+        page.waitForFunction(() => {
+          const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
+          const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
+          return hasAnchor || hasRow;
+        }, { timeout: 8000 }),
+        page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).catch(() => null),
+        page.waitForSelector('div[role="row"]', { timeout: 8000 }).catch(() => null)
+      ]);
+      
+      if (ok) {
+        logger.info(`[VIRTUS][garantirMarketplace] UI pronta na rota: ${route}`);
+        return true;
+      } else {
+        logger.warn(`[VIRTUS][garantirMarketplace] Rota ${route} não encontrou anchors/rows`);
+        return false;
+      }
+    } catch (e) {
+      logger.warn(`[VIRTUS][garantirMarketplace] Erro ao tentar rota ${route}: ${e && e.message || e}`);
+      return false;
+    }
+  }
+  
   let url = '';
   try { url = page.url() || ''; } catch {}
-  if (!/messenger.com\/marketplace/i.test(url)) {
-    try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs }); } catch {}
+  
+  // Se já está no marketplace, verifica se está pronto
+  if (/messenger.com\/marketplace/i.test(url)) {
+    try {
+      const hasAnchor = await page.$('a[href^="/marketplace/t/"]').catch(() => null);
+      const hasRow = await page.$('div[role="row"]').catch(() => null);
+      if (hasAnchor || hasRow) {
+        logger.info('[VIRTUS][garantirMarketplace] UI já pronta na página atual');
+        return;
+      }
+    } catch {}
   }
-  // Cura fluxos de nonce/continuar
-  try {
-    const browserJs = require('./browser.js');
-    if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
-      await browserJs.resolveNonceIfPresent(page).catch(()=>{});
+  
+  // Tenta as rotas em ordem
+  const rotas = [
+    '/marketplace/you/selling/messages',
+    '/marketplace/inbox',
+    '/marketplace'
+  ];
+  
+  for (const rota of rotas) {
+    const ok = await gotoInboxRobust(rota);
+    if (ok) {
+      return; // Sucesso, marketplace pronto
     }
-    if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
-      await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
-    }
-  } catch {}
-  // Espera robusta por UI
-  const ok = await Promise.race([
-    page.waitForFunction(() => {
-      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
-      const hasGrid = !!document.querySelector('div[role="grid"]') || !!document.querySelector('div[role="rowgroup"]');
-      const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
-      return hasAnchor || hasGrid || hasRow;
-    }, { timeout: timeoutMs }),
-    page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: timeoutMs }).catch(() => null)
-  ]);
-  if (!ok) {
-    logger.warn('[VIRTUS][garantirMarketplace] UI não ficou pronta a tempo');
-    throw new Error('Marketplace UI não ficou pronta a tempo');
   }
-  logger.debug('[VIRTUS][garantirMarketplace] UI pronta');
+  
+  // Se nenhuma rota funcionou, loga warning e não prossegue
+  logger.warn('[VIRTUS][garantirMarketplace] Nenhuma rota conseguiu carregar marketplace com anchors/rows');
+  throw new Error('Marketplace UI não ficou pronta a tempo em nenhuma rota');
 }
 
 // ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
@@ -1879,31 +1952,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           p.waitForSelector('div[role="row"] span', { timeout: 5000 })
         ]);
       } catch {
-        logger.debug(`[VIRTUS][${nome}] timeout curto aguardando anchors/rows`);
+        logger.info(`[VIRTUS][${nome}] timeout curto aguardando anchors/rows`);
       }
 
       // 3) Coleta inicial
       let todos = await coletaChatsMarketplaceTodos(p);
-      logger.debug(`[VIRTUS][${nome}] coletaTodos inicial: ${todos.length} itens`);
+      logger.info(`[VIRTUS][${nome}] coletaTodos inicial: ${todos.length} itens`);
 
       // 4) Se nada encontrado ou poucos itens/nenhum recente, tentar scroll até 8h e recolher
       if (!todos || todos.length === 0) {
-        logger.debug(`[VIRTUS][${nome}] coleta vazia — ativando scrollListaAte8h()`);
+        logger.info(`[VIRTUS][${nome}] coleta vazia — ativando scrollListaAte8h()`);
         try {
           await scrollListaAte8h(p, { maxMs: 60000, quietLoops: 2 });
         } catch (e) {
           logger.warn(`[VIRTUS][${nome}] scrollListaAte8h falhou: ${(e && e.message) || e}`);
         }
         todos = await coletaChatsMarketplaceTodos(p);
-        logger.debug(`[VIRTUS][${nome}] coletaTodos após scroll: ${todos.length} itens`);
+        logger.info(`[VIRTUS][${nome}] coletaTodos após scroll: ${todos.length} itens`);
       }
 
       // 5) Filtra recentes (<=8h) com logs
       const filtrados = (todos || []).filter(c => c.id && isChatRecente(c.tempo));
-      logger.debug(`[VIRTUS][${nome}] filtrados recentes: ${filtrados.length} / ${todos.length}`);
+      logger.info(`[VIRTUS][${nome}] filtrados recentes: ${filtrados.length} / ${todos.length}`);
       if (process.env.VIRTUS_FEED_DEBUG === '1') {
         for (const it of (todos || [])) {
-          logger.debug(`[VIRTUS][${nome}] CHAT FEED: id=${it.id} tempo="${it.tempo}" recent=${isChatRecente(it.tempo)}`);
+          logger.info(`[VIRTUS][${nome}] CHAT FEED: id=${it.id} tempo="${it.tempo}" recent=${isChatRecente(it.tempo)}`);
         }
       }
 
@@ -1950,30 +2023,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function initHistoricoSePreciso() {
     if (!running || !epochOk()) return;
     
-    // NOVO: Habilitar snapshot por padrão (pode desabilitar via env var)
-    const FIRST_BOOT_SNAPSHOT = (process.env.VIRTUS_FIRST_BOOT_SNAPSHOT ?? '1') === '1';
+    // Por padrão deve ser '0' (sem snapshot)
+    const FIRST_BOOT_SNAPSHOT = (process.env.VIRTUS_FIRST_BOOT_SNAPSHOT ?? '0') === '1';
     
     try {
       await fs.access(HIST_FILE);
       await carregaHistorico();
       await reconcilePendingsIfAny();
-      log('Histórico existente carregado. Retomando pendentes <24h.');
+      logger.info('[SNAPSHOT] Histórico existente carregado. Retomando pendentes <24h.', { nome });
       return;
     } catch {}
 
-    // Snapshot agressivo desabilitado por padrão para não "matar" primeira onda de mensagens
+    // Snapshot desabilitado por padrão
     if (!FIRST_BOOT_SNAPSHOT) {
-      log('[SNAPSHOT] Modo seguro: não marcando recents como respondidos no primeiro boot. (Defina VIRTUS_FIRST_BOOT_SNAPSHOT=1 para habilitar)');
+      logger.info('[SNAPSHOT] Modo seguro: não marcando recents como respondidos no primeiro boot. (Defina VIRTUS_FIRST_BOOT_SNAPSHOT=1 para habilitar)', { nome });
       await carregaHistorico();
       await reconcilePendingsIfAny();
       return;
     }
 
-    // Código antigo mantido apenas se FIRST_BOOT_SNAPSHOT estiver habilitado
-    log('[SNAPSHOT] Primeiro boot sem histórico. Marcando <24h atuais como respondidos.');
+    // Só chama snapshot se VIRTUS_FIRST_BOOT_SNAPSHOT=1, e só marca como respondido chats que estejam isVelho24h(chat.tempo) === true
+    logger.info('[SNAPSHOT] Primeiro boot sem histórico. Coletando chats >=24h para marcar como respondidos.', { nome });
     if (!running || !epochOk()) return;
     const p = await ensurePage();
-    if (!p) { log('[SNAPSHOT] Falha ao garantir aba zero.'); return; }
+    if (!p) { logger.warn('[SNAPSHOT] Falha ao garantir aba zero.', { nome }); return; }
     if (!running || !epochOk()) return;
     await garantirMarketplace(p);
     try {
@@ -1984,14 +2057,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch {}
     try { await scrollListaAte8h(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
     const todos = await coletaChatsMarketplaceTodos(p);
-    const recentes = todos.filter(c => isChatRecente(c.tempo));
+    // CORREÇÃO: só marca como respondido chats que estejam isVelho24h(chat.tempo) === true
+    const velhos = todos.filter(c => isVelho24h(c.tempo));
     const agora = agoraEpoch();
     historico = {};
-    for (const chat of recentes) historico[chat.id] = agora;
+    for (const chat of velhos) historico[chat.id] = agora;
     await salvaHistorico();
     await carregaHistorico();
     await reconcilePendingsIfAny();
-    log(`[SNAPSHOT] Concluído. ${recentes.length} chats <24h marcados como respondidos no primeiro boot.`);
+    logger.info(`[SNAPSHOT] Concluído. ${velhos.length} chats >=24h marcados como respondidos no primeiro boot.`, { nome });
   }
 
   // NOVO: Reduzido de 24h para 8h (menos scroll = menos RAM consumida)
@@ -2038,10 +2112,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function atualizaFila() {
     let mudancaFila = false;
     const chatsNovos = await coletaChatsMarketplaceRecentes();
-    logger.debug(`[FILA][${nome}] recebidos da coleta: ${chatsNovos.length}`);
+    logger.info(`[FILA][${nome}] recebidos da coleta: ${chatsNovos.length}`);
 
     const aguard = getSetAguardando(nome);
     const agoraMs = Date.now();
+    const ERROR_TTL_MS = parseInt(process.env.VIRTUS_ERROR_TTL_MS || '1800000', 10); // 30min padrão
 
     for (const c of chatsNovos) {
       const id = c.id;
@@ -2049,7 +2124,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Cooldown local de re-probe
       const last = lastProbeMap.get(id) || 0;
       if ((agoraMs - last) < PROBE_RECHECK_MIN_MS) {
-        logger.debug(`[FILA][${nome}] skip ${id} — re-probe <${PROBE_RECHECK_MIN_MS}ms`);
+        logger.info(`[FILA][${nome}] skip ${id} — re-probe <${PROBE_RECHECK_MIN_MS}ms`);
         continue;
       }
 
@@ -2058,7 +2133,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try { st = await getChatState(nome, id); } catch {}
       if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
         lastProbeMap.set(id, agoraMs);
-        logger.debug(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
+        logger.info(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
         continue;
       }
       // TTL de força: mesmo sem mudança aparente, forçar abertura do chat após X minutos
@@ -2074,21 +2149,38 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       ) {
         // nenhum avanço desde último probe E ainda não bateu o TTL de força
         lastProbeMap.set(id, agoraMs);
-        logger.debug(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
+        logger.info(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
         continue;
       }
+      
+      // TTL para erro_envio: só pule se a idade desse erro for menor que ERROR_TTL_MS
       if (st && st.state === 'erro_envio') {
-        lastProbeMap.set(id, agoraMs);
-        logger.debug(`[FILA][${nome}] skip ${id} — marcado como erro_envio (aguardar nova mensagem)`);
-        continue;
+        const erroTimestamp = (st.erroTimestamp || st.updatedAt || st.createdAt) || 0;
+        const erroAge = agoraMs - erroTimestamp;
+        if (erroAge < ERROR_TTL_MS) {
+          lastProbeMap.set(id, agoraMs);
+          logger.info(`[FILA][${nome}] skip ${id} — marcado como erro_envio (idade ${Math.round(erroAge/1000)}s < ${Math.round(ERROR_TTL_MS/1000)}s)`);
+          continue;
+        } else {
+          // TTL expirado: reset o estado para PENDENTE e reprocessa
+          logger.info(`[FILA][${nome}] erro_envio expirado (${Math.round(erroAge/1000)}s), resetando para PENDENTE`, { nome, chatId: id });
+          try {
+            await setChatState(nome, id, {
+              state: CHAT_STATES.PENDENTE,
+              erroTimestamp: null,
+              lastProbeAt: agoraMs
+            });
+          } catch {}
+          // Continua para enfileirar
+        }
       }
 
       if (aguard.has(id)) {
-        logger.debug(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
+        logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
         continue;
       }
       if (fila.includes(id)) {
-        logger.debug(`[FILA][${nome}] skip ${id} — já está na fila`);
+        logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
         continue;
       }
 
@@ -2681,6 +2773,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   state: 'erro_envio',
                   sendAttempts: attempts,
                   ultimaMsgErroHash: msgHash,
+                  erroTimestamp: Date.now(), // NOVO: salva timestamp do erro para TTL
                   ultimoProbeCLIts: tsCLI || 0
                 });
                 await logIssue(nome, 'virtus_send_failed', `erro_envio após ${attempts} tentativas (chat ${chatId})`);
@@ -2772,7 +2865,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // ========================
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
-    logger.debug(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`);
+    logger.info(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`, { nome });
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -3280,6 +3373,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
+    
+    // Kick inicial no runner: agende outra chamada em 3s, e outra em 10s
+    // Isso garante polling rapidíssimo no boot para "ver" os chats sem precisar esperar o ciclo de 30s
+    setTimeout(() => {
+      if (running && epochOk()) {
+        logger.info('[FILA] Kick inicial (3s) — forçando atualização de fila', { nome });
+        atualizaFila().catch(() => {});
+      }
+    }, 3000);
+    
+    setTimeout(() => {
+      if (running && epochOk()) {
+        logger.info('[FILA] Kick inicial (10s) — forçando atualização de fila', { nome });
+        atualizaFila().catch(() => {});
+      }
+    }, 10000);
   }
 
   runner();
