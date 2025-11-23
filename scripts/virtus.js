@@ -2692,24 +2692,78 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // A verificação de "novas mensagens" será feita após coletar o histórico
         // Mantém apenas verificação de cooldown de prova (já feito em atualizaFila)
 
-        // MANTENHA APENAS scrollChatsToTop (opcional) — sem anchorSel/click/waitForNavigation
-        await scrollChatsToTop(p, nome).catch(()=>{});
-
+        // NAVEGAÇÃO INICIAL PARA ABRIR O CHAT (permitida apenas na primeira vez)
         let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-        if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
-          logger.warn('[VIRTUS] Contexto do chat não corresponde (sem navegação). Abortando atendimento deste chat.', { nome, chatId, urlNow });
-          const prev = await getChatState(nome, chatId).catch(()=>null);
-          const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-          await setChatState(nome, chatId, {
-            state: CHAT_STATES.AGUARDANDO,
-            sendAttempts: attempts,
-            cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-            lastProbeAt: Date.now()
-          });
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
+        if (!chatUrlMatches(urlNow, chatId)) {
+          // Precisa abrir o chat pela primeira vez
+          logger.info('[NAVEGACAO] Abrindo chat pela primeira vez', { nome, chatId });
+          let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+          await scrollChatsToTop(p, nome).catch(()=>{});
+          await sleep(300);
+          let found = await p.$(anchorSel);
+          
+          if (found) {
+            // Tenta clicar no anchor para abrir o chat
+            try {
+              await p.evaluate((sel) => {
+                const el = document.querySelector(sel);
+                if (el) el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+              }, anchorSel);
+              await Promise.race([
+                p.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
+                (async () => { await p.$eval(anchorSel, el => el.click()); })()
+              ]);
+              await sleep(1000); // Aguarda navegação
+            } catch (e) {
+              logger.warn('[NAVEGACAO] Falha ao clicar no anchor, tentando goto direto', { nome, chatId, error: e && e.message || e });
+            }
+          }
+          
+          // Se ainda não está no chat, tenta goto direto (apenas na primeira vez)
+          urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+          if (!chatUrlMatches(urlNow, chatId)) {
+            try {
+              await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+              await sleep(1000);
+              urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+            } catch (e) {
+              logger.warn('[NAVEGACAO] Falha ao navegar para o chat', { nome, chatId, error: e && e.message || e });
+            }
+          }
+          
+          // Verifica se conseguiu abrir o chat
+          if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
+            logger.warn('[VIRTUS] Não foi possível abrir o chat. Abortando atendimento.', { nome, chatId, urlNow });
+            const prev = await getChatState(nome, chatId).catch(()=>null);
+            const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              sendAttempts: attempts,
+              cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+              lastProbeAt: Date.now()
+            });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+        } else {
+          // Já está no chat, apenas valida
+          if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
+            logger.warn('[VIRTUS] Contexto do chat não corresponde. Abortando atendimento.', { nome, chatId, urlNow });
+            const prev = await getChatState(nome, chatId).catch(()=>null);
+            const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              sendAttempts: attempts,
+              cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+              lastProbeAt: Date.now()
+            });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
         }
 
 
