@@ -31,6 +31,8 @@ const manifestStore = require('./manifestStore.js');
 
 // === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
+// === Pipeline de Perguntas (dominante, Groq só como fallback) ===
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
 
 // Verificação da chave será feita apenas quando necessário (lazy check)
 // Isso evita erro no boot se o .env ainda não estiver configurado
@@ -325,6 +327,221 @@ async function appendIaLine(perfil, chatId, texto) {
   const file = chatLogPath(perfil, chatId);
   try { fsRaw.mkdirSync(path.dirname(file), { recursive: true }); fsRaw.appendFileSync(file, JSON.stringify(obj)+'\n', 'utf8'); } catch {}
   try { await setChatState(perfil, chatId, { chatLogLastTs: obj.timestamp }); } catch {}
+}
+
+// Pipeline de Perguntas - Helpers
+const SECONDARY_FIELDS = [
+  'ajudante',
+  'saida_tipo',
+  'saida_elevador',
+  'destino_tipo',
+  'destino_elevador',
+  'bairro_saida',
+  'bairro_destino',
+  'itens'
+];
+
+const FIELD_LABELS = {
+  'ajudante': 'Precisa de ajudante?',
+  'saida_tipo': 'Saída é casa ou apartamento?',
+  'saida_elevador': 'Saída tem elevador?',
+  'destino_tipo': 'Destino é casa ou apartamento?',
+  'destino_elevador': 'Destino tem elevador?',
+  'bairro_saida': 'Qual bairro de saída?',
+  'bairro_destino': 'Qual bairro de destino?',
+  'itens': 'Quais itens e quantidades? (ex.: 2 camas, 10 sacolas)'
+};
+
+function choosePair(qaAsked, qaAnswered) {
+  const askedSet = new Set(qaAsked || []);
+  const answeredSet = new Set(Object.keys(qaAnswered || {}));
+  const pending = SECONDARY_FIELDS.filter(f => !answeredSet.has(f) && !askedSet.has(f));
+  
+  if (pending.length === 0) return [];
+  if (pending.length === 1) return pending;
+  
+  // Embaralha e pega 2
+  const shuffled = [...pending].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, 2);
+}
+
+function buildMessageFromQuestions(questions) {
+  if (!questions || questions.length === 0) return '';
+  const texts = questions.map(q => FIELD_LABELS[q] || q);
+  if (texts.length === 1) return texts[0];
+  return texts.join('\n');
+}
+
+function extractAnswersFromHistory(historico) {
+  const answers = {};
+  const textoCompleto = (historico || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
+  
+  // Ajudante
+  if (/precis[oa]|ajudante|ajuda|helper/i.test(textoCompleto)) {
+    if (/sim|yes|precis[oa]/i.test(textoCompleto)) answers.ajudante = 'sim';
+    else if (/n[ãa]o|no|não preciso/i.test(textoCompleto)) answers.ajudante = 'não';
+  }
+  
+  // Saída/Destino tipo
+  if (/sa[íi]da.*(casa|apartamento|apto)/i.test(textoCompleto)) {
+    const match = textoCompleto.match(/sa[íi]da.*?(casa|apartamento|apto)/i);
+    if (match) answers.saida_tipo = match[1].toLowerCase().includes('casa') ? 'casa' : 'apartamento';
+  }
+  if (/destino.*(casa|apartamento|apto)/i.test(textoCompleto)) {
+    const match = textoCompleto.match(/destino.*?(casa|apartamento|apto)/i);
+    if (match) answers.destino_tipo = match[1].toLowerCase().includes('casa') ? 'casa' : 'apartamento';
+  }
+  
+  // Elevador
+  if (/sa[íi]da.*elevador/i.test(textoCompleto)) {
+    if (/sim|yes|tem/i.test(textoCompleto)) answers.saida_elevador = 'sim';
+    else if (/n[ãa]o|no|sem/i.test(textoCompleto)) answers.saida_elevador = 'não';
+  }
+  if (/destino.*elevador/i.test(textoCompleto)) {
+    if (/sim|yes|tem/i.test(textoCompleto)) answers.destino_elevador = 'sim';
+    else if (/n[ãa]o|no|sem/i.test(textoCompleto)) answers.destino_elevador = 'não';
+  }
+  
+  // Bairros
+  const bairroMatch = textoCompleto.match(/(?:bairro|bairros?)[\s:]*([^,\.\n]+)/i);
+  if (bairroMatch) {
+    const parts = bairroMatch[1].split(/para|até|destino/i);
+    if (parts[0]) answers.bairro_saida = parts[0].trim();
+    if (parts[1]) answers.bairro_destino = parts[1].trim();
+  }
+  
+  // Itens
+  const itensMatch = textoCompleto.match(/(?:itens?|coisas?|m[óo]veis?)[\s:]*([^,\.\n]{10,})/i);
+  if (itensMatch) answers.itens = itensMatch[1].trim();
+  
+  return answers;
+}
+
+// Pipeline de Perguntas - Função principal
+async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
+  logger.info('[PIPELINE] Iniciando processamento', { nome, chatId });
+  
+  // Extrai respostas do histórico
+  const extractedAnswers = extractAnswersFromHistory(historicoConversa);
+  logger.info('[PIPELINE] Respostas extraídas do histórico', { nome, chatId, extractedAnswers });
+  
+  // Carrega state atual
+  const qaAsked = (stPrev && Array.isArray(stPrev.qaAsked)) ? stPrev.qaAsked : [];
+  const qaAnswered = (stPrev && stPrev.qaAnswered && typeof stPrev.qaAnswered === 'object') ? stPrev.qaAnswered : {};
+  
+  // Atualiza qaAnswered com respostas extraídas
+  const qaAnsweredUpdated = { ...qaAnswered };
+  for (const [field, value] of Object.entries(extractedAnswers)) {
+    if (value && !qaAnsweredUpdated[field]) {
+      qaAnsweredUpdated[field] = value;
+      logger.info('[PIPELINE] Resposta coletada', { nome, chatId, field, value });
+    }
+  }
+  
+  // Extrai telefone do histórico
+  const textoHistorico = (historicoConversa || []).map(m => m && m.texto || '').join(' ');
+  const telefone = extrairTelefoneFallback(textoHistorico);
+  
+  // Determina próximas perguntas baseado na prioridade
+  let perguntasParaFazer = [];
+  const temWhatsapp = !!telefone || !!qaAnsweredUpdated.telefone;
+  const temItens = !!qaAnsweredUpdated.itens;
+  const temAjudante = !!qaAnsweredUpdated.ajudante;
+  
+  // Primeira mensagem: WhatsApp + itens
+  if (qaAsked.length === 0) {
+    perguntasParaFazer = ['whatsapp', 'itens'];
+    logger.info('[PIPELINE] Primeira mensagem: WhatsApp + itens', { nome, chatId });
+  }
+  // Se só um respondido, pergunta o outro + ajudante
+  else if ((temWhatsapp && !temItens) || (!temWhatsapp && temItens)) {
+    if (!temWhatsapp) perguntasParaFazer.push('whatsapp');
+    if (!temItens) perguntasParaFazer.push('itens');
+    if (!temAjudante) perguntasParaFazer.push('ajudante');
+    logger.info('[PIPELINE] Um respondido: perguntando outro + ajudante', { nome, chatId, temWhatsapp, temItens, temAjudante });
+  }
+  // Quando ambos (whatsapp, itens) respondidos, continue perguntando ajudante + outro secundário
+  else if (temWhatsapp && temItens && !temAjudante) {
+    const secundarios = choosePair(qaAsked, qaAnsweredUpdated);
+    perguntasParaFazer = ['ajudante'];
+    if (secundarios.length > 0) {
+      perguntasParaFazer.push(secundarios[0]);
+    }
+    logger.info('[PIPELINE] WhatsApp e itens OK: perguntando ajudante + secundário', { nome, chatId, perguntasParaFazer });
+  }
+  // Depois, sorteie secundários faltantes em pares de 2
+  else if (temWhatsapp && temItens && temAjudante) {
+    perguntasParaFazer = choosePair(qaAsked, qaAnsweredUpdated);
+    logger.info('[PIPELINE] Coleta secundários em pares', { nome, chatId, perguntasParaFazer });
+  }
+  
+  // Se não há perguntas determinadas, tenta escolher pares de secundários
+  if (perguntasParaFazer.length === 0) {
+    perguntasParaFazer = choosePair(qaAsked, qaAnsweredUpdated);
+    if (perguntasParaFazer.length > 0) {
+      logger.info('[PIPELINE] Nenhuma pergunta prioritária, escolhendo pares de secundários', { nome, chatId, perguntasParaFazer });
+    }
+  }
+  
+  // Remove duplicatas e já perguntadas/respostas
+  perguntasParaFazer = perguntasParaFazer.filter(q => {
+    const jaPerguntou = qaAsked.includes(q);
+    const jaRespondeu = !!qaAnsweredUpdated[q];
+    if (jaPerguntou || jaRespondeu) {
+      logger.info('[PIPELINE] Pulando pergunta já feita/respondida', { nome, chatId, q, jaPerguntou, jaRespondeu });
+      return false;
+    }
+    return true;
+  });
+  
+  // Se não há perguntas, retorna null (tudo coletado)
+  if (perguntasParaFazer.length === 0) {
+    logger.info('[PIPELINE] Todas as informações coletadas', { nome, chatId, qaAnswered: qaAnsweredUpdated });
+    return {
+      resposta: null,
+      telefone_extraido: telefone || qaAnsweredUpdated.telefone || null,
+      finalizado: !!telefone || !!qaAnsweredUpdated.telefone,
+      dados: qaAnsweredUpdated,
+      qaAsked: [...qaAsked],
+      qaAnswered: qaAnsweredUpdated
+    };
+  }
+  
+  // Limita a 2 perguntas
+  if (perguntasParaFazer.length > 2) {
+    perguntasParaFazer = perguntasParaFazer.slice(0, 2);
+  }
+  
+  // Constrói mensagem
+  let mensagem = '';
+  if (perguntasParaFazer.includes('whatsapp')) {
+    mensagem = 'Olá! Para eu entender melhor e te passar o orçamento, preciso do seu WhatsApp com DDD.';
+    if (perguntasParaFazer.length > 1) {
+      const outras = perguntasParaFazer.filter(q => q !== 'whatsapp');
+      const outrasTextos = outras.map(q => {
+        if (q === 'itens') return 'Quais itens e quantidades você precisa transportar? (ex.: 2 camas, 10 sacolas)';
+        return FIELD_LABELS[q] || q;
+      });
+      mensagem += '\n\nSe quiser adiantar, me passa também:\n' + outrasTextos.join('\n');
+    }
+  } else {
+    const textos = perguntasParaFazer.map(q => FIELD_LABELS[q] || q);
+    mensagem = 'Agora preciso de alguns detalhes pra fechar o orçamento:\n' + textos.join('\n');
+  }
+  
+  // Atualiza qaAsked
+  const qaAskedUpdated = [...qaAsked, ...perguntasParaFazer];
+  
+  logger.info('[PIPELINE] Mensagem gerada', { nome, chatId, perguntasParaFazer, mensagem });
+  
+  return {
+    resposta: mensagem,
+    telefone_extraido: telefone || qaAnsweredUpdated.telefone || null,
+    finalizado: false,
+    dados: qaAnsweredUpdated,
+    qaAsked: qaAskedUpdated,
+    qaAnswered: qaAnsweredUpdated
+  };
 }
 async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
@@ -2730,8 +2947,180 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
 
-        // NOVO: fluxo direto Groq (se DIRECT_GROQ ativo)
-        if (DIRECT_GROQ) {
+        // Pipeline de Perguntas (dominante) ou Groq (fallback)
+        if (VIRTUS_USE_PIPELINE) {
+          try {
+            logger.info('[PIPELINE] Processando com pipeline de perguntas', { nome, chatId });
+            
+            const pipelineResult = await processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev);
+            
+            if (!pipelineResult || !pipelineResult.resposta) {
+              logger.info('[PIPELINE] Todas informações coletadas, finalizando', { nome, chatId });
+              // Todas informações coletadas, pode finalizar
+              const telefoneFinal = pipelineResult?.telefone_extraido || null;
+              if (telefoneFinal) {
+                const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
+                if (!jaTinhaTimer) {
+                  iniciarTimerFechamento(chatId, telefoneFinal);
+                }
+              }
+              try {
+                await setChatState(nome, chatId, {
+                  qaAsked: pipelineResult?.qaAsked || [],
+                  qaAnswered: pipelineResult?.qaAnswered || {},
+                  state: CHAT_STATES.FINALIZADO
+                });
+              } catch {}
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
+            
+            // Atualiza state com qaAsked e qaAnswered
+            try {
+              await setChatState(nome, chatId, {
+                qaAsked: pipelineResult.qaAsked || [],
+                qaAnswered: pipelineResult.qaAnswered || {}
+              });
+            } catch {}
+            
+            // Atualiza dados coletados
+            let cidadePreferida = null;
+            try {
+              const man = await manifestStore.read(nome).catch(()=>null);
+              cidadePreferida = (man && man.cidade) ? man.cidade : null;
+            } catch {}
+            if (!cidadePreferida && localizacao && localizacao.cidade) {
+              cidadePreferida = localizacao.cidade;
+            }
+            atualizarDadosColetados(chatId, {
+              cidade: cidadePreferida || null,
+              telefone: pipelineResult.telefone_extraido || null,
+              dados: pipelineResult.dados || {}
+            });
+            
+            // Inicia timer se capturou telefone pela primeira vez
+            const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
+            if (!jaTinhaTimer && pipelineResult.telefone_extraido) {
+              iniciarTimerFechamento(chatId, pipelineResult.telefone_extraido);
+            }
+            
+            // Reaproveitar a página atual - NUNCA reload/goto
+            const pAtual = await ensurePage().catch(() => null);
+            if (!pAtual) {
+              logger.warn('[PIPELINE] Page indisponível', { nome, chatId });
+              await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
+            
+            // Verifica se está no chat correto - se não, apenas marca cooldown (não navega)
+            const expectedPath = `/marketplace/t/${chatId}/`;
+            let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
+            if (!urlNow.includes(expectedPath)) {
+              logger.warn('[PIPELINE] URL não corresponde ao chat - marcando cooldown', { nome, chatId, urlNow });
+              const prev = await getChatState(nome, chatId).catch(()=>null);
+              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+              await setChatState(nome, chatId, {
+                state: CHAT_STATES.AGUARDANDO,
+                sendAttempts: attempts,
+                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+                ultimoProbeCLIts: tsCLI || 0,
+                lastProbeAt: Date.now()
+              });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
+            
+            // Tenta obter composer - se falhar, usa refocusComposerNoReload
+            let campoEnvio = await waitForComposer(pAtual, 10000);
+            if (!campoEnvio) {
+              logger.info('[PIPELINE] Composer não encontrado, tentando refocus', { nome, chatId });
+              campoEnvio = await refocusComposerNoReload(pAtual, chatId, anchorSel);
+            }
+            
+            if (!campoEnvio) {
+              logger.warn('[PIPELINE] Composer indisponível após refocus - marcando cooldown', { nome, chatId });
+              const prev = await getChatState(nome, chatId).catch(()=>null);
+              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+              await setChatState(nome, chatId, {
+                state: 'erro_envio',
+                erroTimestamp: Date.now(),
+                sendAttempts: attempts,
+                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+                ultimoProbeCLIts: tsCLI || 0,
+                lastProbeAt: Date.now()
+              });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
+            
+            try {
+              await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
+            } catch {}
+            
+            // AQUISIÇÃO DO LOCK — "just-in-time locking"
+            await acquireSendGuard(pAtual, chatId);
+            
+            await sendMessageSafe(pAtual, campoEnvio, pipelineResult.resposta, nome, chatId);
+            
+            await appendIaLine(nome, chatId, pipelineResult.resposta);
+            
+            await marcarRespondido(nome, chatId);
+            
+            // Após envio bem-sucedido, persista:
+            try {
+              await setChatState(nome, chatId, {
+                ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
+                ultimoProbeCLIts: tsCLI || 0,
+                lastIATs: Date.now(),
+                lastProbeAt: Date.now(),
+                lastClientHash
+              });
+            } catch {}
+            
+            logger.info('[PIPELINE] Resposta enviada com sucesso', { chatId, telefone: pipelineResult.telefone_extraido, perguntas: pipelineResult.qaAsked });
+          } catch (e) {
+            logger.error('[PIPELINE] Falha no pipeline', { chatId, error: e && e.message || e });
+            // Retry/backoff similar ao Groq
+            try {
+              const prev = await getChatState(nome, chatId);
+              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+              const baseMin = 2;
+              const nextMs = Math.min(5 * 60 * 1000, Math.pow(2, attempts - 1) * baseMin * 60 * 1000);
+              
+              if (attempts >= 3) {
+                await setChatState(nome, chatId, {
+                  state: 'erro_envio',
+                  sendAttempts: attempts,
+                  erroTimestamp: Date.now(),
+                  ultimoProbeCLIts: tsCLI || 0
+                });
+                await logIssue(nome, 'virtus_send_failed', `erro_envio após ${attempts} tentativas (chat ${chatId})`);
+              } else {
+                await setChatState(nome, chatId, {
+                  state: CHAT_STATES.AGUARDANDO,
+                  sendAttempts: attempts,
+                  cooldownUntil: Date.now() + nextMs,
+                  ultimoProbeCLIts: tsCLI || 0
+                });
+                await logIssue(nome, 'virtus_send_failed', `retry_schedule attempt=${attempts} in=${Math.round(nextMs/1000)}s chat=${chatId}`);
+              }
+            } catch {}
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+        } else if (DIRECT_GROQ) {
+          // Fallback: Groq (só se VIRTUS_USE_PIPELINE=0)
           try {
             logger.info('[CONTEXTO] Chamando Groq API', {
               nome,
@@ -2787,81 +3176,51 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               iniciarTimerFechamento(chatId, parsed.telefone_extraido);
             }
 
-            // Reaproveitar a página atual e evitar reload/goto desnecessário
+            // Reaproveitar a página atual - NUNCA reload/goto
             const pAtual = await ensurePage().catch(() => null);
-            if (!pAtual) throw new Error('page_unavailable_for_send');
+            if (!pAtual) {
+              logger.warn('[GROQ] Page indisponível', { nome, chatId });
+              await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
 
+            // Verifica se está no chat correto - se não, apenas marca cooldown (não navega)
             const expectedPath = `/marketplace/t/${chatId}/`;
             let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
             if (!urlNow.includes(expectedPath)) {
-              await pAtual.goto(`https://www.messenger.com${expectedPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-              const ok = await assertOnChat(pAtual, chatId, { timeoutMs: 5000 });
-              if (!ok) {
-                // Tenta novamente forçando navegação
-                await pAtual.goto(`https://www.messenger.com${expectedPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-                const ok2 = await assertOnChat(pAtual, chatId, { timeoutMs: 8000 });
-                if (!ok2) {
-                  await logIssue(nome, 'mil_action', `virtus_context_abort: cannot reach chat ${chatId} after forced nav`);
-                  // Reenfileira com cooldown breve, sem erro_envio permanente
-                  const prev = await getChatState(nome, chatId).catch(()=>null);
-                  const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-                  await setChatState(nome, chatId, {
-                    state: CHAT_STATES.AGUARDANDO,
-                    sendAttempts: attempts,
-                    cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                    ultimoProbeCLIts: tsCLI || 0,
-                    lastProbeAt: Date.now()
-                  });
-                  try { await pendingDel(nome, chatId); } catch {}
-                  fila = fila.filter(id => id !== chatId);
-                  chatAtivo = null;
-                  return;
-                }
-              }
-            }
-
-            // Tente usar o composer já obtido anteriormente; se não existir, espere um pouco mais
-            let campoEnvio = await waitForComposer(pAtual, 15000);
-            if (!campoEnvio) {
-              // Tentativa 1: scroll
-              try { await pAtual.evaluate(() => window.scrollBy(0, 100)); } catch {}
-              campoEnvio = await waitForComposer(pAtual, 5000);
-            }
-
-            if (!campoEnvio) {
-              // Tentativa 2: reload
-              await pAtual.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-              campoEnvio = await waitForComposer(pAtual, 8000);
-            }
-
-            if (!campoEnvio) {
-              // Tentativa 3: goto novamente
-              await pAtual.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-              campoEnvio = await waitForComposer(pAtual, 8000);
-            }
-
-            if (!campoEnvio) {
-              // Última tentativa: nova aba (fallback)
-              try {
-                const novaAba = await pAtual.browser().newPage();
-                await novaAba.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-                campoEnvio = await waitForComposer(novaAba, 8000);
-                if (campoEnvio) {
-                  // Usa nova aba para envio
-                  pAtual = novaAba;
-                } else {
-                  await novaAba.close().catch(()=>{});
-                }
-              } catch {}
-            }
-
-            if (!campoEnvio) {
-              // Não marca erro_envio permanente, apenas cooldown leve
-              logger.warn(`[COMPOSER] Composer indisponível após todas tentativas — aguardando cooldown`, { nome, chatId });
+              logger.warn('[GROQ] URL não corresponde ao chat - marcando cooldown', { nome, chatId, urlNow });
               const prev = await getChatState(nome, chatId).catch(()=>null);
               const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
               await setChatState(nome, chatId, {
                 state: CHAT_STATES.AGUARDANDO,
+                sendAttempts: attempts,
+                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+                ultimoProbeCLIts: tsCLI || 0,
+                lastProbeAt: Date.now()
+              });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
+
+            // Tenta obter composer - se falhar, usa refocusComposerNoReload
+            let campoEnvio = await waitForComposer(pAtual, 10000);
+            if (!campoEnvio) {
+              logger.info('[GROQ] Composer não encontrado, tentando refocus', { nome, chatId });
+              campoEnvio = await refocusComposerNoReload(pAtual, chatId, anchorSel);
+            }
+
+            if (!campoEnvio) {
+              logger.warn('[GROQ] Composer indisponível após refocus - marcando cooldown', { nome, chatId });
+              const prev = await getChatState(nome, chatId).catch(()=>null);
+              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+              await setChatState(nome, chatId, {
+                state: 'erro_envio',
+                erroTimestamp: Date.now(),
                 sendAttempts: attempts,
                 cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
                 ultimoProbeCLIts: tsCLI || 0,
@@ -3343,17 +3702,37 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function enviarMensagemFinal(chatId) {
     const mensagem = 'Perfeito! Recebi todas as informações. Já vou processar seu pedido e te chamar no WhatsApp. Obrigado pela confiança! 🙌\n\nSiga nosso Instagram: @seu_instagram';
     let p = await ensurePage().catch(() => null);
-    if (!p) return;
+    if (!p) {
+      logger.warn('[MENSAGEM_FINAL] Page indisponível', { nome, chatId });
+      return;
+    }
     try {
-      await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(()=>{});
-      const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
-      if (!okOn) return;
+      // NUNCA navegue/goto - apenas verifica se está no chat correto
+      const expectedPath = `/marketplace/t/${chatId}/`;
+      let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+      if (!urlNow.includes(expectedPath)) {
+        logger.warn('[MENSAGEM_FINAL] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
+        return;
+      }
+      
+      const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
+      if (!okOn) {
+        logger.warn('[MENSAGEM_FINAL] Chat não confirmado - abortando', { nome, chatId });
+        return;
+      }
+      
       let campo = await waitForComposer(p, 8000);
       if (!campo) {
-        await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(()=>{});
-        campo = await waitForComposer(p, 8000);
+        logger.info('[MENSAGEM_FINAL] Composer não encontrado, tentando refocus', { nome, chatId });
+        const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+        campo = await refocusComposerNoReload(p, chatId, anchorSel);
       }
-      if (!campo) return;
+      
+      if (!campo) {
+        logger.warn('[MENSAGEM_FINAL] Composer indisponível após refocus', { nome, chatId });
+        return;
+      }
+      
       await sendMessageSafe(p, campo, mensagem, nome, chatId);
       logger.info('[MESSENGER] Mensagem final enviada', { chatId });
     } catch (e) {
@@ -3460,19 +3839,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
             
-            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+            // NUNCA navegue/goto - apenas verifica se está no chat correto
+            const expectedPath = `/marketplace/t/${chatId}/`;
+            let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+            if (!urlNow.includes(expectedPath)) {
+              logger.warn('[MESSENGER] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
+              throw new Error('chat_not_on_correct_url');
+            }
             
-            const okOn = await assertOnChat(p, chatId, { timeoutMs: 5000 });
+            const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
             if (!okOn) {
               throw new Error('chat_not_opened');
             }
             
             let campo = await waitForComposer(p, 10000);
             if (!campo) {
-              try {
-                await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
-              } catch {}
-              campo = await waitForComposer(p, 8000);
+              logger.info('[MESSENGER] Composer não encontrado, tentando refocus', { nome, chatId });
+              const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+              campo = await refocusComposerNoReload(p, chatId, anchorSel);
             }
             
             if (!campo) {

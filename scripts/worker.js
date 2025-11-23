@@ -1135,27 +1135,14 @@ async function activateOnce(nome, source = '') {
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
         // [NAV_INIT] garantir UI do Marketplace após abrir o browser (sem usar o chat ativo!)
-        function nowIso(){ try { return new Date().toISOString(); } catch { return String(Date.now()); } }
         try {
           const pages = await browser.pages().catch(()=>[]);
           const main = pages && pages[0];
           if (main) {
-            logger.info('[NAV_INIT] indo para marketplace (activateOnce)', { nome, ts: nowIso() });
-            try {
-              await main.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            } catch {}
-            try {
-              const okUi = await Promise.race([
-                main.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).then(()=>true).catch(()=>false),
-                main.waitForSelector('div[role="row"]', { timeout: 8000 }).then(()=>true).catch(()=>false)
-              ]);
-              logger.info('[NAV_INIT] UI marketplace ' + (okUi ? 'OK' : 'NOK'), { nome, url: (typeof main.url === 'function' ? main.url() : ''), ts: nowIso() });
-            } catch (e) {
-              logger.warn('[NAV_INIT] UI marketplace não validada', { nome, error: (e && e.message)||String(e), ts: nowIso() });
-            }
+            await browserHelper.gotoMessengerMarketplace(main, nome);
           }
         } catch (e) {
-          logger.warn('[NAV_INIT] falha ao preparar marketplace', { nome, error: (e && e.message)||String(e), ts: nowIso() });
+          logger.warn('[NAV_INIT] falha ao preparar marketplace', { nome, error: (e && e.message)||String(e) });
         }
 
         robeMeta[nome] = robeMeta[nome] || {};
@@ -3932,6 +3919,18 @@ async function isPageLikelyAlive(page, nome) {
 }
 
 async function recoveryStep(nome, page, step) {
+  // BLOQUEIO: não recuperar se Virtus ativo e na URL de chat
+  try {
+    const urlNow = page && typeof page.url === 'function' ? (page.url() || '') : '';
+    const ctrl = controllers.get(nome);
+    const virtusOn = !!(ctrl && ctrl.trabalhando && !ctrl.humanControl && !ctrl.configurando);
+    if (/messenger\.com\/marketplace\/t\/\d+/.test(urlNow) && virtusOn) {
+      try { await issues.append(nome, 'mil_action', 'health_recovery_skip_on_chat'); } catch {}
+      logger.warn('[NURSE_RECOVER_SKIP] Em chat ativo da Virtus — NUNCA reload/goto para recuperar', { nome, urlNow });
+      return false;
+    }
+  } catch {}
+  
   const st = getHealth(nome);
   const now = Date.now();
   if (st.nextTryAt && st.nextTryAt > now) return false;

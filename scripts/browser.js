@@ -2194,8 +2194,8 @@ module.exports = {
   installOneTabGuard,
   installAboutBlankKiller,
   isProtectedBuscaLocalizacao,
+  gotoMessengerMarketplace,    // <----- NOVO: Helper de navegação inicial do Marketplace
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended,
-  gotoMessengerMarketplace
+  detectAccountSuspended
 };
