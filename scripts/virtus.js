@@ -3316,13 +3316,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   function scheduleNextIfIdle() {
-    if (!running) return;
+    if (!running) {
+      logger.debug('[FILA] Sistema não está rodando', { nome });
+      return;
+    }
     if (chatAtivo) {
       logger.debug('[FILA] Chat ativo, aguardando...', { nome, chatAtivo });
       return;
     }
     if (filaChatTimer) {
-      logger.debug('[FILA] Timer já agendado, aguardando...', { nome });
+      logger.debug('[FILA] Timer já agendado, aguardando...', { nome, filaChatTimer });
       return;
     }
     if (!fila.length) {
@@ -3332,7 +3335,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     // CRÍTICO: Remover o chat da fila ANTES de processar para evitar duplicação
     const next = fila.shift(); // Remove da fila imediatamente
-    if (!next) return;
+    if (!next) {
+      logger.warn('[FILA] Chat removido da fila mas era null/undefined', { nome });
+      return;
+    }
+    
+    // CRÍTICO: Marcar chatAtivo ANTES de agendar para evitar chamadas concorrentes
+    chatAtivo = next;
 
     // Primeira execução SEM delay; próximas respeitam o env (default 0)
     const delayMs = (() => {
@@ -3347,24 +3356,33 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     logger.info('[FILA] Preparando atendimento do próximo chat', { nome, chatId: next, delay: delayMs, filaRestante: fila.length });
     filaChatTimer = setTimeout(async () => {
       try {
+        filaChatTimer = null; // Limpa timer imediatamente
+        
         if (!running || !epochOk()) {
-          filaChatTimer = null;
+          chatAtivo = null; // Libera chatAtivo
+          fila.unshift(next); // Re-enfileira
+          logger.warn('[FILA] Sistema não está rodando ou epoch inválido, re-enfileirando', { nome, chatId: next });
           return;
         }
-        // Revalida: se alguém setou chatAtivo nesse meio tempo, re-enfileira e agenda novamente
-        if (chatAtivo) {
+        
+        // Verifica se ainda é o chat ativo (proteção extra)
+        if (chatAtivo !== next) {
+          logger.warn('[FILA] Chat ativo mudou, re-enfileirando', { nome, chatId: next, chatAtivo });
           fila.unshift(next); // Re-enfileira no início
-          filaChatTimer = null;
-          logger.info('[FILA] Chat ativo detectado, re-enfileirando', { nome, chatId: next });
           return scheduleNextIfIdle();
         }
+        
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
-        filaChatTimer = null;
         await responderChat(next);
+        
+        // Libera chatAtivo após processar
+        chatAtivo = null;
+        
         setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       } catch (e) {
         filaChatTimer = null;
-        logger.error('[FILA] Erro no timer de atendimento', { nome, chatId: next, error: e && e.message || e });
+        chatAtivo = null; // Libera chatAtivo em caso de erro
+        logger.error('[FILA] Erro no timer de atendimento', { nome, chatId: next, error: e && e.message || e, stack: e && e.stack });
         // Re-enfileira em caso de erro
         fila.unshift(next);
         setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
@@ -3419,10 +3437,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       // === FIM GUARD DE VIDA ===
-      if (!chatId) return;
+      if (!chatId) {
+        logger.warn('[RESPONDER] chatId inválido', { nome, chatId });
+        chatAtivo = null; // Libera chatAtivo antes de retornar
+        return;
+      }
+
+      // CRÍTICO: Verificar se já está processando este chat (proteção contra chamadas concorrentes)
+      // NOTA: chatAtivo já foi setado em scheduleNextIfIdle, então esta verificação não deve falhar
+      // Mas mantemos como proteção extra
+      if (chatAtivo && chatAtivo !== chatId) {
+        logger.warn('[RESPONDER] Outro chat já está sendo processado (chatAtivo)', { nome, chatId, chatAtivo });
+        return;
+      }
+      
+      // Garante que chatAtivo está setado (proteção extra)
+      chatAtivo = chatId;
 
       // Lock de disco POR chatId!
+      logger.info('[RESPONDER] Tentando adquirir lock', { nome, chatId });
       if (!chatLock.acquire(nome, chatId)) {
+        logger.warn('[RESPONDER] Falha ao adquirir lock - chat já está sendo processado', { nome, chatId });
         stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
         // logging adicional de lock fail
         stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
@@ -3432,6 +3467,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       _chatLockAcquired = true;
+      logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       
       // NOVO: Registra lastProbeAt no início (antes de qualquer navegação)
       try {
@@ -4324,9 +4360,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       fila = fila.filter(id => id !== chatId);
-      chatAtivo = null;
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
     } finally {
+      // CRÍTICO: Sempre liberar chatAtivo no finally para garantir que não fique travado
+      if (chatAtivo === chatId) {
+        chatAtivo = null;
+        logger.info('[RESPONDER] chatAtivo liberado no finally', { nome, chatId });
+      }
+      
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
