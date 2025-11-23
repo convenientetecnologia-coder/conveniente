@@ -551,23 +551,36 @@ function montarPromptUser(cidade, historico, opts = {}) {
   const jaMencionouBairroDestino = /\b(bairro.*?destino|destino.*?bairro)\b/i.test(historicoTexto);
   
   // Determina qual pergunta fazer agora (ordem fixa)
+  const nonPhoneFields = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
+  const allNonPhoneAnswered = nonPhoneFields.every(f => {
+    try { 
+      if (f === 'itens') return jaMencionouItens;
+      if (f === 'bairro_saida') return jaMencionouBairroSaida;
+      if (f === 'bairro_destino') return jaMencionouBairroDestino;
+      if (f === 'ajudante') return jaMencionouAjudante;
+      if (f === 'saida_tipo') return jaMencionouSaidaTipo;
+      if (f === 'destino_tipo') return jaMencionouDestinoTipo;
+      return false;
+    } catch { return false; }
+  });
+  const priceAsk = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(historicoTexto);
+  const availabilityAsk = /\b(dispon[ií]vel|disponivel|agendar|agenda|marcar|hor[áa]rio|quando|que\s+dia|d[aá] pra (hoje|agora|amanh[ãa])|faz\s+(hoje|agora)|consegue\s+(hoje|agora))\b/i.test(historicoTexto);
   let proximaPergunta = '';
-  if (!temWhatsappComDDD) {
-    proximaPergunta = 'WhatsApp com DDD (PRIORIDADE ABSOLUTA)';
-  } else if (!jaMencionouItens) {
-    proximaPergunta = 'O que precisa transportar?';
-  } else if (!jaMencionouAjudante) {
-    proximaPergunta = 'Precisa de ajudante?';
-  } else if (!jaMencionouSaidaTipo) {
-    proximaPergunta = 'Saída é casa ou apartamento?';
-  } else if (!jaMencionouDestinoTipo) {
-    proximaPergunta = 'Destino é casa ou apartamento?';
-  } else if (!jaMencionouBairroSaida) {
-    proximaPergunta = 'Bairro de saída';
-  } else if (!jaMencionouBairroDestino) {
-    proximaPergunta = 'Bairro de destino';
+  if ((priceAsk || availabilityAsk) && !temWhatsappComDDD) {
+    proximaPergunta = 'telefone'; // WhatsApp
   } else {
-    proximaPergunta = 'Todas informações coletadas - apenas peça WhatsApp se ainda não tiver';
+    const faltante = nonPhoneFields.find(f => {
+      if (f === 'itens') return !jaMencionouItens;
+      if (f === 'bairro_saida') return !jaMencionouBairroSaida;
+      if (f === 'bairro_destino') return !jaMencionouBairroDestino;
+      if (f === 'ajudante') return !jaMencionouAjudante;
+      if (f === 'saida_tipo') return !jaMencionouSaidaTipo;
+      if (f === 'destino_tipo') return !jaMencionouDestinoTipo;
+      return false;
+    });
+    if (faltante) proximaPergunta = faltante;
+    else if (!temWhatsappComDDD) proximaPergunta = 'telefone';
+    else proximaPergunta = '—';
   }
   
   const cabecalho = [
@@ -577,13 +590,13 @@ function montarPromptUser(cidade, historico, opts = {}) {
     `- Cliente perguntou sobre disponibilidade? ${perguntouDisponibilidade ? 'SIM (é pergunta sobre disponibilidade, NÃO sobre o que transportar)' : 'NÃO'}`,
     ``,
     `ORDEM FIXA DE COLETA (UMA PERGUNTA POR VEZ):`,
-    `1. WhatsApp com DDD: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (PRIORIDADE ABSOLUTA)'}`,
-    `2. O que precisa transportar: ${jaMencionouItens ? '✅ COLETADO' : '❌ FALTA'}`,
-    `3. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
-    `4. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `5. Destino é casa ou apartamento: ${jaMencionouDestinoTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `6. Bairro de saída: ${jaMencionouBairroSaida ? '✅ COLETADO' : '❌ FALTA'}`,
-    `7. Bairro de destino: ${jaMencionouBairroDestino ? '✅ COLETADO' : '❌ FALTA'}`,
+    `1. O que precisa transportar: ${jaMencionouItens ? '✅ COLETADO' : '❌ FALTA'}`,
+    `2. Bairro de saída: ${jaMencionouBairroSaida ? '✅ COLETADO' : '❌ FALTA'}`,
+    `3. Bairro de destino: ${jaMencionouBairroDestino ? '✅ COLETADO' : '❌ FALTA'}`,
+    `4. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
+    `5. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
+    `6. Destino é casa ou apartamento: ${jaMencionouDestinoTipo ? '✅ COLETADO' : '❌ FALTA'}`,
+    `7. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (pedir apenas quando cliente perguntar preço/disponibilidade ou quando todos os outros dados estiverem coletados)'}`,
     ``,
     `PRÓXIMA PERGUNTA A FAZER: ${proximaPergunta}`,
     ``,
@@ -868,17 +881,17 @@ function extractAnswersFromHistory(historico) {
 
 // Pipeline de Perguntas - Função principal (VERSÃO ULTRA-BLINDADA)
 const FLOW_ORDER = [
-  'telefone',       // WhatsApp com DDD — prioridade absoluta
   'itens',
+  'bairro_saida',
+  'bairro_destino',
   'ajudante',
   'saida_tipo',
   'destino_tipo',
-  'bairro_saida',
-  'bairro_destino'
+  'telefone'
 ];
 
 const FIELD_PROMPTS = {
-  telefone:        'Me passa teu WhatsApp com DDD? O motorista chama por lá.',
+  telefone:        'Pode me passar seu WhatsApp? O motorista chama por lá.',
   itens:           'O que você precisa transportar? (ex.: 2 camas, 10 sacolas)',
   ajudante:        'Você precisa de ajudante?',
   saída_tipo:      'O local de saída é casa ou apartamento?',
@@ -899,10 +912,26 @@ function getOrInitFlowState(stPrev) {
   return fs;
 }
 
-function pickNextMissingField(flow) {
-  for (const f of FLOW_ORDER) {
-    if (!flow.answered[f]) return f;
+function devePedirWhatsApp(historicoConversa, flow) {
+  const txt = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
+  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(txt);
+  const askedAvailability = /\b(dispon[ií]vel|disponivel|agendar|agenda|marcar|hor[áa]rio|quando|que\s+dia|d[aá] pra (hoje|agora|amanh[ãa])|faz\s+(hoje|agora)|consegue\s+(hoje|agora))\b/i.test(txt);
+  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
+  const allNonPhoneAnswered = nonPhone.every(f => !!(flow && flow.answered && flow.answered[f]));
+  return askedPrice || askedAvailability || allNonPhoneAnswered;
+}
+
+function pickNextMissingField(flow, historicoConversa) {
+  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
+  const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
+  const askPhoneNow = devePedirWhatsApp(historicoConversa, flow) || allNonPhoneAnswered;
+  if (!askPhoneNow) {
+    for (const f of nonPhone) {
+      if (!flow.answered[f]) return f;
+    }
+    return null;
   }
+  if (!flow.answered.telefone) return 'telefone';
   return null;
 }
 
@@ -1011,6 +1040,15 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
   const dataHora = extractDataHoraPTBR(texto);
   flow.answered.data_hora = dataHora || flow.answered.data_hora || 'agora';
 
+  // Sinaliza que precisamos do DDD se detectamos número local (8-9 dígitos) sem DDD
+  if (!flow.answered.telefone) {
+    const mLocal = texto.match(/\b([2-9]\d{7,8})\b/);
+    if (mLocal && mLocal[1]) {
+      flow.meta = flow.meta || {};
+      flow.meta.needDDD = true;
+    }
+  }
+
   return flow;
 }
 
@@ -1085,80 +1123,58 @@ function buildNaturalPrefix(ultimaDoCliente) {
 async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
   const utils = require('./utils.js');
   const flow = getOrInitFlowState(stPrev);
-  flow.meta = flow.meta || { askWhatsCount: 0, lastAskAt: 0 };
+  flow.meta = flow.meta || {};
+  flow.meta.needDDD = !!flow.meta.needDDD; // se já estamos esperando DDD
   applyExtractedAnswers(flow, historicoConversa, utils);
 
   const textoCompleto = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
-  const pediuPreco = /\b(pre[cç]o|valor|or[çc]amento|custa|quanto)\b/i.test(textoCompleto);
+  // WhatsApp válido?
   const whatsappValido = utils.isValidBRPhoneWithDDD((flow.answered && flow.answered.telefone) || '');
 
-  // Se pediu preço: obrigar WhatsApp (com contagem de insistência variando a forma)
-  if (pediuPreco && !whatsappValido) {
-    flow.meta.askWhatsCount++;
-    flow.meta.lastAskAt = Date.now();
-    const variantes = [
-      'O orçamento é passado pelo motorista no WhatsApp. Pode me enviar seu número com DDD?',
-      'Te passo pro motorista te chamar por WhatsApp e passar os valores. Qual seu número (com DDD)?',
-      'O motorista informa os valores pelo Whats. Me passa teu WhatsApp com DDD?'
-    ];
+  // Se detectamos número local sem DDD antes, perguntamos DDD uma única vez
+  if (!whatsappValido && flow.meta.needDDD) {
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const msg = `${prefixo}${variantes[flow.meta.askWhatsCount % variantes.length]}`;
-    flow.asked.telefone = true;
     return {
-      resposta: msg,
+      resposta: `${prefixo}Preciso do DDD também, pode me passar o número completo?`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
+      qaAsked: Object.keys(flow.asked || {}),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  // Não pediu preço: avançar coleta de dados e pedir WhatsApp de forma amigável apenas a cada 1–2 mensagens
-  const next = pickNextMissingField(flow);
-  if (!whatsappValido && flow.meta.askWhatsCount < 2) {
-    // Primeiras insistências leves ao longo da conversa
-    flow.meta.askWhatsCount++;
-    flow.meta.lastAskAt = Date.now();
-    const variantes = [
-      'Se puder, me passa teu WhatsApp com DDD? Assim o motorista te chama rapidinho.',
-      'Me manda teu número de WhatsApp com DDD, por favor? O motorista chama por lá.'
-    ];
+  // Próximo campo faltante respeitando a ordem nova, NÃO forçar telefone
+  const next = pickNextMissingField(flow, historicoConversa);
+  // Deve pedir WhatsApp agora?
+  const askPhoneNow = devePedirWhatsApp(historicoConversa, flow);
+
+  // Se é hora de pedir WhatsApp e ainda não temos WhatsApp válido
+  if (askPhoneNow && !whatsappValido) {
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const textoWhats = `${prefixo}${variantes[(flow.meta.askWhatsCount - 1) % variantes.length]}`;
-    
-    // Se já temos algo a coletar (next existe e não é telefone), encaixa só 1 pergunta
-    if (next && next !== 'telefone') {
-      flow.asked[next] = true;
-      const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
-      return {
-        resposta: `${textoWhats} ${pergunta}`,
-        telefone_extraido: null,
-        finalizado: false,
-        dados: flow.answered,
-        qaAsked: Object.keys(flow.asked),
-        qaAnswered: flow.answered,
-        flow
-      };
-    }
-    
-    // Senão, só reforce WhatsApp com leveza
+    // Se quase tudo está preenchido, enfatize que já tem tudo
+    const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
+    const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
+    const variante = allNonPhoneAnswered
+      ? 'Perfeito! Já temos todos os dados. Agora só falta seu WhatsApp para o motorista te enviar o orçamento. Pode me passar?'
+      : 'O motorista passa o orçamento e combina horário pelo WhatsApp. Pode me passar seu WhatsApp?';
     return {
-      resposta: textoWhats,
+      resposta: `${prefixo}${variante}`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
+      qaAsked: Object.keys(flow.asked || {}),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  // Se já insistimos o suficiente, avance a conversa normalmente
-  if (next) {
+  // Se ainda há campos não-telefone faltando, pergunte o próximo
+  if (next && next !== 'telefone') {
+    flow.asked = flow.asked || {};
     flow.asked[next] = true;
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
@@ -1174,29 +1190,28 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     };
   }
 
-  // Caso esteja tudo coletado e não tenha whatsapp válido, peça com reforço final
+  // Se só falta WhatsApp (e não é hora por preço/agenda), peça educadamente uma vez
   if (!whatsappValido) {
-    flow.meta.askWhatsCount++;
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
     return {
-      resposta: `${prefixo}Faltou só seu WhatsApp com DDD pra eu te passar pro motorista. Pode me enviar?`,
+      resposta: `${prefixo}Perfeito! Já temos todos os dados. Agora só falta seu WhatsApp para o motorista te enviar o orçamento. Pode me passar?`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
+      qaAsked: Object.keys(flow.asked || {}),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  // Tudo pronto e whatsapp OK
+  // WhatsApp válido já presente → finaliza
   return {
     resposta: null,
     telefone_extraido: flow.answered.telefone || null,
     finalizado: true,
     dados: flow.answered,
-    qaAsked: Object.keys(flow.asked),
+    qaAsked: Object.keys(flow.asked || {}),
     qaAnswered: flow.answered,
     flow
   };
