@@ -1744,6 +1744,10 @@ const SENT_COOLDOWN_MS = 60 * 1000; // mínimo de 60s
 // ====== INÍCIO: Config Probe e TTL de Revalidação ======
 const PROBE_RECHECK_MIN_MS = parseInt(process.env.VIRTUS_PROBE_RECHECK_MIN_MS || '60000', 10);  // mínimo entre enfileiramentos (anti-flood), default 60s
 const PROBE_FORCE_OPEN_MS  = parseInt(process.env.VIRTUS_PROBE_FORCE_OPEN_MS  || '300000', 10); // forçar abertura do chat após X ms, default 5min
+
+// Quiet-window configurável (evita travar primeira resposta)
+const VIRTUS_FIRST_REPLY_QUIET_MS = parseInt(process.env.VIRTUS_FIRST_REPLY_QUIET_MS || '0', 10);    // default 0ms (primeira resposta instantânea)
+const VIRTUS_NEXT_REPLY_QUIET_MS  = parseInt(process.env.VIRTUS_NEXT_REPLY_QUIET_MS  || '5000', 10); // default 5s (respostas subsequentes)
 // ====== FIM: Config Probe e TTL de Revalidação ======
 
 // ====== INÍCIO: Config Notificador e Filas ======
@@ -3609,22 +3613,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // [BURST TIMER] Aguarde a janela de 20s sem nova mensagem antes de responder
+        // QUIET WINDOW inteligente: na primeira resposta NÃO espera; nas subsequentes, espera curto (configurável)
         const pAtual = await ensurePage().catch(()=>null);
-        const okQuiet = await waitQuietWindow(nome, chatId, 20000, {
-          page: pAtual,
-          getHistoricoFn: async () => await extrairHistoricoConversa(pAtual)
-        });
-        if (!okQuiet) {
-          logger.info('[BURST] Chat ' + chatId + ': nova mensagem durante quiet window, abortando', { nome });
-          try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }); } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
+        const isFirstReply = (idxUltIA < 0); // idxUltIA já calculado acima
+        const quietMs = isFirstReply ? VIRTUS_FIRST_REPLY_QUIET_MS : VIRTUS_NEXT_REPLY_QUIET_MS;
+        
+        if (quietMs > 0) {
+          let okQuiet = await waitQuietWindow(nome, chatId, quietMs, {
+            page: pAtual,
+            getHistoricoFn: async () => await extrairHistoricoConversa(pAtual)
+          });
+          if (!okQuiet) {
+            // Houve mensagem do cliente durante a janela curta: reavalie histórico e CONTINUE (não aborta)
+            logger.info('[BURST] Mensagem durante quiet window curta — reavaliando e seguindo', { nome, chatId, quietMs, isFirstReply });
+            try {
+              historicoConversa = await extrairHistoricoConversa(pAtual);
+            } catch {}
+            // segue fluxo normalmente; nada de return aqui
+          }
+        } else {
+          logger.debug('[QUIET] Primeira resposta: quiet window desativada', { nome, chatId });
         }
 
-        // OK: há novidade do cliente e passou o período de quietude
+        // OK: há novidade do cliente (passou quiet window ou é primeira resposta)
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
 
