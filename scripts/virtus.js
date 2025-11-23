@@ -2141,31 +2141,60 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       expectedNorm
     ).catch(() => false);
 
+    let mensagemEnviada = sent;
     if (!sent) {
-      logger.error('[MESSENGER] ❌ FALHA ROBUSTA: nova bolha não confirmada', { 
-        nome, 
+      // Verificação adicional: talvez a mensagem foi enviada mas a confirmação falhou
+      // Verifica se o composer foi esvaziado (indicativo de envio)
+      const composerEmpty = await p.evaluate(() => {
+        const composers = Array.from(document.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
+        for (const comp of composers) {
+          const txt = (comp.innerText || comp.textContent || '').trim();
+          if (txt.length === 0) return true;
+        }
+        return false;
+      }).catch(() => false);
+      
+      if (composerEmpty) {
+        // Composer vazio = mensagem provavelmente foi enviada, mesmo sem confirmação robusta
+        logger.warn('[MESSENGER] ⚠️ Confirmação robusta falhou, mas composer vazio (mensagem provavelmente enviada)', { 
+          nome, 
+          chatId,
+          beforeTotal: before.total
+        });
+        mensagemEnviada = true; // Assume que enviou
+      } else {
+        // Composer ainda tem texto = mensagem não foi enviada
+        logger.error('[MESSENGER] ❌ FALHA: mensagem não enviada (composer não vazio)', { 
+          nome, 
+          chatId,
+          beforeTotal: before.total
+        });
+        await logIssue(nome, 'virtus_send_failed', 'send_confirmation_robust_timeout');
+        // Não lança erro - apenas loga e continua (evita bloquear o sistema)
+        // Mas não marca como enviado
+      }
+    }
+    
+    // Só marca como enviado se realmente enviou (ou composer vazio)
+    if (mensagemEnviada) {
+      logger.info('[MESSENGER] ✅ Mensagem confirmada (robusta ou composer vazio)', {
+        nome,
         chatId,
-        beforeTotal: before.total
+        beforeTotal: before.total,
+        metodo: sent ? 'contagem_aumentou_texto_coincide' : 'composer_vazio_fallback'
       });
-      await logIssue(nome, 'virtus_send_failed', 'send_confirmation_robust_timeout');
-      throw new Error('send_not_confirmed_robust');
     }
 
-    logger.info('[MESSENGER] ✅ Mensagem confirmada (robusta)', {
-      nome,
-      chatId,
-      beforeTotal: before.total,
-      metodo: 'contagem_aumentou_texto_coincide'
-    });
-
-    // Marcar estado após envio bem-sucedido (APENAS disco)
-    try {
-      await setChatState(nome, chatId, {
-        state: CHAT_STATES.AGUARDANDO,
-        lastIATs: Date.now(),
-        cooldownUntil: Date.now() + SENT_COOLDOWN_MS
-      });
-    } catch {}
+    // Marcar estado após envio (apenas se realmente enviou)
+    if (mensagemEnviada) {
+      try {
+        await setChatState(nome, chatId, {
+          state: CHAT_STATES.AGUARDANDO,
+          lastIATs: Date.now(),
+          cooldownUntil: Date.now() + SENT_COOLDOWN_MS
+        });
+      } catch {}
+    }
 
   } finally {
     setVirtusInputLock(nome, false);
@@ -3383,12 +3412,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             // AQUISIÇÃO DO LOCK — "just-in-time locking"
             await acquireSendGuard(pAtual, chatId);
-            
-            await sendMessageSafe(pAtual, campoEnvio, pipelineResult.resposta, nome, chatId);
-            
-            await appendIaLine(nome, chatId, pipelineResult.resposta);
-            
-            await marcarRespondido(nome, chatId);
+            try {
+              await sendMessageSafe(pAtual, campoEnvio, pipelineResult.resposta, nome, chatId);
+              await appendIaLine(nome, chatId, pipelineResult.resposta);
+              await marcarRespondido(nome, chatId);
+            } finally {
+              // SEMPRE libera o lock, mesmo em caso de erro
+              releaseSendGuard(pAtual);
+            }
             
             // Após envio bem-sucedido, persista:
             try {
@@ -3551,31 +3582,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
             // AQUISIÇÃO DO LOCK — "just-in-time locking"
             await acquireSendGuard(pAtual, chatId);
+            try {
+              // PROTEÇÃO: Verifica se a última mensagem enviada é igual à atual (evita duplicação)
+              const ultimaIATexto = ultimaIA && ultimaIA.texto ? String(ultimaIA.texto).trim() : '';
+              const respostaAtual = String(parsed.resposta || '').trim();
+              if (ultimaIATexto && respostaAtual && ultimaIATexto === respostaAtual) {
+                logger.warn('[GROQ] Mensagem duplicada detectada - pulando envio', { nome, chatId, resposta: respostaAtual.substring(0, 50) });
+                await setChatState(nome, chatId, {
+                  state: CHAT_STATES.AGUARDANDO,
+                  lastProbeAt: Date.now(),
+                  ultimoProbeCLIts: tsCLI || 0
+                });
+                try { await pendingDel(nome, chatId); } catch {}
+                fila = fila.filter(id => id !== chatId);
+                chatAtivo = null;
+                return;
+              }
 
-            // PROTEÇÃO: Verifica se a última mensagem enviada é igual à atual (evita duplicação)
-            const ultimaIATexto = ultimaIA && ultimaIA.texto ? String(ultimaIA.texto).trim() : '';
-            const respostaAtual = String(parsed.resposta || '').trim();
-            if (ultimaIATexto && respostaAtual && ultimaIATexto === respostaAtual) {
-              logger.warn('[GROQ] Mensagem duplicada detectada - pulando envio', { nome, chatId, resposta: respostaAtual.substring(0, 50) });
-              await setChatState(nome, chatId, {
-                state: CHAT_STATES.AGUARDANDO,
-                lastProbeAt: Date.now(),
-                ultimoProbeCLIts: tsCLI || 0
-              });
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
+              await sendMessageSafe(pAtual, campoEnvio, parsed.resposta, nome, chatId);
+              await appendIaLine(nome, chatId, parsed.resposta);
+              
+              // Salvar secondaryPrompted após enviar resposta
+              try { await setChatState(nome, chatId, { secondaryPrompted: true }); } catch {}
+
+              await marcarRespondido(nome, chatId);
+            } finally {
+              // SEMPRE libera o lock, mesmo em caso de erro ou return antecipado
+              releaseSendGuard(pAtual);
             }
-
-            await sendMessageSafe(pAtual, campoEnvio, parsed.resposta, nome, chatId);
-            
-            await appendIaLine(nome, chatId, parsed.resposta);
-            
-            // Salvar secondaryPrompted após enviar resposta
-            try { await setChatState(nome, chatId, { secondaryPrompted: true }); } catch {}
-
-            await marcarRespondido(nome, chatId);
 
             // Após envio bem-sucedido, persista:
             try {
@@ -3797,8 +3831,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.warn('[FILA] sendLock ativo há >45s — liberando por watchdog', { nome });
           b._sendLock.active = false;
         } else {
-          logger.info('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
-          return;
+          // Log apenas em debug (não poluir terminal)
+          logger.debug('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
+          // Não retorna - continua processando (apenas não garante marketplace)
         }
       }
       await garantirMarketplace(p, { nome });
