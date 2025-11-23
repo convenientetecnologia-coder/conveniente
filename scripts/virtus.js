@@ -2541,7 +2541,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         // Hash/TS gating
         const stPrev = await getChatState(nome, chatId).catch(()=>null);
-        const prevIATs = stPrev && Number(stPrev.lastIATs || 0);
 
         const ultimaIA = (() => {
           const iaMsgs = historicoConversa.filter(m => m.autor === 'ia');
@@ -2557,20 +2556,55 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const lastClientHash = hashResposta(ultimaMsgClienteTexto);
         const lastClientHashAnterior = (stPrev && stPrev.lastClientHash) || null;
 
-        const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
+        // Índices ordem no histórico — decisor mais confiável do que timestamp
+        const idxUltCliente = (() => {
+          let idx = -1;
+          for (let i = 0; i < historicoConversa.length; i++) {
+            if (historicoConversa[i] && historicoConversa[i].autor === 'cliente') idx = i;
+          }
+          return idx;
+        })();
+        const idxUltIA = (() => {
+          let idx = -1;
+          for (let i = 0; i < historicoConversa.length; i++) {
+            if (historicoConversa[i] && historicoConversa[i].autor === 'ia') idx = i;
+          }
+          return idx;
+        })();
+
         const tsCLI = tsNum(ultimaCliente && ultimaCliente.timestamp);
+        const prevIATs = Number((stPrev && stPrev.lastIATs) || 0);
 
-        const mudouConteudo = (!lastClientHashAnterior) || (lastClientHashAnterior !== lastClientHash);
-        const clienteMaisRecenteQueIA = (tsCLI > Math.max(tsIA || 0, prevIATs || 0));
+        const mudouConteudo = (lastClientHashAnterior !== lastClientHash);
+        // Cliente "vence" se ele está depois da última IA no histórico (por posição) ou se o ts do cliente é posterior ao último envio registrado
+        const clienteVencePorOrdem = (idxUltCliente >= 0 && (idxUltIA < 0 || idxUltCliente > idxUltIA));
+        const clienteVencePorTempo = (tsCLI > prevIATs);
+        const clienteMaisRecenteQueIA = (clienteVencePorOrdem || clienteVencePorTempo);
 
+        logger.info('[GATE] Avaliação do chat', {
+          nome,
+          chatId,
+          mudouConteudo,
+          idxUltCliente,
+          idxUltIA,
+          tsCLI,
+          prevIATs,
+          clienteVencePorOrdem,
+          clienteVencePorTempo,
+          clienteMaisRecenteQueIA
+        });
+
+        // Final gate com branch rastreável
         if (!mudouConteudo || !clienteMaisRecenteQueIA) {
-          logger.info(`[SKIP] Chat ${chatId}: sem novidade (hash/ts).`, {
-            nome, chatId, mudouConteudo, clienteMaisRecenteQueIA, tsCLI, tsIA, prevIATs
+          logger.info('[SKIP] Chat ' + chatId + ': gate não satisfeito', {
+            nome,
+            motivoMudouConteudo: mudouConteudo ? 'ok' : 'hash_cliente_igual',
+            motivoRecencia: clienteMaisRecenteQueIA ? 'ok' : 'cliente_nao_vence(tempo/ordem)'
           });
           try {
             await setChatState(nome, chatId, {
               state: CHAT_STATES.AGUARDANDO,
-              lastIATs: tsIA || 0,
+              lastIATs: Number(stPrev && stPrev.lastIATs || 0),
               ultimoProbeCLIts: tsCLI || 0,
               lastProbeAt: Date.now()
             });
@@ -2582,6 +2616,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         // OK: há novidade do cliente
+        const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
 
         // NOVO: fluxo direto Groq (se DIRECT_GROQ ativo)
