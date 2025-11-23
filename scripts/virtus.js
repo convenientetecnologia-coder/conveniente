@@ -2077,10 +2077,11 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     const before = await getMySentSnapshot(p);
     logger.debug('[MESSENGER] Snapshot antes do envio', { nome, chatId, beforeTotal: before.total });
 
-    // ATRASO HUMANO REAL ENTRE RESPOSTAS
-    const minD = parseInt(process.env.VIRTUS_REPLY_MIN_MS || '5000', 10);
-    const maxD = parseInt(process.env.VIRTUS_REPLY_MAX_MS || '10000', 10);
+    // ATRASO HUMANO REAL ENTRE RESPOSTAS (5-15 segundos)
+    const minD = parseInt(process.env.VIRTUS_REPLY_MIN_MS || '5000', 10); // 5s
+    const maxD = parseInt(process.env.VIRTUS_REPLY_MAX_MS || '15000', 10); // 15s
     const delay = Math.max(0, Math.min(maxD, Math.floor(Math.random()*(maxD-minD+1))+minD));
+    logger.debug('[MESSENGER] Delay humano antes de enviar', { nome, chatId, delayMs: delay });
     await new Promise(r=>setTimeout(r, delay));
 
     // Envia (um único Enter)
@@ -2217,9 +2218,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
-  const POLL_INTERVAL_MS = 30_000; // polling de novos chats
-  const MIN_REPLY_DELAY_MS = 0;
-  const MAX_REPLY_DELAY_MS = 0;
+  // Verificação contínua (sem intervalo fixo - processa imediatamente)
+  const POLL_INTERVAL_MS = 1000; // apenas para fallback de segurança (não usado no loop contínuo)
+  // Delay entre respostas: 5-15 segundos (para evitar spam)
+  const MIN_REPLY_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_MIN_MS || '5000', 10); // 5s
+  const MAX_REPLY_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_MAX_MS || '15000', 10); // 15s
 
   // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
@@ -2818,19 +2821,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!running) return;
     if (chatAtivo) return;
     if (filaChatTimer) return;
-    if (!fila.length) return;
+    if (!fila.length) {
+      // Fila vazia: reinicia verificação imediatamente (sem espera)
+      setTimeout(() => {
+        if (running && epochOk() && !chatAtivo) {
+          filaManagerLoop();
+        }
+      }, 500); // pequeno delay de 500ms para evitar loop muito rápido
+      return;
+    }
 
     const next = fila[0];
-    // Primeira execução SEM delay; próximas respeitam o env (default 0)
-    const delayMs = (() => {
-      const env = process.env.VIRTUS_NEXT_CHAT_DELAY_MS;
-      if (typeof scheduleNextIfIdle._firstRun === 'undefined') {
-        scheduleNextIfIdle._firstRun = false;
-        return 0; // roda o primeiro chat imediatamente
-      }
-      const parsed = parseInt(env, 10);
-      return Number.isFinite(parsed) ? parsed : 0;
-    })();
+    // Delay entre respostas: 5-15 segundos (aleatório)
+    const delayMs = Math.floor(Math.random() * (MAX_REPLY_DELAY_MS - MIN_REPLY_DELAY_MS + 1)) + MIN_REPLY_DELAY_MS;
     logger.info('[FILA] Preparando atendimento do próximo chat', { nome, chatId: next, delay: delayMs });
     filaChatTimer = setTimeout(async () => {
       try {
@@ -2843,11 +2846,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
         filaChatTimer = null;
         await responderChat(next);
-        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
+        // Após responder, agenda o próximo imediatamente (sem delay adicional)
+        scheduleNextIfIdle();
       } catch (e) {
         filaChatTimer = null;
         logger.error('[FILA] Erro no timer de atendimento', { nome, error: e && e.message || e });
-        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
+        // Em caso de erro, agenda o próximo após pequeno delay
+        setTimeout(scheduleNextIfIdle, 1000);
       }
     }, delayMs);
   }
@@ -3684,6 +3689,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
     logger.info(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`, { nome });
+    
+    // Se há chat ativo, aguarda um pouco antes de verificar novamente
+    if (chatAtivo) {
+      setTimeout(() => {
+        if (running && epochOk()) filaManagerLoop();
+      }, 2000); // 2s de espera se há chat ativo
+      return;
+    }
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -3779,7 +3792,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       await garantirMarketplace(p, { nome });
 
+      // Verificação contínua: atualiza fila e agenda processamento
       await atualizaFila();
+      // Agenda o próximo chat (com delay de 5-15s entre respostas)
       scheduleNextIfIdle();
       resetRecoverBackoff();
 
@@ -3849,6 +3864,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     } finally {
       filaLoopBusy = false;
+      
+      // NOVO: Loop contínuo - reinicia imediatamente após processar
+      // Se não há chat ativo e a fila está vazia, reinicia verificação imediatamente
+      if (running && epochOk() && !chatAtivo) {
+        if (fila.length === 0) {
+          // Fila vazia: reinicia verificação imediatamente (sem espera)
+          setTimeout(() => {
+            if (running && epochOk() && !chatAtivo && !filaLoopBusy) {
+              filaManagerLoop();
+            }
+          }, 500); // pequeno delay de 500ms para evitar loop muito rápido
+        } else {
+          // Fila tem itens: scheduleNextIfIdle já vai processar
+          // Mas também reinicia verificação para pegar novos chats
+          setTimeout(() => {
+            if (running && epochOk() && !chatAtivo && !filaLoopBusy) {
+              filaManagerLoop();
+            }
+          }, 1000); // 1s entre verificações quando há fila
+        }
+      }
     }
   }
   // ==== FIM BLOCO MODIFICADO ====
@@ -4246,24 +4282,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     await resumeTimers();
     }
     
-    filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
+    // Verificação contínua: loop recursivo sem intervalos longos
+    // O filaInterval é apenas um fallback de segurança (não usado no loop principal)
+    filaInterval = setInterval(() => {
+      // Fallback de segurança: se o loop principal parar, este garante que continue
+      if (running && epochOk() && !filaLoopBusy && !chatAtivo) {
+        filaManagerLoop();
+      }
+    }, POLL_INTERVAL_MS);
+    
+    // Inicia o loop contínuo imediatamente
     filaManagerLoop();
-    
-    // Kick inicial no runner: agende outra chamada em 3s, e outra em 10s
-    // Isso garante polling rapidíssimo no boot para "ver" os chats sem precisar esperar o ciclo de 30s
-    setTimeout(() => {
-      if (running && epochOk()) {
-        logger.info('[FILA] Kick inicial (3s) — forçando atualização de fila', { nome });
-        atualizaFila().catch(() => {});
-      }
-    }, 3000);
-    
-    setTimeout(() => {
-      if (running && epochOk()) {
-        logger.info('[FILA] Kick inicial (10s) — forçando atualização de fila', { nome });
-        atualizaFila().catch(() => {});
-      }
-    }, 10000);
   }
 
   runner();
