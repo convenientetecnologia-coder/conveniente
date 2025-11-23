@@ -2247,11 +2247,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
-  // Verificação contínua (sem intervalo fixo - processa imediatamente)
-  const POLL_INTERVAL_MS = 1000; // apenas para fallback de segurança (não usado no loop contínuo)
-  // Delay entre respostas: 5-15 segundos (para evitar spam)
-  const MIN_REPLY_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_MIN_MS || '5000', 10); // 5s
-  const MAX_REPLY_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_MAX_MS || '15000', 10); // 15s
+  const POLL_INTERVAL_MS = 30_000; // polling de novos chats (30s - versão estável)
+  const MIN_REPLY_DELAY_MS = 0;
+  const MAX_REPLY_DELAY_MS = 0;
 
   // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
@@ -2602,28 +2600,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // 3) Coleta inicial
       let todos = await coletaChatsMarketplaceTodos(p);
-      logger.debug(`[VIRTUS][${nome}] coletaTodos inicial: ${todos.length} itens`);
+      logger.info(`[VIRTUS][${nome}] coletaTodos inicial: ${todos.length} itens`);
 
       // 4) Se nada encontrado ou poucos itens/nenhum recente, tentar scroll até 8h e recolher
       if (!todos || todos.length === 0) {
-        logger.debug(`[VIRTUS][${nome}] coleta vazia — ativando scrollListaAte8h()`);
+        logger.info(`[VIRTUS][${nome}] coleta vazia — ativando scrollListaAte8h()`);
         try {
           await scrollListaAte8h(p, { maxMs: 60000, quietLoops: 2 });
         } catch (e) {
           logger.warn(`[VIRTUS][${nome}] scrollListaAte8h falhou: ${(e && e.message) || e}`);
         }
         todos = await coletaChatsMarketplaceTodos(p);
-        logger.debug(`[VIRTUS][${nome}] coletaTodos após scroll: ${todos.length} itens`);
+        logger.info(`[VIRTUS][${nome}] coletaTodos após scroll: ${todos.length} itens`);
       }
 
       // 5) Filtra recentes (<=8h) com logs
       const filtrados = (todos || []).filter(c => c.id && isChatRecente(c.tempo));
-      // Log apenas se encontrou chats recentes (não poluir terminal)
-      if (filtrados.length > 0) {
-        logger.info(`[VIRTUS][${nome}] filtrados recentes: ${filtrados.length} / ${todos.length}`);
-      } else {
-        logger.debug(`[VIRTUS][${nome}] filtrados recentes: 0 / ${todos.length}`);
-      }
+      logger.info(`[VIRTUS][${nome}] filtrados recentes: ${filtrados.length} / ${todos.length}`);
       if (process.env.VIRTUS_FEED_DEBUG === '1') {
         for (const it of (todos || [])) {
           logger.info(`[VIRTUS][${nome}] CHAT FEED: id=${it.id} tempo="${it.tempo}" recent=${isChatRecente(it.tempo)}`);
@@ -2765,12 +2758,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function atualizaFila() {
     let mudancaFila = false;
     const chatsNovos = await coletaChatsMarketplaceRecentes();
-    // Log apenas se encontrou chats novos (não poluir terminal)
-    if (chatsNovos.length > 0) {
-      logger.info(`[FILA][${nome}] recebidos da coleta: ${chatsNovos.length}`);
-    } else {
-      logger.debug(`[FILA][${nome}] recebidos da coleta: 0`);
-    }
+    logger.info(`[FILA][${nome}] recebidos da coleta: ${chatsNovos.length}`);
 
     const aguard = getSetAguardando(nome);
     const agoraMs = Date.now();
@@ -2782,7 +2770,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Cooldown local de re-probe
       const last = lastProbeMap.get(id) || 0;
       if ((agoraMs - last) < PROBE_RECHECK_MIN_MS) {
-        logger.debug(`[FILA][${nome}] skip ${id} — re-probe <${PROBE_RECHECK_MIN_MS}ms`);
+        logger.info(`[FILA][${nome}] skip ${id} — re-probe <${PROBE_RECHECK_MIN_MS}ms`);
         continue;
       }
 
@@ -2791,7 +2779,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try { st = await getChatState(nome, id); } catch {}
       if (st && st.state === CHAT_STATES.AGUARDANDO && st.cooldownUntil && st.cooldownUntil > Date.now()) {
         lastProbeMap.set(id, agoraMs);
-        logger.debug(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
+        logger.info(`[FILA][${nome}] skip ${id} — aguardando cooldown até ${new Date(st.cooldownUntil).toLocaleString()}`);
         continue;
       }
       // TTL de força: mesmo sem mudança aparente, forçar abertura do chat após X minutos
@@ -2807,7 +2795,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       ) {
         // nenhum avanço desde último probe E ainda não bateu o TTL de força
         lastProbeMap.set(id, agoraMs);
-        logger.debug(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
+        logger.info(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
         continue;
       }
       
@@ -2818,11 +2806,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       if (aguard.has(id)) {
-        logger.debug(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
+        logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
         continue;
       }
       if (fila.includes(id)) {
-        logger.debug(`[FILA][${nome}] skip ${id} — já está na fila`);
+        logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
         continue;
       }
 
@@ -2852,11 +2840,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     if (mudancaFila) {
       logger.info(`[FILA][${nome}] Atualizada: ${fila.length} chats pendentes`);
-      // NOVO: Se encontrou novos chats e não há chat ativo, agenda processamento imediatamente
-      if (!chatAtivo && !filaChatTimer && fila.length > 0) {
-        // Processa o primeiro chat imediatamente (sem delay)
-        scheduleNextIfIdle();
-      }
     }
     return mudancaFila;
   }
@@ -2865,14 +2848,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!running) return;
     if (chatAtivo) return;
     if (filaChatTimer) return;
-    if (!fila.length) {
-      // Fila vazia: reinicia verificação após intervalo maior
-      return;
-    }
+    if (!fila.length) return;
 
     const next = fila[0];
-    // Delay entre respostas: 5-15 segundos (aleatório)
-    const delayMs = Math.floor(Math.random() * (MAX_REPLY_DELAY_MS - MIN_REPLY_DELAY_MS + 1)) + MIN_REPLY_DELAY_MS;
+    // Primeira execução SEM delay; próximas respeitam o env (default 0)
+    const delayMs = (() => {
+      const env = process.env.VIRTUS_NEXT_CHAT_DELAY_MS;
+      if (typeof scheduleNextIfIdle._firstRun === 'undefined') {
+        scheduleNextIfIdle._firstRun = false;
+        return 0; // roda o primeiro chat imediatamente
+      }
+      const parsed = parseInt(env, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    })();
     logger.info('[FILA] Preparando atendimento do próximo chat', { nome, chatId: next, delay: delayMs });
     filaChatTimer = setTimeout(async () => {
       try {
@@ -2885,13 +2873,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
         filaChatTimer = null;
         await responderChat(next);
-        // Após responder, agenda o próximo imediatamente (sem delay adicional)
-        scheduleNextIfIdle();
+        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       } catch (e) {
         filaChatTimer = null;
         logger.error('[FILA] Erro no timer de atendimento', { nome, error: e && e.message || e });
-        // Em caso de erro, agenda o próximo após pequeno delay
-        setTimeout(scheduleNextIfIdle, 1000);
+        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       }
     }, delayMs);
   }
@@ -3732,16 +3718,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // ========================
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
-    // Log apenas em debug (não poluir terminal)
-    logger.debug(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`, { nome });
-    
-    // Se há chat ativo, aguarda um pouco antes de verificar novamente
-    if (chatAtivo) {
-      setTimeout(() => {
-        if (running && epochOk()) filaManagerLoop();
-      }, 3000); // 3s de espera se há chat ativo
-      return;
-    }
+    logger.info(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`, { nome });
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -3831,16 +3808,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.warn('[FILA] sendLock ativo há >45s — liberando por watchdog', { nome });
           b._sendLock.active = false;
         } else {
-          // Log apenas em debug (não poluir terminal)
-          logger.debug('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
-          // Não retorna - continua processando (apenas não garante marketplace)
+          logger.info('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
+          return;
         }
       }
       await garantirMarketplace(p, { nome });
 
-      // Verificação contínua: atualiza fila e agenda processamento
       await atualizaFila();
-      // Agenda o próximo chat (com delay de 5-15s entre respostas)
       scheduleNextIfIdle();
       resetRecoverBackoff();
 
@@ -3911,28 +3885,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } finally {
       filaLoopBusy = false;
       
-      // NOVO: Loop contínuo - reinicia após processar
-      // Se não há chat ativo e a fila está vazia, reinicia verificação após intervalo maior
-      if (running && epochOk() && !chatAtivo) {
-        if (fila.length === 0) {
-          // Fila vazia: reinicia verificação após 3-5s (não precisa ser tão rápido)
-          const delayVazio = 3000 + Math.floor(Math.random() * 2000); // 3-5s aleatório
-          setTimeout(() => {
-            if (running && epochOk() && !chatAtivo && !filaLoopBusy) {
-              filaManagerLoop();
-            }
-          }, delayVazio);
-        } else {
-          // Fila tem itens: scheduleNextIfIdle já vai processar
-          // Reinicia verificação após 2-3s para pegar novos chats enquanto processa
-          const delayComFila = 2000 + Math.floor(Math.random() * 1000); // 2-3s aleatório
-          setTimeout(() => {
-            if (running && epochOk() && !chatAtivo && !filaLoopBusy) {
-              filaManagerLoop();
-            }
-          }, delayComFila);
-        }
-      }
     }
   }
   // ==== FIM BLOCO MODIFICADO ====
@@ -4332,15 +4284,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     
     // Verificação contínua: loop recursivo sem intervalos longos
     // O filaInterval é apenas um fallback de segurança (não usado no loop principal)
-    filaInterval = setInterval(() => {
-      // Fallback de segurança: se o loop principal parar, este garante que continue
-      if (running && epochOk() && !filaLoopBusy && !chatAtivo) {
-        filaManagerLoop();
-      }
-    }, POLL_INTERVAL_MS);
-    
-    // Inicia o loop contínuo imediatamente
+    filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
+    
+    // Kick inicial no runner: agende outra chamada em 3s, e outra em 10s
+    // Isso garante polling rapidíssimo no boot para "ver" os chats sem precisar esperar o ciclo de 30s
+    setTimeout(() => {
+      if (running && epochOk()) {
+        logger.info('[FILA] Kick inicial (3s) — forçando atualização de fila', { nome });
+        atualizaFila().catch(() => {});
+      }
+    }, 3000);
+    
+    setTimeout(() => {
+      if (running && epochOk()) {
+        logger.info('[FILA] Kick inicial (10s) — forçando atualização de fila', { nome });
+        atualizaFila().catch(() => {});
+      }
+    }, 10000);
   }
 
   runner();
