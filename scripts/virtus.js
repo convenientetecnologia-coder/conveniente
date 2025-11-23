@@ -1204,13 +1204,45 @@ async function coletaChatsMarketplaceTodos(page) {
 }
 
 // Messenger helpers
-async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
+async function garantirMarketplace(page, { timeoutMs = 25000, nome = null } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
+  
+  // NO TOPO: checagem de sendLock
+  try {
+    const b = getBrowserFromPage(page);
+    if (b && b._sendLock && b._sendLock.active) {
+      logger.info('[VIRTUS][garantirMarketplace] sendLock ativo — não navegar/não recarregar.', nome ? { nome } : {});
+      return;
+    }
+  } catch {}
+  
+  const urlNow = page.url() || '';
+  if (/messenger.com\/marketplace\/t\//i.test(urlNow)) {
+    logger.info('[VIRTUS][garantirMarketplace] já está em página de chat — não navegar.', nome ? { nome } : {});
+    return;
+  }
+  
+  try {
+    const alreadyOk = await Promise.race([
+      page.evaluate(() =>
+        !!(
+          document.querySelector('a[href^="/marketplace/t/"]') ||
+          document.querySelector('div[role="row"]') ||
+          document.querySelector('div[contenteditable="true"][role="textbox"]')
+        )
+      ).catch(()=>false),
+      new Promise(r => setTimeout(()=>r(false), 800))
+    ]);
+    if (alreadyOk) {
+      logger.info('[VIRTUS][garantirMarketplace] UI já pronta (liste ou compose)', nome ? { nome } : {});
+      return;
+    }
+  } catch {}
   
   // Função helper para tentar uma rota e verificar se está pronta
   async function gotoInboxRobust(route) {
     try {
-      logger.info(`[VIRTUS][garantirMarketplace] Tentando rota: ${route}`);
+      logger.info(`[VIRTUS][garantirMarketplace] Tentando rota: ${route}`, nome ? { nome } : {});
       await page.goto(`https://www.messenger.com${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
       
       // Cura fluxos de nonce/continuar
@@ -1236,14 +1268,14 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
       ]);
       
       if (ok) {
-        logger.info(`[VIRTUS][garantirMarketplace] UI pronta na rota: ${route}`);
+        logger.info(`[VIRTUS][garantirMarketplace] UI pronta na rota: ${route}`, nome ? { nome } : {});
         return true;
       } else {
-        logger.warn(`[VIRTUS][garantirMarketplace] Rota ${route} não encontrou anchors/rows`);
+        logger.warn(`[VIRTUS][garantirMarketplace] Rota ${route} não encontrou anchors/rows`, nome ? { nome } : {});
         return false;
       }
     } catch (e) {
-      logger.warn(`[VIRTUS][garantirMarketplace] Erro ao tentar rota ${route}: ${e && e.message || e}`);
+      logger.warn(`[VIRTUS][garantirMarketplace] Erro ao tentar rota ${route}: ${e && e.message || e}`, nome ? { nome } : {});
       return false;
     }
   }
@@ -1278,7 +1310,7 @@ async function garantirMarketplace(page, { timeoutMs = 25000 } = {}) {
   }
   
   // Se nenhuma rota funcionou, loga warning e não prossegue
-  logger.warn('[VIRTUS][garantirMarketplace] Nenhuma rota conseguiu carregar marketplace com anchors/rows');
+  logger.warn('[VIRTUS][garantirMarketplace] Nenhuma rota conseguiu carregar marketplace com anchors/rows', nome ? { nome } : {});
   throw new Error('Marketplace UI não ficou pronta a tempo em nenhuma rota');
 }
 
@@ -1938,7 +1970,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // 1) Garantir Marketplace (com logs)
       try {
-        await garantirMarketplace(p);
+        await garantirMarketplace(p, { nome });
       } catch (err) {
         logger.warn(`[VIRTUS][${nome}] garantirMarketplace falhou: ${(err && err.message) || err}`);
         await sleep(2000);
@@ -2153,26 +2185,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         continue;
       }
       
-      // TTL para erro_envio: só pule se a idade desse erro for menor que ERROR_TTL_MS
+      // Em atualizaFila, no bloco de erro_envio:
       if (st && st.state === 'erro_envio') {
-        const erroTimestamp = (st.erroTimestamp || st.updatedAt || st.createdAt) || 0;
-        const erroAge = agoraMs - erroTimestamp;
-        if (erroAge < ERROR_TTL_MS) {
-          lastProbeMap.set(id, agoraMs);
-          logger.info(`[FILA][${nome}] skip ${id} — marcado como erro_envio (idade ${Math.round(erroAge/1000)}s < ${Math.round(ERROR_TTL_MS/1000)}s)`);
-          continue;
-        } else {
-          // TTL expirado: reset o estado para PENDENTE e reprocessa
-          logger.info(`[FILA][${nome}] erro_envio expirado (${Math.round(erroAge/1000)}s), resetando para PENDENTE`, { nome, chatId: id });
-          try {
-            await setChatState(nome, id, {
-              state: CHAT_STATES.PENDENTE,
-              erroTimestamp: null,
-              lastProbeAt: agoraMs
-            });
-          } catch {}
-          // Continua para enfileirar
-        }
+        logger.info(`[FILA][${nome}] ${id} estava em erro_envio — será testado novamente (fila permissiva).`);
+        // Continua!
       }
 
       if (aguard.has(id)) {
@@ -2337,7 +2353,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-        await garantirMarketplace(p);
+        await garantirMarketplace(p, { nome });
 
         // NOVO: Não bloquear baseado apenas em respondedCache
         // A verificação de "novas mensagens" será feita após coletar o histórico
@@ -2505,8 +2521,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
         });
 
-        // NOVO: Verificar se há mensagens novas do cliente após última resposta da IA
-        // Determine última do cliente vs última da IA
+        // Em responderChat, após obter o histórico:
+        const ultimaMsg = Array.isArray(historicoConversa) && historicoConversa.length
+          ? historicoConversa[historicoConversa.length - 1]
+          : null;
+        if (!ultimaMsg || ultimaMsg.autor !== 'cliente') {
+          logger.info(`[SKIP] Chat ${chatId}: última mensagem não é do cliente.`, { nome, chatId });
+          try {
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              lastProbeAt: Date.now()
+            });
+          } catch {}
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        // Hash/TS gating
+        const stPrev = await getChatState(nome, chatId).catch(()=>null);
+        const prevIATs = stPrev && Number(stPrev.lastIATs || 0);
+
         const ultimaIA = (() => {
           const iaMsgs = historicoConversa.filter(m => m.autor === 'ia');
           return iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
@@ -2517,49 +2553,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return cli.length ? cli[cli.length - 1] : null;
         })();
 
+        const ultimaMsgClienteTexto = (ultimaCliente && ultimaCliente.texto) ? String(ultimaCliente.texto) : '';
+        const lastClientHash = hashResposta(ultimaMsgClienteTexto);
+        const lastClientHashAnterior = (stPrev && stPrev.lastClientHash) || null;
+
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         const tsCLI = tsNum(ultimaCliente && ultimaCliente.timestamp);
 
-        // Atualizar timestamps no estado (APENAS disco)
-        try {
-          await setChatState(nome, chatId, {
-            lastIATs: tsIA || 0,
-            lastCLIts: tsCLI || 0
+        const mudouConteudo = (!lastClientHashAnterior) || (lastClientHashAnterior !== lastClientHash);
+        const clienteMaisRecenteQueIA = (tsCLI > Math.max(tsIA || 0, prevIATs || 0));
+
+        if (!mudouConteudo || !clienteMaisRecenteQueIA) {
+          logger.info(`[SKIP] Chat ${chatId}: sem novidade (hash/ts).`, {
+            nome, chatId, mudouConteudo, clienteMaisRecenteQueIA, tsCLI, tsIA, prevIATs
           });
-        } catch {}
-
-        // Se não há cliente, não há o que fazer
-        if (!ultimaCliente) {
-          log(`[SKIP] Chat ${chatId}: sem mensagem do cliente`);
-          try {
-            await setChatState(nome, chatId, { 
-              state: CHAT_STATES.AGUARDANDO, 
-              lastIATs: tsIA || 0,
-              lastProbeAt: Date.now() // NOVO: atualiza lastProbeAt
-            });
-          } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-
-        // INÍCIO PATCH: Comparação de timestamps + conteúdo (persistida em disco)
-        // Leitura do estado atual (persistido) para comparar conteúdo
-        let estadoAnteriorChat = null;
-        try { estadoAnteriorChat = await getChatState(nome, chatId); } catch {}
-        const ultimaMsgAnterior = (estadoAnteriorChat && estadoAnteriorChat.ultimaMensagemClienteProcessada) || '';
-        const ultimaMsgAtual = (ultimaCliente && ultimaCliente.texto) ? String(ultimaCliente.texto) : '';
-        const lastClientHash = hashResposta(ultimaMsgAtual);
-        const lastClientHashAnterior = (estadoAnteriorChat && estadoAnteriorChat.lastClientHash) || null;
-        
-        // Verificação de hash: só responde se hash mudou (garante 1 resposta por input)
-        if (lastClientHashAnterior && lastClientHash === lastClientHashAnterior) {
-          log(`[SKIP] Chat ${chatId}: hash da última mensagem do cliente não mudou (já respondido)`);
           try {
             await setChatState(nome, chatId, {
               state: CHAT_STATES.AGUARDANDO,
               lastIATs: tsIA || 0,
+              ultimoProbeCLIts: tsCLI || 0,
               lastProbeAt: Date.now()
             });
           } catch {}
@@ -2568,44 +2580,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatAtivo = null;
           return;
         }
-        
-        // Não tentar novamente se estiver marcado como erro_envio para a mesma mensagem do cliente
-        if (estadoAnteriorChat && estadoAnteriorChat.state === 'erro_envio') {
-          const curHash = hashResposta(ultimaMsgAtual);
-          if (estadoAnteriorChat.ultimaMsgErroHash && estadoAnteriorChat.ultimaMsgErroHash === curHash) {
-            log(`[SKIP] Chat ${chatId}: já marcado como erro_envio para esta mesma mensagem. Não tentar novamente.`);
-            try { 
-              await setChatState(nome, chatId, { lastProbeAt: Date.now() }); // NOVO: atualiza lastProbeAt
-            } catch {}
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-        }
-
-        const haNovidadePorTimestamp = (!tsIA) || (tsCLI > tsIA);
-        const haNovidadePorConteudo = (tsCLI >= (tsIA || 0)) && (ultimaMsgAtual && ultimaMsgAtual !== ultimaMsgAnterior);
-
-        if (!(haNovidadePorTimestamp || haNovidadePorConteudo)) {
-          log(`[SKIP] Chat ${chatId}: sem novidade por ts/conteúdo (tsCLI=${tsCLI} tsIA=${tsIA})`);
-          try {
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              lastIATs: tsIA || 0,
-              ultimoProbeCLIts: tsCLI || 0,
-              lastProbeAt: Date.now() // NOVO: atualiza lastProbeAt
-            });
-          } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-        // FIM PATCH
 
         // OK: há novidade do cliente
-        log(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`);
+        logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
 
         // NOVO: fluxo direto Groq (se DIRECT_GROQ ativo)
         if (DIRECT_GROQ) {
@@ -2746,13 +2723,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
             await marcarRespondido(nome, chatId);
 
+            // Após envio bem-sucedido, persista:
             try {
               await setChatState(nome, chatId, {
-                ultimaMensagemClienteProcessada: ultimaMsgAtual,
+                ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
                 ultimoProbeCLIts: tsCLI || 0,
                 lastIATs: Date.now(),
-                lastProbeAt: Date.now(), // NOVO: atualiza lastProbeAt após sucesso
-                lastClientHash: lastClientHash // NOVO: salva hash da mensagem respondida
+                lastProbeAt: Date.now(),
+                lastClientHash
               });
             } catch {}
 
@@ -2768,7 +2746,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
               if (attempts >= 3) {
                 // Após 3 falhas, marca "erro_envio" e não tenta mais para esta mesma mensagem
-                const msgHash = hashResposta(ultimaMsgAtual || '');
+                const msgHash = hashResposta(ultimaMsgClienteTexto || '');
                 await setChatState(nome, chatId, {
                   state: 'erro_envio',
                   sendAttempts: attempts,
@@ -2811,7 +2789,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // INÍCIO PATCH: Gravar última mensagem do cliente processada (persistida em disco) - caminho Notificador
           try {
             await setChatState(nome, chatId, {
-              ultimaMensagemClienteProcessada: ultimaMsgAtual,
+              ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
               ultimoProbeCLIts: tsCLI || 0
             });
           } catch {}
@@ -2946,6 +2924,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       if (limpaHistoricoVelho()) await salvaHistorico();
+
+      // Em filaManagerLoop (logo após obter p via ensurePage()):
+      const b = getBrowserFromPage(p);
+      if (b && b._sendLock && b._sendLock.active) {
+        logger.info('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
+      } else {
+        await garantirMarketplace(p, { nome });
+      }
 
       await atualizaFila();
       scheduleNextIfIdle();
@@ -3237,7 +3223,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         if (!running || !epochOk()) return;
-        await garantirMarketplace(p, { timeoutMs: 25000 });
+        await garantirMarketplace(p, { timeoutMs: 25000, nome });
         try {
           const ok = await scrollChatsToTop(p, nome);
           setTimeout(() => {
@@ -3281,6 +3267,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
           
           try {
+            // Em enviarRespostaMessengerSeguraLocal: Antes de qualquer navegação/goto, insira o check:
+            try {
+              const urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
+              const okChat = urlNow.includes(`/marketplace/t/${chatId}/`);
+              let campo = null;
+              let hasComposer = false;
+              if (okChat) {
+                campo = await waitForComposer(p, 1500).catch(()=>null);
+                hasComposer = !!campo;
+              }
+              if (okChat && hasComposer) {
+                await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+                return true;
+              }
+            } catch {}
+            
             logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
             
             await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
