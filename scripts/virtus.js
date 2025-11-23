@@ -3392,29 +3392,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function responderChat(chatId) {
     logger.info('[RESPONDER] Iniciando responderChat', { nome, chatId, filaLength: fila.length, chatAtivo });
-    if (!running || !epochOk()) {
-      logger.warn('[RESPONDER] Sistema não está rodando ou epoch inválido', { nome, chatId, running, epochOk: epochOk() });
-      return;
-    }
-    const responderStartedAt = Date.now();
-    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
-    let manifestFrozenUntil = 0;
-    try {
-      const manifest = await manifestStore.read(nome);
-      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
-    } catch {}
-    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
-      return;
-    }
-    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
-
+    
+    // CRÍTICO: try/finally deve envolver TODO o código para garantir liberação do lock e chatAtivo
     let _chatLockAcquired = false;
     try {
+      if (!running || !epochOk()) {
+        logger.warn('[RESPONDER] Sistema não está rodando ou epoch inválido', { nome, chatId, running, epochOk: epochOk() });
+        return;
+      }
+      const responderStartedAt = Date.now();
+      // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
+      let manifestFrozenUntil = 0;
+      try {
+        const manifest = await manifestStore.read(nome);
+        manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+      } catch {}
+      if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+        running = false;
+        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+        logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
+        return;
+      }
+      // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
       // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
       if (!browser || browser.isConnected?.() === false) {
@@ -3456,18 +3457,38 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // Lock de disco POR chatId!
       logger.info('[RESPONDER] Tentando adquirir lock', { nome, chatId });
+      
+      // CRÍTICO: Se não conseguir adquirir lock, tenta forçar liberação de lock stale
       if (!chatLock.acquire(nome, chatId)) {
-        logger.warn('[RESPONDER] Falha ao adquirir lock - chat já está sendo processado', { nome, chatId });
-        stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
-        // logging adicional de lock fail
-        stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
-        try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId}`); } catch {}
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
+        logger.warn('[RESPONDER] Falha ao adquirir lock - tentando forçar liberação', { nome, chatId });
+        // Tenta liberar lock stale (pode estar travado de tentativa anterior)
+        try {
+          chatLock.release(nome, chatId);
+          // Aguarda um pouco e tenta novamente
+          await new Promise(r => setTimeout(r, 100));
+          if (chatLock.acquire(nome, chatId)) {
+            logger.info('[RESPONDER] Lock adquirido após forçar liberação', { nome, chatId });
+            _chatLockAcquired = true;
+          } else {
+            logger.warn('[RESPONDER] Falha ao adquirir lock mesmo após forçar liberação', { nome, chatId });
+            stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
+            stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
+            try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId} mesmo após forçar liberação`); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            return;
+          }
+        } catch (e) {
+          logger.error('[RESPONDER] Erro ao tentar forçar liberação de lock', { nome, chatId, error: e && e.message || e });
+          stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
+          stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
+          try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId}`); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          return;
+        }
+      } else {
+        _chatLockAcquired = true;
+        logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       }
-      _chatLockAcquired = true;
-      logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       
       // NOVO: Registra lastProbeAt no início (antes de qualquer navegação)
       try {
@@ -4368,14 +4389,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info('[RESPONDER] chatAtivo liberado no finally', { nome, chatId });
       }
       
+      // CRÍTICO: Sempre tentar liberar lock no finally, mesmo se não foi adquirido
+      // Isso garante que locks órfãos sejam limpos
+      try { 
+        chatLock.release(nome, chatId);
+        if (_chatLockAcquired) {
+          logger.info('[RESPONDER] Lock liberado no finally', { nome, chatId });
+        } else {
+          logger.debug('[RESPONDER] Tentativa de liberar lock no finally (não estava adquirido)', { nome, chatId });
+        }
+      } catch (e) {
+        logger.warn('[RESPONDER] Erro ao liberar lock no finally', { nome, chatId, error: e && e.message || e });
+      }
+      
+      if (_chatLockAcquired) {
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
+      }
+      
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
-      try { releaseSendGuard(p); } catch {}
-      if (_chatLockAcquired) {
-        try { chatLock.release(nome, chatId); } catch {}
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
-      }
+      try { 
+        const p = await ensurePage().catch(()=>null);
+        if (p) releaseSendGuard(p); 
+      } catch {}
     }
   }
 
