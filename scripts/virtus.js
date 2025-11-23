@@ -1535,12 +1535,6 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     return;
   }
   
-  try {
-    logger.info('[VIRTUS][garantirMarketplace] UI já pronta (liste ou compose)', nome ? { nome } : {});
-      return;
-    }
-  } catch {}
-  
   // Função helper para tentar uma rota e verificar se está pronta
   async function gotoInboxRobust(route) {
     try {
@@ -2281,15 +2275,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.warn('[COMPOSER] Refocus falhou (sem navegação)', { chatId, error: e && e.message || e });
     }
     return null;
-        logger.info('[COMPOSER] Refocus bem-sucedido sem reload', { nome, chatId });
-        return campo;
-      }
-      logger.warn('[COMPOSER] Refocus falhou, composer ainda indisponível', { nome, chatId });
-      return null;
-    } catch (e) {
-      logger.warn('[COMPOSER] Erro no refocus', { nome, chatId, error: e && e.message || e });
-      return null;
-    }
   }
 
   function incFail(chatId) {
