@@ -3240,8 +3240,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       // Para chats novos, aplicar cooldown normal
+      // CRÍTICO: Não aplicar cooldown se o chat já está na fila (já foi enfileirado e está aguardando processamento)
       const last = lastProbeMap.get(id) || 0;
       const cooldownAplicavel = PROBE_RECHECK_MIN_MS;
+      
+      // Se o chat já está na fila, não aplicar cooldown - ele já foi enfileirado e está aguardando processamento
+      if (fila.includes(id)) {
+        logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
+        return;
+      }
       
       if ((agoraMs - last) < cooldownAplicavel) {
         logger.info(`[FILA][${nome}] skip ${id} — re-probe <${cooldownAplicavel}ms`);
@@ -3275,8 +3282,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
         return;
       }
+      // CRÍTICO: Verificar se já está na fila ANTES de aplicar cooldown
+      // Se já está na fila, não precisa enfileirar novamente
       if (fila.includes(id)) {
-        logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
+        logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
         return;
       }
 
