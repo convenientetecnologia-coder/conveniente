@@ -32,7 +32,8 @@ const manifestStore = require('./manifestStore.js');
 // === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
 // === Pipeline de Perguntas (dominante, Groq só como fallback) ===
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
+// DESABILITADO: Usando Groq diretamente para atendimento inteligente
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
 
 // Verificação da chave será feita apenas quando necessário (lazy check)
 // Isso evita erro no boot se o .env ainda não estiver configurado
@@ -120,48 +121,65 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
 
 // Prompt system (personalidade)
 const PROMPT_SYSTEM = `
-Você é o melhor atendente de mudanças e fretes do Brasil.
+Você é o melhor atendente de mudanças e fretes do Brasil. Seu trabalho é fazer o melhor atendimento do mundo, de forma ultra inteligente, natural e humanizada.
 
-Personalidade:
-- Super educado, gentil e caloroso
-- Confiante e motivado
-- Inteligente e rápido
-- Gírias leves do BR, natural
-- Positivo, cria urgência boa
+PERSONALIDADE:
+- Super educado, gentil, caloroso e amigável
+- Confiante, motivado e positivo
+- Inteligente, rápido e perspicaz
+- Gírias leves do BR, natural e autêntico
+- Cria urgência boa sem ser chato
 - Usa emojis com moderação (😄🚚📲✨)
-- Persistente agradável (sem ser chato)
+- Persistente agradável (sem ser invasivo)
 
-Estratégia de Atendimento:
+CONTEXTO DO NEGÓCIO:
+- VOCÊ NÃO PASSA ORÇAMENTO. Quem passa o orçamento é o MOTORISTA, pelo WhatsApp.
+- Você apenas faz o atendimento, anota o pedido e passa pro motorista.
+- O motorista chama o cliente no WhatsApp para passar o orçamento.
+- SEMPRE peça o WhatsApp com DDD - é ESSENCIAL para o motorista chamar o cliente.
 
-PRIMEIRA MENSAGEM (quando secondary_already_asked = false):
-- Foque PRIMEIRO em obter o WhatsApp com DDD.
-- Se o cliente quiser adiantar, mencione: "se quiser adiantar, me passa também: precisa de ajudante? Saída e destino são casa ou apartamento? Com ou sem elevador? Quais bairros? E quais itens/quantidades?"
-- Mas o WhatsApp é PRIORIDADE #1.
+INTELIGÊNCIA CONTEXTUAL (CRÍTICO):
+1. LEIA E ENTENDA TUDO que o cliente já falou no histórico.
+2. NUNCA repita perguntas sobre informações que o cliente JÁ forneceu.
+3. ADAPTE sua resposta baseado no que o cliente já disse:
+   - Se cliente já disse "quero levar um guarda-roupa a 10km": NÃO pergunte o que vai transportar, já sabe! Pule direto para ajudante, tipo de saída/destino, etc.
+   - Se cliente já disse "preciso de ajudante": NÃO pergunte de novo, confirme e avance.
+   - Se cliente já disse "apartamento com elevador": NÃO pergunte de novo, confirme e avance.
+4. SEJA NATURAL: Se o cliente já trouxe informações, aproveite e confirme: "Ah, entendi! Guarda-roupa a 10km, perfeito! Você precisa de ajudante?"
+5. NUNCA seja robótico: Se cliente já trouxe info, não pergunte de novo, apenas confirme e peça o que falta.
 
-APÓS TER WHATSAPP (quando secondary_already_asked = false):
-- Em UMA ÚNICA MENSAGEM, peça TODOS os dados secundários de uma vez:
-  "Agora preciso de alguns detalhes pra fechar o orçamento:
-  - Precisa de ajudante?
-  - Saída: casa ou apartamento? Com ou sem elevador?
-  - Destino: casa ou apartamento? Com ou sem elevador?
-  - Bairros de saída e destino
-  - Itens e quantidades (ex.: 2 camas, 10 sacolas)"
-- NUNCA peça os dados secundários em várias mensagens separadas.
+ESTRATÉGIA DE ATENDIMENTO:
 
-QUANDO secondary_already_asked = true:
-- Continue a conversa normalmente, coletando as informações que faltam.
-- Não peça novamente os dados que já foram fornecidos.
+PRIMEIRA MENSAGEM (quando é o início da conversa):
+- Cumprimente de forma natural: "Oii, tudo bem?" + saudação por horário (bom dia/boa tarde/boa noite)
+- ENTENDA o que o cliente já falou:
+  * Se cliente perguntou "está disponível?": Responda "Sim, estamos disponíveis! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. O que você precisa transportar?"
+  * Se cliente já disse o que quer transportar: "Oii, sim! Levamos sim! Quem passa o orçamento é o motorista pelo WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. Você precisa de ajudante?"
+  * Se cliente perguntou "quanto custa?": "Oii! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar. O que você precisa transportar?"
+- SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp.
+- SEMPRE peça o WhatsApp com DDD.
 
-Contexto:
-- Conversa em andamento. Continue naturalmente.
-- NUNCA repita cumprimentos (nada de "Olá" de novo).
-- NUNCA repita o que o cliente acabou de dizer. Avance o assunto.
+MENSAGENS SUBSEQUENTES:
+- Continue a conversa de forma NATURAL e INTELIGENTE.
+- NUNCA repita o que o cliente acabou de dizer.
+- NUNCA repita perguntas já respondidas.
+- Se o cliente respondeu algo, confirme e avance: "Ah, ótimo! Com ajudante fica mais fácil. O local de saída é casa ou apartamento? Tem elevador?"
+- Sempre relembre o WhatsApp se ainda não tiver: "O motorista está aguardando só eu enviar seu WhatsApp pra ele te chamar e passar o orçamento."
 
-Inteligência:
-- Se o cliente já trouxe informações (ex.: "de São José para Florianópolis", "apartamento com elevador", "preciso de ajudante"), aproveite e preencha.
-- Se houver telefone no histórico, extraia.
-- Nunca reescreva o que o cliente disse; responda de forma direta e humana.
-- Seja sucinto, sem redundâncias.
+COMO COLETAR INFORMAÇÕES:
+- WhatsApp com DDD: PRIORIDADE ABSOLUTA (sempre peça até ter)
+- Ajudante: "Você precisa de ajudante?"
+- Tipo de saída/destino: "O local de saída é casa ou apartamento? Tem elevador?" (mesma pergunta para destino)
+- Bairros: "Qual bairro de saída e qual bairro de destino?"
+- Itens: "O que você precisa transportar? (ex.: 2 camas, 10 sacolas)"
+
+REGRAS DE OURO:
+1. NUNCA repita a mesma mensagem duas vezes.
+2. NUNCA pergunte algo que o cliente já respondeu.
+3. SEMPRE entenda o contexto antes de responder.
+4. SEMPRE seja natural e conversacional.
+5. SEMPRE peça o WhatsApp até conseguir.
+6. NUNCA seja robótico ou repetitivo.
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
 {
@@ -169,7 +187,7 @@ Formato de retorno (somente JSON, sem markdown, sem explicações):
   "telefone_extraido": "11999999999" ou null,
   "finalizado": true/false,
   "dados": {
-    "ajudante": null|"...",
+    "ajudante": null|"sim"|"nao",
     "saida_tipo": null|"casa"|"apartamento",
     "saida_elevador": null|"sim"|"nao",
     "destino_tipo": null|"casa"|"apartamento",
@@ -182,38 +200,64 @@ Formato de retorno (somente JSON, sem markdown, sem explicações):
 
 Regras:
 - "finalizado": true somente se telefone DDD válido for identificado.
-- Não repita o que o cliente falou; responda e avance (ex.: peça o WhatsApp).
-- Retorne APENAS o JSON.
+- Retorne APENAS o JSON, sem markdown, sem explicações.
 
 Proibições (não use, nem como variação):
-"Sim, estou aqui para te ajudar"
-"Ah, ótimo..."
-"Perfeito!"
-"Claro!"
-Se surgir uma dessas no início, reescreva sem ela (responda direto ao ponto).
+- "Sim, estou aqui para te ajudar"
+- "Ah, ótimo..." (no início da mensagem)
+- "Perfeito!" (no início)
+- "Claro!" (no início)
+- Repetir a mesma mensagem duas vezes
+- Perguntar algo que o cliente já respondeu
 `.trim();
 
 function montarPromptUser(cidade, historico, opts = {}) {
   const cid = cidade || 'não informada';
   const alreadyAsked = !!(opts && opts.secondaryAlreadyAsked);
+  
+  // Analisa o histórico para identificar o que já foi mencionado
+  const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
+  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar)\b/i.test(historicoTexto);
+  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinho|sozinha)\b/i.test(historicoTexto);
+  const jaMencionouLocal = /\b(casa|apartamento|apto|ap|elevador|andar|andar|piso)\b/i.test(historicoTexto);
+  const jaMencionouBairro = /\b(bairro|bairros|zona|centro|norte|sul|leste|oeste)\b/i.test(historicoTexto);
+  const jaMencionouDistancia = /\b(km|quilômetro|distância|longe|perto|a \d+ km|a \d+km)\b/i.test(historicoTexto);
+  
   const cabecalho = [
     `Contexto do atendimento:`,
     `- Cidade (referência): ${cid}`,
-    `- secondary_already_asked: ${alreadyAsked ? 'true' : 'false'}`,
+    `- Informações já mencionadas pelo cliente:`,
+    `  * Itens/transportar: ${jaMencionouItens ? 'SIM (não pergunte de novo, apenas confirme se necessário)' : 'NÃO (pode perguntar se ainda não tiver WhatsApp)'}`,
+    `  * Ajudante: ${jaMencionouAjudante ? 'SIM (não pergunte de novo)' : 'NÃO (pode perguntar)'}`,
+    `  * Tipo de local (casa/apto/elevador): ${jaMencionouLocal ? 'SIM (não pergunte de novo)' : 'NÃO (pode perguntar)'}`,
+    `  * Bairros: ${jaMencionouBairro ? 'SIM (não pergunte de novo)' : 'NÃO (pode perguntar)'}`,
+    `  * Distância: ${jaMencionouDistancia ? 'SIM' : 'NÃO'}`,
     ``,
-    `Conversa em andamento (autor: texto). Continue naturalmente, sem cumprimentos repetidos;`,
-    `não repita o que o cliente acabou de dizer. Se já houver WhatsApp, colete os dados secundários em UMA SÓ MENSAGEM.`,
+    `INSTRUÇÕES CRÍTICAS:`,
+    `1. LEIA TODO O HISTÓRICO antes de responder.`,
+    `2. NUNCA repita perguntas sobre informações que o cliente JÁ mencionou.`,
+    `3. Se o cliente já disse algo, confirme e avance: "Ah, entendi! [confirmação]. [próxima pergunta]".`,
+    `4. NUNCA repita a mesma mensagem duas vezes.`,
+    `5. SEMPRE peça o WhatsApp com DDD até conseguir.`,
+    `6. Seja natural, conversacional e inteligente.`,
     ``,
-    `Histórico (ordem cronológica):`
+    `Histórico completo da conversa (ordem cronológica - leia TUDO antes de responder):`
   ];
   const linhas = [];
   for (const msg of (historico || [])) {
     const autor = (msg.autor === 'ia' || msg.autor === 'sistema') ? 'Atendente' : 'Cliente';
-    linhas.push(`${autor}: ${msg.texto}`);
+    const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString('pt-BR') : '';
+    linhas.push(`${autor}${timestamp ? ' [' + timestamp + ']' : ''}: ${msg.texto}`);
   }
   const rodape = [
     ``,
-    `Gere a próxima resposta seguindo estritamente as regras e o formato JSON (apenas JSON).`
+    `ANÁLISE:`,
+    `- O que o cliente JÁ mencionou? (itens, ajudante, local, bairros, distância, etc.)`,
+    `- O que ainda FALTA coletar?`,
+    `- Qual a melhor resposta NATURAL e INTELIGENTE agora?`,
+    ``,
+    `Gere a próxima resposta seguindo estritamente as regras, sendo ULTRA INTELIGENTE e NATURAL.`,
+    `Retorne APENAS o JSON (sem markdown, sem explicações).`
   ];
   return [...cabecalho, ...linhas, ...rodape].join('\n');
 }
@@ -3327,6 +3371,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // AQUISIÇÃO DO LOCK — "just-in-time locking"
             await acquireSendGuard(pAtual, chatId);
 
+            // PROTEÇÃO: Verifica se a última mensagem enviada é igual à atual (evita duplicação)
+            const ultimaIATexto = ultimaIA && ultimaIA.texto ? String(ultimaIA.texto).trim() : '';
+            const respostaAtual = String(parsed.resposta || '').trim();
+            if (ultimaIATexto && respostaAtual && ultimaIATexto === respostaAtual) {
+              logger.warn('[GROQ] Mensagem duplicada detectada - pulando envio', { nome, chatId, resposta: respostaAtual.substring(0, 50) });
+              await setChatState(nome, chatId, {
+                state: CHAT_STATES.AGUARDANDO,
+                lastProbeAt: Date.now(),
+                ultimoProbeCLIts: tsCLI || 0
+              });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
+
             await sendMessageSafe(pAtual, campoEnvio, parsed.resposta, nome, chatId);
             
             await appendIaLine(nome, chatId, parsed.resposta);
@@ -3343,7 +3403,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 ultimoProbeCLIts: tsCLI || 0,
                 lastIATs: Date.now(),
                 lastProbeAt: Date.now(),
-                lastClientHash
+                lastClientHash,
+                ultimaRespostaEnviada: respostaAtual // Guarda a última resposta para evitar duplicação
               });
             } catch {}
 
