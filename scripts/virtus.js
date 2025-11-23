@@ -269,7 +269,7 @@ PARTE 1 (50% da resposta) - RESPONDER AO CLIENTE:
   * Se ele disse "boa tarde" → você DEVE responder com "boa tarde" também
   * Se ele perguntou "tudo bem?" → você DEVE responder "tudo ótimo! e você?" (varie a forma, mas SEMPRE responda)
   * Se ele perguntou "você faz frete?" → você DEVE responder "sim, fazemos sim!" (varie a forma, mas SEMPRE responda)
-  * Se ele perguntou "qual valor?" ou "quanto custa?" → você DEVE responder sobre o orçamento/motorista
+  * Se ele perguntou "qual valor?" ou "quanto custa?" ou "mas quero saber o preço" → você DEVE responder explicando que o motorista passa o orçamento pelo WhatsApp
   * Se ele disse "preciso levar uma cama" → você DEVE responder confirmando que transporta
   * Se ele mencionou algo específico → você DEVE responder a isso de forma inteligente
 - Crie uma resposta ÚNICA, NATURAL, CALOROSA e INTELIGENTE para CADA coisa que o cliente falou
@@ -278,6 +278,7 @@ PARTE 1 (50% da resposta) - RESPONDER AO CLIENTE:
 - NUNCA pule nenhuma pergunta/afirmação do cliente
 - NUNCA pule esta parte! SEMPRE responda ao cliente primeiro!
 - Seja CALOROSO, AMIGÁVEL e NATURAL - não seja frio ou robótico
+- NUNCA use respostas genéricas como "Beleza!" ou "Certo!" sem contexto - sempre responda especificamente ao que o cliente perguntou
 
 PARTE 2 (50% da resposta) - SEGUIR ROTEIRO:
 - Depois de responder ao cliente, faça a pergunta necessária do roteiro
@@ -993,7 +994,16 @@ function enforceGovRulesOnText(txt, { alreadyGreeted = true } = {}) {
   let s = String(txt || '').trim();
   s = stripPhoneConfirmation(s);
   s = ensureSingleQuestion(s);
-  if (alreadyGreeted) s = removeRepeatedGreeting(s);
+  // CRÍTICO: Só remove saudação repetida se for EXATAMENTE no início e já foi dada
+  // Não remove se a saudação faz parte de uma resposta natural (ex: "Oi, boa tarde! Tudo ótimo!")
+  if (alreadyGreeted) {
+    // Só remove se for uma saudação isolada no início (ex: "Boa tarde! Me passa...")
+    // Não remove se faz parte de uma resposta (ex: "Oi, boa tarde! Tudo ótimo!")
+    const saudacaoIsolada = /^(bom dia|boa tarde|boa noite)[,!\s-]+(me|qual|o|a|você|teu|seu)/i;
+    if (saudacaoIsolada.test(s)) {
+      s = removeRepeatedGreeting(s);
+    }
+  }
   return s.trim();
 }
 
@@ -1590,19 +1600,19 @@ function aplicarDedupResposta(respostaNova, historico) {
   
   const respostaNorm = respostaNova.trim().toLowerCase();
   
-  // Verifica similaridade (se > 80% similar, força variação)
+  // Verifica similaridade (se > 90% similar, apenas loga - não força variação genérica)
+  // A IA deve criar respostas únicas naturalmente, não forçar prefixos genéricos
   for (const respAntiga of respostasIA) {
     const similaridade = calcularSimilaridade(respostaNorm, respAntiga);
-    if (similaridade > 0.8) {
-      // Força variação: adiciona variações sutis
-      const variacoes = [
-        'Perfeito! ',
-        'Entendi! ',
-        'Ótimo! ',
-        'Certo! ',
-      ];
-      const variacao = variacoes[Math.floor(Math.random() * variacoes.length)];
-      return variacao + respostaNova;
+    if (similaridade > 0.9) {
+      // Apenas loga - não força variação genérica que torna robótico
+      logger.warn('[DEDUP] Resposta muito similar detectada - IA deve criar resposta mais única', { 
+        similaridade: Math.round(similaridade * 100) + '%',
+        respostaAntiga: respAntiga.substring(0, 50),
+        respostaNova: respostaNorm.substring(0, 50)
+      });
+      // Retorna a resposta original - confia na IA para criar respostas únicas
+      return respostaNova;
     }
   }
   
@@ -4227,16 +4237,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 return;
               }
 
-              // ENFORCEMENT: Aplicar regras de governança antes de enviar
+              // ENFORCEMENT: Aplicar regras de governança antes de enviar (mas preservar a inteligência da IA)
               const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
               const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {} };
               let respostaGov = enforceGovRulesOnText(respostaFinal, { alreadyGreeted: !!flowPrev.greeted });
               
+              // CRÍTICO: NÃO substituir a resposta da IA por uma fixa - confiar na inteligência da IA
+              // Apenas garantir que menciona WhatsApp se necessário, mas SEMPRE preservando a resposta original
               const utils = require('./utils.js');
               const telOk = utils.isValidBRPhoneWithDDD(parsed.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
               if (!telOk) {
+                // Se a resposta não menciona WhatsApp, adiciona de forma natural (não substitui)
                 if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
-                  respostaGov = 'Me passa teu WhatsApp com DDD? O motorista chama por lá.';
+                  // Adiciona a pergunta de WhatsApp de forma natural, preservando a resposta original
+                  respostaGov = respostaGov.trim();
+                  if (!respostaGov.endsWith('.')) respostaGov += '.';
+                  respostaGov += ' Me passa teu WhatsApp com DDD? O motorista chama por lá.';
                 }
               }
               
