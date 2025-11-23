@@ -589,6 +589,14 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+function chatUrlMatches(url, chatId) {
+  try {
+    const u = String(url || '');
+    const re = new RegExp(`/marketplace/t/${chatId}(?:[/?#]|$)`);
+    return re.test(u);
+  } catch { return false; }
+}
+
 function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -1490,24 +1498,10 @@ async function coletaChatsMarketplaceTodos(page) {
 }
 
 // Messenger helpers
-async function garantirMarketplace(page, { timeoutMs = 25000, nome = null } = {}) {
+async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allowNavigate = false } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
   
-  // NO TOPO: checagem de sendLock
-  try {
-    const b = getBrowserFromPage(page);
-    if (b && b._sendLock && b._sendLock.active) {
-      logger.info('[VIRTUS][garantirMarketplace] sendLock ativo — não navegar/não recarregar.', nome ? { nome } : {});
-      return;
-    }
-  } catch {}
-  
-  const urlNow = page.url() || '';
-  if (/messenger.com\/marketplace\/t\//i.test(urlNow)) {
-    logger.info('[VIRTUS][garantirMarketplace] já está em página de chat — não navegar.', nome ? { nome } : {});
-    return;
-  }
-  
+  const urlNow = (typeof page.url === 'function') ? (page.url() || '') : '';
   try {
     const alreadyOk = await Promise.race([
       page.evaluate(() =>
@@ -1519,8 +1513,30 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null } = {}
       ).catch(()=>false),
       new Promise(r => setTimeout(()=>r(false), 800))
     ]);
-    if (alreadyOk) {
-      logger.info('[VIRTUS][garantirMarketplace] UI já pronta (liste ou compose)', nome ? { nome } : {});
+    if (alreadyOk) return;
+  } catch {}
+
+  if (!allowNavigate) {
+    try { logger.info('[VIRTUS][garantirMarketplace] safe-mode: skip navigation', nome ? { nome } : {}); } catch {}
+    return;
+  }
+  
+  // NO TOPO: checagem de sendLock
+  try {
+    const b = getBrowserFromPage(page);
+    if (b && b._sendLock && b._sendLock.active) {
+      logger.info('[VIRTUS][garantirMarketplace] sendLock ativo — não navegar/não recarregar.', nome ? { nome } : {});
+      return;
+    }
+  } catch {}
+  
+  if (/messenger.com\/marketplace\/t\//i.test(urlNow)) {
+    logger.info('[VIRTUS][garantirMarketplace] já está em página de chat — não navegar.', nome ? { nome } : {});
+    return;
+  }
+  
+  try {
+    logger.info('[VIRTUS][garantirMarketplace] UI já pronta (liste ou compose)', nome ? { nome } : {});
       return;
     }
   } catch {}
@@ -1747,12 +1763,15 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       }
     }
   } catch {}
-  if (!campo) throw new Error('composer_missing');
+  if (!campo) {
+    await logIssue(nome, 'mil_action', `virtus_no_composer chat=${chatId}`);
+    return;
+  }
 
   // Valida URL antes de começar a digitar (hard check)
   try {
     const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-    if (!urlNow.includes(`/marketplace/t/${chatId}/`)) {
+    if (!chatUrlMatches(urlNow, chatId)) {
       await logIssue(nome, 'mil_action', `virtus_context_abort: url_mismatch_before_type chat=${chatId} url="${urlNow}"`);
       return; // aborta o envio neste chat
     }
@@ -1791,7 +1810,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     // Revalida URL antes de pressionar Enter (hard check)
     try {
       const urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
-      if (!urlNow2.includes(`/marketplace/t/${chatId}/`)) {
+      if (!chatUrlMatches(urlNow2, chatId)) {
         await clearComposerIfAny(p, campo);
         await logIssue(nome, 'mil_action', `virtus_context_abort: url_mismatch_before_enter chat=${chatId} url="${urlNow2}"`);
         return; // aborta o envio neste chat
@@ -2244,25 +2263,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function refocusComposerNoReload(p, chatId, anchorSel) {
     try {
-      logger.info('[COMPOSER] Tentando refocus sem reload', { nome, chatId });
-      // Tenta scroll leve e foco
-      try {
-        await p.evaluate(() => window.scrollBy(0, 120));
-        await sleep(500);
-      } catch {}
-      // Tenta clicar no anchor para garantir contexto
-      if (anchorSel) {
-        try {
-          const anchor = await p.$(anchorSel);
-          if (anchor) {
-            await anchor.click({ delay: 100 }).catch(()=>{});
-            await sleep(800);
-          }
-        } catch {}
-      }
-      // Tenta encontrar composer novamente
+      logger.info('[COMPOSER] Refocus (sem navegação)', { chatId });
+      try { await p.evaluate(() => { try { window.scrollBy(0, 120); } catch {} }); } catch {}
+
+      // Apenas requery do composer e pequenas tentativas de focus/tab
       const campo = await waitForComposer(p, 5000);
-      if (campo) {
+      if (campo) return campo;
+
+      try {
+        await p.evaluate(() => { try { document.body && document.body.focus && document.body.focus(); } catch {} });
+        await p.keyboard.press('Tab').catch(()=>{});
+      } catch {}
+
+      const campo2 = await waitForComposer(p, 3000);
+      if (campo2) return campo2;
+    } catch (e) {
+      logger.warn('[COMPOSER] Refocus falhou (sem navegação)', { chatId, error: e && e.message || e });
+    }
+    return null;
         logger.info('[COMPOSER] Refocus bem-sucedido sem reload', { nome, chatId });
         return campo;
       }
@@ -2294,7 +2312,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // 1) Garantir Marketplace (com logs)
       try {
-        await garantirMarketplace(p, { nome });
+        await garantirMarketplace(p, { nome, allowNavigate: false });
       } catch (err) {
         logger.warn(`[VIRTUS][${nome}] garantirMarketplace falhou: ${(err && err.message) || err}`);
         await sleep(2000);
@@ -2358,7 +2376,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (age < 8*60*1000) continue; // deixa “aquecendo” 8min antes de reconciliar
         try {
           if (!running || !epochOk()) return;
-          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil:'domcontentloaded', timeout: 20000 }).catch(()=>{});
+          const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+          if (!chatUrlMatches(urlNow, chatId)) {
+            continue; // Skip se não está no chat correto (sem navegação)
+          }
           const looksSent = await wasRecentlySentByMe(p, 10*60*1000);
           if (looksSent) {
             // considera “committed”
@@ -2404,7 +2425,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const p = await ensurePage();
     if (!p) { logger.warn('[SNAPSHOT] Falha ao garantir aba zero.', { nome }); return; }
     if (!running || !epochOk()) return;
-    await garantirMarketplace(p);
+    await garantirMarketplace(p, { allowNavigate: false });
     try {
       await Promise.race([
         p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }),
@@ -2679,47 +2700,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
         logger.info('[NAVEGACAO] Garantindo Marketplace UI', { nome, chatId });
-        await garantirMarketplace(p, { nome });
+        await garantirMarketplace(p, { nome, allowNavigate: false });
         logger.info('[NAVEGACAO] Marketplace UI garantida', { nome, chatId });
 
         // NOVO: Não bloquear baseado apenas em respondedCache
         // A verificação de "novas mensagens" será feita após coletar o histórico
         // Mantém apenas verificação de cooldown de prova (já feito em atualizaFila)
 
-        let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-        logger.info('[NAVEGACAO] Scroll para topo e busca de anchor', { nome, chatId, anchorSel });
+        // MANTENHA APENAS scrollChatsToTop (opcional) — sem anchorSel/click/waitForNavigation
         await scrollChatsToTop(p, nome).catch(()=>{});
-        await sleep(300);
-        let found = await p.$(anchorSel);
 
-        if (!found) {
-          logger.info('[SKIP] Âncora do chatId não encontrada', { nome, chatId });
-          logger.warn(`Âncora do chatId ${chatId} não encontrada. Pulando para próximo chat.`, { nome, chatId });
+        let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+        if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
+          logger.warn('[VIRTUS] Contexto do chat não corresponde (sem navegação). Abortando atendimento deste chat.', { nome, chatId, urlNow });
+          const prev = await getChatState(nome, chatId).catch(()=>null);
+          const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
+          await setChatState(nome, chatId, {
+            state: CHAT_STATES.AGUARDANDO,
+            sendAttempts: attempts,
+            cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
+            lastProbeAt: Date.now()
+          });
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
           return;
-        }
-
-        await p.evaluate((sel) => {
-          const el = document.querySelector(sel);
-          if (el) el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
-        }, anchorSel);
-        await Promise.race([
-          p.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
-          (async () => { await p.$eval(anchorSel, el => el.click()); })()
-        ]);
-        const okNav = await assertOnChat(p, chatId, { timeoutMs: 6000 });
-        if (!okNav) {
-          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-          const okNav2 = await assertOnChat(p, chatId, { timeoutMs: 8000 });
-          if (!okNav2) {
-            logger.warn(`Chat ${chatId} não abriu após clique e goto — pulando.`, { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
         }
 
 
@@ -3018,17 +3023,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
             
             // Verifica se está no chat correto - se não, apenas marca cooldown (não navega)
-            const expectedPath = `/marketplace/t/${chatId}/`;
             let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
-            if (!urlNow.includes(expectedPath)) {
-              logger.warn('[PIPELINE] URL não corresponde ao chat - marcando cooldown', { nome, chatId, urlNow });
+            if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(pAtual, chatId, { timeoutMs: 0 }))) {
+              logger.warn('[PIPELINE] URL/contexto não corresponde (sem navegação). Cooldown.', { nome, chatId, urlNow });
               const prev = await getChatState(nome, chatId).catch(()=>null);
               const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
               await setChatState(nome, chatId, {
                 state: CHAT_STATES.AGUARDANDO,
                 sendAttempts: attempts,
                 cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                ultimoProbeCLIts: tsCLI || 0,
                 lastProbeAt: Date.now()
               });
               try { await pendingDel(nome, chatId); } catch {}
@@ -3188,17 +3191,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
 
             // Verifica se está no chat correto - se não, apenas marca cooldown (não navega)
-            const expectedPath = `/marketplace/t/${chatId}/`;
             let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
-            if (!urlNow.includes(expectedPath)) {
-              logger.warn('[GROQ] URL não corresponde ao chat - marcando cooldown', { nome, chatId, urlNow });
+            if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(pAtual, chatId, { timeoutMs: 0 }))) {
+              logger.warn('[GROQ] URL/contexto não corresponde (sem navegação). Cooldown.', { nome, chatId, urlNow });
               const prev = await getChatState(nome, chatId).catch(()=>null);
               const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
               await setChatState(nome, chatId, {
                 state: CHAT_STATES.AGUARDANDO,
                 sendAttempts: attempts,
                 cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                ultimoProbeCLIts: tsCLI || 0,
                 lastProbeAt: Date.now()
               });
               try { await pendingDel(nome, chatId); } catch {}
@@ -3777,7 +3778,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         if (!running || !epochOk()) return;
-        await garantirMarketplace(p, { timeoutMs: 25000, nome });
+        await garantirMarketplace(p, { timeoutMs: 25000, nome, allowNavigate: true });
         try {
           const ok = await scrollChatsToTop(p, nome);
           setTimeout(() => {
@@ -3824,7 +3825,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // Em enviarRespostaMessengerSeguraLocal: Antes de qualquer navegação/goto, insira o check:
             try {
               const urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
-              const okChat = urlNow.includes(`/marketplace/t/${chatId}/`);
+              const okChat = chatUrlMatches(urlNow, chatId);
               let campo = null;
               let hasComposer = false;
               if (okChat) {
@@ -3840,9 +3841,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
             
             // NUNCA navegue/goto - apenas verifica se está no chat correto
-            const expectedPath = `/marketplace/t/${chatId}/`;
             let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-            if (!urlNow.includes(expectedPath)) {
+            if (!chatUrlMatches(urlNow, chatId)) {
               logger.warn('[MESSENGER] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
               throw new Error('chat_not_on_correct_url');
             }
