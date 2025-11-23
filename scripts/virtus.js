@@ -172,6 +172,13 @@ Regras:
 - "finalizado": true somente se telefone DDD válido for identificado.
 - Não repita o que o cliente falou; responda e avance (ex.: peça o WhatsApp).
 - Retorne APENAS o JSON.
+
+Proibições (não use, nem como variação):
+"Sim, estou aqui para te ajudar"
+"Ah, ótimo..."
+"Perfeito!"
+"Claro!"
+Se surgir uma dessas no início, reescreva sem ela (responda direto ao ponto).
 `.trim();
 
 function montarPromptUser(cidade, historico) {
@@ -257,6 +264,57 @@ function isVirtusLocked(nome){ return VIRTUS_INPUT_LOCKS.has(nome); }
 function getBrowserFromPage(p) { try { return typeof p.browser === 'function' ? p.browser() : null; } catch { return null; } }
 async function acquireSendGuard(p, chatId) { try { const b = getBrowserFromPage(p); if (b) b._sendLock = { active: true, owner: 'virtus', chatId, since: Date.now() }; } catch {} }
 function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b && b._sendLock && b._sendLock.owner === 'virtus') b._sendLock.active = false; } catch {} }
+
+// Sanitização (IA) anti-clichê
+function sanitizeIAResponse(texto, historico) {
+  let t = String(texto||'').trim();
+  const cliches = [
+    /^sim[,!.\s]/i,
+    /^ah[,!.\s]/i,
+    /^ótimo[,!.\s]/i,
+    /^perfeito[,!.\s]/i,
+    /^claro[,!.\s]/i,
+    /^ol[aá][,!.\s]/i
+  ];
+  for (const rx of cliches) t = t.replace(rx, '').trim();
+  t = t.replace(/\s{2,}/g, ' ').trim();
+  const ultIA = Array.isArray(historico) ? historico.filter(m => m.autor==='ia').slice(-1)[0] : null;
+  if (ultIA && typeof ultIA.texto === 'string') {
+    const prev = ultIA.texto.trim().toLowerCase();
+    const cur = t.trim().toLowerCase();
+    if (prev && cur && prev === cur) t = t + ' 😉';
+  }
+  if (t.length < 6) t = t + ' :)';
+  return t;
+}
+
+// Log hard de histórico por chatId (em disco, JSONL por chat)
+function chatLogPath(perfil, chatId) {
+  return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.jsonl`);
+}
+
+async function appendChatHistoryLog(perfil, chatId, historicoArr) {
+  try {
+    const file = chatLogPath(perfil, chatId);
+    fsRaw.mkdirSync(path.dirname(file), { recursive: true });
+    const st = await getChatState(perfil, chatId).catch(()=>null);
+    const lastTs = st && st.chatLogLastTs || 0;
+    const novos = (historicoArr||[]).filter(m => Number(m.timestamp||0) > lastTs);
+    if (!novos.length) return;
+    const fd = fsRaw.openSync(file + '.tmp', 'a');
+    try { for (const m of novos) fsRaw.writeSync(fd, JSON.stringify(m) + '\n', 'utf8'); fsRaw.fsyncSync(fd); } finally { fsRaw.closeSync(fd); }
+    try { fsRaw.appendFileSync(file, fsRaw.readFileSync(file+'.tmp')); fsRaw.unlinkSync(file+'.tmp'); } catch { try { fsRaw.renameSync(file+'.tmp', file); } catch {} }
+    const maxTs = Math.max(...novos.map(m=>Number(m.timestamp||0)));
+    await setChatState(perfil, chatId, { chatLogLastTs: maxTs || Date.now() });
+  } catch {}
+}
+
+async function appendIaLine(perfil, chatId, texto) {
+  const obj = { autor:'ia', texto:String(texto||''), timestamp: Date.now() };
+  const file = chatLogPath(perfil, chatId);
+  try { fsRaw.mkdirSync(path.dirname(file), { recursive: true }); fsRaw.appendFileSync(file, JSON.stringify(obj)+'\n', 'utf8'); } catch {}
+  try { await setChatState(perfil, chatId, { chatLogLastTs: obj.timestamp }); } catch {}
+}
 async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
   while (true) {
@@ -1322,10 +1380,10 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null } = {}
  * Executa direto via page.evaluate no Messenger.
  */
 async function scrollChatsToTop(page, nome) {
-  if (isVirtusLocked(nome)) return false;
+  if (isVirtusLocked(nome)) return true; // Não retorna false, apenas não clica
   try {
     const b = getBrowserFromPage(page);
-    if (b && b._sendLock && b._sendLock.active) return false;
+    if (b && b._sendLock && b._sendLock.active) return true; // Não retorna false, apenas não clica
   } catch {}
   if (!page) return false;
   try {
@@ -1523,6 +1581,12 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     const expected = String(msg || '').trim();
     const before = await getMySentSnapshot(p);
     logger.debug('[MESSENGER] Snapshot antes do envio', { nome, chatId, beforeTotal: before.total });
+
+    // ATRASO HUMANO REAL ENTRE RESPOSTAS
+    const minD = parseInt(process.env.VIRTUS_REPLY_MIN_MS || '5000', 10);
+    const maxD = parseInt(process.env.VIRTUS_REPLY_MAX_MS || '10000', 10);
+    const delay = Math.max(0, Math.min(maxD, Math.floor(Math.random()*(maxD-minD+1))+minD));
+    await new Promise(r=>setTimeout(r, delay));
 
     // Envia (um único Enter)
     await p.keyboard.press('Enter');
@@ -2270,6 +2334,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function responderChat(chatId) {
     if (!running || !epochOk()) return;
+    const responderStartedAt = Date.now();
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
@@ -2393,8 +2458,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
 
-        // Ativa send-guard imediatamente após confirmar navegação correta
-        await acquireSendGuard(p, chatId);
 
         if (await isChatBlocked(p)) {
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
@@ -2512,6 +2575,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         // 4. Coleta TODO o histórico da conversa (mensagens do cliente e da IA)
         const historicoConversa = await extrairHistoricoConversa(p);
+        
+        await appendChatHistoryLog(nome, chatId, historicoConversa);
         
         logger.info('[CHAT] Histórico coletado', { 
           nome, 
@@ -2638,9 +2703,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               cidadePreferida = localizacao.cidade;
             }
 
+            // Deadline check antes de chamar Groq
+            if (Date.now() - responderStartedAt > 30000) {
+              await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
+              logger.warn('[RESPOSTA] Deadline por chat excedido — abortando com erro_envio', { nome, chatId });
+              return;
+            }
+            
             const promptUser = montarPromptUser(cidadePreferida, historicoConversa);
             const txt = await chamarGroqAPI(PROMPT_SYSTEM, promptUser);
             const parsed = parsearRespostaGroq(txt);
+            
+            // Sanitização (IA) anti-clichê
+            parsed.resposta = sanitizeIAResponse(parsed.resposta, historicoConversa);
 
             // fallback de telefone quando LLM não retornar
             if (!parsed.telefone_extraido) {
@@ -2754,7 +2829,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
             } catch {}
 
+            // AQUISIÇÃO DO LOCK — "just-in-time locking"
+            await acquireSendGuard(pAtual, chatId);
+
             await sendMessageSafe(pAtual, campoEnvio, parsed.resposta, nome, chatId);
+            
+            await appendIaLine(nome, chatId, parsed.resposta);
 
             await marcarRespondido(nome, chatId);
 
@@ -2963,10 +3043,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Em filaManagerLoop (logo após obter p via ensurePage()):
       const b = getBrowserFromPage(p);
       if (b && b._sendLock && b._sendLock.active) {
-        logger.info('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
-      } else {
-        await garantirMarketplace(p, { nome });
+        const age = Date.now() - (b._sendLock.since || 0);
+        if (age > 45000) {
+          logger.warn('[FILA] sendLock ativo há >45s — liberando por watchdog', { nome });
+          b._sendLock.active = false;
+        } else {
+          logger.info('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
+          return;
+        }
       }
+      await garantirMarketplace(p, { nome });
 
       await atualizaFila();
       scheduleNextIfIdle();
@@ -3032,6 +3118,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       } catch {}
       // ========== FIM BLOCO ADICIONADO ==========
+
+      // Garantir giro da fila
+      if (!chatAtivo) scheduleNextIfIdle();
 
     } finally {
       filaLoopBusy = false;
