@@ -249,10 +249,12 @@ PERSONALIDADE:
 REGRAS DE OURO:
 - Sempre: 50% responder ao cliente + 50% avançar roteiro (UMA pergunta por vez).
 - NÃO interrompa o cliente pedindo WhatsApp; peça WhatsApp SOMENTE quando:
-    o cliente perguntar preço/valor/orçamento; OU
-    o cliente perguntar disponibilidade/agendamento/horário; OU
+    o cliente perguntar preço/valor/orçamento (primeira vez); OU
+    o cliente perguntar disponibilidade/agendamento/horário (primeira vez); OU
     você já tiver coletado todos os dados necessários (itens, ajudante, saída/destino, bairros).
-- Ao pedir WhatsApp, peça apenas "WhatsApp". Se o número vier sem DDD, peça o DDD uma única vez (de forma gentil).
+- NUNCA peça WhatsApp em mensagens consecutivas: se você acabou de pedir, continue coletando dados. Só peça novamente quando todos os dados estiverem coletados e ainda não houver WhatsApp.
+- NÃO peça WhatsApp se, na mesma mensagem, o cliente estiver fornecendo dados (ex.: itens, bairros, ajudante, casa/apto). Priorize coletar dados.
+- Ao pedir WhatsApp, peça apenas "WhatsApp". Se o número vier sem DDD, peça o DDD uma única vez (gentilmente).
 - Não confirme número ("me confirma se está correto?"): PROIBIDO.
 - Não repetir saudação (bom dia/boa tarde/boa noite) após a primeira mensagem.
 - NÃO repita o que o cliente acabou de dizer; confirme de forma neutra e avance para a próxima pergunta.
@@ -352,35 +354,18 @@ REGRAS CRÍTICAS:
 - Se cliente enviou WhatsApp sem DDD, peça gentilmente o DDD uma única vez.
 
 PRIMEIRA MENSAGEM (quando é o início da conversa):
-- ESTRUTURA OBRIGATÓRIA: [Responda ao cliente de forma ÚNICA e INTELIGENTE] + [Pergunta necessária]
-- IMPORTANTE: Cada cliente é ÚNICO. NUNCA use a mesma resposta para clientes diferentes. Adapte sua resposta ao que o cliente ESPECIFICAMENTE falou.
-- Cumprimente de forma natural e variada: Use saudação por horário (bom dia/boa tarde/boa noite) - USE O HORÁRIO CORRETO!
-- SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, de forma ÚNICA e INTELIGENTE:
-  * Se cliente disse "tudo bem?": Responda de forma variada: "Tudo bem sim, e você? 😊" ou "Tudo ótimo! E você, como está? 😊" ou "Tudo bem sim! E você? 😊"
-  * Se cliente perguntou "você faz frete?" ou "está disponível?": Responda de forma variada: "Sim, fazemos sim! 😊" ou "Claro! Fazemos sim! 😊" ou "Sim! Estamos disponíveis! 😊"
-  * Se cliente já disse o que quer transportar (ex: "duas camas", "quero levar um guarda-roupa"): Responda de forma variada: "Ah, entendi! Levamos sim! 😊" ou "Perfeito! Transportamos sim! 😊" ou "Ah, legal! Fazemos sim! 😊"
-  * Se cliente perguntou "quanto custa?": Responda de forma variada: "Oii! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. 😊" ou "Oii! O motorista que passa o orçamento, ele te chama no WhatsApp. 😊"
-- DEPOIS de responder, faça a pergunta necessária de forma variada:
-  * Se cliente perguntou preço/valor: "Pode me passar seu WhatsApp? O motorista passa o orçamento por lá."
-  * Se já tem WhatsApp mas não sabe o que transportar: "O que você precisa transportar?" ou "O que você quer transportar?" ou "O que precisa levar?"
-  * Caso contrário, colete dados (itens, origem, destino, ajudante) SEM pedir WhatsApp ainda.
-- SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp (mas varie a forma de dizer).
-- Se o cliente pedir preço/valor, peça o WhatsApp explicando que o motorista passa os valores por lá.
-- Caso contrário, confirme que fazemos e colete dados (itens, origem, destino, ajudante) SEM pedir WhatsApp ainda.
-- NUNCA use a mesma frase duas vezes seguidas. Varie sempre!
+- Se o cliente só cumprimentou ("oi", "boa tarde", "tudo bem?") e NÃO mencionou serviço/itens, responda e pergunte: "Precisa de frete?".
+- Se o cliente perguntou preço/valor/disponibilidade na primeira mensagem, explique que quem passa o orçamento é o motorista (pelo WhatsApp) e prossiga.
+- Se o cliente já mencionou itens, confirme que levamos e siga com a próxima pergunta do roteiro.
 
 PROIBIÇÕES ABSOLUTAS (NUNCA FAÇA):
-1. NUNCA repita o que o cliente quer transportar:
-   - ERRADO: "Você precisa transportar 2 guarda-roupas"
-   - ERRADO: "Você quer transportar 2 guarda-roupas"
-   - CORRETO: "Ah, legal! Transportamos sim!" ou "Perfeito! Levamos sim!"
-2. NUNCA mencione a cidade do cliente:
-   - ERRADO: "Você está em Florianópolis"
-   - ERRADO: "Está em Florianópolis"
-   - CORRETO: Não mencione a cidade, apenas atenda normalmente
-3. NUNCA confirme detalhes que o cliente já mencionou:
-   - ERRADO: "Você quer levar 2 guarda-roupas de Florianópolis"
-   - CORRETO: "Ah, entendi! Você precisa de ajudante?"
+1) NUNCA pedir WhatsApp em mensagens consecutivas.
+2) NUNCA pedir WhatsApp junto com outra pergunta (uma pergunta por mensagem).
+3) NUNCA pedir WhatsApp enquanto o cliente estiver fornecendo dados (itens, bairros, ajudante, casa/apto) na mesma mensagem. Colete o dado e avance.
+4) NUNCA repetir a saudação.
+5) NUNCA reafirmar o que o cliente acabou de dizer (apenas confirmar de forma neutra e avançar).
+6) NUNCA mencionar a cidade do cliente.
+7) NUNCA confirmar número de WhatsApp.
 
 MENSAGENS SUBSEQUENTES:
 - ESTRUTURA OBRIGATÓRIA: [Responda ao cliente] + [Pergunta necessária]
@@ -504,83 +489,103 @@ Proibições (não use, nem como variação):
 
 function montarPromptUser(cidade, historico, opts = {}) {
   const cid = cidade || 'não informada';
-  const alreadyAsked = !!(opts && opts.secondaryAlreadyAsked);
-  
-  // Calcula horário atual para saudação
   const agora = new Date();
   const hora = agora.getHours();
   const minuto = agora.getMinutes();
   const horaMinuto = hora * 100 + minuto;
   let saudacao = '';
-  if (horaMinuto >= 501 && horaMinuto <= 1200) {
-    saudacao = 'bom dia';
-  } else if (horaMinuto >= 1201 && horaMinuto <= 1800) {
-    saudacao = 'boa tarde';
-  } else {
-    saudacao = 'boa noite';
-  }
-  
-  // Analisa o histórico para identificar o que já foi mencionado
+  if (horaMinuto >= 501 && horaMinuto <= 1200) saudacao = 'bom dia';
+  else if (horaMinuto >= 1201 && horaMinuto <= 1800) saudacao = 'boa tarde';
+  else saudacao = 'boa noite';
+
   const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
   const historicoIA = (historico || []).filter(m => m.autor === 'ia' || m.autor === 'sistema');
-  const jaDeuSaudacao = historicoIA.some(m => {
-    const txt = (m.texto || '').toLowerCase();
-    return /\b(bom dia|boa tarde|boa noite)\b/i.test(txt);
-  });
-  
-  // Detecta se cliente perguntou sobre disponibilidade vs. o que transportar
-  const perguntouDisponibilidade = /\b(você faz|faz|fazem|está disponível|disponível|atende|atendem|trabalha|trabalham|frete|mudança)\b/i.test(historicoTexto) && 
-    !/\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero|preciso levar|preciso transportar)\b/i.test(historicoTexto);
-  
-  // Detecta WhatsApp no histórico (com ou sem DDD)
-  const temWhatsapp = /\b(\d{10,11}|\d{2}\s?\d{8,9})\b/.test(historicoTexto);
-  const temWhatsappComDDD = /\b(\d{2}\s?\d{8,9}|\d{11})\b/.test(historicoTexto);
-  
-  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar|preciso transportar)\b/i.test(historicoTexto);
-  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinho|sozinha|não preciso|não precisa)\b/i.test(historicoTexto);
-  const jaMencionouSaidaTipo = /\b(saída|saida).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouDestinoTipo = /\b(destino).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouBairroSaida = /\b(bairro.*?saída|bairro.*?saida|saída.*?bairro|saida.*?bairro)\b/i.test(historicoTexto);
-  const jaMencionouBairroDestino = /\b(bairro.*?destino|destino.*?bairro)\b/i.test(historicoTexto);
-  
-  // Determina qual pergunta fazer agora (ordem fixa)
-  const nonPhoneFields = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
-  const allNonPhoneAnswered = nonPhoneFields.every(f => {
-    try { 
-      if (f === 'itens') return jaMencionouItens;
-      if (f === 'bairro_saida') return jaMencionouBairroSaida;
-      if (f === 'bairro_destino') return jaMencionouBairroDestino;
-      if (f === 'ajudante') return jaMencionouAjudante;
-      if (f === 'saida_tipo') return jaMencionouSaidaTipo;
-      if (f === 'destino_tipo') return jaMencionouDestinoTipo;
-      return false;
-    } catch { return false; }
-  });
+  const historicoCLI = (historico || []).filter(m => m.autor === 'cliente');
+  const jaDeuSaudacao = historicoIA.some(m => /\b(bom dia|boa tarde|boa noite)\b/i.test((m.texto || '').toLowerCase()));
+
+  // Sinais
+  const perguntouDisponibilidade = /\b(você faz|faz|fazem|está disponível|disponível|atende|atendem|trabalha|trabalham|frete|mudança)\b/i.test(historicoTexto);
   const priceAsk = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(historicoTexto);
   const availabilityAsk = /\b(dispon[ií]vel|disponivel|agendar|agenda|marcar|hor[áa]rio|quando|que\s+dia|d[aá] pra (hoje|agora|amanh[ãa])|faz\s+(hoje|agora)|consegue\s+(hoje|agora))\b/i.test(historicoTexto);
+  const temWhatsapp = /\b(\d{10,11}|\d{2}\s?\d{8,9})\b/.test(historicoTexto);
+  const temWhatsappComDDD = /\b(\d{2}\s?\d{8,9}|\d{11})\b/.test(historicoTexto);
+
+  // Marcas de dados já mencionados
+  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar|preciso transportar)\b/i.test(historicoTexto);
+  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinh[oa]|não preciso|nao preciso)\b/i.test(historicoTexto);
+  const jaMencionouSaidaTipo = /\b(sa[íi]da).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
+  const jaMencionouDestinoTipo = /\b(destino).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
+  const jaMencionouBairroSaida = /\b(bairro.*?sa[ií]da|sa[ií]da.*?bairro)\b/i.test(historicoTexto);
+  const jaMencionouBairroDestino = /\b(bairro.*?destino|destino.*?bairro)\b/i.test(historicoTexto);
+  const nonPhoneFields = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
+  const allNonPhoneAnswered = nonPhoneFields.every(f => {
+    if (f === 'itens') return jaMencionouItens;
+    if (f === 'bairro_saida') return jaMencionouBairroSaida;
+    if (f === 'bairro_destino') return jaMencionouBairroDestino;
+    if (f === 'ajudante') return jaMencionouAjudante;
+    if (f === 'saida_tipo') return jaMencionouSaidaTipo;
+    if (f === 'destino_tipo') return jaMencionouDestinoTipo;
+    return false;
+  });
+
+  // "Já pediu WhatsApp" – detecta nas últimas mensagens da IA
+  const iaMsgs = historicoIA;
+  const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '') : '';
+  const jaPediuWhatsappUltima = /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(lastIA);
+  const jaPediuWhatsappAntes = jaPediuWhatsappUltima || iaMsgs.slice(-3).some(m => /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(String(m.texto || '')));
+
+  // Cliente acabou de fornecer dado na ÚLTIMA mensagem?
+  const ultCLI = historicoCLI.length ? String(historicoCLI[historicoCLI.length - 1].texto || '') : '';
+  const forneceuDadoAgora = /\b(ajudante|ajuda|casa|apartamento|apto|ap\b|bairro|levar|transportar|cama|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|cadeira|m[óo]vel|m[óo]veis)\b/i.test(ultCLI);
+
+  // PRÓXIMA PERGUNTA
   let proximaPergunta = '';
-  if ((priceAsk || availabilityAsk) && !temWhatsappComDDD) {
-    proximaPergunta = 'telefone'; // WhatsApp
+
+  // 1) Início de conversa, sem menção a serviço nem itens/mudança: perguntar se precisa de frete
+  if (!historicoIA.length && !jaMencionouItens && !perguntouDisponibilidade) {
+    proximaPergunta = 'precisa_servico';
   } else {
-    const faltante = nonPhoneFields.find(f => {
-      if (f === 'itens') return !jaMencionouItens;
-      if (f === 'bairro_saida') return !jaMencionouBairroSaida;
-      if (f === 'bairro_destino') return !jaMencionouBairroDestino;
-      if (f === 'ajudante') return !jaMencionouAjudante;
-      if (f === 'saida_tipo') return !jaMencionouSaidaTipo;
-      if (f === 'destino_tipo') return !jaMencionouDestinoTipo;
-      return false;
-    });
-    if (faltante) proximaPergunta = faltante;
-    else if (!temWhatsappComDDD) proximaPergunta = 'telefone';
-    else proximaPergunta = '—';
+    // 2) Se já tem WhatsApp válido -> seguir coleta de dados
+    if (temWhatsappComDDD) {
+      const faltante = nonPhoneFields.find(f => {
+        if (f === 'itens') return !jaMencionouItens;
+        if (f === 'bairro_saida') return !jaMencionouBairroSaida;
+        if (f === 'bairro_destino') return !jaMencionouBairroDestino;
+        if (f === 'ajudante') return !jaMencionouAjudante;
+        if (f === 'saida_tipo') return !jaMencionouSaidaTipo;
+        if (f === 'destino_tipo') return !jaMencionouDestinoTipo;
+        return false;
+      });
+      proximaPergunta = faltante || '—';
+    } else {
+      // 3) WhatsApp deve ser pedido somente:
+      //    - primeira vez que cliente pergunta preço/agendamento
+      //    - OU quando todos os dados estiverem coletados
+      //    - Nunca em mensagens consecutivas e nunca se acabou de fornecer dados
+      const podePedirPhonePrimeiraVez = (priceAsk || availabilityAsk) && !jaPediuWhatsappAntes && !forneceuDadoAgora;
+      const podePedirPhoneAoFinal = allNonPhoneAnswered && !jaPediuWhatsappUltima;
+
+      if (podePedirPhonePrimeiraVez) proximaPergunta = 'telefone';
+      else if (podePedirPhoneAoFinal) proximaPergunta = 'telefone';
+      else {
+        const faltante = nonPhoneFields.find(f => {
+          if (f === 'itens') return !jaMencionouItens;
+          if (f === 'bairro_saida') return !jaMencionouBairroSaida;
+          if (f === 'bairro_destino') return !jaMencionouBairroDestino;
+          if (f === 'ajudante') return !jaMencionouAjudante;
+          if (f === 'saida_tipo') return !jaMencionouSaidaTipo;
+          if (f === 'destino_tipo') return !jaMencionouDestinoTipo;
+          return false;
+        });
+        proximaPergunta = faltante || '—';
+      }
+    }
   }
-  
+
   const cabecalho = [
     `Contexto do atendimento:`,
     `- Horário atual: ${agora.toLocaleString('pt-BR')} - ${jaDeuSaudacao ? `JÁ DEU SAUDAÇÃO - NUNCA repita "${saudacao}"` : `Use "${saudacao}" na saudação (APENAS SE FOR PRIMEIRA MENSAGEM)`}`,
     `- Cidade (referência interna apenas - NUNCA mencione ao cliente): ${cid}`,
-    `- Cliente perguntou sobre disponibilidade? ${perguntouDisponibilidade ? 'SIM (é pergunta sobre disponibilidade, NÃO sobre o que transportar)' : 'NÃO'}`,
     ``,
     `ORDEM FIXA DE COLETA (UMA PERGUNTA POR VEZ):`,
     `1. O que precisa transportar: ${jaMencionouItens ? '✅ COLETADO' : '❌ FALTA'}`,
@@ -589,63 +594,42 @@ function montarPromptUser(cidade, historico, opts = {}) {
     `4. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
     `5. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
     `6. Destino é casa ou apartamento: ${jaMencionouDestinoTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `7. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (pedir apenas quando cliente perguntar preço/disponibilidade ou quando todos os outros dados estiverem coletados)'}`,
+    `7. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (pedir apenas quando cliente perguntar preço/disponibilidade OU no final)'}`,
     ``,
-    `PRÓXIMA PERGUNTA A FAZER: ${proximaPergunta}`,
+    `PRÓXIMA PERGUNTA A FAZER: ${proximaPergunta || '—'}`,
     ``,
     `PROIBIÇÕES ABSOLUTAS:`,
-    `1. NUNCA repita a saudação (bom dia/boa tarde/boa noite) se já foi dada - apenas continue a conversa`,
-    `2. NUNCA repita o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO! Apenas avance: "Ah, ótimo! [próxima pergunta]")`,
-    `3. NUNCA repita o que o cliente quer transportar (ex: "você precisa transportar 2 guarda-roupas") - apenas confirme: "Ah, legal! Transportamos sim!"`,
-    `4. NUNCA mencione a cidade do cliente (ex: "você está em Florianópolis") - não confirme a cidade, apenas atenda`,
-    `5. NUNCA faça múltiplas perguntas juntas (ex: "o local de saída é casa ou apartamento? tem elevador?" - ERRADO! Apenas uma pergunta por vez)`,
-    `6. NUNCA confirme WhatsApp digitado pelo cliente (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO! Se tem WhatsApp, apenas avance)`,
-    `7. NUNCA repita perguntas já respondidas`,
-    `8. NUNCA repita a mesma mensagem duas vezes`,
+    `1. NUNCA repita a saudação se já foi dada`,
+    `2. NUNCA repita o que o cliente acabou de responder`,
+    `3. NUNCA repita o que o cliente quer transportar — apenas confirme que levamos`,
+    `4. NUNCA mencione a cidade do cliente`,
+    `5. NUNCA faça múltiplas perguntas juntas (apenas UMA por mensagem)`,
+    `6. NUNCA confirme WhatsApp digitado ("confirma esse número...?")`,
+    `7. NUNCA peça WhatsApp em mensagens consecutivas; se acabou de pedir, continue coletando dados`,
+    `8. NUNCA peça WhatsApp enquanto o cliente está fornecendo dados na mesma mensagem; só no final ou ao perguntar preço/agendamento pela primeira vez`,
     ``,
-    `ESTRUTURA OBRIGATÓRIA (REGRA DE OURO):`,
-    `SEMPRE use esta estrutura: [RESPONDA AO CLIENTE] + [PERGUNTA NECESSÁRIA]`,
+    `ESTRUTURA OBRIGATÓRIA: [RESPONDA AO CLIENTE] + [PERGUNTA NECESSÁRIA]`,
     ``,
-    `EXEMPLOS:`,
-    `- Cliente: "oi boa noite tudo bem? você faz frete para o jardim ana paula? duas camas"`,
-    `- Resposta: "Oii, boa noite! Tudo bem sim, e você? 😊 Sim, fazemos sim! Vai sair de onde?"`,
-    ``,
-    `- Cliente: "você faz frete?"`,
-    `- Resposta: "Oii! Sim, fazemos sim! 😊 O que você precisa transportar?"`,
-    ``,
-    `- Cliente: "sim preciso" (de ajudante)`,
-    `- Resposta: "Ah, ótimo! Com ajudante fica mais fácil! 😊 O local de saída é casa ou apartamento?"`,
-    ``,
-    `INSTRUÇÕES CRÍTICAS:`,
-    `1. LEIA TODO O HISTÓRICO antes de responder.`,
-    `2. ${jaDeuSaudacao ? 'NÃO use saudação - já foi dada' : `Use "${saudacao}" na saudação (baseado no horário atual: ${hora}:${String(minuto).padStart(2, '0')})`}.`,
-    `3. SEMPRE RESPONDA PRIMEIRO ao que o cliente falou (seja amigável, respeitoso, educado, cordial, motivacional).`,
-    `4. DEPOIS faça a pergunta necessária (uma por vez, seguindo a ordem fixa).`,
-    `5. Se cliente já respondeu algo, NÃO repita a resposta dele. Apenas confirme e avance: "Ah, ótimo! 😊 [próxima pergunta]".`,
-    `6. Peça WhatsApp apenas nos momentos certos (preço/disponibilidade ou fim da coleta). Se vier sem DDD, peça o DDD uma única vez.`,
-    `7. Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"`,
-    `8. EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).`,
-    `9. Seja natural, conversacional, inteligente, amigável, respeitoso, educado, cordial e motivacional.`,
-    `10. NUNCA "ataque" com perguntas sem primeiro responder ao cliente.`,
-    ``,
-    `Histórico completo da conversa (ordem cronológica - leia TUDO antes de responder):`
+    `Histórico completo da conversa:`
   ];
+
   const linhas = [];
   for (const msg of (historico || [])) {
     const autor = (msg.autor === 'ia' || msg.autor === 'sistema') ? 'Atendente' : 'Cliente';
     const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString('pt-BR') : '';
     linhas.push(`${autor}${timestamp ? ' [' + timestamp + ']' : ''}: ${msg.texto}`);
   }
+
   const rodape = [
     ``,
     `ANÁLISE:`,
-    `- O que o cliente JÁ mencionou? (itens, ajudante, local, bairros, distância, etc.)`,
+    `- O que o cliente JÁ mencionou?`,
     `- O que ainda FALTA coletar?`,
-    `- Qual a melhor resposta NATURAL e INTELIGENTE agora?`,
+    `- Qual resposta NATURAL e INTELIGENTE agora?`,
     ``,
-    `Gere a próxima resposta seguindo estritamente as regras, sendo ULTRA INTELIGENTE e NATURAL.`,
-    `Retorne APENAS o JSON (sem markdown, sem explicações).`
+    `Retorne APENAS o JSON (sem markdown).`
   ];
+
   return [...cabecalho, ...linhas, ...rodape].join('\n');
 }
 
@@ -891,7 +875,9 @@ const FIELD_PROMPTS = {
   saida_tipo:      'O local de saída é casa ou apartamento?',
   destino_tipo:    'O destino é casa ou apartamento?',
   bairro_saida:    'Qual bairro de saída?',
-  bairro_destino:  'Qual bairro de destino?'
+  bairro_destino:  'Qual bairro de destino?',
+  // Pseudo-campo exclusivo do prompt para PRIMEIRA MENSAGEM
+  precisa_servico: 'Precisa de frete?'
 };
 
 function getOrInitFlowState(stPrev) {
@@ -906,25 +892,61 @@ function getOrInitFlowState(stPrev) {
 }
 
 function devePedirWhatsApp(historicoConversa, flow) {
-  const txt = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
-  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(txt);
-  const askedAvailability = /\b(dispon[ií]vel|disponivel|agendar|agenda|marcar|hor[áa]rio|quando|que\s+dia|d[aá] pra (hoje|agora|amanh[ãa])|faz\s+(hoje|agora)|consegue\s+(hoje|agora))\b/i.test(txt);
-  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
-  const allNonPhoneAnswered = nonPhone.every(f => !!(flow && flow.answered && flow.answered[f]));
-  return askedPrice || askedAvailability || allNonPhoneAnswered;
+  try {
+    const utils = require('./utils.js');
+    flow = flow || {};
+    flow.answered = flow.answered || {};
+    const hasPhone = utils.isValidBRPhoneWithDDD((flow.answered.telefone || '').toString());
+    // Texto completo e flags de intenção
+    const txt = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
+    const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(txt);
+    const askedAvailability = /\b(dispon[ií]vel|disponivel|agendar|agenda|marcar|hor[áa]rio|quando|que\s+dia|d[aá] pra (hoje|agora|amanh[ãa])|faz\s+(hoje|agora)|consegue\s+(hoje|agora))\b/i.test(txt);
+    // Todos os campos não-phone respondidos?
+    const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
+    const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
+    // Checa mensagens recentes do atendente para ver se já pediu WhatsApp
+    const iaMsgs = (historicoConversa || []).filter(m => m && (m.autor === 'ia' || m.autor === 'sistema'));
+    const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '') : '';
+    const askedWhatsLast = /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(lastIA);
+    const askedWhatsBefore = askedWhatsLast || iaMsgs.slice(-3).some(m => /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(String(m.texto || '')));
+    // Se já tem WhatsApp válido, nunca pedir
+    if (hasPhone) return false;
+    // Nunca pedir em mensagens consecutivas
+    if (flow.lastAsked === 'telefone' || askedWhatsLast) return false;
+    // Se já pediu uma vez e ainda está coletando dados, não repetir até terminar todos os dados
+    if (flow.phoneAskedOnce === true && !allNonPhoneAnswered) return false;
+    // Se cliente acabou de fornecer dados (itens, bairro, ajudante, casa/apto), não pedir WhatsApp nesta mensagem
+    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+    const lastCLI = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+    const forneceuDado = /\b(ajudante|ajuda|casa|apartamento|apto|ap\b|bairro|levar|transportar|cama|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|cadeira|m[óo]vel|m[óo]veis)\b/i.test(lastCLI);
+    // Disparos permitidos
+    // 1) primeira vez que pergunta preço/agendamento (e ainda não pediu WhatsApp anteriormente)
+    if ((askedPrice || askedAvailability) && !flow.phoneAskedOnce && !askedWhatsBefore) {
+      // Mas se acabou de fornecer dados, não peça nesta mesma mensagem
+      if (forneceuDado) return false;
+      return true;
+    }
+    // 2) já coletou todos os dados (e ainda não tem WhatsApp)
+    if (allNonPhoneAnswered && !askedWhatsBefore) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function pickNextMissingField(flow, historicoConversa) {
   const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
-  const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
+  const allNonPhoneAnswered = nonPhone.every(f => !!(flow.answered && flow.answered[f]));
   const askPhoneNow = devePedirWhatsApp(historicoConversa, flow) || allNonPhoneAnswered;
-  if (!askPhoneNow) {
-    for (const f of nonPhone) {
-      if (!flow.answered[f]) return f;
+  if (askPhoneNow) {
+    // Nunca em mensagens consecutivas
+    if (flow.lastAsked !== 'telefone') {
+      return 'telefone';
     }
-    return null;
   }
-  if (!flow.answered.telefone) return 'telefone';
+  for (const f of nonPhone) {
+    if (!flow.answered[f]) return f;
+  }
   return null;
 }
 
@@ -1117,17 +1139,19 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
   const utils = require('./utils.js');
   const flow = getOrInitFlowState(stPrev);
   flow.meta = flow.meta || {};
-  flow.meta.needDDD = !!flow.meta.needDDD; // se já estamos esperando DDD
+  flow.meta.needDDD = !!flow.meta.needDDD; // flag se só veio o número sem DDD
   applyExtractedAnswers(flow, historicoConversa, utils);
 
   const textoCompleto = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
-  // WhatsApp válido?
   const whatsappValido = utils.isValidBRPhoneWithDDD((flow.answered && flow.answered.telefone) || '');
 
-  // Se detectamos número local sem DDD antes, perguntamos DDD uma única vez
+  // Se precisamos só do DDD, peça uma única vez
   if (!whatsappValido && flow.meta.needDDD) {
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    flow.lastAsked = 'telefone';
+    flow.lastAskedAt = Date.now();
+    flow.phoneAskedOnce = true;
     return {
       resposta: `${prefixo}Preciso do DDD também, pode me passar o número completo?`,
       telefone_extraido: null,
@@ -1139,21 +1163,38 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     };
   }
 
-  // Próximo campo faltante respeitando a ordem nova, NÃO forçar telefone
+  // Próxima pergunta
   const next = pickNextMissingField(flow, historicoConversa);
-  // Deve pedir WhatsApp agora?
-  const askPhoneNow = devePedirWhatsApp(historicoConversa, flow);
+  const askPhoneNow = (next === 'telefone');
 
-  // Se é hora de pedir WhatsApp e ainda não temos WhatsApp válido
+  // Se é hora de pedir Whatsapp
   if (askPhoneNow && !whatsappValido) {
+    // Não repetir caso a última pergunta já tenha sido telefone
+    if (flow.lastAsked === 'telefone') {
+      return {
+        resposta: null,
+        telefone_extraido: null,
+        finalizado: false,
+        dados: flow.answered,
+        qaAsked: Object.keys(flow.asked || {}),
+        qaAnswered: flow.answered,
+        flow
+      };
+    }
+
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    // Se quase tudo está preenchido, enfatize que já tem tudo
+    flow.asked = flow.asked || {};
+    flow.asked.telefone = true;
+    flow.lastAsked = 'telefone';
+    flow.lastAskedAt = Date.now();
+    flow.phoneAskedOnce = true;
     const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
     const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
     const variante = allNonPhoneAnswered
       ? 'Perfeito! Já temos todos os dados. Agora só falta seu WhatsApp para o motorista te enviar o orçamento. Pode me passar?'
-      : 'O motorista passa o orçamento e combina horário pelo WhatsApp. Pode me passar seu WhatsApp?';
+      : 'O motorista passa o orçamento e combina o horário pelo WhatsApp. Pode me passar seu WhatsApp?';
+
     return {
       resposta: `${prefixo}${variante}`,
       telefone_extraido: null,
@@ -1165,13 +1206,16 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     };
   }
 
-  // Se ainda há campos não-telefone faltando, pergunte o próximo
+  // Próxima pergunta (não-telefone)
   if (next && next !== 'telefone') {
     flow.asked = flow.asked || {};
     flow.asked[next] = true;
+    flow.lastAsked = next;
+    flow.lastAskedAt = Date.now();
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
     const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
+
     return {
       resposta: `${prefixo}${pergunta}`,
       telefone_extraido: whatsappValido ? flow.answered.telefone : null,
@@ -1183,10 +1227,28 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     };
   }
 
-  // Se só falta WhatsApp (e não é hora por preço/agenda), peça educadamente uma vez
+  // Todos os dados já coletados e ainda não tem WhatsApp
   if (!whatsappValido) {
+    // Evita perguntar WhatsApp de novo consecutivo
+    if (flow.lastAsked === 'telefone') {
+      return {
+        resposta: null,
+        telefone_extraido: null,
+        finalizado: false,
+        dados: flow.answered,
+        qaAsked: Object.keys(flow.asked || {}),
+        qaAnswered: flow.answered,
+        flow
+      };
+    }
+
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    flow.asked = flow.asked || {};
+    flow.asked.telefone = true;
+    flow.lastAsked = 'telefone';
+    flow.lastAskedAt = Date.now();
+    flow.phoneAskedOnce = true;
     return {
       resposta: `${prefixo}Perfeito! Já temos todos os dados. Agora só falta seu WhatsApp para o motorista te enviar o orçamento. Pode me passar?`,
       telefone_extraido: null,
@@ -1198,11 +1260,11 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     };
   }
 
-  // WhatsApp válido já presente → finaliza
+  // Nada a perguntar: finaliza se telefone válido
   return {
     resposta: null,
     telefone_extraido: flow.answered.telefone || null,
-    finalizado: true,
+    finalizado: !!whatsappValido,
     dados: flow.answered,
     qaAsked: Object.keys(flow.asked || {}),
     qaAnswered: flow.answered,
