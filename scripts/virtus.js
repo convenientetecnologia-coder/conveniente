@@ -337,7 +337,7 @@ async function enviarLoteNotificador(nomePerfil) {
       
       if (response.ok && responseData && responseData.ok === true) {
         logger.info('[NOTIFICADOR] Chat enviado com sucesso', { nomePerfil, chatId: dadosChat.chatId });
-      } else {
+    } else {
         logger.error('[NOTIFICADOR] Erro ao enviar chat', { 
           nomePerfil, 
           chatId: dadosChat.chatId, 
@@ -348,8 +348,8 @@ async function enviarLoteNotificador(nomePerfil) {
           responseText: responseText.substring(0, 500) // Primeiros 500 chars
         });
         fila.push(dadosChat);
-      }
-    } catch (e) {
+    }
+  } catch (e) {
       logger.error('[NOTIFICADOR] Falha ao enviar chat', { nomePerfil, chatId: dadosChat.chatId, error: e && e.message || e });
       fila.push(dadosChat);
     }
@@ -819,16 +819,16 @@ async function writeJsonAtomicFsync(file, obj){
     return false;
   }
   try {
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    const tmp = file + '.tmp';
-    const fd = await fs.open(tmp, 'w');
-    try {
-      await fd.writeFile(JSON.stringify(obj, null, 2), 'utf8');
-      await fd.sync();
-    } finally { await fd.close(); }
-    try { await fs.unlink(file); } catch {}
-    try { await fs.rename(tmp, file); }
-    catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp);} catch{} }
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  const fd = await fs.open(tmp, 'w');
+  try {
+    await fd.writeFile(JSON.stringify(obj, null, 2), 'utf8');
+    await fd.sync();
+  } finally { await fd.close(); }
+  try { await fs.unlink(file); } catch {}
+  try { await fs.rename(tmp, file); }
+  catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp);} catch{} }
     return true;
   } finally {
     await releaseFileLock(file);
@@ -915,14 +915,14 @@ async function coletaChatsMarketplaceTodos(page) {
       function _extraiTempo(row) {
         if (!row) return '';
         const pickAbbr = () => {
-          try {
-            const abbr = row.querySelector('abbr[aria-label]');
-            if (abbr) {
-              const t1 = (abbr.innerText || '').trim();
-              if (t1) return t1;
-              const t2 = (abbr.getAttribute('aria-label') || '').trim();
-              if (t2) return t2;
-            }
+        try {
+          const abbr = row.querySelector('abbr[aria-label]');
+          if (abbr) {
+            const t1 = (abbr.innerText || '').trim();
+            if (t1) return t1;
+            const t2 = (abbr.getAttribute('aria-label') || '').trim();
+            if (t2) return t2;
+          }
           } catch {}
           return '';
         };
@@ -1010,20 +1010,20 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
       logger.info(`[VIRTUS][garantirMarketplace] Tentando rota: ${route}`, nome ? { nome } : {});
       await page.goto(`https://www.messenger.com${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
       
-      try {
-        const browserJs = require('./browser.js');
-        if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
-          await browserJs.resolveNonceIfPresent(page).catch(()=>{});
-        }
-        if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
-          await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
-        }
-      } catch {}
+  try {
+    const browserJs = require('./browser.js');
+    if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
+      await browserJs.resolveNonceIfPresent(page).catch(()=>{});
+    }
+    if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
+      await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
+    }
+  } catch {}
       
-      const ok = await Promise.race([
-        page.waitForFunction(() => {
-          const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
-          const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
+  const ok = await Promise.race([
+    page.waitForFunction(() => {
+      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
+      const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
           return hasAnchor || hasRow;
         }, { timeout: 8000 }),
         page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).catch(() => null),
@@ -1725,7 +1725,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       try {
         await maybeGuaranteeMarketplaceFast(p, nome);
-      } catch (err) {
+    } catch (err) {
         logger.warn(`[VIRTUS][${nome}] maybeGuaranteeMarketplaceFast falhou: ${(err && err.message) || err}`);
         await sleep(2000);
         return chatsRespondidosParaVerificar;
@@ -1993,7 +1993,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
-        await responderChat(next);
+      await responderChat(next);
         
         chatAtivo = null;
         
@@ -2018,19 +2018,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       const responderStartedAt = Date.now();
-      let manifestFrozenUntil = 0;
-      try {
-        const manifest = await manifestStore.read(nome);
-        manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
-      } catch {}
-      if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-        running = false;
-        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-        logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
-        return;
-      }
+    let manifestFrozenUntil = 0;
+    try {
+      const manifest = await manifestStore.read(nome);
+      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
+    } catch {}
+    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
+      running = false;
+      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
+      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
+      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
+      return;
+    }
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
       if (!browser || browser.isConnected?.() === false) {
         logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
@@ -2076,7 +2076,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             _chatLockAcquired = true;
           } else {
             logger.warn('[RESPONDER] Falha ao adquirir lock mesmo após forçar liberação', { nome, chatId });
-            stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
+        stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
             stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
             try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId} mesmo após forçar liberação`); } catch {}
             fila = fila.filter(id => id !== chatId);
@@ -2085,13 +2085,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch (e) {
           logger.error('[RESPONDER] Erro ao tentar forçar liberação de lock', { nome, chatId, error: e && e.message || e });
           stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
-          stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
-          try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId}`); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          return;
-        }
+        stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
+        try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId}`); } catch {}
+        fila = fila.filter(id => id !== chatId);
+        return;
+      }
       } else {
-        _chatLockAcquired = true;
+      _chatLockAcquired = true;
         logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       }
       
@@ -2128,17 +2128,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
         if (!chatUrlMatches(urlNow, chatId)) {
           logger.info('[NAVEGACAO] Abrindo chat pela primeira vez', { nome, chatId });
-          let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-          await scrollChatsToTop(p, nome).catch(()=>{});
-          await sleep(300);
-          let found = await p.$(anchorSel);
-          
+        let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+        await scrollChatsToTop(p, nome).catch(()=>{});
+        await sleep(300);
+        let found = await p.$(anchorSel);
+
           if (found) {
             try {
-              await p.evaluate((sel) => {
-                const el = document.querySelector(sel);
+        await p.evaluate((sel) => {
+          const el = document.querySelector(sel);
                 if (el) el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
-              }, anchorSel);
+        }, anchorSel);
               await Promise.race([
                 p.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
                 (async () => { await p.$eval(anchorSel, el => el.click()); })()
@@ -2170,10 +2170,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
               lastProbeAt: Date.now()
             });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
           }
         } else {
           if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
@@ -2237,7 +2237,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
 
-        resetFail(chatId);
+            resetFail(chatId);
 
         const urlClassificado = await extrairUrlClassificado(p, chatId);
 
@@ -2355,7 +2355,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               parsed = domain.parseModelAnswerToDomain(modelRawResp);
             } catch (e) {
               logger.error('[GROQ] Erro ao chamar IA ou parsear resposta', { nome, chatId, error: e && e.message || e });
-              try { await pendingDel(nome, chatId); } catch {}
+            try { await pendingDel(nome, chatId); } catch {}
               fila = fila.filter(id => id !== chatId);
               chatAtivo = null;
               return;
@@ -2373,10 +2373,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               logger.warn('[GROQ] Page indisponível', { nome, chatId });
               await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
               try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
 
             let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
             if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(pAtual, chatId, { timeoutMs: 0 }))) {
@@ -2389,11 +2389,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
                 lastProbeAt: Date.now()
               });
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
+    try { await pendingDel(nome, chatId); } catch {}
+    fila = fila.filter(id => id !== chatId);
+    chatAtivo = null;
+    return;
+  }
 
             let campoEnvio = await waitForComposer(pAtual, 10000);
             if (!campoEnvio) {
@@ -2440,14 +2440,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               // Se finalizado, processa finalização (IA já validou)
               if (parsed.finalizado === true) {
                 try {
-                  await enviarPedidoParaNotificador(chatId, {
-                    cidade: cidadePreferida || null,
-                    telefone: parsed.telefone_extraido,
-                    ...parsed.dados
-                  });
-                  if (pedidosEnviados) pedidosEnviados.add(chatId);
-                  await enviarMensagemFinal(chatId);
-                  await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
+                  // Cancela timer se existir
+                  if (timersFechamento.has(chatId)) {
+                    cancelarTimerFechamento(chatId);
+                  }
+                  
+                  // Verifica se já foi enviado (anti-duplicidade)
+                  if (!pedidosEnviados.has(chatId)) {
+                    await enviarPedidoParaNotificador(chatId, {
+                      cidade: cidadePreferida || null,
+                      telefone: parsed.telefone_extraido,
+                      ...parsed.dados
+                    });
+                    pedidosEnviados.add(chatId);
+                    await enviarMensagemFinal(chatId);
+                    await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
+                  }
                 } catch (e) {
                   logger.error('[FINALIZACAO] Erro ao finalizar chat', { nome, chatId, error: e && e.message || e });
                 }
@@ -2462,7 +2470,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastProbeAt: Date.now(),
                 state: CHAT_STATES.AGUARDANDO
               });
-            } catch {}
+        } catch {}
 
             logger.info('[GROQ] Resposta enviada com sucesso', { chatId, finalizado: parsed.finalizado, tel: parsed.telefone_extraido });
           } catch (e) {
@@ -2543,7 +2551,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
       try { 
         chatLock.release(nome, chatId);
-        if (_chatLockAcquired) {
+      if (_chatLockAcquired) {
           logger.info('[RESPONDER] Lock liberado no finally', { nome, chatId });
         } else {
           logger.debug('[RESPONDER] Tentativa de liberar lock no finally (não estava adquirido)', { nome, chatId });
@@ -2702,7 +2710,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  const timersFechamento = new Map(); // chatId -> { inicio, telefone, expirado }
+  const timersFechamento = new Map(); // chatId -> { inicio, telefone, expirado, expiraEm, timerId }
   const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
   const pedidosEnviados = new Set();  // chatId já enviados
 
@@ -2723,16 +2731,44 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         updatedAt: Date.now()
       });
     } catch {}
-    try { enviarPedidoParcialSeHabilitado(chatId); } catch {}
+
+    // Verifica WhatsApp e campos completos
+    const temWhats = !!(cur.telefone && promptFretes.isValidBRPhoneWithDDD(cur.telefone));
+    const completos = temWhats &&
+      !!(cur.itens && cur.bairro_saida && cur.bairro_destino &&
+      (cur.ajudante != null) && (cur.saida_tipo != null) && (cur.destino_tipo != null));
+
+    // Se WhatsApp chegou, faltam campos, e timer NÃO existe: inicia timer
+    if (temWhats && !completos && !timersFechamento.has(chatId)) {
+      await iniciarTimerFechamento(chatId, cur.telefone);
+    }
+
+    // Se WhatsApp chegou E TODOS os campos foram preenchidos: cancela timer e envia imediatamente
+    if (temWhats && completos) {
+      if (timersFechamento.has(chatId)) {
+        cancelarTimerFechamento(chatId);
+      }
+      if (!pedidosEnviados.has(chatId)) {
+        try {
+          await enviarPedidoParaNotificador(chatId, cur);
+          pedidosEnviados.add(chatId);
+          await enviarMensagemFinal(chatId);
+          await marcarRespondido(nome, chatId);
+          await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
+        } catch (e) {
+          logger.error('[FINALIZACAO] Erro ao finalizar chat', { nome, chatId, error: e && e.message || e });
+        }
+      }
+    }
   }
 
   async function iniciarTimerFechamento(chatId, telefone) {
-    // IA já validou telefone no JSON, não revalidamos aqui
     if (!timersFechamento) return;
     if (timersFechamento.has(chatId)) return; // não reinicia
     const inicio = Date.now();
     const expiraEm = inicio + (10 * 60 * 1000); // 10 minutos
-    timersFechamento.set(chatId, { inicio, telefone, expirado: false, expiraEm });
+    const timerId = setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
+    timersFechamento.set(chatId, { inicio, telefone, expirado: false, expiraEm, timerId });
     try {
       await setChatState(nome, chatId, {
         timerStartedAt: inicio,
@@ -2741,8 +2777,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         updatedAt: Date.now()
       });
     } catch {}
-    setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
     logger.info('[TIMER] Timer de 10min iniciado', { chatId, telefone });
+  }
+
+  function cancelarTimerFechamento(chatId) {
+    const t = timersFechamento.get(chatId);
+    if (t && t.timerId) {
+      try { clearTimeout(t.timerId); } catch {}
+    }
+    timersFechamento.delete(chatId);
+    try {
+      setChatState(nome, chatId, { timerCancelledAt: Date.now() });
+    } catch {}
   }
 
   async function verificarTimerExpirado(chatId) {
@@ -2750,19 +2796,35 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const t = timersFechamento.get(chatId);
     if (!t || t.expirado) return;
     const decorrido = Date.now() - t.inicio;
-    if (decorrido >= 10 * 60 * 1000) {
-      t.expirado = true;
-      timersFechamento.set(chatId, t);
-      logger.info('[TIMER] Timer expirado — fechando pedido', { chatId });
-      const dados = dadosColetados ? (dadosColetados.get(chatId) || {}) : {};
-      try {
-        await enviarPedidoParaNotificador(chatId, dados);
-        if (pedidosEnviados) pedidosEnviados.add(chatId);
-        await enviarMensagemFinal(chatId);
-        await marcarRespondido(nome, chatId); // marca local
-      } catch (e) {
-        logger.error('[TIMER] Falha ao fechar pedido', { chatId, error: e && e.message || e });
-      }
+    if (decorrido < 10 * 60 * 1000) return;
+    
+    t.expirado = true;
+    timersFechamento.set(chatId, t);
+
+    const dados = dadosColetados ? (dadosColetados.get(chatId) || {}) : {};
+    const tel = dados.telefone || t.telefone || null;
+
+    if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) {
+      logger.info('[TIMER] Expirado, mas sem WhatsApp válido — nada será enviado', { chatId });
+      timersFechamento.delete(chatId);
+      return;
+    }
+
+    if (pedidosEnviados && pedidosEnviados.has(chatId)) {
+      timersFechamento.delete(chatId);
+      return;
+    }
+
+    try {
+      await enviarPedidoParaNotificador(chatId, { ...dados, telefone: tel });
+      if (pedidosEnviados) pedidosEnviados.add(chatId);
+      await enviarMensagemFinal(chatId);
+      await marcarRespondido(nome, chatId);
+      logger.info('[TIMER] Timer expirado — pedido parcial enviado', { chatId });
+    } catch (e) {
+      logger.error('[TIMER] Falha ao fechar pedido', { chatId, error: e && e.message || e });
+    } finally {
+      timersFechamento.delete(chatId);
     }
   }
 
@@ -2778,13 +2840,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await verificarTimerExpirado(chatId);
         } else {
           const restante = expiraEm - agora;
+          const timerId = setTimeout(() => verificarTimerExpirado(chatId), restante);
           timersFechamento.set(chatId, {
             inicio: state.timerStartedAt || (agora - (10 * 60 * 1000 - restante)),
             telefone: state.timerTelefone || null,
             expirado: false,
-            expiraEm
+            expiraEm,
+            timerId
           });
-          setTimeout(() => verificarTimerExpirado(chatId), restante);
           logger.info('[TIMER] Timer restaurado', { chatId, restante: Math.round(restante / 1000) + 's' });
         }
         if (state.dadosColetados && dadosColetados) {
