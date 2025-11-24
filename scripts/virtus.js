@@ -489,6 +489,34 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     try {
       const respostaFinal = String(proximo.resposta || '').trim();
       
+      // GATE ANTI-DUPLICIDADE: só permite enviar se o cliente falou algo novo
+      const st = await getChatState(nomePerfil, proximo.chatId).catch(() => null);
+      const lastCLIts = Number(st && st.lastCLIts || 0);
+      const lastIATs  = Number(st && st.lastIATs  || 0);
+
+      if (lastCLIts && lastIATs && lastIATs >= lastCLIts) {
+        // Já respondido após a última fala do cliente — só ACK e dropa
+        try {
+          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              servidor: NOTIFICADOR_SERVIDOR,
+              perfil: nomePerfil,
+              chat_id: proximo.chatId
+            })
+          });
+          logger.info('[NOTIFICADOR] ACK enviado (skip por gating)', { nomePerfil, chatId: proximo.chatId });
+        } catch (e) {
+          logger.warn('[NOTIFICADOR] Falha ao ACK (skip por gating)', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
+        }
+        // Libera dedup local da resposta
+        try {
+          if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
+        } catch {}
+        return; // SKIP O ENVIO PARA ESTE ITEM
+      }
+      
       if (enviarRespostaMessengerSeguraFn) {
         await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
       }
