@@ -29,7 +29,6 @@ const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 
-// Batch (buffer) para I/O (logs, states)
 const CHAT_LOG_BUFFERS = new Map();  // file -> [line]
 let CHAT_LOG_FLUSH_TIMER = null;
 
@@ -68,7 +67,6 @@ function scheduleChatStateFlush() {
   }, 200);
 }
 
-// MutationObserver para detectar novos chats em tempo real
 async function installChatFeedObserver(page, nome, onChat) {
   if (!page || page._virtusChatObserverInstalled) return;
   page._virtusChatObserverInstalled = true;
@@ -141,13 +139,9 @@ async function installChatFeedObserver(page, nome, onChat) {
   });
 }
 
-// === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
-// === Pipeline de Perguntas (dominante, Groq só como fallback) ===
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
 
-// Verificação da chave será feita apenas quando necessário (lazy check)
-// Isso evita erro no boot se o .env ainda não estiver configurado
 let GROQ_API_KEY = null;
 let GROQ_MODEL = null;
 let GROQ_API_URL = null;
@@ -155,7 +149,6 @@ let GROQ_API_URL = null;
 function verificarConfigGroq() {
   if (!GROQ_API_KEY) {
     GROQ_API_KEY = process.env.GROQ_API_KEY;
-    // Modelo deve ser configurado no arquivo .env
     GROQ_MODEL = process.env.GROQ_MODEL;
     GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
     
@@ -173,7 +166,6 @@ function verificarConfigGroq() {
 }
 
 async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retries = 2 } = {}) {
-  // Verificar configuração antes de usar
   const config = verificarConfigGroq();
   const apiKey = config.GROQ_API_KEY;
   const model = config.GROQ_MODEL;
@@ -236,26 +228,24 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
   throw lastErr || new Error('groq_error');
 }
 
-// Prompt system (personalidade)
 const PROMPT_SYSTEM = `
 Você é o melhor atendente de mudanças e fretes do Brasil. Seu trabalho é fazer o melhor atendimento do mundo, de forma ultra inteligente, natural e humanizada.
 
 PERSONALIDADE:
-- Educado, cordial, natural e positivo
-- 1 pergunta por mensagem; respostas curtas e objetivas
-- SEMPRE responda o que o cliente disse antes de perguntar algo
-- EMOJIS: padrão sem emoji, use no máximo 1 a cada 3-4 mensagens quando fizer sentido
+- Super educado, gentil, caloroso, amigável, respeitoso, cordial e motivacional
+- Confiante, motivado e positivo
+- Inteligente, rápido e perspicaz
+- Gírias leves do BR, natural e autêntico
+- Cria urgência boa sem ser chato
+- EMOJIS (REGRA DURA): Padrão: não use emoji. Use no máximo 1 emoji a cada 3 ou 4 mensagens, e nunca mais de 1 emoji na mesma mensagem. Não use emoji em mensagens muito curtas, confirmações ou quando a resposta já está polida. Se tiver dúvida: não use emoji.
+- Persistente agradável (sem ser invasivo)
+- SEMPRE ouve e responde ao cliente antes de fazer perguntas
 
-REGRAS DE OURO:
-- Sempre: 50% responder ao cliente + 50% avançar roteiro (UMA pergunta por vez).
-- NÃO interrompa o cliente pedindo WhatsApp; peça WhatsApp SOMENTE quando: o cliente perguntar preço/valor/orçamento (primeira vez); OU você já tiver coletado todos os dados necessários (itens, ajudante, saída/destino, bairros).
-- NUNCA peça WhatsApp em mensagens consecutivas: se você acabou de pedir, continue coletando dados. Só peça novamente quando todos os dados estiverem coletados e ainda não houver WhatsApp.
-- NÃO peça WhatsApp se, na mesma mensagem, o cliente estiver fornecendo dados (ex.: itens, bairros, ajudante, casa/apto). Priorize coletar dados.
-- Ao pedir WhatsApp, peça apenas "WhatsApp". Se o número vier sem DDD, peça o DDD uma única vez (gentilmente).
-- Não confirme número ("me confirma se está correto?"): PROIBIDO.
-- Não repetir saudação (bom dia/boa tarde/boa noite) após a primeira mensagem.
-- NÃO repita o que o cliente acabou de dizer; confirme de forma neutra e avance para a próxima pergunta.
-- Cada cliente é único: responda exatamente ao que ele perguntou e avance naturalmente.
+CONTEXTO DO NEGÓCIO:
+- VOCÊ NÃO PASSA ORÇAMENTO. Quem passa o orçamento é o MOTORISTA, pelo WhatsApp.
+- Você apenas faz o atendimento, anota o pedido e passa pro motorista.
+- O motorista chama o cliente no WhatsApp para passar o orçamento.
+- SEMPRE peça o WhatsApp com DDD - é ESSENCIAL para o motorista chamar o cliente.
 
 CONCISÃO (OBRIGATÓRIA):
 - Máximo 1–2 frases curtas por mensagem (ideal <= 20 palavras).
@@ -292,7 +282,8 @@ PARTE 1 (50% da resposta) - RESPONDER AO CLIENTE:
 
 PARTE 2 (50% da resposta) - SEGUIR ROTEIRO:
 - Depois de responder ao cliente, faça a pergunta necessária do roteiro
-- Siga a ordem de coleta: itens → bairro de saída → bairro de destino → ajudante → saída/destino (casa ou apartamento) → WhatsApp (apenas quando cliente perguntar preço/disponibilidade ou quando todos os outros dados estiverem coletados)
+- Se não tem WhatsApp: peça o WhatsApp com DDD
+- Se já tem WhatsApp: faça a próxima pergunta do roteiro
 
 EXEMPLO CORRETO DETALHADO:
 Cliente: "oi boa tarde tudo bem? você faz frete? preciso levar uma cama"
@@ -305,25 +296,25 @@ ANÁLISE DO QUE O CLIENTE FALOU:
 - "preciso levar uma cama" → informação sobre o que transportar
 
 RESPOSTA CORRETA (COMPLETA):
-"Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! Ah, entendi que você precisa levar uma cama, transportamos sim! 😊 Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Pode me passar seu WhatsApp?"
+"Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! Ah, entendi que você precisa levar uma cama, transportamos sim! 😊 Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
 
 ANÁLISE DA RESPOSTA CORRETA:
 - "Oi, boa tarde!" → respondeu ao "oi" e "boa tarde" (PARTE 1 - 50%)
 - "Tudo ótimo sim, e você? 😊" → respondeu ao "tudo bem?" (PARTE 1 - 50%)
 - "Sim, fazemos sim!" → respondeu ao "você faz frete?" (PARTE 1 - 50%)
 - "Ah, entendi que você precisa levar uma cama, transportamos sim! 😊" → respondeu ao "preciso levar uma cama" (PARTE 1 - 50%)
-- "Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Pode me passar seu WhatsApp?" → segue o roteiro (PARTE 2 - 50%)
+- "Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
 
 EXEMPLO 2 - Cliente pergunta sobre valor:
 Cliente: "qual valor?"
 
 RESPOSTA CORRETA:
-"Oii! O orçamento quem passa é o motorista, ele te chama no WhatsApp para passar o valor. 😊 Pode me passar seu WhatsApp?"
+"Oii! O orçamento quem passa é o motorista, ele te chama no WhatsApp para passar o valor. 😊 Me passa teu número com DDD que já peço pra ele te chamar."
 
 ANÁLISE:
 - "Oii!" → cumprimento amigável (PARTE 1 - 50%)
 - "O orçamento quem passa é o motorista, ele te chama no WhatsApp para passar o valor. 😊" → respondeu ao "qual valor?" (PARTE 1 - 50%)
-- "Pode me passar seu WhatsApp?" → segue o roteiro (PARTE 2 - 50%)
+- "Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
 
 ⚠️⚠️⚠️ PROIBIÇÃO ABSOLUTA ⚠️⚠️⚠️
 - NUNCA pule a PARTE 1 (responder ao cliente)
@@ -342,27 +333,48 @@ SAUDAÇÃO POR HORÁRIO (OBRIGATÓRIO):
 
 ESTRATÉGIA DE ATENDIMENTO (UMA PERGUNTA POR VEZ):
 
+ORDEM DE COLETA (uma por vez, mas com flexibilidade inteligente):
+- Se o cliente pediu preço/valor/orçamento: peça o WhatsApp com DDD e explique que o motorista passa os valores por lá (obrigatório).
+- Se o cliente NÃO pediu preço: atenda normalmente, responda o que ele disse e colete dados do frete (itens, ajudante, saída/destino, bairros). Peça o WhatsApp de forma amigável a cada 1–2 mensagens, sem travar a conversa.
+
 REGRAS CRÍTICAS:
 - SEMPRE faça UMA PERGUNTA POR VEZ (nunca 2 ou mais juntas).
 - NÃO avance para a próxima pergunta até coletar a resposta da atual.
 - Se cliente já respondeu uma pergunta, NÃO pergunte de novo - apenas avance para a próxima.
-- Para orçamento/valor: WhatsApp é obrigatório; peça e explique que o motorista passa os valores por lá.
-- Caso contrário: converse, responda, e colete dados. NÃO peça WhatsApp até que seja o momento certo (preço/agendamento ou fim da coleta).
-- Se cliente enviou WhatsApp sem DDD, peça gentilmente o DDD uma única vez.
+- Para orçamento/valor: WhatsApp com DDD é obrigatório; peça e explique que o motorista passa os valores por lá.
+- Caso contrário: converse, responda, e colete dados. Peça o WhatsApp com DDD de forma amigável, mas não bloqueie o avanço das perguntas.
+- Se cliente enviou WhatsApp sem DDD, peça gentilmente o DDD, mas NÃO confirme o número digitado (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO!).
+- Varie as formas de pedir WhatsApp: "Me passa teu número com DDD?", "Qual seu WhatsApp com DDD?", "O motorista está aguardando seu WhatsApp com DDD para te chamar", etc.
 
 PRIMEIRA MENSAGEM (quando é o início da conversa):
-- Se o cliente só cumprimentou ("oi", "boa tarde", "tudo bem?") e NÃO mencionou serviço/itens, responda e pergunte: "Precisa de frete?".
-- Se o cliente perguntou preço/valor/disponibilidade na primeira mensagem, explique que quem passa o orçamento é o motorista (pelo WhatsApp) e prossiga.
-- Se o cliente já mencionou itens, confirme que levamos e siga com a próxima pergunta do roteiro.
+- ESTRUTURA OBRIGATÓRIA: [Responda ao cliente de forma ÚNICA e INTELIGENTE] + [Pergunta necessária]
+- IMPORTANTE: Cada cliente é ÚNICO. NUNCA use a mesma resposta para clientes diferentes. Adapte sua resposta ao que o cliente ESPECIFICAMENTE falou.
+- Cumprimente de forma natural e variada: Use saudação por horário (bom dia/boa tarde/boa noite) - USE O HORÁRIO CORRETO!
+- SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, de forma ÚNICA e INTELIGENTE:
+  * Se cliente disse "tudo bem?": Responda de forma variada: "Tudo bem sim, e você? 😊" ou "Tudo ótimo! E você, como está? 😊" ou "Tudo bem sim! E você? 😊"
+  * Se cliente perguntou "você faz frete?" ou "está disponível?": Responda de forma variada: "Sim, fazemos sim! 😊" ou "Claro! Fazemos sim! 😊" ou "Sim! Estamos disponíveis! 😊"
+  * Se cliente já disse o que quer transportar (ex: "duas camas", "quero levar um guarda-roupa"): Responda de forma variada: "Ah, entendi! Levamos sim! 😊" ou "Perfeito! Transportamos sim! 😊" ou "Ah, legal! Fazemos sim! 😊"
+  * Se cliente perguntou "quanto custa?": Responda de forma variada: "Oii! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. 😊" ou "Oii! O motorista que passa o orçamento, ele te chama no WhatsApp. 😊"
+- DEPOIS de responder, faça a pergunta necessária de forma variada:
+  * Se ainda não tem WhatsApp: "Me passa teu número com DDD que já peço pra ele te chamar." ou "Qual seu WhatsApp com DDD? O motorista está aguardando para te chamar." ou "Me passa teu número de WhatsApp com DDD que já peço pra ele te chamar e passar o orçamento."
+  * Se já tem WhatsApp mas não sabe o que transportar: "O que você precisa transportar?" ou "O que você quer transportar?" ou "O que precisa levar?"
+- SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp (mas varie a forma de dizer).
+- Se o cliente pedir preço/valor, peça o WhatsApp com DDD explicando que o motorista passa os valores por lá.
+- Caso contrário, confirme que fazemos e colete o que ele quer levar, ajudante, etc., pedindo o WhatsApp de forma gentil (sem travar a conversa).
+- NUNCA use a mesma frase duas vezes seguidas. Varie sempre!
 
 PROIBIÇÕES ABSOLUTAS (NUNCA FAÇA):
-1) NUNCA pedir WhatsApp em mensagens consecutivas.
-2) NUNCA pedir WhatsApp junto com outra pergunta (uma pergunta por mensagem).
-3) NUNCA pedir WhatsApp enquanto o cliente estiver fornecendo dados (itens, bairros, ajudante, casa/apto) na mesma mensagem. Colete o dado e avance.
-4) NUNCA repetir a saudação.
-5) NUNCA reafirmar o que o cliente acabou de dizer (apenas confirmar de forma neutra e avançar).
-6) NUNCA mencionar a cidade do cliente.
-7) NUNCA confirmar número de WhatsApp.
+1. NUNCA repita o que o cliente quer transportar:
+   - ERRADO: "Você precisa transportar 2 guarda-roupas"
+   - ERRADO: "Você quer transportar 2 guarda-roupas"
+   - CORRETO: "Ah, legal! Transportamos sim!" ou "Perfeito! Levamos sim!"
+2. NUNCA mencione a cidade do cliente:
+   - ERRADO: "Você está em Florianópolis"
+   - ERRADO: "Está em Florianópolis"
+   - CORRETO: Não mencione a cidade, apenas atenda normalmente
+3. NUNCA confirme detalhes que o cliente já mencionou:
+   - ERRADO: "Você quer levar 2 guarda-roupas de Florianópolis"
+   - CORRETO: "Ah, entendi! Você precisa de ajudante?"
 
 MENSAGENS SUBSEQUENTES:
 - ESTRUTURA OBRIGATÓRIA: [Responda ao cliente] + [Pergunta necessária]
@@ -381,18 +393,22 @@ MENSAGENS SUBSEQUENTES:
   * ERRADO: "Ah, entendi! Você precisa de ajudante" (repetiu o que cliente disse)
   * ERRADO: "O local de saída é casa ou apartamento? Tem elevador?" (2 perguntas juntas + não respondeu ao cliente)
   * CORRETO: "Ah, ótimo! Com ajudante fica mais fácil! 😊 O local de saída é casa ou apartamento?"
+- Se ainda não tem WhatsApp, continue pedindo de forma variada, gentil e amigável:
+  * "Me passa teu número de WhatsApp com DDD, por favor? 😊"
+  * "O motorista está aguardando seu WhatsApp com DDD para te chamar e passar o orçamento. 📲"
+  * "Qual seu número de WhatsApp com DDD? O motorista já vai te chamar! 😊"
 - NÃO confirme o WhatsApp digitado pelo cliente (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO!).
-- Se cliente enviou WhatsApp sem DDD, peça gentilmente uma única vez: "Preciso do DDD também, pode me passar completo?"
+- Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"
 - EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).
 
 COMO COLETAR INFORMAÇÕES (UMA PERGUNTA POR VEZ):
+- WhatsApp com DDD: peça de forma inteligente e persistente; se o cliente não pediu preço, continue coletando dados do frete e reforce o pedido de WhatsApp a cada 1–2 mensagens.
 - O que precisa transportar: "O que você precisa transportar?" (apenas isso, sem outras perguntas)
+- Ajudante: "Você precisa de ajudante?" (apenas isso)
+- Tipo de saída: "O local de saída é casa ou apartamento?" (apenas isso, depois pergunte sobre elevador se necessário)
+- Tipo de destino: "O destino é casa ou apartamento?" (apenas isso, depois pergunte sobre elevador se necessário)
 - Bairro de saída: "Qual bairro de saída?" (apenas isso)
 - Bairro de destino: "Qual bairro de destino?" (apenas isso)
-- Ajudante: "Você precisa de ajudante?" (apenas isso)
-- Tipo de saída: "O local de saída é casa ou apartamento?" (apenas isso)
-- Tipo de destino: "O destino é casa ou apartamento?" (apenas isso)
-- WhatsApp: peça apenas quando cliente perguntar preço/valor/disponibilidade/agendamento, ou quando todos os outros dados estiverem coletados.
 
 REGRAS DE OURO (CRÍTICO - LEIA COM ATENÇÃO):
 ⚠️⚠️⚠️ REGRA #1 (MAIS IMPORTANTE): 50% RESPONDER AO CLIENTE + 50% SEGUIR ROTEIRO ⚠️⚠️⚠️
@@ -418,13 +434,13 @@ ANÁLISE:
 - "você faz frete?" → pergunta sobre disponibilidade
 
 RESPOSTA CORRETA:
-"Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! O que você precisa transportar?"
+"Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
 
 ANÁLISE DA RESPOSTA:
 - "Oi, boa tarde!" → respondeu ao "oi" e "boa tarde" (PARTE 1 - 50%)
 - "Tudo ótimo sim, e você? 😊" → respondeu ao "tudo bem?" (PARTE 1 - 50%)
 - "Sim, fazemos sim!" → respondeu ao "você faz frete?" (PARTE 1 - 50%)
-- "O que você precisa transportar?" → segue o roteiro (PARTE 2 - 50%) - coleta dados primeiro, não pede WhatsApp ainda
+- "Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
 
 ⚠️⚠️⚠️ PROIBIÇÕES ABSOLUTAS ⚠️⚠️⚠️:
 - NUNCA pule a PARTE 1 (responder ao cliente) - isso é OBRIGATÓRIO
@@ -442,10 +458,10 @@ ANÁLISE DA RESPOSTA:
 - SEMPRE entenda o contexto antes de responder
 - SEMPRE seja natural, conversacional, amigável, respeitoso, educado, cordial e motivacional
 - EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji)
-- Peça WhatsApp apenas nos momentos certos (preço/disponibilidade ou fim da coleta)
+- SEMPRE peça o WhatsApp até conseguir
 - NUNCA seja robótico ou repetitivo
 - VOCÊ DEVE FAZER EXATAMENTE 1 PERGUNTA POR MENSAGEM
-- REGRA DE OURO: 50% responder ao cliente + 50% avançar roteiro. Para preço/valor: WhatsApp obrigatório. Caso contrário, colete dados PRIMEIRO, WhatsApp por ÚLTIMO.
+- REGRA DE OURO: 50% responder ao cliente + 50% avançar roteiro. Para preço/valor: WhatsApp obrigatório. Caso contrário, colete dados e peça WhatsApp com gentileza ao longo da conversa (1–2 mensagens), sem bloquear.
 - NUNCA confirme número enviado pelo cliente
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
@@ -486,150 +502,130 @@ Proibições (não use, nem como variação):
 
 function montarPromptUser(cidade, historico, opts = {}) {
   const cid = cidade || 'não informada';
+  const alreadyAsked = !!(opts && opts.secondaryAlreadyAsked);
+  
   const agora = new Date();
   const hora = agora.getHours();
   const minuto = agora.getMinutes();
   const horaMinuto = hora * 100 + minuto;
   let saudacao = '';
-  if (horaMinuto >= 501 && horaMinuto <= 1200) saudacao = 'bom dia';
-  else if (horaMinuto >= 1201 && horaMinuto <= 1800) saudacao = 'boa tarde';
-  else saudacao = 'boa noite';
-
+  if (horaMinuto >= 501 && horaMinuto <= 1200) {
+    saudacao = 'bom dia';
+  } else if (horaMinuto >= 1201 && horaMinuto <= 1800) {
+    saudacao = 'boa tarde';
+  } else {
+    saudacao = 'boa noite';
+  }
+  
+  const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
   const historicoIA = (historico || []).filter(m => m.autor === 'ia' || m.autor === 'sistema');
-  const historicoCLI = (historico || []).filter(m => m.autor === 'cliente');
-  const jaDeuSaudacao = historicoIA.some(m => /\b(bom dia|boa tarde|boa noite)\b/i.test((m.texto || '').toLowerCase()));
-
-  // Usar APENAS histórico do CLIENTE para cálculos
-  const historicoTextoCLI = historicoCLI.map(m => String(m.texto || '')).join(' ').toLowerCase();
-  const ultimaMsgCliente = historicoCLI.length ? String(historicoCLI[historicoCLI.length - 1].texto || '') : '';
-  
-  // sinais fracos de disponibilidade NÃO devem disparar telefone
-  const priceAsk = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(ultimaMsgCliente);
-  
-  // coleta de dados já mencionados (heurístico) - usar APENAS histórico do cliente
-  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar)\b/i.test(historicoTextoCLI);
-  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinh[oa]|não preciso|nao preciso)\b/i.test(historicoTextoCLI);
-  const jaMencionouSaidaTipo = /\b(sa[íi]da).?(casa|apartamento|apto|ap)\b/i.test(historicoTextoCLI);
-  const jaMencionouDestinoTipo = /\b(destino).?(casa|apartamento|apto|ap)\b/i.test(historicoTextoCLI);
-  const jaMencionouBairroSaida = /\b(bairro.?sa[ií]da|sa[ií]da.?bairro)\b/i.test(historicoTextoCLI);
-  const jaMencionouBairroDestino = /\b(bairro.?destino|destino.?bairro)\b/i.test(historicoTextoCLI);
-  const nonPhoneFields = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
-  const allNonPhoneAnswered = nonPhoneFields.every(f => {
-    if (f === 'itens') return jaMencionouItens;
-    if (f === 'bairro_saida') return jaMencionouBairroSaida;
-    if (f === 'bairro_destino') return jaMencionouBairroDestino;
-    if (f === 'ajudante') return jaMencionouAjudante;
-    if (f === 'saida_tipo') return jaMencionouSaidaTipo;
-    if (f === 'destino_tipo') return jaMencionouDestinoTipo;
-    return false;
+  const jaDeuSaudacao = historicoIA.some(m => {
+    const txt = (m.texto || '').toLowerCase();
+    return /\b(bom dia|boa tarde|boa noite)\b/i.test(txt);
   });
   
-  // 3.1) coreReady: trio item + bairro de saída + bairro de destino
-  const coreReady = jaMencionouItens && jaMencionouBairroSaida && jaMencionouBairroDestino;
+  const perguntouDisponibilidade = /\b(você faz|faz|fazem|está disponível|disponível|atende|atendem|trabalha|trabalham|frete|mudança)\b/i.test(historicoTexto) && 
+    !/\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero|preciso levar|preciso transportar)\b/i.test(historicoTexto);
   
-  // 3.2) primeiraMensagem
-  const primeiraMensagem = historicoIA.length === 0;
-  
-  const iaMsgs = historicoIA;
-  const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '') : '';
-  const jaPediuWhatsappUltima = /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(lastIA);
-  const jaPediuWhatsappAntes = jaPediuWhatsappUltima || iaMsgs.slice(-3).some(m => /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(String(m.texto || '')));
-  
-  // Detecta se a última IA perguntou um campo (para considerar que o cliente respondeu um dado)
-  function iaPerguntouCampo(msg) {
-    const t = String(msg || '').toLowerCase();
-    if (/qual\s+o?\s*bairro.sa[íi]da/.test(t)) return 'bairro_saida';
-    if (/qual\s+o?\sbairro.*destino/.test(t)) return 'bairro_destino';
-    if (/precisa\s+de\s+ajudante/.test(t)) return 'ajudante';
-    if (/sa[ií]da.*casa|apartamento|apto|ap/.test(t)) return 'saida_tipo';
-    if (/destino.*casa|apartamento|apto|ap/.test(t)) return 'destino_tipo';
-    if (/o que voc[eê]\s+precisa\s+transportar|quais\s+itens/.test(t)) return 'itens';
-    return null;
-  }
-  
-  const ultIA = iaMsgs.length ? iaMsgs[iaMsgs.length - 1].texto || '' : '';
-  const campoPerguntadoAntes = iaPerguntouCampo(ultIA);
-  const ultCLI = historicoCLI.length ? String(historicoCLI[historicoCLI.length - 1].texto || '') : '';
-  const forneceuDadoAgora = !!(campoPerguntadoAntes && ultCLI && !/\?\s*$/.test(ultCLI));
-  
-  // Telefone no histórico (usar histórico completo para detectar telefone)
-  const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
+  const temWhatsapp = /\b(\d{10,11}|\d{2}\s?\d{8,9})\b/.test(historicoTexto);
   const temWhatsappComDDD = /\b(\d{2}\s?\d{8,9}|\d{11})\b/.test(historicoTexto);
-
-  // PRIMEIRA MENSAGEM: perguntar itens (não "precisa de frete?")
+  
+  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar|preciso transportar)\b/i.test(historicoTexto);
+  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinho|sozinha|não preciso|não precisa)\b/i.test(historicoTexto);
+  const jaMencionouSaidaTipo = /\b(saída|saida).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
+  const jaMencionouDestinoTipo = /\b(destino).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
+  const jaMencionouBairroSaida = /\b(bairro.*?saída|bairro.*?saida|saída.*?bairro|saida.*?bairro)\b/i.test(historicoTexto);
+  const jaMencionouBairroDestino = /\b(bairro.*?destino|destino.*?bairro)\b/i.test(historicoTexto);
+  
   let proximaPergunta = '';
-  if (!historicoIA.length && !jaMencionouItens) {
-    proximaPergunta = 'itens';
+  if (!temWhatsappComDDD) {
+    proximaPergunta = 'WhatsApp com DDD (PRIORIDADE ABSOLUTA)';
+  } else if (!jaMencionouItens) {
+    proximaPergunta = 'O que precisa transportar?';
+  } else if (!jaMencionouAjudante) {
+    proximaPergunta = 'Precisa de ajudante?';
+  } else if (!jaMencionouSaidaTipo) {
+    proximaPergunta = 'Saída é casa ou apartamento?';
+  } else if (!jaMencionouDestinoTipo) {
+    proximaPergunta = 'Destino é casa ou apartamento?';
+  } else if (!jaMencionouBairroSaida) {
+    proximaPergunta = 'Bairro de saída';
+  } else if (!jaMencionouBairroDestino) {
+    proximaPergunta = 'Bairro de destino';
   } else {
-    // 3.3) Ajuste dos gatilhos de pedir telefone no fallback
-    const podePedirPhonePrimeiraVez = priceAsk && !jaPediuWhatsappAntes && !forneceuDadoAgora;
-    const podePedirPhoneCore = coreReady && !jaPediuWhatsappUltima && !primeiraMensagem;
-    const podePedirPhoneAoFinal = allNonPhoneAnswered && !jaPediuWhatsappUltima && !primeiraMensagem;
-
-    if (!temWhatsappComDDD && (podePedirPhonePrimeiraVez || podePedirPhoneCore || podePedirPhoneAoFinal)) {
-      proximaPergunta = 'telefone';
-    } else {
-      const fila = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
-      for (const f of fila) {
-        if (f === 'itens' && !jaMencionouItens) { proximaPergunta = 'itens'; break; }
-        if (f === 'bairro_saida' && !jaMencionouBairroSaida) { proximaPergunta = 'bairro_saida'; break; }
-        if (f === 'bairro_destino' && !jaMencionouBairroDestino) { proximaPergunta = 'bairro_destino'; break; }
-        if (f === 'ajudante' && !jaMencionouAjudante) { proximaPergunta = 'ajudante'; break; }
-        if (f === 'saida_tipo' && !jaMencionouSaidaTipo) { proximaPergunta = 'saida_tipo'; break; }
-        if (f === 'destino_tipo' && !jaMencionouDestinoTipo) { proximaPergunta = 'destino_tipo'; break; }
-      }
-      if (!proximaPergunta) proximaPergunta = '—';
-    }
+    proximaPergunta = 'Todas informações coletadas - apenas peça WhatsApp se ainda não tiver';
   }
-
+  
   const cabecalho = [
     `Contexto do atendimento:`,
     `- Horário atual: ${agora.toLocaleString('pt-BR')} - ${jaDeuSaudacao ? `JÁ DEU SAUDAÇÃO - NUNCA repita "${saudacao}"` : `Use "${saudacao}" na saudação (APENAS SE FOR PRIMEIRA MENSAGEM)`}`,
     `- Cidade (referência interna apenas - NUNCA mencione ao cliente): ${cid}`,
+    `- Cliente perguntou sobre disponibilidade? ${perguntouDisponibilidade ? 'SIM (é pergunta sobre disponibilidade, NÃO sobre o que transportar)' : 'NÃO'}`,
     ``,
     `ORDEM FIXA DE COLETA (UMA PERGUNTA POR VEZ):`,
-    `1. O que precisa transportar: ${jaMencionouItens ? '✅ COLETADO' : '❌ FALTA'}`,
-    `2. Bairro de saída: ${jaMencionouBairroSaida ? '✅ COLETADO' : '❌ FALTA'}`,
-    `3. Bairro de destino: ${jaMencionouBairroDestino ? '✅ COLETADO' : '❌ FALTA'}`,
-    `4. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
-    `5. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `6. Destino é casa ou apartamento: ${jaMencionouDestinoTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `7. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (pedir apenas quando cliente perguntar preço OU no final)'}`,
+    `1. WhatsApp com DDD: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (PRIORIDADE ABSOLUTA)'}`,
+    `2. O que precisa transportar: ${jaMencionouItens ? '✅ COLETADO' : '❌ FALTA'}`,
+    `3. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
+    `4. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
+    `5. Destino é casa ou apartamento: ${jaMencionouDestinoTipo ? '✅ COLETADO' : '❌ FALTA'}`,
+    `6. Bairro de saída: ${jaMencionouBairroSaida ? '✅ COLETADO' : '❌ FALTA'}`,
+    `7. Bairro de destino: ${jaMencionouBairroDestino ? '✅ COLETADO' : '❌ FALTA'}`,
     ``,
-    `PRÓXIMA PERGUNTA A FAZER: ${proximaPergunta || '—'}`,
+    `PRÓXIMA PERGUNTA A FAZER: ${proximaPergunta}`,
     ``,
     `PROIBIÇÕES ABSOLUTAS:`,
-    `1. NUNCA repita a saudação se já foi dada`,
-    `2. NUNCA repita o que o cliente acabou de responder`,
-    `3. NUNCA repita o que o cliente quer transportar — apenas confirme que levamos`,
-    `4. NUNCA mencione a cidade do cliente`,
-    `5. NUNCA faça múltiplas perguntas juntas (apenas UMA por mensagem)`,
-    `6. NUNCA confirme WhatsApp digitado ("confirma esse número...?")`,
-    `7. NUNCA peça WhatsApp em mensagens consecutivas; se acabou de pedir, continue coletando dados`,
-    `8. NUNCA peça WhatsApp enquanto o cliente está fornecendo dados na mesma mensagem; só no final ou ao perguntar preço/agendamento pela primeira vez`,
+    `1. NUNCA repita a saudação (bom dia/boa tarde/boa noite) se já foi dada - apenas continue a conversa`,
+    `2. NUNCA repita o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO! Apenas avance: "Ah, ótimo! [próxima pergunta]")`,
+    `3. NUNCA repita o que o cliente quer transportar (ex: "você precisa transportar 2 guarda-roupas") - apenas confirme: "Ah, legal! Transportamos sim!"`,
+    `4. NUNCA mencione a cidade do cliente (ex: "você está em Florianópolis") - não confirme a cidade, apenas atenda`,
+    `5. NUNCA faça múltiplas perguntas juntas (ex: "o local de saída é casa ou apartamento? tem elevador?" - ERRADO! Apenas uma pergunta por vez)`,
+    `6. NUNCA confirme WhatsApp digitado pelo cliente (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO! Se tem WhatsApp, apenas avance)`,
+    `7. NUNCA repita perguntas já respondidas`,
+    `8. NUNCA repita a mesma mensagem duas vezes`,
     ``,
-    `ESTRUTURA OBRIGATÓRIA: [RESPONDA AO CLIENTE] + [PERGUNTA NECESSÁRIA]`,
+    `ESTRUTURA OBRIGATÓRIA (REGRA DE OURO):`,
+    `SEMPRE use esta estrutura: [RESPONDA AO CLIENTE] + [PERGUNTA NECESSÁRIA]`,
     ``,
-    `Histórico completo da conversa:`
+    `EXEMPLOS:`,
+    `- Cliente: "oi boa noite tudo bem? você faz frete para o jardim ana paula? duas camas"`,
+    `- Resposta: "Oii, boa noite! Tudo bem sim, e você? 😊 Sim, fazemos sim! Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."`,
+    ``,
+    `- Cliente: "você faz frete?"`,
+    `- Resposta: "Oii! Sim, fazemos sim! 😊 Quem passa o orçamento é o motorista pelo WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."`,
+    ``,
+    `- Cliente: "sim preciso" (de ajudante)`,
+    `- Resposta: "Ah, ótimo! Com ajudante fica mais fácil! 😊 O local de saída é casa ou apartamento?"`,
+    ``,
+    `INSTRUÇÕES CRÍTICAS:`,
+    `1. LEIA TODO O HISTÓRICO antes de responder.`,
+    `2. ${jaDeuSaudacao ? 'NÃO use saudação - já foi dada' : `Use "${saudacao}" na saudação (baseado no horário atual: ${hora}:${String(minuto).padStart(2, '0')})`}.`,
+    `3. SEMPRE RESPONDA PRIMEIRO ao que o cliente falou (seja amigável, respeitoso, educado, cordial, motivacional).`,
+    `4. DEPOIS faça a pergunta necessária (uma por vez, seguindo a ordem fixa).`,
+    `5. Se cliente já respondeu algo, NÃO repita a resposta dele. Apenas confirme e avance: "Ah, ótimo! 😊 [próxima pergunta]".`,
+    `6. Se ainda não tem WhatsApp com DDD, peça de forma variada, gentil e amigável (não confirme o número digitado).`,
+    `7. Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"`,
+    `8. EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).`,
+    `9. Seja natural, conversacional, inteligente, amigável, respeitoso, educado, cordial e motivacional.`,
+    `10. NUNCA "ataque" com perguntas sem primeiro responder ao cliente.`,
+    ``,
+    `Histórico completo da conversa (ordem cronológica - leia TUDO antes de responder):`
   ];
-
   const linhas = [];
   for (const msg of (historico || [])) {
     const autor = (msg.autor === 'ia' || msg.autor === 'sistema') ? 'Atendente' : 'Cliente';
     const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString('pt-BR') : '';
     linhas.push(`${autor}${timestamp ? ' [' + timestamp + ']' : ''}: ${msg.texto}`);
   }
-
   const rodape = [
     ``,
     `ANÁLISE:`,
-    `- O que o cliente JÁ mencionou?`,
+    `- O que o cliente JÁ mencionou? (itens, ajudante, local, bairros, distância, etc.)`,
     `- O que ainda FALTA coletar?`,
-    `- Qual resposta NATURAL e INTELIGENTE agora?`,
+    `- Qual a melhor resposta NATURAL e INTELIGENTE agora?`,
     ``,
-    `Retorne APENAS o JSON (sem markdown).`
+    `Gere a próxima resposta seguindo estritamente as regras, sendo ULTRA INTELIGENTE e NATURAL.`,
+    `Retorne APENAS o JSON (sem markdown, sem explicações).`
   ];
-
   return [...cabecalho, ...linhas, ...rodape].join('\n');
 }
 
@@ -637,13 +633,10 @@ function parsearRespostaGroq(respostaTexto) {
   try {
     let texto = String(respostaTexto || '').trim();
     
-    // Remove markdown code blocks (```json ... ```)
     texto = texto.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
     
-    // Tenta encontrar JSON (pode estar no início, meio ou fim)
     let match = texto.match(/\{[\s\S]*\}/);
     if (!match) {
-      // Fallback: procura qualquer JSON na string
       match = texto.match(/\{.*\}/s);
     }
     if (!match) throw new Error('JSON não encontrado na resposta');
@@ -672,38 +665,30 @@ function parsearRespostaGroq(respostaTexto) {
   }
 }
 
-// Fallback robusto de telefone (BR). Extrai do texto bruto
-// ATUALIZADO: Usa extractPhonesBRStrict do utils.js para validação ultra-rígida
 function extrairTelefoneFallback(texto) {
   try {
     const phones = utils.extractPhonesBRStrict(texto);
-    // Retorna o primeiro telefone válido encontrado (ou null)
     return phones.length > 0 ? phones[0] : null;
   } catch {
     return null;
   }
 }
 
-// Locks por perfil de input
 const VIRTUS_INPUT_LOCKS = new Map();
 function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
 function isVirtusLocked(nome){ return VIRTUS_INPUT_LOCKS.has(nome); }
 
-// Helpers globais de send-lock/contexto
 function getBrowserFromPage(p) { try { return typeof p.browser === 'function' ? p.browser() : null; } catch { return null; } }
 async function acquireSendGuard(p, chatId) { try { const b = getBrowserFromPage(p); if (b) b._sendLock = { active: true, owner: 'virtus', chatId, since: Date.now() }; } catch {} }
 function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b && b._sendLock && b._sendLock.owner === 'virtus') b._sendLock.active = false; } catch {} }
 
-// Sanitização (IA) anti-clichê
 function sanitizeIAResponse(texto, historico) {
   let t = String(texto || '').trim();
   
-  // Detecta se já houve saudação anteriormente por parte da IA
   const jaSaudou = Array.isArray(historico)
     ? historico.some(m => m.autor === 'ia' && /\b(bom dia|boa tarde|boa noite|ol[áa]|oii?)\b/i.test(String(m.texto || '')))
     : false;
   
-  // Evita remover saudações amigáveis na primeira resposta
   const cliches = [
     /^sim[,!.\s]/i,
     /^ah[,!.\s]/i,
@@ -716,31 +701,26 @@ function sanitizeIAResponse(texto, historico) {
     t = t.replace(rx, '').trim();
   }
   
-  // Remova "olá/oi" apenas se já houve saudação anteriormente
   if (jaSaudou) {
     t = t.replace(/^ol[áa][,!.\s]/i, '').trim();
     t = t.replace(/^oii?[,!.\s]/i, '').trim();
   }
   
-  // Dedupe: evita repetir exatamente a última resposta da IA
   t = t.replace(/\s{2,}/g, ' ').trim();
   const ultIA = Array.isArray(historico) ? historico.filter(m => m.autor==='ia').slice(-1)[0] : null;
   if (ultIA && typeof ultIA.texto === 'string') {
     const prev = ultIA.texto.trim().toLowerCase();
     const cur = t.trim().toLowerCase();
     if (prev && cur && prev === cur) {
-      // Evita repetir a mesma frase; faz variação mínima sem emoji nem ruído
       t = t + '.';
     }
   }
   if (t.length < 3) {
-    // Nunca força emoji em mensagem curta
     t = 'Ok.';
   }
   return t;
 }
 
-// Log hard de histórico por chatId (em disco, JSONL por chat)
 function chatLogPath(perfil, chatId) {
   return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.jsonl`);
 }
@@ -768,7 +748,6 @@ async function appendIaLine(perfil, chatId, texto) {
   try { await setChatState(perfil, chatId, { chatLogLastTs: obj.timestamp }); } catch {}
 }
 
-// Pipeline de Perguntas - Helpers
 const SECONDARY_FIELDS = [
   'ajudante',
   'saida_tipo',
@@ -799,7 +778,6 @@ function choosePair(qaAsked, qaAnswered) {
   if (pending.length === 0) return [];
   if (pending.length === 1) return pending;
   
-  // Embaralha e pega 2
   const shuffled = [...pending].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, 2);
 }
@@ -815,13 +793,11 @@ function extractAnswersFromHistory(historico) {
   const answers = {};
   const textoCompleto = (historico || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
   
-  // Ajudante
   if (/precis[oa]|ajudante|ajuda|helper/i.test(textoCompleto)) {
     if (/sim|yes|precis[oa]/i.test(textoCompleto)) answers.ajudante = 'sim';
     else if (/n[ãa]o|no|não preciso/i.test(textoCompleto)) answers.ajudante = 'não';
   }
   
-  // Saída/Destino tipo
   if (/sa[íi]da.*(casa|apartamento|apto)/i.test(textoCompleto)) {
     const match = textoCompleto.match(/sa[íi]da.*?(casa|apartamento|apto)/i);
     if (match) answers.saida_tipo = match[1].toLowerCase().includes('casa') ? 'casa' : 'apartamento';
@@ -831,7 +807,6 @@ function extractAnswersFromHistory(historico) {
     if (match) answers.destino_tipo = match[1].toLowerCase().includes('casa') ? 'casa' : 'apartamento';
   }
   
-  // Elevador
   if (/sa[íi]da.*elevador/i.test(textoCompleto)) {
     if (/sim|yes|tem/i.test(textoCompleto)) answers.saida_elevador = 'sim';
     else if (/n[ãa]o|no|sem/i.test(textoCompleto)) answers.saida_elevador = 'não';
@@ -841,7 +816,6 @@ function extractAnswersFromHistory(historico) {
     else if (/n[ãa]o|no|sem/i.test(textoCompleto)) answers.destino_elevador = 'não';
   }
   
-  // Bairros
   const bairroMatch = textoCompleto.match(/(?:bairro|bairros?)[\s:]*([^,\.\n]+)/i);
   if (bairroMatch) {
     const parts = bairroMatch[1].split(/para|até|destino/i);
@@ -849,153 +823,61 @@ function extractAnswersFromHistory(historico) {
     if (parts[1]) answers.bairro_destino = parts[1].trim();
   }
   
-  // Itens
   const itensMatch = textoCompleto.match(/(?:itens?|coisas?|m[óo]veis?)[\s:]*([^,\.\n]{10,})/i);
   if (itensMatch) answers.itens = itensMatch[1].trim();
   
   return answers;
 }
 
-// Pipeline de Perguntas - Função principal (VERSÃO ULTRA-BLINDADA)
 const FLOW_ORDER = [
+  'telefone',       // WhatsApp com DDD — prioridade absoluta
   'itens',
-  'bairro_saida',
-  'bairro_destino',
   'ajudante',
   'saida_tipo',
   'destino_tipo',
-  'telefone'
+  'bairro_saida',
+  'bairro_destino'
 ];
 
 const FIELD_PROMPTS = {
-  telefone:        'Pode me passar seu WhatsApp? O motorista chama por lá.',
+  telefone:        'Me passa teu WhatsApp com DDD? O motorista chama por lá.',
   itens:           'O que você precisa transportar? (ex.: 2 camas, 10 sacolas)',
   ajudante:        'Você precisa de ajudante?',
   saída_tipo:      'O local de saída é casa ou apartamento?',
   saida_tipo:      'O local de saída é casa ou apartamento?',
   destino_tipo:    'O destino é casa ou apartamento?',
   bairro_saida:    'Qual bairro de saída?',
-  bairro_destino:  'Qual bairro de destino?',
-  // Pseudo-campo exclusivo do prompt para PRIMEIRA MENSAGEM
-  precisa_servico: 'Precisa de frete?'
+  bairro_destino:  'Qual bairro de destino?'
 };
 
 function getOrInitFlowState(stPrev) {
   const fs = stPrev && stPrev.flow ? stPrev.flow : {
     greeted: false,
     asked: {},
-    answered: {},
-    askedTimes: {}
+    answered: {}
   };
   fs.asked = fs.asked || {};
   fs.answered = fs.answered || {};
-  fs.askedTimes = fs.askedTimes || {};
   return fs;
 }
 
-function devePedirWhatsApp(historicoConversa, flow) {
-  try {
-    const utils = require('./utils.js');
-    flow = flow || {};
-    flow.answered = flow.answered || {};
-    
-    const hasPhone = utils.isValidBRPhoneWithDDD((flow.answered.telefone || '').toString());
-    
-    // Usar APENAS a última mensagem do cliente para priceAsk
-    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-    const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-    const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
-    
-    const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
-    const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
-    const coreAnswered = !!(flow.answered.itens && flow.answered.bairro_saida && flow.answered.bairro_destino);
-    
-    const iaMsgs = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
-    const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '') : '';
-    const askedWhatsLast = /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(lastIA);
-    
-    // Bloqueios absolutos
-    if (hasPhone) return false;
-    // UMA VEZ SÓ: depois de pedir, nunca mais nesta conversa
-    if (flow.phoneAskedOnce === true) return false;
-    // Nunca em mensagens consecutivas
-    if (flow.lastAsked === 'telefone' || askedWhatsLast) return false;
-    
-    // Se a IA perguntou um CAMPO e o cliente acaba de fornecer DADO (resposta sem '?'), não pedir WhatsApp agora
-    const lastIAText = lastIA.toLowerCase();
-    const iaAskedField =
-      /qual\s+o?\s*bairro.*sa[ií]da/.test(lastIAText) ||
-      /qual\s+o?\s*bairro.*destino/.test(lastIAText) ||
-      /precisa\s+de\s+ajudante/.test(lastIAText) ||
-      /sa[ií]da.*(casa|apartamento|apto|ap)/.test(lastIAText) ||
-      /destino.*(casa|apartamento|apto|ap)/.test(lastIAText) ||
-      /(o que voc[eê]\s+precisa\s+transportar|quais\s+itens)/.test(lastIAText);
-    
-    const clienteRespondeuDadoAgora = lastCliText && !/\?\s*$/.test(lastCliText);
-    if (iaAskedField && clienteRespondeuDadoAgora) return false;
-    
-    // TRÊS GATILHOS
-    if (askedPrice) return true;
-    if (coreAnswered) return true;
-    if (allNonPhoneAnswered) return true;
-    
-    return false;
-  } catch {
-    return false;
+function pickNextMissingField(flow) {
+  for (const f of FLOW_ORDER) {
+    if (!flow.answered[f]) return f;
   }
-}
-
-function pickNextMissingField(flow, historicoConversa) {
-  flow.askedTimes = flow.askedTimes || {};
-  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
-  
-  // Se o cliente acabou de fornecer dados, priorize continuar coletando (sem WhatsApp agora)
-  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-  const lastCLI = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-  const forneceuDadoAgora = /\b(cama|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|cadeira|m[óo]vel|m[óo]veis|transportar|levar|preciso levar|preciso transportar|bairro|ajudante|ajuda|casa|apartamento|apto|ap\b)\b/i.test(lastCLI);
-  
-  // 1) Se cliente forneceu dados e ainda faltam campos, siga a coleta respeitando askedTimes (no máximo 1 vez por campo)
-  if (forneceuDadoAgora) {
-    for (const f of nonPhone) {
-      if (!flow.answered[f] && (flow.askedTimes[f] || 0) < 1) {
-        return f;
-      }
-    }
-  }
-  
-  // 2) Verifica se deve pedir WhatsApp (SEM o atalho por "allNonPhoneAnswered")
-  const askPhoneNow = devePedirWhatsApp(historicoConversa, flow);
-  if (askPhoneNow && !forneceuDadoAgora) {
-    if (flow.lastAsked !== 'telefone') {
-      return 'telefone';
-    }
-  }
-  
-  // 3) Se ainda faltam campos não-telefone, pergunte o PRÓXIMO que ainda não foi perguntado (max 1x)
-  for (const f of nonPhone) {
-    if (!flow.answered[f] && (flow.askedTimes[f] || 0) < 1) {
-      return f;
-    }
-  }
-  
-  // 4) Nada a perguntar (ou já perguntamos 1x cada) — retorna null
   return null;
 }
 
 function applyExtractedAnswers(flow, historicoConversa, utils) {
   const texto = (historicoConversa || []).map(m => (m && m.texto) || '').join(' ').toLowerCase();
 
-  // 1) Telefone — robusto: tenta extrair direto, depois combinar DDD + número soltos
   const phones = utils.extractPhonesBRStrict(texto);
   if (phones && phones.length) {
     flow.answered.telefone = phones[0];
   } else {
-    // Combina "ddd 48" + "91985634" ou "48 999999999" (ordem variável)
     const t = texto.replace(/[^\d\s]/g, ' ');
-    // padrão: ddd + local
     let m = t.match(/\b(?:ddd\s*)?([1-9]{2})\D*([2-9]\d{7,8})\b/);
     if (!m) {
-      // local + ddd
       m = t.match(/\b([2-9]\d{7,8})\D*(?:ddd\s*)?([1-9]{2})\b/);
     }
     if (m) {
@@ -1008,7 +890,6 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
     }
   }
 
-  // 2) Contextual (pega última pergunta da IA e última resposta do cliente)
   const iaMsgs = (historicoConversa || []).filter(m => m && (m.autor === 'ia' || m.autor === 'sistema'));
   const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
   const ultIA = iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
@@ -1016,14 +897,12 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
   const iaTxt = (ultIA && String(ultIA.texto || '').toLowerCase()) || '';
   const cliTxt = (ultCLI && String(ultCLI.texto || '').trim().toLowerCase()) || '';
 
-  // Helper: decide se resposta do cliente indica 'casa' ou 'apartamento'
   const casaOuAp = (txt) => {
     if (/\b(casa)\b/i.test(txt)) return 'casa';
     if (/\b(apto|ap|apart|apartamento)\b/i.test(txt)) return 'apartamento';
     return null;
   };
 
-  // Helper: bairro plausível (1 a 3 palavras sem números, ex.: "pelotas", "aririu")
   const talvezBairro = (txt) => {
     const clean = txt.replace(/[^\p{L}\s-]/gu, '').trim(); // letras/hífens/espaços
     if (!clean) return null;
@@ -1034,25 +913,21 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
     return null;
   };
 
-  // 2a) Ajudante (se a última pergunta IA foi sobre ajudante)
   if (/ajudante|precisa de ajuda/i.test(iaTxt)) {
     if (/\b(sim|preciso|quero)\b/i.test(cliTxt)) flow.answered.ajudante = 'sim';
     else if (/\b(n[aã]o|nao|sem)\b/i.test(cliTxt)) flow.answered.ajudante = 'não';
   }
 
-  // 2b) Saída casa/apto
   if (/sa[ií]da.*casa.apart/i.test(iaTxt) || /sa[ií]da.(casa|apto|apart)/i.test(iaTxt)) {
     const val = casaOuAp(cliTxt);
     if (val) flow.answered.saida_tipo = val;
   }
 
-  // 2c) Destino casa/apto
   if (/destino.*casa.apart/i.test(iaTxt) || /destino.(casa|apto|apart)/i.test(iaTxt)) {
     const val = casaOuAp(cliTxt);
     if (val) flow.answered.destino_tipo = val;
   }
 
-  // 2d) Bairro (saída/destino) — se a última pergunta foi bairro de saída/destino e cliente respondeu texto curto
   if (/bairro.*sa[ií]da/i.test(iaTxt)) {
     const b = talvezBairro(cliTxt);
     if (b) flow.answered.bairro_saida = b;
@@ -1062,7 +937,6 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
     if (b) flow.answered.bairro_destino = b;
   }
 
-  // 3) Varreduras globais (fallbacks)
   if (/ajudante|ajuda/i.test(texto)) {
     if (/\b(sim|precis[oa]|quero)\b/i.test(texto)) flow.answered.ajudante = flow.answered.ajudante || 'sim';
     else if (/\b(n[aã]o|nao|sem)\b/i.test(texto)) flow.answered.ajudante = flow.answered.ajudante || 'não';
@@ -1078,33 +952,13 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
     const clean = (bx[2] || '').trim();
     if (clean && !flow.answered.bairro_saida) flow.answered.bairro_saida = clean;
   }
-  // Detecção de itens - mais robusta
-  if (/transportar|levar|itens?|coisas?|m[óo]veis?|mudan[çc]a|cama|camas|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|mesas|cadeira|cadeiras|m[óo]vel|m[óo]veis/i.test(texto)) {
-    // Se ainda não tem itens coletados, pega o contexto relevante
-    if (!flow.answered.itens) {
-      // Tenta pegar a parte mais relevante (ex: "preciso levar uma cama")
-      const match = texto.match(/(?:preciso|quero|vou|precisar|transportar|levar).{0,100}(?:cama|camas|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|mesas|cadeira|cadeiras|m[óo]vel|m[óo]veis|itens?|coisas?)/i);
-      if (match) {
-        flow.answered.itens = match[0].trim();
-      } else {
-        const snippet = texto.slice(0, 180);
-        flow.answered.itens = snippet;
-      }
-    }
+  if (/transportar|levar|itens?|coisas?|m[óo]veis?|mudan[çc]a/i.test(texto)) {
+    const snippet = texto.slice(0, 180);
+    flow.answered.itens = flow.answered.itens || snippet;
   }
 
-  // 4) Data/hora — sem nunca perguntar (apenas extrai)
   const dataHora = extractDataHoraPTBR(texto);
   flow.answered.data_hora = dataHora || flow.answered.data_hora || 'agora';
-
-  // Sinaliza que precisamos do DDD se detectamos número local (8-9 dígitos) sem DDD
-  if (!flow.answered.telefone) {
-    const mLocal = texto.match(/\b([2-9]\d{7,8})\b/);
-    if (mLocal && mLocal[1]) {
-      flow.meta = flow.meta || {};
-      flow.meta.needDDD = true;
-    }
-  }
 
   return flow;
 }
@@ -1125,7 +979,6 @@ function extractDataHoraPTBR(texto) {
     else if (/\bamanh[ãa]\b/.test(t)) diaRef = dia(1);
     else if (/\bdepois de amanh[ãa]\b/.test(t)) diaRef = dia(2);
 
-    // Hora: "14h", "14:00", "às 14", "as 14", "2 da tarde", "dua tarde", "de manha/demanha", "de noite"
     let hora = null;
     const mHora = t.match(/\b(\d{1,2})(?:[:h]\s?(\d{2}))?\b/);
     if (mHora) {
@@ -1135,7 +988,6 @@ function extractDataHoraPTBR(texto) {
         hora = `${h}h`;
         if (mm && mm > 0) hora = `${h}:${String(mm).padStart(2,'0')}`;
       }
-      // "da tarde/noite" => normaliza para 24h
       if ((/\bda tarde\b/.test(t) || /\btarde\b/.test(t)) && h >= 1 && h <= 11) hora = `${h+12}h`;
       if ((/\bda noite\b/.test(t) || /\bnoite\b/.test(t)) && h >= 1 && h <= 11) hora = `${h+12}h`;
     }
@@ -1160,119 +1012,94 @@ function buildNaturalPrefix(ultimaDoCliente) {
   if (!ultimaDoCliente) return '';
   const t = String(ultimaDoCliente || '').trim().toLowerCase();
 
-  // Cumprimentos/estado
   if (/tudo bem|td bem|como est[aá]/i.test(t)) return 'Tudo bem, sim. ';
 
-  // Evitar confirmar o mesmo termo (sem eco)
   if (/faz frete|fazem frete|dispon[ií]vel|voc[eê] faz|trabalha/i.test(t)) return '';
   if (/pre[cç]o|quanto custa|or[çc]amento|valor|custa/i.test(t)) return '';
   if (/ajudante|ajuda/i.test(t)) return '';
   if (/casa|apartamento|apto|ap\b/i.test(t)) return '';
   if (/bairro/i.test(t)) return '';
 
-  // Mensagens sobre itens: evite repetir "transportamos"
   if (/cama|sof[aá]|guarda-?roupa|m[óo]vel|geladeira|fog[aã]o|mudan[çc]a|itens|coisas/i.test(t)) return '';
 
-  // Caso genérico: confirme de forma neutra, sem eco
   return 'Entendido. ';
 }
 
 async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
   const utils = require('./utils.js');
   const flow = getOrInitFlowState(stPrev);
-  flow.meta = flow.meta || {};
-  flow.meta.needDDD = !!flow.meta.needDDD; // flag se só veio o número sem DDD
+  flow.meta = flow.meta || { askWhatsCount: 0, lastAskAt: 0 };
   applyExtractedAnswers(flow, historicoConversa, utils);
 
   const textoCompleto = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
+  const pediuPreco = /\b(pre[cç]o|valor|or[çc]amento|custa|quanto)\b/i.test(textoCompleto);
   const whatsappValido = utils.isValidBRPhoneWithDDD((flow.answered && flow.answered.telefone) || '');
 
-  // Se precisamos só do DDD, peça uma única vez
-  if (!whatsappValido && flow.meta.needDDD) {
+  if (pediuPreco && !whatsappValido) {
+    flow.meta.askWhatsCount++;
+    flow.meta.lastAskAt = Date.now();
+    const variantes = [
+      'O orçamento é passado pelo motorista no WhatsApp. Pode me enviar seu número com DDD?',
+      'Te passo pro motorista te chamar por WhatsApp e passar os valores. Qual seu número (com DDD)?',
+      'O motorista informa os valores pelo Whats. Me passa teu WhatsApp com DDD?'
+    ];
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    flow.lastAsked = 'telefone';
-    flow.lastAskedAt = Date.now();
-    flow.phoneAskedOnce = true;
+    const msg = `${prefixo}${variantes[flow.meta.askWhatsCount % variantes.length]}`;
+    flow.asked.telefone = true;
     return {
-      resposta: `${prefixo}Preciso do DDD também, pode me passar o número completo?`,
+      resposta: msg,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked || {}),
+      qaAsked: Object.keys(flow.asked),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  // Próxima pergunta
-  const next = pickNextMissingField(flow, historicoConversa);
-  const askPhoneNow = (next === 'telefone');
-
-  // Se é hora de pedir Whatsapp
-  if (askPhoneNow && !whatsappValido) {
-    // BLOQUEIO ABSOLUTO: Se já pediu WhatsApp uma vez, NUNCA pedir de novo
-    if (flow.phoneAskedOnce === true) {
+  const next = pickNextMissingField(flow);
+  if (!whatsappValido && flow.meta.askWhatsCount < 2) {
+    flow.meta.askWhatsCount++;
+    flow.meta.lastAskAt = Date.now();
+    const variantes = [
+      'Se puder, me passa teu WhatsApp com DDD? Assim o motorista te chama rapidinho.',
+      'Me manda teu número de WhatsApp com DDD, por favor? O motorista chama por lá.'
+    ];
+    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
+    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const textoWhats = `${prefixo}${variantes[(flow.meta.askWhatsCount - 1) % variantes.length]}`;
+    
+    if (next && next !== 'telefone') {
+      flow.asked[next] = true;
+      const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
       return {
-        resposta: null,
+        resposta: `${textoWhats} ${pergunta}`,
         telefone_extraido: null,
         finalizado: false,
         dados: flow.answered,
-        qaAsked: Object.keys(flow.asked || {}),
+        qaAsked: Object.keys(flow.asked),
         qaAnswered: flow.answered,
         flow
       };
     }
     
-    // Não repetir caso a última pergunta já tenha sido telefone
-    if (flow.lastAsked === 'telefone') {
-      return {
-        resposta: null,
-        telefone_extraido: null,
-        finalizado: false,
-        dados: flow.answered,
-        qaAsked: Object.keys(flow.asked || {}),
-        qaAnswered: flow.answered,
-        flow
-      };
-    }
-
-    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
-    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    flow.asked = flow.asked || {};
-    flow.asked.telefone = true;
-    flow.lastAsked = 'telefone';
-    flow.lastAskedAt = Date.now();
-    flow.phoneAskedOnce = true;
-    const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
-    const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
-    const variante = allNonPhoneAnswered
-      ? 'Perfeito! Já temos todos os dados. Agora só falta seu WhatsApp para o motorista te enviar o orçamento. Pode me passar?'
-      : 'O motorista passa o orçamento e combina o horário pelo WhatsApp. Pode me passar seu WhatsApp?';
-
     return {
-      resposta: `${prefixo}${variante}`,
+      resposta: textoWhats,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked || {}),
+      qaAsked: Object.keys(flow.asked),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  // Próxima pergunta (não-telefone)
-  if (next && next !== 'telefone') {
-    flow.asked = flow.asked || {};
+  if (next) {
     flow.asked[next] = true;
-    flow.askedTimes = flow.askedTimes || {};
-    flow.askedTimes[next] = (flow.askedTimes[next] || 0) + 1;
-    flow.lastAsked = next;
-    flow.lastAskedAt = Date.now();
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
     const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
-
     return {
       resposta: `${prefixo}${pergunta}`,
       telefone_extraido: whatsappValido ? flow.answered.telefone : null,
@@ -1284,52 +1111,31 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     };
   }
 
-  // Todos os dados já coletados e ainda não tem WhatsApp
   if (!whatsappValido) {
-    // Se já pedimos uma vez nesta conversa, NÃO pedir novamente
-    if (flow.phoneAskedOnce === true || flow.lastAsked === 'telefone') {
-      return {
-        resposta: null,
-        telefone_extraido: null,
-        finalizado: false,
-        dados: flow.answered,
-        qaAsked: Object.keys(flow.asked || {}),
-        qaAnswered: flow.answered,
-        flow
-      };
-    }
-    
+    flow.meta.askWhatsCount++;
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    flow.asked = flow.asked || {};
-    flow.asked.telefone = true;
-    flow.lastAsked = 'telefone';
-    flow.lastAskedAt = Date.now();
-    flow.phoneAskedOnce = true;
-    
     return {
-      resposta: `${prefixo}Perfeito! Já temos todos os dados. Agora só falta seu WhatsApp para o motorista te enviar o orçamento. Pode me passar?`,
+      resposta: `${prefixo}Faltou só seu WhatsApp com DDD pra eu te passar pro motorista. Pode me enviar?`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked || {}),
+      qaAsked: Object.keys(flow.asked),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  // Nada a perguntar: finaliza se telefone válido
   return {
     resposta: null,
     telefone_extraido: flow.answered.telefone || null,
-    finalizado: !!whatsappValido,
+    finalizado: true,
     dados: flow.answered,
-    qaAsked: Object.keys(flow.asked || {}),
+    qaAsked: Object.keys(flow.asked),
     qaAnswered: flow.answered,
     flow
   };
 }
-// Funções de enforcement (governança)
 function stripPhoneConfirmation(txt) {
   let t = String(txt || '');
   t = t.replace(/me\s+confirmou\s+o\s+whats(app)?\s+como.*\?/ig, '');
@@ -1356,11 +1162,7 @@ function enforceGovRulesOnText(txt, { alreadyGreeted = true } = {}) {
   let s = String(txt || '').trim();
   s = stripPhoneConfirmation(s);
   s = ensureSingleQuestion(s);
-  // CRÍTICO: Só remove saudação repetida se for EXATAMENTE no início e já foi dada
-  // Não remove se a saudação faz parte de uma resposta natural (ex: "Oi, boa tarde! Tudo ótimo!")
   if (alreadyGreeted) {
-    // Só remove se for uma saudação isolada no início (ex: "Boa tarde! Me passa...")
-    // Não remove se faz parte de uma resposta (ex: "Oi, boa tarde! Tudo ótimo!")
     const saudacaoIsolada = /^(bom dia|boa tarde|boa noite)[,!\s-]+(me|qual|o|a|você|teu|seu)/i;
     if (saudacaoIsolada.test(s)) {
       s = removeRepeatedGreeting(s);
@@ -1392,14 +1194,11 @@ async function clearComposerIfAny(p, campo) {
   } catch {}
 }
 
-// Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
 
-// Debounce de log "Browser morto, não é possível garantir page." — 1x/60s por perfil
 const virtusDeadLogTimes = {}; // { [nome]: timestamp }
 
-// TTL periódica para virtusDeadLogTimes (limpeza de entradas >24h)
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of Object.entries(virtusDeadLogTimes)) {
@@ -1407,7 +1206,6 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-// Log de issues (robusto; falha silenciosa se o módulo não existir)
 let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
 
@@ -1427,18 +1225,15 @@ function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// Adicionado helper local para registrar issues
 async function logIssue(nome, type, message) {
   try {
     if (issues && typeof issues.append === 'function') {
       await issues.append(nome, type, message);
     }
   } catch {
-    // silencioso
   }
 }
 
-// ====== INÍCIO: Auxiliares Notificador/Messenger ======
 function getSetAguardando(nomePerfil) {
   if (!aguardandoRespostaMap.has(nomePerfil)) aguardandoRespostaMap.set(nomePerfil, new Set());
   return aguardandoRespostaMap.get(nomePerfil);
@@ -1447,10 +1242,8 @@ function getSetAguardando(nomePerfil) {
 async function identificarTipoServico(nomePerfil) {
   try {
     const man = await manifestStore.read(nomePerfil).catch(()=>null);
-    // Se tiver flags específicas:
     if (man && man.automoveis === true) return 'automoveis';
     if (man && man.imoveis === true) return 'imoveis';
-    // Se usa robeMode 'veiculos' => mapeia para automoveis
     if (man && String(man.robeMode || '').toLowerCase() === 'veiculos') return 'automoveis';
     return 'fretes';
   } catch {
@@ -1487,7 +1280,6 @@ function adicionarChatParaEnvio(nomePerfil, dadosChat) {
   const aguard = getSetAguardando(nomePerfil);
   try { aguard.add(dadosChat.chatId); } catch {}
 
-  // agenda envio em lote
   setTimeout(() => enviarLoteNotificador(nomePerfil), NOTIFICADOR_ENVIO_LOTE_MS);
 }
 
@@ -1527,7 +1319,6 @@ async function enviarLoteNotificador(nomePerfil) {
         body: JSON.stringify(payload)
       });
       
-      // Lê response uma única vez (body só pode ser lido uma vez)
       const responseText = await response.text().catch(() => '');
       let responseData = null;
       try {
@@ -1548,17 +1339,14 @@ async function enviarLoteNotificador(nomePerfil) {
           response: responseData,
           responseText: responseText.substring(0, 500) // Primeiros 500 chars
         });
-        // requeue se falha
         fila.push(dadosChat);
       }
     } catch (e) {
       logger.error('[NOTIFICADOR] Falha ao enviar chat', { nomePerfil, chatId: dadosChat.chatId, error: e && e.message || e });
-      // requeue se falha
       fila.push(dadosChat);
     }
   }));
 
-  // Se ainda tem mais, agenda próximo lote
   if (filaEnviarNotificador.get(nomePerfil).length > 0) {
     setTimeout(() => enviarLoteNotificador(nomePerfil), NOTIFICADOR_ENVIO_LOTE_MS);
   }
@@ -1574,13 +1362,10 @@ function iniciarPollingRespostas(nomePerfil) {
         const perfilKeySet = getPendingSet(nomePerfil);
         
         for (const resp of data.respostas) {
-          // Sanitiza resposta antes de processar
           const respostaSan = sanitizarResposta(resp.resposta || '');
           
-          // Gera chave única para deduplicação
           const key = `${resp.chat_id}||${hashResposta(respostaSan)}`;
           
-          // Dedup: se já em fila/pendente, ignore
           if (perfilKeySet.has(key)) {
             logger.debug('[NOTIFICADOR] Resposta duplicada ignorada', { nomePerfil, chatId: resp.chat_id, key });
             continue;
@@ -1589,7 +1374,6 @@ function iniciarPollingRespostas(nomePerfil) {
           if (!filaRespostas.has(nomePerfil)) filaRespostas.set(nomePerfil, []);
           filaRespostas.get(nomePerfil).push(resp);
           
-          // Empilha para envio no Messenger, sanitizando e incluindo key
           if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
           filaEnvioMessenger.get(nomePerfil).push({ 
             chatId: resp.chat_id, 
@@ -1597,7 +1381,6 @@ function iniciarPollingRespostas(nomePerfil) {
             key 
           });
           
-          // Marca como pendente local (anti-duplicado)
           perfilKeySet.add(key);
           
           logger.debug('[NOTIFICADOR] Resposta adicionada à fila', { nomePerfil, chatId: resp.chat_id, key });
@@ -1627,23 +1410,19 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     if (!proximo) return;
 
     try {
-      // Sanitiza resposta antes de enviar (garantia extra)
       const respostaFinal = sanitizarResposta(proximo.resposta);
       
-      // envia de forma segura (abre chat, pega composer, envia)
       if (enviarRespostaMessengerSeguraFn) {
         await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
       }
       ultimaRespostaMessenger.set(nomePerfil, Date.now());
 
-      // marca histórico respondido (somente agora!)
       if (marcarRespondidoFn) {
         await marcarRespondidoFn(proximo.chatId);
       } else {
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
       
-      // NOVO: Enviar ACK ao Notificador após confirmação de envio
       try {
         await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
           method: 'POST',
@@ -1661,10 +1440,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         });
       }
       
-      // remove do set aguardando
       try { const setA = getSetAguardando(nomePerfil); setA.delete(proximo.chatId); } catch {}
 
-      // Libera a chave pending dedup (permite reprocessar se houver nova resposta diferente)
       try {
         if (proximo.key) {
           const setPend = getPendingSet(nomePerfil);
@@ -1677,7 +1454,6 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     } catch (e) {
       logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
       
-      // Mesmo em erro, libere a chave para permitir reprocessar em próxima iteração
       try {
         if (proximo.key) {
           const setPend = getPendingSet(nomePerfil);
@@ -1691,8 +1467,6 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
   filaEnvioTimers.set(nomePerfil, id);
 }
 
-// enviarRespostaMessengerSegura será implementada dentro do contexto do startVirtus
-
 async function marcarRespondido(nomePerfil, chatId) {
   try {
     const agoraTs = agoraEpoch();
@@ -1701,27 +1475,22 @@ async function marcarRespondido(nomePerfil, chatId) {
     try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
     historicoLocal[chatId] = agoraTs;
     await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
-    // Nota: setResponded só está disponível dentro do contexto do Virtus
-    // Esta função é um fallback genérico
   } catch (e) {
     logger.error('[VIRTUS] marcarRespondido error', { nomePerfil, chatId, error: e && e.message || e });
   }
 }
 
-// Extrai a URL do classificado diretamente da pagina do chat
 async function extrairUrlClassificado(page, chatId) {
   try {
     const url = await page.evaluate(() => {
       const fixAbsolute = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
       const anchors = Array.from(document.querySelectorAll('a'));
-      // Prioriza /marketplace/item/
       for (const a of anchors) {
         const href = a.getAttribute('href') || a.href || '';
         if (href && href.includes('/marketplace/item/')) {
           if (!href.includes('/marketplace/t/')) return fixAbsolute(href);
         }
       }
-      // Fallback: links do marketplace que não são t/ e não são profile
       for (const a of anchors) {
         const href = a.getAttribute('href') || a.href || '';
         if (href && href.includes('/marketplace/') && !href.includes('/marketplace/t/') && !href.includes('/marketplace/profile/')) {
@@ -1734,7 +1503,6 @@ async function extrairUrlClassificado(page, chatId) {
   } catch { return null; }
 }
 
-// Extrai TODO o histórico da conversa (mensagens do cliente e da IA) - VERSÃO CORRIGIDA
 async function extrairHistoricoConversa(page) {
   try {
     const historico = await page.evaluate(() => {
@@ -1786,7 +1554,6 @@ async function extrairHistoricoConversa(page) {
           const txt = (r.innerText || r.textContent || '').trim();
           if (!txt) continue;
 
-          // Heurística robusta: se for bolha do próprio usuário => alinhamento à direita/flex-end
           let isMine = false;
           try {
             const st = window.getComputedStyle(r);
@@ -1795,11 +1562,9 @@ async function extrairHistoricoConversa(page) {
             }
           } catch {}
 
-          // Fallback textual
           const n = norm(txt);
           if (/\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(n)) isMine = true;
 
-          // Timestamp real pelo abbr mais próximo
           let ts = 0;
           try {
             const ab = r.querySelector('abbr[aria-label]');
@@ -1827,7 +1592,6 @@ async function extrairHistoricoConversa(page) {
         } catch {}
       }
 
-      // Ordena por timestamp ascendente
       out.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
       return out;
     });
@@ -1838,25 +1602,12 @@ async function extrairHistoricoConversa(page) {
   }
 }
 
-// Formata localização no padrão "Cidade (UF)" para a planilha Google
-// ====== FUNÇÕES AUXILIARES: BURST TIMER, PACE E DEDUP ======
-
-// Map para armazenar timers de quiet window por chat
 const quietWindowTimers = new Map(); // chatId -> { timer, lastReset }
 
-/**
- * Aguarda uma janela de quietude (sem novas mensagens do cliente) antes de responder
- * @param {string} nome - Nome do perfil
- * @param {string} chatId - ID do chat
- * @param {number} quietMs - Tempo de quietude necessário em ms (padrão 20000 = 20s)
- * @param {object} opts - { page, getHistoricoFn }
- * @returns {Promise<boolean>} - true se passou o período de quietude, false se foi interrompido
- */
 async function waitQuietWindow(nome, chatId, quietMs = 20000, { page, getHistoricoFn } = {}) {
   const key = `${nome}:${chatId}`;
   const now = Date.now();
   
-  // Captura timestamp da última mensagem do cliente no início
   let lastClientTs = 0;
   if (getHistoricoFn && page) {
     try {
@@ -1868,13 +1619,11 @@ async function waitQuietWindow(nome, chatId, quietMs = 20000, { page, getHistori
     } catch {}
   }
   
-  // Se já existe um timer ativo, cancela e reseta
   const existing = quietWindowTimers.get(key);
   if (existing && existing.timer) {
     clearTimeout(existing.timer);
   }
   
-  // Inicia novo timer com verificação periódica
   return new Promise((resolve) => {
     let checkInterval = null;
     const timer = setTimeout(async () => {
@@ -1883,14 +1632,12 @@ async function waitQuietWindow(nome, chatId, quietMs = 20000, { page, getHistori
       resolve(true);
     }, quietMs);
     
-    // Verifica periodicamente se houve nova mensagem (a cada 2s)
     checkInterval = setInterval(async () => {
       if (getHistoricoFn && page) {
         try {
           const historicoAtual = await getHistoricoFn();
           const ultimaCliente = historicoAtual && historicoAtual.filter(m => m.autor === 'cliente').pop();
           if (ultimaCliente && ultimaCliente.timestamp) {
-            // Se houve nova mensagem após o início do timer, cancela e rejeita
             if (ultimaCliente.timestamp > lastClientTs) {
               if (checkInterval) clearInterval(checkInterval);
               clearTimeout(timer);
@@ -1906,18 +1653,12 @@ async function waitQuietWindow(nome, chatId, quietMs = 20000, { page, getHistori
   });
 }
 
-/**
- * Calcula o pace (velocidade) do cliente baseado no histórico
- * @param {Array} historico - Histórico de mensagens
- * @returns {number} - Delay em ms (5-15s padrão, até 25s se cliente é lento)
- */
 function calcularPaceCliente(historico) {
   if (!historico || !Array.isArray(historico)) return randomBetween(5000, 15000);
   
   const mensagensCliente = historico.filter(m => m.autor === 'cliente');
   if (mensagensCliente.length < 2) return randomBetween(5000, 15000);
   
-  // Calcula intervalo médio entre mensagens do cliente
   const intervalos = [];
   for (let i = 1; i < mensagensCliente.length; i++) {
     const prev = mensagensCliente[i - 1].timestamp || 0;
@@ -1929,14 +1670,11 @@ function calcularPaceCliente(historico) {
   
   const mediaIntervalo = intervalos.reduce((a, b) => a + b, 0) / intervalos.length;
   
-  // Se cliente responde rápido (< 10s), usa delay padrão (5-15s)
-  // Se cliente responde lento (> 30s), usa delay maior (15-25s)
   if (mediaIntervalo < 10000) {
     return randomBetween(5000, 15000);
   } else if (mediaIntervalo > 30000) {
     return randomBetween(15000, 25000);
   } else {
-    // Interpolação linear entre 5-15s e 15-25s
     const ratio = (mediaIntervalo - 10000) / 20000; // 0 a 1
     const minDelay = 5000 + (ratio * 10000); // 5s a 15s
     const maxDelay = 15000 + (ratio * 10000); // 15s a 25s
@@ -1944,12 +1682,6 @@ function calcularPaceCliente(historico) {
   }
 }
 
-/**
- * Deduplicação rigorosa: verifica se a resposta é muito similar às últimas 3 respostas IA
- * @param {string} respostaNova - Nova resposta gerada
- * @param {Array} historico - Histórico de mensagens
- * @returns {string} - Resposta ajustada se necessário (com variação forçada)
- */
 function aplicarDedupResposta(respostaNova, historico) {
   if (!historico || !Array.isArray(historico)) return respostaNova;
   
@@ -1962,18 +1694,14 @@ function aplicarDedupResposta(respostaNova, historico) {
   
   const respostaNorm = respostaNova.trim().toLowerCase();
   
-  // Verifica similaridade (se > 90% similar, apenas loga - não força variação genérica)
-  // A IA deve criar respostas únicas naturalmente, não forçar prefixos genéricos
   for (const respAntiga of respostasIA) {
     const similaridade = calcularSimilaridade(respostaNorm, respAntiga);
     if (similaridade > 0.9) {
-      // Apenas loga - não força variação genérica que torna robótico
       logger.warn('[DEDUP] Resposta muito similar detectada - IA deve criar resposta mais única', { 
         similaridade: Math.round(similaridade * 100) + '%',
         respostaAntiga: respAntiga.substring(0, 50),
         respostaNova: respostaNorm.substring(0, 50)
       });
-      // Retorna a resposta original - confia na IA para criar respostas únicas
       return respostaNova;
     }
   }
@@ -1981,23 +1709,16 @@ function aplicarDedupResposta(respostaNova, historico) {
   return respostaNova;
 }
 
-/**
- * Calcula similaridade entre duas strings (0 a 1)
- */
 function calcularSimilaridade(str1, str2) {
   if (!str1 || !str2) return 0;
   const longer = str1.length > str2.length ? str1 : str2;
   const shorter = str1.length > str2.length ? str2 : str1;
   if (longer.length === 0) return 1.0;
   
-  // Distância de Levenshtein simplificada
   const distancia = levenshteinDistance(str1, str2);
   return 1 - (distancia / longer.length);
 }
 
-/**
- * Calcula distância de Levenshtein entre duas strings
- */
 function levenshteinDistance(str1, str2) {
   const matrix = [];
   for (let i = 0; i <= str2.length; i++) {
@@ -2022,39 +1743,29 @@ function levenshteinDistance(str1, str2) {
   return matrix[str2.length][str1.length];
 }
 
-// ====== FIM FUNÇÕES AUXILIARES ======
-
 function formatarLocalizacaoParaPlanilha(localizacao) {
   if (!localizacao) return null;
   
-  // Se já está no formato correto (string "Cidade (UF)"), retorna como está
   if (typeof localizacao === 'string') {
     return localizacao;
   }
   
-  // Se é objeto { cidade, estado }
   if (localizacao && typeof localizacao === 'object') {
     const cidade = (localizacao.cidade || '').trim();
     const estado = (localizacao.estado || '').trim().toUpperCase();
     
     if (cidade && estado) {
-      // Formata: "Cidade (UF)"
       return `${cidade} (${estado})`;
     }
     
-    // Se só tem cidade, retorna cidade
     if (cidade) return cidade;
     
-    // Se só tem estado, retorna estado
     if (estado) return estado;
   }
   
   return null;
 }
-// ====== FIM: Auxiliares Notificador/Messenger ======
 
-// Carrega JSON de atendimento.json (array de respostas randomizáveis)
-// IGNORADO: Respostas agora vêm do Notificador
 let mensagensAtendimento = [];
 
 function agoraEpoch() {
@@ -2063,10 +1774,8 @@ function agoraEpoch() {
 
 const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_respondidos.json');
 
-// === INÍCIO: CONTROLE DE ESTADO DE CHAT (persistido APENAS em disco) ===
 const CHAT_STATE_FILE = (perfil) => path.join(__dirname, '../dados/perfis', perfil, 'chats_state.json');
 
-// Lock de arquivo (com .lck)
 const fileLocks = new Map(); // file -> { pid, timestamp }
 
 async function acquireFileLock(file, timeoutMs = 5000) {
@@ -2083,12 +1792,10 @@ async function acquireFileLock(file, timeoutMs = 5000) {
       fileLocks.set(file, { pid, timestamp });
       return true;
     } catch (e) {
-      // Lock já existe, verifica se está stale (>30s)
       try {
         const lockContent = fsRaw.readFileSync(lockFile, 'utf8');
         const lockData = JSON.parse(lockContent);
         if (Date.now() - lockData.timestamp > 30000) {
-          // Lock stale, remove
           try { fsRaw.unlinkSync(lockFile); } catch {}
           continue;
         }
@@ -2183,7 +1890,6 @@ async function setChatState(perfil, chatId, patch) {
   } catch {}
 }
 
-// Estados aceitos:
 const CHAT_STATES = Object.freeze({
   PENDENTE: 'pendente',
   COLETANDO: 'coletando_localizacao',
@@ -2195,18 +1901,13 @@ const CHAT_STATES = Object.freeze({
 });
 
 const SENT_COOLDOWN_MS = 60 * 1000; // mínimo de 60s
-// === FIM: CONTROLE DE ESTADO DE CHAT ===
 
-// ====== INÍCIO: Config Probe e TTL de Revalidação ======
 const PROBE_RECHECK_MIN_MS = parseInt(process.env.VIRTUS_PROBE_RECHECK_MIN_MS || '60000', 10);  // mínimo entre enfileiramentos (anti-flood), default 60s
 const PROBE_FORCE_OPEN_MS  = parseInt(process.env.VIRTUS_PROBE_FORCE_OPEN_MS  || '300000', 10); // forçar abertura do chat após X ms, default 5min
 
-// Quiet-window configurável (evita travar primeira resposta)
 const VIRTUS_FIRST_REPLY_QUIET_MS = parseInt(process.env.VIRTUS_FIRST_REPLY_QUIET_MS || '0', 10);    // default 0ms (primeira resposta instantânea)
 const VIRTUS_NEXT_REPLY_QUIET_MS  = parseInt(process.env.VIRTUS_NEXT_REPLY_QUIET_MS  || '5000', 10); // default 5s (respostas subsequentes)
-// ====== FIM: Config Probe e TTL de Revalidação ======
 
-// ====== INÍCIO: Config Notificador e Filas ======
 const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io';
 const NOTIFICADOR_SERVIDOR = process.env.SERVIDOR_NOME || 'servidor1';
 
@@ -2224,8 +1925,6 @@ const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
 
-// ====== INÍCIO: Deduplicação e Sanitização ======
-// Dedup por perfil: chave = ${chatId}||${hashResposta}
 const pendingKeysPorPerfil = new Map(); // nomePerfil -> Set(keys)
 
 function getPendingSet(perfil) {
@@ -2246,7 +1945,6 @@ function sanitizarResposta(texto) {
   if (!texto || typeof texto !== 'string') return '';
   let t = texto;
   
-  // Corrige encoding mojibake (OlÃ¡ -> Olá)
   if (/[ÃÂ]/.test(t)) {
     try {
       const fixed = Buffer.from(t, 'latin1').toString('utf8');
@@ -2254,19 +1952,13 @@ function sanitizarResposta(texto) {
     } catch {}
   }
   
-  // Colapsa duplicatas excessivas de caracteres (OOlláá -> Ollá)
   t = t.replace(/(.)\1{2,}/g, '$1$1');
   
-  // Remove espaços múltiplos
   t = t.replace(/\s{2,}/g, ' ');
   
   return t.trim();
 }
-// ====== FIM: Deduplicação e Sanitização ======
 
-// ====== FIM: Config Notificador e Filas ======
-
-// ======= ADIÇÃO: Pending Ledger Helpers & Heurística =======
 const PENDING_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_pending.json');
 
 async function readJson(file, fb={}) {
@@ -2315,7 +2007,6 @@ async function pendingList(perfil) {
   const file = PENDING_JSON_NAME(perfil);
   return await readJson(file, {});
 }
-// Heurística: detecta bubble "você enviou/you sent"
 async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
   try {
     return await page.evaluate((maxMs) => {
@@ -2328,7 +2019,6 @@ async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
         return style && (style.justifyContent==='flex-end' || style.textAlign==='right');
       });
       if (!me) return false;
-      // Se bubble fala em "agora", minutos, ou "há menos de 10min"
       const t = (me.innerText||'').toLowerCase();
       if (/agora|now/.test(t)) return true;
       if (/\b\d+\s*(min|m|minuto)\b/.test(t)) return true;
@@ -2341,25 +2031,20 @@ async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
   } catch { return false; }
 }
 
-// Classificadores de tempo
-// NOVO: Reduzido de 24h para 8h (menos scroll = menos RAM consumida)
 function isVelho8h(tempoLabel) {
   if (!tempoLabel) return false;
   const t = String(tempoLabel)
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .toLowerCase().trim();
 
-  // Semanas sempre velho
   if (/\b(seman|sem|weeks?|w)\b/.test(t)) return true;
 
-  // Dias: >=1 velho
   const mDias = t.match(/\b(\d+)\s*(d|dia|dias)\b/);
   if (mDias) {
     const n = parseInt(mDias[1], 10);
     if (Number.isFinite(n) && n >= 1) return true;
   }
 
-  // Horas: >=8 velho
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
   if (mH) {
     const n = parseInt(mH[1], 10);
@@ -2367,32 +2052,26 @@ function isVelho8h(tempoLabel) {
     return false;
   }
 
-  // Minutos/segundos/"agora" nunca velho
   if (/\b(agora|now|just\snow)\b/.test(t)) return false;
   if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return false;
   if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return false;
 
-  // Fallback: NÃO marque como velho se não entender — considerar recente
   return false;
 }
-// Função corrigida para checar >=24h de fato
 function isVelho24h(tempoLabel) {
   if (!tempoLabel) return false;
   const t = String(tempoLabel)
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .toLowerCase().trim();
 
-  // Semanas sempre velho
   if (/\b(seman|sem|weeks?|w)\b/.test(t)) return true;
 
-  // Dias: >=1 velho
   const mDias = t.match(/\b(\d+)\s*(d|dia|dias)\b/);
   if (mDias) {
     const n = parseInt(mDias[1], 10);
     if (Number.isFinite(n) && n >= 1) return true;
   }
 
-  // Horas: >=24 velho
   const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
   if (mH) {
     const n = parseInt(mH[1], 10);
@@ -2400,12 +2079,10 @@ function isVelho24h(tempoLabel) {
     return false;
   }
 
-  // Minutos/segundos/"agora" nunca velho
   if (/\b(agora|now|just\snow)\b/.test(t)) return false;
   if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return false;
   if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return false;
 
-  // Fallback: NÃO marque como velho se não entender — considerar recente
   return false;
 }
 function isChatRecente(tempoLabel) {
@@ -2424,16 +2101,13 @@ function isChatRecente(tempoLabel) {
   if (mH) {
     const n = parseInt(mH[1], 10);
     if (Number.isFinite(n)) {
-      // <8h = recente (limite do sistema)
       return n < 8;
     }
   }
 
-  // Fallback otimista: se não entendeu, considerar recente
   return true;
 }
 
-// Extratores e coleta
 function extraiIdDoHref(href) {
   try {
     const s = String(href || '');
@@ -2529,7 +2203,6 @@ async function coletaChatsMarketplaceTodos(page) {
   }
 }
 
-// Messenger helpers
 async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allowNavigate = false } = {}) {
   if (!page || typeof page.url !== 'function') throw new Error('Page inválida');
   
@@ -2553,7 +2226,6 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     return;
   }
   
-  // NO TOPO: checagem de sendLock
   try {
     const b = getBrowserFromPage(page);
     if (b && b._sendLock && b._sendLock.active) {
@@ -2567,13 +2239,11 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     return;
   }
   
-  // Função helper para tentar uma rota e verificar se está pronta
   async function gotoInboxRobust(route) {
     try {
       logger.info(`[VIRTUS][garantirMarketplace] Tentando rota: ${route}`, nome ? { nome } : {});
       await page.goto(`https://www.messenger.com${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
       
-      // Cura fluxos de nonce/continuar
       try {
         const browserJs = require('./browser.js');
         if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
@@ -2584,7 +2254,6 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
         }
       } catch {}
       
-      // Verifica se encontrou anchor de thread ou rows
       const ok = await Promise.race([
         page.waitForFunction(() => {
           const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
@@ -2611,7 +2280,6 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
   let url = '';
   try { url = page.url() || ''; } catch {}
   
-  // Se já está no marketplace, verifica se está pronto
   if (/messenger.com\/marketplace/i.test(url)) {
     try {
       const hasAnchor = await page.$('a[href^="/marketplace/t/"]').catch(() => null);
@@ -2623,7 +2291,6 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     } catch {}
   }
   
-  // Tenta as rotas em ordem (removida rota incorreta /marketplace/you/selling/messages)
   const rotas = [
     '/marketplace',
     '/marketplace/inbox'
@@ -2636,18 +2303,10 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     }
   }
   
-  // Se nenhuma rota funcionou, loga warning e não prossegue
   logger.warn('[VIRTUS][garantirMarketplace] Nenhuma rota conseguiu carregar marketplace com anchors/rows', nome ? { nome } : {});
   throw new Error('Marketplace UI não ficou pronta a tempo em nenhuma rota');
 }
 
-// ========== INÍCIO DAS FUNÇÕES E GUARDRAILS SOLICITADAS ==========
-
-/**
- * GUARD: manter top chats always visible to avoid drifting out of viewport.
- * Função utilitária para scrollar a lista de chats para o topo.
- * Executa direto via page.evaluate no Messenger.
- */
 async function scrollChatsToTop(page, nome) {
   if (isVirtusLocked(nome)) return true; // Não retorna false, apenas não clica
   try {
@@ -2657,23 +2316,15 @@ async function scrollChatsToTop(page, nome) {
   if (!page) return false;
   try {
     const res = await page.evaluate(() => {
-      // Procure vários elementos "scrolláveis"
-      // 1. grid por role
       let grid = document.querySelector('div[role="grid"]');
-      // 2. por data-virtualized e classes do FB
       if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf[data-virtualized="false"]');
-      // 3. rowgroup
       if (!grid) grid = document.querySelector('div[role="rowgroup"]');
-      // 4. fallback classe base
       if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf');
-      // 5. heurística de altura
       if (!grid) grid = Array.from(document.querySelectorAll('div'))
         .find(d => d.scrollHeight > 400 && d.scrollHeight > d.clientHeight + 30);
-      // 6. fallback body
       if (!grid) grid = document.body;
       if (!grid) return false;
 
-      // Forçar scrollTop em grid e ancestrais
       grid.scrollTop = 0;
       let node = grid.parentElement;
       for (let i = 0; i < 4 && node; i++) {
@@ -2681,17 +2332,14 @@ async function scrollChatsToTop(page, nome) {
         node = node.parentElement;
       }
 
-      // Tentativa extra: clicar em cima no topo para garantir foco no chat mais recente
       try {
         let firstA = grid.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
         if (firstA) {
           firstA.focus && firstA.focus();
-          // Eventual scrollIntoView + toTop
           firstA.scrollIntoView({block: "start", behavior: "smooth"});
         }
       } catch {}
 
-      // Se scroll ainda não foi suficiente (scrollTop > 0 depois do set), repete
       setTimeout(() => { if (grid.scrollTop > 0) grid.scrollTop = 0; }, 250);
 
       return grid.scrollTop === 0;
@@ -2702,10 +2350,6 @@ async function scrollChatsToTop(page, nome) {
   }
 }
 
-// ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
-
-// ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
-// Helpers para confirmação robusta de envio
 function normalize(s) {
   try {
     return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
@@ -2735,7 +2379,6 @@ async function getMySentSnapshot(p) {
       }
       
       if (lastIdx >= 0) {
-        // tenta pegar "quando" em abbr/aria-label
         const lastEl = rows[lastIdx];
         let when = '';
         try {
@@ -2744,7 +2387,6 @@ async function getMySentSnapshot(p) {
         } catch {}
         
         if (!when) {
-          // fallback: procurar spans pequenos com "agora", "1 min", etc.
           const spans = lastEl ? Array.from(lastEl.querySelectorAll('span')) : [];
           for (const s of spans) {
             const t = (s.innerText || s.textContent || '').trim();
@@ -2765,7 +2407,6 @@ async function getMySentSnapshot(p) {
 }
 
 async function sendMessageSafe(p, campo, msg, nome, chatId) {
-  // 0) Reobtenha o composer se campo for ausente ou suspeito
   try {
     if (!campo || (await campo.evaluate(el => !el.isConnected).catch(()=>true))) {
       const sels = [
@@ -2793,7 +2434,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     return;
   }
 
-  // Valida URL antes de começar a digitar (hard check)
   try {
     const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
     if (!chatUrlMatches(urlNow, chatId)) {
@@ -2802,7 +2442,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     }
   } catch {}
 
-  // Verificar contexto antes de digitar
   if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
     await logIssue(nome, 'mil_action', `virtus_context_abort: before_type (chat ${chatId})`);
     return;
@@ -2812,9 +2451,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
   setVirtusInputLock(nome, true);
   try {
-    // Foco real no composer
     await campo.click({ delay: 20 }).catch(()=>{});
-    // Limpeza: Select All + Backspace/Delete
     try {
       await p.keyboard.down(ctrlKey);
       await p.keyboard.press('KeyA');
@@ -2822,20 +2459,17 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     } catch {}
     try { await p.keyboard.press('Backspace'); } catch {}
     try { await p.keyboard.press('Delete'); } catch {}
-    // Aguarda esvaziar (tolerante)
     await p.waitForFunction(
       el => ((el.innerText || el.textContent || '').trim().length === 0),
       { timeout: 1200 },
       campo
     ).catch(()=>{});
 
-    // Digita uma única vez (sem execCommand/insertText) - COM SANITIZAÇÃO
     const stGreet = await getChatState(nome, chatId).catch(()=>null);
     const greetedFlag = !!(stGreet && stGreet.flow && stGreet.flow.greeted);
     const toSend = enforceGovRulesOnText(String(msg || ''), { alreadyGreeted: greetedFlag });
     await p.keyboard.type(toSend, { delay: 0 });
 
-    // Revalida URL antes de pressionar Enter (hard check)
     try {
       const urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
       if (!chatUrlMatches(urlNow2, chatId)) {
@@ -2845,30 +2479,25 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       }
     } catch {}
 
-    // Revalidar contexto antes do Enter
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
       await clearComposerIfAny(p, campo);
       await logIssue(nome, 'mil_action', `virtus_context_abort: before_enter (chat ${chatId})`);
       return;
     }
 
-    // NOVO: Confirmação ROBUSTA - tirar snapshot ANTES de enviar
     const expected = String(msg || '').trim();
     const before = await getMySentSnapshot(p);
     logger.debug('[MESSENGER] Snapshot antes do envio', { nome, chatId, beforeTotal: before.total });
 
-    // ATRASO HUMANO REAL ENTRE RESPOSTAS (5-15 segundos)
     const minD = parseInt(process.env.VIRTUS_REPLY_MIN_MS || '5000', 10); // 5s
     const maxD = parseInt(process.env.VIRTUS_REPLY_MAX_MS || '15000', 10); // 15s
     const delay = Math.max(0, Math.min(maxD, Math.floor(Math.random()*(maxD-minD+1))+minD));
     logger.debug('[MESSENGER] Delay humano antes de enviar', { nome, chatId, delayMs: delay });
     await new Promise(r=>setTimeout(r, delay));
 
-    // Envia (um único Enter)
     await p.keyboard.press('Enter');
     logger.debug('[MESSENGER] Enter pressionado, aguardando confirmação robusta', { nome, chatId });
 
-    // NOVO: Confirmação ROBUSTA - verificar que número de bolhas aumentou + texto coincide (SEM whenRecent)
     function normalizeMsg(s) {
       try {
         return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -2889,7 +2518,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
             const txt = (el.innerText || el.textContent || '').trim();
             if (!txt) continue;
 
-            // considera "minhas" bolhas por alinhamento à direita ou presença do rótulo textual
             let isMine = false;
             try {
               const st = window.getComputedStyle(el);
@@ -2913,7 +2541,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
         const lastNorm = String(snap.lastText || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 
-        // confirmação: contagem aumentou E último texto contém (normalizado) o esperado
         return lastNorm.includes(expectedNorm);
       },
       { timeout: 12000 },
@@ -2923,8 +2550,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
     let mensagemEnviada = sent;
     if (!sent) {
-      // Verificação adicional: talvez a mensagem foi enviada mas a confirmação falhou
-      // Verifica se o composer foi esvaziado (indicativo de envio)
       const composerEmpty = await p.evaluate(() => {
         const composers = Array.from(document.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
         for (const comp of composers) {
@@ -2935,7 +2560,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       }).catch(() => false);
       
       if (composerEmpty) {
-        // Composer vazio = mensagem provavelmente foi enviada, mesmo sem confirmação robusta
         logger.warn('[MESSENGER] ⚠️ Confirmação robusta falhou, mas composer vazio (mensagem provavelmente enviada)', { 
           nome, 
           chatId,
@@ -2943,19 +2567,15 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
         });
         mensagemEnviada = true; // Assume que enviou
       } else {
-        // Composer ainda tem texto = mensagem não foi enviada
         logger.error('[MESSENGER] ❌ FALHA: mensagem não enviada (composer não vazio)', { 
           nome, 
           chatId,
           beforeTotal: before.total
         });
         await logIssue(nome, 'virtus_send_failed', 'send_confirmation_robust_timeout');
-        // Não lança erro - apenas loga e continua (evita bloquear o sistema)
-        // Mas não marca como enviado
       }
     }
     
-    // Só marca como enviado se realmente enviou (ou composer vazio)
     if (mensagemEnviada) {
       logger.info('[MESSENGER] ✅ Mensagem confirmada (robusta ou composer vazio)', {
         nome,
@@ -2965,15 +2585,11 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       });
     }
 
-    // Marcar estado após envio (apenas se realmente enviou)
     if (mensagemEnviada) {
       try {
-        // Atualiza lastIATs mas NÃO bloqueia com cooldown longo - permite continuidade da conversa
-        // O cooldown só serve para evitar spam, não para bloquear respostas subsequentes
         await setChatState(nome, chatId, {
           state: CHAT_STATES.AGUARDANDO,
           lastIATs: Date.now()
-          // Removido cooldownUntil aqui - será aplicado apenas se necessário (evitar spam)
         });
       } catch {}
     }
@@ -2982,21 +2598,17 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     setVirtusInputLock(nome, false);
   }
 }
-// ========== FIM DA FUNÇÃO sendMessageSafe ==========
 
 async function startVirtus(browser, nome, robeMeta = {}) {
-  // Na primeira linha dentro de startVirtus, após argumentos:
   let requiredEpoch = 0;
   if (arguments.length >= 3 && arguments[2] && arguments[2].epoch != null) {
     requiredEpoch = arguments[2].epoch;
   }
-  // Broker fence: sempre leia do browser._fenceEpochMap
   function epochOk() {
     try {
       if (browser && browser._fenceEpochMap && typeof browser._fenceEpochMap[nome] !== "undefined") {
         return browser._fenceEpochMap[nome] === requiredEpoch;
       }
-      // Compat: se não definido, considera ok
       return true;
     } catch { return false; }
   }
@@ -3004,8 +2616,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const attId = stepLog.attemptId();
   stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'start' });
 
-  // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 1 ==========
-  // Checagem ultra robusta de freezer
   let manifestFrozenUntil = 0;
   try {
     const manifest = await manifestStore.read(nome);
@@ -3017,7 +2627,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (issues) try { await logIssue(nome, 'virtus_skip_frozen', `perfil congelado até ${new Date(manifestFrozenUntil).toISOString()}`); } catch {}
     return { stop: async () => {} }; // Virtus runner no-op
   }
-  // ========== FIM BLOCO FREEZER INSTRUÇÃO 1 ==========
 
   const log = (...args) => logger.info(args.join(' '), { nome });
 
@@ -3033,7 +2642,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const MIN_REPLY_DELAY_MS = 0;
   const MAX_REPLY_DELAY_MS = 0;
 
-  // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
   function setResponded(id, ts) {
     if (!respondedCache.has(id) && respondedCache.size >= RESP_CACHE_MAX) {
@@ -3044,8 +2652,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
   const respondedCache = new Map();
 
-  // ====== INÍCIO: Cooldown de Prova e Detecção de Novas Mensagens ======
-  // Caches para evitar "martelar" o mesmo chat a cada loop
   const lastProbeMap = new Map(); // chatId -> Date.now() da última prova/checagem
   const lastClientTsMap = new Map(); // chatId -> ms do último cliente visto (memória local, opcional)
 
@@ -3054,21 +2660,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const n = typeof x === 'number' ? x : Date.parse(x);
     return Number.isFinite(n) ? n : 0;
   }
-  // ====== FIM: Cooldown de Prova e Detecção de Novas Mensagens ======
 
-  // MILITAR: Timers unificados
   let filaInterval = null;
   let filaChatTimer = null;
   let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
 
   let lastScrollToTop = 0;
 
-  // trackers
   let saveChain = Promise.resolve();
   let filaLoopBusy = false;
   let recoverBackoffMs = 0;
   const failCounts = new Map();
-  // Limpeza/cap failCounts — nunca deve passar de 1000
   function setFailCount(chatId, n) {
     if (!failCounts.has(chatId) && failCounts.size >= 1000) {
       const first = failCounts.keys().next().value;
@@ -3077,7 +2679,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     failCounts.set(chatId, n);
   }
 
-  // Persistência segura no Windows
   async function salvaHistorico() {
     saveChain = saveChain.then(async () => {
       try {
@@ -3100,7 +2701,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function carregaHistorico() {
     try {
-      // Fallback .tmp órfão
       const tmp = HIST_FILE + '.tmp';
       try { await fs.access(HIST_FILE); }
       catch {
@@ -3136,7 +2736,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         log(`Histórico limpo: ${id} removido (>24h)`);
       }
     });
-    // Garantir cap adicional do respondedCache
     while (respondedCache.size > RESP_CACHE_MAX) {
       const first = respondedCache.keys().next().value;
       if (first !== undefined) respondedCache.delete(first);
@@ -3172,17 +2771,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             page = null;
           }
         }
-        // NÃO FECHAR EXTRAS se há busca ativa (BLOQUEIO CRÍTICO)
         try {
           if (browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
-            // apenas retorna a main page disponível
             return page;
           }
         } catch {}
 
         try {
           if (browser && browser._robeActiveFor === nome) {
-            // nada
           } else {
             const allPages = await browser.pages();
             if (Array.isArray(allPages) && allPages.length > 1) {
@@ -3211,7 +2807,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch {}
         if (!page) {
           if (!running || !epochOk()) return null;
-          // cria nova aba
           const newP = await browser.newPage();
           try {
             const manifest = await manifestStore.read(nome);
@@ -3326,7 +2921,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.info('[COMPOSER] Refocus (sem navegação)', { chatId });
       try { await p.evaluate(() => { try { window.scrollBy(0, 120); } catch {} }); } catch {}
 
-      // Apenas requery do composer e pequenas tentativas de focus/tab
       const campo = await waitForComposer(p, 5000);
       if (campo) return campo;
 
@@ -3361,30 +2955,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return [];
       }
 
-      // CRÍTICO: Primeiro, verificar chats já respondidos que podem ter novas mensagens
-      // Esses chats devem ser sempre verificados, independente do tempo
       const chatsRespondidosParaVerificar = [];
       try {
         const todosEstados = await loadChatState(nome).catch(() => ({}));
         for (const [chatId, st] of Object.entries(todosEstados || {})) {
           if (st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO)) {
-            // Chat já respondido - sempre verificar para novas mensagens
             chatsRespondidosParaVerificar.push({ id: chatId, tempo: 'agora', jaRespondido: true });
           }
         }
       } catch {}
 
-      // 1) Garantir Marketplace (com logs) - versão otimizada
       try {
         await maybeGuaranteeMarketplaceFast(p, nome);
       } catch (err) {
         logger.warn(`[VIRTUS][${nome}] maybeGuaranteeMarketplaceFast falhou: ${(err && err.message) || err}`);
         await sleep(2000);
-        // Mesmo se falhar, retorna chats já respondidos para verificar
         return chatsRespondidosParaVerificar;
       }
 
-      // 2) Espera mínima por elementos do feed
       try {
         await Promise.race([
           p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 5000 }),
@@ -3394,11 +2982,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info(`[VIRTUS][${nome}] timeout curto aguardando anchors/rows`);
       }
 
-      // 3) Coleta inicial
       let todos = await coletaChatsMarketplaceTodos(p);
       logger.info(`[VIRTUS][${nome}] coletaTodos inicial: ${todos.length} itens`);
 
-      // 4) Se nada encontrado ou poucos itens/nenhum recente, tentar scroll até 8h e recolher
       if (!todos || todos.length === 0) {
         logger.info(`[VIRTUS][${nome}] coleta vazia — ativando scrollListaAte8h()`);
         try {
@@ -3410,7 +2996,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info(`[VIRTUS][${nome}] coletaTodos após scroll: ${todos.length} itens`);
       }
 
-      // 5) Filtra recentes (<=8h) com logs
       const filtrados = (todos || []).filter(c => c.id && isChatRecente(c.tempo));
       logger.info(`[VIRTUS][${nome}] filtrados recentes: ${filtrados.length} / ${todos.length}`);
       if (process.env.VIRTUS_FEED_DEBUG === '1') {
@@ -3419,8 +3004,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       }
 
-      // CRÍTICO: Adiciona chats já respondidos para verificar novas mensagens
-      // Esses chats são sempre verificados, independente do tempo
       const idsFiltrados = new Set(filtrados.map(c => c.id));
       for (const chatRespondido of chatsRespondidosParaVerificar) {
         if (!idsFiltrados.has(chatRespondido.id)) {
@@ -3436,7 +3019,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  // Reconciliação de pendências
   async function reconcilePendingsIfAny() {
     if (!running || !epochOk()) return;
     try {
@@ -3457,17 +3039,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
           const looksSent = await wasRecentlySentByMe(p, 10*60*1000);
           if (looksSent) {
-            // considera “committed”
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
             setResponded(chatId, tsNow);
             await salvaHistorico();
             await pendingDel(nome, chatId);
           } else {
-            // rollback: libera para reenvio
             await pendingDel(nome, chatId);
           }
-        } catch { /* segue próximo */ }
+        } catch {  }
       }
     } catch {}
   }
@@ -3475,7 +3055,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function initHistoricoSePreciso() {
     if (!running || !epochOk()) return;
     
-    // Por padrão deve ser '0' (sem snapshot)
     const FIRST_BOOT_SNAPSHOT = (process.env.VIRTUS_FIRST_BOOT_SNAPSHOT ?? '0') === '1';
     
     try {
@@ -3486,7 +3065,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     } catch {}
 
-    // Snapshot desabilitado por padrão
     if (!FIRST_BOOT_SNAPSHOT) {
       logger.info('[SNAPSHOT] Modo seguro: não marcando recents como respondidos no primeiro boot. (Defina VIRTUS_FIRST_BOOT_SNAPSHOT=1 para habilitar)', { nome });
       await carregaHistorico();
@@ -3494,7 +3072,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     }
 
-    // Só chama snapshot se VIRTUS_FIRST_BOOT_SNAPSHOT=1, e só marca como respondido chats que estejam isVelho24h(chat.tempo) === true
     logger.info('[SNAPSHOT] Primeiro boot sem histórico. Coletando chats >=24h para marcar como respondidos.', { nome });
     if (!running || !epochOk()) return;
     const p = await ensurePage();
@@ -3510,7 +3087,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch {}
     try { await scrollListaAte8h(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
     const todos = await coletaChatsMarketplaceTodos(p);
-    // CORREÇÃO: só marca como respondido chats que estejam isVelho24h(chat.tempo) === true
     const velhos = todos.filter(c => isVelho24h(c.tempo));
     const agora = agoraEpoch();
     historico = {};
@@ -3521,7 +3097,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     logger.info(`[SNAPSHOT] Concluído. ${velhos.length} chats >=24h marcados como respondidos no primeiro boot.`, { nome });
   }
 
-  // NOVO: Reduzido de 24h para 8h (menos scroll = menos RAM consumida)
   async function scrollListaAte8h(page, { maxMs = 90000, quietLoops = 3 } = {}) {
     const t0 = Date.now();
     let semNovos = 0;
@@ -3571,7 +3146,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const agoraMs = Date.now();
     const ERROR_TTL_MS = parseInt(process.env.VIRTUS_ERROR_TTL_MS || '1800000', 10); // 30min padrão
 
-    // Paralelização com p-limit
     let pLimitImport;
     try {
       pLimitImport = require('p-limit');
@@ -3584,16 +3158,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     await Promise.all(chatsNovos.map(c => limit(async () => {
       const id = c.id;
 
-      // CRÍTICO: Verificar se chat já foi respondido ANTES de aplicar filtros
       let st = null;
       try { st = await getChatState(nome, id); } catch {}
       const jaFoiRespondido = st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO);
       
-      // Se já foi respondido, SEMPRE verificar (ignora filtro de tempo recente)
-      // Isso garante que novas mensagens do cliente sejam detectadas mesmo se o chat "envelheceu"
       if (jaFoiRespondido) {
-        // Chats já respondidos devem ser sempre verificados para novas mensagens
-        // Ignora cooldown e filtro de tempo - sempre enfileira se não estiver na fila
         if (aguard.has(id)) {
           logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
           return;
@@ -3602,7 +3171,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
           return;
         }
-        // Enfileira diretamente para verificar novas mensagens
         fila.push(id);
         lastProbeMap.set(id, agoraMs);
         logger.info(`[FILA][${nome}] Chat já respondido re-enfileirado para verificar novas mensagens: ${id}`);
@@ -3610,20 +3178,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-      // CRÍTICO: Se o chat já está na fila, não fazer nada - ele já foi enfileirado e está aguardando processamento
-      // Não aplicar cooldown nem re-probe para chats já enfileirados
       if (fila.includes(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
         return;
       }
       
-      // Para chats novos que ainda não estão na fila, verificar se já foi processado recentemente
-      // Mas apenas se não estiver na fila (já verificado acima)
       const last = lastProbeMap.get(id) || 0;
-      // REMOVIDO: cooldown de re-probe que estava bloqueando chats novos
-      // Se o chat não está na fila e não foi processado, deve ser enfileirado
 
-      // TTL de força: mesmo sem mudança aparente, forçar abertura do chat após X minutos
       const lastProbeAt = (st && typeof st.lastProbeAt === 'number') ? st.lastProbeAt : 0;
       const forceOpen = (!st) || (agoraMs - lastProbeAt >= PROBE_FORCE_OPEN_MS);
       
@@ -3634,30 +3195,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         typeof st.ultimoProbeCLIts === 'number' &&
         st.lastCLIts === st.ultimoProbeCLIts
       ) {
-        // nenhum avanço desde último probe E ainda não bateu o TTL de força
         lastProbeMap.set(id, agoraMs);
         logger.info(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
         return;
       }
       
-      // Em atualizaFila, no bloco de erro_envio:
       if (st && st.state === 'erro_envio') {
         logger.info(`[FILA][${nome}] ${id} estava em erro_envio — será testado novamente (fila permissiva).`);
-        // Continua!
       }
 
       if (aguard.has(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
         return;
       }
-      // CRÍTICO: Verificar se já está na fila ANTES de aplicar cooldown
-      // Se já está na fila, não precisa enfileirar novamente
       if (fila.includes(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
         return;
       }
 
-      // Registro mínimo imediato do chatId (robustez)
       try {
         await setChatState(nome, id, {
           state: CHAT_STATES.PENDENTE,
@@ -3666,7 +3221,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         });
       } catch {}
 
-      // Registro de cidade do perfil (se disponível)
       try {
         const man = await manifestStore.read(nome).catch(()=>null);
         const cid = man && man.cidade || null;
@@ -3705,17 +3259,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     }
 
-    // CRÍTICO: Remover o chat da fila ANTES de processar para evitar duplicação
     const next = fila.shift(); // Remove da fila imediatamente
     if (!next) {
       logger.warn('[FILA] Chat removido da fila mas era null/undefined', { nome });
       return;
     }
     
-    // CRÍTICO: Marcar chatAtivo ANTES de agendar para evitar chamadas concorrentes
     chatAtivo = next;
 
-    // Primeira execução SEM delay; próximas respeitam o env (default 0)
     const delayMs = (() => {
       const env = process.env.VIRTUS_NEXT_CHAT_DELAY_MS;
       if (typeof scheduleNextIfIdle._firstRun === 'undefined') {
@@ -3737,7 +3288,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         
-        // Verifica se ainda é o chat ativo (proteção extra)
         if (chatAtivo !== next) {
           logger.warn('[FILA] Chat ativo mudou, re-enfileirando', { nome, chatId: next, chatAtivo });
           fila.unshift(next); // Re-enfileira no início
@@ -3747,7 +3297,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
         await responderChat(next);
         
-        // Libera chatAtivo após processar
         chatAtivo = null;
         
         setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
@@ -3755,7 +3304,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         filaChatTimer = null;
         chatAtivo = null; // Libera chatAtivo em caso de erro
         logger.error('[FILA] Erro no timer de atendimento', { nome, chatId: next, error: e && e.message || e, stack: e && e.stack });
-        // Re-enfileira em caso de erro
         fila.unshift(next);
         setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
       }
@@ -3765,7 +3313,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function responderChat(chatId) {
     logger.info('[RESPONDER] Iniciando responderChat', { nome, chatId, filaLength: fila.length, chatAtivo });
     
-    // CRÍTICO: try/finally deve envolver TODO o código para garantir liberação do lock e chatAtivo
     let _chatLockAcquired = false;
     try {
       if (!running || !epochOk()) {
@@ -3773,7 +3320,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       const responderStartedAt = Date.now();
-      // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
       let manifestFrozenUntil = 0;
       try {
         const manifest = await manifestStore.read(nome);
@@ -3787,8 +3333,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
         return;
       }
-      // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
-      // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
       if (!browser || browser.isConnected?.() === false) {
         logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
@@ -3809,34 +3353,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
         return;
       }
-      // === FIM GUARD DE VIDA ===
       if (!chatId) {
         logger.warn('[RESPONDER] chatId inválido', { nome, chatId });
         chatAtivo = null; // Libera chatAtivo antes de retornar
         return;
       }
 
-      // CRÍTICO: Verificar se já está processando este chat (proteção contra chamadas concorrentes)
-      // NOTA: chatAtivo já foi setado em scheduleNextIfIdle, então esta verificação não deve falhar
-      // Mas mantemos como proteção extra
       if (chatAtivo && chatAtivo !== chatId) {
         logger.warn('[RESPONDER] Outro chat já está sendo processado (chatAtivo)', { nome, chatId, chatAtivo });
         return;
       }
       
-      // Garante que chatAtivo está setado (proteção extra)
       chatAtivo = chatId;
 
-      // Lock de disco POR chatId!
       logger.info('[RESPONDER] Tentando adquirir lock', { nome, chatId });
       
-      // CRÍTICO: Se não conseguir adquirir lock, tenta forçar liberação de lock stale
       if (!chatLock.acquire(nome, chatId)) {
         logger.warn('[RESPONDER] Falha ao adquirir lock - tentando forçar liberação', { nome, chatId });
-        // Tenta liberar lock stale (pode estar travado de tentativa anterior)
         try {
           chatLock.release(nome, chatId);
-          // Aguarda um pouco e tenta novamente
           await new Promise(r => setTimeout(r, 100));
           if (chatLock.acquire(nome, chatId)) {
             logger.info('[RESPONDER] Lock adquirido após forçar liberação', { nome, chatId });
@@ -3862,7 +3397,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       }
       
-      // NOVO: Registra lastProbeAt no início (antes de qualquer navegação)
       try {
         await setChatState(nome, chatId, { lastProbeAt: Date.now() });
       } catch {}
@@ -3871,12 +3405,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.info('[CONTEXTO] Iniciando processamento', { nome, chatId });
       stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
 
-      // Marcar estado como PENDENTE (APENAS disco)
       try {
         await setChatState(nome, chatId, { state: CHAT_STATES.PENDENTE });
       } catch {}
 
-      // Ledger: adiciona pending imediatamente após adquirir lock
       const attemptId2 = stepLog.attemptId();
       try { await pendingAdd(nome, chatId, attemptId2); } catch {}
 
@@ -3895,14 +3427,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await maybeGuaranteeMarketplaceFast(p, nome);
         logger.info('[NAVEGACAO] Marketplace UI garantida', { nome, chatId });
 
-        // NOVO: Não bloquear baseado apenas em respondedCache
-        // A verificação de "novas mensagens" será feita após coletar o histórico
-        // Mantém apenas verificação de cooldown de prova (já feito em atualizaFila)
-
-        // NAVEGAÇÃO INICIAL PARA ABRIR O CHAT (permitida apenas na primeira vez)
         let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
         if (!chatUrlMatches(urlNow, chatId)) {
-          // Precisa abrir o chat pela primeira vez
           logger.info('[NAVEGACAO] Abrindo chat pela primeira vez', { nome, chatId });
           let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
           await scrollChatsToTop(p, nome).catch(()=>{});
@@ -3910,7 +3436,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           let found = await p.$(anchorSel);
           
           if (found) {
-            // Tenta clicar no anchor para abrir o chat
             try {
               await p.evaluate((sel) => {
                 const el = document.querySelector(sel);
@@ -3926,7 +3451,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           }
           
-          // Se ainda não está no chat, tenta goto direto (apenas na primeira vez)
           urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
             try {
@@ -3938,7 +3462,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           }
           
-          // Verifica se conseguiu abrir o chat
           if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
             logger.warn('[VIRTUS] Não foi possível abrir o chat. Abortando atendimento.', { nome, chatId, urlNow });
             const prev = await getChatState(nome, chatId).catch(()=>null);
@@ -3955,7 +3478,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return;
           }
         } else {
-          // Já está no chat, apenas valida
           if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
             logger.warn('[VIRTUS] Contexto do chat não corresponde. Abortando atendimento.', { nome, chatId, urlNow });
             const prev = await getChatState(nome, chatId).catch(()=>null);
@@ -3973,7 +3495,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
 
-
         if (await isChatBlocked(p)) {
           logger.info('[SKIP] Chat bloqueado/indisponível', { nome, chatId });
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
@@ -3985,7 +3506,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // Checagem de contexto antes de aguardar o composer
         if (!(await assertOnChat(p, chatId, { timeoutMs: 1200 }))) {
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
@@ -3996,7 +3516,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let campo = await waitForComposer(p, 10000);
         if (!campo) {
-          // GARANTA: NUNCA RELOAD GOTO NA ABA PRINCIPAL DO CHAT
           logger.info('[COMPOSER] Composer não encontrado, tentando refocus sem reload', { nome, chatId });
           const campo2 = await refocusComposerNoReload(p, chatId, anchorSel);
           if (campo2) {
@@ -4019,20 +3538,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return;
           }
         }
-// REVALIDAÇÃO FINAL: verificação será feita após coletar histórico
-// A lógica de "novas mensagens" substitui o gating por respondedCache
 
         resetFail(chatId);
 
-        // 1. Extrai URL do classificado
         const urlClassificado = await extrairUrlClassificado(p, chatId);
 
-        // 2. INÍCIO PATCH: Cache de localização por chat (persistida em disco)
         let localizacao = null;
         try {
           const stLoc = await getChatState(nome, chatId);
           if (stLoc && stLoc.cidade && stLoc.estado) {
-            // Já temos cache persistido: NÃO buscar novamente
             localizacao = { cidade: stLoc.cidade, estado: stLoc.estado };
             logger.info('[LOCALIZACAO] Localização recuperada do cache', { 
               nome, 
@@ -4041,7 +3555,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               estado: localizacao.estado 
             });
           } else {
-            // Buscar apenas se não houver cache
             localizacao = await new Promise((resolve) => {
               try {
                 const buscador = (global && global.__buscaLocalizacaoVirtus) ? global.__buscaLocalizacaoVirtus : null;
@@ -4064,9 +3577,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch {
           localizacao = null;
         }
-        // FIM PATCH
 
-        // Log detalhado sobre localização
         if (localizacao && localizacao.cidade && localizacao.estado) {
           logger.info('[LOCALIZACAO] Localização encontrada', { 
             nome, 
@@ -4078,15 +3589,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.warn('[LOCALIZACAO] Localização NÃO encontrada', { nome, chatId, urlClassificado });
         }
 
-        // 3. Identifica tipo de serviço
         const tipoServico = await identificarTipoServico(nome);
 
-        // Marcar estado como GERANDO antes de coletar histórico
         try {
           await setChatState(nome, chatId, { state: CHAT_STATES.GERANDO });
         } catch {}
 
-        // 4. Coleta TODO o histórico da conversa (mensagens do cliente e da IA)
         logger.info('[COLETA] Iniciando coleta de histórico', { nome, chatId });
         const historicoConversa = await extrairHistoricoConversa(p);
         
@@ -4100,7 +3608,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
         });
 
-        // Em responderChat, após obter o histórico:
         const ultimaMsg = Array.isArray(historicoConversa) && historicoConversa.length
           ? historicoConversa[historicoConversa.length - 1]
           : null;
@@ -4118,7 +3625,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // Hash/TS gating
         const stPrev = await getChatState(nome, chatId).catch(()=>null);
 
         const ultimaIA = (() => {
@@ -4135,7 +3641,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const lastClientHash = hashResposta(ultimaMsgClienteTexto);
         const lastClientHashAnterior = (stPrev && stPrev.lastClientHash) || null;
 
-        // Índices ordem no histórico — decisor mais confiável do que timestamp
         const idxUltCliente = (() => {
           let idx = -1;
           for (let i = 0; i < historicoConversa.length; i++) {
@@ -4155,7 +3660,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const prevIATs = Number((stPrev && stPrev.lastIATs) || 0);
 
         const mudouConteudo = (lastClientHashAnterior !== lastClientHash);
-        // Cliente "vence" se ele está depois da última IA no histórico (por posição) ou se o ts do cliente é posterior ao último envio registrado
         const clienteVencePorOrdem = (idxUltCliente >= 0 && (idxUltIA < 0 || idxUltCliente > idxUltIA));
         const clienteVencePorTempo = (tsCLI > prevIATs);
         const clienteMaisRecenteQueIA = (clienteVencePorOrdem || clienteVencePorTempo);
@@ -4173,7 +3677,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           clienteMaisRecenteQueIA
         });
 
-        // Final gate com branch rastreável
         if (!mudouConteudo || !clienteMaisRecenteQueIA) {
           logger.info('[SKIP] Chat ' + chatId + ': gate não satisfeito', {
             nome,
@@ -4194,7 +3697,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // QUIET WINDOW inteligente: na primeira resposta NÃO espera; nas subsequentes, espera curto (configurável)
         const pAtual = await ensurePage().catch(()=>null);
         const isFirstReply = (idxUltIA < 0); // idxUltIA já calculado acima
         const quietMs = isFirstReply ? VIRTUS_FIRST_REPLY_QUIET_MS : VIRTUS_NEXT_REPLY_QUIET_MS;
@@ -4205,30 +3707,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             getHistoricoFn: async () => await extrairHistoricoConversa(pAtual)
           });
           if (!okQuiet) {
-            // Houve mensagem do cliente durante a janela curta: reavalie histórico e CONTINUE (não aborta)
             logger.info('[BURST] Mensagem durante quiet window curta — reavaliando e seguindo', { nome, chatId, quietMs, isFirstReply });
             try {
               historicoConversa = await extrairHistoricoConversa(pAtual);
             } catch {}
-            // segue fluxo normalmente; nada de return aqui
           }
         } else {
           logger.debug('[QUIET] Primeira resposta: quiet window desativada', { nome, chatId });
         }
 
-        // OK: há novidade do cliente (passou quiet window ou é primeira resposta)
         const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
         logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
 
-        // CRÍTICO: Para primeira resposta, não espera; para subsequentes, espera pequena se configurado
         const WAIT_BEFORE_GENERATE_MS = parseInt(process.env.VIRTUS_WAIT_BEFORE_GENERATE_MS || '0', 10);
         const isFirstReplyTiming = (idxUltIA < 0);
         
-        // Para respostas subsequentes (não a primeira), uma pequena espera dinâmica:
         if (!isFirstReplyTiming && WAIT_BEFORE_GENERATE_MS > 0) {
           logger.info(`[TIMING] Aguardando ${WAIT_BEFORE_GENERATE_MS}ms antes de gerar resposta (subsequente)...`, { nome, chatId });
           await sleep(WAIT_BEFORE_GENERATE_MS);
-          // Re-extrai histórico após espera para pegar todas as mensagens do cliente
           try {
             historicoConversa = await extrairHistoricoConversa(pAtual);
             logger.info(`[TIMING] Histórico re-extraído após espera: ${historicoConversa.length} mensagens`, { nome, chatId });
@@ -4237,33 +3733,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.debug(`[TIMING] Primeira resposta: sem espera (WAIT_BEFORE_GENERATE_MS=${WAIT_BEFORE_GENERATE_MS}ms)`, { nome, chatId });
         }
 
-        // Pipeline de Perguntas (dominante) ou Groq (fallback)
         if (VIRTUS_USE_PIPELINE) {
           try {
             logger.info('[PIPELINE] Processando com pipeline de perguntas', { nome, chatId });
             
             const pipelineResult = await processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev);
             
-            // NOVO: se o pipeline respondeu null, NÃO cair no Groq. Apenas aguardar.
-            if (pipelineResult && !pipelineResult.resposta) {
-              try {
-                await setChatState(nome, chatId, {
-                  qaAsked: pipelineResult.qaAsked || [],
-                  qaAnswered: pipelineResult.qaAnswered || {},
-                  flow: pipelineResult.flow || {},
-                  state: CHAT_STATES.AGUARDANDO,
-                  lastProbeAt: Date.now()
-                });
-              } catch {}
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              logger.info('[PIPELINE] Sem mensagem a enviar agora (aguardando).', { chatId });
-              return;
-            }
-            
             if (!pipelineResult || !pipelineResult.resposta) {
-              // Fallback: só se pipelineResult for nulo/indefinido (erro, por ex.).
               const telefoneFinal = pipelineResult?.telefone_extraido || null;
               if (telefoneFinal && pipelineResult?.finalizado) {
                 logger.info('[PIPELINE] Todas informações coletadas COM WhatsApp, finalizando', { nome, chatId });
@@ -4283,11 +3759,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 chatAtivo = null;
                 return;
               } else {
-                logger.info('[PIPELINE] Pipeline sem resposta; fallback para Groq', { nome, chatId });
+                logger.info('[PIPELINE] Pipeline sem resposta e sem WhatsApp - usando Groq como fallback', { nome, chatId });
               }
             }
             
-            // Atualiza state com qaAsked e qaAnswered
             try {
               await setChatState(nome, chatId, {
                 qaAsked: pipelineResult.qaAsked || [],
@@ -4295,7 +3770,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               });
             } catch {}
             
-            // Atualiza dados coletados
             let cidadePreferida = null;
             try {
               const man = await manifestStore.read(nome).catch(()=>null);
@@ -4310,13 +3784,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               dados: pipelineResult.dados || {}
             });
             
-            // Inicia timer se capturou telefone pela primeira vez
             const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
             if (!jaTinhaTimer && pipelineResult.telefone_extraido) {
               iniciarTimerFechamento(chatId, pipelineResult.telefone_extraido);
             }
             
-            // Reaproveitar a página atual - NUNCA reload/goto
             const pAtual = await ensurePage().catch(() => null);
             if (!pAtual) {
               logger.warn('[PIPELINE] Page indisponível', { nome, chatId });
@@ -4327,7 +3799,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
             
-            // Verifica se está no chat correto - se não, apenas marca cooldown (não navega)
             let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
             if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(pAtual, chatId, { timeoutMs: 0 }))) {
               logger.warn('[PIPELINE] URL/contexto não corresponde (sem navegação). Cooldown.', { nome, chatId, urlNow });
@@ -4345,7 +3816,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
             
-            // Tenta obter composer - se falhar, usa refocusComposerNoReload
             let campoEnvio = await waitForComposer(pAtual, 10000);
             if (!campoEnvio) {
               logger.info('[PIPELINE] Composer não encontrado, tentando refocus', { nome, chatId });
@@ -4374,34 +3844,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
             } catch {}
             
-            // AQUISIÇÃO DO LOCK — "just-in-time locking"
             await acquireSendGuard(pAtual, chatId);
             try {
-              // ENFORCEMENT: Aplicar regras de governança antes de enviar
               const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
-              const effectiveFlow = pipelineResult.flow || (stFlowPrev && stFlowPrev.flow) || { greeted: false, asked: {}, answered: {}, askedTimes: {} };
-              let respostaGov = enforceGovRulesOnText(pipelineResult.resposta, { alreadyGreeted: !!effectiveFlow.greeted });
+              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : (pipelineResult.flow || { greeted: false, asked: {}, answered: {} });
+              let respostaGov = enforceGovRulesOnText(pipelineResult.resposta, { alreadyGreeted: !!flowPrev.greeted });
               
               const utils = require('./utils.js');
-              
-              // Proteção contra duas mensagens consecutivas pedindo WhatsApp
-              const iaMsgs2 = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
-              const lastIaTxt2 = iaMsgs2.length ? String(iaMsgs2[iaMsgs2.length - 1].texto || '') : '';
-              if (/whats(app)?|telefone|n[uú]mero/i.test(lastIaTxt2) && /whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
-                // bloqueio total de repetição de WhatsApp consecutiva — NUNCA envie
-                try {
-                  await setChatState(nome, chatId, {
-                    flow: effectiveFlow,
-                    lastProbeAt: Date.now()
-                  });
-                } catch {}
-                try { await pendingDel(nome, chatId); } catch {}
-                fila = fila.filter(id => id !== chatId);
-                chatAtivo = null;
-                return;
+              const telOk = utils.isValidBRPhoneWithDDD(pipelineResult.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
+              if (!telOk) {
+                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+                  respostaGov = 'Me passa teu WhatsApp com DDD? O motorista chama por lá.';
+                }
               }
+              
               await setChatState(nome, chatId, {
-                flow: effectiveFlow,
+                flow: flowPrev,
                 ultimaRespostaEnviada: respostaGov,
                 lastProbeAt: Date.now()
               });
@@ -4409,7 +3867,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               await sendMessageSafe(pAtual, campoEnvio, respostaGov, nome, chatId);
               await appendIaLine(nome, chatId, respostaGov);
               
-              // Garantir greeted=true após primeira resposta
               try {
                 const st = await getChatState(nome, chatId).catch(()=>null);
                 const flowSt = (st && st.flow) ? st.flow : { greeted: false, asked: {}, answered: {} };
@@ -4421,13 +3878,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               
               await marcarRespondido(nome, chatId);
             } finally {
-              // SEMPRE libera o lock, mesmo em caso de erro
               releaseSendGuard(pAtual);
             }
             
-            // Após envio bem-sucedido, persista (CRÍTICO: atualiza ultimoProbeCLIts para permitir detecção de novas mensagens)
             try {
-              // Re-extrai histórico para pegar o timestamp mais recente do cliente
               let tsCLIAtualizado = tsCLI || 0;
               try {
                 const historicoAtualizado = await extrairHistoricoConversa(pAtual);
@@ -4450,7 +3904,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             logger.info('[PIPELINE] Resposta enviada com sucesso', { chatId, telefone: pipelineResult.telefone_extraido, perguntas: pipelineResult.qaAsked });
           } catch (e) {
             logger.error('[PIPELINE] Falha no pipeline', { chatId, error: e && e.message || e });
-            // Retry/backoff similar ao Groq
             try {
               const prev = await getChatState(nome, chatId);
               const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
@@ -4481,7 +3934,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return;
           }
         } else if (DIRECT_GROQ) {
-          // Fallback: Groq (só se VIRTUS_USE_PIPELINE=0)
           try {
             logger.info('[CONTEXTO] Chamando Groq API', {
               nome,
@@ -4489,7 +3941,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               historicoLength: Array.isArray(historicoConversa) ? historicoConversa.length : 0
             });
             
-            // Cidade preferencial: manifest.cidade > localizacao.cidade > null
             let cidadePreferida = null;
             try {
               const man = await manifestStore.read(nome).catch(()=>null);
@@ -4499,23 +3950,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               cidadePreferida = localizacao.cidade;
             }
 
-            // Deadline check antes de chamar Groq
             if (Date.now() - responderStartedAt > 30000) {
               await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
               logger.warn('[RESPOSTA] Deadline por chat excedido — abortando com erro_envio', { nome, chatId });
               return;
             }
             
-            // PATCH LOGIC CHECKLIST "alreadyAsked"
             const secondaryAlreadyAsked = !!(stPrev && stPrev.secondaryPrompted === true);
             const promptUser = montarPromptUser(cidadePreferida, historicoConversa, { secondaryAlreadyAsked });
             const txt = await chamarGroqAPI(PROMPT_SYSTEM, promptUser);
             const parsed = parsearRespostaGroq(txt);
             
-            // Sanitização (IA) anti-clichê
             parsed.resposta = sanitizeIAResponse(parsed.resposta, historicoConversa);
 
-            // fallback de telefone quando LLM não retornar
             if (!parsed.telefone_extraido) {
               const textoHistorico = (historicoConversa || []).map(m => m && m.texto || '').join(' ');
               const utils = require('./utils.js');
@@ -4526,20 +3973,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               }
             }
 
-            // Atualiza dados coletados locais (cidade, telefone, cereja)
             atualizarDadosColetados(chatId, {
               cidade: cidadePreferida || null,
               telefone: parsed.telefone_extraido || null,
               dados: parsed.dados || {}
             });
 
-            // Inicia timer se capturou telefone pela primeira vez
             const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
             if (!jaTinhaTimer && parsed.telefone_extraido) {
               iniciarTimerFechamento(chatId, parsed.telefone_extraido);
             }
 
-            // Reaproveitar a página atual - NUNCA reload/goto
             const pAtual = await ensurePage().catch(() => null);
             if (!pAtual) {
               logger.warn('[GROQ] Page indisponível', { nome, chatId });
@@ -4550,7 +3994,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
 
-            // Verifica se está no chat correto - se não, apenas marca cooldown (não navega)
             let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
             if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(pAtual, chatId, { timeoutMs: 0 }))) {
               logger.warn('[GROQ] URL/contexto não corresponde (sem navegação). Cooldown.', { nome, chatId, urlNow });
@@ -4568,7 +4011,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
 
-            // Tenta obter composer - se falhar, usa refocusComposerNoReload
             let campoEnvio = await waitForComposer(pAtual, 10000);
             if (!campoEnvio) {
               logger.info('[GROQ] Composer não encontrado, tentando refocus', { nome, chatId });
@@ -4593,28 +4035,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
 
-            // Calcular pace do cliente e aplicar dedup
             const paceDelay = calcularPaceCliente(historicoConversa);
             logger.info('[PACE] Delay calculado: ' + paceDelay + 'ms', { nome, chatId });
             
-            // Aplicar dedup rigoroso (últimas 3 respostas IA)
             let respostaFinal = parsed.resposta;
             respostaFinal = aplicarDedupResposta(respostaFinal, historicoConversa);
             if (respostaFinal !== parsed.resposta) {
               logger.info('[DEDUP] Resposta ajustada para evitar repetição', { nome, chatId });
             }
             
-            // Aguardar delay humano baseado no pace do cliente
             await sleep(paceDelay);
             
             try {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
             } catch {}
 
-            // AQUISIÇÃO DO LOCK — "just-in-time locking"
             await acquireSendGuard(pAtual, chatId);
             try {
-              // PROTEÇÃO: Verifica se a última mensagem enviada é igual à atual (evita duplicação)
               const ultimaIATexto = ultimaIA && ultimaIA.texto ? String(ultimaIA.texto).trim() : '';
               const respostaAtual = String(respostaFinal || '').trim();
               if (ultimaIATexto && respostaAtual && ultimaIATexto === respostaAtual) {
@@ -4630,45 +4067,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 return;
               }
 
-              // ENFORCEMENT: Aplicar regras de governança antes de enviar (mas preservar a inteligência da IA)
               const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
-              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {}, askedTimes: {} };
+              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {} };
               let respostaGov = enforceGovRulesOnText(respostaFinal, { alreadyGreeted: !!flowPrev.greeted });
               
-              // Proteção contra duas mensagens consecutivas pedindo WhatsApp
-              const iaMsgs3 = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
-              const lastIaTxt3 = iaMsgs3.length ? String(iaMsgs3[iaMsgs3.length - 1].texto || '') : '';
-              if (/whats(app)?|telefone|n[uú]mero/i.test(lastIaTxt3) && /whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
-                // bloqueio total de repetição de WhatsApp consecutiva — NUNCA envie
-                try {
-                  await setChatState(nome, chatId, {
-                    flow: flowPrev,
-                    lastProbeAt: Date.now()
-                  });
-                } catch {}
-                try { await pendingDel(nome, chatId); } catch {}
-                fila = fila.filter(id => id !== chatId);
-                chatAtivo = null;
-                return;
-              }
-              
-              // CRÍTICO: Só adicionar WhatsApp se cliente perguntou preço na última mensagem
               const utils = require('./utils.js');
               const telOk = utils.isValidBRPhoneWithDDD(parsed.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
               if (!telOk) {
-                const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-                const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-                const askedPriceNow = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
-                
-                // Verificar TODO o histórico de mensagens da IA para bloquear duplicidade absoluta
-                const jaPediuWhatsAntesHistorico = iaMsgs3.some(m => /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(String(m.texto || '')));
-                
-                // Só adiciona WhatsApp se: cliente perguntou preço E ainda não pediu WhatsApp em toda a conversa
-                // E resposta não pede WhatsApp
-                if (askedPriceNow && !jaPediuWhatsAntesHistorico && !/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
                   respostaGov = respostaGov.trim();
                   if (!respostaGov.endsWith('.')) respostaGov += '.';
-                  respostaGov += ' Pode me passar seu WhatsApp? O motorista chama por lá.';
+                  respostaGov += ' Me passa teu WhatsApp com DDD? O motorista chama por lá.';
                 }
               }
               
@@ -4681,7 +4090,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               await sendMessageSafe(pAtual, campoEnvio, respostaGov, nome, chatId);
               await appendIaLine(nome, chatId, respostaGov);
               
-              // Garantir greeted=true após primeira resposta
               try {
                 const st = await getChatState(nome, chatId).catch(()=>null);
                 const flowSt = (st && st.flow) ? st.flow : { greeted: false, asked: {}, answered: {} };
@@ -4691,18 +4099,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 }
               } catch {}
               
-              // Salvar secondaryPrompted após enviar resposta
               try { await setChatState(nome, chatId, { secondaryPrompted: true }); } catch {}
 
               await marcarRespondido(nome, chatId);
             } finally {
-              // SEMPRE libera o lock, mesmo em caso de erro ou return antecipado
               releaseSendGuard(pAtual);
             }
 
-            // Após envio bem-sucedido, persista (CRÍTICO: atualiza ultimoProbeCLIts para permitir detecção de novas mensagens)
             try {
-              // Re-extrai histórico para pegar o timestamp mais recente do cliente
               let tsCLIAtualizado = tsCLI || 0;
               try {
                 const historicoAtualizado = await extrairHistoricoConversa(pAtual);
@@ -4726,7 +4130,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             logger.info('[GROQ] Resposta enviada com sucesso', { chatId, finalizado: parsed.finalizado, tel: parsed.telefone_extraido });
           } catch (e) {
             logger.error('[GROQ] Falha no fluxo direto', { chatId, error: e && e.message || e });
-            // Retry/backoff: registra tentativas e agenda reprocessamento
             try {
               const prev = await getChatState(nome, chatId);
               const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
@@ -4734,7 +4137,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const nextMs = Math.min(5 * 60 * 1000, Math.pow(2, attempts - 1) * baseMin * 60 * 1000); // max 5min
 
               if (attempts >= 3) {
-                // Após 3 falhas, marca "erro_envio" e não tenta mais para esta mesma mensagem
                 const msgHash = hashResposta(ultimaMsgClienteTexto || '');
                 await setChatState(nome, chatId, {
                   state: 'erro_envio',
@@ -4745,7 +4147,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 });
                 await logIssue(nome, 'virtus_send_failed', `erro_envio após ${attempts} tentativas (chat ${chatId})`);
               } else {
-                // Backoff exponencial até 5min no estado AGUARDANDO
                 await setChatState(nome, chatId, {
                   state: CHAT_STATES.AGUARDANDO,
                   sendAttempts: attempts,
@@ -4755,18 +4156,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 await logIssue(nome, 'virtus_send_failed', `retry_schedule attempt=${attempts} in=${Math.round(nextMs/1000)}s chat=${chatId}`);
               }
             } catch {}
-            // encerra ciclo
             try { await pendingDel(nome, chatId); } catch {}
             fila = fila.filter(id => id !== chatId);
             chatAtivo = null;
             return;
           }
         } else {
-          // Fluxo antigo: Notificador
-          // 5. Formata localização no padrão "Cidade (UF)" para a planilha Google
           const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
 
-          // 6. Adiciona na fila de envio para o notificador com TODO o histórico
           adicionarChatParaEnvio(nome, {
             chatId,
             tipoServico,
@@ -4775,38 +4172,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             urlClassificado
           });
 
-          // INÍCIO PATCH: Gravar última mensagem do cliente processada (persistida em disco) - caminho Notificador
           try {
             await setChatState(nome, chatId, {
               ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
               ultimoProbeCLIts: tsCLI || 0
             });
           } catch {}
-          // FIM PATCH
         }
 
-        // Ledger: remove pending (chat foi processado)
         try { await pendingDel(nome, chatId); } catch {}
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
         
-        // NOVO: atualiza lastProbeAt no final do processamento (sucesso)
         try { 
           await setChatState(nome, chatId, { lastProbeAt: Date.now() }); 
         } catch {}
 
       } catch (err) {
         const msgErr = (err && err.message) ? err.message : String(err);
-        // Se alvo fechou, classificar corretamente e sair silenciosamente
         if (/Target closed|Protocol error.*Target closed|Session closed/i.test(msgErr)) {
           try { await logIssue(nome, 'browser_disconnected', `chat ${chatId}: target/page closed during send`); } catch {}
         } else {
           try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msgErr}`); } catch {}
         }
         logger.error('Erro ao responder chat', { nome, chatId }, err);
-        // Rollback pending em caso de erro
         try { await pendingDel(nome, chatId); } catch {}
-        // NOVO: atualiza lastProbeAt mesmo em caso de erro
         try { 
           await setChatState(nome, chatId, { lastProbeAt: Date.now() }); 
         } catch {}
@@ -4815,14 +4205,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       fila = fila.filter(id => id !== chatId);
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
     } finally {
-      // CRÍTICO: Sempre liberar chatAtivo no finally para garantir que não fique travado
       if (chatAtivo === chatId) {
         chatAtivo = null;
         logger.info('[RESPONDER] chatAtivo liberado no finally', { nome, chatId });
       }
       
-      // CRÍTICO: Sempre tentar liberar lock no finally, mesmo se não foi adquirido
-      // Isso garante que locks órfãos sejam limpos
       try { 
         chatLock.release(nome, chatId);
         if (_chatLockAcquired) {
@@ -4838,7 +4225,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
       }
       
-      // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
       try { 
@@ -4848,13 +4234,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  // ========================
-  // === BLOCO MODIFICADO ===
-  // ========================
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
     logger.info(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`, { nome });
-    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
       const manifest = await manifestStore.read(nome);
@@ -4868,9 +4250,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
-    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
 
-    // === INÍCIO GUARD DE VIDA NO FILAMANAGERLOOP ===
     if (!browser || browser.isConnected?.() === false) {
       logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
       if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
@@ -4880,7 +4260,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       return;
     }
-    // Fim guard de vida browser
 
     if (filaLoopBusy) return;
     filaLoopBusy = true;
@@ -4896,29 +4275,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-
-      // ======= INSTRUÇÃO: REMOVER BLOCO REVIVE AQUI =======
-      /*
-      // --- INÍCIO DETECTOR/REVIVE ---
-      try {
-        const reviveTimeoutMs = 1000;
-        const jsTest = await Promise.race([
-          p.evaluate(() => 1+41),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), reviveTimeoutMs))
-        ]);
-      } catch (e) {
-        try {
-          log('[VIRTUS][REVIVE] Navegador detectado travado/sem resposta — abrindo aba fantasma para tentar reviver.');
-          const tmp = await browser.newPage();
-          setTimeout(() => { try { tmp.close(); } catch {} }, 1000);
-        } catch (e2) {
-        }
-      }
-      // --- FIM DETECTOR/REVIVE ---
-      */
-      // === BLOCO REMOVIDO CONFORME INSTRUÇÃO ===
-
-      // Não dispare keepalive durante inserção de mensagem
       if (!isVirtusLocked(nome)) {
         try {
           await p.evaluate(() => {
@@ -4935,7 +4291,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       if (limpaHistoricoVelho()) await salvaHistorico();
 
-      // Em filaManagerLoop (logo após obter p via ensurePage()):
       const b = getBrowserFromPage(p);
       if (b && b._sendLock && b._sendLock.active) {
         const age = Date.now() - (b._sendLock.since || 0);
@@ -4963,7 +4318,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               lastScrollToTop = Date.now();
             }
           } catch {}
-          // Reforço após 800ms para garantir Messenger reativo
           setTimeout(() => {
             if (!running || !epochOk()) return;
             try {
@@ -4980,7 +4334,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (scrolled) {
           lastScrollToTop = Date.now();
         }
-        // Reforço após 800ms para garantir Messenger reativo
         setTimeout(() => {
           if (!running || !epochOk()) return;
           try {
@@ -4991,8 +4344,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }, 800);
       } catch {}
 
-      // ========== INÍCIO BLOCO ADICIONADO CONFORME INSTRUÇÃO ==========
-      // Checagem de bloqueio temporário Messenger (DOM) — apenas LOG, congelamento é feito pelo nurseTick
       try {
         const det = await p.evaluate(() => {
           const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -5008,13 +4359,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return { blocked: hasBlocked };
         });
         if (det && det.blocked) {
-          // Apenas LOG, não congele aqui! O nurseTick irá congelar.
           if (issues) try { await logIssue(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado (Virtus/Marketplace)'); } catch {}
         }
       } catch {}
-      // ========== FIM BLOCO ADICIONADO ==========
 
-      // Garantir giro da fila
       if (!chatAtivo) scheduleNextIfIdle();
 
     } finally {
@@ -5022,10 +4370,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
     }
   }
-  // ==== FIM BLOCO MODIFICADO ====
 
-  // Controle de timer e dados por chat (escopo do perfil) - APENAS SE DIRECT_GROQ
-  // Definido ANTES de responderChat() para estar acessível
   const timersFechamento = DIRECT_GROQ ? new Map() : null; // chatId -> { inicio, telefone, expirado }
   const dadosColetados = DIRECT_GROQ ? new Map() : null;   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
   const pedidosEnviados = DIRECT_GROQ ? new Set() : null;  // chatId já enviados
@@ -5036,13 +4381,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const cur = dadosColetados.get(chatId);
     if (cidade && !cur.cidade) cur.cidade = cidade;
     if (telefone) cur.telefone = telefone;
-    // dados cereja
     const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens','data_hora'];
     for (const k of keys) {
       if (dados && dados[k] != null) cur[k] = dados[k];
     }
     dadosColetados.set(chatId, cur);
-    // Persiste em disco
     try {
       await setChatState(nome, chatId, {
         dadosColetados: cur,
@@ -5063,7 +4406,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const inicio = Date.now();
     const expiraEm = inicio + (10 * 60 * 1000); // 10 minutos
     timersFechamento.set(chatId, { inicio, telefone, expirado: false, expiraEm });
-    // Persiste em disco
     try {
       await setChatState(nome, chatId, {
         timerStartedAt: inicio,
@@ -5072,7 +4414,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         updatedAt: Date.now()
       });
     } catch {}
-    // 10 minutos depois, verifica
     setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
     logger.info('[TIMER] Timer de 10min iniciado', { chatId, telefone });
   }
@@ -5098,7 +4439,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  // Resume timers após reboot/startVirtus
   async function resumeTimers() {
     if (!DIRECT_GROQ || !timersFechamento) return;
     try {
@@ -5108,10 +4448,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!state || !state.timerExpiresAt) continue;
         const expiraEm = state.timerExpiresAt;
         if (expiraEm <= agora) {
-          // Timer já expirado, processa imediatamente
           await verificarTimerExpirado(chatId);
         } else {
-          // Reprograma timer
           const restante = expiraEm - agora;
           timersFechamento.set(chatId, {
             inicio: state.timerStartedAt || (agora - (10 * 60 * 1000 - restante)),
@@ -5122,7 +4460,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           setTimeout(() => verificarTimerExpirado(chatId), restante);
           logger.info('[TIMER] Timer restaurado', { chatId, restante: Math.round(restante / 1000) + 's' });
         }
-        // Restaura dados coletados
         if (state.dadosColetados && dadosColetados) {
           dadosColetados.set(chatId, state.dadosColetados);
         }
@@ -5152,7 +4489,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     };
   }
 
-  // envio parcial opcional: NOTIFICADOR_ENVIAR_PARCIAL=1
   const _parcialCooldown = new Map(); // chatId -> lastSent
   async function enviarPedidoParcialSeHabilitado(chatId) {
     try {
@@ -5198,7 +4534,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     }
     try {
-      // NUNCA navegue/goto - apenas verifica se está no chat correto
       const expectedPath = `/marketplace/t/${chatId}/`;
       let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
       if (!urlNow.includes(expectedPath)) {
@@ -5234,7 +4569,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function runner() {
     const attId = stepLog.attemptId();
 
-    // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
     try {
       const manifest = await manifestStore.read(nome);
@@ -5248,7 +4582,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
-    // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
 
     await sleep(2000);
     let ready = false;
@@ -5283,7 +4616,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         ready = true;
         logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
         
-        // Instalar MutationObserver para detectar novos chats em tempo real
         let NEWCHAT_DEDUP = new Set();
         function onNewChatDetected({ id, tempo }) {
           const chatId = id;
@@ -5307,13 +4639,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!running || !epochOk()) return;
     await initHistoricoSePreciso();
     
-    // Inicialização do Notificador (apenas se não estiver em modo DIRECT_GROQ)
     if (!DIRECT_GROQ) {
       try {
         await fazerHandshakeNotificador(nome);
         iniciarPollingRespostas(nome);
         
-        // Implementa enviarRespostaMessengerSegura dentro do contexto do Virtus
         async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
         const MAX_TRIES = 2;
         let lastErr = null;
@@ -5328,7 +4658,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
           
           try {
-            // Em enviarRespostaMessengerSeguraLocal: Antes de qualquer navegação/goto, insira o check:
             try {
               const urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
               const okChat = chatUrlMatches(urlNow, chatId);
@@ -5346,7 +4675,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
             
-            // NUNCA navegue/goto - apenas verifica se está no chat correto
             let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
             if (!chatUrlMatches(urlNow, chatId)) {
               logger.warn('[MESSENGER] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
@@ -5392,7 +4720,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             });
             
             if (attempt < MAX_TRIES) {
-              // Aguardar antes de retry
               await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
             }
           }
@@ -5411,7 +4738,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return false;
       }
       
-      // Implementa marcarRespondido dentro do contexto do Virtus
       async function marcarRespondidoLocal(chatId) {
         try {
           const agoraTs = agoraEpoch();
@@ -5419,7 +4745,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
           historicoLocal[chatId] = agoraTs;
           await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
-          // atualiza cache local do Virtus
           setResponded(chatId, agoraTs);
           await salvaHistorico();
         } catch (e) {
@@ -5432,19 +4757,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
       }
     } else {
-      // Modo DIRECT_GROQ: nada a fazer aqui (responderChat envia diretamente no Messenger)
       logger.info('[GROQ] Modo DIRECT_GROQ ativo', { nome });
-    // Restaura timers e dados coletados do disco
     await resumeTimers();
     }
     
-    // Verificação contínua: loop recursivo sem intervalos longos
-    // O filaInterval é apenas um fallback de segurança (não usado no loop principal)
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
     filaManagerLoop();
     
-    // Kick inicial no runner: agende outra chamada em 3s, e outra em 10s
-    // Isso garante polling rapidíssimo no boot para "ver" os chats sem precisar esperar o ciclo de 30s
     setTimeout(() => {
       if (running && epochOk()) {
         logger.info('[FILA] Kick inicial (3s) — forçando atualização de fila', { nome });
@@ -5475,7 +4794,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!robeMeta[nome]) robeMeta[nome] = {};
         robeMeta[nome].numPages = pages.length;
       }
-      // ========== Limpeza para evitar leaks ==========
       delete virtusDeadLogTimes[nome];
       try { respondedCache.clear(); } catch {}
       try { fila = []; } catch {}
