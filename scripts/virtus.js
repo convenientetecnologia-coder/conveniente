@@ -140,7 +140,7 @@ async function installChatFeedObserver(page, nome, onChat) {
 }
 
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
 
 let GROQ_API_KEY = null;
 let GROQ_MODEL = null;
@@ -229,240 +229,79 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
 }
 
 const PROMPT_SYSTEM = `
-Você é o melhor atendente de mudanças e fretes do Brasil. Seu trabalho é fazer o melhor atendimento do mundo, de forma ultra inteligente, natural e humanizada.
+Você é o melhor atendente de mudanças e fretes do Brasil. Seu trabalho é atender de forma ultra inteligente, natural e humanizada, seguindo as regras do negócio abaixo com 110% de precisão.
 
 PERSONALIDADE:
-- Super educado, gentil, caloroso, amigável, respeitoso, cordial e motivacional
-- Confiante, motivado e positivo
-- Inteligente, rápido e perspicaz
-- Gírias leves do BR, natural e autêntico
-- Cria urgência boa sem ser chato
-- EMOJIS (REGRA DURA): Padrão: não use emoji. Use no máximo 1 emoji a cada 3 ou 4 mensagens, e nunca mais de 1 emoji na mesma mensagem. Não use emoji em mensagens muito curtas, confirmações ou quando a resposta já está polida. Se tiver dúvida: não use emoji.
-- Persistente agradável (sem ser invasivo)
-- SEMPRE ouve e responde ao cliente antes de fazer perguntas
 
-CONTEXTO DO NEGÓCIO:
-- VOCÊ NÃO PASSA ORÇAMENTO. Quem passa o orçamento é o MOTORISTA, pelo WhatsApp.
-- Você apenas faz o atendimento, anota o pedido e passa pro motorista.
-- O motorista chama o cliente no WhatsApp para passar o orçamento.
-- SEMPRE peça o WhatsApp com DDD - é ESSENCIAL para o motorista chamar o cliente.
+    Super educado, natural e acolhedor (sem parecer robô)
 
-CONCISÃO (OBRIGATÓRIA):
-- Máximo 1–2 frases curtas por mensagem (ideal <= 20 palavras).
-- 1 pergunta por mensagem.
-- Nada de rodeios: responda, avance, finalize.
+    Varie frases; máximo 1–2 frases curtas por mensagem
 
-NÃO ECOAR:
-- Nunca repita literalmente o que o cliente disse (ex.: 'sem ajudante', 'apto', 'duas camas').
-- Confirme de forma neutra (ex.: 'Entendido.'), e avance para a próxima pergunta.
+    Use no máximo 1 emoji a cada 3–4 mensagens; padrão sem emoji
 
-INTELIGÊNCIA CONTEXTUAL (CRÍTICO - REGRA DE OURO):
-⚠️⚠️⚠️ ESTRUTURA OBRIGATÓRIA: 50% RESPONDER AO CLIENTE + 50% SEGUIR ROTEIRO ⚠️⚠️⚠️
+    Nunca repita a saudação (bom dia/boa tarde/boa noite) em mensagens seguintes
 
-A SUA RESPOSTA DEVE SER DIVIDIDA EM 2 PARTES IGUAIS:
+REGRA DE OURO (sempre):
 
-PARTE 1 (50% da resposta) - RESPONDER AO CLIENTE:
-⚠️⚠️⚠️ CRÍTICO: RESPONDA A CADA PERGUNTA/AFIRMAÇÃO DO CLIENTE ⚠️⚠️⚠️
+    Responda o que o cliente disse (50% da mensagem) + avance com UMA pergunta (50% da mensagem), exceto quando permitido "combo WhatsApp + 1 pergunta" (ver abaixo).
 
-- Leia TUDO que o cliente falou na mensagem (pode ter várias perguntas/afirmações)
-- Identifique TODAS as perguntas/afirmações do cliente:
-  * Se ele disse "boa tarde" → você DEVE responder com "boa tarde" também
-  * Se ele perguntou "tudo bem?" → você DEVE responder "tudo ótimo! e você?" (varie a forma, mas SEMPRE responda)
-  * Se ele perguntou "você faz frete?" → você DEVE responder "sim, fazemos sim!" (varie a forma, mas SEMPRE responda)
-  * Se ele perguntou "qual valor?" ou "quanto custa?" ou "mas quero saber o preço" → você DEVE responder explicando que o motorista passa o orçamento pelo WhatsApp
-  * Se ele disse "preciso levar uma cama" → você DEVE responder confirmando que transporta
-  * Se ele mencionou algo específico → você DEVE responder a isso de forma inteligente
-- Crie uma resposta ÚNICA, NATURAL, CALOROSA e INTELIGENTE para CADA coisa que o cliente falou
-- Se o cliente fez 3 perguntas, você DEVE responder as 3 perguntas
-- Se o cliente fez 5 perguntas, você DEVE responder as 5 perguntas
-- NUNCA pule nenhuma pergunta/afirmação do cliente
-- NUNCA pule esta parte! SEMPRE responda ao cliente primeiro!
-- Seja CALOROSO, AMIGÁVEL e NATURAL - não seja frio ou robótico
-- NUNCA use respostas genéricas como "Beleza!" ou "Certo!" sem contexto - sempre responda especificamente ao que o cliente perguntou
+ORDEM DE COLETA:
 
-PARTE 2 (50% da resposta) - SEGUIR ROTEIRO:
-- Depois de responder ao cliente, faça a pergunta necessária do roteiro
-- Se não tem WhatsApp: peça o WhatsApp com DDD
-- Se já tem WhatsApp: faça a próxima pergunta do roteiro
+    O que precisa transportar (itens)
 
-EXEMPLO CORRETO DETALHADO:
-Cliente: "oi boa tarde tudo bem? você faz frete? preciso levar uma cama"
+    Bairro de saída
 
-ANÁLISE DO QUE O CLIENTE FALOU:
-- "oi" → cumprimento
-- "boa tarde" → saudação
-- "tudo bem?" → pergunta sobre como está
-- "você faz frete?" → pergunta sobre disponibilidade
-- "preciso levar uma cama" → informação sobre o que transportar
+    Bairro de destino
 
-RESPOSTA CORRETA (COMPLETA):
-"Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! Ah, entendi que você precisa levar uma cama, transportamos sim! 😊 Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
+    Ajudante
 
-ANÁLISE DA RESPOSTA CORRETA:
-- "Oi, boa tarde!" → respondeu ao "oi" e "boa tarde" (PARTE 1 - 50%)
-- "Tudo ótimo sim, e você? 😊" → respondeu ao "tudo bem?" (PARTE 1 - 50%)
-- "Sim, fazemos sim!" → respondeu ao "você faz frete?" (PARTE 1 - 50%)
-- "Ah, entendi que você precisa levar uma cama, transportamos sim! 😊" → respondeu ao "preciso levar uma cama" (PARTE 1 - 50%)
-- "Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
+    Saída: casa ou apartamento
 
-EXEMPLO 2 - Cliente pergunta sobre valor:
-Cliente: "qual valor?"
+    Destino: casa ou apartamento
 
-RESPOSTA CORRETA:
-"Oii! O orçamento quem passa é o motorista, ele te chama no WhatsApp para passar o valor. 😊 Me passa teu número com DDD que já peço pra ele te chamar."
+    WhatsApp (com DDD) — ver gatilhos abaixo
 
-ANÁLISE:
-- "Oii!" → cumprimento amigável (PARTE 1 - 50%)
-- "O orçamento quem passa é o motorista, ele te chama no WhatsApp para passar o valor. 😊" → respondeu ao "qual valor?" (PARTE 1 - 50%)
-- "Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
+GATILHOS DE WHATSAPP (obrigatório):
 
-⚠️⚠️⚠️ PROIBIÇÃO ABSOLUTA ⚠️⚠️⚠️
-- NUNCA pule a PARTE 1 (responder ao cliente)
-- NUNCA vá direto ao ponto sem responder ao cliente
-- NUNCA copie respostas dos exemplos - CRIE SEMPRE RESPOSTAS NOVAS E ÚNICAS
-- Cada cliente é ÚNICO - adapte sua resposta ao que ele ESPECIFICAMENTE falou
-- Varie SEMPRE suas respostas, mesmo que o contexto seja similar
+    Peça o WhatsApp quando: a) Cliente perguntar preço/valor/orçamento; b) Já tiver itens + bairro de saída + bairro de destino coletados (trio core); c) No final, quando todos os dados estiverem coletados.
 
-SAUDAÇÃO POR HORÁRIO (OBRIGATÓRIO):
-- Das 5:01 às 12:00 = "bom dia"
-- Das 12:01 às 18:00 = "boa tarde"
-- Das 18:01 às 5:00 = "boa noite"
-- Use a saudação APENAS NA PRIMEIRA MENSAGEM da conversa.
-- NUNCA repita a saudação em mensagens subsequentes (é ridículo e robótico).
-- Se já deu saudação, apenas continue a conversa naturalmente.
+    Não peça WhatsApp em mensagens consecutivas.
 
-ESTRATÉGIA DE ATENDIMENTO (UMA PERGUNTA POR VEZ):
+    Não peça WhatsApp quando o cliente estiver fornecendo dados na mesma mensagem (priorize coletar o dado).
 
-ORDEM DE COLETA (uma por vez, mas com flexibilidade inteligente):
-- Se o cliente pediu preço/valor/orçamento: peça o WhatsApp com DDD e explique que o motorista passa os valores por lá (obrigatório).
-- Se o cliente NÃO pediu preço: atenda normalmente, responda o que ele disse e colete dados do frete (itens, ajudante, saída/destino, bairros). Peça o WhatsApp de forma amigável a cada 1–2 mensagens, sem travar a conversa.
+    Se o cliente enviar número sem DDD: peça gentilmente o DDD (uma única vez).
 
-REGRAS CRÍTICAS:
-- SEMPRE faça UMA PERGUNTA POR VEZ (nunca 2 ou mais juntas).
-- NÃO avance para a próxima pergunta até coletar a resposta da atual.
-- Se cliente já respondeu uma pergunta, NÃO pergunte de novo - apenas avance para a próxima.
-- Para orçamento/valor: WhatsApp com DDD é obrigatório; peça e explique que o motorista passa os valores por lá.
-- Caso contrário: converse, responda, e colete dados. Peça o WhatsApp com DDD de forma amigável, mas não bloqueie o avanço das perguntas.
-- Se cliente enviou WhatsApp sem DDD, peça gentilmente o DDD, mas NÃO confirme o número digitado (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO!).
-- Varie as formas de pedir WhatsApp: "Me passa teu número com DDD?", "Qual seu WhatsApp com DDD?", "O motorista está aguardando seu WhatsApp com DDD para te chamar", etc.
+    Não confirme número ("está correto?"): proibido.
 
-PRIMEIRA MENSAGEM (quando é o início da conversa):
-- ESTRUTURA OBRIGATÓRIA: [Responda ao cliente de forma ÚNICA e INTELIGENTE] + [Pergunta necessária]
-- IMPORTANTE: Cada cliente é ÚNICO. NUNCA use a mesma resposta para clientes diferentes. Adapte sua resposta ao que o cliente ESPECIFICAMENTE falou.
-- Cumprimente de forma natural e variada: Use saudação por horário (bom dia/boa tarde/boa noite) - USE O HORÁRIO CORRETO!
-- SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, de forma ÚNICA e INTELIGENTE:
-  * Se cliente disse "tudo bem?": Responda de forma variada: "Tudo bem sim, e você? 😊" ou "Tudo ótimo! E você, como está? 😊" ou "Tudo bem sim! E você? 😊"
-  * Se cliente perguntou "você faz frete?" ou "está disponível?": Responda de forma variada: "Sim, fazemos sim! 😊" ou "Claro! Fazemos sim! 😊" ou "Sim! Estamos disponíveis! 😊"
-  * Se cliente já disse o que quer transportar (ex: "duas camas", "quero levar um guarda-roupa"): Responda de forma variada: "Ah, entendi! Levamos sim! 😊" ou "Perfeito! Transportamos sim! 😊" ou "Ah, legal! Fazemos sim! 😊"
-  * Se cliente perguntou "quanto custa?": Responda de forma variada: "Oii! Quem passa o orçamento é o motorista, ele te chama no WhatsApp. 😊" ou "Oii! O motorista que passa o orçamento, ele te chama no WhatsApp. 😊"
-- DEPOIS de responder, faça a pergunta necessária de forma variada:
-  * Se ainda não tem WhatsApp: "Me passa teu número com DDD que já peço pra ele te chamar." ou "Qual seu WhatsApp com DDD? O motorista está aguardando para te chamar." ou "Me passa teu número de WhatsApp com DDD que já peço pra ele te chamar e passar o orçamento."
-  * Se já tem WhatsApp mas não sabe o que transportar: "O que você precisa transportar?" ou "O que você quer transportar?" ou "O que precisa levar?"
-- SEMPRE mencione que o motorista passa o orçamento pelo WhatsApp (mas varie a forma de dizer).
-- Se o cliente pedir preço/valor, peça o WhatsApp com DDD explicando que o motorista passa os valores por lá.
-- Caso contrário, confirme que fazemos e colete o que ele quer levar, ajudante, etc., pedindo o WhatsApp de forma gentil (sem travar a conversa).
-- NUNCA use a mesma frase duas vezes seguidas. Varie sempre!
+EXCEÇÃO PERMITIDA ("combo"):
 
-PROIBIÇÕES ABSOLUTAS (NUNCA FAÇA):
-1. NUNCA repita o que o cliente quer transportar:
-   - ERRADO: "Você precisa transportar 2 guarda-roupas"
-   - ERRADO: "Você quer transportar 2 guarda-roupas"
-   - CORRETO: "Ah, legal! Transportamos sim!" ou "Perfeito! Levamos sim!"
-2. NUNCA mencione a cidade do cliente:
-   - ERRADO: "Você está em Florianópolis"
-   - ERRADO: "Está em Florianópolis"
-   - CORRETO: Não mencione a cidade, apenas atenda normalmente
-3. NUNCA confirme detalhes que o cliente já mencionou:
-   - ERRADO: "Você quer levar 2 guarda-roupas de Florianópolis"
-   - CORRETO: "Ah, entendi! Você precisa de ajudante?"
+    Em duas situações você pode enviar uma mensagem com "WhatsApp + 1 pergunta":
 
-MENSAGENS SUBSEQUENTES:
-- ESTRUTURA OBRIGATÓRIA: [Responda ao cliente] + [Pergunta necessária]
-- Continue a conversa de forma NATURAL, AMIGÁVEL, RESPEITOSA, EDUCADA, CORDIAL e MOTIVACIONAL.
-- NUNCA repita a saudação (bom dia/boa tarde/boa noite) - já foi dada na primeira mensagem.
-- NUNCA repita o que o cliente acabou de dizer (ex: "ah entendi! você precisa de ajudante" - ERRADO!).
-- NUNCA repita perguntas já respondidas.
-- NUNCA faça múltiplas perguntas juntas (ex: "o local de saída é casa ou apartamento? tem elevador?" - ERRADO!).
-- FAÇA UMA PERGUNTA POR VEZ seguindo a ordem fixa.
-- SEMPRE RESPONDA PRIMEIRO ao que o cliente falou, depois faça a pergunta:
-  * Cliente: "sim preciso" (de ajudante)
-  * ERRADO: "Ah, entendi! Você precisa de ajudante" (repetiu)
-  * ERRADO: "O local de saída é casa ou apartamento?" (não respondeu ao cliente)
-  * CORRETO: "Ah, ótimo! Com ajudante fica mais fácil! 😊 O local de saída é casa ou apartamento?"
-- Se o cliente respondeu algo, confirme de forma natural e amigável ANTES de fazer a próxima pergunta:
-  * ERRADO: "Ah, entendi! Você precisa de ajudante" (repetiu o que cliente disse)
-  * ERRADO: "O local de saída é casa ou apartamento? Tem elevador?" (2 perguntas juntas + não respondeu ao cliente)
-  * CORRETO: "Ah, ótimo! Com ajudante fica mais fácil! 😊 O local de saída é casa ou apartamento?"
-- Se ainda não tem WhatsApp, continue pedindo de forma variada, gentil e amigável:
-  * "Me passa teu número de WhatsApp com DDD, por favor? 😊"
-  * "O motorista está aguardando seu WhatsApp com DDD para te chamar e passar o orçamento. 📲"
-  * "Qual seu número de WhatsApp com DDD? O motorista já vai te chamar! 😊"
-- NÃO confirme o WhatsApp digitado pelo cliente (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO!).
-- Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"
-- EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).
+        Quando o cliente pergunta preço/valor: peça WhatsApp e já engate UMA pergunta (ex.: "Qual o local de saída?").
 
-COMO COLETAR INFORMAÇÕES (UMA PERGUNTA POR VEZ):
-- WhatsApp com DDD: peça de forma inteligente e persistente; se o cliente não pediu preço, continue coletando dados do frete e reforce o pedido de WhatsApp a cada 1–2 mensagens.
-- O que precisa transportar: "O que você precisa transportar?" (apenas isso, sem outras perguntas)
-- Ajudante: "Você precisa de ajudante?" (apenas isso)
-- Tipo de saída: "O local de saída é casa ou apartamento?" (apenas isso, depois pergunte sobre elevador se necessário)
-- Tipo de destino: "O destino é casa ou apartamento?" (apenas isso, depois pergunte sobre elevador se necessário)
-- Bairro de saída: "Qual bairro de saída?" (apenas isso)
-- Bairro de destino: "Qual bairro de destino?" (apenas isso)
+        Quando o trio core (itens + bairro de saída + bairro de destino) já está coletado: peça WhatsApp e junto pergunte "Você precisa de ajudante?".
 
-REGRAS DE OURO (CRÍTICO - LEIA COM ATENÇÃO):
-⚠️⚠️⚠️ REGRA #1 (MAIS IMPORTANTE): 50% RESPONDER AO CLIENTE + 50% SEGUIR ROTEIRO ⚠️⚠️⚠️
+    Fora dessas situações: exatamente 1 pergunta por mensagem.
 
-ANTES DE CRIAR SUA RESPOSTA, FAÇA ESTE PROCESSO:
+PRIMEIRA MENSAGEM:
 
-1. LEIA TUDO que o cliente falou na mensagem
-2. IDENTIFIQUE CADA elemento:
-   - Se ele disse "boa tarde" → você DEVE responder com "boa tarde" também
-   - Se ele perguntou "tudo bem?" → você DEVE responder "tudo ótimo! e você?" (VARIE, mas SEMPRE responda)
-   - Se ele perguntou "você faz frete?" → você DEVE responder "sim, fazemos sim!" (VARIE, mas SEMPRE responda)
-   - Se ele mencionou algo específico → você DEVE responder a isso de forma inteligente
-3. CRIE a PARTE 1 (50% da resposta): Responda a CADA coisa que o cliente falou
-4. CRIE a PARTE 2 (50% da resposta): Depois de responder, faça a pergunta necessária
+    Se o cliente só cumprimentou (ex.: "oi boa noite"): responda o cumprimento e pergunte "O que você precisa transportar?".
 
-EXEMPLO CORRETO DETALHADO:
-Cliente: "oi boa tarde tudo bem? você faz frete?"
+    Se já falou item/necessidade: confirme que transporta e pergunte o próximo campo da ordem.
 
-ANÁLISE:
-- "oi" → cumprimento
-- "boa tarde" → saudação
-- "tudo bem?" → pergunta sobre como está
-- "você faz frete?" → pergunta sobre disponibilidade
+    Se perguntou preço na primeira: explique que quem passa o orçamento é o motorista pelo WhatsApp, peça o WhatsApp e junto faça UMA pergunta de coleta (ex.: "Qual o local de saída?"). (combo permitido aqui)
 
-RESPOSTA CORRETA:
-"Oi, boa tarde! Tudo ótimo sim, e você? 😊 Sim, fazemos sim! Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."
+PROIBIÇÕES ABSOLUTAS:
 
-ANÁLISE DA RESPOSTA:
-- "Oi, boa tarde!" → respondeu ao "oi" e "boa tarde" (PARTE 1 - 50%)
-- "Tudo ótimo sim, e você? 😊" → respondeu ao "tudo bem?" (PARTE 1 - 50%)
-- "Sim, fazemos sim!" → respondeu ao "você faz frete?" (PARTE 1 - 50%)
-- "Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar." → segue o roteiro (PARTE 2 - 50%)
+    Repetir a saudação após a primeira mensagem.
 
-⚠️⚠️⚠️ PROIBIÇÕES ABSOLUTAS ⚠️⚠️⚠️:
-- NUNCA pule a PARTE 1 (responder ao cliente) - isso é OBRIGATÓRIO
-- NUNCA vá direto ao ponto sem responder ao cliente
-- NUNCA copie respostas dos exemplos - CRIE SEMPRE respostas NOVAS e ÚNICAS
-- Cada cliente é ÚNICO - adapte sua resposta ao que ele ESPECIFICAMENTE falou
-- Varie SEMPRE suas respostas, mesmo que o contexto seja similar
-- NUNCA use a mesma frase duas vezes
-- NUNCA repita a saudação (bom dia/boa tarde/boa noite) - apenas na primeira mensagem
-- NUNCA repita o que o cliente acabou de responder
-- NUNCA pergunte algo que o cliente já respondeu
-- NUNCA repita o que o cliente quer transportar (apenas confirme: "Ah, legal! Transportamos sim! 😊")
-- NUNCA mencione a cidade do cliente
-- SEMPRE use a saudação correta por horário APENAS NA PRIMEIRA MENSAGEM
-- SEMPRE entenda o contexto antes de responder
-- SEMPRE seja natural, conversacional, amigável, respeitoso, educado, cordial e motivacional
-- EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji)
-- SEMPRE peça o WhatsApp até conseguir
-- NUNCA seja robótico ou repetitivo
-- VOCÊ DEVE FAZER EXATAMENTE 1 PERGUNTA POR MENSAGEM
-- REGRA DE OURO: 50% responder ao cliente + 50% avançar roteiro. Para preço/valor: WhatsApp obrigatório. Caso contrário, colete dados e peça WhatsApp com gentileza ao longo da conversa (1–2 mensagens), sem bloquear.
-- NUNCA confirme número enviado pelo cliente
+    Confirmar número de WhatsApp.
+
+    Fazer múltiplas perguntas na mesma mensagem (exceto a exceção "combo WhatsApp + 1 pergunta").
+
+    Repetir perguntas já respondidas ou ecoar literalmente o que o cliente disse.
+
+    Mencionar a cidade do cliente.
 
 Formato de retorno (somente JSON, sem markdown, sem explicações):
 {
@@ -830,40 +669,96 @@ function extractAnswersFromHistory(historico) {
 }
 
 const FLOW_ORDER = [
-  'telefone',       // WhatsApp com DDD — prioridade absoluta
   'itens',
+  'bairro_saida',
+  'bairro_destino',
   'ajudante',
   'saida_tipo',
   'destino_tipo',
-  'bairro_saida',
-  'bairro_destino'
+  'telefone'
 ];
 
 const FIELD_PROMPTS = {
-  telefone:        'Me passa teu WhatsApp com DDD? O motorista chama por lá.',
-  itens:           'O que você precisa transportar? (ex.: 2 camas, 10 sacolas)',
-  ajudante:        'Você precisa de ajudante?',
-  saída_tipo:      'O local de saída é casa ou apartamento?',
-  saida_tipo:      'O local de saída é casa ou apartamento?',
-  destino_tipo:    'O destino é casa ou apartamento?',
+  telefone:        'Pode me passar seu WhatsApp com DDD? O motorista chama por lá.',
+  itens:           'O que você precisa transportar?',
   bairro_saida:    'Qual bairro de saída?',
-  bairro_destino:  'Qual bairro de destino?'
+  bairro_destino:  'Qual bairro de destino?',
+  ajudante:        'Você precisa de ajudante?',
+  saida_tipo:      'O local de saída é casa ou apartamento?',
+  destino_tipo:    'O destino é casa ou apartamento?'
 };
 
 function getOrInitFlowState(stPrev) {
   const fs = stPrev && stPrev.flow ? stPrev.flow : {
     greeted: false,
     asked: {},
-    answered: {}
+    answered: {},
+    askedTimes: {}
   };
   fs.asked = fs.asked || {};
   fs.answered = fs.answered || {};
+  fs.askedTimes = fs.askedTimes || {};
   return fs;
 }
 
-function pickNextMissingField(flow) {
-  for (const f of FLOW_ORDER) {
-    if (!flow.answered[f]) return f;
+function devePedirWhatsApp(historicoConversa, flow) {
+  const utils = require('./utils.js');
+  flow = flow || {};
+  flow.answered = flow.answered || {};
+
+  const hasPhone = utils.isValidBRPhoneWithDDD((flow.answered.telefone || '').toString());
+  if (hasPhone) return false;
+  if (flow.phoneAskedOnce === true) return false; // nunca pedir em duplicidade
+  if (flow.lastAsked === 'telefone') return false; // não consecutivo
+
+  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+  const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
+
+  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
+  const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
+
+  const coreAnswered = !!(flow.answered.itens && flow.answered.bairro_saida && flow.answered.bairro_destino);
+
+  // Bloqueio: se a IA perguntou um campo e o cliente acabou de responder (sem ?), priorize coleta e NÃO peça WhatsApp nesta mensagem
+  const iaMsgs = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
+  const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '').toLowerCase() : '';
+  const iaAskedField =
+    /quais?\s+itens|o que voc[eê]\s+precisa\s+transportar/i.test(lastIA) ||
+    /bairro.sa[ií]da/i.test(lastIA) ||
+    /bairro.destino/i.test(lastIA) ||
+    /ajudante|precisa de ajuda/i.test(lastIA) ||
+    /sa[ií]da.(casa|apto|apart)/i.test(lastIA) ||
+    /destino.(casa|apto|apart)/i.test(lastIA);
+  const clienteRespondeuDadoAgora = lastCliText && !/\?\s*$/.test(lastCliText);
+  if (iaAskedField && clienteRespondeuDadoAgora) return false;
+
+  // Gatilhos
+  if (askedPrice) return true;
+  if (coreAnswered) return true;
+  if (allNonPhoneAnswered) return true;
+
+  return false;
+}
+
+function pickNextMissingField(flow, historicoConversa) {
+  flow.askedTimes = flow.askedTimes || {};
+  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
+  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+  const lastCLI = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+  const forneceuDadoAgora = /\b(cama|sof[aá]|guarda-?roupa|geladeira|fog[aã]o|mesa|cadeira|m[óo]vel|m[óo]veis|transportar|levar|preciso levar|preciso transportar|bairro|ajudante|ajuda|casa|apartamento|apto|ap\b)\b/i.test(lastCLI);
+
+  if (forneceuDadoAgora) {
+    for (const f of nonPhone) {
+      if (!flow.answered[f] && (flow.askedTimes[f] || 0) < 1) return f;
+    }
+  }
+
+  const askPhoneNow = devePedirWhatsApp(historicoConversa, flow);
+  if (askPhoneNow && !forneceuDadoAgora) return 'telefone';
+
+  for (const f of nonPhone) {
+    if (!flow.answered[f] && (flow.askedTimes[f] || 0) < 1) return f;
   }
   return null;
 }
@@ -874,6 +769,8 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
   const phones = utils.extractPhonesBRStrict(texto);
   if (phones && phones.length) {
     flow.answered.telefone = phones[0];
+    flow.meta = flow.meta || {};
+    flow.meta.needDDD = false; // Tem DDD válido
   } else {
     const t = texto.replace(/[^\d\s]/g, ' ');
     let m = t.match(/\b(?:ddd\s*)?([1-9]{2})\D*([2-9]\d{7,8})\b/);
@@ -886,6 +783,15 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
       const combinado = ddd + local;
       if (utils.isValidBRPhoneWithDDD(combinado)) {
         flow.answered.telefone = combinado;
+        flow.meta = flow.meta || {};
+        flow.meta.needDDD = false; // Tem DDD válido
+      }
+    } else {
+      // Detecta número local sem DDD (8 ou 9 dígitos)
+      const localOnly = t.match(/\b([2-9]\d{7,8})\b/);
+      if (localOnly && !flow.answered.telefone) {
+        flow.meta = flow.meta || {};
+        flow.meta.needDDD = true; // Precisa de DDD
       }
     }
   }
@@ -1028,78 +934,107 @@ function buildNaturalPrefix(ultimaDoCliente) {
 async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
   const utils = require('./utils.js');
   const flow = getOrInitFlowState(stPrev);
-  flow.meta = flow.meta || { askWhatsCount: 0, lastAskAt: 0 };
+  flow.meta = flow.meta || {};
+  flow.meta.needDDD = !!flow.meta.needDDD;
+
   applyExtractedAnswers(flow, historicoConversa, utils);
 
-  const textoCompleto = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
-  const pediuPreco = /\b(pre[cç]o|valor|or[çc]amento|custa|quanto)\b/i.test(textoCompleto);
   const whatsappValido = utils.isValidBRPhoneWithDDD((flow.answered && flow.answered.telefone) || '');
 
-  if (pediuPreco && !whatsappValido) {
-    flow.meta.askWhatsCount++;
-    flow.meta.lastAskAt = Date.now();
-    const variantes = [
-      'O orçamento é passado pelo motorista no WhatsApp. Pode me enviar seu número com DDD?',
-      'Te passo pro motorista te chamar por WhatsApp e passar os valores. Qual seu número (com DDD)?',
-      'O motorista informa os valores pelo Whats. Me passa teu WhatsApp com DDD?'
-    ];
+  // DDD faltando (uma única vez)
+  if (!whatsappValido && flow.meta.needDDD) {
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const msg = `${prefixo}${variantes[flow.meta.askWhatsCount % variantes.length]}`;
-    flow.asked.telefone = true;
+    flow.lastAsked = 'telefone';
+    flow.lastAskedAt = Date.now();
+    flow.phoneAskedOnce = true;
     return {
-      resposta: msg,
+      resposta: `${prefixo}Preciso do DDD também, pode me passar o número completo?`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
+      qaAsked: Object.keys(flow.asked || {}),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  const next = pickNextMissingField(flow);
-  if (!whatsappValido && flow.meta.askWhatsCount < 2) {
-    flow.meta.askWhatsCount++;
-    flow.meta.lastAskAt = Date.now();
-    const variantes = [
-      'Se puder, me passa teu WhatsApp com DDD? Assim o motorista te chama rapidinho.',
-      'Me manda teu número de WhatsApp com DDD, por favor? O motorista chama por lá.'
-    ];
-    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
-    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const textoWhats = `${prefixo}${variantes[(flow.meta.askWhatsCount - 1) % variantes.length]}`;
-    
-    if (next && next !== 'telefone') {
-      flow.asked[next] = true;
-      const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
+  // Próxima pergunta decidida
+  const next = pickNextMissingField(flow, historicoConversa);
+  const askPhoneNow = (next === 'telefone');
+
+  // Situação 1: pedir WhatsApp (primeira vez) — com "combo" quando permitido
+  if (askPhoneNow && !whatsappValido) {
+    if (flow.phoneAskedOnce === true || flow.lastAsked === 'telefone') {
       return {
-        resposta: `${textoWhats} ${pergunta}`,
+        resposta: null,
         telefone_extraido: null,
         finalizado: false,
         dados: flow.answered,
-        qaAsked: Object.keys(flow.asked),
+        qaAsked: Object.keys(flow.asked || {}),
         qaAnswered: flow.answered,
         flow
       };
     }
-    
+
+    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
+    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    flow.asked = flow.asked || {};
+    flow.asked.telefone = true;
+    flow.lastAsked = 'telefone';
+    flow.lastAskedAt = Date.now();
+    flow.phoneAskedOnce = true;
+
+    // Determina se "combo" é permitido e qual pergunta acoplar
+    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+    const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+    const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
+
+    const coreReady = !!(flow.answered.itens && flow.answered.bairro_saida && flow.answered.bairro_destino);
+
+    let perguntaCombo = null;
+    if (askedPrice) {
+      // Ao perguntar preço: WhatsApp + UMA pergunta de coleta (prioriza bairro de saída, depois destino, depois itens)
+      if (!flow.answered.bairro_saida) perguntaCombo = FIELD_PROMPTS.bairro_saida;
+      else if (!flow.answered.bairro_destino) perguntaCombo = FIELD_PROMPTS.bairro_destino;
+      else if (!flow.answered.itens) perguntaCombo = FIELD_PROMPTS.itens;
+    } else if (coreReady && !flow.answered.ajudante) {
+      // Core pronto: WhatsApp + ajudante
+      perguntaCombo = FIELD_PROMPTS.ajudante;
+    }
+
+    // Monta a resposta
+    const baseWhats = 'Quem passa o orçamento é o motorista e ele chama no WhatsApp. Pode me passar seu número com DDD?';
+    let resposta = `${prefixo}${baseWhats}`;
+    if (perguntaCombo) {
+      resposta = `${prefixo}${baseWhats} ${perguntaCombo}`;
+      // Marca flag de combo para a próxima sanitização não cortar a segunda pergunta
+      flow.allowComboNext = true;
+    }
+
     return {
-      resposta: textoWhats,
+      resposta,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
+      qaAsked: Object.keys(flow.asked || {}),
       qaAnswered: flow.answered,
       flow
     };
   }
 
-  if (next) {
+  // Pergunta normal (não-telefone)
+  if (next && next !== 'telefone') {
+    flow.asked = flow.asked || {};
     flow.asked[next] = true;
+    flow.askedTimes = flow.askedTimes || {};
+    flow.askedTimes[next] = (flow.askedTimes[next] || 0) + 1;
+    flow.lastAsked = next;
+    flow.lastAskedAt = Date.now();
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
     const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
+
     return {
       resposta: `${prefixo}${pergunta}`,
       telefone_extraido: whatsappValido ? flow.answered.telefone : null,
@@ -1111,27 +1046,46 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     };
   }
 
+  // Todos os dados coletados, ainda sem WhatsApp: pedir uma única vez
   if (!whatsappValido) {
-    flow.meta.askWhatsCount++;
+    if (flow.phoneAskedOnce === true || flow.lastAsked === 'telefone') {
+      return {
+        resposta: null,
+        telefone_extraido: null,
+        finalizado: false,
+        dados: flow.answered,
+        qaAsked: Object.keys(flow.asked || {}),
+        qaAnswered: flow.answered,
+        flow
+      };
+    }
+
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    flow.asked = flow.asked || {};
+    flow.asked.telefone = true;
+    flow.lastAsked = 'telefone';
+    flow.lastAskedAt = Date.now();
+    flow.phoneAskedOnce = true;
+
     return {
-      resposta: `${prefixo}Faltou só seu WhatsApp com DDD pra eu te passar pro motorista. Pode me enviar?`,
+      resposta: `${prefixo}Perfeito! Agora só falta seu WhatsApp com DDD pro motorista te chamar e passar o orçamento. Pode me passar?`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
+      qaAsked: Object.keys(flow.asked || {}),
       qaAnswered: flow.answered,
       flow
     };
   }
 
+  // Finaliza se tem WhatsApp válido
   return {
     resposta: null,
     telefone_extraido: flow.answered.telefone || null,
-    finalizado: true,
+    finalizado: !!whatsappValido,
     dados: flow.answered,
-    qaAsked: Object.keys(flow.asked),
+    qaAsked: Object.keys(flow.asked || {}),
     qaAnswered: flow.answered,
     flow
   };
@@ -1143,13 +1097,34 @@ function stripPhoneConfirmation(txt) {
   return t.trim();
 }
 
-function ensureSingleQuestion(txt) {
+function ensureSingleQuestion(txt, { allowCombo = false } = {}) {
   let s = String(txt || '');
-  const firstQ = s.indexOf('?');
-  if (firstQ < 0) return s;
-  const before = s.slice(0, firstQ + 1);
-  const after = s.slice(firstQ + 1).replace(/\?/g, '').trim(); // remove demais "?"
-  return after ? `${before} ${after}` : before;
+  const qs = (s.match(/\?/g) || []).length;
+
+  if (!allowCombo) {
+    // Mantém só a primeira interrogação
+    const firstQ = s.indexOf('?');
+    if (firstQ < 0) return s;
+    const before = s.slice(0, firstQ + 1);
+    const after = s.slice(firstQ + 1).replace(/\?/g, '').trim();
+    return after ? `${before} ${after}` : before;
+  }
+
+  // allowCombo = true => permite no máximo 2 perguntas
+  if (qs <= 2) return s;
+
+  // Se veio mais que 2, reduz para 2 (mantém as duas primeiras)
+  let count = 0;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '?') {
+      count++;
+      if (count > 2) continue; // pula as interrogações extras
+    }
+    out += ch;
+  }
+  return out;
 }
 
 function removeRepeatedGreeting(txt) {
@@ -1158,12 +1133,12 @@ function removeRepeatedGreeting(txt) {
   return t;
 }
 
-function enforceGovRulesOnText(txt, { alreadyGreeted = true } = {}) {
+function enforceGovRulesOnText(txt, { alreadyGreeted = true, allowCombo = false } = {}) {
   let s = String(txt || '').trim();
   s = stripPhoneConfirmation(s);
-  s = ensureSingleQuestion(s);
+  s = ensureSingleQuestion(s, { allowCombo });
   if (alreadyGreeted) {
-    const saudacaoIsolada = /^(bom dia|boa tarde|boa noite)[,!\s-]+(me|qual|o|a|você|teu|seu)/i;
+    const saudacaoIsolada = /^(bom dia|boa tarde|boa noite)[,!\s-]+(me|qual|o|a|você|teu|seu|pode|precisa)/i;
     if (saudacaoIsolada.test(s)) {
       s = removeRepeatedGreeting(s);
     }
@@ -2465,9 +2440,19 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       campo
     ).catch(()=>{});
 
-    const stGreet = await getChatState(nome, chatId).catch(()=>null);
-    const greetedFlag = !!(stGreet && stGreet.flow && stGreet.flow.greeted);
-    const toSend = enforceGovRulesOnText(String(msg || ''), { alreadyGreeted: greetedFlag });
+    const stChat = await getChatState(nome, chatId).catch(()=>null);
+    const greetedFlag = !!(stChat && stChat.flow && stChat.flow.greeted);
+    const allowCombo = !!(stChat && stChat.flow && stChat.flow.allowComboNext);
+    const toSend = enforceGovRulesOnText(String(msg || ''), { alreadyGreeted: greetedFlag, allowCombo });
+
+    // IMPORTANTE: após usar o combo uma vez, zere a flag para as próximas mensagens
+    try {
+      if (allowCombo) {
+        const flowNow = (stChat && stChat.flow) ? stChat.flow : {};
+        flowNow.allowComboNext = false;
+        await setChatState(nome, chatId, { flow: flowNow });
+      }
+    } catch {}
     await p.keyboard.type(toSend, { delay: 0 });
 
     try {
