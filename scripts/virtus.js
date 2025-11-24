@@ -932,16 +932,33 @@ function devePedirWhatsApp(historicoConversa, flow) {
 function pickNextMissingField(flow, historicoConversa) {
   const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
   const allNonPhoneAnswered = nonPhone.every(f => !!(flow.answered && flow.answered[f]));
+  
+  // PRIORIDADE 1: Se cliente acabou de fornecer dados, continue coletando (NÃO peça WhatsApp)
+  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+  const lastCLI = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+  const forneceuDadoAgora = /\b(cama|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|cadeira|m[óo]vel|m[óo]veis|transportar|levar|preciso levar|preciso transportar|bairro|ajudante|ajuda|casa|apartamento|apto|ap\b)\b/i.test(lastCLI);
+  
+  // Se cliente acabou de fornecer dados, SEMPRE priorize coletar mais dados
+  if (forneceuDadoAgora && !allNonPhoneAnswered) {
+    for (const f of nonPhone) {
+      if (!flow.answered[f]) return f;
+    }
+  }
+  
+  // PRIORIDADE 2: Verificar se deve pedir WhatsApp (só se não acabou de fornecer dados)
   const askPhoneNow = devePedirWhatsApp(historicoConversa, flow) || allNonPhoneAnswered;
-  if (askPhoneNow) {
+  if (askPhoneNow && !forneceuDadoAgora) {
     // Nunca em mensagens consecutivas
     if (flow.lastAsked !== 'telefone') {
       return 'telefone';
     }
   }
+  
+  // PRIORIDADE 3: Coletar campos não-telefone faltantes
   for (const f of nonPhone) {
     if (!flow.answered[f]) return f;
   }
+  
   return null;
 }
 
@@ -1041,9 +1058,19 @@ function applyExtractedAnswers(flow, historicoConversa, utils) {
     const clean = (bx[2] || '').trim();
     if (clean && !flow.answered.bairro_saida) flow.answered.bairro_saida = clean;
   }
-  if (/transportar|levar|itens?|coisas?|m[óo]veis?|mudan[çc]a/i.test(texto)) {
-    const snippet = texto.slice(0, 180);
-    flow.answered.itens = flow.answered.itens || snippet;
+  // Detecção de itens - mais robusta
+  if (/transportar|levar|itens?|coisas?|m[óo]veis?|mudan[çc]a|cama|camas|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|mesas|cadeira|cadeiras|m[óo]vel|m[óo]veis/i.test(texto)) {
+    // Se ainda não tem itens coletados, pega o contexto relevante
+    if (!flow.answered.itens) {
+      // Tenta pegar a parte mais relevante (ex: "preciso levar uma cama")
+      const match = texto.match(/(?:preciso|quero|vou|precisar|transportar|levar).{0,100}(?:cama|camas|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|mesas|cadeira|cadeiras|m[óo]vel|m[óo]veis|itens?|coisas?)/i);
+      if (match) {
+        flow.answered.itens = match[0].trim();
+      } else {
+        const snippet = texto.slice(0, 180);
+        flow.answered.itens = snippet;
+      }
+    }
   }
 
   // 4) Data/hora — sem nunca perguntar (apenas extrai)
