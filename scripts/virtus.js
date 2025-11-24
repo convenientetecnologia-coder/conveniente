@@ -140,7 +140,7 @@ async function installChatFeedObserver(page, nome, onChat) {
 }
 
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
 
 let GROQ_API_KEY = null;
 let GROQ_MODEL = null;
@@ -229,83 +229,57 @@ async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retr
 }
 
 const PROMPT_SYSTEM = `
-Você é o melhor atendente de mudanças e fretes do Brasil. Seu trabalho é atender de forma ultra inteligente, natural e humanizada, seguindo as regras do negócio abaixo com 110% de precisão.
+Você é o atendente de fretes/mudanças. Você decide 100% do conteúdo. O sistema só envia sua mensagem. Siga à risca:
 
-PERSONALIDADE:
+ESTILO:
 
-    Super educado, natural e acolhedor (sem parecer robô)
+    Natural, humano e acolhedor. 1–2 frases curtas por mensagem (ideal <= 20 palavras).
 
-    Varie frases; máximo 1–2 frases curtas por mensagem
+    Use saudação certa (bom dia/boa tarde/boa noite) SOMENTE na primeira resposta da conversa.
 
-    Use no máximo 1 emoji a cada 3–4 mensagens; padrão sem emoji
+    Não ecoe literalmente o que o cliente falou; responda e avance.
 
-    Nunca repita a saudação (bom dia/boa tarde/boa noite) em mensagens seguintes
+    Máximo 1 emoji a cada 3–4 mensagens; padrão sem emoji.
 
-REGRA DE OURO (sempre):
+ORDEM LÓGICA (uma pergunta por vez):
 
-    Responda o que o cliente disse (50% da mensagem) + avance com UMA pergunta (50% da mensagem), exceto quando permitido "combo WhatsApp + 1 pergunta" (ver abaixo).
+    O que precisa transportar (itens)?
 
-ORDEM DE COLETA:
+    Bairro/local de saída?
 
-    O que precisa transportar (itens)
+    Bairro/local de destino?
 
-    Bairro de saída
+    Ajudante?
 
-    Bairro de destino
+    Saída: casa ou apartamento?
 
-    Ajudante
+    Destino: casa ou apartamento?
 
-    Saída: casa ou apartamento
+WHATSAPP (regras duras):
 
-    Destino: casa ou apartamento
+    Peça WhatsApp quando: a) o cliente perguntar preço/valor/orçamento; OU b) o trio core (itens + saída + destino) já estiver coletado; OU c) no final, quando todos os dados estiverem coletados.
 
-    WhatsApp — ver gatilhos abaixo
+    Ao pedir WhatsApp, não diga "com DDD". Se vier sem DDD, peça o DDD gentilmente EM OUTRA MENSAGEM.
 
-GATILHOS DE WHATSAPP (obrigatório):
+    Não peça WhatsApp em mensagens consecutivas. Evite pedí-lo mais de uma vez (se já pediu, prossiga a coleta).
 
-    Peça o WhatsApp quando: a) Cliente perguntar preço/valor/orçamento; b) Já tiver itens + bairro de saída + bairro de destino coletados (trio core); c) No final, quando todos os dados estiverem coletados.
+DICAS DE FLUXO:
 
-    Não peça WhatsApp em mensagens consecutivas.
+    Se o cliente só cumprimentou: cumprimente e pergunte "O que você precisa transportar?".
 
-    Não peça WhatsApp quando o cliente estiver fornecendo dados na mesma mensagem (priorize coletar o dado).
+    Se já trouxe item, pergunte saída. Se já trouxe item + saída, pergunte destino.
 
-    Se o cliente enviar número sem DDD: peça gentilmente o DDD (uma única vez).
+    Se já trouxe item + destino e perguntou preço, peça WhatsApp e pergunte saída (uma pergunta na mesma mensagem é aceitável nesses casos).
 
-    Não confirme número ("está correto?"): proibido.
+    Em geral, faça 1 pergunta por mensagem. Em casos de preço, você pode pedir WhatsApp e encaixar 1 pergunta de coleta na mesma mensagem (para manter o ritmo).
 
-EXCEÇÃO PERMITIDA ("combo"):
+    Jamais mencione a cidade do cliente.
 
-    Em duas situações você pode enviar uma mensagem com "WhatsApp + 1 pergunta":
+    Nunca confirme número de WhatsApp.
 
-        Quando o cliente pergunta preço/valor: peça WhatsApp e já engate UMA pergunta (ex.: "Qual o local de saída?").
-
-        Quando o trio core (itens + bairro de saída + bairro de destino) já está coletado: peça WhatsApp e junto pergunte "Você precisa de ajudante?".
-
-    Fora dessas situações: exatamente 1 pergunta por mensagem.
-
-PRIMEIRA MENSAGEM:
-
-    Se o cliente só cumprimentou (ex.: "oi boa noite"): responda o cumprimento e pergunte "O que você precisa transportar?".
-
-    Se já falou item/necessidade: confirme que transporta e pergunte o próximo campo da ordem.
-
-    Se perguntou preço na primeira: explique que quem passa o orçamento é o motorista pelo WhatsApp, peça o WhatsApp e junto faça UMA pergunta de coleta (ex.: "Qual o local de saída?"). (combo permitido aqui)
-
-PROIBIÇÕES ABSOLUTAS:
-
-    Repetir a saudação após a primeira mensagem.
-
-    Confirmar número de WhatsApp.
-
-    Fazer múltiplas perguntas na mesma mensagem (exceto a exceção "combo WhatsApp + 1 pergunta").
-
-    Repetir perguntas já respondidas ou ecoar literalmente o que o cliente disse.
-
-    Mencionar a cidade do cliente.
-
-Formato de retorno (somente JSON, sem markdown, sem explicações):
+Formato de saída (APENAS JSON, sem texto fora):
 {
-  "resposta": "texto a ser enviado ao cliente",
+  "resposta": "texto ao cliente",
   "telefone_extraido": "11999999999" ou null,
   "finalizado": true/false,
   "dados": {
@@ -320,152 +294,66 @@ Formato de retorno (somente JSON, sem markdown, sem explicações):
   }
 }
 
-Regras:
-- "finalizado": true somente se telefone DDD válido for identificado.
-- Retorne APENAS o JSON, sem markdown, sem explicações.
+REGRAS:
 
-Proibições (não use, nem como variação):
-- "Sim, estou aqui para te ajudar"
-- "Ah, ótimo..." (no início da mensagem)
-- "Perfeito!" (no início)
-- "Claro!" (no início)
-- Repetir a mesma mensagem duas vezes
-- Repetir a saudação (bom dia/boa tarde/boa noite) em mensagens subsequentes
-- Repetir o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO!)
-- Perguntar algo que o cliente já respondeu
-- Repetir o que o cliente quer transportar (ex: "você precisa transportar 2 guarda-roupas") - apenas confirme: "Ah, legal! Transportamos sim!"
-- Mencionar a cidade do cliente (ex: "você está em Florianópolis") - não confirme a cidade, apenas atenda
-- Confirmar WhatsApp digitado pelo cliente (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO! Se tem WhatsApp, apenas avance)
-- Fazer múltiplas perguntas juntas (ex: "o local de saída é casa ou apartamento? tem elevador?" - ERRADO! Apenas uma pergunta por vez)
-`.trim();
+    finalizado=true somente se houver telefone com DDD válido.
+
+    Retorne APENAS o JSON.
+
+    Não use as frases proibidas abaixo em nenhuma variação.
+
+PROIBIDOS:
+
+    "Sim, estou aqui para te ajudar"
+
+    "Ah, ótimo..." (no início)
+
+    "Perfeito!" (no início)
+
+    "Claro!" (no início)
+
+    Repetir a saudação após a primeira mensagem
+
+    Confirmar número de WhatsApp
+
+    Fazer múltiplas perguntas juntas (exceto pedir WhatsApp quando cliente pergunta preço e encaixar UMA pergunta de coleta) `.trim();
 
 function montarPromptUser(cidade, historico, opts = {}) {
-  const cid = cidade || 'não informada';
-  const alreadyAsked = !!(opts && opts.secondaryAlreadyAsked);
-  
-  const agora = new Date();
-  const hora = agora.getHours();
-  const minuto = agora.getMinutes();
-  const horaMinuto = hora * 100 + minuto;
-  let saudacao = '';
-  if (horaMinuto >= 501 && horaMinuto <= 1200) {
-    saudacao = 'bom dia';
-  } else if (horaMinuto >= 1201 && horaMinuto <= 1800) {
-    saudacao = 'boa tarde';
-  } else {
-    saudacao = 'boa noite';
-  }
-  
-  const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
-  const historicoIA = (historico || []).filter(m => m.autor === 'ia' || m.autor === 'sistema');
-  const jaDeuSaudacao = historicoIA.some(m => {
-    const txt = (m.texto || '').toLowerCase();
-    return /\b(bom dia|boa tarde|boa noite)\b/i.test(txt);
-  });
-  
-  const perguntouDisponibilidade = /\b(você faz|faz|fazem|está disponível|disponível|atende|atendem|trabalha|trabalham|frete|mudança)\b/i.test(historicoTexto) && 
-    !/\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero|preciso levar|preciso transportar)\b/i.test(historicoTexto);
-  
-  const temWhatsapp = /\b(\d{10,11}|\d{2}\s?\d{8,9})\b/.test(historicoTexto);
-  const temWhatsappComDDD = /\b(\d{2}\s?\d{8,9}|\d{11})\b/.test(historicoTexto);
-  
-  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar|preciso transportar)\b/i.test(historicoTexto);
-  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinho|sozinha|não preciso|não precisa)\b/i.test(historicoTexto);
-  const jaMencionouSaidaTipo = /\b(saída|saida).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouDestinoTipo = /\b(destino).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouBairroSaida = /\b(bairro.*?saída|bairro.*?saida|saída.*?bairro|saida.*?bairro)\b/i.test(historicoTexto);
-  const jaMencionouBairroDestino = /\b(bairro.*?destino|destino.*?bairro)\b/i.test(historicoTexto);
-  
-  let proximaPergunta = '';
-  if (!temWhatsappComDDD) {
-    proximaPergunta = 'WhatsApp (PRIORIDADE ABSOLUTA)';
-  } else if (!jaMencionouItens) {
-    proximaPergunta = 'O que precisa transportar?';
-  } else if (!jaMencionouAjudante) {
-    proximaPergunta = 'Precisa de ajudante?';
-  } else if (!jaMencionouSaidaTipo) {
-    proximaPergunta = 'Saída é casa ou apartamento?';
-  } else if (!jaMencionouDestinoTipo) {
-    proximaPergunta = 'Destino é casa ou apartamento?';
-  } else if (!jaMencionouBairroSaida) {
-    proximaPergunta = 'Bairro de saída';
-  } else if (!jaMencionouBairroDestino) {
-    proximaPergunta = 'Bairro de destino';
-  } else {
-    proximaPergunta = 'Todas informações coletadas - apenas peça WhatsApp se ainda não tiver';
-  }
-  
-  const cabecalho = [
-    `Contexto do atendimento:`,
-    `- Horário atual: ${agora.toLocaleString('pt-BR')} - ${jaDeuSaudacao ? `JÁ DEU SAUDAÇÃO - NUNCA repita "${saudacao}"` : `Use "${saudacao}" na saudação (APENAS SE FOR PRIMEIRA MENSAGEM)`}`,
-    `- Cidade (referência interna apenas - NUNCA mencione ao cliente): ${cid}`,
-    `- Cliente perguntou sobre disponibilidade? ${perguntouDisponibilidade ? 'SIM (é pergunta sobre disponibilidade, NÃO sobre o que transportar)' : 'NÃO'}`,
-    ``,
-    `ORDEM FIXA DE COLETA (UMA PERGUNTA POR VEZ):`,
-    `1. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (PRIORIDADE ABSOLUTA)'}`,
-    `2. O que precisa transportar: ${jaMencionouItens ? '✅ COLETADO' : '❌ FALTA'}`,
-    `3. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
-    `4. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `5. Destino é casa ou apartamento: ${jaMencionouDestinoTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `6. Bairro de saída: ${jaMencionouBairroSaida ? '✅ COLETADO' : '❌ FALTA'}`,
-    `7. Bairro de destino: ${jaMencionouBairroDestino ? '✅ COLETADO' : '❌ FALTA'}`,
-    ``,
-    `PRÓXIMA PERGUNTA A FAZER: ${proximaPergunta}`,
-    ``,
-    `PROIBIÇÕES ABSOLUTAS:`,
-    `1. NUNCA repita a saudação (bom dia/boa tarde/boa noite) se já foi dada - apenas continue a conversa`,
-    `2. NUNCA repita o que o cliente acabou de responder (ex: "ah entendi! você precisa de ajudante" - ERRADO! Apenas avance: "Ah, ótimo! [próxima pergunta]")`,
-    `3. NUNCA repita o que o cliente quer transportar (ex: "você precisa transportar 2 guarda-roupas") - apenas confirme: "Ah, legal! Transportamos sim!"`,
-    `4. NUNCA mencione a cidade do cliente (ex: "você está em Florianópolis") - não confirme a cidade, apenas atenda`,
-    `5. NUNCA faça múltiplas perguntas juntas (ex: "o local de saída é casa ou apartamento? tem elevador?" - ERRADO! Apenas uma pergunta por vez)`,
-    `6. NUNCA confirme WhatsApp digitado pelo cliente (ex: "me confirmou o whatsapp como 91985634 certo?" - ERRADO! Se tem WhatsApp, apenas avance)`,
-    `7. NUNCA repita perguntas já respondidas`,
-    `8. NUNCA repita a mesma mensagem duas vezes`,
-    ``,
-    `ESTRUTURA OBRIGATÓRIA (REGRA DE OURO):`,
-    `SEMPRE use esta estrutura: [RESPONDA AO CLIENTE] + [PERGUNTA NECESSÁRIA]`,
-    ``,
-    `EXEMPLOS:`,
-    `- Cliente: "oi boa noite tudo bem? você faz frete para o jardim ana paula? duas camas"`,
-    `- Resposta: "Oii, boa noite! Tudo bem sim, e você? 😊 Sim, fazemos sim! Quem passa o orçamento é o motorista, ele atende apenas no WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."`,
-    ``,
-    `- Cliente: "você faz frete?"`,
-    `- Resposta: "Oii! Sim, fazemos sim! 😊 Quem passa o orçamento é o motorista pelo WhatsApp. Me passa teu número com DDD que já peço pra ele te chamar."`,
-    ``,
-    `- Cliente: "sim preciso" (de ajudante)`,
-    `- Resposta: "Ah, ótimo! Com ajudante fica mais fácil! 😊 O local de saída é casa ou apartamento?"`,
-    ``,
-    `INSTRUÇÕES CRÍTICAS:`,
-    `1. LEIA TODO O HISTÓRICO antes de responder.`,
-    `2. ${jaDeuSaudacao ? 'NÃO use saudação - já foi dada' : `Use "${saudacao}" na saudação (baseado no horário atual: ${hora}:${String(minuto).padStart(2, '0')})`}.`,
-    `3. SEMPRE RESPONDA PRIMEIRO ao que o cliente falou (seja amigável, respeitoso, educado, cordial, motivacional).`,
-    `4. DEPOIS faça a pergunta necessária (uma por vez, seguindo a ordem fixa).`,
-    `5. Se cliente já respondeu algo, NÃO repita a resposta dele. Apenas confirme e avance: "Ah, ótimo! 😊 [próxima pergunta]".`,
-    `6. Se ainda não tem WhatsApp, peça de forma variada, gentil e amigável (não confirme o número digitado).`,
-    `7. Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"`,
-    `8. EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).`,
-    `9. Seja natural, conversacional, inteligente, amigável, respeitoso, educado, cordial e motivacional.`,
-    `10. NUNCA "ataque" com perguntas sem primeiro responder ao cliente.`,
-    ``,
-    `Histórico completo da conversa (ordem cronológica - leia TUDO antes de responder):`
-  ];
+  const agora = new Date().toLocaleString('pt-BR');
+  const historicoCLI = (historico || []).filter(m => m.autor === 'cliente');
+  const historicoIA  = (historico || []).filter(m => m.autor === 'ia' || m.autor === 'sistema');
+
+  // Sinais simples (apenas para contexto; a IA decide tudo)
+  const textoCliente = historicoCLI.map(m => String(m.texto||'')).join(' ').toLowerCase();
+  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(textoCliente);
+
+  // Status heurístico (somente informativo)
+  const status = {
+    itens_coletado: /\b(cama|sof[aá]|guarda-?roupa|geladeira|fog[aã]o|mesa|cadeira|m[óo]veis?|itens?|transportar|levar)\b/i.test(textoCliente),
+    saida_coletado: /\b(bairro|saida|sa[ií]da)\b/i.test(textoCliente),
+    destino_coletado: /\b(destino|levar para|para\s+o|para\s+a)\b/i.test(textoCliente)
+  };
+
+  // Histórico em formato legível
   const linhas = [];
   for (const msg of (historico || [])) {
     const autor = (msg.autor === 'ia' || msg.autor === 'sistema') ? 'Atendente' : 'Cliente';
-    const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString('pt-BR') : '';
-    linhas.push(`${autor}${timestamp ? ' [' + timestamp + ']' : ''}: ${msg.texto}`);
+    const ts = msg.timestamp ? new Date(msg.timestamp).toLocaleString('pt-BR') : '';
+    linhas.push(`${autor}${ts ? ' ['+ts+']' : ''}: ${msg.texto}`);
   }
-  const rodape = [
+
+  return [
+    `Momento: ${agora}`,
     ``,
-    `ANÁLISE:`,
-    `- O que o cliente JÁ mencionou? (itens, ajudante, local, bairros, distância, etc.)`,
-    `- O que ainda FALTA coletar?`,
-    `- Qual a melhor resposta NATURAL e INTELIGENTE agora?`,
+    `Observações para o modelo (contexto, não instrutivo):`,
+    `- Cliente perguntou preço agora? ${askedPrice ? 'SIM' : 'NÃO'}`,
+    `- Status (pode estar incompleto): itens=${status.itens_coletado ? 'sim' : 'não'}, saída=${status.saida_coletado ? 'sim' : 'não'}, destino=${status.destino_coletado ? 'sim' : 'não'}`,
     ``,
-    `Gere a próxima resposta seguindo estritamente as regras, sendo ULTRA INTELIGENTE e NATURAL.`,
-    `Retorne APENAS o JSON (sem markdown, sem explicações).`
-  ];
-  return [...cabecalho, ...linhas, ...rodape].join('\n');
+    `Histórico da conversa (leia tudo e responda conforme o PROMPT_SYSTEM acima):`,
+    ...linhas,
+    ``,
+    `Gere APENAS o JSON especificado no PROMPT_SYSTEM.`
+  ].join('\n');
 }
 
 function parsearRespostaGroq(respostaTexto) {
@@ -2471,19 +2359,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       campo
     ).catch(()=>{});
 
-    const stChat = await getChatState(nome, chatId).catch(()=>null);
-    const greetedFlag = !!(stChat && stChat.flow && stChat.flow.greeted);
-    const allowCombo = !!(stChat && stChat.flow && stChat.flow.allowComboNext);
-    const toSend = enforceGovRulesOnText(String(msg || ''), { alreadyGreeted: greetedFlag, allowCombo });
-
-    // IMPORTANTE: após usar o combo uma vez, zere a flag para as próximas mensagens
-    try {
-      if (allowCombo) {
-        const flowNow = (stChat && stChat.flow) ? stChat.flow : {};
-        flowNow.allowComboNext = false;
-        await setChatState(nome, chatId, { flow: flowNow });
-      }
-    } catch {}
+    const toSend = String(msg || '');
     await p.keyboard.type(toSend, { delay: 0 });
 
     try {
@@ -3751,9 +3627,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         if (VIRTUS_USE_PIPELINE) {
           try {
-            logger.info('[PIPELINE] Processando com pipeline de perguntas', { nome, chatId });
-            
-            const pipelineResult = await processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev);
+            // pipeline desativado por configuração
+            await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }).catch(()=>{});
+            await pendingDel(nome, chatId).catch(()=>{});
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
             
             if (!pipelineResult || !pipelineResult.resposta) {
               const telefoneFinal = pipelineResult?.telefone_extraido || null;
@@ -3969,7 +3848,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const txt = await chamarGroqAPI(PROMPT_SYSTEM, promptUser);
             const parsed = parsearRespostaGroq(txt);
             
-            parsed.resposta = sanitizeIAResponse(parsed.resposta, historicoConversa);
 
             if (!parsed.telefone_extraido) {
               const textoHistorico = (historicoConversa || []).map(m => m && m.texto || '').join(' ');
@@ -3987,10 +3865,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               dados: parsed.dados || {}
             });
 
-            const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
-            if (!jaTinhaTimer && parsed.telefone_extraido) {
-              iniciarTimerFechamento(chatId, parsed.telefone_extraido);
-            }
 
             const pAtual = await ensurePage().catch(() => null);
             if (!pAtual) {
@@ -4075,61 +3949,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 return;
               }
 
-              const utils = require('./utils.js');
-              
-              // GATING para fallback Groq (somente se necessário)
-              const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
-              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {}, askedTimes: {} };
-              let respostaGov = enforceGovRulesOnText(respostaFinal, { alreadyGreeted: !!flowPrev.greeted });
-              const telOk = utils.isValidBRPhoneWithDDD(parsed.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
-              
-              try {
-                const askPhoneNow = devePedirWhatsApp(historicoConversa, { answered: flowPrev.answered, phoneAskedOnce: flowPrev.phoneAskedOnce, lastAsked: flowPrev.lastAsked });
-                if (!telOk && askPhoneNow && !/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
-                  // Verifica se "combo" pode ser aplicado (preço ou coreReady)
-                  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-                  const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-                  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
-                  const coreReady = !!(flowPrev.answered && flowPrev.answered.itens && flowPrev.answered.bairro_saida && flowPrev.answered.bairro_destino);
-                  
-                  let perguntaCombo = null;
-                  if (askedPrice) {
-                    if (!flowPrev.answered.bairro_saida) perguntaCombo = FIELD_PROMPTS.bairro_saida;
-                    else if (!flowPrev.answered.bairro_destino) perguntaCombo = FIELD_PROMPTS.bairro_destino;
-                    else if (!flowPrev.answered.itens) perguntaCombo = FIELD_PROMPTS.itens;
-                  } else if (coreReady && !flowPrev.answered.ajudante) {
-                    perguntaCombo = FIELD_PROMPTS.ajudante;
-                  }
-                  
-                  let inj = 'Quem passa o orçamento é o motorista e ele chama no WhatsApp. Pode me passar seu WhatsApp?';
-                  if (perguntaCombo) {
-                    inj = `${inj} ${perguntaCombo}`;
-                    flowPrev.allowComboNext = true;
-                  }
-                  
-                  respostaGov = respostaGov.trim();
-                  if (respostaGov && !/[.!?]$/.test(respostaGov)) respostaGov += '.';
-                  respostaGov = `${respostaGov} ${inj}`;
-                  
-                  // Atualiza flags para não repetir WhatsApp
-                  flowPrev.asked = flowPrev.asked || {};
-                  flowPrev.asked.telefone = true;
-                  flowPrev.lastAsked = 'telefone';
-                  flowPrev.lastAskedAt = Date.now();
-                  flowPrev.phoneAskedOnce = true;
-                  
-                  await setChatState(nome, chatId, { flow: flowPrev });
-                }
-              } catch {}
-              
               await setChatState(nome, chatId, {
-                flow: flowPrev,
-                ultimaRespostaEnviada: respostaGov,
+                ultimaRespostaEnviada: respostaFinal,
                 lastProbeAt: Date.now()
               });
               
-              await sendMessageSafe(pAtual, campoEnvio, respostaGov, nome, chatId);
-              await appendIaLine(nome, chatId, respostaGov);
+              await sendMessageSafe(pAtual, campoEnvio, respostaFinal, nome, chatId);
+              await appendIaLine(nome, chatId, respostaFinal);
               
               try {
                 const st = await getChatState(nome, chatId).catch(()=>null);
@@ -4799,7 +4625,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     } else {
       logger.info('[GROQ] Modo DIRECT_GROQ ativo', { nome });
-    await resumeTimers();
     }
     
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
