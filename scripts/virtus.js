@@ -1517,6 +1517,54 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let historico = {};
   let chatAtivo = null;
 
+  // Debounce de 20s por chat/cliente
+  const DEBOUNCE_MS = parseInt(process.env.VIRTUS_DEBOUNCE_MS || '20000', 10);
+  const debounceTimers = new Map(); // chatId -> { timerId, startedAt, dueAt }
+
+  function clearDebounce(chatId) {
+    const t = debounceTimers.get(chatId);
+    if (t && t.timerId) { try { clearTimeout(t.timerId); } catch {} }
+    debounceTimers.delete(chatId);
+    logger.info('[DBNC] cleared', { nome, chatId });
+  }
+
+  async function scheduleDebounce(chatId) {
+    try {
+      const now = Date.now();
+      const dueAt = now + DEBOUNCE_MS;
+
+      // Resetar timer existente
+      const existing = debounceTimers.get(chatId);
+      if (existing && existing.timerId) {
+        try { clearTimeout(existing.timerId); } catch {}
+      }
+
+      const tid = setTimeout(async () => {
+        try {
+          debounceTimers.delete(chatId);
+          logger.info('[DBNC] fire — enfileirando', { nome, chatId });
+          if (!fila.includes(chatId)) {
+            fila.push(chatId);
+            scheduleNextIfIdle();
+          }
+        } catch (e) {
+          logger.warn('[DBNC] fire erro', { nome, chatId, error: e && e.message || e });
+        }
+      }, DEBOUNCE_MS);
+
+      debounceTimers.set(chatId, { timerId: tid, startedAt: now, dueAt });
+
+      try {
+        await setChatState(nome, chatId, { debounceUntil: dueAt, lastProbeAt: now, state: CHAT_STATES.PENDENTE });
+      } catch {}
+
+      logger.info('[DBNC] buffer started/reset', { nome, chatId, dueAt });
+
+    } catch (e) {
+      logger.warn('[DBNC] schedule erro', { nome, chatId, error: e && e.message || e });
+    }
+  }
+
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
   const POLL_INTERVAL_MS = parseInt(process.env.VIRTUS_POLL_MS || '1000', 10);
@@ -1999,10 +2047,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
           return;
         }
-        fila.push(id);
-        lastProbeMap.set(id, agoraMs);
-        logger.info(`[FILA][${nome}] Chat já respondido re-enfileirado para verificar novas mensagens: ${id}`);
-        mudancaFila = true;
+        // Chats já respondidos são bufferizados via debounce (não re-enfileiramento automático)
         return;
       }
 
@@ -2013,21 +2058,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
       const last = lastProbeMap.get(id) || 0;
 
-      const lastProbeAt = (st && typeof st.lastProbeAt === 'number') ? st.lastProbeAt : 0;
-      const forceOpen = (!st) || (agoraMs - lastProbeAt >= PROBE_FORCE_OPEN_MS);
-      
-      if (
-        !forceOpen &&
-        st &&
-        typeof st.lastCLIts === 'number' &&
-        typeof st.ultimoProbeCLIts === 'number' &&
-        st.lastCLIts === st.ultimoProbeCLIts
-      ) {
-        lastProbeMap.set(id, agoraMs);
-        logger.info(`[FILA][${nome}] skip ${id} — sem avanço (lastCLIts==ultimoProbeCLIts) e TTL < ${PROBE_FORCE_OPEN_MS}ms`);
-        return;
-      }
-      
       if (st && st.state === 'erro_envio') {
         logger.info(`[FILA][${nome}] ${id} estava em erro_envio — será testado novamente (fila permissiva).`);
       }
@@ -2064,9 +2094,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       } catch {}
 
-      fila.push(id);
+      await scheduleDebounce(id);
       lastProbeMap.set(id, agoraMs);
-      logger.info(`[FILA][${nome}] Candidato ${id} enfileirado (${c.tempo})`);
+      logger.info(`[FILA][${nome}] [DBNC] Candidato ${id} bufferizado (${c.tempo})`);
       mudancaFila = true;
     })));
 
@@ -2729,6 +2759,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         chatAtivo = null;
         logger.info('[RESPONDER] chatAtivo liberado no finally', { nome, chatId });
       }
+      try { clearDebounce(chatId); } catch {}
       
       try { 
         chatLock.release(nome, chatId);
@@ -3225,8 +3256,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if ((now - last) < Math.min(PROBE_RECHECK_MIN_MS, 1000)) return;
           lastProbeMap.set(chatId, now);
           if (!fila.includes(chatId) && !aguardandoRespostaMap.get(nome)?.has(chatId)) {
-            fila.push(chatId);
-            scheduleNextIfIdle();
+            scheduleDebounce(chatId).catch(() => {});
           }
         }
         await installChatFeedObserver(p, nome, onNewChatDetected);
