@@ -2415,9 +2415,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
         });
 
-
-        const stPrev = await getChatState(nome, chatId).catch(()=>null);
-
         const ultimaIA = (() => {
           const iaMsgs = historicoConversa.filter(m => m.autor === 'ia');
           return iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
@@ -2427,6 +2424,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const cli = historicoConversa.filter(m => m.autor === 'cliente');
           return cli.length ? cli[cli.length - 1] : null;
         })();
+
+        // --- PATCH GATING ANTI-LOOP (insira exatamente aqui) ---
+        const lastClienteTs = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
+        const lastIaTs = Number((ultimaIA && ultimaIA.timestamp) || 0);
+        const stPrevGate = await getChatState(nome, chatId).catch(() => null);
+        const lastIATsPrev = Number((stPrevGate && stPrevGate.lastIATs) || 0);
+
+        await setChatState(nome, chatId, {
+          lastCLIts: lastClienteTs,
+          ultimoProbeCLIts: lastClienteTs,
+          lastProbeAt: Date.now()
+        });
+
+        // NÃO RESPONDA SE NÃO HOUVE NOVA FALA DO CLIENTE DESDE A ÚLTIMA IA!
+        if (!lastClienteTs || Math.max(lastIaTs, lastIATsPrev) >= lastClienteTs) {
+          logger.info('[RESPONDER][GATE] Sem novas mensagens do cliente — não responder', {
+            nome, chatId, lastClienteTs, lastIaTs, lastIATsPrev
+          });
+          try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO }); } catch {}
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
 
         const pAtual = await ensurePage().catch(()=>null);
 
