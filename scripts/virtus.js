@@ -495,21 +495,24 @@ function montarPromptUser(cidade, historico, opts = {}) {
   else if (horaMinuto >= 1201 && horaMinuto <= 1800) saudacao = 'boa tarde';
   else saudacao = 'boa noite';
 
-  const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
   const historicoIA = (historico || []).filter(m => m.autor === 'ia' || m.autor === 'sistema');
   const historicoCLI = (historico || []).filter(m => m.autor === 'cliente');
   const jaDeuSaudacao = historicoIA.some(m => /\b(bom dia|boa tarde|boa noite)\b/i.test((m.texto || '').toLowerCase()));
 
-  // sinais fracos de disponibilidade NÃO devem disparar telefone
-  const priceAsk = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(historicoTexto);
+  // Usar APENAS histórico do CLIENTE para cálculos
+  const historicoTextoCLI = historicoCLI.map(m => String(m.texto || '')).join(' ').toLowerCase();
+  const ultimaMsgCliente = historicoCLI.length ? String(historicoCLI[historicoCLI.length - 1].texto || '') : '';
   
-  // coleta de dados já mencionados (heurístico)
-  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar)\b/i.test(historicoTexto);
-  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinh[oa]|não preciso|nao preciso)\b/i.test(historicoTexto);
-  const jaMencionouSaidaTipo = /\b(sa[íi]da).?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouDestinoTipo = /\b(destino).?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouBairroSaida = /\b(bairro.?sa[ií]da|sa[ií]da.?bairro)\b/i.test(historicoTexto);
-  const jaMencionouBairroDestino = /\b(bairro.?destino|destino.?bairro)\b/i.test(historicoTexto);
+  // sinais fracos de disponibilidade NÃO devem disparar telefone
+  const priceAsk = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(ultimaMsgCliente);
+  
+  // coleta de dados já mencionados (heurístico) - usar APENAS histórico do cliente
+  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar)\b/i.test(historicoTextoCLI);
+  const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinh[oa]|não preciso|nao preciso)\b/i.test(historicoTextoCLI);
+  const jaMencionouSaidaTipo = /\b(sa[íi]da).?(casa|apartamento|apto|ap)\b/i.test(historicoTextoCLI);
+  const jaMencionouDestinoTipo = /\b(destino).?(casa|apartamento|apto|ap)\b/i.test(historicoTextoCLI);
+  const jaMencionouBairroSaida = /\b(bairro.?sa[ií]da|sa[ií]da.?bairro)\b/i.test(historicoTextoCLI);
+  const jaMencionouBairroDestino = /\b(bairro.?destino|destino.?bairro)\b/i.test(historicoTextoCLI);
   const nonPhoneFields = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
   const allNonPhoneAnswered = nonPhoneFields.every(f => {
     if (f === 'itens') return jaMencionouItens;
@@ -543,7 +546,8 @@ function montarPromptUser(cidade, historico, opts = {}) {
   const ultCLI = historicoCLI.length ? String(historicoCLI[historicoCLI.length - 1].texto || '') : '';
   const forneceuDadoAgora = !!(campoPerguntadoAntes && ultCLI && !/\?\s*$/.test(ultCLI));
   
-  // Telefone no histórico
+  // Telefone no histórico (usar histórico completo para detectar telefone)
+  const historicoTexto = (historico || []).map(m => m.texto || '').join(' ').toLowerCase();
   const temWhatsappComDDD = /\b(\d{2}\s?\d{8,9}|\d{11})\b/.test(historicoTexto);
 
   // PRIMEIRA MENSAGEM: perguntar itens (não "precisa de frete?")
@@ -887,9 +891,11 @@ function devePedirWhatsApp(historicoConversa, flow) {
     flow.answered = flow.answered || {};
     
     const hasPhone = utils.isValidBRPhoneWithDDD((flow.answered.telefone || '').toString());
-    const txt = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
     
-    const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(txt);
+    // Usar APENAS última mensagem do cliente para askedPrice
+    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+    const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+    const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
     
     const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
     const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
@@ -904,8 +910,7 @@ function devePedirWhatsApp(historicoConversa, flow) {
     if (flow.phoneAskedOnce === true && !allNonPhoneAnswered) return false;
     
     // Se a última pergunta da IA foi um campo e o cliente acabou de responder, não pedir telefone agora
-    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-    const lastCLI = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+    const lastCLI = lastCliText;
     const lastIAText = lastIA.toLowerCase();
     const iaPediuCampoAntes =
       /qual\s+o?\s*bairro.*sa[ií]da/.test(lastIAText) ||
@@ -4343,19 +4348,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             try {
               // ENFORCEMENT: Aplicar regras de governança antes de enviar
               const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
-              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : (pipelineResult.flow || { greeted: false, asked: {}, answered: {} });
-              let respostaGov = enforceGovRulesOnText(pipelineResult.resposta, { alreadyGreeted: !!flowPrev.greeted });
+              const effectiveFlow = pipelineResult.flow || (stFlowPrev && stFlowPrev.flow) || { greeted: false, asked: {}, answered: {} };
+              let respostaGov = enforceGovRulesOnText(pipelineResult.resposta, { alreadyGreeted: !!effectiveFlow.greeted });
               
               const utils = require('./utils.js');
-              const telOk = utils.isValidBRPhoneWithDDD(pipelineResult.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
-              if (!telOk) {
-                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
-                  respostaGov = 'Pode me passar seu WhatsApp? O motorista chama por lá.';
-                }
-              }
               
+              // Proteção contra duas mensagens consecutivas pedindo WhatsApp
+              const iaMsgs2 = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
+              const lastIaTxt2 = iaMsgs2.length ? String(iaMsgs2[iaMsgs2.length - 1].texto || '') : '';
+              if (/whats(app)?|telefone|n[uú]mero/i.test(lastIaTxt2) && /whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+                // bloqueio total de repetição de WhatsApp consecutiva — NUNCA envie
+                try {
+                  await setChatState(nome, chatId, {
+                    flow: effectiveFlow,
+                    lastProbeAt: Date.now()
+                  });
+                } catch {}
+                try { await pendingDel(nome, chatId); } catch {}
+                fila = fila.filter(id => id !== chatId);
+                chatAtivo = null;
+                return;
+              }
               await setChatState(nome, chatId, {
-                flow: flowPrev,
+                flow: effectiveFlow,
                 ultimaRespostaEnviada: respostaGov,
                 lastProbeAt: Date.now()
               });
@@ -4589,14 +4604,33 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {} };
               let respostaGov = enforceGovRulesOnText(respostaFinal, { alreadyGreeted: !!flowPrev.greeted });
               
-              // CRÍTICO: NÃO substituir a resposta da IA por uma fixa - confiar na inteligência da IA
-              // Apenas garantir que menciona WhatsApp se necessário, mas SEMPRE preservando a resposta original
+              // Proteção contra duas mensagens consecutivas pedindo WhatsApp
+              const iaMsgs3 = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
+              const lastIaTxt3 = iaMsgs3.length ? String(iaMsgs3[iaMsgs3.length - 1].texto || '') : '';
+              if (/whats(app)?|telefone|n[uú]mero/i.test(lastIaTxt3) && /whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+                // bloqueio total de repetição de WhatsApp consecutiva — NUNCA envie
+                try {
+                  await setChatState(nome, chatId, {
+                    flow: flowPrev,
+                    lastProbeAt: Date.now()
+                  });
+                } catch {}
+                try { await pendingDel(nome, chatId); } catch {}
+                fila = fila.filter(id => id !== chatId);
+                chatAtivo = null;
+                return;
+              }
+              
+              // CRÍTICO: Só adicionar WhatsApp se cliente perguntou preço na última mensagem
               const utils = require('./utils.js');
               const telOk = utils.isValidBRPhoneWithDDD(parsed.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
               if (!telOk) {
-                // Se a resposta não menciona WhatsApp, adiciona de forma natural (não substitui)
-                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
-                  // Adiciona a pergunta de WhatsApp de forma natural, preservando a resposta original
+                const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+                const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+                const askedPriceNow = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
+                
+                // Só adiciona WhatsApp se: cliente perguntou preço E última IA não pediu WhatsApp E resposta não pede WhatsApp
+                if (askedPriceNow && !/whats(app)?|telefone|n[uú]mero/i.test(lastIaTxt3) && !/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
                   respostaGov = respostaGov.trim();
                   if (!respostaGov.endsWith('.')) respostaGov += '.';
                   respostaGov += ' Pode me passar seu WhatsApp? O motorista chama por lá.';
