@@ -22,6 +22,7 @@ try {
 const fs = require('fs/promises');
 const fsRaw = require('fs'); // Necessário para uso síncrono dentro de getPerfilManifest
 const path = require('path');
+const crypto = require('crypto');
 const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
 const stepLog = require('./stepLog.js');
@@ -155,6 +156,53 @@ function chatLogPath(perfil, chatId) {
   return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.jsonl`);
 }
 
+// Helpers de idempotência persistente e log forense
+function pedidoSentFile(perfil, chatId) {
+  return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.pedido.json`);
+}
+
+function pedidoAuditLog(perfil) {
+  return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'pedidos_audit.jsonl');
+}
+
+function sha1(str) {
+  return crypto.createHash('sha1').update(String(str), 'utf8').digest('hex');
+}
+
+async function loadPedidoSent(perfil, chatId) {
+  try { return JSON.parse(fsRaw.readFileSync(pedidoSentFile(perfil, chatId), 'utf8')); } catch { return null; }
+}
+
+async function writeJsonAtomicFsyncStrict(file, obj) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  const fd = fsRaw.openSync(tmp, 'w');
+  try {
+    fsRaw.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+    fsRaw.fsyncSync(fd);
+  } finally { fsRaw.closeSync(fd); }
+  try { fsRaw.unlinkSync(file); } catch {}
+  try { fsRaw.renameSync(tmp, file); }
+  catch { fsRaw.copyFileSync(tmp, file); try { fsRaw.unlinkSync(tmp); } catch {} }
+}
+
+async function markPedidoSent(perfil, chatId, payload, source) {
+  const file = pedidoSentFile(perfil, chatId);
+  const rec = { sentAt: Date.now(), source, payloadHash: sha1(JSON.stringify(payload)), payload };
+  await writeJsonAtomicFsyncStrict(file, rec);
+  await appendPedidoAudit(perfil, chatId, 'sent_ok', { source, cidade: payload && payload.cidade, telefone: payload && payload.telefone });
+}
+
+async function appendPedidoAudit(perfil, chatId, event, data) {
+  try {
+    await fs.mkdir(path.dirname(pedidoAuditLog(perfil)), { recursive: true });
+    fsRaw.appendFileSync(pedidoAuditLog(perfil), JSON.stringify({
+      ts: Date.now(), chatId, event, ...((data && typeof data === 'object') ? data : { info: String(data||'') })
+    }) + '\n', 'utf8');
+  } catch {}
+  try { await issues.append(perfil, 'pedido_audit', `${event} chat=${chatId} ${data ? JSON.stringify(data).slice(0,200) : ''}`); } catch {}
+}
+
 async function appendChatHistoryLog(perfil, chatId, historicoArr) {
   try {
     const file = chatLogPath(perfil, chatId);
@@ -162,12 +210,12 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
     const lastTs = st && st.chatLogLastTs || 0;
     const novos = (historicoArr||[]).filter(m => Number(m.timestamp||0) > lastTs);
     if (!novos.length) return;
-    const buf = CHAT_LOG_BUFFERS.get(file) || [];
-    for (const m of novos) buf.push(JSON.stringify(m) + '\n');
-    CHAT_LOG_BUFFERS.set(file, buf);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    for (const m of novos) {
+      fsRaw.appendFileSync(file, JSON.stringify(m)+'\n', 'utf8');
+    }
     const maxTs = Math.max(...novos.map(m=>Number(m.timestamp||0)));
     await setChatState(perfil, chatId, { chatLogLastTs: maxTs || Date.now() });
-    scheduleChatLogFlush();
   } catch {}
 }
 
@@ -2440,23 +2488,46 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               // Se finalizado, processa finalização (IA já validou)
               if (parsed.finalizado === true) {
                 try {
+                  await appendPedidoAudit(nome, chatId, 'finalizado_ia', {});
+                  
+                  // REGRA CRÍTICA: Verifica telefone E cidade antes de enviar
+                  const tel = parsed.telefone_extraido;
+                  const cidade = cidadePreferida || null;
+                  
+                  if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) {
+                    await appendPedidoAudit(nome, chatId, 'finalizado_blocked_no_whatsapp', {});
+                    logger.warn('[FINALIZACAO] IA marcou como finalizado, mas telefone inválido — não enviando', { nome, chatId });
+                    return; // Não envia sem telefone válido
+                  }
+                  
+                  if (!cidade || !String(cidade).trim()) {
+                    await appendPedidoAudit(nome, chatId, 'finalizado_blocked_no_city', {});
+                    logger.warn('[FINALIZACAO] IA marcou como finalizado, mas sem cidade — não enviando', { nome, chatId });
+                    return; // Não envia sem cidade
+                  }
+                  
                   // Cancela timer se existir
                   if (timersFechamento.has(chatId)) {
                     cancelarTimerFechamento(chatId);
                   }
                   
-                  // Verifica se já foi enviado (anti-duplicidade)
-                  if (!pedidosEnviados.has(chatId)) {
-                    await enviarPedidoParaNotificador(chatId, {
-                      cidade: cidadePreferida || null,
-                      telefone: parsed.telefone_extraido,
-                      ...parsed.dados
-                    });
-                    pedidosEnviados.add(chatId);
-                    await enviarMensagemFinal(chatId);
-                    await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
+                  // Verifica se já foi enviado (anti-duplicidade via idempotência persistente)
+                  const already = await loadPedidoSent(nome, chatId);
+                  if (already) {
+                    await appendPedidoAudit(nome, chatId, 'finalizado_dedupe_skip', { sentAt: already.sentAt });
+                    return;
                   }
+                  
+                  await enviarPedidoParaNotificador(chatId, {
+                    cidade: cidade,
+                    telefone: tel,
+                    ...parsed.dados
+                  });
+                  // Não precisa mais adicionar a pedidosEnviados aqui, pois markPedidoSent já faz isso
+                  await enviarMensagemFinal(chatId);
+                  await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
                 } catch (e) {
+                  await appendPedidoAudit(nome, chatId, 'finalizado_error', { error: e && e.message || String(e) });
                   logger.error('[FINALIZACAO] Erro ao finalizar chat', { nome, chatId, error: e && e.message || e });
                 }
               }
@@ -2732,19 +2803,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       });
     } catch {}
 
-    // Verifica WhatsApp e campos completos
+    // REGRA CRÍTICA: NUNCA envia pedido sem TELEFONE E CIDADE
     const temWhats = !!(cur.telefone && promptFretes.isValidBRPhoneWithDDD(cur.telefone));
-    const completos = temWhats &&
-      !!(cur.itens && cur.bairro_saida && cur.bairro_destino &&
+    const temCidade = !!(cur.cidade && String(cur.cidade).trim());
+    
+    // Se não tem telefone OU não tem cidade: NÃO FAZ NADA (não envia, não inicia timer)
+    if (!temWhats || !temCidade) {
+      return; // Aguarda telefone e cidade antes de qualquer ação
+    }
+
+    // A partir daqui, temos telefone E cidade válidos
+    const completos = !!(cur.itens && cur.bairro_saida && cur.bairro_destino &&
       (cur.ajudante != null) && (cur.saida_tipo != null) && (cur.destino_tipo != null));
 
-    // Se WhatsApp chegou, faltam campos, e timer NÃO existe: inicia timer
-    if (temWhats && !completos && !timersFechamento.has(chatId)) {
+    // Se WhatsApp e cidade chegaram, faltam campos, e timer NÃO existe: inicia timer de 10min
+    if (!completos && !timersFechamento.has(chatId)) {
       await iniciarTimerFechamento(chatId, cur.telefone);
     }
 
-    // Se WhatsApp chegou E TODOS os campos foram preenchidos: cancela timer e envia imediatamente
-    if (temWhats && completos) {
+    // Se WhatsApp, cidade E TODOS os campos foram preenchidos: cancela timer e envia imediatamente
+    if (completos) {
       if (timersFechamento.has(chatId)) {
         cancelarTimerFechamento(chatId);
       }
@@ -2782,12 +2860,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   function cancelarTimerFechamento(chatId) {
     const t = timersFechamento.get(chatId);
-    if (t && t.timerId) {
-      try { clearTimeout(t.timerId); } catch {}
-    }
+    if (t && t.timerId) { try { clearTimeout(t.timerId); } catch {} }
     timersFechamento.delete(chatId);
     try {
-      setChatState(nome, chatId, { timerCancelledAt: Date.now() });
+      setChatState(nome, chatId, {
+        timerCancelledAt: Date.now(),
+        timerExpiresAt: null,
+        timerStartedAt: null,
+        timerTelefone: null
+      });
+      appendPedidoAudit(nome, chatId, 'timer_cancelled', {});
     } catch {}
   }
 
@@ -2795,46 +2877,60 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!timersFechamento) return;
     const t = timersFechamento.get(chatId);
     if (!t || t.expirado) return;
+
     const decorrido = Date.now() - t.inicio;
     if (decorrido < 10 * 60 * 1000) return;
-    
+
     t.expirado = true;
     timersFechamento.set(chatId, t);
 
-    const dados = dadosColetados ? (dadosColetados.get(chatId) || {}) : {};
+    const dados = (dadosColetados && dadosColetados.get(chatId)) || {};
     const tel = dados.telefone || t.telefone || null;
+    const cidade = dados.cidade || null;
 
-    if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) {
-      logger.info('[TIMER] Expirado, mas sem WhatsApp válido — nada será enviado', { chatId });
+    await appendPedidoAudit(nome, chatId, 'timer_expired', { telOk: !!(tel && promptFretes.isValidBRPhoneWithDDD(tel)), cidadeOk: !!(cidade && String(cidade).trim()) });
+
+    if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) { timersFechamento.delete(chatId); return; }
+    if (!cidade || !String(cidade).trim()) { timersFechamento.delete(chatId); return; }
+
+    if (!chatLock.acquire(nome, chatId)) {
+      await appendPedidoAudit(nome, chatId, 'timer_lock_busy_skip', {});
       timersFechamento.delete(chatId);
       return;
     }
-
-    if (pedidosEnviados && pedidosEnviados.has(chatId)) {
-      timersFechamento.delete(chatId);
-      return;
-    }
-
     try {
-      await enviarPedidoParaNotificador(chatId, { ...dados, telefone: tel });
-      if (pedidosEnviados) pedidosEnviados.add(chatId);
-      await enviarMensagemFinal(chatId);
-      await marcarRespondido(nome, chatId);
-      logger.info('[TIMER] Timer expirado — pedido parcial enviado', { chatId });
-    } catch (e) {
-      logger.error('[TIMER] Falha ao fechar pedido', { chatId, error: e && e.message || e });
-    } finally {
+      const already = await loadPedidoSent(nome, chatId);
+      if (already) {
+        await appendPedidoAudit(nome, chatId, 'timer_dedupe_skip', { sentAt: already.sentAt });
+        timersFechamento.delete(chatId);
+        return;
+      }
+      await enviarPedidoParaNotificador(chatId, { ...dados, telefone: tel, cidade });
       timersFechamento.delete(chatId);
+    } finally {
+      chatLock.release(nome, chatId);
     }
   }
 
   async function resumeTimers() {
-    if (!timersFechamento) return;
+    if (!timersFechamento || !dadosColetados) return;
     try {
       const allStates = await loadChatState(nome);
       const agora = Date.now();
+
+      for (const [chatId, state] of Object.entries(allStates)) {
+        if (state && state.dadosColetados) {
+          dadosColetados.set(chatId, state.dadosColetados);
+        }
+      }
+
       for (const [chatId, state] of Object.entries(allStates)) {
         if (!state || !state.timerExpiresAt) continue;
+        if (state.timerCancelledAt || state.state === CHAT_STATES.FINALIZADO) continue;
+
+        const already = await loadPedidoSent(nome, chatId);
+        if (already) continue; // não rearma timer já enviado
+
         const expiraEm = state.timerExpiresAt;
         if (expiraEm <= agora) {
           await verificarTimerExpirado(chatId);
@@ -2848,53 +2944,75 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             expiraEm,
             timerId
           });
-          logger.info('[TIMER] Timer restaurado', { chatId, restante: Math.round(restante / 1000) + 's' });
-        }
-        if (state.dadosColetados && dadosColetados) {
-          dadosColetados.set(chatId, state.dadosColetados);
+          await appendPedidoAudit(nome, chatId, 'timer_restored', { restanteMs: restante });
         }
       }
+
+      const totalDados = dadosColetados ? dadosColetados.size : 0;
+      const totalTimers = timersFechamento ? timersFechamento.size : 0;
+      logger.info('[VIRTUS] Restauração completa', { nome, dadosColetados: totalDados, timersAtivos: totalTimers });
+
     } catch (e) {
       logger.warn('[TIMER] Erro ao restaurar timers', { error: e && e.message || e });
     }
   }
 
 
-  const _parcialCooldown = new Map(); // chatId -> lastSent
-  async function enviarPedidoParcialSeHabilitado(chatId) {
-    try {
-      if (String(process.env.NOTIFICADOR_ENVIAR_PARCIAL || '0') !== '1') return;
-      const now = Date.now();
-      const last = _parcialCooldown.get(chatId) || 0;
-      if ((now - last) < 5000) return; // 5s de cooldown
-      const dados = dadosColetados && dadosColetados.get(chatId) || {};
-      const payload = promptFretes.buildFinalOrderPayload(nome, chatId, dados, NOTIFICADOR_SERVIDOR);
-      payload.parcial = true;
-      const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
-      await fetch(urlFinal, {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify(payload)
-      }).catch(()=>{});
-      _parcialCooldown.set(chatId, now);
-      logger.info('[NOTIFICADOR] Pedido parcial enviado', { chatId, perfil: nome });
-    } catch {}
-  }
+  // REMOVIDO: enviarPedidoParcialSeHabilitado - função perigosa removida
+  // Todos os envios agora passam por enviarPedidoParaNotificador com idempotência e validação completa
 
   async function enviarPedidoParaNotificador(chatId, dados) {
-    if (!pedidosEnviados || pedidosEnviados.has(chatId)) return; // evita duplicar
-    const payload = promptFretes.buildFinalOrderPayload(nome, chatId, dados, NOTIFICADOR_SERVIDOR);
-    const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
-    const resp = await fetch(urlFinal, {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!resp.ok) {
-      const txt = await resp.text().catch(()=> '');
-      throw new Error(`Notificador error ${resp.status}: ${txt}`);
+    const tel = dados && dados.telefone;
+    const cidade = dados && dados.cidade;
+    await appendPedidoAudit(nome, chatId, 'send_attempt', { cidade, telefone: tel });
+
+    if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) {
+      await appendPedidoAudit(nome, chatId, 'blocked_no_whatsapp', {});
+      return;
     }
-    logger.info('[NOTIFICADOR] Pedido final enviado', { chatId, perfil: nome });
+    if (!cidade || !String(cidade).trim()) {
+      await appendPedidoAudit(nome, chatId, 'blocked_no_city', {});
+      return;
+    }
+
+    if (!chatLock.acquire(nome, chatId)) {
+      await appendPedidoAudit(nome, chatId, 'lock_busy_skip', {});
+      return;
+    }
+    try {
+      const already = await loadPedidoSent(nome, chatId);
+      if (already) {
+        await appendPedidoAudit(nome, chatId, 'dedupe_skip', { sentAt: already.sentAt });
+        return;
+      }
+
+      const payload = promptFretes.buildFinalOrderPayload(nome, chatId, dados, NOTIFICADOR_SERVIDOR);
+      const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
+      let resp = null, bodyText = '';
+      try {
+        resp = await fetch(urlFinal, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        bodyText = await resp.text().catch(()=> '');
+      } catch (e) {
+        await appendPedidoAudit(nome, chatId, 'send_fail_network', { error: e && e.message || String(e) });
+        return;
+      }
+
+      if (resp && resp.ok) {
+        await markPedidoSent(nome, chatId, payload, 'immediate_or_timer');
+        pedidosEnviados.add(chatId);
+        await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO, pedidoSentAt: Date.now() });
+        await enviarMensagemFinal(chatId);
+      } else {
+        await appendPedidoAudit(nome, chatId, 'send_fail_http', { status: resp && resp.status, body: bodyText.slice(0,500) });
+      }
+
+    } finally {
+      chatLock.release(nome, chatId);
+    }
   }
 
   async function enviarMensagemFinal(chatId) {
@@ -3126,6 +3244,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
+    }
+    
+    // Restaura dados coletados e timers do disco ao reiniciar
+    try {
+      await resumeTimers();
+      logger.info('[VIRTUS] Dados coletados e timers restaurados do disco', { nome });
+    } catch (e) {
+      logger.warn('[VIRTUS] Erro ao restaurar dados/timers do disco', { nome, error: e && e.message || e });
     }
     
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
