@@ -144,7 +144,7 @@ async function installChatFeedObserver(page, nome, onChat) {
 // === Groq Direct Mode (Virtus → Groq API → Virtus) ===
 const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
 // === Pipeline de Perguntas (dominante, Groq só como fallback) ===
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
+const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '1') === '1';
 
 // Verificação da chave será feita apenas quando necessário (lazy check)
 // Isso evita erro no boot se o .env ainda não estiver configurado
@@ -248,10 +248,7 @@ PERSONALIDADE:
 
 REGRAS DE OURO:
 - Sempre: 50% responder ao cliente + 50% avançar roteiro (UMA pergunta por vez).
-- NÃO interrompa o cliente pedindo WhatsApp; peça WhatsApp SOMENTE quando:
-    o cliente perguntar preço/valor/orçamento (primeira vez); OU
-    o cliente perguntar disponibilidade/agendamento/horário (primeira vez); OU
-    você já tiver coletado todos os dados necessários (itens, ajudante, saída/destino, bairros).
+- NÃO interrompa o cliente pedindo WhatsApp; peça WhatsApp SOMENTE quando: o cliente perguntar preço/valor/orçamento (primeira vez); OU você já tiver coletado todos os dados necessários (itens, ajudante, saída/destino, bairros).
 - NUNCA peça WhatsApp em mensagens consecutivas: se você acabou de pedir, continue coletando dados. Só peça novamente quando todos os dados estiverem coletados e ainda não houver WhatsApp.
 - NÃO peça WhatsApp se, na mesma mensagem, o cliente estiver fornecendo dados (ex.: itens, bairros, ajudante, casa/apto). Priorize coletar dados.
 - Ao pedir WhatsApp, peça apenas "WhatsApp". Se o número vier sem DDD, peça o DDD uma única vez (gentilmente).
@@ -503,20 +500,16 @@ function montarPromptUser(cidade, historico, opts = {}) {
   const historicoCLI = (historico || []).filter(m => m.autor === 'cliente');
   const jaDeuSaudacao = historicoIA.some(m => /\b(bom dia|boa tarde|boa noite)\b/i.test((m.texto || '').toLowerCase()));
 
-  // Sinais
-  const perguntouDisponibilidade = /\b(você faz|faz|fazem|está disponível|disponível|atende|atendem|trabalha|trabalham|frete|mudança)\b/i.test(historicoTexto);
+  // sinais fracos de disponibilidade NÃO devem disparar telefone
   const priceAsk = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(historicoTexto);
-  const availabilityAsk = /\b(dispon[ií]vel|disponivel|agendar|agenda|marcar|hor[áa]rio|quando|que\s+dia|d[aá] pra (hoje|agora|amanh[ãa])|faz\s+(hoje|agora)|consegue\s+(hoje|agora))\b/i.test(historicoTexto);
-  const temWhatsapp = /\b(\d{10,11}|\d{2}\s?\d{8,9})\b/.test(historicoTexto);
-  const temWhatsappComDDD = /\b(\d{2}\s?\d{8,9}|\d{11})\b/.test(historicoTexto);
-
-  // Marcas de dados já mencionados
-  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar|preciso transportar)\b/i.test(historicoTexto);
+  
+  // coleta de dados já mencionados (heurístico)
+  const jaMencionouItens = /\b(guardaroupa|guarda-roupa|cama|móvel|mobília|geladeira|fogão|sofá|mesa|cadeira|itens|coisas|produtos|transportar|levar|mudança|mudar|quero levar|preciso levar)\b/i.test(historicoTexto);
   const jaMencionouAjudante = /\b(ajudante|ajuda|preciso de ajuda|sem ajuda|sozinh[oa]|não preciso|nao preciso)\b/i.test(historicoTexto);
-  const jaMencionouSaidaTipo = /\b(sa[íi]da).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouDestinoTipo = /\b(destino).*?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
-  const jaMencionouBairroSaida = /\b(bairro.*?sa[ií]da|sa[ií]da.*?bairro)\b/i.test(historicoTexto);
-  const jaMencionouBairroDestino = /\b(bairro.*?destino|destino.*?bairro)\b/i.test(historicoTexto);
+  const jaMencionouSaidaTipo = /\b(sa[íi]da).?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
+  const jaMencionouDestinoTipo = /\b(destino).?(casa|apartamento|apto|ap)\b/i.test(historicoTexto);
+  const jaMencionouBairroSaida = /\b(bairro.?sa[ií]da|sa[ií]da.?bairro)\b/i.test(historicoTexto);
+  const jaMencionouBairroDestino = /\b(bairro.?destino|destino.?bairro)\b/i.test(historicoTexto);
   const nonPhoneFields = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
   const allNonPhoneAnswered = nonPhoneFields.every(f => {
     if (f === 'itens') return jaMencionouItens;
@@ -527,58 +520,54 @@ function montarPromptUser(cidade, historico, opts = {}) {
     if (f === 'destino_tipo') return jaMencionouDestinoTipo;
     return false;
   });
-
-  // "Já pediu WhatsApp" – detecta nas últimas mensagens da IA
+  
   const iaMsgs = historicoIA;
   const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '') : '';
   const jaPediuWhatsappUltima = /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(lastIA);
   const jaPediuWhatsappAntes = jaPediuWhatsappUltima || iaMsgs.slice(-3).some(m => /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(String(m.texto || '')));
-
-  // Cliente acabou de fornecer dado na ÚLTIMA mensagem?
+  
+  // Detecta se a última IA perguntou um campo (para considerar que o cliente respondeu um dado)
+  function iaPerguntouCampo(msg) {
+    const t = String(msg || '').toLowerCase();
+    if (/qual\s+o?\s*bairro.sa[íi]da/.test(t)) return 'bairro_saida';
+    if (/qual\s+o?\sbairro.*destino/.test(t)) return 'bairro_destino';
+    if (/precisa\s+de\s+ajudante/.test(t)) return 'ajudante';
+    if (/sa[ií]da.*casa|apartamento|apto|ap/.test(t)) return 'saida_tipo';
+    if (/destino.*casa|apartamento|apto|ap/.test(t)) return 'destino_tipo';
+    if (/o que voc[eê]\s+precisa\s+transportar|quais\s+itens/.test(t)) return 'itens';
+    return null;
+  }
+  
+  const ultIA = iaMsgs.length ? iaMsgs[iaMsgs.length - 1].texto || '' : '';
+  const campoPerguntadoAntes = iaPerguntouCampo(ultIA);
   const ultCLI = historicoCLI.length ? String(historicoCLI[historicoCLI.length - 1].texto || '') : '';
-  const forneceuDadoAgora = /\b(ajudante|ajuda|casa|apartamento|apto|ap\b|bairro|levar|transportar|cama|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|cadeira|m[óo]vel|m[óo]veis)\b/i.test(ultCLI);
+  const forneceuDadoAgora = !!(campoPerguntadoAntes && ultCLI && !/\?\s*$/.test(ultCLI));
+  
+  // Telefone no histórico
+  const temWhatsappComDDD = /\b(\d{2}\s?\d{8,9}|\d{11})\b/.test(historicoTexto);
 
-  // PRÓXIMA PERGUNTA
+  // PRIMEIRA MENSAGEM: perguntar itens (não "precisa de frete?")
   let proximaPergunta = '';
-
-  // 1) Início de conversa, sem menção a serviço nem itens/mudança: perguntar se precisa de frete
-  if (!historicoIA.length && !jaMencionouItens && !perguntouDisponibilidade) {
-    proximaPergunta = 'precisa_servico';
+  if (!historicoIA.length && !jaMencionouItens) {
+    proximaPergunta = 'itens';
   } else {
-    // 2) Se já tem WhatsApp válido -> seguir coleta de dados
-    if (temWhatsappComDDD) {
-      const faltante = nonPhoneFields.find(f => {
-        if (f === 'itens') return !jaMencionouItens;
-        if (f === 'bairro_saida') return !jaMencionouBairroSaida;
-        if (f === 'bairro_destino') return !jaMencionouBairroDestino;
-        if (f === 'ajudante') return !jaMencionouAjudante;
-        if (f === 'saida_tipo') return !jaMencionouSaidaTipo;
-        if (f === 'destino_tipo') return !jaMencionouDestinoTipo;
-        return false;
-      });
-      proximaPergunta = faltante || '—';
-    } else {
-      // 3) WhatsApp deve ser pedido somente:
-      //    - primeira vez que cliente pergunta preço/agendamento
-      //    - OU quando todos os dados estiverem coletados
-      //    - Nunca em mensagens consecutivas e nunca se acabou de fornecer dados
-      const podePedirPhonePrimeiraVez = (priceAsk || availabilityAsk) && !jaPediuWhatsappAntes && !forneceuDadoAgora;
-      const podePedirPhoneAoFinal = allNonPhoneAnswered && !jaPediuWhatsappUltima;
+    // pedir telefone: somente se preço OU tudo coletado (NUNCA por disponibilidade genérica)
+    const podePedirPhonePrimeiraVez = priceAsk && !jaPediuWhatsappAntes && !forneceuDadoAgora;
+    const podePedirPhoneAoFinal = allNonPhoneAnswered && !jaPediuWhatsappUltima;
 
-      if (podePedirPhonePrimeiraVez) proximaPergunta = 'telefone';
-      else if (podePedirPhoneAoFinal) proximaPergunta = 'telefone';
-      else {
-        const faltante = nonPhoneFields.find(f => {
-          if (f === 'itens') return !jaMencionouItens;
-          if (f === 'bairro_saida') return !jaMencionouBairroSaida;
-          if (f === 'bairro_destino') return !jaMencionouBairroDestino;
-          if (f === 'ajudante') return !jaMencionouAjudante;
-          if (f === 'saida_tipo') return !jaMencionouSaidaTipo;
-          if (f === 'destino_tipo') return !jaMencionouDestinoTipo;
-          return false;
-        });
-        proximaPergunta = faltante || '—';
+    if (!temWhatsappComDDD && (podePedirPhonePrimeiraVez || podePedirPhoneAoFinal)) {
+      proximaPergunta = 'telefone';
+    } else {
+      const fila = ['itens','bairro_saida','bairro_destino','ajudante','saida_tipo','destino_tipo'];
+      for (const f of fila) {
+        if (f === 'itens' && !jaMencionouItens) { proximaPergunta = 'itens'; break; }
+        if (f === 'bairro_saida' && !jaMencionouBairroSaida) { proximaPergunta = 'bairro_saida'; break; }
+        if (f === 'bairro_destino' && !jaMencionouBairroDestino) { proximaPergunta = 'bairro_destino'; break; }
+        if (f === 'ajudante' && !jaMencionouAjudante) { proximaPergunta = 'ajudante'; break; }
+        if (f === 'saida_tipo' && !jaMencionouSaidaTipo) { proximaPergunta = 'saida_tipo'; break; }
+        if (f === 'destino_tipo' && !jaMencionouDestinoTipo) { proximaPergunta = 'destino_tipo'; break; }
       }
+      if (!proximaPergunta) proximaPergunta = '—';
     }
   }
 
@@ -594,7 +583,7 @@ function montarPromptUser(cidade, historico, opts = {}) {
     `4. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
     `5. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
     `6. Destino é casa ou apartamento: ${jaMencionouDestinoTipo ? '✅ COLETADO' : '❌ FALTA'}`,
-    `7. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (pedir apenas quando cliente perguntar preço/disponibilidade OU no final)'}`,
+    `7. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (pedir apenas quando cliente perguntar preço OU no final)'}`,
     ``,
     `PRÓXIMA PERGUNTA A FAZER: ${proximaPergunta || '—'}`,
     ``,
@@ -896,38 +885,44 @@ function devePedirWhatsApp(historicoConversa, flow) {
     const utils = require('./utils.js');
     flow = flow || {};
     flow.answered = flow.answered || {};
+    
     const hasPhone = utils.isValidBRPhoneWithDDD((flow.answered.telefone || '').toString());
-    // Texto completo e flags de intenção
     const txt = (historicoConversa || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
+    
     const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(txt);
-    const askedAvailability = /\b(dispon[ií]vel|disponivel|agendar|agenda|marcar|hor[áa]rio|quando|que\s+dia|d[aá] pra (hoje|agora|amanh[ãa])|faz\s+(hoje|agora)|consegue\s+(hoje|agora))\b/i.test(txt);
-    // Todos os campos não-phone respondidos?
+    
     const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
     const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
-    // Checa mensagens recentes do atendente para ver se já pediu WhatsApp
-    const iaMsgs = (historicoConversa || []).filter(m => m && (m.autor === 'ia' || m.autor === 'sistema'));
+    
+    const iaMsgs = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
     const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '') : '';
     const askedWhatsLast = /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(lastIA);
     const askedWhatsBefore = askedWhatsLast || iaMsgs.slice(-3).some(m => /\b(whats|whatsapp|telefone|n[uú]mero)\b/i.test(String(m.texto || '')));
-    // Se já tem WhatsApp válido, nunca pedir
+    
     if (hasPhone) return false;
-    // Nunca pedir em mensagens consecutivas
     if (flow.lastAsked === 'telefone' || askedWhatsLast) return false;
-    // Se já pediu uma vez e ainda está coletando dados, não repetir até terminar todos os dados
     if (flow.phoneAskedOnce === true && !allNonPhoneAnswered) return false;
-    // Se cliente acabou de fornecer dados (itens, bairro, ajudante, casa/apto), não pedir WhatsApp nesta mensagem
+    
+    // Se a última pergunta da IA foi um campo e o cliente acabou de responder, não pedir telefone agora
     const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
     const lastCLI = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-    const forneceuDado = /\b(ajudante|ajuda|casa|apartamento|apto|ap\b|bairro|levar|transportar|cama|sof[aá]|guarda-?roupa|fog[aã]o|geladeira|mesa|cadeira|m[óo]vel|m[óo]veis)\b/i.test(lastCLI);
-    // Disparos permitidos
-    // 1) primeira vez que pergunta preço/agendamento (e ainda não pediu WhatsApp anteriormente)
-    if ((askedPrice || askedAvailability) && !flow.phoneAskedOnce && !askedWhatsBefore) {
-      // Mas se acabou de fornecer dados, não peça nesta mesma mensagem
-      if (forneceuDado) return false;
+    const lastIAText = lastIA.toLowerCase();
+    const iaPediuCampoAntes =
+      /qual\s+o?\s*bairro.*sa[ií]da/.test(lastIAText) ||
+      /qual\s+o?\s*bairro.*destino/.test(lastIAText) ||
+      /precisa\s+de\s+ajudante/.test(lastIAText) ||
+      /sa[ií]da.*(casa|apartamento|apto|ap)/.test(lastIAText) ||
+      /destino.*(casa|apartamento|apto|ap)/.test(lastIAText) ||
+      /(o que voc[eê]\s+precisa\s+transportar|quais\s+itens)/.test(lastIAText);
+    
+    if (iaPediuCampoAntes && lastCLI && !/\?\s*$/.test(lastCLI)) return false;
+    
+    // Somente preço ou final da coleta
+    if (askedPrice && !flow.phoneAskedOnce && !askedWhatsBefore) {
       return true;
     }
-    // 2) já coletou todos os dados (e ainda não tem WhatsApp)
     if (allNonPhoneAnswered && !askedWhatsBefore) return true;
+    
     return false;
   } catch {
     return false;
@@ -4186,8 +4181,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             const pipelineResult = await processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev);
             
+            // NOVO: se o pipeline respondeu null, NÃO cair no Groq. Apenas aguardar.
+            if (pipelineResult && !pipelineResult.resposta) {
+              try {
+                await setChatState(nome, chatId, {
+                  qaAsked: pipelineResult.qaAsked || [],
+                  qaAnswered: pipelineResult.qaAnswered || {},
+                  flow: pipelineResult.flow || {},
+                  state: CHAT_STATES.AGUARDANDO,
+                  lastProbeAt: Date.now()
+                });
+              } catch {}
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              logger.info('[PIPELINE] Sem mensagem a enviar agora (aguardando).', { chatId });
+              return;
+            }
+            
             if (!pipelineResult || !pipelineResult.resposta) {
-              // Pipeline retornou null - verifica se tem WhatsApp para finalizar
+              // Fallback: só se pipelineResult for nulo/indefinido (erro, por ex.).
               const telefoneFinal = pipelineResult?.telefone_extraido || null;
               if (telefoneFinal && pipelineResult?.finalizado) {
                 logger.info('[PIPELINE] Todas informações coletadas COM WhatsApp, finalizando', { nome, chatId });
@@ -4207,9 +4220,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 chatAtivo = null;
                 return;
               } else {
-                // Sem resposta do pipeline mas também sem WhatsApp - usar Groq como fallback
-                logger.info('[PIPELINE] Pipeline sem resposta e sem WhatsApp - usando Groq como fallback', { nome, chatId });
-                // Continua para o bloco DIRECT_GROQ abaixo
+                logger.info('[PIPELINE] Pipeline sem resposta; fallback para Groq', { nome, chatId });
               }
             }
             
