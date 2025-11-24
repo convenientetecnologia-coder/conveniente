@@ -292,57 +292,11 @@ function getAvailableMB() {
   }
 }
 
-// Validação e extração ultra-rígida de telefone BR (com DDD)
-function normalizeBRPhone(raw) {
-  const s = String(raw || '').replace(/[^\d+]/g, '');
-  const noPlus = s.replace(/^\+/, '');
-  const br = noPlus.replace(/^55/, '');
-  return br;
-}
-
-function isValidBRPhoneWithDDD(digitsOnly) {
-  const d = String(digitsOnly || '').replace(/\D/g, '');
-  if (d.length === 11) {
-    const ddd = d.slice(0,2);
-    const n9 = d[2] === '9';
-    return /^[1-9]{2}$/.test(ddd) && n9;
-  }
-  if (d.length === 10) {
-    const ddd = d.slice(0,2);
-    const first = d[2];
-    return /^[1-9]{2}$/.test(ddd) && /^[2-9]$/.test(first);
-  }
-  return false;
-}
-
-function extractPhonesBRStrict(text) {
-  if (!text) return [];
-  const cleaned = String(text).replace(/[^\d+]/g, ' ');
-  const candidates = cleaned.match(/(?:\+?55)?\s*\d{10,11}/g) || [];
-  const out = [];
-  const seen = new Set();
-  for (const c of candidates) {
-    const norm = normalizeBRPhone(c);
-    const d = norm.replace(/\D/g, '');
-    if (!isValidBRPhoneWithDDD(d)) continue;
-    if (!seen.has(d)) { seen.add(d); out.push(d); }
-  }
-  return out;
-}
-
 module.exports = {
   slugify,
   readJsonSafe,
   writeJsonSafe,
   normalizeCookies,
   getCoords,
-  getAvailableMB,
-  normalizeBRPhone,
-  isValidBRPhoneWithDDD,
-  extractPhonesBRStrict,
+  getAvailableMB
 };
-
-// Exportação explícita adicional (garantia de blindagem)
-module.exports.normalizeBRPhone = normalizeBRPhone;
-module.exports.isValidBRPhoneWithDDD = isValidBRPhoneWithDDD;
-module.exports.extractPhonesBRStrict = extractPhonesBRStrict;

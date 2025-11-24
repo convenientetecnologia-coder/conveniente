@@ -77,6 +77,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
     if (!controller || !controller.browser) return null;
 
     const logger = require('./logger.js');
+    const promptFretes = require('./promptFretes.js');
     const browser = controller.browser;
 
     // Flag global ANTES de newPage
@@ -102,28 +103,9 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
     try {
       await novaAba.goto(urlClassificado, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      const localizacao = await novaAba.evaluate(() => {
+      // Apenas scraping DOM - coleta candidatos de texto, SEM parsing
+      const candidates = await novaAba.evaluate(() => {
         try {
-          // Helpers
-          const CITYUF_EXACT_RE = /^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'´.\-\s]{1,60}?),\s*([A-Z]{2})$/;
-          const CITYUF_FIND_RE = /([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'´.-\s]{1,60}?),\s*([A-Z]{2})/g;
-
-          function limparEValidarCidade(cidade) {
-            if (!cidade || typeof cidade !== 'string') return null;
-            let s = String(cidade).trim();
-            // Remove prefixos e lixo mais comuns (SUPER abrangente)
-            s = s
-              .replace(/^(uma\s+hora\s+em|há\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|a\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|em\s+|de\s+|para\s+|até\s+)/i, '')
-              .replace(/^\s+|\s+$/g, '');
-            // rejeita conteúdos obviamente inválidos
-            if (/\d+/.test(s)) return null;
-            if (!/^[A-Za-zÀ-ÿ]/.test(s)) return null;
-            if (s.length < 2 || s.length > 60) return null;
-            // não deve começar por palavras temporais/destino
-            if (/^(uma\s+hora|há|a\s+\d+|em|de|para|até)/i.test(s)) return null;
-            return s;
-          }
-
           function isVisible(el) {
             try {
               const st = window.getComputedStyle(el);
@@ -134,17 +116,9 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
             } catch { return false; }
           }
 
-          function candidateFromText(txt) {
-            const t = (txt || '').trim();
-            const m = CITYUF_EXACT_RE.exec(t);
-            if (!m) return null;
-            const cidade = limparEValidarCidade(m[1] || '');
-            const uf = (m[2] || '').toUpperCase();
-            if (!cidade || !/^[A-Z]{2}$/.test(uf)) return null;
-            return { cidade, estado: uf };
-          }
+          const candidates = [];
 
-          // Estratégia 1 — Anchor de localização do Marketplace: /marketplace/<localId>/, não /t/ (chat) e não /item/
+          // Estratégia 1 — Anchor de localização do Marketplace
           {
             const anchors = Array.from(document.querySelectorAll('a[role="link"][href^="/marketplace/"], a[href^="/marketplace/"]'))
               .filter(a => {
@@ -153,50 +127,25 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
               });
             for (const a of anchors) {
               if (!isVisible(a)) continue;
-              // Tenta texto do anchor e dos spans internos
               const texts = [
                 (a.innerText || a.textContent || '').trim(),
                 ...Array.from(a.querySelectorAll('span')).map(s => (s.innerText || s.textContent || '').trim())
               ].filter(Boolean);
-              for (const t of texts) {
-                const cand = candidateFromText(t);
-                if (cand) return cand;
-              }
-              // Se vier dentro de frase ("… em Cidade, UF"), extrai o "Cidade, UF"
-              const big = (a.innerText || a.textContent || '').trim();
-              if (big) {
-                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
-                while ((mm = CITYUF_FIND_RE.exec(big)) !== null) last = mm;
-                if (last) {
-                  const c2 = candidateFromText(last[0]);
-                  if (c2) return c2;
-                }
-              }
+              candidates.push(...texts);
             }
           }
 
-          // Estratégia 2 — Spans e Divs visíveis com texto "Cidade, UF" exato
+          // Estratégia 2 — Spans e Divs visíveis
           {
             const nodes = Array.from(document.querySelectorAll('span,div'));
             for (const el of nodes) {
               if (!isVisible(el)) continue;
               const txt = (el.innerText || el.textContent || '').trim();
-              if (!txt) continue;
-              // Caso "... em Cidade, UF", extrai apenas a parte final
-              if (/\sem\s/i.test(txt)) {
-                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
-                while ((mm = CITYUF_FIND_RE.exec(txt)) !== null) last = mm;
-                if (last) {
-                  const c2 = candidateFromText(last[0]);
-                  if (c2) return c2;
-                }
-              }
-              const cand = candidateFromText(txt);
-              if (cand) return cand;
+              if (txt) candidates.push(txt);
             }
           }
 
-          // Estratégia 3 — Cabeçalhos/regiões principais (header, role=main, data-pagelet Marketplace)
+          // Estratégia 3 — Cabeçalhos/regiões principais
           {
             const regs = [
               document.querySelector('header'),
@@ -205,65 +154,27 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
             ].filter(Boolean);
             for (const r of regs) {
               const lines = ((r.innerText || r.textContent || '') || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
-              for (const ln of lines) {
-                const cand = candidateFromText(ln);
-                if (cand) return cand;
-                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
-                while ((mm = CITYUF_FIND_RE.exec(ln)) !== null) last = mm;
-                if (last) {
-                  const c2 = candidateFromText(last[0]);
-                  if (c2) return c2;
-                }
-              }
+              candidates.push(...lines);
             }
           }
 
-          // Estratégia 4 — Último recurso: fullText (linha a linha) pegando SOMENTE "Cidade, UF"
+          // Estratégia 4 — Último recurso: fullText
           {
             const full = (document.body && (document.body.innerText || document.body.textContent) || '');
             if (full) {
               const parts = full.split(/\n+/).map(x => x.trim()).filter(Boolean);
-              for (const t of parts) {
-                const cand = candidateFromText(t);
-                if (cand) return cand;
-                let mm, last = null; CITYUF_FIND_RE.lastIndex = 0;
-                while ((mm = CITYUF_FIND_RE.exec(t)) !== null) last = mm;
-                if (last) {
-                  const c2 = candidateFromText(last[0]);
-                  if (c2) return c2;
-                }
-              }
+              candidates.push(...parts);
             }
           }
 
-          return null;
+          return candidates;
         } catch {
-          return null;
+          return [];
         }
       });
 
-      // Validação dupla no Node (fora do evaluate) para blindagem extra
-      function limparEValidarCidadeNode(cidade) {
-        if (!cidade || typeof cidade !== 'string') return null;
-        let s = cidade.trim();
-        // Remove prefixos e lixo
-        s = s
-          .replace(/^(uma\s+hora\s+em|há\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|a\s+\d+\s*(km|kms|quil[oô]metros?)\s+de|em\s+|de\s+|para\s+|até\s+)/i, '')
-          .replace(/^\s+|\s+$/g, '');
-        if (/\d+/.test(s)) return null;
-        if (!/^[A-Za-zÀ-ÿ]/.test(s)) return null;
-        if (s.length < 2 || s.length > 60) return null;
-        if (/^(uma\s+hora|há|a\s+\d+|em|de|para|até)/i.test(s)) return null;
-        return s;
-      }
-
-      let finalLocal = null;
-      if (localizacao && localizacao.cidade && localizacao.estado && /^[A-Z]{2}$/.test(localizacao.estado)) {
-        const cidadeLimpa = limparEValidarCidadeNode(localizacao.cidade);
-        if (cidadeLimpa) {
-          finalLocal = { cidade: cidadeLimpa, estado: localizacao.estado.toUpperCase() };
-        }
-      }
+      // Chama o domínio para fazer o parsing
+      const finalLocal = promptFretes.parseCityUfFromText(candidates);
 
       // Log detalhado sobre resultado da busca
       if (finalLocal && finalLocal.cidade && finalLocal.estado) {

@@ -139,267 +139,8 @@ async function installChatFeedObserver(page, nome, onChat) {
   });
 }
 
-const DIRECT_GROQ = (process.env.DIRECT_GROQ || '1') === '1';
-const VIRTUS_USE_PIPELINE = (process.env.VIRTUS_USE_PIPELINE || '0') === '1';
-
-let GROQ_API_KEY = null;
-let GROQ_MODEL = null;
-let GROQ_API_URL = null;
-
-function verificarConfigGroq() {
-  if (!GROQ_API_KEY) {
-    GROQ_API_KEY = process.env.GROQ_API_KEY;
-    GROQ_MODEL = process.env.GROQ_MODEL;
-    GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
-    
-    if (!GROQ_API_KEY) {
-      logger.error('[GROQ] GROQ_API_KEY não configurada! Configure no arquivo .env');
-      throw new Error('GROQ_API_KEY não configurada. Crie arquivo .env com GROQ_API_KEY=sua_chave');
-    }
-    
-    if (!GROQ_MODEL) {
-      logger.error('[GROQ] GROQ_MODEL não configurada! Configure no arquivo .env');
-      throw new Error('GROQ_MODEL não configurada. Configure GROQ_MODEL=openai/gpt-oss-120b no arquivo .env');
-    }
-  }
-  return { GROQ_API_KEY, GROQ_MODEL, GROQ_API_URL };
-}
-
-async function chamarGroqAPI(promptSystem, promptUser, { timeoutMs = 15000, retries = 2 } = {}) {
-  const config = verificarConfigGroq();
-  const apiKey = config.GROQ_API_KEY;
-  const model = config.GROQ_MODEL;
-  const apiUrl = config.GROQ_API_URL;
-  
-  let lastErr = null;
-
-  for (let i = 0; i <= retries; i++) {
-    let ac = null;
-    try {
-      ac = new (global.AbortController || (() => {
-        try { return require('abort-controller').AbortController; } catch { return null; }
-      })())();
-    } catch {}
-    
-    const t = ac ? setTimeout(() => { try { if (ac) ac.abort(); } catch {} }, timeoutMs) : null;
-
-    try {
-      const resp = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: model,
-          messages: [
-            { role: 'system', content: promptSystem },
-            { role: 'user', content: promptUser }
-          ],
-          temperature: 0.9, // Aumentado para respostas mais naturais e variadas
-          max_tokens: 1200  // Aumentado para permitir respostas completas que respondam todas as perguntas
-        }),
-        signal: ac ? ac.signal : undefined
-      });
-
-      if (t) clearTimeout(t);
-
-      if (!resp.ok) {
-        lastErr = new Error(`Groq API error: ${resp.status} ${resp.statusText}`);
-        continue;
-      }
-
-      const data = await resp.json();
-      const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '';
-
-      if (!content || !String(content).trim()) {
-        lastErr = new Error('Groq API retornou resposta vazia');
-        continue;
-      }
-
-      return content.trim();
-    } catch (e) {
-      if (t) clearTimeout(t);
-      lastErr = e;
-    }
-  }
-
-  logger.error('[GROQ] Erro ao chamar API', { error: (lastErr && lastErr.message) || String(lastErr) });
-  throw lastErr || new Error('groq_error');
-}
-
-const PROMPT_SYSTEM = `
-Você é o atendente de fretes/mudanças. Você decide 100% do conteúdo. O sistema só envia sua mensagem. Siga à risca:
-
-ESTILO:
-
-    Natural, humano e acolhedor. 1–2 frases curtas por mensagem (ideal <= 20 palavras).
-
-    Use saudação certa (bom dia/boa tarde/boa noite) SOMENTE na primeira resposta da conversa.
-
-    Não ecoe literalmente o que o cliente falou; responda e avance.
-
-    Máximo 1 emoji a cada 3–4 mensagens; padrão sem emoji.
-
-ORDEM LÓGICA (uma pergunta por vez):
-
-    O que precisa transportar (itens)?
-
-    Bairro/local de saída?
-
-    Bairro/local de destino?
-
-    Ajudante?
-
-    Saída: casa ou apartamento?
-
-    Destino: casa ou apartamento?
-
-WHATSAPP (regras duras):
-
-    Peça WhatsApp quando: a) o cliente perguntar preço/valor/orçamento; OU b) o trio core (itens + saída + destino) já estiver coletado; OU c) no final, quando todos os dados estiverem coletados.
-
-    Ao pedir WhatsApp, não diga "com DDD". Se vier sem DDD, peça o DDD gentilmente EM OUTRA MENSAGEM.
-
-    Não peça WhatsApp em mensagens consecutivas. Evite pedí-lo mais de uma vez (se já pediu, prossiga a coleta).
-
-DICAS DE FLUXO:
-
-    Se o cliente só cumprimentou: cumprimente e pergunte "O que você precisa transportar?".
-
-    Se já trouxe item, pergunte saída. Se já trouxe item + saída, pergunte destino.
-
-    Se já trouxe item + destino e perguntou preço, peça WhatsApp e pergunte saída (uma pergunta na mesma mensagem é aceitável nesses casos).
-
-    Em geral, faça 1 pergunta por mensagem. Em casos de preço, você pode pedir WhatsApp e encaixar 1 pergunta de coleta na mesma mensagem (para manter o ritmo).
-
-    Jamais mencione a cidade do cliente.
-
-    Nunca confirme número de WhatsApp.
-
-Formato de saída (APENAS JSON, sem texto fora):
-{
-  "resposta": "texto ao cliente",
-  "telefone_extraido": "11999999999" ou null,
-  "finalizado": true/false,
-  "dados": {
-    "ajudante": null|"sim"|"nao",
-    "saida_tipo": null|"casa"|"apartamento",
-    "saida_elevador": null|"sim"|"nao",
-    "destino_tipo": null|"casa"|"apartamento",
-    "destino_elevador": null|"sim"|"nao",
-    "bairro_saida": null|"...",
-    "bairro_destino": null|"...",
-    "itens": null|"..."
-  }
-}
-
-REGRAS:
-
-    finalizado=true somente se houver telefone com DDD válido.
-
-    Retorne APENAS o JSON.
-
-    Não use as frases proibidas abaixo em nenhuma variação.
-
-PROIBIDOS:
-
-    "Sim, estou aqui para te ajudar"
-
-    "Ah, ótimo..." (no início)
-
-    "Perfeito!" (no início)
-
-    "Claro!" (no início)
-
-    Repetir a saudação após a primeira mensagem
-
-    Confirmar número de WhatsApp
-
-    Fazer múltiplas perguntas juntas (exceto pedir WhatsApp quando cliente pergunta preço e encaixar UMA pergunta de coleta) `.trim();
-
-function montarPromptUser(cidade, historico, opts = {}) {
-  const agora = new Date().toLocaleString('pt-BR');
-  const historicoCLI = (historico || []).filter(m => m.autor === 'cliente');
-  const historicoIA  = (historico || []).filter(m => m.autor === 'ia' || m.autor === 'sistema');
-
-  // Sinais simples (apenas para contexto; a IA decide tudo)
-  const textoCliente = historicoCLI.map(m => String(m.texto||'')).join(' ').toLowerCase();
-  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(textoCliente);
-
-  // Status heurístico (somente informativo)
-  const status = {
-    itens_coletado: /\b(cama|sof[aá]|guarda-?roupa|geladeira|fog[aã]o|mesa|cadeira|m[óo]veis?|itens?|transportar|levar)\b/i.test(textoCliente),
-    saida_coletado: /\b(bairro|saida|sa[ií]da)\b/i.test(textoCliente),
-    destino_coletado: /\b(destino|levar para|para\s+o|para\s+a)\b/i.test(textoCliente)
-  };
-
-  // Histórico em formato legível
-  const linhas = [];
-  for (const msg of (historico || [])) {
-    const autor = (msg.autor === 'ia' || msg.autor === 'sistema') ? 'Atendente' : 'Cliente';
-    const ts = msg.timestamp ? new Date(msg.timestamp).toLocaleString('pt-BR') : '';
-    linhas.push(`${autor}${ts ? ' ['+ts+']' : ''}: ${msg.texto}`);
-  }
-
-  return [
-    `Momento: ${agora}`,
-    ``,
-    `Observações para o modelo (contexto, não instrutivo):`,
-    `- Cliente perguntou preço agora? ${askedPrice ? 'SIM' : 'NÃO'}`,
-    `- Status (pode estar incompleto): itens=${status.itens_coletado ? 'sim' : 'não'}, saída=${status.saida_coletado ? 'sim' : 'não'}, destino=${status.destino_coletado ? 'sim' : 'não'}`,
-    ``,
-    `Histórico da conversa (leia tudo e responda conforme o PROMPT_SYSTEM acima):`,
-    ...linhas,
-    ``,
-    `Gere APENAS o JSON especificado no PROMPT_SYSTEM.`
-  ].join('\n');
-}
-
-function parsearRespostaGroq(respostaTexto) {
-  try {
-    let texto = String(respostaTexto || '').trim();
-    
-    texto = texto.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-    
-    let match = texto.match(/\{[\s\S]*\}/);
-    if (!match) {
-      match = texto.match(/\{.*\}/s);
-    }
-    if (!match) throw new Error('JSON não encontrado na resposta');
-
-    const obj = JSON.parse(match[0]);
-    const safeDados = obj.dados && typeof obj.dados === 'object' ? obj.dados : {};
-
-    return {
-      resposta: obj.resposta || '',
-      telefone_extraido: obj.telefone_extraido || null,
-      finalizado: obj.finalizado === true,
-      dados: {
-        ajudante: safeDados.ajudante ?? null,
-        saida_tipo: safeDados.saida_tipo ?? null,
-        saida_elevador: safeDados.saida_elevador ?? null,
-        destino_tipo: safeDados.destino_tipo ?? null,
-        destino_elevador: safeDados.destino_elevador ?? null,
-        bairro_saida: safeDados.bairro_saida ?? null,
-        bairro_destino: safeDados.bairro_destino ?? null,
-        itens: safeDados.itens ?? null
-      }
-    };
-  } catch (e) {
-    logger.error('[GROQ] Erro ao parsear JSON', { error: e && e.message || e, raw: String(respostaTexto).slice(0, 300) });
-    throw e;
-  }
-}
-
-function extrairTelefoneFallback(texto) {
-  try {
-    const phones = utils.extractPhonesBRStrict(texto);
-    return phones.length > 0 ? phones[0] : null;
-  } catch {
-    return null;
-  }
-}
+const { chatCompletion } = require('./inteligenciaArtificial.js');
+const promptFretes = require('./promptFretes.js');
 
 const VIRTUS_INPUT_LOCKS = new Map();
 function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
@@ -409,44 +150,6 @@ function getBrowserFromPage(p) { try { return typeof p.browser === 'function' ? 
 async function acquireSendGuard(p, chatId) { try { const b = getBrowserFromPage(p); if (b) b._sendLock = { active: true, owner: 'virtus', chatId, since: Date.now() }; } catch {} }
 function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b && b._sendLock && b._sendLock.owner === 'virtus') b._sendLock.active = false; } catch {} }
 
-function sanitizeIAResponse(texto, historico) {
-  let t = String(texto || '').trim();
-  
-  const jaSaudou = Array.isArray(historico)
-    ? historico.some(m => m.autor === 'ia' && /\b(bom dia|boa tarde|boa noite|ol[áa]|oii?)\b/i.test(String(m.texto || '')))
-    : false;
-  
-  const cliches = [
-    /^sim[,!.\s]/i,
-    /^ah[,!.\s]/i,
-    /^ótimo[,!.\s]/i,
-    /^perfeito[,!.\s]/i,
-    /^claro[,!.\s]/i
-  ];
-  
-  for (const rx of cliches) {
-    t = t.replace(rx, '').trim();
-  }
-  
-  if (jaSaudou) {
-    t = t.replace(/^ol[áa][,!.\s]/i, '').trim();
-    t = t.replace(/^oii?[,!.\s]/i, '').trim();
-  }
-  
-  t = t.replace(/\s{2,}/g, ' ').trim();
-  const ultIA = Array.isArray(historico) ? historico.filter(m => m.autor==='ia').slice(-1)[0] : null;
-  if (ultIA && typeof ultIA.texto === 'string') {
-    const prev = ultIA.texto.trim().toLowerCase();
-    const cur = t.trim().toLowerCase();
-    if (prev && cur && prev === cur) {
-      t = t + '.';
-    }
-  }
-  if (t.length < 3) {
-    t = 'Ok.';
-  }
-  return t;
-}
 
 function chatLogPath(perfil, chatId) {
   return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.jsonl`);
@@ -475,595 +178,6 @@ async function appendIaLine(perfil, chatId, texto) {
   try { await setChatState(perfil, chatId, { chatLogLastTs: obj.timestamp }); } catch {}
 }
 
-const SECONDARY_FIELDS = [
-  'ajudante',
-  'saida_tipo',
-  'saida_elevador',
-  'destino_tipo',
-  'destino_elevador',
-  'bairro_saida',
-  'bairro_destino',
-  'itens'
-];
-
-const FIELD_LABELS = {
-  'ajudante': 'Precisa de ajudante?',
-  'saida_tipo': 'Saída é casa ou apartamento?',
-  'saida_elevador': 'Saída tem elevador?',
-  'destino_tipo': 'Destino é casa ou apartamento?',
-  'destino_elevador': 'Destino tem elevador?',
-  'bairro_saida': 'Qual bairro de saída?',
-  'bairro_destino': 'Qual bairro de destino?',
-  'itens': 'Quais itens e quantidades? (ex.: 2 camas, 10 sacolas)'
-};
-
-function choosePair(qaAsked, qaAnswered) {
-  const askedSet = new Set(qaAsked || []);
-  const answeredSet = new Set(Object.keys(qaAnswered || {}));
-  const pending = SECONDARY_FIELDS.filter(f => !answeredSet.has(f) && !askedSet.has(f));
-  
-  if (pending.length === 0) return [];
-  if (pending.length === 1) return pending;
-  
-  const shuffled = [...pending].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 2);
-}
-
-function buildMessageFromQuestions(questions) {
-  if (!questions || questions.length === 0) return '';
-  const texts = questions.map(q => FIELD_LABELS[q] || q);
-  if (texts.length === 1) return texts[0];
-  return texts.join('\n');
-}
-
-function extractAnswersFromHistory(historico) {
-  const answers = {};
-  const textoCompleto = (historico || []).map(m => String(m.texto || '')).join(' ').toLowerCase();
-  
-  if (/precis[oa]|ajudante|ajuda|helper/i.test(textoCompleto)) {
-    if (/sim|yes|precis[oa]/i.test(textoCompleto)) answers.ajudante = 'sim';
-    else if (/n[ãa]o|no|não preciso/i.test(textoCompleto)) answers.ajudante = 'não';
-  }
-  
-  if (/sa[íi]da.*(casa|apartamento|apto)/i.test(textoCompleto)) {
-    const match = textoCompleto.match(/sa[íi]da.*?(casa|apartamento|apto)/i);
-    if (match) answers.saida_tipo = match[1].toLowerCase().includes('casa') ? 'casa' : 'apartamento';
-  }
-  if (/destino.*(casa|apartamento|apto)/i.test(textoCompleto)) {
-    const match = textoCompleto.match(/destino.*?(casa|apartamento|apto)/i);
-    if (match) answers.destino_tipo = match[1].toLowerCase().includes('casa') ? 'casa' : 'apartamento';
-  }
-  
-  if (/sa[íi]da.*elevador/i.test(textoCompleto)) {
-    if (/sim|yes|tem/i.test(textoCompleto)) answers.saida_elevador = 'sim';
-    else if (/n[ãa]o|no|sem/i.test(textoCompleto)) answers.saida_elevador = 'não';
-  }
-  if (/destino.*elevador/i.test(textoCompleto)) {
-    if (/sim|yes|tem/i.test(textoCompleto)) answers.destino_elevador = 'sim';
-    else if (/n[ãa]o|no|sem/i.test(textoCompleto)) answers.destino_elevador = 'não';
-  }
-  
-  const bairroMatch = textoCompleto.match(/(?:bairro|bairros?)[\s:]*([^,\.\n]+)/i);
-  if (bairroMatch) {
-    const parts = bairroMatch[1].split(/para|até|destino/i);
-    if (parts[0]) answers.bairro_saida = parts[0].trim();
-    if (parts[1]) answers.bairro_destino = parts[1].trim();
-  }
-  
-  const itensMatch = textoCompleto.match(/(?:itens?|coisas?|m[óo]veis?)[\s:]*([^,\.\n]{10,})/i);
-  if (itensMatch) answers.itens = itensMatch[1].trim();
-  
-  return answers;
-}
-
-const FLOW_ORDER = [
-  'itens',
-  'bairro_saida',
-  'bairro_destino',
-  'ajudante',
-  'saida_tipo',
-  'destino_tipo',
-  'telefone'
-];
-
-const FIELD_PROMPTS = {
-  telefone:        'Pode me passar seu WhatsApp? O motorista chama por lá.',
-  itens:           'O que você precisa transportar?',
-  bairro_saida:    'Qual bairro de saída?',
-  bairro_destino:  'Qual bairro de destino?',
-  ajudante:        'Você precisa de ajudante?',
-  saida_tipo:      'O local de saída é casa ou apartamento?',
-  destino_tipo:    'O destino é casa ou apartamento?'
-};
-
-function getOrInitFlowState(stPrev) {
-  const fs = stPrev && stPrev.flow ? stPrev.flow : {
-    greeted: false,
-    asked: {},
-    answered: {},
-    askedTimes: {}
-  };
-  fs.asked = fs.asked || {};
-  fs.answered = fs.answered || {};
-  fs.askedTimes = fs.askedTimes || {};
-  return fs;
-}
-
-function devePedirWhatsApp(historicoConversa, flow) {
-  const utils = require('./utils.js');
-  flow = flow || {};
-  flow.answered = flow.answered || {};
-
-  const hasPhone = utils.isValidBRPhoneWithDDD((flow.answered.telefone || '').toString());
-  if (hasPhone) return false;
-  if (flow.phoneAskedOnce === true) return false; // nunca pedir em duplicidade
-  if (flow.lastAsked === 'telefone') return false; // não consecutivo
-
-  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-  const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
-
-  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
-  const allNonPhoneAnswered = nonPhone.every(f => !!flow.answered[f]);
-
-  const coreAnswered = !!(flow.answered.itens && flow.answered.bairro_saida && flow.answered.bairro_destino);
-
-  // Bloqueio: se a IA perguntou um campo e o cliente acabou de responder (sem ?), priorize coleta e NÃO peça WhatsApp nesta mensagem
-  const iaMsgs = (historicoConversa || []).filter(m => (m.autor === 'ia' || m.autor === 'sistema'));
-  const lastIA = iaMsgs.length ? String(iaMsgs[iaMsgs.length - 1].texto || '').toLowerCase() : '';
-  const iaAskedField =
-    /quais?\s+itens|o que voc[eê]\s+precisa\s+transportar/i.test(lastIA) ||
-    /bairro.sa[ií]da/i.test(lastIA) ||
-    /bairro.destino/i.test(lastIA) ||
-    /ajudante|precisa de ajuda/i.test(lastIA) ||
-    /sa[ií]da.(casa|apto|apart)/i.test(lastIA) ||
-    /destino.(casa|apto|apart)/i.test(lastIA);
-  const clienteRespondeuDadoAgora = lastCliText && !/\?\s*$/.test(lastCliText);
-  if (iaAskedField && clienteRespondeuDadoAgora) return false;
-
-  // Gatilhos
-  if (askedPrice) return true;
-  if (coreAnswered) return true;
-  if (allNonPhoneAnswered) return true;
-
-  return false;
-}
-
-function pickNextMissingField(flow, historicoConversa) {
-  flow.askedTimes = flow.askedTimes || {};
-  const nonPhone = FLOW_ORDER.filter(f => f !== 'telefone');
-  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-  const lastCLI = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-  const forneceuDadoAgora = /\b(cama|sof[aá]|guarda-?roupa|geladeira|fog[aã]o|mesa|cadeira|m[óo]vel|m[óo]veis|transportar|levar|preciso levar|preciso transportar|bairro|ajudante|ajuda|casa|apartamento|apto|ap\b)\b/i.test(lastCLI);
-
-  if (forneceuDadoAgora) {
-    for (const f of nonPhone) {
-      if (!flow.answered[f] && (flow.askedTimes[f] || 0) < 1) return f;
-    }
-  }
-
-  const askPhoneNow = devePedirWhatsApp(historicoConversa, flow);
-  if (askPhoneNow && !forneceuDadoAgora) return 'telefone';
-
-  for (const f of nonPhone) {
-    if (!flow.answered[f] && (flow.askedTimes[f] || 0) < 1) return f;
-  }
-  return null;
-}
-
-function applyExtractedAnswers(flow, historicoConversa, utils) {
-  const texto = (historicoConversa || []).map(m => (m && m.texto) || '').join(' ').toLowerCase();
-
-  const phones = utils.extractPhonesBRStrict(texto);
-  if (phones && phones.length) {
-    flow.answered.telefone = phones[0];
-    flow.meta = flow.meta || {};
-    flow.meta.needDDD = false; // Tem DDD válido
-  } else {
-    const t = texto.replace(/[^\d\s]/g, ' ');
-    let m = t.match(/\b(?:ddd\s*)?([1-9]{2})\D*([2-9]\d{7,8})\b/);
-    if (!m) {
-      m = t.match(/\b([2-9]\d{7,8})\D*(?:ddd\s*)?([1-9]{2})\b/);
-    }
-    if (m) {
-      const ddd = m[1].length === 2 ? m[1] : m[2];
-      const local = m[1].length >= 8 ? m[1] : m[2];
-      const combinado = ddd + local;
-      if (utils.isValidBRPhoneWithDDD(combinado)) {
-        flow.answered.telefone = combinado;
-        flow.meta = flow.meta || {};
-        flow.meta.needDDD = false; // Tem DDD válido
-      }
-    } else {
-      // Detecta número local sem DDD (8 ou 9 dígitos)
-      const localOnly = t.match(/\b([2-9]\d{7,8})\b/);
-      if (localOnly && !flow.answered.telefone) {
-        flow.meta = flow.meta || {};
-        flow.meta.needDDD = true; // Precisa de DDD
-      }
-    }
-  }
-
-  const iaMsgs = (historicoConversa || []).filter(m => m && (m.autor === 'ia' || m.autor === 'sistema'));
-  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-  const ultIA = iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
-  const ultCLI = cliMsgs.length ? cliMsgs[cliMsgs.length - 1] : null;
-  const iaTxt = (ultIA && String(ultIA.texto || '').toLowerCase()) || '';
-  const cliTxt = (ultCLI && String(ultCLI.texto || '').trim().toLowerCase()) || '';
-
-  const casaOuAp = (txt) => {
-    if (/\b(casa)\b/i.test(txt)) return 'casa';
-    if (/\b(apto|ap|apart|apartamento)\b/i.test(txt)) return 'apartamento';
-    return null;
-  };
-
-  const talvezBairro = (txt) => {
-    const clean = txt.replace(/[^\p{L}\s-]/gu, '').trim(); // letras/hífens/espaços
-    if (!clean) return null;
-    const words = clean.split(/\s+/).filter(Boolean);
-    if (words.length >= 1 && words.length <= 3 && /^[\p{L}\s-]+$/u.test(clean)) {
-      return clean;
-    }
-    return null;
-  };
-
-  if (/ajudante|precisa de ajuda/i.test(iaTxt)) {
-    if (/\b(sim|preciso|quero)\b/i.test(cliTxt)) flow.answered.ajudante = 'sim';
-    else if (/\b(n[aã]o|nao|sem)\b/i.test(cliTxt)) flow.answered.ajudante = 'não';
-  }
-
-  if (/sa[ií]da.*casa.apart/i.test(iaTxt) || /sa[ií]da.(casa|apto|apart)/i.test(iaTxt)) {
-    const val = casaOuAp(cliTxt);
-    if (val) flow.answered.saida_tipo = val;
-  }
-
-  if (/destino.*casa.apart/i.test(iaTxt) || /destino.(casa|apto|apart)/i.test(iaTxt)) {
-    const val = casaOuAp(cliTxt);
-    if (val) flow.answered.destino_tipo = val;
-  }
-
-  if (/bairro.*sa[ií]da/i.test(iaTxt)) {
-    const b = talvezBairro(cliTxt);
-    if (b) flow.answered.bairro_saida = b;
-  }
-  if (/bairro.*destino/i.test(iaTxt)) {
-    const b = talvezBairro(cliTxt);
-    if (b) flow.answered.bairro_destino = b;
-  }
-
-  if (/ajudante|ajuda/i.test(texto)) {
-    if (/\b(sim|precis[oa]|quero)\b/i.test(texto)) flow.answered.ajudante = flow.answered.ajudante || 'sim';
-    else if (/\b(n[aã]o|nao|sem)\b/i.test(texto)) flow.answered.ajudante = flow.answered.ajudante || 'não';
-  }
-  if (/sa[ií]da.(casa|apartamento|apto|ap)\b/i.test(texto)) {
-    flow.answered.saida_tipo = flow.answered.saida_tipo || (/casa/i.test(texto) ? 'casa' : 'apartamento');
-  }
-  if (/destino.(casa|apartamento|apto|ap)\b/i.test(texto)) {
-    flow.answered.destino_tipo = flow.answered.destino_tipo || (/casa/i.test(texto) ? 'casa' : 'apartamento');
-  }
-  const bx = texto.match(/\bbairro(s)?\b[:\s]*([^,.\n]+)/i);
-  if (bx) {
-    const clean = (bx[2] || '').trim();
-    if (clean && !flow.answered.bairro_saida) flow.answered.bairro_saida = clean;
-  }
-  if (/transportar|levar|itens?|coisas?|m[óo]veis?|mudan[çc]a/i.test(texto)) {
-    const snippet = texto.slice(0, 180);
-    flow.answered.itens = flow.answered.itens || snippet;
-  }
-
-  const dataHora = extractDataHoraPTBR(texto);
-  flow.answered.data_hora = dataHora || flow.answered.data_hora || 'agora';
-
-  return flow;
-}
-
-function extractDataHoraPTBR(texto) {
-  try {
-    const t = String(texto || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-
-    const hoje = new Date();
-    const dia = (d) => {
-      const dt = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() + d);
-      return `${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}`;
-    };
-
-    let diaRef = null;
-    if (/\bhoje\b/.test(t)) diaRef = dia(0);
-    else if (/\bagora\b/.test(t)) diaRef = dia(0);
-    else if (/\bamanh[ãa]\b/.test(t)) diaRef = dia(1);
-    else if (/\bdepois de amanh[ãa]\b/.test(t)) diaRef = dia(2);
-
-    let hora = null;
-    const mHora = t.match(/\b(\d{1,2})(?:[:h]\s?(\d{2}))?\b/);
-    if (mHora) {
-      let h = parseInt(mHora[1],10);
-      const mm = mHora[2] ? parseInt(mHora[2],10) : 0;
-      if (h >= 0 && h <= 23) {
-        hora = `${h}h`;
-        if (mm && mm > 0) hora = `${h}:${String(mm).padStart(2,'0')}`;
-      }
-      if ((/\bda tarde\b/.test(t) || /\btarde\b/.test(t)) && h >= 1 && h <= 11) hora = `${h+12}h`;
-      if ((/\bda noite\b/.test(t) || /\bnoite\b/.test(t)) && h >= 1 && h <= 11) hora = `${h+12}h`;
-    }
-
-    if (!hora) {
-      if (/\bde manh[ãa]\b|\bdemanha\b/.test(t)) hora = 'de manhã';
-      else if (/\bde tarde\b|\btarde\b/.test(t)) hora = 'de tarde';
-      else if (/\bde noite\b|\bnoite\b/.test(t)) hora = 'de noite';
-    }
-
-    if (!diaRef && !hora) return null;
-    if (!diaRef) diaRef = dia(0); // sem dia -> assume hoje
-    if (hora) return `${diaRef} - ${hora}`;
-    return `${diaRef}`;
-
-  } catch {
-    return null;
-  }
-}
-
-function saudacaoSePrimeira(historicoConversa, flow) {
-  try {
-    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-    if (!cliMsgs.length) return '';
-    const last = String(cliMsgs[cliMsgs.length - 1].texto || '').toLowerCase();
-    if (flow && flow.greeted) return '';
-    const agora = new Date();
-    const hhmm = agora.getHours() * 100 + agora.getMinutes();
-    let saud = '';
-    if (hhmm >= 501 && hhmm <= 1200) saud = 'Bom dia! ';
-    else if (hhmm >= 1201 && hhmm <= 1800) saud = 'Boa tarde! ';
-    else saud = 'Boa noite! ';
-    if (/\b(bom dia|boa tarde|boa noite|oi|ol[áa])\b/i.test(last)) return saud;
-    return '';
-  } catch { return ''; }
-}
-
-function buildNaturalPrefix(ultimaDoCliente) {
-  if (!ultimaDoCliente) return '';
-  const t = String(ultimaDoCliente || '').trim().toLowerCase();
-
-  if (/tudo bem|td bem|como est[aá]/i.test(t)) return 'Tudo bem, sim. ';
-
-  if (/faz frete|fazem frete|dispon[ií]vel|voc[eê] faz|trabalha/i.test(t)) return '';
-  if (/pre[cç]o|quanto custa|or[çc]amento|valor|custa/i.test(t)) return '';
-  if (/ajudante|ajuda/i.test(t)) return '';
-  if (/casa|apartamento|apto|ap\b/i.test(t)) return '';
-  if (/bairro/i.test(t)) return '';
-
-  if (/cama|sof[aá]|guarda-?roupa|m[óo]vel|geladeira|fog[aã]o|mudan[çc]a|itens|coisas/i.test(t)) return '';
-
-  return 'Entendido. ';
-}
-
-async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPrev) {
-  const utils = require('./utils.js');
-  const flow = getOrInitFlowState(stPrev);
-  flow.meta = flow.meta || {};
-  flow.meta.needDDD = !!flow.meta.needDDD;
-
-  applyExtractedAnswers(flow, historicoConversa, utils);
-
-  const whatsappValido = utils.isValidBRPhoneWithDDD((flow.answered && flow.answered.telefone) || '');
-
-  // DDD faltando (uma única vez)
-  if (!whatsappValido && flow.meta.needDDD) {
-    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
-    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const saud = saudacaoSePrimeira(historicoConversa, flow);
-    flow.lastAsked = 'telefone';
-    flow.lastAskedAt = Date.now();
-    flow.phoneAskedOnce = true;
-    // Marca que já saudou se usou saudação
-    if (saud) flow.greeted = true;
-    return {
-      resposta: `${saud}${prefixo}Preciso do DDD também, pode me passar o número completo?`,
-      telefone_extraido: null,
-      finalizado: false,
-      dados: flow.answered,
-      qaAsked: Object.keys(flow.asked || {}),
-      qaAnswered: flow.answered,
-      flow
-    };
-  }
-
-  // Próxima pergunta decidida
-  const next = pickNextMissingField(flow, historicoConversa);
-  const askPhoneNow = (next === 'telefone');
-
-  // Situação 1: pedir WhatsApp (primeira vez) — com "combo" quando permitido
-  if (askPhoneNow && !whatsappValido) {
-    if (flow.phoneAskedOnce === true || flow.lastAsked === 'telefone') {
-      return {
-        resposta: null,
-        telefone_extraido: null,
-        finalizado: false,
-        dados: flow.answered,
-        qaAsked: Object.keys(flow.asked || {}),
-        qaAnswered: flow.answered,
-        flow
-      };
-    }
-
-    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
-    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const saud = saudacaoSePrimeira(historicoConversa, flow);
-    flow.asked = flow.asked || {};
-    flow.asked.telefone = true;
-    flow.lastAsked = 'telefone';
-    flow.lastAskedAt = Date.now();
-    flow.phoneAskedOnce = true;
-
-    // Determina se "combo" é permitido e qual pergunta acoplar
-    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
-    const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
-    const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
-
-    const coreReady = !!(flow.answered.itens && flow.answered.bairro_saida && flow.answered.bairro_destino);
-
-    let perguntaCombo = null;
-    if (askedPrice) {
-      // Ao perguntar preço: WhatsApp + UMA pergunta de coleta (prioriza bairro de saída, depois destino, depois itens)
-      if (!flow.answered.bairro_saida) perguntaCombo = FIELD_PROMPTS.bairro_saida;
-      else if (!flow.answered.bairro_destino) perguntaCombo = FIELD_PROMPTS.bairro_destino;
-      else if (!flow.answered.itens) perguntaCombo = FIELD_PROMPTS.itens;
-    } else if (coreReady && !flow.answered.ajudante) {
-      // Core pronto: WhatsApp + ajudante
-      perguntaCombo = FIELD_PROMPTS.ajudante;
-    }
-
-    // Monta a resposta
-    const baseWhats = 'Quem passa o orçamento é o motorista e ele chama no WhatsApp. Pode me passar seu WhatsApp?';
-    let resposta = `${saud}${prefixo}${baseWhats}`;
-    if (perguntaCombo) {
-      resposta = `${saud}${prefixo}${baseWhats} ${perguntaCombo}`;
-      // Marca flag de combo para a próxima sanitização não cortar a segunda pergunta
-      flow.allowComboNext = true;
-    }
-    // Marca que já saudou se usou saudação
-    if (saud) flow.greeted = true;
-
-    return {
-      resposta,
-      telefone_extraido: null,
-      finalizado: false,
-      dados: flow.answered,
-      qaAsked: Object.keys(flow.asked || {}),
-      qaAnswered: flow.answered,
-      flow
-    };
-  }
-
-  // Pergunta normal (não-telefone)
-  if (next && next !== 'telefone') {
-    flow.asked = flow.asked || {};
-    flow.asked[next] = true;
-    flow.askedTimes = flow.askedTimes || {};
-    flow.askedTimes[next] = (flow.askedTimes[next] || 0) + 1;
-    flow.lastAsked = next;
-    flow.lastAskedAt = Date.now();
-    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
-    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const saud = saudacaoSePrimeira(historicoConversa, flow);
-    const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
-
-    // Marca que já saudou se usou saudação
-    if (saud) flow.greeted = true;
-    
-    return {
-      resposta: `${saud}${prefixo}${pergunta}`,
-      telefone_extraido: whatsappValido ? flow.answered.telefone : null,
-      finalizado: false,
-      dados: flow.answered,
-      qaAsked: Object.keys(flow.asked),
-      qaAnswered: flow.answered,
-      flow
-    };
-  }
-
-  // Todos os dados coletados, ainda sem WhatsApp: pedir uma única vez
-  if (!whatsappValido) {
-    if (flow.phoneAskedOnce === true || flow.lastAsked === 'telefone') {
-      return {
-        resposta: null,
-        telefone_extraido: null,
-        finalizado: false,
-        dados: flow.answered,
-        qaAsked: Object.keys(flow.asked || {}),
-        qaAnswered: flow.answered,
-        flow
-      };
-    }
-
-    const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
-    const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
-    const saud = saudacaoSePrimeira(historicoConversa, flow);
-    flow.asked = flow.asked || {};
-    flow.asked.telefone = true;
-    flow.lastAsked = 'telefone';
-    flow.lastAskedAt = Date.now();
-    flow.phoneAskedOnce = true;
-
-    // Marca que já saudou se usou saudação
-    if (saud) flow.greeted = true;
-    
-    return {
-      resposta: `${saud}${prefixo}Perfeito! Agora só falta seu WhatsApp pro motorista te chamar e passar o orçamento. Pode me passar?`,
-      telefone_extraido: null,
-      finalizado: false,
-      dados: flow.answered,
-      qaAsked: Object.keys(flow.asked || {}),
-      qaAnswered: flow.answered,
-      flow
-    };
-  }
-
-  // Finaliza se tem WhatsApp válido
-  return {
-    resposta: null,
-    telefone_extraido: flow.answered.telefone || null,
-    finalizado: !!whatsappValido,
-    dados: flow.answered,
-    qaAsked: Object.keys(flow.asked || {}),
-    qaAnswered: flow.answered,
-    flow
-  };
-}
-function stripPhoneConfirmation(txt) {
-  let t = String(txt || '');
-  t = t.replace(/me\s+confirmou\s+o\s+whats(app)?\s+como.*\?/ig, '');
-  t = t.replace(/est[aá]\s+correto\s+seu\s+n[uú]mero.*\?/ig, '');
-  return t.trim();
-}
-
-function ensureSingleQuestion(txt, { allowCombo = false } = {}) {
-  let s = String(txt || '');
-  const qs = (s.match(/\?/g) || []).length;
-
-  if (!allowCombo) {
-    // Mantém só a primeira interrogação
-    const firstQ = s.indexOf('?');
-    if (firstQ < 0) return s;
-    const before = s.slice(0, firstQ + 1);
-    const after = s.slice(firstQ + 1).replace(/\?/g, '').trim();
-    return after ? `${before} ${after}` : before;
-  }
-
-  // allowCombo = true => permite no máximo 2 perguntas
-  if (qs <= 2) return s;
-
-  // Se veio mais que 2, reduz para 2 (mantém as duas primeiras)
-  let count = 0;
-  let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (ch === '?') {
-      count++;
-      if (count > 2) continue; // pula as interrogações extras
-    }
-    out += ch;
-  }
-  return out;
-}
-
-function removeRepeatedGreeting(txt) {
-  let t = String(txt || '').trim();
-  t = t.replace(/^(bom dia|boa tarde|boa noite)[,!\s-]*/i, '').trim();
-  return t;
-}
-
-function enforceGovRulesOnText(txt, { alreadyGreeted = true, allowCombo = false } = {}) {
-  let s = String(txt || '').trim();
-  s = stripPhoneConfirmation(s);
-  s = ensureSingleQuestion(s, { allowCombo });
-  if (alreadyGreeted) {
-    const saudacaoIsolada = /^(bom dia|boa tarde|boa noite)[,!\s-]+(me|qual|o|a|você|teu|seu|pode|precisa)/i;
-    if (saudacaoIsolada.test(s)) {
-      s = removeRepeatedGreeting(s);
-    }
-  }
-  return s.trim();
-}
 
 async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
@@ -1256,9 +370,9 @@ function iniciarPollingRespostas(nomePerfil) {
         const perfilKeySet = getPendingSet(nomePerfil);
         
         for (const resp of data.respostas) {
-          const respostaSan = sanitizarResposta(resp.resposta || '');
+          const respostaSan = String(resp.resposta || '').trim();
           
-          const key = `${resp.chat_id}||${hashResposta(respostaSan)}`;
+          const key = `${resp.chat_id}||${respostaSan}`;
           
           if (perfilKeySet.has(key)) {
             logger.debug('[NOTIFICADOR] Resposta duplicada ignorada', { nomePerfil, chatId: resp.chat_id, key });
@@ -1304,7 +418,7 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     if (!proximo) return;
 
     try {
-      const respostaFinal = sanitizarResposta(proximo.resposta);
+      const respostaFinal = String(proximo.resposta || '').trim();
       
       if (enviarRespostaMessengerSeguraFn) {
         await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
@@ -1496,146 +610,7 @@ async function extrairHistoricoConversa(page) {
   }
 }
 
-const quietWindowTimers = new Map(); // chatId -> { timer, lastReset }
 
-async function waitQuietWindow(nome, chatId, quietMs = 20000, { page, getHistoricoFn } = {}) {
-  const key = `${nome}:${chatId}`;
-  const now = Date.now();
-  
-  let lastClientTs = 0;
-  if (getHistoricoFn && page) {
-    try {
-      const historicoInicial = await getHistoricoFn();
-      const ultimaClienteInicial = historicoInicial && historicoInicial.filter(m => m.autor === 'cliente').pop();
-      if (ultimaClienteInicial && ultimaClienteInicial.timestamp) {
-        lastClientTs = ultimaClienteInicial.timestamp;
-      }
-    } catch {}
-  }
-  
-  const existing = quietWindowTimers.get(key);
-  if (existing && existing.timer) {
-    clearTimeout(existing.timer);
-  }
-  
-  return new Promise((resolve) => {
-    let checkInterval = null;
-    const timer = setTimeout(async () => {
-      if (checkInterval) clearInterval(checkInterval);
-      quietWindowTimers.delete(key);
-      resolve(true);
-    }, quietMs);
-    
-    checkInterval = setInterval(async () => {
-      if (getHistoricoFn && page) {
-        try {
-          const historicoAtual = await getHistoricoFn();
-          const ultimaCliente = historicoAtual && historicoAtual.filter(m => m.autor === 'cliente').pop();
-          if (ultimaCliente && ultimaCliente.timestamp) {
-            if (ultimaCliente.timestamp > lastClientTs) {
-              if (checkInterval) clearInterval(checkInterval);
-              clearTimeout(timer);
-              quietWindowTimers.delete(key);
-              resolve(false);
-            }
-          }
-        } catch {}
-      }
-    }, 2000);
-    
-    quietWindowTimers.set(key, { timer, lastReset: now, checkInterval });
-  });
-}
-
-function calcularPaceCliente(historico) {
-  if (!historico || !Array.isArray(historico)) return randomBetween(5000, 15000);
-  
-  const mensagensCliente = historico.filter(m => m.autor === 'cliente');
-  if (mensagensCliente.length < 2) return randomBetween(5000, 15000);
-  
-  const intervalos = [];
-  for (let i = 1; i < mensagensCliente.length; i++) {
-    const prev = mensagensCliente[i - 1].timestamp || 0;
-    const curr = mensagensCliente[i].timestamp || 0;
-    if (curr > prev) intervalos.push(curr - prev);
-  }
-  
-  if (intervalos.length === 0) return randomBetween(5000, 15000);
-  
-  const mediaIntervalo = intervalos.reduce((a, b) => a + b, 0) / intervalos.length;
-  
-  if (mediaIntervalo < 10000) {
-    return randomBetween(5000, 15000);
-  } else if (mediaIntervalo > 30000) {
-    return randomBetween(15000, 25000);
-  } else {
-    const ratio = (mediaIntervalo - 10000) / 20000; // 0 a 1
-    const minDelay = 5000 + (ratio * 10000); // 5s a 15s
-    const maxDelay = 15000 + (ratio * 10000); // 15s a 25s
-    return randomBetween(minDelay, maxDelay);
-  }
-}
-
-function aplicarDedupResposta(respostaNova, historico) {
-  if (!historico || !Array.isArray(historico)) return respostaNova;
-  
-  const respostasIA = historico
-    .filter(m => m.autor === 'ia')
-    .slice(-3) // Últimas 3 respostas IA
-    .map(m => (m.texto || '').trim().toLowerCase());
-  
-  if (respostasIA.length === 0) return respostaNova;
-  
-  const respostaNorm = respostaNova.trim().toLowerCase();
-  
-  for (const respAntiga of respostasIA) {
-    const similaridade = calcularSimilaridade(respostaNorm, respAntiga);
-    if (similaridade > 0.9) {
-      logger.warn('[DEDUP] Resposta muito similar detectada - IA deve criar resposta mais única', { 
-        similaridade: Math.round(similaridade * 100) + '%',
-        respostaAntiga: respAntiga.substring(0, 50),
-        respostaNova: respostaNorm.substring(0, 50)
-      });
-      return respostaNova;
-    }
-  }
-  
-  return respostaNova;
-}
-
-function calcularSimilaridade(str1, str2) {
-  if (!str1 || !str2) return 0;
-  const longer = str1.length > str2.length ? str1 : str2;
-  const shorter = str1.length > str2.length ? str2 : str1;
-  if (longer.length === 0) return 1.0;
-  
-  const distancia = levenshteinDistance(str1, str2);
-  return 1 - (distancia / longer.length);
-}
-
-function levenshteinDistance(str1, str2) {
-  const matrix = [];
-  for (let i = 0; i <= str2.length; i++) {
-    matrix[i] = [i];
-  }
-  for (let j = 0; j <= str1.length; j++) {
-    matrix[0][j] = j;
-  }
-  for (let i = 1; i <= str2.length; i++) {
-    for (let j = 1; j <= str1.length; j++) {
-      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1,
-          matrix[i][j - 1] + 1,
-          matrix[i - 1][j] + 1
-        );
-      }
-    }
-  }
-  return matrix[str2.length][str1.length];
-}
 
 function formatarLocalizacaoParaPlanilha(localizacao) {
   if (!localizacao) return null;
@@ -1799,8 +774,6 @@ const SENT_COOLDOWN_MS = 60 * 1000; // mínimo de 60s
 const PROBE_RECHECK_MIN_MS = parseInt(process.env.VIRTUS_PROBE_RECHECK_MIN_MS || '60000', 10);  // mínimo entre enfileiramentos (anti-flood), default 60s
 const PROBE_FORCE_OPEN_MS  = parseInt(process.env.VIRTUS_PROBE_FORCE_OPEN_MS  || '300000', 10); // forçar abertura do chat após X ms, default 5min
 
-const VIRTUS_FIRST_REPLY_QUIET_MS = parseInt(process.env.VIRTUS_FIRST_REPLY_QUIET_MS || '0', 10);    // default 0ms (primeira resposta instantânea)
-const VIRTUS_NEXT_REPLY_QUIET_MS  = parseInt(process.env.VIRTUS_NEXT_REPLY_QUIET_MS  || '5000', 10); // default 5s (respostas subsequentes)
 
 const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io';
 const NOTIFICADOR_SERVIDOR = process.env.SERVIDOR_NOME || 'servidor1';
@@ -1826,32 +799,7 @@ function getPendingSet(perfil) {
   return pendingKeysPorPerfil.get(perfil);
 }
 
-function hashResposta(s) {
-  try { 
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(String(s || '')).digest('hex');
-  } catch { 
-    return String(s || ''); 
-  }
-}
 
-function sanitizarResposta(texto) {
-  if (!texto || typeof texto !== 'string') return '';
-  let t = texto;
-  
-  if (/[ÃÂ]/.test(t)) {
-    try {
-      const fixed = Buffer.from(t, 'latin1').toString('utf8');
-      if (/[áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇ]/.test(fixed)) t = fixed;
-    } catch {}
-  }
-  
-  t = t.replace(/(.)\1{2,}/g, '$1$1');
-  
-  t = t.replace(/\s{2,}/g, ' ');
-  
-  return t.trim();
-}
 
 const PENDING_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_pending.json');
 
@@ -1925,82 +873,6 @@ async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
   } catch { return false; }
 }
 
-function isVelho8h(tempoLabel) {
-  if (!tempoLabel) return false;
-  const t = String(tempoLabel)
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .toLowerCase().trim();
-
-  if (/\b(seman|sem|weeks?|w)\b/.test(t)) return true;
-
-  const mDias = t.match(/\b(\d+)\s*(d|dia|dias)\b/);
-  if (mDias) {
-    const n = parseInt(mDias[1], 10);
-    if (Number.isFinite(n) && n >= 1) return true;
-  }
-
-  const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) {
-    const n = parseInt(mH[1], 10);
-    if (Number.isFinite(n) && n >= 8) return true;
-    return false;
-  }
-
-  if (/\b(agora|now|just\snow)\b/.test(t)) return false;
-  if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return false;
-  if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return false;
-
-  return false;
-}
-function isVelho24h(tempoLabel) {
-  if (!tempoLabel) return false;
-  const t = String(tempoLabel)
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .toLowerCase().trim();
-
-  if (/\b(seman|sem|weeks?|w)\b/.test(t)) return true;
-
-  const mDias = t.match(/\b(\d+)\s*(d|dia|dias)\b/);
-  if (mDias) {
-    const n = parseInt(mDias[1], 10);
-    if (Number.isFinite(n) && n >= 1) return true;
-  }
-
-  const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) {
-    const n = parseInt(mH[1], 10);
-    if (Number.isFinite(n) && n >= 24) return true;
-    return false;
-  }
-
-  if (/\b(agora|now|just\snow)\b/.test(t)) return false;
-  if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return false;
-  if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return false;
-
-  return false;
-}
-function isChatRecente(tempoLabel) {
-  if (!tempoLabel) return false;
-  const t = String(tempoLabel)
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .toLowerCase().trim();
-
-  if (isVelho8h(t)) return false;
-
-  if (/\b(agora|now|just\snow)\b/.test(t)) return true;
-  if (/\b(\d+)\s(s|seg|sec|secs?|seconds?)\b/.test(t)) return true;
-  if (/\b(\d+)\s*(min|mins?|m|minuto|minutos|minutes?)\b/.test(t)) return true;
-
-  const mH = t.match(/\b(\d+)\s*(h|hora|horas|hours?)\b/);
-  if (mH) {
-    const n = parseInt(mH[1], 10);
-    if (Number.isFinite(n)) {
-      return n < 8;
-    }
-  }
-
-  return true;
-}
 
 function extraiIdDoHref(href) {
   try {
@@ -2380,12 +1252,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     const expected = String(msg || '').trim();
     const before = await getMySentSnapshot(p);
     logger.debug('[MESSENGER] Snapshot antes do envio', { nome, chatId, beforeTotal: before.total });
-
-    const minD = parseInt(process.env.VIRTUS_REPLY_MIN_MS || '5000', 10); // 5s
-    const maxD = parseInt(process.env.VIRTUS_REPLY_MAX_MS || '15000', 10); // 15s
-    const delay = Math.max(0, Math.min(maxD, Math.floor(Math.random()*(maxD-minD+1))+minD));
-    logger.debug('[MESSENGER] Delay humano antes de enviar', { nome, chatId, delayMs: delay });
-    await new Promise(r=>setTimeout(r, delay));
 
     await p.keyboard.press('Enter');
     logger.debug('[MESSENGER] Enter pressionado, aguardando confirmação robusta', { nome, chatId });
@@ -2874,37 +1740,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info(`[VIRTUS][${nome}] timeout curto aguardando anchors/rows`);
       }
 
-      let todos = await coletaChatsMarketplaceTodos(p);
-      logger.info(`[VIRTUS][${nome}] coletaTodos inicial: ${todos.length} itens`);
+      const todos = await coletaChatsMarketplaceTodos(p);
+      logger.info(`[VIRTUS][${nome}] coletaTodos: ${todos.length} itens`);
 
-      if (!todos || todos.length === 0) {
-        logger.info(`[VIRTUS][${nome}] coleta vazia — ativando scrollListaAte8h()`);
-        try {
-          await scrollListaAte8h(p, { maxMs: 60000, quietLoops: 2 });
-        } catch (e) {
-          logger.warn(`[VIRTUS][${nome}] scrollListaAte8h falhou: ${(e && e.message) || e}`);
-        }
-        todos = await coletaChatsMarketplaceTodos(p);
-        logger.info(`[VIRTUS][${nome}] coletaTodos após scroll: ${todos.length} itens`);
-      }
-
-      const filtrados = (todos || []).filter(c => c.id && isChatRecente(c.tempo));
-      logger.info(`[VIRTUS][${nome}] filtrados recentes: ${filtrados.length} / ${todos.length}`);
-      if (process.env.VIRTUS_FEED_DEBUG === '1') {
-        for (const it of (todos || [])) {
-          logger.info(`[VIRTUS][${nome}] CHAT FEED: id=${it.id} tempo="${it.tempo}" recent=${isChatRecente(it.tempo)}`);
-        }
-      }
-
-      const idsFiltrados = new Set(filtrados.map(c => c.id));
+      const idsColetados = new Set(todos.map(c => c.id));
       for (const chatRespondido of chatsRespondidosParaVerificar) {
-        if (!idsFiltrados.has(chatRespondido.id)) {
-          filtrados.push(chatRespondido);
+        if (!idsColetados.has(chatRespondido.id)) {
+          todos.push(chatRespondido);
           logger.info(`[VIRTUS][${nome}] Chat já respondido adicionado para verificação: ${chatRespondido.id}`);
         }
       }
 
-      return filtrados;
+      return todos;
     } catch (err) {
       logger.error(`[VIRTUS][${nome}] Erro em coletaChatsMarketplaceRecentes(): ${(err && err.message) || err}`, {}, err);
       return [];
@@ -2977,57 +1824,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         p.waitForSelector('div[role="row"] span', { timeout: 8000 })
       ]);
     } catch {}
-    try { await scrollListaAte8h(p, { maxMs: 90000, quietLoops: 3 }); } catch {}
     const todos = await coletaChatsMarketplaceTodos(p);
-    const velhos = todos.filter(c => isVelho24h(c.tempo));
     const agora = agoraEpoch();
     historico = {};
-    for (const chat of velhos) historico[chat.id] = agora;
+    for (const chat of todos) historico[chat.id] = agora;
     await salvaHistorico();
     await carregaHistorico();
     await reconcilePendingsIfAny();
-    logger.info(`[SNAPSHOT] Concluído. ${velhos.length} chats >=24h marcados como respondidos no primeiro boot.`, { nome });
+    logger.info(`[SNAPSHOT] Concluído. ${todos.length} chats marcados como respondidos no primeiro boot.`, { nome });
   }
 
-  async function scrollListaAte8h(page, { maxMs = 90000, quietLoops = 3 } = {}) {
-    const t0 = Date.now();
-    let semNovos = 0;
-    let vistos = new Set();
-
-    while ((Date.now() - t0) < maxMs) {
-      const todos = await coletaChatsMarketplaceTodos(page);
-      let houveNovo = false, viuAntigo = false;
-      for (const c of todos) {
-        if (!vistos.has(c.id)) { vistos.add(c.id); houveNovo = true; }
-        if (isVelho8h(c.tempo)) viuAntigo = true; // NOVO: Usa isVelho8h
-      }
-      if (viuAntigo) break;
-      if (!houveNovo) {
-        semNovos += 1;
-        if (semNovos >= quietLoops) break;
-      } else {
-        semNovos = 0;
-      }
-      try {
-        const contSel = await page.evaluate(() => {
-          const cands = ['div[role="grid"]','div[role="rowgroup"]','div.x78zum5.xdt5ytf'];
-          for (const sel of cands) {
-            const el = document.querySelector(sel);
-            if (el && el.scrollHeight > el.clientHeight) return sel;
-          }
-          return 'body';
-        });
-        await page.evaluate((selector) => {
-          const el = document.querySelector(selector) || document.scrollingElement || document.body;
-          el.scrollTop = el.scrollHeight;
-        }, contSel);
-      } catch {
-        try { await page.evaluate(() => window.scrollBy(0, Math.max(400, window.innerHeight * 0.8))); } catch {}
-      }
-      await sleep(800 + Math.floor(Math.random() * 500));
-    }
-    return Array.from(vistos);
-  }
 
   async function atualizaFila() {
     let mudancaFila = false;
@@ -3421,7 +2227,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               state: CHAT_STATES.AGUARDANDO,
               sendAttempts: attempts,
               cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-              ultimoProbeCLIts: tsCLI || 0,
+              ultimoProbeCLIts: Date.now(),
               lastProbeAt: Date.now()
             });
             try { await pendingDel(nome, chatId); } catch {}
@@ -3500,22 +2306,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
         });
 
-        const ultimaMsg = Array.isArray(historicoConversa) && historicoConversa.length
-          ? historicoConversa[historicoConversa.length - 1]
-          : null;
-        if (!ultimaMsg || ultimaMsg.autor !== 'cliente') {
-          logger.info(`[SKIP] Chat ${chatId}: última mensagem não é do cliente.`, { nome, chatId });
-          try {
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              lastProbeAt: Date.now()
-            });
-          } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
 
         const stPrev = await getChatState(nome, chatId).catch(()=>null);
 
@@ -3529,298 +2319,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return cli.length ? cli[cli.length - 1] : null;
         })();
 
-        const ultimaMsgClienteTexto = (ultimaCliente && ultimaCliente.texto) ? String(ultimaCliente.texto) : '';
-        const lastClientHash = hashResposta(ultimaMsgClienteTexto);
-        const lastClientHashAnterior = (stPrev && stPrev.lastClientHash) || null;
-
-        const idxUltCliente = (() => {
-          let idx = -1;
-          for (let i = 0; i < historicoConversa.length; i++) {
-            if (historicoConversa[i] && historicoConversa[i].autor === 'cliente') idx = i;
-          }
-          return idx;
-        })();
-        const idxUltIA = (() => {
-          let idx = -1;
-          for (let i = 0; i < historicoConversa.length; i++) {
-            if (historicoConversa[i] && historicoConversa[i].autor === 'ia') idx = i;
-          }
-          return idx;
-        })();
-
-        const tsCLI = tsNum(ultimaCliente && ultimaCliente.timestamp);
-        const prevIATs = Number((stPrev && stPrev.lastIATs) || 0);
-
-        const mudouConteudo = (lastClientHashAnterior !== lastClientHash);
-        const clienteVencePorOrdem = (idxUltCliente >= 0 && (idxUltIA < 0 || idxUltCliente > idxUltIA));
-        const clienteVencePorTempo = (tsCLI > prevIATs);
-        const clienteMaisRecenteQueIA = (clienteVencePorOrdem || clienteVencePorTempo);
-
-        logger.info('[GATE] Avaliação do chat', {
-          nome,
-          chatId,
-          mudouConteudo,
-          idxUltCliente,
-          idxUltIA,
-          tsCLI,
-          prevIATs,
-          clienteVencePorOrdem,
-          clienteVencePorTempo,
-          clienteMaisRecenteQueIA
-        });
-
-        if (!mudouConteudo || !clienteMaisRecenteQueIA) {
-          logger.info('[SKIP] Chat ' + chatId + ': gate não satisfeito', {
-            nome,
-            motivoMudouConteudo: mudouConteudo ? 'ok' : 'hash_cliente_igual',
-            motivoRecencia: clienteMaisRecenteQueIA ? 'ok' : 'cliente_nao_vence(tempo/ordem)'
-          });
-          try {
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              lastIATs: Number(stPrev && stPrev.lastIATs || 0),
-              ultimoProbeCLIts: tsCLI || 0,
-              lastProbeAt: Date.now()
-            });
-          } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-
         const pAtual = await ensurePage().catch(()=>null);
-        const isFirstReply = (idxUltIA < 0); // idxUltIA já calculado acima
-        const quietMs = isFirstReply ? VIRTUS_FIRST_REPLY_QUIET_MS : VIRTUS_NEXT_REPLY_QUIET_MS;
-        
-        if (quietMs > 0) {
-          let okQuiet = await waitQuietWindow(nome, chatId, quietMs, {
-            page: pAtual,
-            getHistoricoFn: async () => await extrairHistoricoConversa(pAtual)
-          });
-          if (!okQuiet) {
-            logger.info('[BURST] Mensagem durante quiet window curta — reavaliando e seguindo', { nome, chatId, quietMs, isFirstReply });
-            try {
-              historicoConversa = await extrairHistoricoConversa(pAtual);
-            } catch {}
-          }
-        } else {
-          logger.debug('[QUIET] Primeira resposta: quiet window desativada', { nome, chatId });
-        }
 
-        const tsIA = tsNum(ultimaIA && ultimaIA.timestamp);
-        logger.info(`[NOVO] Chat ${chatId}: há novidade do cliente (última cliente: ${new Date(tsCLI).toLocaleString()}, última IA: ${tsIA ? new Date(tsIA).toLocaleString() : 'nenhuma'})`, { nome, chatId });
-
-        const WAIT_BEFORE_GENERATE_MS = parseInt(process.env.VIRTUS_WAIT_BEFORE_GENERATE_MS || '0', 10);
-        const isFirstReplyTiming = (idxUltIA < 0);
-        
-        if (!isFirstReplyTiming && WAIT_BEFORE_GENERATE_MS > 0) {
-          logger.info(`[TIMING] Aguardando ${WAIT_BEFORE_GENERATE_MS}ms antes de gerar resposta (subsequente)...`, { nome, chatId });
-          await sleep(WAIT_BEFORE_GENERATE_MS);
-          try {
-            historicoConversa = await extrairHistoricoConversa(pAtual);
-            logger.info(`[TIMING] Histórico re-extraído após espera: ${historicoConversa.length} mensagens`, { nome, chatId });
-          } catch {}
-        } else {
-          logger.debug(`[TIMING] Primeira resposta: sem espera (WAIT_BEFORE_GENERATE_MS=${WAIT_BEFORE_GENERATE_MS}ms)`, { nome, chatId });
-        }
-
-        if (VIRTUS_USE_PIPELINE) {
-          try {
-            // pipeline desativado por configuração
-            await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }).catch(()=>{});
-            await pendingDel(nome, chatId).catch(()=>{});
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-            
-            if (!pipelineResult || !pipelineResult.resposta) {
-              const telefoneFinal = pipelineResult?.telefone_extraido || null;
-              if (telefoneFinal && pipelineResult?.finalizado) {
-                logger.info('[PIPELINE] Todas informações coletadas COM WhatsApp, finalizando', { nome, chatId });
-                const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
-                if (!jaTinhaTimer) {
-                  iniciarTimerFechamento(chatId, telefoneFinal);
-                }
-                try {
-                  await setChatState(nome, chatId, {
-                    qaAsked: pipelineResult?.qaAsked || [],
-                    qaAnswered: pipelineResult?.qaAnswered || {},
-                    state: CHAT_STATES.FINALIZADO
-                  });
-                } catch {}
-                try { await pendingDel(nome, chatId); } catch {}
-                fila = fila.filter(id => id !== chatId);
-                chatAtivo = null;
-                return;
-              } else {
-                logger.info('[PIPELINE] Pipeline sem resposta e sem WhatsApp - usando Groq como fallback', { nome, chatId });
-              }
-            }
-            
-            try {
-              await setChatState(nome, chatId, {
-                qaAsked: pipelineResult.qaAsked || [],
-                qaAnswered: pipelineResult.qaAnswered || {}
-              });
-            } catch {}
-            
-            let cidadePreferida = null;
-            try {
-              const man = await manifestStore.read(nome).catch(()=>null);
-              cidadePreferida = (man && man.cidade) ? man.cidade : null;
-            } catch {}
-            if (!cidadePreferida && localizacao && localizacao.cidade) {
-              cidadePreferida = localizacao.cidade;
-            }
-            atualizarDadosColetados(chatId, {
-              cidade: cidadePreferida || null,
-              telefone: pipelineResult.telefone_extraido || null,
-              dados: pipelineResult.dados || {}
-            });
-            
-            const jaTinhaTimer = timersFechamento && timersFechamento.has(chatId);
-            if (!jaTinhaTimer && pipelineResult.telefone_extraido) {
-              iniciarTimerFechamento(chatId, pipelineResult.telefone_extraido);
-            }
-            
-            const pAtual = await ensurePage().catch(() => null);
-            if (!pAtual) {
-              logger.warn('[PIPELINE] Page indisponível', { nome, chatId });
-              await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
-            
-            let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
-            if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(pAtual, chatId, { timeoutMs: 0 }))) {
-              logger.warn('[PIPELINE] URL/contexto não corresponde (sem navegação). Cooldown.', { nome, chatId, urlNow });
-              const prev = await getChatState(nome, chatId).catch(()=>null);
-              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-              await setChatState(nome, chatId, {
-                state: CHAT_STATES.AGUARDANDO,
-                sendAttempts: attempts,
-                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                lastProbeAt: Date.now()
-              });
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
-            
-            let campoEnvio = await waitForComposer(pAtual, 10000);
-            if (!campoEnvio) {
-              logger.info('[PIPELINE] Composer não encontrado, tentando refocus', { nome, chatId });
-              campoEnvio = await refocusComposerNoReload(pAtual, chatId, anchorSel);
-            }
-            
-            if (!campoEnvio) {
-              logger.warn('[PIPELINE] Composer indisponível após refocus - marcando cooldown', { nome, chatId });
-              const prev = await getChatState(nome, chatId).catch(()=>null);
-              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-              await setChatState(nome, chatId, {
-                state: 'erro_envio',
-                erroTimestamp: Date.now(),
-                sendAttempts: attempts,
-                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                ultimoProbeCLIts: tsCLI || 0,
-                lastProbeAt: Date.now()
-              });
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
-            
-            try {
-              await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
-            } catch {}
-            
-            await acquireSendGuard(pAtual, chatId);
-            try {
-              const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
-              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : (pipelineResult.flow || { greeted: false, asked: {}, answered: {} });
-              let respostaGov = enforceGovRulesOnText(pipelineResult.resposta, { alreadyGreeted: !!flowPrev.greeted });
-              
-              await setChatState(nome, chatId, {
-                flow: flowPrev,
-                ultimaRespostaEnviada: respostaGov,
-                lastProbeAt: Date.now()
-              });
-              
-              await sendMessageSafe(pAtual, campoEnvio, respostaGov, nome, chatId);
-              await appendIaLine(nome, chatId, respostaGov);
-              
-              try {
-                const st = await getChatState(nome, chatId).catch(()=>null);
-                const flowSt = (st && st.flow) ? st.flow : { greeted: false, asked: {}, answered: {} };
-                if (!flowSt.greeted) {
-                  flowSt.greeted = true;
-                  await setChatState(nome, chatId, { flow: flowSt, lastProbeAt: Date.now() });
-                }
-              } catch {}
-              
-              await marcarRespondido(nome, chatId);
-            } finally {
-              releaseSendGuard(pAtual);
-            }
-            
-            try {
-              let tsCLIAtualizado = tsCLI || 0;
-              try {
-                const historicoAtualizado = await extrairHistoricoConversa(pAtual);
-                const ultimaClienteAtualizada = historicoAtualizado && historicoAtualizado.filter(m => m.autor === 'cliente').pop();
-                if (ultimaClienteAtualizada && ultimaClienteAtualizada.timestamp) {
-                  tsCLIAtualizado = tsNum(ultimaClienteAtualizada.timestamp);
-                }
-              } catch {}
-              
-              await setChatState(nome, chatId, {
-                ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
-                ultimoProbeCLIts: tsCLIAtualizado, // Atualiza para permitir detecção de novas mensagens
-                lastIATs: Date.now(),
-                lastProbeAt: Date.now(),
-                lastClientHash,
-                state: CHAT_STATES.AGUARDANDO // Garante que está aguardando resposta do cliente
-              });
-            } catch {}
-            
-            logger.info('[PIPELINE] Resposta enviada com sucesso', { chatId, telefone: pipelineResult.telefone_extraido, perguntas: pipelineResult.qaAsked });
-          } catch (e) {
-            logger.error('[PIPELINE] Falha no pipeline', { chatId, error: e && e.message || e });
-            try {
-              const prev = await getChatState(nome, chatId);
-              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-              const baseMin = 2;
-              const nextMs = Math.min(5 * 60 * 1000, Math.pow(2, attempts - 1) * baseMin * 60 * 1000);
-              
-              if (attempts >= 3) {
-                await setChatState(nome, chatId, {
-                  state: 'erro_envio',
-                  sendAttempts: attempts,
-                  erroTimestamp: Date.now(),
-                  ultimoProbeCLIts: tsCLI || 0
-                });
-                await logIssue(nome, 'virtus_send_failed', `erro_envio após ${attempts} tentativas (chat ${chatId})`);
-              } else {
-                await setChatState(nome, chatId, {
-                  state: CHAT_STATES.AGUARDANDO,
-                  sendAttempts: attempts,
-                  cooldownUntil: Date.now() + nextMs,
-                  ultimoProbeCLIts: tsCLI || 0
-                });
-                await logIssue(nome, 'virtus_send_failed', `retry_schedule attempt=${attempts} in=${Math.round(nextMs/1000)}s chat=${chatId}`);
-              }
-            } catch {}
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-        } else if (DIRECT_GROQ) {
+        {
           try {
             logger.info('[CONTEXTO] Chamando Groq API', {
               nome,
@@ -3843,20 +2344,21 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
             
-            const secondaryAlreadyAsked = !!(stPrev && stPrev.secondaryPrompted === true);
-            const promptUser = montarPromptUser(cidadePreferida, historicoConversa, { secondaryAlreadyAsked });
-            const txt = await chamarGroqAPI(PROMPT_SYSTEM, promptUser);
-            const parsed = parsearRespostaGroq(txt);
+            const domain = promptFretes;
             
-
-            if (!parsed.telefone_extraido) {
-              const textoHistorico = (historicoConversa || []).map(m => m && m.texto || '').join(' ');
-              const utils = require('./utils.js');
-              const phones = utils.extractPhonesBRStrict(textoHistorico);
-              const telefone = (phones && phones.length) ? phones[0] : null;
-              if (telefone) {
-                parsed.telefone_extraido = telefone;
-              }
+            const systemPrompt = domain.buildSystemPrompt();
+            const userPrompt = domain.buildUserPrompt({ cidade: cidadePreferida, historico: historicoConversa });
+            
+            let parsed;
+            try {
+              const modelRawResp = await chatCompletion({ system: systemPrompt, user: userPrompt, provider: 'groq' });
+              parsed = domain.parseModelAnswerToDomain(modelRawResp);
+            } catch (e) {
+              logger.error('[GROQ] Erro ao chamar IA ou parsear resposta', { nome, chatId, error: e && e.message || e });
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
             }
 
             atualizarDadosColetados(chatId, {
@@ -3908,7 +2410,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 erroTimestamp: Date.now(),
                 sendAttempts: attempts,
                 cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                ultimoProbeCLIts: tsCLI || 0,
+                ultimoProbeCLIts: Date.now(),
                 lastProbeAt: Date.now()
               });
               try { await pendingDel(nome, chatId); } catch {}
@@ -3917,16 +2419,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
 
-            const paceDelay = calcularPaceCliente(historicoConversa);
-            logger.info('[PACE] Delay calculado: ' + paceDelay + 'ms', { nome, chatId });
-            
-            let respostaFinal = parsed.resposta;
-            respostaFinal = aplicarDedupResposta(respostaFinal, historicoConversa);
-            if (respostaFinal !== parsed.resposta) {
-              logger.info('[DEDUP] Resposta ajustada para evitar repetição', { nome, chatId });
-            }
-            
-            await sleep(paceDelay);
+            const respostaFinal = String(parsed.resposta || '').trim();
             
             try {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
@@ -3934,21 +2427,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
             await acquireSendGuard(pAtual, chatId);
             try {
-              const ultimaIATexto = ultimaIA && ultimaIA.texto ? String(ultimaIA.texto).trim() : '';
-              const respostaAtual = String(respostaFinal || '').trim();
-              if (ultimaIATexto && respostaAtual && ultimaIATexto === respostaAtual) {
-                logger.warn('[GROQ] Mensagem duplicada detectada - pulando envio', { nome, chatId, resposta: respostaAtual.substring(0, 50) });
-                await setChatState(nome, chatId, {
-                  state: CHAT_STATES.AGUARDANDO,
-                  lastProbeAt: Date.now(),
-                  ultimoProbeCLIts: tsCLI || 0
-                });
-                try { await pendingDel(nome, chatId); } catch {}
-                fila = fila.filter(id => id !== chatId);
-                chatAtivo = null;
-                return;
-              }
-
               await setChatState(nome, chatId, {
                 ultimaRespostaEnviada: respostaFinal,
                 lastProbeAt: Date.now()
@@ -3957,40 +2435,32 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               await sendMessageSafe(pAtual, campoEnvio, respostaFinal, nome, chatId);
               await appendIaLine(nome, chatId, respostaFinal);
               
-              try {
-                const st = await getChatState(nome, chatId).catch(()=>null);
-                const flowSt = (st && st.flow) ? st.flow : { greeted: false, asked: {}, answered: {} };
-                if (!flowSt.greeted) {
-                  flowSt.greeted = true;
-                  await setChatState(nome, chatId, { flow: flowSt, lastProbeAt: Date.now() });
-                }
-              } catch {}
-              
-              try { await setChatState(nome, chatId, { secondaryPrompted: true }); } catch {}
-
               await marcarRespondido(nome, chatId);
+              
+              // Se finalizado, processa finalização (IA já validou)
+              if (parsed.finalizado === true) {
+                try {
+                  await enviarPedidoParaNotificador(chatId, {
+                    cidade: cidadePreferida || null,
+                    telefone: parsed.telefone_extraido,
+                    ...parsed.dados
+                  });
+                  if (pedidosEnviados) pedidosEnviados.add(chatId);
+                  await enviarMensagemFinal(chatId);
+                  await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
+                } catch (e) {
+                  logger.error('[FINALIZACAO] Erro ao finalizar chat', { nome, chatId, error: e && e.message || e });
+                }
+              }
             } finally {
               releaseSendGuard(pAtual);
             }
 
             try {
-              let tsCLIAtualizado = tsCLI || 0;
-              try {
-                const historicoAtualizado = await extrairHistoricoConversa(pAtual);
-                const ultimaClienteAtualizada = historicoAtualizado && historicoAtualizado.filter(m => m.autor === 'cliente').pop();
-                if (ultimaClienteAtualizada && ultimaClienteAtualizada.timestamp) {
-                  tsCLIAtualizado = tsNum(ultimaClienteAtualizada.timestamp);
-                }
-              } catch {}
-              
               await setChatState(nome, chatId, {
-                ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
-                ultimoProbeCLIts: tsCLIAtualizado, // Atualiza para permitir detecção de novas mensagens
                 lastIATs: Date.now(),
                 lastProbeAt: Date.now(),
-                lastClientHash,
-                ultimaRespostaEnviada: respostaAtual, // Guarda a última resposta para evitar duplicação
-                state: CHAT_STATES.AGUARDANDO // Garante que está aguardando resposta do cliente
+                state: CHAT_STATES.AGUARDANDO
               });
             } catch {}
 
@@ -4004,13 +2474,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const nextMs = Math.min(5 * 60 * 1000, Math.pow(2, attempts - 1) * baseMin * 60 * 1000); // max 5min
 
               if (attempts >= 3) {
-                const msgHash = hashResposta(ultimaMsgClienteTexto || '');
                 await setChatState(nome, chatId, {
                   state: 'erro_envio',
                   sendAttempts: attempts,
-                  ultimaMsgErroHash: msgHash,
-                  erroTimestamp: Date.now(), // NOVO: salva timestamp do erro para TTL
-                  ultimoProbeCLIts: tsCLI || 0
+                  erroTimestamp: Date.now(),
+                  ultimoProbeCLIts: Date.now()
                 });
                 await logIssue(nome, 'virtus_send_failed', `erro_envio após ${attempts} tentativas (chat ${chatId})`);
               } else {
@@ -4018,7 +2486,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   state: CHAT_STATES.AGUARDANDO,
                   sendAttempts: attempts,
                   cooldownUntil: Date.now() + nextMs,
-                  ultimoProbeCLIts: tsCLI || 0
+                  ultimoProbeCLIts: Date.now()
                 });
                 await logIssue(nome, 'virtus_send_failed', `retry_schedule attempt=${attempts} in=${Math.round(nextMs/1000)}s chat=${chatId}`);
               }
@@ -4028,7 +2496,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             chatAtivo = null;
             return;
           }
-        } else {
+        }
+        
+        {
           const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
 
           adicionarChatParaEnvio(nome, {
@@ -4039,12 +2509,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             urlClassificado
           });
 
-          try {
-            await setChatState(nome, chatId, {
-              ultimaMensagemClienteProcessada: ultimaMsgClienteTexto,
-              ultimoProbeCLIts: tsCLI || 0
-            });
-          } catch {}
         }
 
         try { await pendingDel(nome, chatId); } catch {}
@@ -4238,9 +2702,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  const timersFechamento = DIRECT_GROQ ? new Map() : null; // chatId -> { inicio, telefone, expirado }
-  const dadosColetados = DIRECT_GROQ ? new Map() : null;   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
-  const pedidosEnviados = DIRECT_GROQ ? new Set() : null;  // chatId já enviados
+  const timersFechamento = new Map(); // chatId -> { inicio, telefone, expirado }
+  const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
+  const pedidosEnviados = new Set();  // chatId já enviados
 
   async function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
     if (!dadosColetados) return;
@@ -4263,11 +2727,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function iniciarTimerFechamento(chatId, telefone) {
-    const utils = require('./utils.js');
-    if (!utils.isValidBRPhoneWithDDD(telefone || '')) {
-      logger.warn('[TIMER] Tentativa de iniciar timer sem WhatsApp válido — bloqueado', { chatId });
-      return;
-    }
+    // IA já validou telefone no JSON, não revalidamos aqui
     if (!timersFechamento) return;
     if (timersFechamento.has(chatId)) return; // não reinicia
     const inicio = Date.now();
@@ -4307,7 +2767,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function resumeTimers() {
-    if (!DIRECT_GROQ || !timersFechamento) return;
+    if (!timersFechamento) return;
     try {
       const allStates = await loadChatState(nome);
       const agora = Date.now();
@@ -4336,25 +2796,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  function estruturarPedidoCompleto(nomePerfil, chatId, dados = {}) {
-    const cidade = (dados && dados.cidade) || null;
-    return {
-      servidor: NOTIFICADOR_SERVIDOR || 'servidor1',
-      perfil: nomePerfil,
-      chat_id: chatId,
-      cidade: cidade,
-      telefone: dados && dados.telefone || null,
-      itens: dados && dados.itens || null,
-      bairro_saida: dados && dados.bairro_saida || null,
-      bairro_destino: dados && dados.bairro_destino || null,
-      saida_tipo: dados && dados.saida_tipo || null,
-      saida_elevador: dados && dados.saida_elevador || null,
-      destino_tipo: dados && dados.destino_tipo || null,
-      destino_elevador: dados && dados.destino_elevador || null,
-      ajudante: dados && dados.ajudante || null,
-      timestamp: Date.now()
-    };
-  }
 
   const _parcialCooldown = new Map(); // chatId -> lastSent
   async function enviarPedidoParcialSeHabilitado(chatId) {
@@ -4364,7 +2805,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const last = _parcialCooldown.get(chatId) || 0;
       if ((now - last) < 5000) return; // 5s de cooldown
       const dados = dadosColetados && dadosColetados.get(chatId) || {};
-      const payload = estruturarPedidoCompleto(nome, chatId, dados);
+      const payload = promptFretes.buildFinalOrderPayload(nome, chatId, dados, NOTIFICADOR_SERVIDOR);
       payload.parcial = true;
       const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
       await fetch(urlFinal, {
@@ -4379,7 +2820,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function enviarPedidoParaNotificador(chatId, dados) {
     if (!pedidosEnviados || pedidosEnviados.has(chatId)) return; // evita duplicar
-    const payload = estruturarPedidoCompleto(nome, chatId, dados);
+    const payload = promptFretes.buildFinalOrderPayload(nome, chatId, dados, NOTIFICADOR_SERVIDOR);
     const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
     const resp = await fetch(urlFinal, {
       method: 'POST',
@@ -4394,7 +2835,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function enviarMensagemFinal(chatId) {
-    const mensagem = 'Perfeito! Recebi todas as informações. Já vou processar seu pedido e te chamar no WhatsApp. Obrigado pela confiança! 🙌\n\nSiga nosso Instagram: @seu_instagram';
+    const dados = dadosColetados && dadosColetados.get(chatId) || {};
+    const mensagem = promptFretes.buildFinalMessage({}, dados);
+    
     let p = await ensurePage().catch(() => null);
     if (!p) {
       logger.warn('[MENSAGEM_FINAL] Page indisponível', { nome, chatId });
@@ -4483,7 +2926,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         ready = true;
         logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
         
-        let NEWCHAT_DEDUP = new Set();
         function onNewChatDetected({ id, tempo }) {
           const chatId = id;
           const now = Date.now();
@@ -4506,125 +2948,121 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!running || !epochOk()) return;
     await initHistoricoSePreciso();
     
-    if (!DIRECT_GROQ) {
-      try {
-        await fazerHandshakeNotificador(nome);
-        iniciarPollingRespostas(nome);
+    try {
+      await fazerHandshakeNotificador(nome);
+      iniciarPollingRespostas(nome);
+      
+      async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
+      const MAX_TRIES = 2;
+      let lastErr = null;
+      
+      for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+        let p = await ensurePage().catch(() => null);
+        if (!p) {
+          lastErr = new Error('page_unavailable');
+          if (attempt === MAX_TRIES) break;
+          await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
+          continue;
+        }
         
-        async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
-        const MAX_TRIES = 2;
-        let lastErr = null;
-        
-        for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
-          let p = await ensurePage().catch(() => null);
-          if (!p) {
-            lastErr = new Error('page_unavailable');
-            if (attempt === MAX_TRIES) break;
-            await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
-            continue;
+        try {
+          try {
+            const urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
+            const okChat = chatUrlMatches(urlNow, chatId);
+            let campo = null;
+            let hasComposer = false;
+            if (okChat) {
+              campo = await waitForComposer(p, 1500).catch(()=>null);
+              hasComposer = !!campo;
+            }
+            if (okChat && hasComposer) {
+              await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+              return true;
+            }
+          } catch {}
+          
+          logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
+          
+          let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+          if (!chatUrlMatches(urlNow, chatId)) {
+            logger.warn('[MESSENGER] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
+            throw new Error('chat_not_on_correct_url');
           }
           
-          try {
-            try {
-              const urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
-              const okChat = chatUrlMatches(urlNow, chatId);
-              let campo = null;
-              let hasComposer = false;
-              if (okChat) {
-                campo = await waitForComposer(p, 1500).catch(()=>null);
-                hasComposer = !!campo;
-              }
-              if (okChat && hasComposer) {
-                await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
-                return true;
-              }
-            } catch {}
-            
-            logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
-            
-            let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-            if (!chatUrlMatches(urlNow, chatId)) {
-              logger.warn('[MESSENGER] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
-              throw new Error('chat_not_on_correct_url');
-            }
-            
-            const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
-            if (!okOn) {
-              throw new Error('chat_not_opened');
-            }
-            
-            let campo = await waitForComposer(p, 10000);
-            if (!campo) {
-              logger.info('[MESSENGER] Composer não encontrado, tentando refocus', { nome, chatId });
-              const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-              campo = await refocusComposerNoReload(p, chatId, anchorSel);
-            }
-            
-            if (!campo) {
-              throw new Error('composer_not_available');
-            }
-            
-            await campo.focus();
-            await new Promise(r => setTimeout(r, 120));
-            
-            if (!(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
-              throw new Error('context_lost');
-            }
-            
-            await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
-            
-            logger.info('[MESSENGER] ✅✅✅ Enviada (robusta)', { nome, chatId, attempt });
-            return true;
-          } catch (err) {
-            lastErr = err;
-            const msgErr = (err && err.message) ? err.message : String(err);
-            logger.warn('[MESSENGER] Tentativa falhou', { 
-              nome, 
-              chatId, 
-              attempt, 
-              maxTries: MAX_TRIES,
-              error: msgErr 
-            });
-            
-            if (attempt < MAX_TRIES) {
-              await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
-            }
+          const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
+          if (!okOn) {
+            throw new Error('chat_not_opened');
           }
-        }
-        
-        if (lastErr) {
-          const msgErr = (lastErr && lastErr.message) ? lastErr.message : String(lastErr);
-          logger.error('[MESSENGER] ❌ Erro ao enviar mensagem após todas as tentativas', { 
+          
+          let campo = await waitForComposer(p, 10000);
+          if (!campo) {
+            logger.info('[MESSENGER] Composer não encontrado, tentando refocus', { nome, chatId });
+            const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+            campo = await refocusComposerNoReload(p, chatId, anchorSel);
+          }
+          
+          if (!campo) {
+            throw new Error('composer_not_available');
+          }
+          
+          await campo.focus();
+          await new Promise(r => setTimeout(r, 120));
+          
+          if (!(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
+            throw new Error('context_lost');
+          }
+          
+          await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+          
+          logger.info('[MESSENGER] ✅✅✅ Enviada (robusta)', { nome, chatId, attempt });
+          return true;
+        } catch (err) {
+          lastErr = err;
+          const msgErr = (err && err.message) ? err.message : String(err);
+          logger.warn('[MESSENGER] Tentativa falhou', { 
             nome, 
             chatId, 
+            attempt, 
+            maxTries: MAX_TRIES,
             error: msgErr 
-          }, lastErr);
-          throw lastErr;
-        }
-        
-        return false;
-      }
-      
-      async function marcarRespondidoLocal(chatId) {
-        try {
-          const agoraTs = agoraEpoch();
-          let historicoLocal = {};
-          try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
-          historicoLocal[chatId] = agoraTs;
-          await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
-          setResponded(chatId, agoraTs);
-          await salvaHistorico();
-        } catch (e) {
-          logger.error('[VIRTUS] marcarRespondido error', { nome, chatId, error: e && e.message || e });
+          });
+          
+          if (attempt < MAX_TRIES) {
+            await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
+          }
         }
       }
       
-        iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      if (lastErr) {
+        const msgErr = (lastErr && lastErr.message) ? lastErr.message : String(lastErr);
+        logger.error('[MESSENGER] ❌ Erro ao enviar mensagem após todas as tentativas', { 
+          nome, 
+          chatId, 
+          error: msgErr 
+        }, lastErr);
+        throw lastErr;
+      }
+      
+      return false;
+    }
+    
+    async function marcarRespondidoLocal(chatId) {
+      try {
+        const agoraTs = agoraEpoch();
+        let historicoLocal = {};
+        try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
+        historicoLocal[chatId] = agoraTs;
+        await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
+        setResponded(chatId, agoraTs);
+        await salvaHistorico();
       } catch (e) {
-        logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
+        logger.error('[VIRTUS] marcarRespondido error', { nome, chatId, error: e && e.message || e });
       }
-    } else {
-      logger.info('[GROQ] Modo DIRECT_GROQ ativo', { nome });
+    }
+    
+      iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+    } catch (e) {
+      logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
     }
     
     filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
