@@ -259,7 +259,7 @@ ORDEM DE COLETA:
 
     Destino: casa ou apartamento
 
-    WhatsApp (com DDD) — ver gatilhos abaixo
+    WhatsApp — ver gatilhos abaixo
 
 GATILHOS DE WHATSAPP (obrigatório):
 
@@ -378,7 +378,7 @@ function montarPromptUser(cidade, historico, opts = {}) {
   
   let proximaPergunta = '';
   if (!temWhatsappComDDD) {
-    proximaPergunta = 'WhatsApp com DDD (PRIORIDADE ABSOLUTA)';
+    proximaPergunta = 'WhatsApp (PRIORIDADE ABSOLUTA)';
   } else if (!jaMencionouItens) {
     proximaPergunta = 'O que precisa transportar?';
   } else if (!jaMencionouAjudante) {
@@ -402,7 +402,7 @@ function montarPromptUser(cidade, historico, opts = {}) {
     `- Cliente perguntou sobre disponibilidade? ${perguntouDisponibilidade ? 'SIM (é pergunta sobre disponibilidade, NÃO sobre o que transportar)' : 'NÃO'}`,
     ``,
     `ORDEM FIXA DE COLETA (UMA PERGUNTA POR VEZ):`,
-    `1. WhatsApp com DDD: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (PRIORIDADE ABSOLUTA)'}`,
+    `1. WhatsApp: ${temWhatsappComDDD ? '✅ COLETADO' : '❌ FALTA (PRIORIDADE ABSOLUTA)'}`,
     `2. O que precisa transportar: ${jaMencionouItens ? '✅ COLETADO' : '❌ FALTA'}`,
     `3. Precisa de ajudante: ${jaMencionouAjudante ? '✅ COLETADO' : '❌ FALTA'}`,
     `4. Saída é casa ou apartamento: ${jaMencionouSaidaTipo ? '✅ COLETADO' : '❌ FALTA'}`,
@@ -441,7 +441,7 @@ function montarPromptUser(cidade, historico, opts = {}) {
     `3. SEMPRE RESPONDA PRIMEIRO ao que o cliente falou (seja amigável, respeitoso, educado, cordial, motivacional).`,
     `4. DEPOIS faça a pergunta necessária (uma por vez, seguindo a ordem fixa).`,
     `5. Se cliente já respondeu algo, NÃO repita a resposta dele. Apenas confirme e avance: "Ah, ótimo! 😊 [próxima pergunta]".`,
-    `6. Se ainda não tem WhatsApp com DDD, peça de forma variada, gentil e amigável (não confirme o número digitado).`,
+    `6. Se ainda não tem WhatsApp, peça de forma variada, gentil e amigável (não confirme o número digitado).`,
     `7. Se cliente enviou WhatsApp sem DDD, peça gentilmente: "Preciso do DDD também, pode me passar completo? 😊"`,
     `8. EMOJIS: Use com extrema moderação (máximo 1 a cada 3-4 mensagens, padrão sem emoji).`,
     `9. Seja natural, conversacional, inteligente, amigável, respeitoso, educado, cordial e motivacional.`,
@@ -679,7 +679,7 @@ const FLOW_ORDER = [
 ];
 
 const FIELD_PROMPTS = {
-  telefone:        'Pode me passar seu WhatsApp com DDD? O motorista chama por lá.',
+  telefone:        'Pode me passar seu WhatsApp? O motorista chama por lá.',
   itens:           'O que você precisa transportar?',
   bairro_saida:    'Qual bairro de saída?',
   bairro_destino:  'Qual bairro de destino?',
@@ -914,6 +914,23 @@ function extractDataHoraPTBR(texto) {
   }
 }
 
+function saudacaoSePrimeira(historicoConversa, flow) {
+  try {
+    const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+    if (!cliMsgs.length) return '';
+    const last = String(cliMsgs[cliMsgs.length - 1].texto || '').toLowerCase();
+    if (flow && flow.greeted) return '';
+    const agora = new Date();
+    const hhmm = agora.getHours() * 100 + agora.getMinutes();
+    let saud = '';
+    if (hhmm >= 501 && hhmm <= 1200) saud = 'Bom dia! ';
+    else if (hhmm >= 1201 && hhmm <= 1800) saud = 'Boa tarde! ';
+    else saud = 'Boa noite! ';
+    if (/\b(bom dia|boa tarde|boa noite|oi|ol[áa])\b/i.test(last)) return saud;
+    return '';
+  } catch { return ''; }
+}
+
 function buildNaturalPrefix(ultimaDoCliente) {
   if (!ultimaDoCliente) return '';
   const t = String(ultimaDoCliente || '').trim().toLowerCase();
@@ -945,11 +962,14 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
   if (!whatsappValido && flow.meta.needDDD) {
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const saud = saudacaoSePrimeira(historicoConversa, flow);
     flow.lastAsked = 'telefone';
     flow.lastAskedAt = Date.now();
     flow.phoneAskedOnce = true;
+    // Marca que já saudou se usou saudação
+    if (saud) flow.greeted = true;
     return {
-      resposta: `${prefixo}Preciso do DDD também, pode me passar o número completo?`,
+      resposta: `${saud}${prefixo}Preciso do DDD também, pode me passar o número completo?`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
@@ -979,6 +999,7 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
 
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const saud = saudacaoSePrimeira(historicoConversa, flow);
     flow.asked = flow.asked || {};
     flow.asked.telefone = true;
     flow.lastAsked = 'telefone';
@@ -1004,13 +1025,15 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     }
 
     // Monta a resposta
-    const baseWhats = 'Quem passa o orçamento é o motorista e ele chama no WhatsApp. Pode me passar seu número com DDD?';
-    let resposta = `${prefixo}${baseWhats}`;
+    const baseWhats = 'Quem passa o orçamento é o motorista e ele chama no WhatsApp. Pode me passar seu WhatsApp?';
+    let resposta = `${saud}${prefixo}${baseWhats}`;
     if (perguntaCombo) {
-      resposta = `${prefixo}${baseWhats} ${perguntaCombo}`;
+      resposta = `${saud}${prefixo}${baseWhats} ${perguntaCombo}`;
       // Marca flag de combo para a próxima sanitização não cortar a segunda pergunta
       flow.allowComboNext = true;
     }
+    // Marca que já saudou se usou saudação
+    if (saud) flow.greeted = true;
 
     return {
       resposta,
@@ -1033,10 +1056,14 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
     flow.lastAskedAt = Date.now();
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const saud = saudacaoSePrimeira(historicoConversa, flow);
     const pergunta = FIELD_PROMPTS[next] || 'Pode me detalhar, por favor?';
 
+    // Marca que já saudou se usou saudação
+    if (saud) flow.greeted = true;
+    
     return {
-      resposta: `${prefixo}${pergunta}`,
+      resposta: `${saud}${prefixo}${pergunta}`,
       telefone_extraido: whatsappValido ? flow.answered.telefone : null,
       finalizado: false,
       dados: flow.answered,
@@ -1062,14 +1089,18 @@ async function processarPipelinePerguntas(nome, chatId, historicoConversa, stPre
 
     const ultimaCliente = (historicoConversa || []).filter(m => m.autor === 'cliente').slice(-1)[0];
     const prefixo = buildNaturalPrefix(ultimaCliente && ultimaCliente.texto);
+    const saud = saudacaoSePrimeira(historicoConversa, flow);
     flow.asked = flow.asked || {};
     flow.asked.telefone = true;
     flow.lastAsked = 'telefone';
     flow.lastAskedAt = Date.now();
     flow.phoneAskedOnce = true;
 
+    // Marca que já saudou se usou saudação
+    if (saud) flow.greeted = true;
+    
     return {
-      resposta: `${prefixo}Perfeito! Agora só falta seu WhatsApp com DDD pro motorista te chamar e passar o orçamento. Pode me passar?`,
+      resposta: `${saud}${prefixo}Perfeito! Agora só falta seu WhatsApp pro motorista te chamar e passar o orçamento. Pode me passar?`,
       telefone_extraido: null,
       finalizado: false,
       dados: flow.answered,
@@ -3835,14 +3866,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : (pipelineResult.flow || { greeted: false, asked: {}, answered: {} });
               let respostaGov = enforceGovRulesOnText(pipelineResult.resposta, { alreadyGreeted: !!flowPrev.greeted });
               
-              const utils = require('./utils.js');
-              const telOk = utils.isValidBRPhoneWithDDD(pipelineResult.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
-              if (!telOk) {
-                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
-                  respostaGov = 'Me passa teu WhatsApp com DDD? O motorista chama por lá.';
-                }
-              }
-              
               await setChatState(nome, chatId, {
                 flow: flowPrev,
                 ultimaRespostaEnviada: respostaGov,
@@ -4052,19 +4075,52 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 return;
               }
 
-              const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
-              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {} };
-              let respostaGov = enforceGovRulesOnText(respostaFinal, { alreadyGreeted: !!flowPrev.greeted });
-              
               const utils = require('./utils.js');
+              
+              // GATING para fallback Groq (somente se necessário)
+              const stFlowPrev = await getChatState(nome, chatId).catch(()=>null);
+              const flowPrev = (stFlowPrev && stFlowPrev.flow) ? stFlowPrev.flow : { greeted: false, asked: {}, answered: {}, askedTimes: {} };
+              let respostaGov = enforceGovRulesOnText(respostaFinal, { alreadyGreeted: !!flowPrev.greeted });
               const telOk = utils.isValidBRPhoneWithDDD(parsed.telefone_extraido || (flowPrev.answered && flowPrev.answered.telefone) || '');
-              if (!telOk) {
-                if (!/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+              
+              try {
+                const askPhoneNow = devePedirWhatsApp(historicoConversa, { answered: flowPrev.answered, phoneAskedOnce: flowPrev.phoneAskedOnce, lastAsked: flowPrev.lastAsked });
+                if (!telOk && askPhoneNow && !/whats(app)?|telefone|n[uú]mero/i.test(respostaGov)) {
+                  // Verifica se "combo" pode ser aplicado (preço ou coreReady)
+                  const cliMsgs = (historicoConversa || []).filter(m => m && m.autor === 'cliente');
+                  const lastCliText = cliMsgs.length ? String(cliMsgs[cliMsgs.length - 1].texto || '') : '';
+                  const askedPrice = /\b(pre[cç]o|valor|or[cç]amento|custa|quanto)\b/i.test(lastCliText);
+                  const coreReady = !!(flowPrev.answered && flowPrev.answered.itens && flowPrev.answered.bairro_saida && flowPrev.answered.bairro_destino);
+                  
+                  let perguntaCombo = null;
+                  if (askedPrice) {
+                    if (!flowPrev.answered.bairro_saida) perguntaCombo = FIELD_PROMPTS.bairro_saida;
+                    else if (!flowPrev.answered.bairro_destino) perguntaCombo = FIELD_PROMPTS.bairro_destino;
+                    else if (!flowPrev.answered.itens) perguntaCombo = FIELD_PROMPTS.itens;
+                  } else if (coreReady && !flowPrev.answered.ajudante) {
+                    perguntaCombo = FIELD_PROMPTS.ajudante;
+                  }
+                  
+                  let inj = 'Quem passa o orçamento é o motorista e ele chama no WhatsApp. Pode me passar seu WhatsApp?';
+                  if (perguntaCombo) {
+                    inj = `${inj} ${perguntaCombo}`;
+                    flowPrev.allowComboNext = true;
+                  }
+                  
                   respostaGov = respostaGov.trim();
-                  if (!respostaGov.endsWith('.')) respostaGov += '.';
-                  respostaGov += ' Me passa teu WhatsApp com DDD? O motorista chama por lá.';
+                  if (respostaGov && !/[.!?]$/.test(respostaGov)) respostaGov += '.';
+                  respostaGov = `${respostaGov} ${inj}`;
+                  
+                  // Atualiza flags para não repetir WhatsApp
+                  flowPrev.asked = flowPrev.asked || {};
+                  flowPrev.asked.telefone = true;
+                  flowPrev.lastAsked = 'telefone';
+                  flowPrev.lastAskedAt = Date.now();
+                  flowPrev.phoneAskedOnce = true;
+                  
+                  await setChatState(nome, chatId, { flow: flowPrev });
                 }
-              }
+              } catch {}
               
               await setChatState(nome, chatId, {
                 flow: flowPrev,
