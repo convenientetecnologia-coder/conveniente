@@ -333,8 +333,7 @@ function adicionarChatParaEnvio(nomePerfil, dadosChat) {
   }
   filaEnviarNotificador.get(nomePerfil).push(dadosChat);
 
-  const aguard = getSetAguardando(nomePerfil);
-  try { aguard.add(dadosChat.chatId); } catch {}
+  try { markAguardando(nomePerfil, dadosChat.chatId); } catch {}
 
   setTimeout(() => enviarLoteNotificador(nomePerfil), NOTIFICADOR_ENVIO_LOTE_MS);
 }
@@ -385,7 +384,7 @@ async function enviarLoteNotificador(nomePerfil) {
       
       if (response.ok && responseData && responseData.ok === true) {
         logger.info('[NOTIFICADOR] Chat enviado com sucesso', { nomePerfil, chatId: dadosChat.chatId });
-    } else {
+      } else {
         logger.error('[NOTIFICADOR] Erro ao enviar chat', { 
           nomePerfil, 
           chatId: dadosChat.chatId, 
@@ -395,11 +394,33 @@ async function enviarLoteNotificador(nomePerfil) {
           response: responseData,
           responseText: responseText.substring(0, 500) // Primeiros 500 chars
         });
-        fila.push(dadosChat);
-    }
-  } catch (e) {
+        
+        // Sempre libera o aguardando em caso de erro
+        try {
+          const s = getSetAguardando(nomePerfil);
+          s.delete(dadosChat.chatId);
+          clearAguardTimer(nomePerfil, dadosChat.chatId);
+        } catch {}
+        
+        // Em caso de 404, NÃO reempilha
+        if (response && response.status === 404) {
+          logger.warn('[NOTIFICADOR] 404 - não reempilhando chat', { nomePerfil, chatId: dadosChat.chatId });
+        } else {
+          // Para erros 5xx/transitórios, reempilha mas SEM adicionar novamente ao aguardando
+          fila.push(dadosChat);
+        }
+      }
+    } catch (e) {
       logger.error('[NOTIFICADOR] Falha ao enviar chat', { nomePerfil, chatId: dadosChat.chatId, error: e && e.message || e });
-      fila.push(dadosChat);
+      
+      // Sempre libera o aguardando em caso de falha de rede
+      try {
+        const s = getSetAguardando(nomePerfil);
+        s.delete(dadosChat.chatId);
+        clearAguardTimer(nomePerfil, dadosChat.chatId);
+      } catch {}
+      
+      // Não reempilha em erros definitivos de rede
     }
   }));
 
@@ -497,6 +518,7 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       }
       
       try { const setA = getSetAguardando(nomePerfil); setA.delete(proximo.chatId); } catch {}
+      try { clearAguardTimer(nomePerfil, proximo.chatId); } catch {}
 
       try {
         if (proximo.key) {
@@ -836,6 +858,31 @@ const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta
 const filaEnvioMessenger = new Map();     // nomePerfil -> [ { chatId, resposta, key } ]
 const ultimaRespostaMessenger = new Map();// nomePerfil -> timestamp
 const aguardandoRespostaMap = new Map();  // nomePerfil -> Set(chatId)
+
+// TTL de aguardando notificador (Virtus)
+const aguardTimers = new Map(); // nomePerfil -> Map(chatId -> timeoutId)
+
+function markAguardando(nomePerfil, chatId) {
+  const set = getSetAguardando(nomePerfil);
+  set.add(chatId);
+  if (!aguardTimers.has(nomePerfil)) aguardTimers.set(nomePerfil, new Map());
+  const map = aguardTimers.get(nomePerfil);
+  if (map.has(chatId)) { try { clearTimeout(map.get(chatId)); } catch {} }
+  const ttlMs = parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10);
+  const tid = setTimeout(() => {
+    try { set.delete(chatId); } catch {}
+    try { map.delete(chatId); } catch {}
+    logger.warn('[NOTIFICADOR] TTL expirado; liberando aguardando', { nomePerfil, chatId });
+  }, ttlMs);
+  map.set(chatId, tid);
+}
+
+function clearAguardTimer(nomePerfil, chatId) {
+  try {
+    const map = aguardTimers.get(nomePerfil);
+    if (map && map.has(chatId)) { clearTimeout(map.get(chatId)); map.delete(chatId); }
+  } catch {}
+}
 const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
@@ -1910,8 +1957,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
       if (jaFoiRespondido) {
         if (aguard.has(id)) {
-          logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
-          return;
+          // Janela de tolerância: aceita reprocessar após 15s (TTL)
+          const st = await getChatState(nome, id).catch(()=>null);
+          const lastProbe = st && st.lastProbeAt ? st.lastProbeAt : 0;
+          if ((Date.now() - lastProbe) < parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10)) {
+            logger.info(`[FILA][${nome}] skip ${id} — aguardando notificador (janela ativa)`);
+            return;
+          }
+          const setA = getSetAguardando(nome);
+          try { setA.delete(id); clearAguardTimer(nome, id); } catch {}
         }
         if (fila.includes(id)) {
           logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
@@ -1951,8 +2005,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       if (aguard.has(id)) {
-        logger.info(`[FILA][${nome}] skip ${id} — aguardando resposta do notificador`);
-        return;
+        // Janela de tolerância: aceita reprocessar após 15s (TTL)
+        const st2 = await getChatState(nome, id).catch(()=>null);
+        const lastProbe2 = st2 && st2.lastProbeAt ? st2.lastProbeAt : 0;
+        if ((Date.now() - lastProbe2) < parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10)) {
+          logger.info(`[FILA][${nome}] skip ${id} — aguardando notificador (janela ativa)`);
+          return;
+        }
+        const setA2 = getSetAguardando(nome);
+        try { setA2.delete(id); clearAguardTimer(nome, id); } catch {}
       }
       if (fila.includes(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
