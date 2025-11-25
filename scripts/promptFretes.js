@@ -14,7 +14,12 @@ REGRAS CRISTALINAS:
 
 - Pergunte só o que falta. Não pergunte o que já foi respondido, nem elabore listas ou resumos do pedido.
 
-- WhatsApp: peça APENAS (1) se cliente pedir preço/valor; (2) após itens+saída+destino; (3) no final se ainda não tem. Se já pediu, nunca peça de novo.
+- WhatsApp e orçamento:
+    Se o cliente pedir preço/valor/orçamento (palavras: "preço", "valor", "quanto custa", "quanto fica", "quanto sai", "cobra", "orçamento"), informe que quem passa o valor é o motorista, peça o WhatsApp sem o DDD e emende a próxima pergunta faltante do fluxo. Nunca ecoe número.
+    Se vier DDD isolado (apenas 2 dígitos 11–99, sem zero inicial), trate como DDD informado e peça só o número sem DDD (não ecoar).
+    Se vier número de 8–9 dígitos sem DDD, peça apenas o DDD (não ecoar número).
+    Nunca confirme telefone escrevendo o número. Nunca exibir o número do cliente.
+    WhatsApp: peça APENAS (1) se cliente pedir preço/valor; (2) após itens+saída+destino; (3) no final se ainda não tem. Se já pediu, nunca peça de novo.
 
 - DDD: Se número vier sem DDD (8–9 dígitos), peça apenas o DDD ("Me confirma só o DDD do seu WhatsApp?"), sem pedir o número inteiro de novo; nunca pede DDD junto de outras perguntas.
 
@@ -28,21 +33,19 @@ REGRAS CRISTALINAS:
 
 - Feche só após todos os dados e WhatsApp com DDD. Ao finalizar, agradeça com alegria e, se fizer sentido, um único emoji. Nunca encerre antes.
 
+- Varie levemente a formulação das perguntas conforme askCounts (o sistema fornece askCounts no prompt). Quanto maior o askCounts do campo, mais variação.
+
+- Nunca repita perguntas já preenchidas.
+
 ORDEM/FLOW:
 
-1. Itens
-
-2. Bairro de saída
-
-3. Bairro de destino
-
-4. Ajudante?
-
-5. Saída: casa/apto?
-
-6. Destino: casa/apto?
-
-7. Elevadores (se apto)
+- Itens
+- Bairro de saída
+- Bairro de destino
+- Ajudante?
+- Saída: casa/apto?
+- Destino: casa/apto?
+- Elevadores (se apto)
 
 JSON OBRIGATÓRIO:
 
@@ -59,7 +62,8 @@ JSON OBRIGATÓRIO:
   "saida_elevador":true/false/null,
   "destino_tipo":"casa|apartamento|null",
   "destino_elevador":true/false/null,
-  "telefone_parcial":"(caso venha 8/9 dígitos, sem DDD; else omitir)"
+  "telefone_parcial":"(caso venha 8/9 dígitos, sem DDD; else omitir)",
+  "ddd":"(caso o cliente envie apenas o DDD em mensagem isolada; else omitir)"
  }
 }
 
@@ -81,15 +85,15 @@ Cliente: "trazer sofá do Bosque para o Centro"
 
 Cliente: "quanto para levar uma geladeira pro Zanelato?"
 
-<= "Quem faz o orçamento é o motorista. Me passa seu WhatsApp com DDD que ele já te chama rapidinho. Onde busco a geladeira?"
+<= "Quem faz o orçamento é o motorista. Me passa seu WhatsApp sem o DDD que ele já te chama rapidinho. Onde busco a geladeira?"
 
 Cliente: "91985634"
 
 <= "Me confirma só o DDD do seu WhatsApp?"
 
-Cliente: "obrigado!"
+Cliente: "48"
 
-<= "Eu que agradeço! Se precisar, conte comigo. 😊"
+<= "Perfeito, pode me enviar somente o número (sem o DDD)?"
 
 Cliente: "levar colchão ali no Centro"
 
@@ -121,16 +125,11 @@ Cliente: "48999998888"
 `.trim();
 }
 
-function buildUserPrompt({ cidade, historico, coletado, flags = {} }) {
-  const pedidoPreco = flags.pedidoPreco ? 'SIM' : 'NÃO';
-  const jaTemTelefone = (coletado && coletado.telefone) ? 'SIM' : 'NÃO';
-
+function buildUserPrompt({ cidade, historico, coletado, askCounts }) {
   const cabecalho = [
     'Contexto do atendimento:',
     `- Cidade do perfil (atendimento): ${cidade || 'desconhecida'}`,
     '- Importante: ignore cidades diferentes que o cliente mencionar; atenda sempre na cidade do perfil.',
-    '',
-    `Sinalizadores: pedido_preco=${pedidoPreco} | telefone_ok=${jaTemTelefone}`,
     '',
     (coletado && typeof coletado === 'object'
       ? (() => {
@@ -150,6 +149,8 @@ function buildUserPrompt({ cidade, historico, coletado, flags = {} }) {
         })()
       : 'O que já temos: —'),
     '',
+    (askCounts ? ('askCounts atuais (para variar perguntas): ' + JSON.stringify(askCounts)) : 'askCounts atuais: {}'),
+    '',
     'Histórico de mensagens:'
   ].join('\n');
 
@@ -163,7 +164,7 @@ function buildUserPrompt({ cidade, historico, coletado, flags = {} }) {
   return cabecalho + '\n' + corpo;
 }
 
-function parseModelAnswerToDomain(rawText) {
+function parseModelAnswerToDomain(rawText, lastClientText) {
   try {
     let txt = String(rawText || '').trim();
     txt = txt.replace(/^json\s*/i, '').replace(/^\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -177,25 +178,33 @@ function parseModelAnswerToDomain(rawText) {
     const obj = JSON.parse(match[0]);
 
     function onlyDigits(s){ return String(s||'').replace(/\D/g,''); }
-    const telRaw = obj.telefone_extraido ? onlyDigits(obj.telefone_extraido) : '';
+
+    const originalResposta = String(obj.resposta || '');
+    const combinedText = (originalResposta + ' ' + txt);
+
+    // Regex canônicas
+    const dddIsoladoRe = /^[1-9]\d$/;
+    const telParcialRe = /\b(\d{8,9})\b/;
+    const telComDDDRe = /\b(\d{10,11})\b/;
+
+    // 1) Extrair telefone completo (10–11 dígitos)
     let telefoneOK = null;
-    if (telRaw && (telRaw.length === 10 || telRaw.length === 11)) {
-      telefoneOK = telRaw;
+    const telObj = obj.telefone_extraido ? onlyDigits(obj.telefone_extraido) : '';
+    const pickObj = (telObj && (telObj.length === 10 || telObj.length === 11) && isValidBRPhoneWithDDD(telObj)) ? telObj : null;
+    if (pickObj) {
+      telefoneOK = pickObj;
     } else {
-      const fallback = extractPhonesBRStrict((obj.resposta || '') + ' ' + txt);
-      const pick = Array.isArray(fallback) ? fallback.find(d => d && (d.length === 10 || d.length === 11)) : null;
-      telefoneOK = pick || null;
+      const fallbackFull = (combinedText.match(telComDDDRe) || []).map(onlyDigits).filter(isValidBRPhoneWithDDD);
+      telefoneOK = Array.isArray(fallbackFull) ? (fallbackFull[0] || null) : null;
     }
 
-    // Detecta telefone parcial (8–9 dígitos) para orientar a conversa sem marcar finalizado
+    // 2) Telefone parcial (8–9 dígitos)
     let telefoneParcial = null;
     if (!telefoneOK) {
-      const partialMatch = String((obj.resposta||'') + ' ' + txt).match(/(^|\D)(\d{8,9})(\D|$)/);
-      if (partialMatch && partialMatch[2]) {
-        telefoneParcial = onlyDigits(partialMatch[2]);
-        if (telefoneParcial && (telefoneParcial.length < 8 || telefoneParcial.length > 9)) {
-          telefoneParcial = null;
-        }
+      const m = combinedText.match(telParcialRe);
+      if (m && m[1]) {
+        const digits = onlyDigits(m[1]);
+        if (digits.length === 8 || digits.length === 9) telefoneParcial = digits;
       }
       try {
         if (!telefoneParcial && obj.dados && obj.dados.telefone_parcial) {
@@ -203,6 +212,23 @@ function parseModelAnswerToDomain(rawText) {
           if (tp && (tp.length === 8 || tp.length === 9)) telefoneParcial = tp;
         }
       } catch {}
+    }
+
+    // 3) DDD isolado do lastClientText (se existir)
+    let dddInformado = null;
+    try {
+      const lastTrim = String(lastClientText || '').trim();
+      if (dddIsoladoRe.test(lastTrim)) dddInformado = lastTrim;
+      else if (obj.dados && obj.dados.ddd && dddIsoladoRe.test(String(obj.dados.ddd))) dddInformado = String(obj.dados.ddd);
+    } catch {}
+
+    // 4) Montagem telefone completo local (sem eco) — ddd + parcial
+    if (!telefoneOK && dddInformado && telefoneParcial) {
+      const combinado = String(dddInformado) + String(telefoneParcial);
+      if (isValidBRPhoneWithDDD(combinado)) {
+        telefoneOK = combinado;
+        telefoneParcial = null;
+      }
     }
 
     const safeDados = obj.dados && typeof obj.dados === 'object' ? obj.dados : {};
@@ -218,6 +244,7 @@ function parseModelAnswerToDomain(rawText) {
     };
 
     if (telefoneParcial) dadosOut.telefone_parcial = telefoneParcial;
+    if (dddInformado) dadosOut.ddd = dddInformado;
     if (safeDados.debug) dadosOut.debug = safeDados.debug;
 
     const finalizavel =
@@ -229,8 +256,14 @@ function parseModelAnswerToDomain(rawText) {
       !!dadosOut.destino_tipo &&
       !!telefoneOK;
 
+    // Sanitização: remover qualquer telefone completo (10–11 dígitos) da resposta
+    let respostaSan = originalResposta;
+    try {
+      respostaSan = respostaSan.replace(/\b\d{10,11}\b/g, '******');
+    } catch {}
+
     return {
-      resposta: obj.resposta || '',
+      resposta: respostaSan || '',
       telefone_extraido: telefoneOK || null,
       finalizado: obj.finalizado === true && finalizavel,
       dados: dadosOut
@@ -249,7 +282,11 @@ function buildFinalOrderPayload(nomePerfil, chatId, dados = {}, servidor = null)
     chat_id: chatId,
     cidade: dados && dados.cidade || null,
     telefone: dados && dados.telefone || null,
-    itens: dados && dados.itens || null,
+    itens: (() => {
+      if (!dados) return null;
+      if (Array.isArray(dados.itens)) return dados.itens.join(', ');
+      return dados.itens || null;
+    })(),
     bairro_saida: dados && dados.bairro_saida || null,
     bairro_destino: dados && dados.bairro_destino || null,
     saida_tipo: dados && dados.saida_tipo || null,
@@ -371,3 +408,9 @@ module.exports = {
   isValidBRPhoneWithDDD,
   extractPhonesBRStrict
 };
+
+// Observação (sanidade): As regex canônicas usadas no parser:
+// Price intent (usada no virtus.js): /(pre[cç]o|valor|quanto\s+(custa|fica|sai)|cobra|or[cç]amento)/i
+// DDD isolado válido: /^[1-9]\d$/
+// Telefone parcial: /\b(\d{8,9})\b/
+// Telefone com DDD: /\b(\d{10,11})\b/

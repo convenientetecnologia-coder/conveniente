@@ -143,101 +143,6 @@ async function installChatFeedObserver(page, nome, onChat) {
 const { chatCompletion } = require('./inteligenciaArtificial.js');
 const promptFretes = require('./promptFretes.js');
 
-// === INÍCIO: utilitários de mensagem e detecção (anti-repetição / preço) ===
-function randomPick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-
-const PRICE_RE = /\b(pre(ç|c)o(s)?|valor(es)?|quanto(s)?|qto|qnts?|qnto|qual\s+o\s+valor|quanto\s+custa)\b/i;
-
-function detectPriceIntent(historicoArr, { lookback = 3 } = {}) {
-  if (!Array.isArray(historicoArr) || historicoArr.length === 0) return false;
-  let count = 0;
-  for (let i = historicoArr.length - 1; i >= 0 && count < lookback; i--) {
-    const m = historicoArr[i];
-    if (!m || m.autor !== 'cliente') continue;
-    const t = (m.texto || '').toLowerCase();
-    if (PRICE_RE.test(t)) return true;
-    count++;
-  }
-  return false;
-}
-
-// Busca telefone válido em estado ou no histórico
-function phoneFromStateOrHistory(state, historicoArr, promptFretesMod) {
-  const tel = state && state.dadosColetados && state.dadosColetados.telefone;
-  if (tel) return tel;
-  try {
-    const joined = (historicoArr || []).map(m => m && m.texto || '').join(' ');
-    const nums = promptFretesMod && promptFretesMod.extractPhonesBRStrict ? promptFretesMod.extractPhonesBRStrict(joined) : [];
-    if (Array.isArray(nums) && nums.length) return nums.find(d => d && (d.length === 10 || d.length === 11)) || null;
-  } catch {}
-  return null;
-}
-
-// Variedade humana para pedir WhatsApp quando pedirem preço
-function buildAskWhatsappMsg() {
-  const bases = [
-    "Quem passa o valor é o motorista. Me manda seu WhatsApp com DDD que ele te chama rapidinho.",
-    "O orçamento é feito direto pelo motorista. Pode me enviar seu Whats com DDD? Ele já entra em contato.",
-    "Fecho aqui com o motorista. Me passa seu WhatsApp (com DDD) que ele te passa certinho.",
-    "Pra te dizer o valor com precisão, o motorista fala com você. Qual seu Whats com DDD?",
-    "Posso pedir pro motorista te chamar e passar o preço? Manda teu Whats com DDD, por favor."
-  ];
-  const fechamentos = [
-    "👍",
-    "😄",
-    "😉",
-    "por gentileza.",
-    "rapidinho."
-  ];
-  return randomPick(bases) + " " + randomPick(fechamentos);
-}
-
-// Remove perguntas que já foram respondidas (anti-repetição)
-function stripRedundantQuestions(resposta, dados) {
-  try {
-    const info = dados || {};
-    const sentSplit = String(resposta || '').split(/([.?!])\s+/).reduce((acc, cur, idx, arr) => {
-      if (idx % 2 === 0) {
-        const end = arr[idx + 1] || '';
-        acc.push((cur + (end ? end + ' ' : '')).trim());
-      }
-      return acc;
-    }, []);
-
-    const filtered = sentSplit.filter(s => {
-      const st = s.toLowerCase();
-      if (info.saida_tipo && /sa[ií]da.*(casa|apartamento|apto|ap\b)/i.test(st)) return false;
-      if (info.destino_tipo && /destino.*(casa|apartamento|apto|ap\b)/i.test(st)) return false;
-      if (typeof info.ajudante === 'boolean' && /ajudante/i.test(st)) return false;
-      if (typeof info.saida_elevador === 'boolean' && /(elevador).*(sa[ií]da)/i.test(st)) return false;
-      if (typeof info.destino_elevador === 'boolean' && /(elevador).*(destino)/i.test(st)) return false;
-      if (info.bairro_saida && /(bairro|de onde|buscar|buscar no|coletar|coleta|pegar).*(sa[ií]da|sair|busca)/i.test(st)) return false;
-      if (info.bairro_destino && /(bairro|para onde|entregar|levar|vai para|destino)/i.test(st)) return false;
-      return true;
-    });
-
-    const out = filtered.join(' ').replace(/\s+/g, ' ').trim();
-    return out || resposta;
-  } catch { return resposta; }
-}
-
-function normalizeForKey(s) {
-  return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-}
-function extractQuestionKey(resposta) {
-  const t = normalizeForKey(resposta);
-  if (/ajudante/.test(t)) return 'ajudante';
-  if (/sa[ii]da.*(casa|apartamento|apto|ap\b)/.test(t)) return 'saida_tipo';
-  if (/destino.*(casa|apartamento|apto|ap\b)/.test(t)) return 'destino_tipo';
-  if (/elevador.*sa[ii]da/.test(t)) return 'saida_elevador';
-  if (/elevador.*destino/.test(t)) return 'destino_elevador';
-  if (/(bairro|de onde|buscar|coletar|coleta|pegar).*(sa[ii]da|busca)/.test(t)) return 'bairro_saida';
-  if (/(bairro|para onde|entregar|levar|vai para|destino)/.test(t)) return 'bairro_destino';
-  if (/whats/.test(t) || /ddd/.test(t) || /telefone/.test(t)) return 'telefone';
-  return null;
-}
-// === FIM ===
-
 const VIRTUS_INPUT_LOCKS = new Map();
 function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
 function isVirtusLocked(nome){ return VIRTUS_INPUT_LOCKS.has(nome); }
@@ -375,6 +280,136 @@ function chatUrlMatches(url, chatId) {
 function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
+
+// === INÍCIO: HELPERS DE ATENDIMENTO (NÃO REMOVER) ===
+function hasPriceIntent(s) {
+  const t = String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return /(pre[cç]o|valor|quanto\s+(custa|fica|sai)|cobra|or[cç]amento)/i.test(t);
+}
+
+function maskPhoneLog(d) {
+  try {
+    const s = String(d || '').replace(/\D/g, '');
+    if (s.length < 4) return '';
+    if (s.length === 10 || s.length === 11) {
+      const ddd = s.slice(0,2);
+      const last4 = s.slice(-4);
+      return `${ddd}****${last4}`;
+    }
+    if (s.length >= 8) return `**${s.slice(-4)}`;
+    return '';
+  } catch { return '****'; }
+}
+
+function removeTelefonesCompletos(texto) {
+  try { return String(texto||'').replace(/\b\d{10,11}\b/g, '******'); } catch { return String(texto||''); }
+}
+
+function nextMissingField(dc = {}) {
+  if (!dc.itens) return 'itens';
+  if (!dc.bairro_saida) return 'bairro_saida';
+  if (!dc.bairro_destino) return 'bairro_destino';
+  if (typeof dc.ajudante !== 'boolean') return 'ajudante';
+  if (!dc.saida_tipo) return 'saida_tipo';
+  if (!dc.destino_tipo) return 'destino_tipo';
+  if (dc.saida_tipo === 'apartamento' && typeof dc.saida_elevador !== 'boolean') return 'saida_elevador';
+  if (dc.destino_tipo === 'apartamento' && typeof dc.destino_elevador !== 'boolean') return 'destino_elevador';
+  return null;
+}
+
+async function getAskCounts(perfil, chatId) {
+  const st = await getChatState(perfil, chatId).catch(()=>null);
+  return (st && st.dadosMeta && st.dadosMeta.askCounts) ? st.dadosMeta.askCounts : {};
+}
+async function bumpAskCount(perfil, chatId, field) {
+  if (!field) return;
+  const st = await getChatState(perfil, chatId).catch(()=>({}));
+  const meta = Object.assign({}, (st && st.dadosMeta) || {});
+  meta.askCounts = meta.askCounts || {};
+  meta.askCounts[field] = (meta.askCounts[field] || 0) + 1;
+  await setChatState(perfil, chatId, { dadosMeta: meta });
+}
+
+function montarRespostaForcadaWhatsAppSemDDD(dados, askCounts = {}) {
+  const varWpp = [
+    'Quem faz o orçamento é o motorista. Me passa seu WhatsApp sem o DDD, por favor.',
+    'O valor é passado direto pelo motorista. Pode me mandar seu WhatsApp sem o DDD, por gentileza?',
+    'Quem informa o preço é o motorista. Me envia o WhatsApp sem o DDD, por favor.'
+  ];
+  const wpp = varWpp[(askCounts.telefone || 0) % varWpp.length];
+  const falta = nextMissingField(dados);
+  if (!falta) return wpp;
+  const mapa = {
+    itens: [
+      'Qual item você precisa levar?',
+      'O que vamos transportar?',
+      'Me diz o item a transportar, por favor.'
+    ],
+    bairro_saida: [
+      'Qual o bairro de saída?',
+      'De qual bairro busco?',
+      'Onde vou buscar (bairro)?'
+    ],
+    bairro_destino: [
+      'E o bairro de destino?',
+      'Para qual bairro vai?',
+      'Qual o bairro de entrega?'
+    ],
+    ajudante: [
+      'Precisa de ajudante para carregar?',
+      'Vai precisar de ajudante?',
+      'Tem necessidade de ajudante?'
+    ],
+    saida_tipo: [
+      'A saída é de casa ou apartamento?',
+      'No local de saída é casa ou apartamento?',
+      'Saída: casa ou ap.?'
+    ],
+    destino_tipo: [
+      'E no destino, é casa ou apartamento?',
+      'Destino é casa ou apartamento?',
+      'Destino: casa ou ap.?'
+    ],
+    saida_elevador: [
+      'Tem elevador no local de saída?',
+      'No prédio de saída tem elevador?',
+      'Saída tem elevador?'
+    ],
+    destino_elevador: [
+      'Tem elevador no destino?',
+      'No prédio de destino tem elevador?',
+      'Destino tem elevador?'
+    ]
+  };
+  const varSet = mapa[falta] || ['Certo, prossigo com a próxima informação.'];
+  const pick = varSet[(askCounts[falta] || 0) % varSet.length];
+  return `${wpp} ${pick}`;
+}
+
+function detectAskedFieldFromText(t) {
+  const n = normTxt(t);
+  if (/bairro.*sa[ií]da|onde.*buscar|buscar.*bairro/.test(n)) return 'bairro_saida';
+  if (/bairro.destino|para.qual.bairro|bairro.entrega/.test(n)) return 'bairro_destino';
+  if (/ajudante/.test(n)) return 'ajudante';
+  if (/(casa|apartamento).(sa[ií]da)|sa[ií]da.(casa|apartamento)/.test(n)) return 'saida_tipo';
+  if (/(casa|apartamento).(destino)|destino.(casa|apartamento)/.test(n)) return 'destino_tipo';
+  if (/elevador.*sa[ií]da/.test(n)) return 'saida_elevador';
+  if (/elevador.destino/.test(n)) return 'destino_elevador';
+  if (/itens?|o que.(levar|transportar)/.test(n)) return 'itens';
+  return null;
+}
+
+function normTxt(s) {
+  try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+  catch { return String(s||'').toLowerCase(); }
+}
+function extractBairro(text, pattern) {
+  const m = pattern.exec(text);
+  if (!m) return null;
+  return String(m[1] || '').trim().replace(/[\s,.;:!?]+$/,'');
+}
+
+// === FIM: HELPERS DE ATENDIMENTO (NÃO REMOVER) ===
 
 async function logIssue(nome, type, message) {
   try {
@@ -1623,7 +1658,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let chatAtivo = null;
 
   // Debounce de 20s por chat/cliente
-  const DEBOUNCE_MS = parseInt(process.env.VIRTUS_DEBOUNCE_MS || '20000', 10);
+  const DEBOUNCE_MS = parseInt(process.env.VIRTUS_DEBOUNCE_MS || '12000', 10);
   const debounceTimers = new Map(); // chatId -> { timerId, startedAt, dueAt }
 
   function clearDebounce(chatId) {
@@ -2633,47 +2668,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
         });
 
-        // HARD-SWITCH: Pedido de preço => pedir WhatsApp e parar checklist
-        const prevState = await getChatState(nome, chatId).catch(() => null);
-        const priceIntent = detectPriceIntent(historicoConversa);
-        const telKnown = phoneFromStateOrHistory(prevState, historicoConversa, promptFretes);
-        if (priceIntent && !telKnown) {
-          // NUNCA checklist aqui; apenas pedir WhatsApp com DDD. Variedade humana.
-          const askMsg = buildAskWhatsappMsg();
-
-          try { await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO }); } catch {}
-          await acquireSendGuard(p, chatId);
-          try {
-            const campoEnvio = await waitForComposer(p, 8000);
-            if (campoEnvio) {
-              await sendMessageSafe(p, campoEnvio, askMsg, nome, chatId);
-              await appendIaLine(nome, chatId, askMsg);
-              await setChatState(nome, chatId, {
-                state: CHAT_STATES.AGUARDANDO,
-                lastIATs: Date.now(),
-                lastQuestionKey: 'telefone',
-                lastProbeAt: Date.now()
-              });
-              logger.info('[GROQ] Bypass — pedido de preço detectado, WhatsApp solicitado', { chatId });
-            } else {
-              logger.warn('[GROQ] Bypass preço: composer indisponível — agendando cooldown', { chatId });
-              const prev = await getChatState(nome, chatId).catch(()=>null);
-              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-              await setChatState(nome, chatId, {
-                state: CHAT_STATES.AGUARDANDO,
-                sendAttempts: attempts,
-                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                lastProbeAt: Date.now()
-              });
-            }
-          } finally { releaseSendGuard(p); }
-
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return; // NÃO CONSULTA LLM; para aqui
-        }
-
         const ultimaIA = (() => {
           const iaMsgs = historicoConversa.filter(m => m.autor === 'ia');
           return iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
@@ -2683,6 +2677,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const cli = historicoConversa.filter(m => m.autor === 'cliente');
           return cli.length ? cli[cli.length - 1] : null;
         })();
+
+        await inferBairrosFromText(nome, chatId, ultimaCliente?.texto);
 
         // --- PATCH GATING ANTI-LOOP (insira exatamente aqui) ---
         const lastClienteTs = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
@@ -2706,6 +2702,95 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             nome, chatId, lastClienteTs, lastIaTs, lastIATsPrev, lastCLItsPrev
           });
           try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO }); } catch {}
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        // DDD isolado e número parcial (antes do LLM)
+        const lastTextPlain = String(ultimaCliente?.texto || '').trim();
+        const dddIsolado = /^[1-9]\d$/.test(lastTextPlain);
+        const parcialMatch = lastTextPlain.match(/\b(\d{8,9})\b/);
+        const parcialOk = parcialMatch && parcialMatch[1] && (parcialMatch[1].length === 8 || parcialMatch[1].length === 9);
+
+        const statePrev = await getChatState(nome, chatId).catch(()=>null);
+        const dcPrev = (statePrev && statePrev.dadosColetados) ? statePrev.dadosColetados : {};
+        const telPrev = (dcPrev && dcPrev.telefone) || null;
+        const telefoneValidoNoState = !!(telPrev && promptFretes.isValidBRPhoneWithDDD(telPrev));
+
+        if (dddIsolado && !telefoneValidoNoState) {
+          await atualizarDadosColetados(chatId, { dados: { ddd: lastTextPlain } });
+          logger.info('[VIRTUS_DDD] ddd_isolado', { nome, chatId, ddd: lastTextPlain });
+          const askCountsNow = await getAskCounts(nome, chatId);
+          const frases = [
+            'Perfeito! Me manda só o número do WhatsApp (sem o DDD), por favor.',
+            'Legal! Pode enviar só o número do WhatsApp (sem o DDD)?',
+            'Show! Só o número do WhatsApp, sem o DDD.'
+          ];
+          const msg = frases[(askCountsNow.telefone || 0) % frases.length];
+          await bumpAskCount(nome, chatId, 'telefone');
+
+          const pAtual0 = await ensurePage().catch(()=>null);
+          if (pAtual0) {
+            let campo = await waitForComposer(pAtual0, 8000);
+            if (!campo) campo = await refocusComposerNoReload(pAtual0, chatId);
+            const out = removeTelefonesCompletos(msg);
+            logger.info('[VIRTUS_RESP] ddd_only_reply', { nome, chatId, sanitized: out !== msg });
+            if (campo) await sendMessageSafe(pAtual0, campo, out, nome, chatId);
+          }
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        if (parcialOk && !telefoneValidoNoState) {
+          const parcialNum = parcialMatch[1];
+          await atualizarDadosColetados(chatId, { dados: { telefone_parcial: parcialNum } });
+          logger.info('[VIRTUS_PHONE_ASSEMBLY] parcial_detected', { nome, chatId, parcial: `****${parcialNum.slice(-4)}` });
+          const askCountsNow = await getAskCounts(nome, chatId);
+          const frasesDdd = [
+            'Perfeito! Me confirma só o DDD do seu WhatsApp?',
+            'Certo! Qual é o DDD do seu WhatsApp?',
+            'Ótimo! Qual o DDD do WhatsApp?'
+          ];
+          const msg = frasesDdd[(askCountsNow.ddd || 0) % frasesDdd.length];
+          await bumpAskCount(nome, chatId, 'ddd');
+
+          const pAtual0 = await ensurePage().catch(()=>null);
+          if (pAtual0) {
+            let campo = await waitForComposer(pAtual0, 8000);
+            if (!campo) campo = await refocusComposerNoReload(pAtual0, chatId);
+            const out = removeTelefonesCompletos(msg);
+            logger.info('[VIRTUS_RESP] partial_only_reply', { nome, chatId, sanitized: out !== msg });
+            if (campo) await sendMessageSafe(pAtual0, campo, out, nome, chatId);
+          }
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        if (hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
+          logger.info('[VIRTUS_PRICE_INTENT] detectado', { nome, chatId });
+          const askCountsNow = await getAskCounts(nome, chatId);
+          const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
+          const dadosColetadosNow = (stPrev2 && stPrev2.dadosColetados) ? stPrev2.dadosColetados : {};
+          const respostaWpp = montarRespostaForcadaWhatsAppSemDDD(dadosColetadosNow, askCountsNow);
+          await bumpAskCount(nome, chatId, 'telefone');
+          const falta = nextMissingField(dadosColetadosNow);
+          if (falta) await bumpAskCount(nome, chatId, falta);
+          logger.info('[VIRTUS_WPP_REQ] override', { nome, chatId });
+
+          const pAtualPrice = await ensurePage().catch(()=>null);
+          if (pAtualPrice) {
+            let campo = await waitForComposer(pAtualPrice, 8000);
+            if (!campo) campo = await refocusComposerNoReload(pAtualPrice, chatId);
+            const out = removeTelefonesCompletos(respostaWpp);
+            logger.info('[VIRTUS_RESP] price_intent_reply', { nome, chatId, sanitized: out !== respostaWpp });
+            if (campo) await sendMessageSafe(pAtualPrice, campo, out, nome, chatId);
+          }
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -2741,13 +2826,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             const systemPrompt = domain.buildSystemPrompt();
             const coletadoHint = stPrevGate && stPrevGate.dadosColetados ? stPrevGate.dadosColetados : null;
-            const flags = { pedidoPreco: priceIntent }; // priceIntent já foi calculado acima
-            const userPrompt = domain.buildUserPrompt({ cidade: cidadePreferida, historico: historicoConversa, coletado: coletadoHint, flags });
+            const priceIntent = hasPriceIntent(ultimaCliente?.texto || '');
+            const flags = { pedidoPreco: priceIntent };
+            const askCountsNow = await getAskCounts(nome, chatId);
+            const userPrompt = domain.buildUserPrompt({ cidade: cidadePreferida, historico: historicoConversa, coletado: coletadoHint, askCounts: askCountsNow });
             
             let parsed;
             try {
               const modelRawResp = await chatCompletion({ system: systemPrompt, user: userPrompt, provider: 'groq' });
-              parsed = domain.parseModelAnswerToDomain(modelRawResp);
+              parsed = domain.parseModelAnswerToDomain(modelRawResp, ultimaCliente?.texto);
               // parsed.telefone_extraido só vem com DDD; se vier apenas parcial, parsed.dados.telefone_parcial é populado.
             } catch (e) {
               logger.error('[GROQ] Erro ao chamar IA ou parsear resposta', { nome, chatId, error: e && e.message || e });
@@ -2755,28 +2842,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               fila = fila.filter(id => id !== chatId);
               chatAtivo = null;
               return;
-            }
-
-            const stMem = await getChatState(nome, chatId).catch(()=>null);
-            const dadosMem = (stMem && stMem.dadosColetados) || {};
-            let respostaFinal = String(parsed.resposta || '').trim();
-            respostaFinal = stripRedundantQuestions(respostaFinal, dadosMem);
-
-            // Anti "mesma pergunta em loop"
-            const qKey = extractQuestionKey(respostaFinal);
-            if (stMem && stMem.lastQuestionKey && qKey && stMem.lastQuestionKey === qKey) {
-              // troque por pedido de WhatsApp (se ainda não temos telefone) ou frase neutra
-              const temTel = !!(dadosMem && dadosMem.telefone);
-              respostaFinal = temTel ? "Perfeito, obrigado." : buildAskWhatsappMsg();
-            }
-
-            // Se cliente reclamou "eu já falei"/"já disse" e filtrou tudo, atue gentil
-            const lastCli = historicoConversa.slice().reverse().find(m => m && m.autor === 'cliente');
-            if (lastCli && /já\s+falei|ja\s+falei|já\s+te\s+disse|ja\s+te\s+disse/i.test(String(lastCli.texto||''))) {
-              if (!respostaFinal || respostaFinal.length < 4) {
-                const temTel = !!(dadosMem && dadosMem.telefone);
-                respostaFinal = temTel ? "Perfeito, obrigado!" : buildAskWhatsappMsg();
-              }
             }
 
             atualizarDadosColetados(chatId, {
@@ -2839,6 +2904,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
 
+            const respostaFinalRaw = String(parsed.resposta || '').trim();
+            const respostaFinal = removeTelefonesCompletos(respostaFinalRaw);
+            logger.info('[VIRTUS_RESP] ok', { nome, chatId, sanitized: respostaFinal !== respostaFinalRaw });
+            
             try {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
             } catch {}
@@ -2851,6 +2920,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               });
               // OBS: não solicitar novamente WhatsApp aqui; o modelo já é instruído a não repetir,
               // e o estado (dadosColetados) impede finalização sem DDD.
+              
+              const askedField = detectAskedFieldFromText(respostaFinal);
+              if (askedField) await bumpAskCount(nome, chatId, askedField);
               
               await sendMessageSafe(pAtual, campoEnvio, respostaFinal, nome, chatId);
               await appendIaLine(nome, chatId, respostaFinal);
@@ -2912,7 +2984,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 state: CHAT_STATES.AGUARDANDO,
                 lastIATs: Date.now(),
                 lastCLIts: lastClienteTs, // NOVO: só agora persistimos o "último cliente visto"!
-                lastQuestionKey: extractQuestionKey(respostaFinal) || null,
                 lastProbeAt: Date.now()
               });
         } catch {}
@@ -3161,6 +3232,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
   const pedidosEnviados = new Set();  // chatId já enviados
 
+  async function inferBairrosFromText(perfil, chatId, lastText) {
+    if (!lastText) return;
+    const st = await getChatState(perfil, chatId).catch(()=>null);
+    const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
+    const t = normTxt(lastText);
+    const saidaPatts = [
+      /\b(?:de|do|da|desde|buscar\s+em|pegar\s+em)\s+([a-zà-ÿ0-9 .-]{2,})\b/i
+    ];
+    const destPatts = [
+      /\b(?:para|pra|pro|em|no|na|ao)\s+([a-zà-ÿ0-9 .-]{2,})\b/i,
+      /\b(?:levar|entregar)\s+(?:para|pro|pra)\s+([a-zà-ÿ0-9 .-]{2,})\b/i
+    ];
+    let saida = null, destino = null;
+    for (const p of saidaPatts) { const b = extractBairro(lastText, p); if (b) { saida = b; break; } }
+    for (const p of destPatts) { const b = extractBairro(lastText, p); if (b) { destino = b; break; } }
+    const stFlow = nextMissingField(dc);
+    const singleWord = /^\s*[a-zà-ÿ0-9.-]{2,}\s*$/i.test(lastText.trim());
+    if (!saida && !destino && singleWord && stFlow === 'bairro_saida' && !dc.bairro_saida) saida = lastText.trim();
+    if (!destino && !saida && singleWord && stFlow === 'bairro_destino' && !dc.bairro_destino) destino = lastText.trim();
+    const patch = {};
+    if (saida && !dc.bairro_saida) patch.bairro_saida = saida;
+    if (destino && !dc.bairro_destino) patch.bairro_destino = destino;
+    if (Object.keys(patch).length) {
+      await atualizarDadosColetados(chatId, { dados: patch });
+      logger.info('[VIRTUS_STATE] infer_bairros', { nome: perfil, chatId, saida: patch.bairro_saida || null, destino: patch.bairro_destino || null });
+    }
+  }
+
   async function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
     if (!dadosColetados) return;
     if (!dadosColetados.has(chatId)) dadosColetados.set(chatId, {});
@@ -3366,6 +3465,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     }
 
+    logger.info('[NOTIF_SEND] preparando envio', { nome, chatId, telefone: maskPhoneLog(tel), cidade });
+
     if (!chatLock.acquire(nome, chatId)) {
       await appendPedidoAudit(nome, chatId, 'lock_busy_skip', {});
       return;
@@ -3394,6 +3495,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       if (resp && resp.ok) {
         await markPedidoSent(nome, chatId, payload, 'immediate_or_timer');
+        logger.info('[NOTIF_SEND] enviado com sucesso', { nome, chatId, telefone: maskPhoneLog(tel), cidade });
         pedidosEnviados.add(chatId);
         await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO, pedidoSentAt: Date.now() });
         await enviarMensagemFinal(chatId);
@@ -3416,11 +3518,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     }
     try {
-      const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-      if (!chatUrlMatches(urlNow, chatId)) {
+      const expectedPath = `/marketplace/t/${chatId}/`;
+      let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+      if (!urlNow.includes(expectedPath)) {
         logger.warn('[MENSAGEM_FINAL] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
         return;
       }
+      
       const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
       if (!okOn) {
         logger.warn('[MENSAGEM_FINAL] Chat não confirmado - abortando', { nome, chatId });
