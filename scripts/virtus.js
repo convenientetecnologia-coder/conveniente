@@ -30,6 +30,9 @@ const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 
+// === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
+const AI_FIRST = true;
+
 const CHAT_LOG_BUFFERS = new Map();  // file -> [line]
 let CHAT_LOG_FLUSH_TIMER = null;
 
@@ -2821,7 +2824,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const telPrev = (dcPrev && dcPrev.telefone) || null;
         const telefoneValidoNoState = !!(telPrev && promptFretes.isValidBRPhoneWithDDD(telPrev));
 
-        if (dddIsolado && !telefoneValidoNoState) {
+        if (!AI_FIRST && dddIsolado && !telefoneValidoNoState) {
+          // [LEGADO] Conteúdo do bloco permanece inalterado
           await atualizarDadosColetados(chatId, { dados: { ddd: lastTextPlain } });
           logger.info('[VIRTUS_DDD] ddd_isolado', { nome, chatId, ddd: lastTextPlain });
           const askCountsNow = await getAskCounts(nome, chatId);
@@ -2851,8 +2855,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatAtivo = null;
           return;
         }
+        // IA-FIRST: seguir para o LLM sem atalho.
 
-        if (parcialOk && !telefoneValidoNoState) {
+        if (!AI_FIRST && parcialOk && !telefoneValidoNoState) {
+          // [LEGADO] Conteúdo do bloco permanece inalterado
           const parcialNum = parcialMatch[1];
           await atualizarDadosColetados(chatId, { dados: { telefone_parcial: parcialNum } });
           logger.info('[VIRTUS_PHONE_ASSEMBLY] parcial_detected', { nome, chatId, parcial: `****${parcialNum.slice(-4)}` });
@@ -2883,8 +2889,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatAtivo = null;
           return;
         }
+        // IA-FIRST: seguir para o LLM sem atalho.
 
-        if (hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
+        if (!AI_FIRST && hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
+          // [LEGADO] Conteúdo do bloco permanece inalterado
           logger.info('[VIRTUS_PRICE_INTENT] detectado', { nome, chatId });
           const askCountsNow = await getAskCounts(nome, chatId);
           const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
@@ -2913,6 +2921,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatAtivo = null;
           return;
         }
+        // IA-FIRST: seguir para o LLM sem atalho.
 
         const pAtual = await ensurePage().catch(()=>null);
 
