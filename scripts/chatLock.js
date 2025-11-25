@@ -11,7 +11,7 @@ try { fs.mkdirSync(LOCK_DIR, { recursive: true }); } catch {}
 ensureDir();
 
 function key(perfil, chatId) {
-return path.join(LOCK_DIR, ${perfil}__${chatId}.lock);
+return path.join(LOCK_DIR, `${perfil}__${chatId}.lock`);
 }
 
 // Armazenamento dos FDs abertos para cada lock ativo
@@ -45,13 +45,13 @@ const fd2 = fs.openSync(f, 'wx');
 fs.writeFileSync(fd2, String(Date.now()));
 fs.fsyncSync(fd2);
 openFDs.set(f, fd2);
-try { issues.append(perfil, 'mil_action', chat_lock_timeout_release chat=${chatId}); } catch {}
+try { issues.append(perfil, 'mil_action', `chat_lock_timeout_release chat=${chatId}`); } catch {}
 logger.info('[CHATLOCK] timeout_release', { perfil, chatId, file: f });
 return true;
 } catch {}
 }
 // Falha na aquisição — registra telemetria
-try { issues.append(perfil, 'mil_action', chat_lock_acquire_fail chat=${chatId}); } catch {}
+try { issues.append(perfil, 'mil_action', `chat_lock_acquire_fail chat=${chatId}`); } catch {}
 logger.warn('[CHATLOCK] acquire_fail', { perfil, chatId, file: f });
 return false;
 }
