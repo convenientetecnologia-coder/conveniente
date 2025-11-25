@@ -699,6 +699,16 @@ async function extrairHistoricoConversa(page) {
       }
 
       out.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      
+      // Monotonicidade: garante que timestamps nunca sejam iguais ou menores que o anterior
+      for (let i = 1; i < out.length; i++) {
+        const prev = Number(out[i - 1].timestamp || 0);
+        const cur  = Number(out[i].timestamp || 0);
+        if (cur <= prev) {
+          out[i].timestamp = prev + 1;
+        }
+      }
+      
       return out;
     });
 
@@ -2541,19 +2551,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // --- PATCH GATING ANTI-LOOP (insira exatamente aqui) ---
         const lastClienteTs = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
         const lastIaTs = Number((ultimaIA && ultimaIA.timestamp) || 0);
+
         const stPrevGate = await getChatState(nome, chatId).catch(() => null);
         const lastIATsPrev = Number((stPrevGate && stPrevGate.lastIATs) || 0);
+        const lastCLItsPrev = Number((stPrevGate && stPrevGate.lastCLIts) || 0);
 
+        // Atualize apenas marcadores de probe; NÃO atualize lastCLIts ainda!
         await setChatState(nome, chatId, {
-          lastCLIts: lastClienteTs,
           ultimoProbeCLIts: lastClienteTs,
           lastProbeAt: Date.now()
         });
 
-        // NÃO RESPONDA SE NÃO HOUVE NOVA FALA DO CLIENTE DESDE A ÚLTIMA IA!
-        if (!lastClienteTs || Math.max(lastIaTs, lastIATsPrev) >= lastClienteTs) {
+        // NOVO GATE: só responde SE o cliente falou ALGO NOVO desde a última IA/CLIts
+        const hasNewClient = lastClienteTs && (lastClienteTs > Math.max(lastIATsPrev, lastIaTs, lastCLItsPrev));
+
+        if (!hasNewClient) {
           logger.info('[RESPONDER][GATE] Sem novas mensagens do cliente — não responder', {
-            nome, chatId, lastClienteTs, lastIaTs, lastIATsPrev
+            nome, chatId, lastClienteTs, lastIaTs, lastIATsPrev, lastCLItsPrev
           });
           try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO }); } catch {}
           try { await pendingDel(nome, chatId); } catch {}
@@ -2732,9 +2746,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
             try {
               await setChatState(nome, chatId, {
+                state: CHAT_STATES.AGUARDANDO,
                 lastIATs: Date.now(),
-                lastProbeAt: Date.now(),
-                state: CHAT_STATES.AGUARDANDO
+                lastCLIts: lastClienteTs, // NOVO: só agora persistimos o "último cliente visto"!
+                lastProbeAt: Date.now()
               });
         } catch {}
 
