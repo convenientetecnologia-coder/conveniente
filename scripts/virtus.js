@@ -409,6 +409,54 @@ function extractBairro(text, pattern) {
   return String(m[1] || '').trim().replace(/[\s,.;:!?]+$/,'');
 }
 
+function interpretYesNo(raw) {
+  const t = normTxt(raw || '');
+  if (/^(sim|isso|claro|afirmativo)\b/.test(t)) return true;
+  if (/\b(vou precisar|com ajudante)\b/.test(t)) return true;
+  if (/^(nao|não|n)\b/.test(t)) return false;
+  if (/\b(sem ajudante|nao vou precisar|não vou precisar|dispenso)\b/.test(t)) return false;
+  return null;
+}
+
+function inferCasaApto(raw) {
+  const t = normTxt(raw || '');
+  if (/\b(apartamento|apto|apt.?)\b/.test(t)) return 'apartamento';
+  if (/\b(casa)\b/.test(t)) return 'casa';
+  return null;
+}
+
+async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastClientText) {
+  try {
+    const askedField = detectAskedFieldFromText(lastIaText || '');
+    if (!askedField) return;
+
+    if (askedField === 'ajudante') {
+      const yn = interpretYesNo(lastClientText);
+      if (yn !== null) {
+        await atualizarDadosColetados(chatId, { dados: { ajudante: yn } });
+        try { await issues.append(perfil, 'mil_action', `ajudante_inferido:${yn ? 'sim' : 'nao'} (via answer_shortcut)`); } catch {}
+      }
+    }
+    if (askedField === 'saida_tipo') {
+      const tipo = inferCasaApto(lastClientText);
+      if (tipo) {
+        await atualizarDadosColetados(chatId, { dados: { saida_tipo: tipo } });
+        try { await issues.append(perfil, 'mil_action', `saida_tipo_inferido:${tipo}`); } catch {}
+      }
+    }
+    if (askedField === 'destino_tipo') {
+      const tipo = inferCasaApto(lastClientText);
+      if (tipo) {
+        await atualizarDadosColetados(chatId, { dados: { destino_tipo: tipo } });
+        try { await issues.append(perfil, 'mil_action', `destino_tipo_inferido:${tipo}`); } catch {}
+      }
+    }
+
+  } catch (e) {
+    try { await issues.append(perfil, 'mil_action', `applyBinaryAnswersFromContext_error:${(e && e.message) || e}`); } catch {}
+  }
+}
+
 // === FIM: HELPERS DE ATENDIMENTO (NÃO REMOVER) ===
 
 async function logIssue(nome, type, message) {
@@ -1255,10 +1303,11 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     return;
   }
   
+  // antes de navegar, respeitar locks/robe ativo
   try {
     const b = getBrowserFromPage(page);
-    if (b && b._sendLock && b._sendLock.active) {
-      logger.info('[VIRTUS][garantirMarketplace] sendLock ativo — não navegar/não recarregar.', nome ? { nome } : {});
+    if (b && ((b._sendLock && b._sendLock.active) || (nome && b._robeActiveFor === nome))) {
+      logger.info('[VIRTUS][garantirMarketplace] sendLock/robeActive — não navegar/recarregar.', nome ? { nome } : {});
       return;
     }
   } catch {}
@@ -2679,7 +2728,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return cli.length ? cli[cli.length - 1] : null;
         })();
 
-        await inferBairrosFromText(nome, chatId, ultimaCliente?.texto);
+        await applyBinaryAnswersFromContext(
+          nome,
+          chatId,
+          (ultimaIA && ultimaIA.texto) || '',
+          (ultimaCliente && ultimaCliente.texto) || ''
+        );
+
+        await inferBairrosFromText(
+          nome,
+          chatId,
+          (ultimaCliente && ultimaCliente.texto) || '',
+          (ultimaIA && ultimaIA.texto) || ''
+        );
 
         // --- PATCH GATING ANTI-LOOP (insira exatamente aqui) ---
         const lastClienteTs = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
@@ -3234,15 +3295,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
   const pedidosEnviados = new Set();  // chatId já enviados
 
-  async function inferBairrosFromText(perfil, chatId, lastText) {
+  async function inferBairrosFromText(perfil, chatId, lastText, lastIaText) {
     if (!lastText) return;
     const st = await getChatState(perfil, chatId).catch(()=>null);
     const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
-    
+
+    // 1) Padrão "X - Y" | "X / Y" | "X | Y" => saida/destino
     try {
       const raw = String(lastText || '');
-      const normTraços = raw.replace(/[–—−]/g, '-').trim(); // normaliza traços longos
-      const parts = normTraços.split(/\s*[-/|]\s*/);     // separadores: -, /, | 
+      const normTracos = raw.replace(/[–—−]/g, '-').trim();
+      const parts = normTracos.split(/\s*[-/|]\s*/);
       if (parts && parts.length === 2) {
         const p1 = parts[0].trim();
         const p2 = parts[1].trim();
@@ -3251,13 +3313,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!dc.bairro_destino && p2) patch.bairro_destino = p2;
         if (Object.keys(patch).length > 0) {
           await atualizarDadosColetados(chatId, { dados: patch });
-          logger.info('[VIRTUS_STATE] infer_bairros_pair', { nome: perfil, chatId, saida: patch.bairro_saida || null, destino: patch.bairro_destino || null });
-          return; // já inferiu pelos separadores
+          logger.info('[VIRTUS_STATE] infer_bairros_pair', { nome: perfil, chatId, saida: patch.bairro_saida||null, destino: patch.bairro_destino||null });
+          return;
         }
       }
     } catch {}
-    
-    const t = normTxt(lastText);
+
+    const askedFromIA = detectAskedFieldFromText(lastIaText || '');
+
     const saidaPatts = [
       /\b(?:de|do|da|desde|buscar\s+em|pegar\s+em)\s+([a-zà-ÿ0-9 .-]{2,})\b/i
     ];
@@ -3265,19 +3328,69 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       /\b(?:para|pra|pro|em|no|na|ao)\s+([a-zà-ÿ0-9 .-]{2,})\b/i,
       /\b(?:levar|entregar)\s+(?:para|pro|pra)\s+([a-zà-ÿ0-9 .-]{2,})\b/i
     ];
+    const bairroWord = /(?:\bbairro\s+)([a-zà-ÿ0-9 .-]{2,})/i;
+    function extractB(s, re) {
+      const m = re.exec(s);
+      return m ? String(m[1] || '').trim().replace(/[\s,.;:!?]+$/,'') : null;
+    }
+
     let saida = null, destino = null;
-    for (const p of saidaPatts) { const b = extractBairro(lastText, p); if (b) { saida = b; break; } }
-    for (const p of destPatts) { const b = extractBairro(lastText, p); if (b) { destino = b; break; } }
-    const stFlow = nextMissingField(dc);
-    const singleWord = /^\s*[a-zà-ÿ0-9.-]{2,}\s*$/i.test(lastText.trim());
-    if (!saida && !destino && singleWord && stFlow === 'bairro_saida' && !dc.bairro_saida) saida = lastText.trim();
-    if (!destino && !saida && singleWord && stFlow === 'bairro_destino' && !dc.bairro_destino) destino = lastText.trim();
+
+    // 2) Padrões verbais
+    for (const p of saidaPatts) {
+      const b = extractB(lastText, p);
+      if (b) { saida = b; break; }
+    }
+    for (const p of destPatts) {
+      const b = extractB(lastText, p);
+      if (b) { destino = b; break; }
+    }
+
+    // 3) "bairro X"
+    if (!saida && !destino) {
+      const bx = extractB(lastText, bairroWord);
+      if (bx) {
+        if (!dc.bairro_saida && (askedFromIA === 'bairro_saida' || (!askedFromIA && !dc.bairro_saida))) {
+          saida = bx;
+        } else if (!dc.bairro_destino) {
+          destino = bx;
+        }
+      }
+    }
+
+    // 4) Palavra única (single word) + sensível à pergunta anterior
+    if (!saida && !destino) {
+      const isSingle = /^\s*[a-zà-ÿ0-9.-]{2,}\s*$/i.test((lastText || '').trim());
+      if (isSingle) {
+        if (askedFromIA === 'bairro_saida' && !dc.bairro_saida) {
+          saida = (lastText || '').trim();
+        } else if (askedFromIA === 'bairro_destino' && !dc.bairro_destino) {
+          destino = (lastText || '').trim();
+        }
+      }
+    }
+
+    // 5) Palavra única (single word) + ordem do fluxo (nextMissingField)
+    if (!saida && !destino) {
+      const stFlow = nextMissingField(dc);
+      const isSingle = /^\s*[a-zà-ÿ0-9.-]{2,}\s*$/i.test((lastText || '').trim());
+      if (isSingle) {
+        if (stFlow === 'bairro_saida' && !dc.bairro_saida) {
+          saida = (lastText || '').trim();
+        } else if (stFlow === 'bairro_destino' && !dc.bairro_destino) {
+          destino = (lastText || '').trim();
+        }
+      }
+    }
+
     const patch = {};
     if (saida && !dc.bairro_saida) patch.bairro_saida = saida;
     if (destino && !dc.bairro_destino) patch.bairro_destino = destino;
+
     if (Object.keys(patch).length) {
       await atualizarDadosColetados(chatId, { dados: patch });
       logger.info('[VIRTUS_STATE] infer_bairros', { nome: perfil, chatId, saida: patch.bairro_saida || null, destino: patch.bairro_destino || null });
+      try { await issues.append(perfil, 'mil_action', `infer_bairros saida="${patch.bairro_saida||''}" destino="${patch.bairro_destino||''}"`); } catch {}
     }
   }
 

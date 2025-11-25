@@ -185,15 +185,23 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
 
     function onlyDigits(s){ return String(s||'').replace(/\D/g,''); }
 
+    // Sempre mascarar qualquer número no texto de resposta (não ecoar telefone do cliente)
     const originalResposta = String(obj.resposta || '');
-    const combinedText = (originalResposta + ' ' + txt);
+    let respostaSan = String(originalResposta || '');
+    try {
+      respostaSan = respostaSan.replace(/\b\d{8,11}\b/g, '******');          // sequências "coladas" (8–11 dígitos)
+      respostaSan = respostaSan.replace(/\+?\d[\d\s().-]{7,}\d/g, '******'); // com separadores (espaços, ( ), -, .)
+    } catch {}
+
+    // Base de extração (sem sanitizar), para não prejudicar detecção de números
+    const combinedText = String(txt || '');
 
     // Regex canônicas
     const dddIsoladoRe = /^[1-9]\d$/;
     const telParcialRe = /\b(\d{8,9})\b/;
     const telComDDDRe = /\b(\d{10,11})\b/;
 
-    // 1) Extrair telefone completo (10–11 dígitos)
+    // 1) Extrair telefone completo (10–11 dígitos) – prioridade: campo do JSON > fallback no texto
     let telefoneOK = null;
     const telObj = obj.telefone_extraido ? onlyDigits(obj.telefone_extraido) : '';
     const pickObj = (telObj && (telObj.length === 10 || telObj.length === 11) && isValidBRPhoneWithDDD(telObj)) ? telObj : null;
@@ -220,7 +228,7 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       } catch {}
     }
 
-    // 3) DDD isolado do lastClientText (se existir)
+    // 3) DDD isolado do lastClientText (ou do próprio JSON, se vier)
     let dddInformado = null;
     try {
       const lastTrim = String(lastClientText || '').trim();
@@ -228,7 +236,7 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       else if (obj.dados && obj.dados.ddd && dddIsoladoRe.test(String(obj.dados.ddd))) dddInformado = String(obj.dados.ddd);
     } catch {}
 
-    // 4) Montagem telefone completo local (sem eco) — ddd + parcial
+    // 4) Montagem local: DDD + telefone parcial → telefone completo válido
     if (!telefoneOK && dddInformado && telefoneParcial) {
       const combinado = String(dddInformado) + String(telefoneParcial);
       if (isValidBRPhoneWithDDD(combinado)) {
@@ -237,6 +245,7 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       }
     }
 
+    // 5) Consolidar campos "dados"
     const safeDados = obj.dados && typeof obj.dados === 'object' ? obj.dados : {};
     const dadosOut = {
       ajudante: safeDados.ajudante ?? null,
@@ -253,6 +262,7 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     if (dddInformado) dadosOut.ddd = dddInformado;
     if (safeDados.debug) dadosOut.debug = safeDados.debug;
 
+    // 6) Critério de finalização real (somente se todos os campos + WhatsApp válido existem)
     const finalizavel =
       !!dadosOut.itens &&
       !!dadosOut.bairro_saida &&
@@ -261,12 +271,6 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       !!dadosOut.saida_tipo &&
       !!dadosOut.destino_tipo &&
       !!telefoneOK;
-
-    // Sanitização: remover qualquer sequência de 8–11 dígitos da resposta
-    let respostaSan = originalResposta;
-    try {
-      respostaSan = respostaSan.replace(/\b\d{8,11}\b/g, '******');
-    } catch {}
 
     return {
       resposta: respostaSan || '',
