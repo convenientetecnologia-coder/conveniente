@@ -302,7 +302,7 @@ function maskPhoneLog(d) {
 }
 
 function removeTelefonesCompletos(texto) {
-  try { return String(texto||'').replace(/\b\d{10,11}\b/g, '******'); } catch { return String(texto||''); }
+  try { return String(texto||'').replace(/\b\d{8,11}\b/g, '******'); } catch { return String(texto||''); }
 }
 
 function nextMissingField(dc = {}) {
@@ -332,9 +332,9 @@ async function bumpAskCount(perfil, chatId, field) {
 
 function montarRespostaForcadaWhatsAppSemDDD(dados, askCounts = {}) {
   const varWpp = [
-    'Quem faz o orçamento é o motorista. Me passa seu WhatsApp sem o DDD, por favor.',
-    'O valor é passado direto pelo motorista. Pode me mandar seu WhatsApp sem o DDD, por gentileza?',
-    'Quem informa o preço é o motorista. Me envia o WhatsApp sem o DDD, por favor.'
+    'Quem passa o orçamento é o motorista. Me passa seu WhatsApp, por favor? Vou repassar seu pedido e ele já te chama no WhatsApp para te informar o valor.',
+    'O valor é passado diretamente pelo motorista. Pode me mandar seu WhatsApp? Em seguida ele te chama lá e te informa o preço.',
+    'Quem informa o valor é o motorista. Me envia seu WhatsApp, por gentileza? Vou repassar e ele já te chama para te dizer o orçamento.'
   ];
   const wpp = varWpp[(askCounts.telefone || 0) % varWpp.length];
   const falta = nextMissingField(dados);
@@ -1495,7 +1495,8 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     ).catch(()=>{});
 
     const toSend = String(msg || '');
-    await p.keyboard.type(toSend, { delay: 0 });
+    const safeMsg = removeTelefonesCompletos(toSend);
+    await p.keyboard.type(safeMsg, { delay: 0 });
 
     try {
       const urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
@@ -2724,9 +2725,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.info('[VIRTUS_DDD] ddd_isolado', { nome, chatId, ddd: lastTextPlain });
           const askCountsNow = await getAskCounts(nome, chatId);
           const frases = [
-            'Perfeito! Me manda só o número do WhatsApp (sem o DDD), por favor.',
-            'Legal! Pode enviar só o número do WhatsApp (sem o DDD)?',
-            'Show! Só o número do WhatsApp, sem o DDD.'
+            'Perfeito! Pode me enviar o número do WhatsApp?',
+            'Legal! Me manda o número do WhatsApp, por favor?',
+            'Show! Me envia o número do WhatsApp?'
           ];
           const msg = frases[(askCountsNow.telefone || 0) % frases.length];
           await bumpAskCount(nome, chatId, 'telefone');
@@ -2774,6 +2775,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         if (hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
           logger.info('[VIRTUS_PRICE_INTENT] detectado', { nome, chatId });
+          if (issues) await issues.append(nome, 'wpp_first_ask:price_intent', `chat=${chatId}`);
           const askCountsNow = await getAskCounts(nome, chatId);
           const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
           const dadosColetadosNow = (stPrev2 && stPrev2.dadosColetados) ? stPrev2.dadosColetados : {};
@@ -3236,6 +3238,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!lastText) return;
     const st = await getChatState(perfil, chatId).catch(()=>null);
     const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
+    
+    try {
+      const raw = String(lastText || '');
+      const normTraços = raw.replace(/[–—−]/g, '-').trim(); // normaliza traços longos
+      const parts = normTraços.split(/\s*[-/|\]\s*/);     // separadores: -, /, |, 
+      if (parts && parts.length === 2) {
+        const p1 = parts[0].trim();
+        const p2 = parts[1].trim();
+        const patch = {};
+        if (!dc.bairro_saida && p1) patch.bairro_saida = p1;
+        if (!dc.bairro_destino && p2) patch.bairro_destino = p2;
+        if (Object.keys(patch).length > 0) {
+          await atualizarDadosColetados(chatId, { dados: patch });
+          logger.info('[VIRTUS_STATE] infer_bairros_pair', { nome: perfil, chatId, saida: patch.bairro_saida || null, destino: patch.bairro_destino || null });
+          return; // já inferiu pelos separadores
+        }
+      }
+    } catch {}
+    
     const t = normTxt(lastText);
     const saidaPatts = [
       /\b(?:de|do|da|desde|buscar\s+em|pegar\s+em)\s+([a-zà-ÿ0-9 .-]{2,})\b/i
@@ -3291,6 +3312,50 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         dadosColetados: cur,
         updatedAt: Date.now()
       });
+    } catch {}
+
+    // REFORÇO FINAL DE WHATSAPP — quando só falta telefone (máximo 1 a cada 2min)
+    try {
+      const stNow = await getChatState(nome, chatId).catch(()=>null);
+      const dcNow = (stNow && stNow.dadosColetados) ? stNow.dadosColetados : (dadosColetados.get(chatId) || {});
+      
+      const hasIt = !!dcNow.itens;
+      const hasBS = !!dcNow.bairro_saida;
+      const hasBD = !!dcNow.bairro_destino;
+      const hasAj = (typeof dcNow.ajudante === 'boolean');
+      const hasST = !!dcNow.saida_tipo;
+      const hasDT = !!dcNow.destino_tipo;
+      const needsSE = (dcNow.saida_tipo === 'apartamento') ? (typeof dcNow.saida_elevador === 'boolean') : true;
+      const needsDE = (dcNow.destino_tipo === 'apartamento') ? (typeof dcNow.destino_elevador === 'boolean') : true;
+      const temWhatsLocal = !!(dcNow.telefone && promptFretes.isValidBRPhoneWithDDD(dcNow.telefone));
+      
+      const camposOkSemTelefone =
+        hasIt && hasBS && hasBD && hasAj && hasST && hasDT && needsSE && needsDE && !temWhatsLocal;
+      
+      if (camposOkSemTelefone) {
+        const lastAt = (stNow && stNow.lastWhatsReminderAt) ? Number(stNow.lastWhatsReminderAt) : 0;
+        const limitMs = 2 * 60 * 1000; // 2 minutos
+        
+        if (!lastAt || (Date.now() - lastAt) >= limitMs) {
+          const askCountsNow = await getAskCounts(nome, chatId);
+          const variantes = [
+            'Perfeito, já tenho todas as informações. Só ficou faltando o seu WhatsApp para o motorista te passar o orçamento. Pode me enviar?',
+            'Tudo certo com os dados! Só preciso do seu WhatsApp para repassar ao motorista e ele te informar o valor. Pode mandar?',
+            'Ótimo! Com as informações aqui, basta seu WhatsApp que o motorista já te chama com o orçamento. Me envia, por favor?'
+          ];
+          const msg = removeTelefonesCompletos(variantes[(askCountsNow.telefone || 0) % variantes.length]);
+          await bumpAskCount(nome, chatId, 'telefone');
+          
+          const pRef = await ensurePage().catch(()=>null);
+          if (pRef) {
+            let campo = await waitForComposer(pRef, 8000);
+            if (!campo) campo = await refocusComposerNoReload(pRef, chatId);
+            if (campo) await sendMessageSafe(pRef, campo, msg, nome, chatId);
+          }
+          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
+          if (issues) await issues.append(nome, 'wpp_final_reminder:missing_only_phone', `chat=${chatId}`);
+        }
+      }
     } catch {}
 
     // REGRA CRÍTICA: NUNCA envia pedido sem TELEFONE E CIDADE
@@ -3543,7 +3608,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       
-      await sendMessageSafe(p, campo, mensagem, nome, chatId);
+      await sendMessageSafe(p, campo, removeTelefonesCompletos(mensagem), nome, chatId);
       logger.info('[MESSENGER] Mensagem final enviada', { chatId });
     } catch (e) {
       logger.warn('[MESSENGER] Falha ao enviar mensagem final', { chatId, error: e && e.message || e });
