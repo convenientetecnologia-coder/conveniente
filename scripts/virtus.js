@@ -3242,7 +3242,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     try {
       const raw = String(lastText || '');
       const normTraços = raw.replace(/[–—−]/g, '-').trim(); // normaliza traços longos
-      const parts = normTraços.split(/\s*[-/|\]\s*/);     // separadores: -, /, |, 
+      const parts = normTraços.split(/\s*[-/|\\\]\s*/);     // separadores: -, /, |, \ 
       if (parts && parts.length === 2) {
         const p1 = parts[0].trim();
         const p2 = parts[1].trim();
