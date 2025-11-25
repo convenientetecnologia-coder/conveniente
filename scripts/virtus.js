@@ -1533,8 +1533,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const now = Date.now();
       const dueAt = now + DEBOUNCE_MS;
 
-      // Resetar timer existente
+      // NOVO: se já há um debounce ativo, não reseta!
       const existing = debounceTimers.get(chatId);
+      if (existing && existing.dueAt && existing.dueAt > now) {
+        // já existe timer ativo; só loga, marca probe no disco e sai
+        try {
+          await setChatState(nome, chatId, {
+            lastProbeAt: now,
+          });
+        } catch {}
+        if (process.env.VIRTUS_DEBUG === '1') {
+          logger.debug('[DBNC] skip reset — já existe timer ativo', { nome, chatId, dueAt: existing.dueAt });
+        }
+        return;
+      }
+
+      // Se existir um timer "velho", limpa (defensivo)
       if (existing && existing.timerId) {
         try { clearTimeout(existing.timerId); } catch {}
       }
@@ -1555,7 +1569,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       debounceTimers.set(chatId, { timerId: tid, startedAt: now, dueAt });
 
       try {
-        await setChatState(nome, chatId, { debounceUntil: dueAt, lastProbeAt: now, state: CHAT_STATES.PENDENTE });
+        await setChatState(nome, chatId, {
+          debounceUntil: dueAt,
+          lastProbeAt: now,
+          state: CHAT_STATES.PENDENTE
+        });
       } catch {}
 
       logger.info('[DBNC] buffer started/reset', { nome, chatId, dueAt });
@@ -2055,8 +2073,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
         return;
       }
-      
-      const last = lastProbeMap.get(id) || 0;
 
       if (st && st.state === 'erro_envio') {
         logger.info(`[FILA][${nome}] ${id} estava em erro_envio — será testado novamente (fila permissiva).`);
@@ -2075,6 +2091,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       if (fila.includes(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
+        return;
+      }
+
+      // Gating para não re-schedule de forma agressiva
+      const lastProbe = lastProbeMap.get(id) || 0;
+      const MIN_RECHECK_MS = Math.max(PROBE_RECHECK_MIN_MS, Math.floor(DEBOUNCE_MS / 2));
+      if ((agoraMs - lastProbe) < MIN_RECHECK_MS) {
+        if (process.env.VIRTUS_DEBUG === '1') {
+          logger.debug(`[FILA][${nome}] [DBNC] Skip reschedule — sondado há ${agoraMs - lastProbe}ms (<${MIN_RECHECK_MS}ms)`, { chatId: id });
+        }
         return;
       }
 
