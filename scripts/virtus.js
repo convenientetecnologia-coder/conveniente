@@ -2050,22 +2050,51 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const jaFoiRespondido = st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO);
       
       if (jaFoiRespondido) {
+        // Se está aguardando o notificador, respeite a janela e não rearme ainda
         if (aguard.has(id)) {
-          // Janela de tolerância: aceita reprocessar após 15s (TTL)
-          const st = await getChatState(nome, id).catch(()=>null);
-          const lastProbe = st && st.lastProbeAt ? st.lastProbeAt : 0;
-          if ((Date.now() - lastProbe) < parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10)) {
+          const st2 = await getChatState(nome, id).catch(()=>null);
+          const lastProbe2 = st2 && st2.lastProbeAt ? st2.lastProbeAt : 0;
+          const awaitTtlMs = parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10);
+          if ((Date.now() - lastProbe2) < awaitTtlMs) {
             logger.info(`[FILA][${nome}] skip ${id} — aguardando notificador (janela ativa)`);
             return;
           }
-          const setA = getSetAguardando(nome);
-          try { setA.delete(id); clearAguardTimer(nome, id); } catch {}
+          // TTL expirou: libere o aguardando para permitir novo debounce
+          try {
+            const setA2 = getSetAguardando(nome);
+            setA2.delete(id);
+            clearAguardTimer(nome, id);
+          } catch {}
         }
+
         if (fila.includes(id)) {
           logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
           return;
         }
-        // Chats já respondidos são bufferizados via debounce (não re-enfileiramento automático)
+
+        // Anti-flood: evita re-enfileirar em janela muito curta
+        const last = lastProbeMap.get(id) || 0;
+        const MIN_RECHECK_MS = Math.max(PROBE_RECHECK_MIN_MS, Math.floor(DEBOUNCE_MS / 2));
+        const nowMs = Date.now();
+        if ((nowMs - last) < MIN_RECHECK_MS) {
+          if (process.env.VIRTUS_DEBUG === '1') {
+            logger.debug(`[FILA][${nome}] [DBNC] Skip reschedule responded — sondado há ${nowMs - last}ms (<${MIN_RECHECK_MS}ms)`, { chatId: id });
+          }
+          return;
+        }
+
+        // Marcamos que voltaremos a processar o chat (estado pendente) e rearmamos o debounce
+        try {
+          await setChatState(nome, id, {
+            state: CHAT_STATES.PENDENTE,
+            lastProbeAt: Date.now()
+          });
+        } catch {}
+
+        await scheduleDebounce(id);
+        lastProbeMap.set(id, nowMs);
+        logger.info(`[FILA][${nome}] [DBNC] Candidato ${id} bufferizado (respondido – rearmado)`);
+        mudancaFila = true;
         return;
       }
 
