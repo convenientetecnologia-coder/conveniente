@@ -121,11 +121,16 @@ Cliente: "48999998888"
 `.trim();
 }
 
-function buildUserPrompt({ cidade, historico, coletado }) {
+function buildUserPrompt({ cidade, historico, coletado, flags = {} }) {
+  const pedidoPreco = flags.pedidoPreco ? 'SIM' : 'NÃO';
+  const jaTemTelefone = (coletado && coletado.telefone) ? 'SIM' : 'NÃO';
+
   const cabecalho = [
     'Contexto do atendimento:',
     `- Cidade do perfil (atendimento): ${cidade || 'desconhecida'}`,
     '- Importante: ignore cidades diferentes que o cliente mencionar; atenda sempre na cidade do perfil.',
+    '',
+    `Sinalizadores: pedido_preco=${pedidoPreco} | telefone_ok=${jaTemTelefone}`,
     '',
     (coletado && typeof coletado === 'object'
       ? (() => {
