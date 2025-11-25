@@ -1030,6 +1030,36 @@ async function saveChatState(perfil, st) {
   return await writeJsonFsyncAtomic(CHAT_STATE_FILE(perfil), st || {});
 }
 
+// [PATCH-3][CORRIGIDO] Flush imediato e seguro do state (mescla pendências do perfil antes de salvar)
+async function flushChatStateNow(perfil) {
+  try {
+    // Coleta pendências deste perfil
+    const pendMap = CHAT_STATE_PENDING.get(perfil);
+    if (!pendMap || pendMap.size === 0) return true;
+
+    // Snapshot e limpa as pendências deste perfil
+    const localPend = Array.from(pendMap.entries()); // [ [chatId, patch], ... ]
+    CHAT_STATE_PENDING.delete(perfil);
+
+    // Carrega o state atual do disco
+    const stAll = await loadChatState(perfil);
+
+    // Aplica os patches pendentes
+    for (const [chatId, patch] of localPend) {
+      const cur = stAll[chatId] || {};
+      stAll[chatId] = Object.assign({}, cur, patch || {}, { updatedAt: Date.now() });
+    }
+
+    // Fsync imediato
+    await saveChatState(perfil, stAll);
+    return true;
+
+  } catch (e) {
+    try { logger.warn('[VIRTUS][flushChatStateNow] erro: ' + ((e && e.message) || e), { perfil }); } catch {}
+    return false;
+  }
+}
+
 async function getChatState(perfil, chatId) {
   const st = await loadChatState(perfil);
   return st[chatId] || null;
@@ -2793,6 +2823,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const msg = frases[(askCountsNow.telefone || 0) % frases.length];
           await bumpAskCount(nome, chatId, 'telefone');
 
+          // Debounce central — registra pedida e flush imediato seguro
+          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
+          await flushChatStateNow(nome);
+          try { await issues.append(nome, 'phone_ask_ddd_isolado', `chat=${chatId}`); } catch {}
+
           const pAtual0 = await ensurePage().catch(()=>null);
           if (pAtual0) {
             let campo = await waitForComposer(pAtual0, 8000);
@@ -2820,6 +2855,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const msg = frasesDdd[(askCountsNow.ddd || 0) % frasesDdd.length];
           await bumpAskCount(nome, chatId, 'ddd');
 
+          // Debounce central — registra pedida e flush imediato seguro
+          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
+          await flushChatStateNow(nome);
+          try { await issues.append(nome, 'phone_ask_parcial_numero', `chat=${chatId}`); } catch {}
+
           const pAtual0 = await ensurePage().catch(()=>null);
           if (pAtual0) {
             let campo = await waitForComposer(pAtual0, 8000);
@@ -2836,7 +2876,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         if (hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
           logger.info('[VIRTUS_PRICE_INTENT] detectado', { nome, chatId });
-          if (issues) await issues.append(nome, 'wpp_first_ask:price_intent', `chat=${chatId}`);
           const askCountsNow = await getAskCounts(nome, chatId);
           const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
           const dadosColetadosNow = (stPrev2 && stPrev2.dadosColetados) ? stPrev2.dadosColetados : {};
@@ -2845,6 +2884,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const falta = nextMissingField(dadosColetadosNow);
           if (falta) await bumpAskCount(nome, chatId, falta);
           logger.info('[VIRTUS_WPP_REQ] override', { nome, chatId });
+
+          // Debounce central — registra pedida e flush imediato seguro
+          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
+          await flushChatStateNow(nome);
+          try { await issues.append(nome, 'phone_ask_price_intent', `chat=${chatId}`); } catch {}
 
           const pAtualPrice = await ensurePage().catch(()=>null);
           if (pAtualPrice) {
@@ -3427,6 +3471,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       });
     } catch {}
 
+    // Montagem automática de telefone (DDD + parcial) com persistência imediata segura
+    try {
+      const stNow = await getChatState(nome, chatId).catch(()=>null);
+      const curDc = (stNow && stNow.dadosColetados) ? stNow.dadosColetados : (dadosColetados.get(chatId) || {});
+
+      const temDDD = curDc && curDc.ddd && String(curDc.ddd).trim().length === 2;
+      const temParcial = curDc && curDc.telefone_parcial && String(curDc.telefone_parcial).trim().length >= 8 && String(curDc.telefone_parcial).trim().length <= 9;
+      const semTelefone = !curDc || !curDc.telefone;
+
+      if (semTelefone && temDDD && temParcial) {
+        const combinado = String(curDc.ddd).replace(/\D/g,'') + String(curDc.telefone_parcial).replace(/\D/g,'');
+        if (promptFretes.isValidBRPhoneWithDDD(combinado)) {
+          curDc.telefone = combinado;
+          delete curDc.telefone_parcial;
+          await setChatState(nome, chatId, { dadosColetados: curDc, lastWhatsReminderAt: Date.now() });
+          await flushChatStateNow(nome);
+          try {
+            const dddMask = String(curDc.ddd).replace(/\D/g,'');
+            const last4 = String(combinado).replace(/\D/g,'').slice(-4);
+            await issues.append(nome, 'phone_compose_ok', `ddd=${dddMask} last4=${last4} chat=${chatId}`);
+          } catch {}
+        }
+      }
+    } catch {}
+
     // REFORÇO FINAL DE WHATSAPP — quando só falta telefone (máximo 1 a cada 2min)
     try {
       const stNow = await getChatState(nome, chatId).catch(()=>null);
@@ -3466,7 +3535,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (campo) await sendMessageSafe(pRef, campo, msg, nome, chatId);
           }
           await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
-          if (issues) await issues.append(nome, 'wpp_final_reminder:missing_only_phone', `chat=${chatId}`);
+          await flushChatStateNow(nome);
+          try { await issues.append(nome, 'phone_ask_reminder', `chat=${chatId}`); } catch {}
         }
       }
     } catch {}
@@ -3501,6 +3571,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await enviarMensagemFinal(chatId);
           await marcarRespondido(nome, chatId);
           await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
+          await flushChatStateNow(nome);
+          try {
+            const telMask = cur.telefone ? maskPhoneLog(cur.telefone) : '';
+            logger.info('[FINALIZACAO] finalizado_imediato', { chatId, telefone: telMask });
+          } catch {}
         } catch (e) {
           logger.error('[FINALIZACAO] Erro ao finalizar chat', { nome, chatId, error: e && e.message || e });
         }
@@ -3523,7 +3598,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         updatedAt: Date.now()
       });
     } catch {}
-    logger.info('[TIMER] Timer de 10min iniciado', { chatId, telefone });
+    await flushChatStateNow(nome);
+    try {
+      const dc = dadosColetados.get(chatId) || {};
+      const telMask = telefone ? maskPhoneLog(telefone) : '';
+      logger.info('[TIMER] timer_start', { chatId, cidade: dc.cidade || null, telefone: telMask });
+      await issues.append(nome, 'mil_action', `timer_start chat=${chatId} cidade="${dc.cidade||''}" tel="${telMask||''}"`);
+    } catch {}
   }
 
   function cancelarTimerFechamento(chatId) {
@@ -3555,6 +3636,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const dados = (dadosColetados && dadosColetados.get(chatId)) || {};
     const tel = dados.telefone || t.telefone || null;
     const cidade = dados.cidade || null;
+
+    try {
+      const telMask = tel ? maskPhoneLog(tel) : '';
+      logger.info('[TIMER] timer_expired', { chatId, cidade: cidade || null, telefone: telMask });
+      await issues.append(nome, 'mil_action', `timer_expired chat=${chatId} cidade="${cidade||''}" tel="${telMask||''}"`);
+    } catch {}
 
     await appendPedidoAudit(nome, chatId, 'timer_expired', { telOk: !!(tel && promptFretes.isValidBRPhoneWithDDD(tel)), cidadeOk: !!(cidade && String(cidade).trim()) });
 

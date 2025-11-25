@@ -178,7 +178,13 @@ const ISSUE_TYPES_SET = new Set([
   'login_required_detected',
   'login_required_cleared',
   'account_banned_detected',
-  'account_banned_cleared'
+  'account_banned_cleared',
+  // [NOVOS TIPOS] Pedidas de WhatsApp e composição de telefone (telemetria tipada)
+  'phone_ask_price_intent',
+  'phone_ask_ddd_isolado',
+  'phone_ask_parcial_numero',
+  'phone_ask_reminder',
+  'phone_compose_ok'
 ]);
 
 function padronizaType(type) {

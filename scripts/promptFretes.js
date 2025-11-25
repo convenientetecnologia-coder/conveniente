@@ -258,8 +258,9 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       itens: safeDados.itens ?? null
     };
 
-    if (telefoneParcial) dadosOut.telefone_parcial = telefoneParcial;
-    if (dddInformado) dadosOut.ddd = dddInformado;
+    // [ALTERAÇÃO] Só incluir peças soltas se NÃO houver telefone completo
+    if (!telefoneOK && telefoneParcial) dadosOut.telefone_parcial = telefoneParcial;
+    if (!telefoneOK && dddInformado) dadosOut.ddd = dddInformado;
     if (safeDados.debug) dadosOut.debug = safeDados.debug;
 
     // 6) Critério de finalização real (somente se todos os campos + WhatsApp válido existem)
