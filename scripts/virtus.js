@@ -2604,14 +2604,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const domain = promptFretes;
             
             const systemPrompt = domain.buildSystemPrompt();
-            const coletadoHint = stPrevGate && stPrevGate.dadosColetados ? stPrevGate.dadosColetados : null;
-            const userPrompt = domain.buildUserPrompt({ cidade: cidadePreferida, historico: historicoConversa, coletado: coletadoHint });
+            const userPrompt = domain.buildUserPrompt({ cidade: cidadePreferida, historico: historicoConversa });
             
             let parsed;
             try {
               const modelRawResp = await chatCompletion({ system: systemPrompt, user: userPrompt, provider: 'groq' });
               parsed = domain.parseModelAnswerToDomain(modelRawResp);
-              // parsed.telefone_extraido só vem com DDD; se vier apenas parcial, parsed.dados.telefone_parcial é populado.
             } catch (e) {
               logger.error('[GROQ] Erro ao chamar IA ou parsear resposta', { nome, chatId, error: e && e.message || e });
             try { await pendingDel(nome, chatId); } catch {}
@@ -2659,8 +2657,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               logger.info('[GROQ] Composer não encontrado, tentando refocus', { nome, chatId });
               campoEnvio = await refocusComposerNoReload(pAtual, chatId, anchorSel);
             }
-            // Observação: o modelo está orientado a não misturar pedido de DDD com outras perguntas.
-            // Este client apenas envia a resposta gerada, sem concatenar outras perguntas.
 
             if (!campoEnvio) {
               logger.warn('[GROQ] Composer indisponível após refocus - marcando cooldown', { nome, chatId });
@@ -2692,8 +2688,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 ultimaRespostaEnviada: respostaFinal,
                 lastProbeAt: Date.now()
               });
-              // OBS: não solicitar novamente WhatsApp aqui; o modelo já é instruído a não repetir,
-              // e o estado (dadosColetados) impede finalização sem DDD.
               
               await sendMessageSafe(pAtual, campoEnvio, respostaFinal, nome, chatId);
               await appendIaLine(nome, chatId, respostaFinal);
@@ -2803,7 +2797,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             localizacao: localizacaoFormatada,
             urlClassificado
           });
-          // Fila do Notificador: permanece deduplicada por chat; ACK controlado pelo polling.
 
         }
 
@@ -3008,25 +3001,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (!dadosColetados.has(chatId)) dadosColetados.set(chatId, {});
     const cur = dadosColetados.get(chatId);
     if (cidade && !cur.cidade) cur.cidade = cidade;
-    if (telefone) {
-      const dig = String(telefone || '').replace(/\D/g,'');
-      if (dig.length >= 10 && dig.length <= 11) {
-        cur.telefone = dig;
-        delete cur.telefone_parcial;
-      } else if (dig.length >= 8 && dig.length <= 9 && !cur.telefone) {
-        cur.telefone_parcial = dig;
-      }
-    }
-    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens','data_hora','telefone_parcial'];
+    if (telefone) cur.telefone = telefone;
+    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens','data_hora'];
     for (const k of keys) {
-      if (dados && dados[k] != null) {
-        if (k === 'telefone_parcial') {
-          const tp = String(dados[k]||'').replace(/\D/g,'');
-          if (!cur.telefone && tp && (tp.length === 8 || tp.length === 9)) cur.telefone_parcial = tp;
-          continue;
-        }
-        cur[k] = dados[k];
-      }
+      if (dados && dados[k] != null) cur[k] = dados[k];
     }
     dadosColetados.set(chatId, cur);
     try {
