@@ -705,6 +705,16 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       } else {
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
+
+      // Atualiza lastIATs para acionar o gating e impedir reenvio futuro da mesma resposta
+      try {
+        await setChatState(nomePerfil, proximo.chatId, { lastIATs: Date.now() });
+        if (typeof flushChatStateNow === 'function') {
+          await flushChatStateNow(nomePerfil);
+        }
+      } catch (e) {
+        try { logger.warn('[NOTIFICADOR][GATING] Falha ao atualizar lastIATs: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId }); } catch {}
+      }
       
       try {
         await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
