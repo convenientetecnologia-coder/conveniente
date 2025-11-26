@@ -481,6 +481,60 @@ function composeWhatsAskLite(dados = {}) {
   return 'Perfeito! Coletamos tudo. Pode me enviar o seu WhatsApp? O motorista te chama e te informa o orçamento.';
 }
 
+function getNewClientMessagesSince(historico, cutTs) {
+  try {
+    return (historico || []).filter(m => m && m.autor === 'cliente' && Number(m.timestamp || 0) > Number(cutTs || 0));
+  } catch {
+    return [];
+  }
+}
+
+async function processNewClientBatch(perfil, chatId, msgs, lastIaText) {
+  // Aplica, em ordem, as inferências de cada mensagem do cliente (não só a última)
+  for (const m of (msgs || [])) {
+    const tx = String(m && m.texto || '').trim();
+
+    // 1) Ajudante, casa/apto etc. (com base na pergunta anterior da IA)
+    try { await applyBinaryAnswersFromContext(perfil, chatId, lastIaText || '', tx); } catch {}
+
+    // 2) Bairros (usa heurística e a pergunta anterior)
+    try { await inferBairrosFromText(perfil, chatId, tx, lastIaText || ''); } catch {}
+
+    // 3) DDD isolado (mensagem apenas 2 dígitos)
+    try {
+      if (/^\s*[1-9]\d\s*$/.test(tx)) {
+        const ddd = tx.replace(/\D/g, '');
+        if (ddd && ddd.length === 2) {
+          await atualizarDadosColetados(chatId, { dados: { ddd } });
+        }
+      }
+    } catch {}
+
+    // 4) Número parcial (8–9 dígitos) — pega o último block numérico da mensagem
+    try {
+      const parts = tx.match(/\b(\d{8,9})\b/g) || [];
+      if (parts.length > 0) {
+        const parcial = String(parts[parts.length - 1] || '').replace(/\D/g, '');
+        if (parcial && (parcial.length === 8 || parcial.length === 9)) {
+          await atualizarDadosColetados(chatId, { dados: { telefone_parcial: parcial } });
+        }
+      }
+    } catch {}
+  }
+}
+
+async function waitForSendLockRelease(p, maxMs = 15000) {
+  try {
+    const b = getBrowserFromPage(p);
+    const start = Date.now();
+    while (true) {
+      if (!b || !b._sendLock || !b._sendLock.active) return true;
+      if ((Date.now() - start) > maxMs) return false;
+      await sleep(120);
+    }
+  } catch { return true; }
+}
+
 // === FIM: HELPERS DE ATENDIMENTO (NÃO REMOVER) ===
 
 async function logIssue(nome, type, message) {
@@ -1610,7 +1664,11 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     const toSend = String(msg || '');
     const safeMsg = sanitizeOutgoing(removeTelefonesCompletos(toSend));
     const jitter = () => 8 + Math.floor(Math.random() * 7); // 8–14ms por caractere
-    await p.keyboard.type(safeMsg, { delay: jitter() });
+    try {
+      await campo.type(safeMsg, { delay: jitter() });
+    } catch {
+      await p.keyboard.type(safeMsg, { delay: jitter() }); // fallback
+    }
 
     try {
       const urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
@@ -2793,20 +2851,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return cli.length ? cli[cli.length - 1] : null;
         })();
 
-        await applyBinaryAnswersFromContext(
-          nome,
-          chatId,
-          (ultimaIA && ultimaIA.texto) || '',
-          (ultimaCliente && ultimaCliente.texto) || ''
-        );
-
-        await inferBairrosFromText(
-          nome,
-          chatId,
-          (ultimaCliente && ultimaCliente.texto) || '',
-          (ultimaIA && ultimaIA.texto) || ''
-        );
-
         // --- PATCH GATING ANTI-LOOP (insira exatamente aqui) ---
         const lastClienteTs = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
         const lastIaTs = Number((ultimaIA && ultimaIA.timestamp) || 0);
@@ -2814,6 +2858,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const stPrevGate = await getChatState(nome, chatId).catch(() => null);
         const lastIATsPrev = Number((stPrevGate && stPrevGate.lastIATs) || 0);
         const lastCLItsPrev = Number((stPrevGate && stPrevGate.lastCLIts) || 0);
+        const lastIaTs = Number((ultimaIA && ultimaIA.timestamp) || 0);
+        const cutTs = Math.max(lastIATsPrev || 0, lastIaTs || 0, lastCLItsPrev || 0);
+
+        // Janela de novas mensagens do cliente desde a última IA
+        const novasMsgs = getNewClientMessagesSince(historicoConversa, cutTs);
+
+        // Processa cada mensagem da janela, atualizando dados (ajudante/casa/apto/bairros/ddd/parcial)
+        await processNewClientBatch(nome, chatId, novasMsgs, (ultimaIA && ultimaIA.texto) || '');
+
+        // Detecta intenção de preço em QUALQUER mensagem nova (não só a última)
+        const priceIntentBatch = novasMsgs.some(m => hasPriceIntent(m && m.texto || ''));
 
         // Atualize apenas marcadores de probe; NÃO atualize lastCLIts ainda!
         await setChatState(nome, chatId, {
@@ -2945,35 +3000,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         // IA-FIRST: seguir para o LLM sem atalho.
 
-        // IA-FIRST: se cliente pediu preço e ainda não temos Whats válido, peça WhatsApp UMA vez (full), sem chamar o LLM neste turno
-        if (hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
-          const stPhase = await getChatState(nome, chatId).catch(()=>null);
-          const phase = (stPhase && stPhase.whatsAskedPhase) || 'none';
-          if (phase === 'none') {
-            const askCountsNow = await getAskCounts(nome, chatId);
-            const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
-            const dadosColetadosNow = (stPrev2 && stPrev2.dadosColetados) ? stPrev2.dadosColetados : {};
-            const respostaWppFull = montarRespostaForcadaWhatsAppSemDDD(dadosColetadosNow, askCountsNow); // full + próxima pergunta
-            await bumpAskCount(nome, chatId, 'telefone');
-            await setChatState(nome, chatId, {
-              whatsAskedPhase: 'full',
-              firstWhatsAskAt: Date.now()
-            });
-            await flushChatStateNow(nome);
-
-            const pAtualIA = await ensurePage().catch(()=>null);
-            if (pAtualIA) {
-              let campo = await waitForComposer(pAtualIA, 8000);
-              if (!campo) campo = await refocusComposerNoReload(pAtualIA, chatId);
-              if (campo) await sendMessageSafe(pAtualIA, campo, respostaWppFull, nome, chatId);
-            }
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-          // Se já pedimos (phase !== 'none'), não pede de novo aqui; segue para o LLM.
-        }
 
         const pAtual = await ensurePage().catch(()=>null);
 
@@ -3082,7 +3108,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               return;
             }
 
-            const respostaFinalRaw = String(parsed.resposta || '').trim();
+            let respostaFinalRaw = String(parsed.resposta || '').trim();
+            
+            // Se houve pedido de preço neste lote e ainda não pedimos WhatsApp, prefixa a FULL 1x
+            try {
+              const stPhase = await getChatState(nome, chatId).catch(()=>null);
+              const phase = (stPhase && stPhase.whatsAskedPhase) || 'none';
+
+              // Telefone válido no state?
+              const stNowTel = await getChatState(nome, chatId).catch(()=>null);
+              const dcTel = (stNowTel && stNowTel.dadosColetados) ? stNowTel.dadosColetados : {};
+              const telOk = !!(dcTel.telefone && promptFretes.isValidBRPhoneWithDDD(dcTel.telefone));
+
+              if (priceIntentBatch && !telOk && phase === 'none') {
+                const full = composeWhatsAskFull(dcTel);
+                const prefixed = `${full} ${respostaFinalRaw}`;
+                respostaFinalRaw = prefixed;
+                await bumpAskCount(nome, chatId, 'telefone');
+                await setChatState(nome, chatId, { whatsAskedPhase: 'full', firstWhatsAskAt: Date.now() });
+                await flushChatStateNow(nome);
+              }
+            } catch {}
+            
             const respostaFinal = removeTelefonesCompletos(respostaFinalRaw);
             logger.info('[VIRTUS_RESP] ok', { nome, chatId, sanitized: respostaFinal !== respostaFinalRaw });
             
@@ -3600,9 +3647,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           const pRef = await ensurePage().catch(()=>null);
           if (pRef) {
-            let campo = await waitForComposer(pRef, 8000);
-            if (!campo) campo = await refocusComposerNoReload(pRef, chatId);
-            if (campo) await sendMessageSafe(pRef, campo, removeTelefonesCompletos(msg), nome, chatId);
+            await waitForSendLockRelease(pRef, 12000);
+            await acquireSendGuard(pRef, chatId);
+            try {
+              let campo = await waitForComposer(pRef, 8000);
+              if (!campo) campo = await refocusComposerNoReload(pRef, chatId);
+              if (campo) await sendMessageSafe(pRef, campo, removeTelefonesCompletos(msg), nome, chatId);
+            } finally {
+              releaseSendGuard(pRef);
+            }
           }
           await bumpAskCount(nome, chatId, 'telefone');
           await setChatState(nome, chatId, patch);
@@ -3878,7 +3931,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
       
-      await sendMessageSafe(p, campo, removeTelefonesCompletos(mensagem), nome, chatId);
+      await waitForSendLockRelease(p, 12000);
+      await acquireSendGuard(p, chatId);
+      try {
+        await sendMessageSafe(p, campo, removeTelefonesCompletos(mensagem), nome, chatId);
+      } finally {
+        releaseSendGuard(p);
+      }
       logger.info('[MESSENGER] Mensagem final enviada', { chatId });
     } catch (e) {
       logger.warn('[MESSENGER] Falha ao enviar mensagem final', { chatId, error: e && e.message || e });
@@ -3984,7 +4043,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               hasComposer = !!campo;
             }
             if (okChat && hasComposer) {
-              await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+              await waitForSendLockRelease(p, 12000);
+              await acquireSendGuard(p, chatId);
+              try {
+                await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+              } finally {
+                releaseSendGuard(p);
+              }
               return true;
             }
           } catch {}
@@ -4020,7 +4085,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             throw new Error('context_lost');
           }
           
-          await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+          await waitForSendLockRelease(p, 12000);
+          await acquireSendGuard(p, chatId);
+          try {
+            await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+          } finally {
+            releaseSendGuard(p);
+          }
           
           logger.info('[MESSENGER] ✅✅✅ Enviada (robusta)', { nome, chatId, attempt });
           return true;
