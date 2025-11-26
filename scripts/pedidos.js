@@ -5,6 +5,8 @@ const path = require('path');
 const EventEmitter = require('events');
 const issues = require('./issues.js');
 const { extractOrderFieldsLLM } = require('./iaExtractors.js');
+const fileStore = require('./fileStore.js');
+const MAX_ASK_RETRIES = parseInt(process.env.MAX_ASK_RETRIES || '3', 10);
 
 const ROOT = path.join(__dirname, '..', 'dados', 'perfis');
 function stateFile(perfil){ return path.join(ROOT, perfil, 'pedidos_state.json'); }
@@ -179,6 +181,11 @@ class PedidoOrchestrator extends EventEmitter {
     s.askCounts = s.askCounts || {};
     if (field) s.askCounts[field] = (s.askCounts[field] || 0) + 1;
     this._set(perfil, chatId, s);
+    // Anti-loop: se exceder MAX_ASK_RETRIES e ainda faltar o campo → fallback humano
+    const stillMissing = Array.isArray(s.missing) && s.missing.includes(field);
+    if (field && stillMissing && s.askCounts[field] >= MAX_ASK_RETRIES) {
+      fallbackToHuman(perfil, chatId, `max_retries_${field}`);
+    }
   }
 
   markSentAndFreeze(perfil, chatId, tipo='completo') {
@@ -219,6 +226,19 @@ class PedidoOrchestrator extends EventEmitter {
     const allMsgs = Array.isArray(mensagensDoCliente) ? mensagensDoCliente : [];
     const campos = await extractOrderFieldsLLM({ perfil, chatId, mensagens: allMsgs, contexto: contexto || {} });
     const snap = this.upsertFromIA(perfil, chatId, campos);
+    
+    // Anti-loop: verifica se algum campo faltante excedeu MAX_ASK_RETRIES
+    const sNow = this._get(perfil, chatId);
+    if (sNow && sNow.askCounts) {
+      for (const miss of (sNow.missing||[])) {
+        const tries = sNow.askCounts[miss] || 0;
+        if (tries >= MAX_ASK_RETRIES) {
+          fallbackToHuman(perfil, chatId, `max_retries_${miss}`);
+          break;
+        }
+      }
+    }
+    
     // Decisões determinísticas
     if (this.readyToSendComplete(perfil, chatId)) {
       const p = this._get(perfil, chatId);
@@ -303,6 +323,20 @@ class PedidoOrchestrator extends EventEmitter {
 }
 
 const orchestrator = new PedidoOrchestrator();
+
+async function fallbackToHuman(perfil, chatId, reason) {
+  try {
+    await fileStore.withDesiredFileLockUpdate(desired => {
+      desired.perfis = desired.perfis || {};
+      desired.perfis[perfil] = { ...(desired.perfis[perfil] || {}), humanHold: true };
+      return desired;
+    });
+    try { issues.append(perfil, 'mil_action', `handoff_to_human chat=${chatId} reason=${reason||''}`); } catch {}
+    orchestrator.emit('handoffToHuman', { perfil, chatId, reason });
+  } catch (e) {
+    try { issues.append(perfil, 'mil_action', `handoff_to_human_failed chat=${chatId} reason=${(e&&e.message)||e}`); } catch {}
+  }
+}
 
 module.exports = {
   events: orchestrator, // emitter: 'orderSent', 'inactivityPing'

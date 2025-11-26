@@ -45,29 +45,31 @@ function sanitizeExtracted(obj) {
     ddd: null,
     telefone_parcial: null,
     cidade: null,
-    missing: []
+    missing: [],
+    protesto: false
   };
 
   try {
-    if (!obj || typeof obj !== 'object') return out;
+    if (!obj || typeof obj !== 'object') {
+      out.missing = computeMissing(out);
+      return out;
+    }
 
-    const pickStr = (v) => {
+    const onlyDigits = s => String(s||'').replace(/\D/g,'');
+    const normTxt = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+    const pickStr = v => {
       if (v == null) return null;
       let s = String(v).trim();
       if (!s) return null;
-      if (s.length > 180) s = s.slice(0, 180);
+      if (s.length > 180) s = s.slice(0,180);
       return s;
     };
-    const pickBool = (v) => {
-      if (v === true) return true;
-      if (v === false) return false;
-      return null;
-    };
-    const pickTipo = (v) => {
+    const pickBool = v => (v === true ? true : (v === false ? false : null));
+    const pickTipo = v => {
       const t = normTxt(v);
-      if (t === 'casa' || t === 'apartamento') return t;
-      if (/apto|apt/.test(t)) return 'apartamento';
-      if (/casa/.test(t)) return 'casa';
+      if (/ap|apt|apto|apart/.test(t)) return 'apartamento';
+      if (t.includes('apartamento')) return 'apartamento';
+      if (t.includes('casa')) return 'casa';
       return null;
     };
 
@@ -81,31 +83,34 @@ function sanitizeExtracted(obj) {
     out.destino_elevador = pickBool(obj.destino_elevador);
     out.cidade = pickStr(obj.cidade);
 
-    // Telefones
     const telFull = onlyDigits(obj.telefone);
     const ddd = onlyDigits(obj.ddd);
     const parcial = onlyDigits(obj.telefone_parcial);
 
-    if (isValidBRPhoneWithDDD(telFull)) {
+    const isValidBR = s => {
+      if (s.length === 11) return /^[1-9]{2}9\d{8}$/.test(s);
+      if (s.length === 10) return /^[1-9]{2}[2-9]\d{7}$/.test(s);
+      return false;
+    };
+
+    if (isValidBR(telFull)) {
       out.telefone = telFull;
-      out.ddd = null;
-      out.telefone_parcial = null;
     } else {
       if (ddd && ddd.length === 2) out.ddd = ddd;
       if (parcial && (parcial.length === 8 || parcial.length === 9)) out.telefone_parcial = parcial;
-
-      if (!out.telefone && out.ddd && out.telefone_parcial) {
-        const comb = out.ddd + out.telefone_parcial;
-        if (isValidBRPhoneWithDDD(comb)) {
-          out.telefone = comb;
-          out.ddd = null;
-          out.telefone_parcial = null;
-        }
+      const comb = (out.ddd || '') + (out.telefone_parcial || '');
+      if (comb && isValidBR(comb)) {
+        out.telefone = comb;
+        out.ddd = null;
+        out.telefone_parcial = null;
       }
     }
 
-    // Missing fields
-    out.missing = Array.isArray(obj.missing) ? (obj.missing || []).map(String) : computeMissing(out);
+    out.protesto = !!obj.protesto;
+
+    out.missing = Array.isArray(obj.missing) && obj.missing.length
+      ? obj.missing.map(String)
+      : computeMissing(out);
 
   } catch {
     out.missing = computeMissing(out);
@@ -116,54 +121,67 @@ function sanitizeExtracted(obj) {
 
 function buildSystemPrompt() {
   return `
-Você é um extrator de dados determinístico. Sempre responda com um único JSON válido, sem texto fora do JSON.
+Você é um extrator determinístico. Saída: um JSON ÚNICO e NADA mais.
 
-Objetivo: Dado o histórico recente de uma conversa sobre frete (cliente/ia), extraia e consolide os campos a seguir e informe "missing":
+Objetivo: Dado o histórico (cliente/ia), extraia e consolide os campos:
 
-    itens: string|null
-    bairro_saida: string|null
-    bairro_destino: string|null
-    ajudante: true|false|null
-    saida_tipo: "casa"|"apartamento"|null
-    saida_elevador: true|false|null
-    destino_tipo: "casa"|"apartamento"|null
-    destino_elevador: true|false|null
-    telefone: string de 10–11 dígitos (somente números) ou null (apenas completo com DDD)
-    ddd: string com 2 dígitos ou null (use apenas quando cliente enviar DDD isolado)
-    telefone_parcial: 8–9 dígitos ou null (use apenas se cliente enviar número sem DDD)
-    cidade: string|null (se disponível no contexto)
-    missing: array com nomes de campos ausentes para concluir o pedido
+- itens: string|null
 
-Regras de telefone:
+- bairro_saida: string|null
 
-    Se cliente enviar de uma vez o número com DDD (10–11 dígitos), normalize para "telefone" (somente números).
-    Se enviar DDD isolado (2 dígitos) em uma mensagem e depois o número parcial (8–9), componha "telefone" quando possível.
-    Não inclua caracteres que não sejam dígitos nos campos de telefone.
-    telefone deve estar completo (DDD + número válido BR) para preencher "telefone".
+- bairro_destino: string|null
 
-Outras regras:
+- ajudante: true|false|null
 
-    Normalize "apto", "apt" para "apartamento".
-    "ajudante" deve ser true/false quando a conversa indica claramente, senão null.
-    Considere apenas as últimas 15 mensagens relevantes do cliente e o contexto fornecido.
-    Missing deve considerar obrigatórios: itens, bairro_saida, bairro_destino, ajudante, saida_tipo, destino_tipo, (saida_elevador e destino_elevador se tipo for "apartamento"), cidade, telefone.
-    Saída estritamente JSON. Nenhuma explicação ou texto fora do JSON.
+- saida_tipo: "casa"|"apartamento"|null (normalize: ap/apto/apt/apart → "apartamento")
 
-Formato de saída OBRIGATÓRIO:
+- saida_elevador: true|false|null (somente se saida_tipo="apartamento")
+
+- destino_tipo: "casa"|"apartamento"|null (normalize aptos etc.)
+
+- destino_elevador: true|false|null (somente se destino_tipo="apartamento")
+
+- telefone: string (10–11 dígitos, BR) ou null (somente completo + DDD)
+
+- ddd: 2 dígitos ou null (se cliente mandou DDD isolado)
+
+- telefone_parcial: 8–9 dígitos ou null (se cliente mandou apenas número sem DDD)
+
+- cidade: string|null
+
+- missing: array [campos faltantes]
+
+- protesto: true|false (se houver sinais de irritação: "já falei", "olha acima", "você é burro?", "pare de perguntar", etc.)
+
+Regras:
+
+- Some mensagens fragmentadas. Se houver ddd e telefone_parcial, componha telefone se válido.
+
+- Nunca ecoe PII ou números de telefone fora do campo correto.
+
+- Normalize casa/apartamento (aceite variações: ap, apt, apto, apart).
+
+- Se detectar protestos, marque protesto: true.
+
+- Missing considera obrigatórios: itens, bairro_saida, bairro_destino, ajudante, saida_tipo, destino_tipo, (saida_elevador e destino_elevador se "apartamento"), cidade, telefone.
+
+Saída OBRIGATÓRIA (apenas JSON, NUNCA TEXTO solto):
+
 {
-"itens": "...|null",
-"bairro_saida": "...|null",
-"bairro_destino": "...|null",
-"ajudante": true|false|null,
-"saida_tipo": "casa"|"apartamento"|null,
-"saida_elevador": true|false|null,
-"destino_tipo": "casa"|"apartamento"|null,
-"destino_elevador": true|false|null,
-"telefone": "10-11 dígitos ou null",
-"ddd": "2 dígitos ou null",
-"telefone_parcial": "8-9 dígitos ou null",
-"cidade": "...|null",
-"missing": ["lista de campos faltantes"]
+ "itens": "...|null",
+ "bairro_saida": "...|null",
+ "bairro_destino": "...|null",
+ "ajudante": true|false|null,
+ "saida_tipo": "casa"|"apartamento"|null,
+ "saida_elevador": true|false|null,
+ "destino_tipo": "casa"|"apartamento"|null,
+ "destino_elevador": true|false|null,
+ "telefone": "10-11 dígitos ou null",
+ "ddd": "2 dígitos ou null",
+ "telefone_parcial": "8-9 dígitos ou null",
+ "cidade": "...|null",
+ "missing": ["lista de campos faltantes"],
+ "protesto": true|false
 }
 `.trim();
 }
@@ -189,17 +207,15 @@ function buildUserPrompt({ mensagens, contexto }) {
 }
 
 async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
-  // Determinístico: temperature 0, sem texto fora do JSON
   const system = buildSystemPrompt();
   const user = buildUserPrompt({ mensagens, contexto });
 
   let raw = '{}';
   try {
     raw = await chatCompletion({ system, user, provider: 'groq', task: 'extract', timeoutMs: 22000, retries: 2 });
-  } catch (e) {
+  } catch {
     raw = '{}';
   }
-  // Tolerância: tenta extrair o primeiro JSON do texto (se vier algo indevido)
   let firstJson = '{}';
   try {
     const m = String(raw || '').match(/{[\s\S]*}/);
@@ -210,11 +226,8 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
   try { parsed = JSON.parse(firstJson); } catch { parsed = {}; }
 
   const sanitized = sanitizeExtracted(parsed);
-  // Aplica contexto de cidade se extrator não trouxe
   if (!sanitized.cidade && contexto && contexto.cidade) sanitized.cidade = String(contexto.cidade);
-  // Recalcula missing coerente
   sanitized.missing = computeMissing(sanitized);
-
   return sanitized;
 }
 

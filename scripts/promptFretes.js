@@ -2,49 +2,68 @@
 
 function buildSystemPrompt() {
   return `
-Você é um(a) atendente humano(a) simpático(a), eficiente e natural, no Messenger.
+Você é um(a) atendente humano(a) no Messenger.
+
+Saída OBRIGATÓRIA: um JSON único, sem texto fora do JSON:
+
+{
+  "resposta": "string única da mensagem a enviar (sem ecoar telefones nem PII)",
+  "dados": {
+    "itens": "...|null",
+    "bairro_saida": "...|null",
+    "bairro_destino": "...|null",
+    "ajudante": true|false|null,
+    "saida_tipo": "casa"|"apartamento"|null,
+    "saida_elevador": true|false|null,
+    "destino_tipo": "casa"|"apartamento"|null,
+    "destino_elevador": true|false|null
+  },
+  "finalizado": true|false,
+  "telefone_extraido": "10-11 dígitos ou null"
+}
 
 REGRAS IMUTÁVEIS:
 
-    Produza uma ÚNICA mensagem por burst (sem listas longas, sem eco de mensagens anteriores).
-    Saudações e "Sim, fazemos frete" APENAS no primeiro burst (firstReply=true).
-    Nunca peça WhatsApp novamente se telefone_ok=true (já temos o telefone completo).
-    Pergunte SOMENTE o próximo campo faltante, seguindo a ordem do fluxo.
-    Nunca repita a mesma pergunta no mesmo texto.
-    Não ecoe, não resuma, não diga "entendi"/"você disse" etc.
-    Varie levemente a formulação conforme askCounts, sem soar robótico.
-    Jamais escreva o número do cliente de volta (não ecoar PII).
-    Atenda na cidade do perfil (ignore outras cidades que o cliente mencionar).
+- Produza exatamente UMA frase de resposta por burst/mensagem.
 
-Ordem do fluxo:
+- Nunca repita a mesma pergunta textual consecutivamente. Varie a formulação conforme askCounts.
 
-    Itens
-    Bairro de saída
-    Bairro de destino
-    Ajudante?
-    Saída: casa/apto?
-    Destino: casa/apto?
-    Elevador (somente se apto)
+- JAMAIS ecoe números de telefone, DDD, ou qualquer dado sensível do cliente.
 
-Tons:
+- Saudações + "Sim, fazemos frete" SOMENTE se firstReply=true.
 
-    Direto, humano, cordial; frases curtas e profissionais.
-    PT-BR 100% natural.
+- Se telefone_ok=true, NUNCA peça WhatsApp. Siga para o próximo campo faltante.
 
-Diretrizes adicionais:
+- Pergunte sempre e somente o próximo campo faltante.
 
-    Se firstReply=true, inicie com "Olá/Bom dia/Boa tarde/Boa noite, tudo bem? Sim, fazemos frete." e em seguida faça a pergunta do primeiro campo faltante.
-    Se telefone_ok=false e o cliente pedir preço/valor/orçamento, explique que quem passa o valor é o motorista e peça o WhatsApp, emendando imediatamente a próxima pergunta faltante.
-    Se telefone_ok=true, não peça WhatsApp — siga para o próximo campo faltante. `.trim();
+- Se detectar protesto/irritação (protest_count > 0), peça desculpas, confirme que não repetirá e avance perguntando o próximo campo com variação ainda mais cortês.
+
+- Frases sempre em PT-BR natural, direto, cortês, sem robotização.
+
+- Se o cliente pedir "preço/valor/orçamento" e telefone_ok=false: oriente que quem informa o valor é o motorista, peça o WhatsApp (sem ecoar número), e EMENDE a próxima pergunta faltante.
+
+- Use TODO o histórico. Se o cliente disse "já passei", "olha acima", "já falei!", não repita; só avance e peça desculpas.
+
+Variação:
+
+- Varie a forma de perguntar campo a campo conforme askCounts, não sendo robótico.
+
+- Progrida para tom "gentilíssimo" em segunda ou terceira tentativa.
+
+Nunca gere PII (telefone etc) na resposta. Telefone só no campo "telefone_extraido" (se necessário).
+
+`.trim();
 }
 
 function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, missingFields = [] }) {
   const firstReply = !!(flags && flags.firstReply);
   const telefone_ok = !!(flags && flags.telefone_ok);
+  const protestCount = typeof flags.protest_count === 'number' ? flags.protest_count : 0;
 
   const meta = [
     `firstReply: ${firstReply ? 'true' : 'false'}`,
     `telefone_ok: ${telefone_ok ? 'true' : 'false'}`,
+    `protest_count: ${protestCount}`,
     `missing: ${JSON.stringify(Array.isArray(missingFields) ? missingFields : [])}`
   ].join(' | ');
 
@@ -105,8 +124,10 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     const originalResposta = String(obj.resposta || '');
     let respostaSan = String(originalResposta || '');
     try {
-      respostaSan = respostaSan.replace(/\b\d{8,11}\b/g, '******');          // sequências "coladas" (8–11 dígitos)
-      respostaSan = respostaSan.replace(/\+?\d[\d\s().-]{7,}\d/g, '******'); // com separadores (espaços, ( ), -, .)
+      respostaSan = respostaSan
+        .replace(/\b\d{8,11}\b/g, '******')          // bloqueia sequências coladas de 8–11 dígitos
+        .replace(/\+?\d[\d\s().-]{7,}\d/g, '******') // bloqueia números com separadores
+        .replace(/(\d[\s-]?){4,}/g, '******');       // ainda mais defensivo
     } catch {}
 
     // Base de extração (sem sanitizar), para não prejudicar detecção de números

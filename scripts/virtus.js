@@ -30,6 +30,7 @@ const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 const pedidos = require('./pedidos.js');
+const fileStore = require('./fileStore.js');
 
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
 const AI_FIRST = true;
@@ -68,6 +69,22 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
           await issues.append(perfil, 'pedidos_inactivity_ping_sent', `chat=${chatId}`);
         } catch (e) {
           try { await issues.append(perfil, 'inactivity_ping_send_fail', (e && e.message) || String(e)); } catch {}
+        }
+      }
+    } catch {}
+  });
+
+  pedidos.events.on('handoffToHuman', async ({ perfil, chatId, reason }) => {
+    try {
+      // Marca humanHold (já setado no pedidos), envia mensagem educativa de transição
+      const texto = 'Beleza! Vou te colocar com um colega para te atender com calma. Obrigado pela paciência.';
+      if (typeof enviarRespostaMessengerSeguraFn === 'function') {
+        try {
+          await enviarRespostaMessengerSeguraFn(chatId, texto);
+          if (typeof marcarRespondidoFn === 'function') await marcarRespondidoFn(chatId);
+          await issues.append(perfil, 'mil_action', `handoff_msg_sent chat=${chatId} reason=${reason||''}`);
+        } catch (e) {
+          await issues.append(perfil, 'mil_action', `handoff_msg_send_fail chat=${chatId} ${e && e.message || e}`);
         }
       }
     } catch {}
@@ -530,18 +547,36 @@ function getNewClientMessagesSince(historico, cutTs) {
   }
 }
 
-async function processNewClientBatch(perfil, chatId, msgs, lastIaText) {
-  // Aplica, em ordem, as inferências de cada mensagem do cliente (não só a última)
+function detectProtestText(t) {
+  const n = String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  return (
+    /ja falei|já falei|ja passei|já passei|olha acima|leia acima|vc nao leu|você nao leu|você é burro|voce e burro|pare de perguntar|para de perguntar|nao insista|não insista|de novo|ta me tirando|vc é burro|vc ta doido|porra|pqp/i.test(n)
+  );
+}
+
+async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePageFn) {
+  let protestedNow = false;
   for (const m of (msgs || [])) {
     const tx = String(m && m.texto || '').trim();
 
-    // 1) Ajudante, casa/apto etc. (com base na pergunta anterior da IA)
+    // Detecta protesto
+    if (detectProtestText(tx)) {
+      protestedNow = true;
+      try {
+        const st = await getChatState(perfil, chatId).catch(()=>null);
+        const pc = ((st && st.protestCount) || 0) + 1;
+        await setChatState(perfil, chatId, { protestCount: pc, lastProbeAt: Date.now() });
+        await issues.append(perfil, 'mil_action', `protest_detected chat=${chatId} count=${pc}`);
+      } catch {}
+    }
+
+    // 1) Ajudante, casa/apto etc.
     try { await applyBinaryAnswersFromContext(perfil, chatId, lastIaText || '', tx); } catch {}
 
-    // 2) Bairros (usa heurística e a pergunta anterior)
+    // 2) Bairros
     try { await inferBairrosFromText(perfil, chatId, tx, lastIaText || ''); } catch {}
 
-    // 3) DDD isolado (mensagem apenas 2 dígitos)
+    // 3) DDD isolado
     try {
       if (/^\s*[1-9]\d\s*$/.test(tx)) {
         const ddd = tx.replace(/\D/g, '');
@@ -551,7 +586,7 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText) {
       }
     } catch {}
 
-    // 4) Número parcial (8–9 dígitos) — pega o último block numérico da mensagem
+    // 4) Número parcial (8–9 dígitos)
     try {
       const parts = tx.match(/\b(\d{8,9})\b/g) || [];
       if (parts.length > 0) {
@@ -559,6 +594,37 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText) {
         if (parcial && (parcial.length === 8 || parcial.length === 9)) {
           await atualizarDadosColetados(chatId, { dados: { telefone_parcial: parcial } });
         }
+      }
+    } catch {}
+  }
+
+  // Se protestou recentemente, contar e acionar handoff após 3 protestos
+  if (protestedNow) {
+    try {
+      const st = await getChatState(perfil, chatId).catch(()=>null);
+      const pc = (st && st.protestCount) || 1;
+      if (pc >= 3) {
+        // Ativa handoff humano definitivo
+        await fileStore.withDesiredFileLockUpdate(desired => {
+          desired.perfis = desired.perfis || {};
+          desired.perfis[perfil] = { ...(desired.perfis[perfil] || {}), humanHold: true };
+          return desired;
+        });
+        await issues.append(perfil, 'mil_action', `handoff_to_human_by_protest chat=${chatId}`);
+        try {
+          const p = ensurePageFn ? await ensurePageFn().catch(()=>null) : null;
+          if (p) {
+            let campo = await waitForComposer(p, 6000);
+            if (!campo) campo = await refocusComposerNoReload(p, chatId);
+            if (campo) {
+              await waitForSendLockRelease(p, 12000);
+              await acquireSendGuard(p, chatId);
+              try {
+                await sendMessageSafe(p, campo, 'Entendi, vou te colocar com um colega agora. Obrigado pela paciência!', perfil, chatId);
+              } finally { releaseSendGuard(p); }
+            }
+          }
+        } catch {}
       }
     } catch {}
   }
@@ -2905,7 +2971,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const novasMsgs = getNewClientMessagesSince(historicoConversa, cutTs);
 
         // Processa cada mensagem da janela, atualizando dados (ajudante/casa/apto/bairros/ddd/parcial)
-        await processNewClientBatch(nome, chatId, novasMsgs, (ultimaIA && ultimaIA.texto) || '');
+        await processNewClientBatch(nome, chatId, novasMsgs, (ultimaIA && ultimaIA.texto) || '', ensurePage);
 
         // Detecta intenção de preço em QUALQUER mensagem nova (não só a última)
         const priceIntentBatch = novasMsgs.some(m => hasPriceIntent(m && m.texto || ''));
@@ -2960,13 +3026,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const firstReply = pedidos.shouldGreetFirstReply(nome, chatId);
 
           // Monta prompts do gerador
+          const stForFlags = await getChatState(nome, chatId).catch(()=>null);
+          const protestCount = (stForFlags && stForFlags.protestCount) || 0;
           const systemAnswer = promptFretes.buildSystemPrompt();
           const userAnswer = promptFretes.buildUserPrompt({
             cidade: dataColetada.cidade || cidadeCtx,
             historico: historicoConversa,
             coletado: dataColetada,
             askCounts: (snap && snap.askCounts) || {},
-            flags: { firstReply, telefone_ok },
+            flags: { firstReply, telefone_ok, protest_count: protestCount },
             missingFields: missing
           });
 
