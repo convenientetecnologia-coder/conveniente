@@ -2858,7 +2858,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const stPrevGate = await getChatState(nome, chatId).catch(() => null);
         const lastIATsPrev = Number((stPrevGate && stPrevGate.lastIATs) || 0);
         const lastCLItsPrev = Number((stPrevGate && stPrevGate.lastCLIts) || 0);
-        const lastIaTs = Number((ultimaIA && ultimaIA.timestamp) || 0);
         const cutTs = Math.max(lastIATsPrev || 0, lastIaTs || 0, lastCLItsPrev || 0);
 
         // Janela de novas mensagens do cliente desde a última IA
