@@ -12,7 +12,7 @@ function pickTempByTask(task) {
 function pickMaxTokensByTask(task) {
   const t = String(task || '').toLowerCase();
   if (t === 'extract') return 800;
-  if (t === 'answer') return 800;
+  if (t === 'answer') return 900; // Ajuste para burst mais humano/robusto
   return 1200;
 }
 

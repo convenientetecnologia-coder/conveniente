@@ -3028,6 +3028,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Monta prompts do gerador
           const stForFlags = await getChatState(nome, chatId).catch(()=>null);
           const protestCount = (stForFlags && stForFlags.protestCount) || 0;
+          
+          // Política de atendimento (burst 1):
+          // - Consolide cumprimentos múltiplos do cliente numa saudação breve e avance.
+          // - Sempre responda perguntas objetivas (tipo "faz frete?", "tem seguro?") antes de pedir dados do fluxo (burst 1 ou no meio da conversa).
+          // - Uma única mensagem, com 1–3 frases curtas/naturais, sem listar, sem ecoar o texto do cliente no corpo.
+          // - Nunca ecoe PII (telefone, DDD).
+          
           const systemAnswer = promptFretes.buildSystemPrompt();
           const userAnswer = promptFretes.buildUserPrompt({
             cidade: dataColetada.cidade || cidadeCtx,
@@ -3039,9 +3046,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           });
 
           // Chama IA geradora
-          let respostaFinal = '';
+          let respostaRawIA = '';
           try {
-            respostaFinal = await chatCompletion({
+            respostaRawIA = await chatCompletion({
               system: systemAnswer,
               user: userAnswer,
               provider: 'groq',
@@ -3057,8 +3064,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return;
           }
 
+          // Parse da resposta: extrai APENAS o campo .resposta (nunca enviar JSON completo)
+          const parsed = promptFretes.parseModelAnswerToDomain(respostaRawIA, ultimaCliente?.texto);
+          const textoAEnviar = String(parsed.resposta || '').trim();
+          
           // Sanitização PII: nunca ecoar telefone do cliente
-          const respostaSan = removeTelefonesCompletos(respostaFinal);
+          const respostaSan = removeTelefonesCompletos(textoAEnviar);
+          
+          // Log para auditoria (garantir que só texto puro vai ao Messenger)
+          logger.debug('[VIRTUS] Enviando só o texto da resposta:', { nome, chatId, textoAEnviar: textoAEnviar.substring(0, 100) });
 
           // Envio único no Messenger
           const pAtual = await ensurePage().catch(()=>null);
