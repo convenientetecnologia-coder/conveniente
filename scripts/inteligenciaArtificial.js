@@ -2,13 +2,30 @@
 
 const fetch = global.fetch || require('node-fetch');
 
-async function chatCompletion({ system, user, provider = 'groq', model, timeoutMs = 15000, retries = 2 }) {
+function pickTempByTask(task) {
+  const t = String(task || '').toLowerCase();
+  if (t === 'extract') return 0.0;
+  if (t === 'answer') return 0.4;
+  return 0.9;
+}
+
+function pickMaxTokensByTask(task) {
+  const t = String(task || '').toLowerCase();
+  if (t === 'extract') return 800;
+  if (t === 'answer') return 800;
+  return 1200;
+}
+
+async function chatCompletion({ system, user, provider = 'groq', model, timeoutMs = 20000, retries = 2, task = 'answer' }) {
   let lastErr = null;
 
-  for (let i = 0; i <= retries; i++) {
-    const controller = new (global.AbortController || require('node-abort-controller'))();
+  const temperature = pickTempByTask(task);
+  const max_tokens = pickMaxTokensByTask(task);
 
-    const t = setTimeout(() => { try { controller.abort(); } catch{} }, timeoutMs);
+  for (let i = 0; i <= retries; i++) {
+    const Controller = global.AbortController || require('node-abort-controller');
+    const controller = new Controller();
+    const t = setTimeout(() => { try { controller.abort(); } catch {} }, timeoutMs);
 
     try {
       if (provider === 'groq') {
@@ -27,8 +44,8 @@ async function chatCompletion({ system, user, provider = 'groq', model, timeoutM
               { role: 'system', content: system },
               { role: 'user', content: user }
             ],
-            temperature: 0.9,
-            max_tokens: 1200
+            temperature,
+            max_tokens
           }),
           signal: controller.signal
         });
@@ -61,8 +78,8 @@ async function chatCompletion({ system, user, provider = 'groq', model, timeoutM
               { role: 'system', content: system },
               { role: 'user', content: user }
             ],
-            temperature: 0.9,
-            max_tokens: 1200
+            temperature,
+            max_tokens
           }),
           signal: controller.signal
         });
@@ -87,6 +104,8 @@ async function chatCompletion({ system, user, provider = 'groq', model, timeoutM
     } catch (e) {
       clearTimeout(t);
       lastErr = e;
+      // backoff suave entre tentativas
+      await new Promise(r => setTimeout(r, 800));
     }
   }
 
@@ -94,4 +113,3 @@ async function chatCompletion({ system, user, provider = 'groq', model, timeoutM
 }
 
 module.exports = { chatCompletion };
-

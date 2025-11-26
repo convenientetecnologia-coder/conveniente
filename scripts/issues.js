@@ -82,7 +82,7 @@ function writeJsonAtomic(file, obj) {
     const fd = fs.openSync(tmp, 'w');
     try {
       fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
-      fs.fsyncSync(fd); // **militar: flush garantido no disco**
+      fs.fsyncSync(fd); // militar: flush garantido no disco
     } finally {
       fs.closeSync(fd);
     }
@@ -117,7 +117,7 @@ function _serialize(nome, fn) {
   const key = String(nome || '');
   const prev = _locks.get(key) || Promise.resolve();
   const next = prev.then(() => Promise.resolve(fn()))
-                   .finally(() => { if (_locks.get(key) === next) _locks.delete(key); });
+    .finally(() => { if (_locks.get(key) === next) _locks.delete(key); });
   _locks.set(key, next);
   return next;
 }
@@ -184,7 +184,14 @@ const ISSUE_TYPES_SET = new Set([
   'phone_ask_ddd_isolado',
   'phone_ask_parcial_numero',
   'phone_ask_reminder',
-  'phone_compose_ok'
+  'phone_compose_ok',
+  // [NOVOS TIPOS] Orquestrador IA-first (pedidos)
+  'pedidos_order_sent',
+  'pedidos_inactivity_ping_sent',
+  'pedidos_freeze_window_enter',
+  'order_sent_notifier_fail',
+  'inactivity_ping_send_fail',
+  'pedido_audit'
 ]);
 
 function padronizaType(type) {

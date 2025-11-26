@@ -29,9 +29,50 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
+const pedidos = require('./pedidos.js');
 
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
 const AI_FIRST = true;
+
+// Vinculação de eventos do orquestrador por perfil — evita múltiplos listeners
+const __pedidosEventBound = new Set();
+
+function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRespostaMessengerSeguraFn, marcarRespondidoFn) {
+  if (__pedidosEventBound.has(nome)) return;
+  __pedidosEventBound.add(nome);
+
+  // Envio de pedido (completo/incompleto) -> envia ao notificador e respeita freeze (marcado pelo orquestrador)
+  pedidos.events.on('orderSent', async ({ perfil, chatId, tipo, payload }) => {
+    try {
+      if (perfil !== nome) return; // evento de outro perfil
+      try {
+        await enviarPedidoParaNotificadorFn(chatId, payload);
+      } catch (e) {
+        try { await issues.append(perfil, 'order_sent_notifier_fail', (e && e.message) || String(e)); } catch {}
+      }
+      try { await issues.append(perfil, 'pedidos_freeze_window_enter', `chat=${chatId}`); } catch {}
+    } catch {}
+  });
+
+  // Ping único de inatividade pedindo WhatsApp
+  pedidos.events.on('inactivityPing', async ({ perfil, chatId }) => {
+    try {
+      if (perfil !== nome) return;
+      const texto = 'Vamos dar continuidade? Me passa seu WhatsApp que peço pro motorista te chamar e tirar as dúvidas por lá.';
+      if (typeof enviarRespostaMessengerSeguraFn === 'function') {
+        try {
+          await enviarRespostaMessengerSeguraFn(chatId, texto);
+          if (typeof marcarRespondidoFn === 'function') {
+            await marcarRespondidoFn(chatId);
+          }
+          await issues.append(perfil, 'pedidos_inactivity_ping_sent', `chat=${chatId}`);
+        } catch (e) {
+          try { await issues.append(perfil, 'inactivity_ping_send_fail', (e && e.message) || String(e)); } catch {}
+        }
+      }
+    } catch {}
+  });
+}
 
 const CHAT_LOG_BUFFERS = new Map();  // file -> [line]
 let CHAT_LOG_FLUSH_TIMER = null;
@@ -2889,6 +2930,136 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
+        // ======================= INÍCIO PIPELINE IA-FIRST (EXTRAÇÃO + RESPOSTA) =======================
+        try {
+          // Contexto de cidade: usa manifest primeiro, senão localizacao do classificado
+          let cidadeCtx = null;
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            cidadeCtx = (man && man.cidade) ? man.cidade : null;
+          } catch {}
+          if (!cidadeCtx && localizacao && localizacao.cidade) cidadeCtx = localizacao.cidade;
+
+          // Atualiza snapshot via IA extratora (JSON puro) — orquestrador decide timers e missing
+          await pedidos.upsertFromHistoryLLM(nome, chatId, historicoConversa, { contexto: { cidade: cidadeCtx } });
+
+          // Respeitar janela de silêncio (freeze) de 10 min após envio
+          if (pedidos.isFinalized(nome, chatId)) {
+            logger.info('[AI-FIRST] Freeze ativo — não responder', { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+
+          // Snapshot atual do pedido
+          const snap = pedidos.getSnapshot(nome, chatId);
+          const dataColetada = snap && snap.data ? snap.data : {};
+          const missing = Array.isArray(snap && snap.missing) ? snap.missing.slice(0) : [];
+          const telefone_ok = !!(dataColetada.telefone && String(dataColetada.telefone).trim().length >= 10);
+          const firstReply = pedidos.shouldGreetFirstReply(nome, chatId);
+
+          // Monta prompts do gerador
+          const systemAnswer = promptFretes.buildSystemPrompt();
+          const userAnswer = promptFretes.buildUserPrompt({
+            cidade: dataColetada.cidade || cidadeCtx,
+            historico: historicoConversa,
+            coletado: dataColetada,
+            askCounts: (snap && snap.askCounts) || {},
+            flags: { firstReply, telefone_ok },
+            missingFields: missing
+          });
+
+          // Chama IA geradora
+          let respostaFinal = '';
+          try {
+            respostaFinal = await chatCompletion({
+              system: systemAnswer,
+              user: userAnswer,
+              provider: 'groq',
+              task: 'answer',
+              timeoutMs: 22000,
+              retries: 2
+            });
+          } catch (e) {
+            logger.warn('[AI-FIRST] Falha IA geradora', { nome, chatId, error: (e && e.message) || String(e) });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+
+          // Sanitização PII: nunca ecoar telefone do cliente
+          const respostaSan = removeTelefonesCompletos(respostaFinal);
+
+          // Envio único no Messenger
+          const pAtual = await ensurePage().catch(()=>null);
+          if (!pAtual) {
+            logger.warn('[AI-FIRST] Page indisponível para envio', { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+          let campoEnvio = await waitForComposer(pAtual, 10000);
+          if (!campoEnvio) campoEnvio = await refocusComposerNoReload(pAtual, chatId);
+          if (!campoEnvio) {
+            logger.warn('[AI-FIRST] Composer indisponível para envio', { nome, chatId });
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+
+          await waitForSendLockRelease(pAtual, 12000);
+          await acquireSendGuard(pAtual, chatId);
+          try {
+            await sendMessageSafe(pAtual, campoEnvio, respostaSan, nome, chatId);
+            await appendIaLine(nome, chatId, respostaSan);
+          } finally {
+            releaseSendGuard(pAtual);
+          }
+
+          // Marca IA replied + askCount do próximo missing
+          try {
+            pedidos.markIaReplied(nome, chatId);
+            const askedField = Array.isArray(missing) && missing.length ? missing[0] : null;
+            if (askedField) pedidos.recordAsk(nome, chatId, askedField);
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              lastIATs: Date.now(),
+              lastCLIts: lastClienteTs,
+              lastProbeAt: Date.now()
+            });
+          } catch {}
+
+          // Enfileira o chat para o notificador (pipeline legado de respostas) — mantém compatibilidade
+          try {
+            const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
+            adicionarChatParaEnvio(nome, {
+              chatId,
+              tipoServico,
+              historico: historicoConversa,
+              localizacao: localizacaoFormatada,
+              urlClassificado
+            });
+          } catch {}
+
+          // Remove pendência e encerra o fluxo (não cai no legado)
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+
+        } catch (e) {
+          logger.warn('[AI-FIRST] Erro inesperado no pipeline IA-first', { nome, chatId, error: (e && e.message) || String(e) });
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+        // ======================= FIM PIPELINE IA-FIRST =======================
+
         // DDD isolado e número parcial (antes do LLM)
         const lastTextPlain = String(ultimaCliente?.texto || '').trim();
         const dddIsolado = /^[1-9]\d$/.test(lastTextPlain);
@@ -4139,6 +4310,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     
       iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
     }
