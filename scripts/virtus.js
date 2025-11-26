@@ -460,6 +460,27 @@ async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastCli
   }
 }
 
+function sanitizeOutgoing(text) {
+  try {
+    let s = String(text == null ? '' : text);
+    s = s.replace(/[\u200B-\u200D\uFEFF]/g, '');     // Zero-width
+    s = s.replace(/[ \t]+/g, ' ');                   // Espaços múltiplos
+    s = s.replace(/\s+([,.!?;:])/g, '$1');           // Espaço antes de pontuação
+    s = s.replace(/([,.!?;:]){2,}/g, '$1');          // Pontuação repetida
+    return s.trim();
+  } catch {
+    return String(text || '').trim();
+  }
+}
+
+function composeWhatsAskFull(dados = {}) {
+  return 'Quem passa o orçamento é o motorista. Eu já anotei seu pedido e vou repassar para ele. Me passa seu WhatsApp, por favor? Ele te chama no WhatsApp e te informa o valor.';
+}
+
+function composeWhatsAskLite(dados = {}) {
+  return 'Perfeito! Coletamos tudo. Pode me enviar o seu WhatsApp? O motorista te chama e te informa o orçamento.';
+}
+
 // === FIM: HELPERS DE ATENDIMENTO (NÃO REMOVER) ===
 
 async function logIssue(nome, type, message) {
@@ -1587,8 +1608,9 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     ).catch(()=>{});
 
     const toSend = String(msg || '');
-    const safeMsg = removeTelefonesCompletos(toSend);
-    await p.keyboard.type(safeMsg, { delay: 0 });
+    const safeMsg = sanitizeOutgoing(removeTelefonesCompletos(toSend));
+    const jitter = () => 8 + Math.floor(Math.random() * 7); // 8–14ms por caractere
+    await p.keyboard.type(safeMsg, { delay: jitter() });
 
     try {
       const urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
@@ -2923,6 +2945,36 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         // IA-FIRST: seguir para o LLM sem atalho.
 
+        // IA-FIRST: se cliente pediu preço e ainda não temos Whats válido, peça WhatsApp UMA vez (full), sem chamar o LLM neste turno
+        if (hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
+          const stPhase = await getChatState(nome, chatId).catch(()=>null);
+          const phase = (stPhase && stPhase.whatsAskedPhase) || 'none';
+          if (phase === 'none') {
+            const askCountsNow = await getAskCounts(nome, chatId);
+            const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
+            const dadosColetadosNow = (stPrev2 && stPrev2.dadosColetados) ? stPrev2.dadosColetados : {};
+            const respostaWppFull = montarRespostaForcadaWhatsAppSemDDD(dadosColetadosNow, askCountsNow); // full + próxima pergunta
+            await bumpAskCount(nome, chatId, 'telefone');
+            await setChatState(nome, chatId, {
+              whatsAskedPhase: 'full',
+              firstWhatsAskAt: Date.now()
+            });
+            await flushChatStateNow(nome);
+
+            const pAtualIA = await ensurePage().catch(()=>null);
+            if (pAtualIA) {
+              let campo = await waitForComposer(pAtualIA, 8000);
+              if (!campo) campo = await refocusComposerNoReload(pAtualIA, chatId);
+              if (campo) await sendMessageSafe(pAtualIA, campo, respostaWppFull, nome, chatId);
+            }
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+          // Se já pedimos (phase !== 'none'), não pede de novo aqui; segue para o LLM.
+        }
+
         const pAtual = await ensurePage().catch(()=>null);
 
         {
@@ -3515,11 +3567,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     } catch {}
 
-    // REFORÇO FINAL DE WHATSAPP — quando só falta telefone (máximo 1 a cada 2min)
+    // === FINAL: só falta telefone (whats) — pedir UMA vez (full se nunca pedimos; lite se já pedimos no meio) ===
     try {
       const stNow = await getChatState(nome, chatId).catch(()=>null);
       const dcNow = (stNow && stNow.dadosColetados) ? stNow.dadosColetados : (dadosColetados.get(chatId) || {});
-      
+
       const hasIt = !!dcNow.itens;
       const hasBS = !!dcNow.bairro_saida;
       const hasBD = !!dcNow.bairro_destino;
@@ -3529,33 +3581,32 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const needsSE = (dcNow.saida_tipo === 'apartamento') ? (typeof dcNow.saida_elevador === 'boolean') : true;
       const needsDE = (dcNow.destino_tipo === 'apartamento') ? (typeof dcNow.destino_elevador === 'boolean') : true;
       const temWhatsLocal = !!(dcNow.telefone && promptFretes.isValidBRPhoneWithDDD(dcNow.telefone));
-      
+
       const camposOkSemTelefone =
         hasIt && hasBS && hasBD && hasAj && hasST && hasDT && needsSE && needsDE && !temWhatsLocal;
-      
+
       if (camposOkSemTelefone) {
-        const lastAt = (stNow && stNow.lastWhatsReminderAt) ? Number(stNow.lastWhatsReminderAt) : 0;
-        const limitMs = 2 * 60 * 1000; // 2 minutos
-        
-        if (!lastAt || (Date.now() - lastAt) >= limitMs) {
-          const askCountsNow = await getAskCounts(nome, chatId);
-          const variantes = [
-            'Perfeito, já tenho todas as informações. Só ficou faltando o seu WhatsApp para o motorista te passar o orçamento. Pode me enviar?',
-            'Tudo certo com os dados! Só preciso do seu WhatsApp para repassar ao motorista e ele te informar o valor. Pode mandar?',
-            'Ótimo! Com as informações aqui, basta seu WhatsApp que o motorista já te chama com o orçamento. Me envia, por favor?'
-          ];
-          const msg = removeTelefonesCompletos(variantes[(askCountsNow.telefone || 0) % variantes.length]);
-          await bumpAskCount(nome, chatId, 'telefone');
-          
+        const phase = (stNow && stNow.whatsAskedPhase) || 'none';
+        const endSent = !!(stNow && stNow.whatsEndAskSent);
+        if (!endSent) {
+          let msg;
+          const patch = { whatsEndAskSent: true };
+          if (phase === 'none') {
+            msg = composeWhatsAskFull(dcNow);
+            patch.whatsAskedPhase = 'full';
+          } else {
+            msg = composeWhatsAskLite(dcNow);
+          }
+
           const pRef = await ensurePage().catch(()=>null);
           if (pRef) {
             let campo = await waitForComposer(pRef, 8000);
             if (!campo) campo = await refocusComposerNoReload(pRef, chatId);
-            if (campo) await sendMessageSafe(pRef, campo, msg, nome, chatId);
+            if (campo) await sendMessageSafe(pRef, campo, removeTelefonesCompletos(msg), nome, chatId);
           }
-          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
+          await bumpAskCount(nome, chatId, 'telefone');
+          await setChatState(nome, chatId, patch);
           await flushChatStateNow(nome);
-          try { await issues.append(nome, 'phone_ask_reminder', `chat=${chatId}`); } catch {}
         }
       }
     } catch {}
