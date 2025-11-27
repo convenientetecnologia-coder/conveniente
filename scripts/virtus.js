@@ -1350,6 +1350,10 @@ const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '1
 const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '30000', 10); // 30s
 const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '60000', 10); // 60s
 
+const VIRTUS_FINAL_MSG_MAX_TRIES = parseInt(process.env.VIRTUS_FINAL_MSG_MAX_TRIES || '2', 10); // tentativas no envio da mensagem final
+const VIRTUS_FINAL_MSG_RETRY_MIN_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MIN_MS || '600', 10); // 600ms
+const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MAX_MS || '900', 10); // 900ms
+
 const REPLY_FIRST_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_FIRST_DELAY_MS || '45000', 10);
 const INTER_CHAT_DELAY_MIN_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MIN_MS || '5000', 10);
 const INTER_CHAT_DELAY_MAX_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MAX_MS || '20000', 10);
@@ -4234,7 +4238,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     logger.info('[NOTIF_SEND] preparando envio', { nome, chatId, telefone: maskPhoneLog(tel), cidade });
 
-    if (!chatLock.acquire(nome, chatId)) {
+    let __acquired = false;
+    for (let i = 0; i < 2; i++) {
+      if (chatLock.acquire(nome, chatId)) { __acquired = true; break; }
+      await sleep(250 + Math.floor(Math.random() * 200)); // backoff curto (250–450ms)
+    }
+    if (!__acquired) {
       await appendPedidoAudit(nome, chatId, 'lock_busy_skip', {});
       return;
     }
@@ -4285,48 +4294,87 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       '@convenientetecnologia'
     ].join('\n');
     const mensagem = [mensagemBase, igCTA].filter(Boolean).join('\n\n');
-    
-    let p = await ensurePage().catch(() => null);
-    if (!p) {
-      logger.warn('[MENSAGEM_FINAL] Page indisponível', { nome, chatId });
-      return;
-    }
+
+    // Evitar duplicidade: se já foi enviada há pouco tempo, não repetir
     try {
-      const expectedPath = `/marketplace/t/${chatId}/`;
-      let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-      if (!urlNow.includes(expectedPath)) {
-        logger.warn('[MENSAGEM_FINAL] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
+      const st = await getChatState(nome, chatId).catch(() => null);
+      if (st && st.finalMsgSentAt && (Date.now() - Number(st.finalMsgSentAt)) < 10 * 60 * 1000) {
+        logger.info('[MENSAGEM_FINAL] já enviada recentemente — skip', { nome, chatId });
         return;
       }
-      
-      const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
-      if (!okOn) {
-        logger.warn('[MENSAGEM_FINAL] Chat não confirmado - abortando', { nome, chatId });
+    } catch {}
+
+    for (let attempt = 1; attempt <= VIRTUS_FINAL_MSG_MAX_TRIES; attempt++) {
+      let p = await ensurePage().catch(() => null);
+      if (!p) {
+        logger.warn('[MENSAGEM_FINAL] Page indisponível', { nome, chatId, attempt });
+        if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
+          await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
+          continue;
+        }
         return;
       }
-      
-      let campo = await waitForComposer(p, 8000);
-      if (!campo) {
-        logger.info('[MENSAGEM_FINAL] Composer não encontrado, tentando refocus', { nome, chatId });
-        const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-        campo = await refocusComposerNoReload(p, chatId, anchorSel);
-      }
-      
-      if (!campo) {
-        logger.warn('[MENSAGEM_FINAL] Composer indisponível após refocus', { nome, chatId });
-        return;
-      }
-      
-      await waitForSendLockRelease(p, 12000);
-      await acquireSendGuard(p, chatId);
+
       try {
-        await sendMessageSafe(p, campo, removeTelefonesCompletos(mensagem), nome, chatId);
-      } finally {
-        releaseSendGuard(p);
+        const expectedPath = `/marketplace/t/${chatId}/`;
+        let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+        if (!urlNow.includes(expectedPath)) {
+          logger.warn('[MENSAGEM_FINAL] URL não corresponde ao chat', { nome, chatId, urlNow, attempt });
+          if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
+            await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
+            continue;
+          }
+          return;
+        }
+
+        const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
+        if (!okOn) {
+          logger.warn('[MENSAGEM_FINAL] Chat não confirmado', { nome, chatId, attempt });
+          if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
+            await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
+            continue;
+          }
+          return;
+        }
+
+        let campo = await waitForComposer(p, 8000);
+        if (!campo) {
+          logger.info('[MENSAGEM_FINAL] Composer não encontrado, tentando refocus', { nome, chatId, attempt });
+          const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+          campo = await refocusComposerNoReload(p, chatId, anchorSel);
+        }
+
+        if (!campo) {
+          logger.warn('[MENSAGEM_FINAL] Composer indisponível após refocus', { nome, chatId, attempt });
+          if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
+            await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
+            continue;
+          }
+          return;
+        }
+
+        await waitForSendLockRelease(p, 12000);
+        await acquireSendGuard(p, chatId);
+        try {
+          await sendMessageSafe(p, campo, removeTelefonesCompletos(mensagem), nome, chatId);
+          // Marca flag de mensagem final enviada (idempotência)
+          try {
+            await setChatState(nome, chatId, { finalMsgSentAt: Date.now() });
+            await flushChatStateNow(nome);
+          } catch {}
+          logger.info('[MESSENGER] Mensagem final enviada', { chatId, attempt });
+          return;
+        } finally {
+          releaseSendGuard(p);
+        }
+      } catch (e) {
+        logger.warn('[MENSAGEM_FINAL] Falha ao enviar (tentativa)', { chatId, attempt, error: e && e.message || e });
+        if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
+          await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
+          continue;
+        }
+        return;
       }
-      logger.info('[MESSENGER] Mensagem final enviada', { chatId });
-    } catch (e) {
-      logger.warn('[MESSENGER] Falha ao enviar mensagem final', { chatId, error: e && e.message || e });
     }
   }
 

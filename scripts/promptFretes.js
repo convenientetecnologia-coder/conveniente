@@ -1,3 +1,5 @@
+// promptFretes.js
+
 'use strict';
 
 function buildSystemPrompt({ askField = null, allowSecondQuestion = false, nextField = null, phoneMode = 'lite', askReason = 'missing' } = {}) {
@@ -29,6 +31,12 @@ Leitura e antirrepetição:
 Privacidade:
   - Nunca ecoe números de telefone/DDD no texto da "resposta" (nem mascarado). Telefones/DDD só podem aparecer nos metadados apropriados.
 
+Atendimento de dúvidas (responder antes de perguntar):
+  - Se o cliente trouxe alguma dúvida fora da coleta nas últimas mensagens (ex.: atende agora? quanto tempo? valor? como funciona? pagamento? nota fiscal?), responda primeiro em UMA frase objetiva.
+  - Para "tempo/atende agora": • Se telefone_ok=true (no User Prompt): diga "Sim, o motorista te chama agora." (ou equivalente objetivo). • Se ainda NÃO houver telefone completo: diga "Assim que você me enviar o WhatsApp, o motorista te chama agora." e em seguida peça o WhatsApp conforme phone_mode (sem ecoar números).
+  - Para "valor": explique brevemente que quem informa o valor é o motorista no WhatsApp e peça o WhatsApp conforme as diretivas (sem mencionar DDD no modo lite e sem ecoar números).
+  - Após responder a dúvida, faça as perguntas desta virada conforme as diretivas (veja seção a seguir). Não adicione perguntas extras.
+
 Número de perguntas (obediência rígida às diretivas):
   - Se ask_field for null: não faça perguntas.
   - Se ask_field NÃO for null:
@@ -58,7 +66,7 @@ Intenção de preço (sem telefone completo):
 SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 
 {
-"resposta": "texto a ser enviado ao cliente (humano, direto, sem redundâncias; ao final, faça exatamente 1 ou 2 perguntas conforme ask_field/allow_second_question/next_field)",
+"resposta": "texto a ser enviado ao cliente (humano, direto, sem redundâncias; antes das perguntas, responda em 1 frase qualquer dúvida do cliente; ao final, faça exatamente 1 ou 2 perguntas conforme ask_field/allow_second_question/next_field)",
 "telefone_extraido": "se detectar nº BR 10-11 dígitos completo (somente dígitos); senão null",
 "dados": {
 "itens": "...|null",
@@ -107,6 +115,8 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
     'Nota (obrigatória):',
     '- Se firstReply=true, inicie com saudação + disponibilidade (ex.: "sim, fazemos frete e podemos te atender"). Depois siga para as perguntas desta virada.',
     '- Leia suas próprias respostas anteriores e NÃO repita conteúdo do cliente ou seu. Não use "Entendi/Recebi/Perfeito/Ok".',
+    '- Antes das perguntas desta virada, responda em 1 frase qualquer dúvida do cliente (ex.: atende agora? quanto tempo? valor? como funciona? pagamento? NF?).',
+    '- Para "tempo/atende agora": se telefone_ok=true, diga que o motorista chama agora; se ainda não houver telefone completo, informe que assim que enviar o WhatsApp o motorista chama agora, e então peça o WhatsApp conforme phone_mode/diretivas.',
     '- Se ask_field="telefone":',
     '   • phone_mode=lite e ask_reason=price_intent OU quando só faltarem campos de telefone (veja "missing"): inclua a explicação de que o motorista informa o valor no WhatsApp e você apenas repassa; em seguida peça o WhatsApp.',
     '   • phone_mode=full: peça o WhatsApp com DDD explicitamente.',
@@ -425,7 +435,7 @@ function parseCityUfFromText(candidates) {
 // Validação e extração ultra-rígida de telefone BR (com DDD)
 function normalizeBRPhone(raw) {
   const s = String(raw || '').replace(/[^\d+]/g, '');
-  const noPlus = s.replace(/^\+/, '');
+  const noPlus = s.replace(/^\++/, '');
   const br = noPlus.replace(/^55/, '');
   return br;
 }

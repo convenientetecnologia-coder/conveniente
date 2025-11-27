@@ -1,3 +1,5 @@
+// pedidos.js
+
 'use strict';
 
 const fs = require('fs');
@@ -7,6 +9,7 @@ const issues = require('./issues.js');
 const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 const fileStore = require('./fileStore.js');
 const MAX_ASK_RETRIES = parseInt(process.env.MAX_ASK_RETRIES || '3', 10);
+const PHONE_ASK_COOLDOWN_MS = parseInt(process.env.PHONE_ASK_COOLDOWN_MS || '120000', 10); // 2 min de cooldown para pedir telefone/DDD novamente
 
 const ROOT = path.join(__dirname, '..', 'dados', 'perfis');
 function stateFile(perfil){ return path.join(ROOT, perfil, 'pedidos_state.json'); }
@@ -433,6 +436,7 @@ class PedidoOrchestrator extends EventEmitter {
         for (const chatId of keys) {
           const s = chats[chatId];
           if (!s) continue;
+
           // janela de silêncio ativa? então não faça nada
           if (s.flags && s.flags.finalizationFreezeUntil && s.flags.finalizationFreezeUntil > now()) continue;
 
@@ -510,8 +514,38 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const counts = (s && s.askCounts) || {};
   const telOk = isValidPhoneBR(data.telefone);
 
+  // Flags e cooldown temporal de re-pergunta
+  const stFlags = (s && s.flags) || {};
+  const lastAskedField = stFlags.lastAskedField;
+  const lastAskedAt = stFlags.lastAskedAt || 0;
+  const nowMs = now();
+  const askedRecently = !!(lastAskedAt && (nowMs - lastAskedAt) < PHONE_ASK_COOLDOWN_MS);
+
   // 1) Preço antes do WhatsApp → pedir telefone AGORA, emparelhado com a próxima pergunta não-telefone
   if (!telOk && shouldAskWhatsappFirst({ historicoNovo: novasMsgs, dataAtual: data })) {
+    // Anti-spam temporal para telefone
+    if (lastAskedField === 'telefone' && askedRecently) {
+      const alt = getNextNonPhoneField(data);
+      if (alt) {
+        return {
+          askField: alt,
+          phase: 'none',
+          reason: 'missing',
+          nextField: null,
+          allowSecondQuestion: false,
+          phoneMode: 'lite'
+        };
+      }
+      return {
+        askField: null,
+        phase: 'none',
+        reason: 'missing',
+        nextField: null,
+        allowSecondQuestion: false,
+        phoneMode: 'lite'
+      };
+    }
+
     const nextField = getNextNonPhoneField(data);
     const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
     return {
@@ -527,6 +561,29 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   // Prioridade máxima: se o cliente mandou telefone PARCIAL e ainda não há DDD,
   // peça o DDD AGORA (antes de qualquer outro campo), acoplando a próxima pergunta não-telefone.
   if (!telOk && data && data.telefone_parcial && !data.ddd) {
+    // Anti-spam temporal para DDD
+    if (lastAskedField === 'ddd' && askedRecently) {
+      const alt = getNextNonPhoneField(data);
+      if (alt) {
+        return {
+          askField: alt,
+          phase: 'none',
+          reason: 'missing',
+          nextField: null,
+          allowSecondQuestion: false,
+          phoneMode: 'lite'
+        };
+      }
+      return {
+        askField: null,
+        phase: 'none',
+        reason: 'missing',
+        nextField: null,
+        allowSecondQuestion: false,
+        phoneMode: 'lite'
+      };
+    }
+
     const nextField = getNextNonPhoneField(data);
     return {
       askField: 'ddd',
@@ -544,10 +601,10 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   // Anti-repetição: se o mesmo campo acabou de ser perguntado e o cliente já respondeu algo,
   // não re-perguntar imediatamente — pule para o próximo campo não-telefone.
   const stNow = orchestrator._get(perfil, chatId) || {};
-  const lastAskedField = stNow.flags && stNow.flags.lastAskedField;
+  const lastAskedField2 = stNow.flags && stNow.flags.lastAskedField;
   const anyNewClient = Array.isArray(novasMsgs) && novasMsgs.length > 0;
 
-  if (next && lastAskedField && next === lastAskedField && anyNewClient && ((counts[next] || 0) >= 1)) {
+  if (next && lastAskedField2 && next === lastAskedField2 && anyNewClient && ((counts[next] || 0) >= 1)) {
     const alt = getNextNonPhoneField(data);
     if (alt) {
       return {
@@ -570,7 +627,29 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     }
   }
 
+  // Cooldown temporal para 'telefone' e 'ddd' no caminho geral
   if (next === 'telefone') {
+    if (lastAskedField === 'telefone' && askedRecently) {
+      const alt = getNextNonPhoneField(data);
+      if (alt) {
+        return {
+          askField: alt,
+          phase: 'none',
+          reason: 'missing',
+          nextField: null,
+          allowSecondQuestion: false,
+          phoneMode: 'lite'
+        };
+      }
+      return {
+        askField: null,
+        phase: 'none',
+        reason: 'missing',
+        nextField: null,
+        allowSecondQuestion: false,
+        phoneMode: 'lite'
+      };
+    }
     const nextField = getNextNonPhoneField(data);
     const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
     return {
@@ -584,6 +663,27 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   }
 
   if (next === 'ddd') {
+    if (lastAskedField === 'ddd' && askedRecently) {
+      const alt = getNextNonPhoneField(data);
+      if (alt) {
+        return {
+          askField: alt,
+          phase: 'none',
+          reason: 'missing',
+          nextField: null,
+          allowSecondQuestion: false,
+          phoneMode: 'lite'
+        };
+      }
+      return {
+        askField: null,
+        phase: 'none',
+        reason: 'missing',
+        nextField: null,
+        allowSecondQuestion: false,
+        phoneMode: 'lite'
+      };
+    }
     const nextField = getNextNonPhoneField(data);
     return {
       askField: 'ddd',
