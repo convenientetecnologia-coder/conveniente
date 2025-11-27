@@ -392,59 +392,30 @@ async function bumpAskCount(perfil, chatId, field) {
 }
 
 function montarRespostaForcadaWhatsAppSemDDD(dados, askCounts = {}) {
-  const varWpp = [
-    'Quem passa o orçamento é o motorista. Me passa seu WhatsApp, por favor? Vou repassar seu pedido e ele já te chama no WhatsApp para te informar o valor.',
-    'O valor é passado diretamente pelo motorista. Pode me mandar seu WhatsApp? Em seguida ele te chama lá e te informa o preço.',
-    'Quem informa o valor é o motorista. Me envia seu WhatsApp, por gentileza? Vou repassar e ele já te chama para te dizer o orçamento.'
+  const telOk = !!(dados && dados.telefone && promptFretes.isValidBRPhoneWithDDD(dados.telefone));
+  const temParcial = !!(dados && dados.telefone_parcial);
+  const temDDD = !!(dados && dados.ddd);
+
+  // Se já tem telefone válido, não peça nada
+  if (telOk) return null;
+
+  // Caso seja parcial sem DDD, peça APENAS o DDD
+  if (temParcial && !temDDD) {
+    const frasesDDD = [
+      'Perfeito! Pode me informar o DDD?',
+      'Certo! Me passa só o DDD, por favor?',
+      'Legal! Qual o DDD?'
+    ];
+    return frasesDDD[(askCounts.ddd || 0) % frasesDDD.length];
+  }
+
+  // Caso contrário, peça APENAS o WhatsApp (nunca "com DDD")
+  const frasesWpp = [
+    'Quem informa o valor é o motorista. Pode me passar o seu WhatsApp?',
+    'O orçamento é passado pelo motorista. Me manda seu WhatsApp?',
+    'O motorista informa o valor. Me passa o seu WhatsApp, por favor?'
   ];
-  const wpp = varWpp[(askCounts.telefone || 0) % varWpp.length];
-  const falta = nextMissingField(dados);
-  if (!falta) return wpp;
-  const mapa = {
-    itens: [
-      'Qual item você precisa levar?',
-      'O que vamos transportar?',
-      'Me diz o item a transportar, por favor.'
-    ],
-    bairro_saida: [
-      'Qual o bairro de saída?',
-      'De qual bairro busco?',
-      'Onde vou buscar (bairro)?'
-    ],
-    bairro_destino: [
-      'E o bairro de destino?',
-      'Para qual bairro vai?',
-      'Qual o bairro de entrega?'
-    ],
-    ajudante: [
-      'Precisa de ajudante para carregar?',
-      'Vai precisar de ajudante?',
-      'Tem necessidade de ajudante?'
-    ],
-    saida_tipo: [
-      'A saída é de casa ou apartamento?',
-      'No local de saída é casa ou apartamento?',
-      'Saída: casa ou ap.?'
-    ],
-    destino_tipo: [
-      'E no destino, é casa ou apartamento?',
-      'Destino é casa ou apartamento?',
-      'Destino: casa ou ap.?'
-    ],
-    saida_elevador: [
-      'Tem elevador no local de saída?',
-      'No prédio de saída tem elevador?',
-      'Saída tem elevador?'
-    ],
-    destino_elevador: [
-      'Tem elevador no destino?',
-      'No prédio de destino tem elevador?',
-      'Destino tem elevador?'
-    ]
-  };
-  const varSet = mapa[falta] || ['Certo, prossigo com a próxima informação.'];
-  const pick = varSet[(askCounts[falta] || 0) % varSet.length];
-  return `${wpp} ${pick}`;
+  return frasesWpp[(askCounts.telefone || 0) % frasesWpp.length];
 }
 
 function detectAskedFieldFromText(t) {
@@ -3089,7 +3060,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Diretiva determinística: qual campo perguntar agora
           const directive = pedidos.getAskDirective(nome, chatId, novasMsgs, snap) || { askField: null, phase: 'none', reason: 'missing', nextField: null };
-          const allowSecond = (directive.askField === 'telefone' && directive.phase === 'full');
+          const allowSecond = false;
 
           // Log da diretiva para auditoria
           try {
@@ -3101,7 +3072,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // - Fazer SOMENTE a pergunta definida pela diretiva (ask_field), exceto a exceção telefone + próxima quando allowSecond=true.
           // - Nunca ecoar PII (telefone, DDD).
           
-          const systemAnswer = promptFretes.buildSystemPrompt({ askField: directive.askField, allowSecondQuestion: allowSecond });
+          const systemAnswer = promptFretes.buildSystemPrompt({ askField: directive.askField, allowSecondQuestion: false });
           const userAnswer = promptFretes.buildUserPrompt({
             cidade: dataColetada.cidade || cidadeCtx,
             historico: historicoConversa,
@@ -3110,8 +3081,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             flags: { firstReply, telefone_ok, protest_count: protestCount },
             missingFields: missing,
             askField: directive.askField,
-            nextField: allowSecond ? directive.nextField : null,
-            allowSecondQuestion: allowSecond
+            nextField: null,
+            allowSecondQuestion: false
           });
 
           // Chama IA geradora
@@ -3202,9 +3173,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               pedidos.markIaReplied(nome, chatId);
               if (directive && directive.askField) {
                 pedidos.recordAsk(nome, chatId, directive.askField);
-                if (allowSecond && directive.nextField) {
-                  pedidos.recordAsk(nome, chatId, directive.nextField);
-                }
                 if (directive.askField === 'telefone') {
                   pedidos.setWhatsPhase(nome, chatId, directive.phase || 'full');
                 }
@@ -3336,9 +3304,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
           const dadosColetadosNow = (stPrev2 && stPrev2.dadosColetados) ? stPrev2.dadosColetados : {};
           const respostaWpp = montarRespostaForcadaWhatsAppSemDDD(dadosColetadosNow, askCountsNow);
-          await bumpAskCount(nome, chatId, 'telefone');
-          const falta = nextMissingField(dadosColetadosNow);
-          if (falta) await bumpAskCount(nome, chatId, falta);
+          const pedeDDD = (!!(dadosColetadosNow && dadosColetadosNow.telefone_parcial) && !(dadosColetadosNow && dadosColetadosNow.ddd));
+          await bumpAskCount(nome, chatId, pedeDDD ? 'ddd' : 'telefone');
           logger.info('[VIRTUS_WPP_REQ] override', { nome, chatId });
 
           // Debounce central — registra pedida e flush imediato seguro

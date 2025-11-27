@@ -111,7 +111,9 @@ const ALLOWED_ASK_FIELDS = Object.freeze([
   'saida_tipo',
   'destino_tipo',
   'saida_elevador',
-  'destino_elevador'
+  'destino_elevador',
+  'ddd',           // <-- adicionado
+  'telefone'
 ]);
 
 /**
@@ -137,8 +139,16 @@ function getNextAskField(data = {}) {
   if (!d.destino_tipo) return 'destino_tipo';
   if (d.saida_tipo === 'apartamento' && typeof d.saida_elevador !== 'boolean') return 'saida_elevador';
   if (d.destino_tipo === 'apartamento' && typeof d.destino_elevador !== 'boolean') return 'destino_elevador';
-  if (!isValidPhoneBR(d.telefone)) return 'telefone';
-  return null;
+
+  // Política telefone:
+  // 1) Se já houver telefone completo válido, nada a perguntar.
+  if (isValidPhoneBR(d.telefone)) return null;
+
+  // 2) Se houver apenas telefone_parcial e não houver ddd, pedir APENAS o ddd.
+  if (!d.ddd && d.telefone_parcial) return 'ddd';
+
+  // 3) Caso contrário, pedir o telefone (WhatsApp).
+  return 'telefone';
 }
 
 /**
@@ -192,7 +202,7 @@ class PedidoOrchestrator extends EventEmitter {
       data: { itens:null,bairro_saida:null,bairro_destino:null,ajudante:null,saida_tipo:null,saida_elevador:null,destino_tipo:null,destino_elevador:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null },
       flags: { firstIaReplied:false, greetDone:false, finalizedAt:null, finalizationFreezeUntil:null, sentToNotifierAt:null, hasAskedWhats:false, singleInactivityPingSent:false, sentType:null },
       timers: { startedAt: now(), incompleteWithWhatsDeadline: null, withoutWhatsDeadline: null },
-      askCounts: { telefone:0, itens:0, bairro_saida:0, bairro_destino:0, ajudante:0, saida_tipo:0, destino_tipo:0, saida_elevador:0, destino_elevador:0 },
+      askCounts: { telefone:0, ddd:0, itens:0, bairro_saida:0, bairro_destino:0, ajudante:0, saida_tipo:0, destino_tipo:0, saida_elevador:0, destino_elevador:0 },
       lastWhatsAskAt: null,
       missing: []
     };
@@ -419,20 +429,12 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const data = (snapshot && snapshot.data) || (s && s.data) || {};
   const telOk = isValidPhoneBR(data.telefone);
 
+  // Intenção de preço → pedir somente o WhatsApp (telefone) se ainda não houver telefone completo
   if (!telOk && shouldAskWhatsappFirst({ historicoNovo: novasMsgs, dataAtual: data })) {
-    // Fase Whats (full na primeira vez; lite nas seguintes)
-    const flags = (s && s.flags) || {};
-    const telCount = (s && s.askCounts && s.askCounts.telefone) || 0;
-    const lastPhase = flags.whatsAskedPhase || null;
-    const phase = (lastPhase === 'full' || telCount > 0) ? 'lite' : 'full';
-    let nextField = getNextAskField(data);
-    // Saneamento rígido do next_field para a exceção controlada telefone+próxima
-    if (nextField === 'telefone' || !ALLOWED_ASK_FIELDS.includes(nextField)) {
-      nextField = null;
-    }
-    return { askField: 'telefone', phase, reason: 'price_intent', nextField };
+    return { askField: 'telefone', phase: 'none', reason: 'price_intent', nextField: null };
   }
 
+  // Próximo campo do fluxo (inclui política ddd -> telefone)
   const next = getNextAskField(data);
   return { askField: next || null, phase: 'none', reason: 'missing', nextField: null };
 }
