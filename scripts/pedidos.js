@@ -245,6 +245,10 @@ class PedidoOrchestrator extends EventEmitter {
       if (p && !p.flags.sentToNotifierAt) {
         const payload = Object.assign({}, p.data);
         this.emit('orderSent', { perfil, chatId, tipo: 'completo', payload });
+        try {
+          const stepLog = require('./stepLog.js');
+          stepLog.appendJSONL(perfil, 'order_sent', { chatId, tipo: 'completo', payload });
+        } catch {}
         // mark freeze e idempotência
         this.markSentAndFreeze(perfil, chatId, 'completo');
         this._audit('pedidos_order_sent', perfil, chatId, { tipo: 'completo', telefone_mask: maskPhone(payload.telefone), campos_faltantes_count: 0 });
@@ -294,6 +298,10 @@ class PedidoOrchestrator extends EventEmitter {
               s.timers.incompleteWithWhatsDeadline <= now()) {
             const payload = Object.assign({}, s.data);
             this.emit('orderSent', { perfil, chatId, tipo: 'incompleto', payload });
+            try {
+              const stepLog = require('./stepLog.js');
+              stepLog.appendJSONL(perfil, 'order_sent', { chatId, tipo: 'incompleto', payload });
+            } catch {}
             this.markSentAndFreeze(perfil, chatId, 'incompleto');
             this._audit('pedidos_order_sent', perfil, chatId, { tipo: 'incompleto', telefone_mask: maskPhone(payload.telefone), campos_faltantes_count: (s.missing||[]).length });
             continue;
@@ -305,6 +313,10 @@ class PedidoOrchestrator extends EventEmitter {
               s.timers.withoutWhatsDeadline <= now() &&
               !(s.flags && s.flags.singleInactivityPingSent === true)) {
             this.emit('inactivityPing', { perfil, chatId });
+            try {
+              const stepLog = require('./stepLog.js');
+              stepLog.appendJSONL(perfil, 'inactivity_ping', { chatId });
+            } catch {}
             s.flags = s.flags || {};
             s.flags.singleInactivityPingSent = true;
             this._set(perfil, chatId, s);
@@ -332,6 +344,10 @@ async function fallbackToHuman(perfil, chatId, reason) {
       return desired;
     });
     try { issues.append(perfil, 'mil_action', `handoff_to_human chat=${chatId} reason=${reason||''}`); } catch {}
+    try {
+      const stepLog = require('./stepLog.js');
+      stepLog.appendJSONL(perfil, 'handoff_to_human', { chatId, reason });
+    } catch {}
     orchestrator.emit('handoffToHuman', { perfil, chatId, reason });
   } catch (e) {
     try { issues.append(perfil, 'mil_action', `handoff_to_human_failed chat=${chatId} reason=${(e&&e.message)||e}`); } catch {}

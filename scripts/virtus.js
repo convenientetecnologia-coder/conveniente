@@ -1804,7 +1804,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       return;
     }
 
-    const expected = String(msg || '').trim();
+    const expected = safeMsg.trim();
     const before = await getMySentSnapshot(p);
     logger.debug('[MESSENGER] Snapshot antes do envio', { nome, chatId, beforeTotal: before.total });
 

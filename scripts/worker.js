@@ -2186,7 +2186,7 @@ const handlers = {
   async ['criar-perfil']({ cidade, cookies }) {
     logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
     if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
-    if (!fs.existsExists(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
+    if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);

@@ -227,6 +227,13 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
 
   const sanitized = sanitizeExtracted(parsed);
   
+  try {
+    const stepLog = require('./stepLog.js');
+    stepLog.appendJSONL(perfil, 'ia_extract', {
+      chatId, raw, firstJson, parsedPreview: Object.keys(parsed||{}), ts: Date.now()
+    });
+  } catch {}
+  
   // Fallback e log se JSON inválido ou parse falhou
   const hasValidJson = firstJson && firstJson !== '{}' && parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0;
   if (!hasValidJson) {

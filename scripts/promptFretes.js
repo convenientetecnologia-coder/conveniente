@@ -46,6 +46,14 @@ Restrições:
 
     Nunca inclua comentários.
 
+Instruções de formatação adicionais:
+
+- Não utilize cercas de código (\`\`\`).
+
+- A resposta deve ser exatamente um único objeto JSON válido.
+
+Se for gerado qualquer saída fora do JSON, será considerado erro.
+
 `.trim();
 }
 
@@ -208,7 +216,12 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     if (!telefoneOK && dddInformado) dadosOut.ddd = dddInformado;
     if (safeDados.debug) dadosOut.debug = safeDados.debug;
 
-    // 6) Critério de finalização real (somente se todos os campos + WhatsApp válido existem)
+    // 6) Critério de finalização real (obrigatório levantar elevador nos aptos)
+    const isAptSaida = (dadosOut.saida_tipo === 'apartamento');
+    const isAptDestino = (dadosOut.destino_tipo === 'apartamento');
+    const elevSaidaOk = !isAptSaida || (safeDados.saida_elevador === true || safeDados.saida_elevador === false || dadosOut.saida_elevador === true || dadosOut.saida_elevador === false);
+    const elevDestinoOk = !isAptDestino || (safeDados.destino_elevador === true || safeDados.destino_elevador === false || dadosOut.destino_elevador === true || dadosOut.destino_elevador === false);
+
     const finalizavel =
       !!dadosOut.itens &&
       !!dadosOut.bairro_saida &&
@@ -216,6 +229,8 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       (safeDados.ajudante === true || safeDados.ajudante === false || dadosOut.ajudante === true || dadosOut.ajudante === false) &&
       !!dadosOut.saida_tipo &&
       !!dadosOut.destino_tipo &&
+      elevSaidaOk &&
+      elevDestinoOk &&
       !!telefoneOK;
 
     // Fallback duro — nunca devolve resposta vazia
