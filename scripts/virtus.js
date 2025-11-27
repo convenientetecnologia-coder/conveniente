@@ -1143,7 +1143,7 @@ const fileLocks = new Map(); // file -> { pid, timestamp }
 async function acquireFileLock(file, timeoutMs = 5000) {
   const lockFile = file + '.lck';
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now - start < timeoutMs) {
     try {
       const fd = fsRaw.openSync(lockFile, 'wx'); // cria se não existe, falha se existe
       const pid = process.pid;
@@ -2138,7 +2138,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         delete historico[id];
         respondedCache.delete(id);
         mudanca = true;
-        log(`Histórico limpo: ${id} removido (>24h)`);
       }
     });
     while (respondedCache.size > RESP_CACHE_MAX) {
@@ -2500,7 +2499,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const pLimit = pLimitImport && (pLimitImport.default || pLimitImport);
     const limit = pLimit ? pLimit(8) : (fn) => fn();
 
-    await Promise.all(chatsNovos.map(c => limit(async () => {
+    await Promise.all(chatsNovos.map(async (c) => limit(async () => {
       const id = c.id;
 
       let st = null;
@@ -3056,24 +3055,35 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const telefone_ok = !!(dataColetada.telefone && String(dataColetada.telefone).trim().length >= 10);
           const firstReply = pedidos.shouldGreetFirstReply(nome, chatId);
 
-          // Monta prompts do gerador
+          // Monta flags e diretiva determinística (pedido decide o que perguntar)
           const stForFlags = await getChatState(nome, chatId).catch(()=>null);
           const protestCount = (stForFlags && stForFlags.protestCount) || 0;
-          
+
+          // Diretiva determinística: qual campo perguntar agora
+          const directive = pedidos.getAskDirective(nome, chatId, novasMsgs, snap) || { askField: null, phase: 'none', reason: 'missing', nextField: null };
+          const allowSecond = (directive.askField === 'telefone' && directive.phase === 'full');
+
+          // Log da diretiva para auditoria
+          try {
+            stepLog.appendJSONL(nome, 'virtus', { step: 'ask_directive', chatId, directive });
+          } catch {}
+
           // Política de atendimento (burst 1):
-          // - Consolide cumprimentos múltiplos do cliente numa saudação breve e avance.
-          // - Sempre responda perguntas objetivas (tipo "faz frete?", "tem seguro?") antes de pedir dados do fluxo (burst 1 ou no meio da conversa).
-          // - Uma única mensagem, com 1–3 frases curtas/naturais, sem listar, sem ecoar o texto do cliente no corpo.
-          // - Nunca ecoe PII (telefone, DDD).
+          // - Responder a tudo o que o cliente disse nesta virada.
+          // - Fazer SOMENTE a pergunta definida pela diretiva (ask_field), exceto a exceção telefone + próxima quando allowSecond=true.
+          // - Nunca ecoar PII (telefone, DDD).
           
-          const systemAnswer = promptFretes.buildSystemPrompt();
+          const systemAnswer = promptFretes.buildSystemPrompt({ askField: directive.askField, allowSecondQuestion: allowSecond });
           const userAnswer = promptFretes.buildUserPrompt({
             cidade: dataColetada.cidade || cidadeCtx,
             historico: historicoConversa,
             coletado: dataColetada,
             askCounts: (snap && snap.askCounts) || {},
             flags: { firstReply, telefone_ok, protest_count: protestCount },
-            missingFields: missing
+            missingFields: missing,
+            askField: directive.askField,
+            nextField: allowSecond ? directive.nextField : null,
+            allowSecondQuestion: allowSecond
           });
 
           // Chama IA geradora
@@ -3135,22 +3145,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try {
             await sendMessageSafe(pAtual, campoEnvio, respostaSan, nome, chatId);
             await appendIaLine(nome, chatId, respostaSan);
+
+            // Marca IA replied + askCount conforme diretiva aprovada
+            try {
+              pedidos.markIaReplied(nome, chatId);
+              if (directive && directive.askField) {
+                pedidos.recordAsk(nome, chatId, directive.askField);
+                if (allowSecond && directive.nextField) {
+                  pedidos.recordAsk(nome, chatId, directive.nextField);
+                }
+                if (directive.askField === 'telefone') {
+                  pedidos.setWhatsPhase(nome, chatId, directive.phase || 'full');
+                }
+              }
+              await setChatState(nome, chatId, {
+                state: CHAT_STATES.AGUARDANDO,
+                lastIATs: Date.now(),
+                lastCLIts: lastClienteTs,
+                lastProbeAt: Date.now()
+              });
+            } catch {}
           } finally {
             releaseSendGuard(pAtual);
           }
-
-          // Marca IA replied + askCount do próximo missing
-          try {
-            pedidos.markIaReplied(nome, chatId);
-            const askedField = Array.isArray(missing) && missing.length ? missing[0] : null;
-            if (askedField) pedidos.recordAsk(nome, chatId, askedField);
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              lastIATs: Date.now(),
-              lastCLIts: lastClienteTs,
-              lastProbeAt: Date.now()
-            });
-          } catch {}
 
           // Enfileira o chat para o notificador (pipeline legado de respostas) — mantém compatibilidade
           try {
@@ -3408,26 +3425,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
             let respostaFinalRaw = String(parsed.resposta || '').trim();
             
-            // Se houve pedido de preço neste lote e ainda não pedimos WhatsApp, prefixa a FULL 1x
-            try {
-              const stPhase = await getChatState(nome, chatId).catch(()=>null);
-              const phase = (stPhase && stPhase.whatsAskedPhase) || 'none';
+            // [DESATIVADO NESTE FLUXO] prefixo FULL por intenção de preço agora é controlado pela diretiva do pedido + prompt (ask_field).
+            // Mantido bloco abaixo para compatibilidade do fluxo legado.
 
-              // Telefone válido no state?
-              const stNowTel = await getChatState(nome, chatId).catch(()=>null);
-              const dcTel = (stNowTel && stNowTel.dadosColetados) ? stNowTel.dadosColetados : {};
-              const telOk = !!(dcTel.telefone && promptFretes.isValidBRPhoneWithDDD(dcTel.telefone));
-
-              if (priceIntentBatch && !telOk && phase === 'none') {
-                const full = composeWhatsAskFull(dcTel);
-                const prefixed = `${full} ${respostaFinalRaw}`;
-                respostaFinalRaw = prefixed;
-                await bumpAskCount(nome, chatId, 'telefone');
-                await setChatState(nome, chatId, { whatsAskedPhase: 'full', firstWhatsAskAt: Date.now() });
-                await flushChatStateNow(nome);
-              }
-            } catch {}
-            
             const respostaFinal = removeTelefonesCompletos(respostaFinalRaw);
             logger.info('[VIRTUS_RESP] ok', { nome, chatId, sanitized: respostaFinal !== respostaFinalRaw });
             
@@ -3614,7 +3614,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
@@ -3625,7 +3625,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
       return;
     }
 
@@ -3639,7 +3639,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         running = false;
         if (filaInterval) clearInterval(filaInterval), filaInterval = null;
         if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+        if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
         return;
       }
 
@@ -4242,7 +4242,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
@@ -4465,7 +4465,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       running = false;
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
+      if (scrollInterval) clearInterval(scrollInterval), filaChatTimer = null;
       let pages = [];
       try { pages = await browser.pages(); } catch {}
       if (robeMeta && typeof nome !== "undefined") {

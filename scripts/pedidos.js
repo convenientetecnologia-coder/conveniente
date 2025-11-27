@@ -87,6 +87,65 @@ function isValidPhoneBR(d) {
   return false;
 }
 
+/* ===================== INÍCIO — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
+
+/**
+ * Normaliza texto (sem acentos, lower) para match robusto.
+ */
+function _norm(s) { try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); } catch { return String(s || '').toLowerCase(); } }
+
+/**
+ * Intenção de preço — usado para disparar pedido de WhatsApp "já".
+ */
+const PRICE_INTENT_RE = /(pre[cç]o|valor|quanto\s+(custa|fica|sai)|cobra|or[cç]amento)/i;
+function hasPriceIntent(text) {
+  const t = _norm(text || '');
+  return /(preco|valor|quanto\s+(custa|fica|sai)|cobra|orcamento)/.test(t);
+}
+
+/**
+ * Decide o próximo campo a perguntar COM ordem fixa e regras:
+ * 1. itens
+ * 2. bairro_saida
+ * 3. bairro_destino
+ * 4. ajudante
+ * 5. saida_tipo
+ * 6. destino_tipo
+ * 7. saida_elevador (se apt)
+ * 8. destino_elevador (se apt)
+ * 9. telefone
+ * Observação: cidade NÃO é perguntada no fluxo do chat ao cliente.
+ */
+function getNextAskField(data = {}) {
+  const d = data || {};
+  if (!d.itens) return 'itens';
+  if (!d.bairro_saida) return 'bairro_saida';
+  if (!d.bairro_destino) return 'bairro_destino';
+  if (typeof d.ajudante !== 'boolean') return 'ajudante';
+  if (!d.saida_tipo) return 'saida_tipo';
+  if (!d.destino_tipo) return 'destino_tipo';
+  if (d.saida_tipo === 'apartamento' && typeof d.saida_elevador !== 'boolean') return 'saida_elevador';
+  if (d.destino_tipo === 'apartamento' && typeof d.destino_elevador !== 'boolean') return 'destino_elevador';
+  if (!isValidPhoneBR(d.telefone)) return 'telefone';
+  return null;
+}
+
+/**
+ * Deve pedir WhatsApp agora (primeira prioridade) se houver intenção de preço,
+ * e ainda não houver telefone completo válido.
+ */
+function shouldAskWhatsappFirst({ historicoNovo = [], dataAtual = {} } = {}) {
+  const telOk = isValidPhoneBR(dataAtual && dataAtual.telefone);
+  if (telOk) return false;
+  for (const m of (historicoNovo || [])) {
+    const txt = (m && m.texto) || '';
+    if (hasPriceIntent(txt)) return true;
+  }
+  return false;
+}
+
+/* ===================== FIM — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
+
 class PedidoOrchestrator extends EventEmitter {
   constructor() {
     super();
@@ -226,7 +285,7 @@ class PedidoOrchestrator extends EventEmitter {
     const allMsgs = Array.isArray(mensagensDoCliente) ? mensagensDoCliente : [];
     const campos = await extractOrderFieldsLLM({ perfil, chatId, mensagens: allMsgs, contexto: contexto || {} });
     const snap = this.upsertFromIA(perfil, chatId, campos);
-    
+
     // Anti-loop: verifica se algum campo faltante excedeu MAX_ASK_RETRIES
     const sNow = this._get(perfil, chatId);
     if (sNow && sNow.askCounts) {
@@ -238,7 +297,7 @@ class PedidoOrchestrator extends EventEmitter {
         }
       }
     }
-    
+
     // Decisões determinísticas
     if (this.readyToSendComplete(perfil, chatId)) {
       const p = this._get(perfil, chatId);
@@ -336,6 +395,49 @@ class PedidoOrchestrator extends EventEmitter {
 
 const orchestrator = new PedidoOrchestrator();
 
+/**
+ * Diretiva determinística: "qual campo perguntar agora" + fase de WhatsApp.
+ * Retorna: { askField, phase, reason, nextField }
+ *   - askField: 'itens'|'bairro_saida'|...|'telefone'|null
+ *   - phase: 'full'|'lite'|'none' (full primeira vez do WhatsApp; lite subsequentes)
+ *   - reason: 'price_intent' ou 'missing'
+ *   - nextField: se askField='telefone' e phase='full', devolve próximo do fluxo (ou null)
+ */
+function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
+  const s = orchestrator._get(perfil, chatId) || {};
+  const data = (snapshot && snapshot.data) || (s && s.data) || {};
+  const telOk = isValidPhoneBR(data.telefone);
+
+  if (!telOk && shouldAskWhatsappFirst({ historicoNovo: novasMsgs, dataAtual: data })) {
+    // Fase Whats (full na primeira vez; lite nas seguintes)
+    const flags = (s && s.flags) || {};
+    const telCount = (s && s.askCounts && s.askCounts.telefone) || 0;
+    const lastPhase = flags.whatsAskedPhase || null;
+    const phase = (lastPhase === 'full' || telCount > 0) ? 'lite' : 'full';
+    const nextField = getNextAskField(data);
+    return { askField: 'telefone', phase, reason: 'price_intent', nextField: nextField || null };
+  }
+
+  const next = getNextAskField(data);
+  return { askField: next || null, phase: 'none', reason: 'missing', nextField: null };
+}
+
+/**
+ * Persistência da fase do WhatsApp (para ser chamada pelo executor quando efetivamente perguntar).
+ * phase: 'full'|'lite'
+ */
+function setWhatsPhase(perfil, chatId, phase) {
+  try {
+    const s = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
+    s.flags = s.flags || {};
+    s.flags.whatsAskedPhase = String(phase || 'full');
+    s.lastWhatsAskAt = now();
+    orchestrator._set(perfil, chatId, s);
+    try { issues.append(perfil, 'mil_action', `whats_phase_set chat=${chatId} phase=${phase}`); } catch {}
+    return true;
+  } catch { return false; }
+}
+
 async function fallbackToHuman(perfil, chatId, reason) {
   try {
     await fileStore.withDesiredFileLockUpdate(desired => {
@@ -365,4 +467,11 @@ module.exports = {
   markFinalizedAndFreeze: (perfil, chatId) => orchestrator.markFinalizedAndFreeze(perfil, chatId),
   upsertFromIA: (perfil, chatId, campos) => orchestrator.upsertFromIA(perfil, chatId, campos),
   upsertFromHistoryLLM: (perfil, chatId, mensagens, opts) => orchestrator.upsertFromHistoryLLM(perfil, chatId, mensagens, opts),
+
+  // ===== ADIÇÕES EXPORTADAS PARA CONTROLE DETERMINÍSTICO DO FLUXO =====
+  getNextAskField,
+  shouldAskWhatsappFirst,
+  getAskDirective,
+  setWhatsPhase,
+  hasPriceIntent
 };
