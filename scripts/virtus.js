@@ -1141,7 +1141,7 @@ const fileLocks = new Map(); // file -> { pid, timestamp }
 async function acquireFileLock(file, timeoutMs = 5000) {
   const lockFile = file + '.lck';
   const start = Date.now();
-  while (Date.now - start < timeoutMs) {
+  while ((Date.now() - start) < timeoutMs) {
     try {
       const fd = fsRaw.openSync(lockFile, 'wx'); // cria se não existe, falha se existe
       const pid = process.pid;
@@ -2048,6 +2048,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         });
       } catch {}
 
+      try {
+        const stPrev = await getChatState(nome, chatId).catch(() => null);
+        const rDuePrev = stPrev && stPrev.replyDueAt;
+        if (!rDuePrev) {
+          await setChatState(nome, chatId, { replyDueAt: Date.now() + REPLY_FIRST_DELAY_MS });
+        }
+      } catch {}
+
       logger.info('[DBNC] buffer started/reset', { nome, chatId, dueAt });
 
     } catch (e) {
@@ -2518,6 +2526,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       let st = null;
       try { st = await getChatState(nome, id); } catch {}
+
+      const replyDue = st && st.replyDueAt || 0;
+      if (replyDue && Date.now() < replyDue) {
+        logger.info(`[FILA][${nome}] skip ${id} — aguardando janela 45s`, { replyDueAt: replyDue });
+        return;
+      }
+
       const jaFoiRespondido = st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO);
       
       if (jaFoiRespondido) {
@@ -2789,6 +2804,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       _chatLockAcquired = true;
         logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       }
+
+      // EARLY GATE 45s — não prosseguir se ainda dentro da janela
+      try {
+        const stGate = await getChatState(nome, chatId).catch(() => null);
+        const rDue = stGate && stGate.replyDueAt || 0;
+        const nowMs = Date.now();
+        if (rDue && nowMs < rDue) {
+          const waitMs = Math.max(50, rDue - nowMs + 10);
+          logger.info('[RESPONDER][DELAY45S] aguardando janela por chat (early gate)', { nome, chatId, waitMs });
+          setTimeout(() => {
+            try {
+              if (!fila.includes(chatId)) fila.push(chatId);
+              scheduleNextIfIdle();
+            } catch {}
+          }, waitMs);
+          // Não liberar lock manualmente; o finally cuidará disso.
+          // Apenas sair cedo para não abrir UI nem coletar histórico.
+          return;
+        }
+      } catch {}
       
       try {
         await setChatState(nome, chatId, { lastProbeAt: Date.now() });
@@ -3034,27 +3069,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           ultimoProbeCLIts: lastClienteTs,
           lastProbeAt: Date.now()
         });
-
-        // Delay mínimo de resposta por chat: aguardar 45s desde a última mensagem do cliente
-        if (lastClienteTs) {
-          const dueAt = lastClienteTs + REPLY_FIRST_DELAY_MS;
-          const nowMs = Date.now();
-          if (nowMs < dueAt) {
-            const waitMs = Math.max(50, dueAt - nowMs + 10);
-            logger.info('[RESPONDER][DELAY45S] aguardando janela por chat', { nome, chatId, waitMs });
-            try { await setChatState(nome, chatId, { replyDueAt: dueAt }); } catch {}
-            setTimeout(() => {
-              try {
-                if (!fila.includes(chatId)) fila.push(chatId);
-                scheduleNextIfIdle();
-              } catch {}
-            }, waitMs);
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-        }
 
         // NOVO GATE: só responde SE o cliente falou ALGO NOVO desde a última IA/CLIts
         const hasNewClient = lastClienteTs && (lastClienteTs > Math.max(lastIATsPrev, lastIaTs, lastCLItsPrev));
