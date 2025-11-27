@@ -747,6 +747,18 @@ async function enviarLoteNotificador(nomePerfil) {
       
       if (response.ok && responseData && responseData.ok === true) {
         logger.info('[NOTIFICADOR] Chat enviado com sucesso', { nomePerfil, chatId: dadosChat.chatId });
+        
+        // Limpa aguardando de imediato após POST ok
+        try {
+          const s = getSetAguardando(nomePerfil);
+          s.delete(dadosChat.chatId);
+          clearAguardTimer(nomePerfil, dadosChat.chatId);
+          // Libere também lastProbeAt, se for preciso para fila (dependendo de sua implementação)
+          const st = await getChatState(nomePerfil, dadosChat.chatId).catch(()=>null);
+          if (st) {
+            await setChatState(nomePerfil, dadosChat.chatId, { lastProbeAt: Date.now() - (parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS||'15000',10)+1000) });
+          }
+        } catch {}
       } else {
         logger.error('[NOTIFICADOR] Erro ao enviar chat', { 
           nomePerfil, 
@@ -1851,42 +1863,68 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
     let mensagemEnviada = sent;
     if (!sent) {
-      const composerEmpty = await p.evaluate(() => {
-        const composers = Array.from(document.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
-        for (const comp of composers) {
-          const txt = (comp.innerText || comp.textContent || '').trim();
-          if (txt.length === 0) return true;
+      // Retry único com re-tipo (colar texto de novo) e Enter
+      try {
+        await clearComposerIfAny(p, campo);
+        await p.waitForTimeout(300);
+        const retryText = String(safeMsg);
+        await campo.type(retryText, { delay: jitter() });
+        await p.keyboard.press('Enter');
+        const sentRetry = await p.waitForFunction((beforeCount, expectedNorm) => {
+          function getSnap() {
+            const rows = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]'));
+            let total = 0, lastText = '';
+
+            for (let i = 0; i < rows.length; i++) {
+              const el = rows[i];
+              const txt = (el.innerText || el.textContent || '').trim();
+              if (!txt) continue;
+
+              let isMine = false;
+              try {
+                const st = window.getComputedStyle(el);
+                if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) isMine = true;
+              } catch {}
+
+              const n = String(txt).toLowerCase();
+              if (/\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(n)) isMine = true;
+
+              if (isMine) {
+                total++;
+                lastText = txt;
+              }
+            }
+
+            return { total, lastText };
+          }
+
+          const snap = getSnap();
+          if (snap.total <= beforeCount) return false;
+
+          const lastNorm = String(snap.lastText || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+          return lastNorm.includes(expectedNorm);
+        }, { timeout: 12000 }, before.total, expectedNorm).catch(() => false);
+        
+        if (!sentRetry) {
+          await logIssue(nome, 'virtus_send_failed', 'send_confirmation_failed_and_retry_failed');
+          return; // ABORTA — NÃO loga "enviado"
         }
-        return false;
-      }).catch(() => false);
-      
-      if (composerEmpty) {
-        logger.warn('[MESSENGER] ⚠️ Confirmação robusta falhou, mas composer vazio (mensagem provavelmente enviada)', { 
-          nome, 
-          chatId,
-          beforeTotal: before.total
-        });
-        mensagemEnviada = true; // Assume que enviou
-      } else {
-        logger.error('[MESSENGER] ❌ FALHA: mensagem não enviada (composer não vazio)', { 
-          nome, 
-          chatId,
-          beforeTotal: before.total
-        });
-        await logIssue(nome, 'virtus_send_failed', 'send_confirmation_robust_timeout');
+        mensagemEnviada = true;
+      } catch {
+        await logIssue(nome, 'virtus_send_failed', 'send_confirmation_retry_exception');
+        return; // ABORTA
       }
     }
     
     if (mensagemEnviada) {
-      logger.info('[MESSENGER] ✅ Mensagem confirmada (robusta ou composer vazio)', {
+      logger.info('[MESSENGER] ✅ Mensagem confirmada', {
         nome,
         chatId,
         beforeTotal: before.total,
-        metodo: sent ? 'contagem_aumentou_texto_coincide' : 'composer_vazio_fallback'
+        metodo: sent ? 'contagem_aumentou_texto_coincide' : 'retry_sucesso'
       });
-    }
-
-    if (mensagemEnviada) {
+      
       try {
         await setChatState(nome, chatId, {
           state: CHAT_STATES.AGUARDANDO,
@@ -2528,15 +2566,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       if (aguard.has(id)) {
-        // Janela de tolerância: aceita reprocessar após 15s (TTL)
-        const st2 = await getChatState(nome, id).catch(()=>null);
-        const lastProbe2 = st2 && st2.lastProbeAt ? st2.lastProbeAt : 0;
-        if ((Date.now() - lastProbe2) < parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10)) {
-          logger.info(`[FILA][${nome}] skip ${id} — aguardando notificador (janela ativa)`);
-          return;
-        }
-        const setA2 = getSetAguardando(nome);
-        try { setA2.delete(id); clearAguardTimer(nome, id); } catch {}
+        logger.info(`[FILA][${nome}] skip ${id} — aguardando notificador`);
+        return;
       }
       if (fila.includes(id)) {
         logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
@@ -3056,6 +3087,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               timeoutMs: 22000,
               retries: 2
             });
+            
+            // Log raw da IA
+            logger.info('[GROQ][RAW]', { nome, chatId, raw: (respostaRawIA||'').slice(0,300) });
           } catch (e) {
             logger.warn('[AI-FIRST] Falha IA geradora', { nome, chatId, error: (e && e.message) || String(e) });
             try { await pendingDel(nome, chatId); } catch {}
@@ -3067,6 +3101,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Parse da resposta: extrai APENAS o campo .resposta (nunca enviar JSON completo)
           const parsed = promptFretes.parseModelAnswerToDomain(respostaRawIA, ultimaCliente?.texto);
           const textoAEnviar = String(parsed.resposta || '').trim();
+          
+          // Log parsed da resposta
+          logger.info('[GROQ][PARSED]', { nome, chatId, resposta: (textoAEnviar||'').slice(0,180) });
           
           // Sanitização PII: nunca ecoar telefone do cliente
           const respostaSan = removeTelefonesCompletos(textoAEnviar);
@@ -3290,7 +3327,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             let parsed;
             try {
               const modelRawResp = await chatCompletion({ system: systemPrompt, user: userPrompt, provider: 'groq' });
+              
+              // Log raw da IA
+              logger.info('[GROQ][RAW]', { nome, chatId, raw: (modelRawResp||'').slice(0,300) });
+              
               parsed = domain.parseModelAnswerToDomain(modelRawResp, ultimaCliente?.texto);
+              
+              // Log parsed da resposta
+              const respostaFinal = String(parsed.resposta || '').trim();
+              logger.info('[GROQ][PARSED]', { nome, chatId, resposta: (respostaFinal||'').slice(0,180) });
+              
               // parsed.telefone_extraido só vem com DDD; se vier apenas parcial, parsed.dados.telefone_parcial é populado.
             } catch (e) {
               logger.error('[GROQ] Erro ao chamar IA ou parsear resposta', { nome, chatId, error: e && e.message || e });
@@ -3499,19 +3545,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         
-        {
-          const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
-
-          adicionarChatParaEnvio(nome, {
-            chatId,
-            tipoServico,
-            historico: historicoConversa, // TODO o histórico da conversa
-            localizacao: localizacaoFormatada,
-            urlClassificado
-          });
-          // Fila do Notificador: permanece deduplicada por chat; ACK controlado pelo polling.
-
-        }
+        // Removido: adicionarChatParaEnvio duplicado (já chamado no pipeline IA-FIRST)
 
         try { await pendingDel(nome, chatId); } catch {}
         fila = fila.filter(id => id !== chatId);

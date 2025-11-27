@@ -226,6 +226,21 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
   try { parsed = JSON.parse(firstJson); } catch { parsed = {}; }
 
   const sanitized = sanitizeExtracted(parsed);
+  
+  // Fallback e log se JSON inválido ou parse falhou
+  const hasValidJson = firstJson && firstJson !== '{}' && parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0;
+  if (!hasValidJson) {
+    try { require('./issues.js').append(perfil, 'pedidos_order_sent', `extractor_raw_invalid chat=${chatId}`); } catch {}
+    
+    // Fallback: usa texto da última mensagem do cliente como itens se não houver
+    if (!sanitized.itens) {
+      const lastClient = Array.isArray(mensagens) ? mensagens.slice().reverse().find(m => m && m.autor === 'cliente') : null;
+      if (lastClient && lastClient.texto) {
+        sanitized.itens = String(lastClient.texto).slice(0, 60);
+      }
+    }
+  }
+  
   if (!sanitized.cidade && contexto && contexto.cidade) sanitized.cidade = String(contexto.cidade);
   sanitized.missing = computeMissing(sanitized);
   return sanitized;
