@@ -368,8 +368,8 @@ function removeTelefonesCompletos(texto) {
 
 function nextMissingField(dc = {}) {
   if (!dc.itens) return 'itens';
-  if (!dc.bairro_saida) return 'bairro_saida';
-  if (!dc.bairro_destino) return 'bairro_destino';
+  if (!dc.endereco_saida) return 'endereco_saida';
+  if (!dc.endereco_destino) return 'endereco_destino';
   if (typeof dc.ajudante !== 'boolean') return 'ajudante';
   if (!dc.saida_tipo) return 'saida_tipo';
   if (!dc.destino_tipo) return 'destino_tipo';
@@ -420,14 +420,16 @@ function montarRespostaForcadaWhatsAppSemDDD(dados, askCounts = {}) {
 
 function detectAskedFieldFromText(t) {
   const n = normTxt(t);
-  if (/bairro.*sa[ií]da|onde.*buscar|buscar.*bairro/.test(n)) return 'bairro_saida';
-  if (/bairro.destino|para.qual.bairro|bairro.entrega/.test(n)) return 'bairro_destino';
+  // Endereço de saída
+  if (/(endereco|endereço).*(sa[ií]da|retirada)|onde\s+(buscar|retirar)|local\s+de\s+retirada/.test(n)) return 'endereco_saida';
+  // Endereço de destino
+  if (/(endereco|endereço).*(destino|entrega)|para\s+onde|local\s+de\s+entrega/.test(n)) return 'endereco_destino';
   if (/ajudante/.test(n)) return 'ajudante';
-  if (/(casa|apartamento).(sa[ií]da)|sa[ií]da.(casa|apartamento)/.test(n)) return 'saida_tipo';
-  if (/(casa|apartamento).(destino)|destino.(casa|apartamento)/.test(n)) return 'destino_tipo';
+  if (/(casa|apartamento).*(sa[ií]da)|sa[ií]da.*(casa|apartamento)/.test(n)) return 'saida_tipo';
+  if (/(casa|apartamento).*(destino)|destino.*(casa|apartamento)/.test(n)) return 'destino_tipo';
   if (/elevador.*sa[ií]da/.test(n)) return 'saida_elevador';
-  if (/elevador.destino/.test(n)) return 'destino_elevador';
-  if (/itens?|o que.(levar|transportar)/.test(n)) return 'itens';
+  if (/elevador.*destino/.test(n)) return 'destino_elevador';
+  if (/itens?|o que\s+(levar|transportar)/.test(n)) return 'itens';
   return null;
 }
 
@@ -544,8 +546,8 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePag
     // 1) Ajudante, casa/apto etc.
     try { await applyBinaryAnswersFromContext(perfil, chatId, lastIaText || '', tx); } catch {}
 
-    // 2) Bairros
-    try { await inferBairrosFromText(perfil, chatId, tx, lastIaText || ''); } catch {}
+    // 2) Endereços
+    try { await inferEnderecosFromText(perfil, chatId, tx, lastIaText || ''); } catch {}
 
     // 3) DDD isolado
     try {
@@ -1305,6 +1307,10 @@ const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '1
 const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '30000', 10); // 30s
 const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '60000', 10); // 60s
 
+const REPLY_FIRST_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_FIRST_DELAY_MS || '45000', 10);
+const INTER_CHAT_DELAY_MIN_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MIN_MS || '5000', 10);
+const INTER_CHAT_DELAY_MAX_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MAX_MS || '20000', 10);
+
 const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
 const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
 const filaEnvioMessenger = new Map();     // nomePerfil -> [ { chatId, resposta, key } ]
@@ -1345,6 +1351,9 @@ function getPendingSet(perfil) {
   if (!pendingKeysPorPerfil.has(perfil)) pendingKeysPorPerfil.set(perfil, new Set());
   return pendingKeysPorPerfil.get(perfil);
 }
+
+// Throttle global entre envios por perfil (anti-spam 5–20s entre chats)
+const GLOBAL_SEND_THROTTLE = new Map(); // nomePerfil -> { nextAllowedSendAt: number }
 
 
 
@@ -1929,6 +1938,12 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
           state: CHAT_STATES.AGUARDANDO,
           lastIATs: Date.now()
         });
+      } catch {}
+
+      // Define throttle global entre chats: 5–20s aleatório
+      try {
+        const jitter = randomBetween(INTER_CHAT_DELAY_MIN_MS, INTER_CHAT_DELAY_MAX_MS);
+        GLOBAL_SEND_THROTTLE.set(nome, { nextAllowedSendAt: Date.now() + jitter });
       } catch {}
     }
 
@@ -2628,6 +2643,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     }
 
+    // Throttle global entre envios (aguarda próximo envio permitido)
+    const thr = GLOBAL_SEND_THROTTLE.get(nome);
+    if (thr && thr.nextAllowedSendAt && Date.now() < thr.nextAllowedSendAt) {
+      const wait = Math.max(50, thr.nextAllowedSendAt - Date.now() + 50);
+      logger.info('[FILA][THROTTLE] aguardando janela global', { nome, waitMs: wait });
+      filaChatTimer = setTimeout(scheduleNextIfIdle, wait);
+      return;
+    }
+
     const next = fila.shift(); // Remove da fila imediatamente
     if (!next) {
       logger.warn('[FILA] Chat removido da fila mas era null/undefined', { nome });
@@ -2999,7 +3023,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Janela de novas mensagens do cliente desde a última IA
         const novasMsgs = getNewClientMessagesSince(historicoConversa, cutTs);
 
-        // Processa cada mensagem da janela, atualizando dados (ajudante/casa/apto/bairros/ddd/parcial)
+        // Processa cada mensagem da janela, atualizando dados (ajudante/casa/apto/enderecos/ddd/parcial)
         await processNewClientBatch(nome, chatId, novasMsgs, (ultimaIA && ultimaIA.texto) || '', ensurePage);
 
         // Detecta intenção de preço em QUALQUER mensagem nova (não só a última)
@@ -3010,6 +3034,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           ultimoProbeCLIts: lastClienteTs,
           lastProbeAt: Date.now()
         });
+
+        // Delay mínimo de resposta por chat: aguardar 45s desde a última mensagem do cliente
+        if (lastClienteTs) {
+          const dueAt = lastClienteTs + REPLY_FIRST_DELAY_MS;
+          const nowMs = Date.now();
+          if (nowMs < dueAt) {
+            const waitMs = Math.max(50, dueAt - nowMs + 10);
+            logger.info('[RESPONDER][DELAY45S] aguardando janela por chat', { nome, chatId, waitMs });
+            try { await setChatState(nome, chatId, { replyDueAt: dueAt }); } catch {}
+            setTimeout(() => {
+              try {
+                if (!fila.includes(chatId)) fila.push(chatId);
+                scheduleNextIfIdle();
+              } catch {}
+            }, waitMs);
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+        }
 
         // NOVO GATE: só responde SE o cliente falou ALGO NOVO desde a última IA/CLIts
         const hasNewClient = lastClienteTs && (lastClienteTs > Math.max(lastIATsPrev, lastIaTs, lastCLItsPrev));
@@ -3762,106 +3807,52 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   const timersFechamento = new Map(); // chatId -> { inicio, telefone, expirado, expiraEm, timerId }
-  const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, bairro_saida, bairro_destino, itens }
+  const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, endereco_saida, endereco_destino, itens }
   const pedidosEnviados = new Set();  // chatId já enviados
 
-  async function inferBairrosFromText(perfil, chatId, lastText, lastIaText) {
+  async function inferEnderecosFromText(perfil, chatId, lastText, lastIaText) {
     if (!lastText) return;
     const st = await getChatState(perfil, chatId).catch(()=>null);
     const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
 
-    // 1) Padrão "X - Y" | "X / Y" | "X | Y" => saida/destino
     try {
-      const raw = String(lastText || '');
-      const normTracos = raw.replace(/[–—−]/g, '-').trim();
-      const parts = normTracos.split(/\s*[-/|]\s*/);
-      if (parts && parts.length === 2) {
-        const p1 = parts[0].trim();
-        const p2 = parts[1].trim();
-        const patch = {};
-        if (!dc.bairro_saida && p1) patch.bairro_saida = p1;
-        if (!dc.bairro_destino && p2) patch.bairro_destino = p2;
-        if (Object.keys(patch).length > 0) {
-          await atualizarDadosColetados(chatId, { dados: patch });
-          logger.info('[VIRTUS_STATE] infer_bairros_pair', { nome: perfil, chatId, saida: patch.bairro_saida||null, destino: patch.bairro_destino||null });
-          return;
+      const txt = String(lastText || '');
+      const n = txt.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+
+      const isEndereco = s => /(\brua\b|\bav\.?\b|\bavenida\b|\btrav(\.|essa)\b|\brod(ovia)?\b|\bestrada\b|\bpraca\b|\bpraça\b|\balameda\b|\bcondom[ií]nio\b|\bn[ºo]?\b\s*\d+)/i.test(s);
+
+      const askedFromIA = detectAskedFieldFromText(lastIaText || '');
+
+      const saidaPat = /\b(de|do|da|desde|buscar\s+em|pegar\s+em)\s+(.{4,160})$/i;
+      const destPat  = /\b(para|pra|pro|em|no|na|ao)\s+(.{4,160})$/i;
+
+      let enderecoSaida = null;
+      let enderecoDestino = null;
+
+      let mS = txt.match(saidaPat);
+      if (mS && isEndereco(mS[2])) enderecoSaida = mS[2].trim().replace(/[\s,.;:!?]+$/,'');
+      let mD = txt.match(destPat);
+      if (mD && isEndereco(mD[2])) enderecoDestino = mD[2].trim().replace(/[\s,.;:!?]+$/,'');
+
+      if (!enderecoSaida && !enderecoDestino) {
+        const single = txt.trim();
+        if (isEndereco(single) && single.length >= 6) {
+          if (askedFromIA === 'endereco_saida' && !dc.endereco_saida) enderecoSaida = single;
+          else if (askedFromIA === 'endereco_destino' && !dc.endereco_destino) enderecoDestino = single;
         }
       }
+
+      const patch = {};
+      if (enderecoSaida && !dc.endereco_saida) patch.endereco_saida = enderecoSaida;
+      if (enderecoDestino && !dc.endereco_destino) patch.endereco_destino = enderecoDestino;
+
+      if (Object.keys(patch).length) {
+        await atualizarDadosColetados(chatId, { dados: patch });
+        logger.info('[VIRTUS_STATE] infer_enderecos', { nome: perfil, chatId, saida: patch.endereco_saida || null, destino: patch.endereco_destino || null });
+        try { await issues.append(perfil, 'mil_action', `infer_enderecos saida="${patch.endereco_saida||''}" destino="${patch.endereco_destino||''}"`); } catch {}
+      }
+
     } catch {}
-
-    const askedFromIA = detectAskedFieldFromText(lastIaText || '');
-
-    const saidaPatts = [
-      /\b(?:de|do|da|desde|buscar\s+em|pegar\s+em)\s+([a-zà-ÿ0-9 .-]{2,})\b/i
-    ];
-    const destPatts = [
-      /\b(?:para|pra|pro|em|no|na|ao)\s+([a-zà-ÿ0-9 .-]{2,})\b/i,
-      /\b(?:levar|entregar)\s+(?:para|pro|pra)\s+([a-zà-ÿ0-9 .-]{2,})\b/i
-    ];
-    const bairroWord = /(?:\bbairro\s+)([a-zà-ÿ0-9 .-]{2,})/i;
-    function extractB(s, re) {
-      const m = re.exec(s);
-      return m ? String(m[1] || '').trim().replace(/[\s,.;:!?]+$/,'') : null;
-    }
-
-    let saida = null, destino = null;
-
-    // 2) Padrões verbais
-    for (const p of saidaPatts) {
-      const b = extractB(lastText, p);
-      if (b) { saida = b; break; }
-    }
-    for (const p of destPatts) {
-      const b = extractB(lastText, p);
-      if (b) { destino = b; break; }
-    }
-
-    // 3) "bairro X"
-    if (!saida && !destino) {
-      const bx = extractB(lastText, bairroWord);
-      if (bx) {
-        if (!dc.bairro_saida && (askedFromIA === 'bairro_saida' || (!askedFromIA && !dc.bairro_saida))) {
-          saida = bx;
-        } else if (!dc.bairro_destino) {
-          destino = bx;
-        }
-      }
-    }
-
-    // 4) Palavra única (single word) + sensível à pergunta anterior
-    if (!saida && !destino) {
-      const isSingle = /^\s*[a-zà-ÿ0-9.-]{2,}\s*$/i.test((lastText || '').trim());
-      if (isSingle) {
-        if (askedFromIA === 'bairro_saida' && !dc.bairro_saida) {
-          saida = (lastText || '').trim();
-        } else if (askedFromIA === 'bairro_destino' && !dc.bairro_destino) {
-          destino = (lastText || '').trim();
-        }
-      }
-    }
-
-    // 5) Palavra única (single word) + ordem do fluxo (nextMissingField)
-    if (!saida && !destino) {
-      const stFlow = nextMissingField(dc);
-      const isSingle = /^\s*[a-zà-ÿ0-9.-]{2,}\s*$/i.test((lastText || '').trim());
-      if (isSingle) {
-        if (stFlow === 'bairro_saida' && !dc.bairro_saida) {
-          saida = (lastText || '').trim();
-        } else if (stFlow === 'bairro_destino' && !dc.bairro_destino) {
-          destino = (lastText || '').trim();
-        }
-      }
-    }
-
-    const patch = {};
-    if (saida && !dc.bairro_saida) patch.bairro_saida = saida;
-    if (destino && !dc.bairro_destino) patch.bairro_destino = destino;
-
-    if (Object.keys(patch).length) {
-      await atualizarDadosColetados(chatId, { dados: patch });
-      logger.info('[VIRTUS_STATE] infer_bairros', { nome: perfil, chatId, saida: patch.bairro_saida || null, destino: patch.bairro_destino || null });
-      try { await issues.append(perfil, 'mil_action', `infer_bairros saida="${patch.bairro_saida||''}" destino="${patch.bairro_destino||''}"`); } catch {}
-    }
   }
 
   async function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
@@ -3878,7 +3869,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         cur.telefone_parcial = dig;
       }
     }
-    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','bairro_saida','bairro_destino','itens','data_hora','telefone_parcial'];
+    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','endereco_saida','endereco_destino','itens','data_hora','telefone_parcial'];
     for (const k of keys) {
       if (dados && dados[k] != null) {
         if (k === 'telefone_parcial') {
@@ -3928,8 +3919,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const dcNow = (stNow && stNow.dadosColetados) ? stNow.dadosColetados : (dadosColetados.get(chatId) || {});
 
       const hasIt = !!dcNow.itens;
-      const hasBS = !!dcNow.bairro_saida;
-      const hasBD = !!dcNow.bairro_destino;
+      const hasES = !!dcNow.endereco_saida;
+      const hasED = !!dcNow.endereco_destino;
       const hasAj = (typeof dcNow.ajudante === 'boolean');
       const hasST = !!dcNow.saida_tipo;
       const hasDT = !!dcNow.destino_tipo;
@@ -3938,7 +3929,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const temWhatsLocal = !!(dcNow.telefone && promptFretes.isValidBRPhoneWithDDD(dcNow.telefone));
 
       const camposOkSemTelefone =
-        hasIt && hasBS && hasBD && hasAj && hasST && hasDT && needsSE && needsDE && !temWhatsLocal;
+        hasIt && hasES && hasED && hasAj && hasST && hasDT && needsSE && needsDE && !temWhatsLocal;
 
       if (camposOkSemTelefone) {
         const phase = (stNow && stNow.whatsAskedPhase) || 'none';
@@ -3982,7 +3973,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
 
     // A partir daqui, temos telefone E cidade válidos
-    const completos = !!(cur.itens && cur.bairro_saida && cur.bairro_destino &&
+    const completos = !!(cur.itens && cur.endereco_saida && cur.endereco_destino &&
       (cur.ajudante != null) && (cur.saida_tipo != null) && (cur.destino_tipo != null));
 
     // Se WhatsApp e cidade chegaram, faltam campos, e timer NÃO existe: inicia timer de 10min

@@ -69,8 +69,8 @@ function computeMissing(data) {
   const d = data || {};
   const missing = [];
   if (!d.itens) missing.push('itens');
-  if (!d.bairro_saida) missing.push('bairro_saida');
-  if (!d.bairro_destino) missing.push('bairro_destino');
+  if (!d.endereco_saida) missing.push('endereco_saida');
+  if (!d.endereco_destino) missing.push('endereco_destino');
   if (typeof d.ajudante !== 'boolean') missing.push('ajudante');
   if (!d.saida_tipo) missing.push('saida_tipo');
   if (!d.destino_tipo) missing.push('destino_tipo');
@@ -105,22 +105,22 @@ function hasPriceIntent(text) {
 
 const ALLOWED_ASK_FIELDS = Object.freeze([
   'itens',
-  'bairro_saida',
-  'bairro_destino',
+  'endereco_saida',
+  'endereco_destino',
   'ajudante',
   'saida_tipo',
   'destino_tipo',
   'saida_elevador',
   'destino_elevador',
-  'ddd',           // <-- adicionado
+  'ddd',
   'telefone'
 ]);
 
 /**
  * Decide o próximo campo a perguntar COM ordem fixa e regras:
  * 1. itens
- * 2. bairro_saida
- * 3. bairro_destino
+ * 2. endereco_saida
+ * 3. endereco_destino
  * 4. ajudante
  * 5. saida_tipo
  * 6. destino_tipo
@@ -132,8 +132,8 @@ const ALLOWED_ASK_FIELDS = Object.freeze([
 function getNextAskField(data = {}) {
   const d = data || {};
   if (!d.itens) return 'itens';
-  if (!d.bairro_saida) return 'bairro_saida';
-  if (!d.bairro_destino) return 'bairro_destino';
+  if (!d.endereco_saida) return 'endereco_saida';
+  if (!d.endereco_destino) return 'endereco_destino';
   if (typeof d.ajudante !== 'boolean') return 'ajudante';
   if (!d.saida_tipo) return 'saida_tipo';
   if (!d.destino_tipo) return 'destino_tipo';
@@ -199,10 +199,10 @@ class PedidoOrchestrator extends EventEmitter {
     const st = this._load(perfil);
     const cur = st.chats[chatId] || {
       createdAt: now(), updatedAt: now(),
-      data: { itens:null,bairro_saida:null,bairro_destino:null,ajudante:null,saida_tipo:null,saida_elevador:null,destino_tipo:null,destino_elevador:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null },
+      data: { itens:null,endereco_saida:null,endereco_destino:null,ajudante:null,saida_tipo:null,saida_elevador:null,destino_tipo:null,destino_elevador:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null },
       flags: { firstIaReplied:false, greetDone:false, finalizedAt:null, finalizationFreezeUntil:null, sentToNotifierAt:null, hasAskedWhats:false, singleInactivityPingSent:false, sentType:null },
       timers: { startedAt: now(), incompleteWithWhatsDeadline: null, withoutWhatsDeadline: null },
-      askCounts: { telefone:0, ddd:0, itens:0, bairro_saida:0, bairro_destino:0, ajudante:0, saida_tipo:0, destino_tipo:0, saida_elevador:0, destino_elevador:0 },
+      askCounts: { telefone:0, ddd:0, itens:0, endereco_saida:0, endereco_destino:0, ajudante:0, saida_tipo:0, destino_tipo:0, saida_elevador:0, destino_elevador:0 },
       lastWhatsAskAt: null,
       missing: []
     };
@@ -347,8 +347,8 @@ class PedidoOrchestrator extends EventEmitter {
     if (s.flags && s.flags.sentToNotifierAt) return false; // idempotência
     const ok =
       !!d.itens &&
-      !!d.bairro_saida &&
-      !!d.bairro_destino &&
+      !!d.endereco_saida &&
+      !!d.endereco_destino &&
       (d.ajudante === true || d.ajudante === false) &&
       !!d.saida_tipo &&
       !!d.destino_tipo &&
@@ -419,7 +419,7 @@ const orchestrator = new PedidoOrchestrator();
 /**
  * Diretiva determinística: "qual campo perguntar agora" + fase de WhatsApp.
  * Retorna: { askField, phase, reason, nextField }
- *   - askField: 'itens'|'bairro_saida'|...|'telefone'|null
+ *   - askField: 'itens'|'endereco_saida'|'endereco_destino'|'ajudante'|'saida_tipo'|'destino_tipo'|'saida_elevador'|'destino_elevador'|'ddd'|'telefone'|null
  *   - phase: 'full'|'lite'|'none' (full primeira vez do WhatsApp; lite subsequentes)
  *   - reason: 'price_intent' ou 'missing'
  *   - nextField: se askField='telefone' e phase='full', devolve próximo do fluxo (ou null)

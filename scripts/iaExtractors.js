@@ -18,8 +18,8 @@ function computeMissing(data) {
   const d = data || {};
   const missing = [];
   if (!d.itens) missing.push('itens');
-  if (!d.bairro_saida) missing.push('bairro_saida');
-  if (!d.bairro_destino) missing.push('bairro_destino');
+  if (!d.endereco_saida) missing.push('endereco_saida');
+  if (!d.endereco_destino) missing.push('endereco_destino');
   if (typeof d.ajudante !== 'boolean') missing.push('ajudante');
   if (!d.saida_tipo) missing.push('saida_tipo');
   if (!d.destino_tipo) missing.push('destino_tipo');
@@ -34,8 +34,8 @@ function computeMissing(data) {
 function sanitizeExtracted(obj) {
   const out = {
     itens: null,
-    bairro_saida: null,
-    bairro_destino: null,
+    endereco_saida: null,
+    endereco_destino: null,
     ajudante: null,
     saida_tipo: null,
     saida_elevador: null,
@@ -74,8 +74,8 @@ function sanitizeExtracted(obj) {
     };
 
     out.itens = pickStr(obj.itens);
-    out.bairro_saida = pickStr(obj.bairro_saida);
-    out.bairro_destino = pickStr(obj.bairro_destino);
+    out.endereco_saida = pickStr(obj.endereco_saida);
+    out.endereco_destino = pickStr(obj.endereco_destino);
     out.ajudante = pickBool(obj.ajudante);
     out.saida_tipo = pickTipo(obj.saida_tipo);
     out.destino_tipo = pickTipo(obj.destino_tipo);
@@ -127,9 +127,9 @@ Objetivo: Dado o histórico (cliente/ia), extraia e consolide os campos:
 
 - itens: string|null
 
-- bairro_saida: string|null
+- endereco_saida: string|null (endereço completo)
 
-- bairro_destino: string|null
+- endereco_destino: string|null (endereço completo)
 
 - ajudante: true|false|null
 
@@ -163,14 +163,14 @@ Regras:
 
 - Se detectar protestos, marque protesto: true.
 
-- Missing considera obrigatórios: itens, bairro_saida, bairro_destino, ajudante, saida_tipo, destino_tipo, (saida_elevador e destino_elevador se "apartamento"), cidade, telefone.
+- Missing considera obrigatórios: itens, endereco_saida, endereco_destino, ajudante, saida_tipo, destino_tipo, (saida_elevador e destino_elevador se "apartamento"), cidade, telefone.
 
 Saída OBRIGATÓRIA (apenas JSON, NUNCA TEXTO solto):
 
 {
  "itens": "...|null",
- "bairro_saida": "...|null",
- "bairro_destino": "...|null",
+ "endereco_saida": "...|null",
+ "endereco_destino": "...|null",
  "ajudante": true|false|null,
  "saida_tipo": "casa"|"apartamento"|null,
  "saida_elevador": true|false|null,

@@ -11,9 +11,11 @@ allow_second_question: false
 
 Valores permitidos para ask_field:
 
-null | "itens" | "bairro_saida" | "bairro_destino" | "ajudante" | "saida_tipo" | "destino_tipo" | "saida_elevador" | "destino_elevador" | "telefone" | "ddd"
+null | "itens" | "endereco_saida" | "endereco_destino" | "ajudante" | "saida_tipo" | "destino_tipo" | "saida_elevador" | "destino_elevador" | "telefone" | "ddd"
 
 Regras determinísticas:
+
+    Cumprimente apenas se firstReply=true; caso contrário, não cumprimente e não use "Oi, tudo bem?" repetido.
 
     Responda naturalmente a tudo o que o cliente escreveu nesta virada, sem repetir informações que já foram coletadas, sem re-sumários a cada resposta e sem agradecer repetidas vezes. No máximo agradeça uma vez na conversa ou no encerramento.
 
@@ -40,8 +42,8 @@ SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 "telefone_extraido": "se detectar nº BR 10-11 dígitos completo (somente dígitos); senão null",
 "dados": {
 "itens": "...|null",
-"bairro_saida": "...|null",
-"bairro_destino": "...|null",
+"endereco_saida": "...|null",
+"endereco_destino": "...|null",
 "ajudante": true|false|null,
 "saida_tipo": "casa"|"apartamento"|null,
 "saida_elevador": true|false|null,
@@ -80,14 +82,14 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
   const header = [
     `Cidade do perfil: ${cidade || '—'}`,
     `Meta: ${meta}`,
-    'Nota: responda a tudo o que o cliente falou nesta virada de forma natural e enxuta. Ao final, faça exatamente 1 pergunta definida por ask_field. A pergunta deve ficar no FINAL da resposta. Não adicione perguntas de cortesia nem repita a mesma pergunta com sinônimos. Quando ask_field="telefone", peça somente o WhatsApp. Quando ask_field="ddd", peça somente o DDD. Se ask_field for null, não faça nenhuma pergunta.',
+    'Nota: cumprimente apenas se firstReply=true; evite qualquer saudação repetida. Responda a tudo o que o cliente falou nesta virada de forma natural e enxuta. Ao final, faça exatamente 1 pergunta definida por ask_field. A pergunta deve ficar no FINAL da resposta. Não adicione perguntas de cortesia nem repita a mesma pergunta com sinônimos. Quando ask_field="telefone", peça somente o WhatsApp. Quando ask_field="ddd", peça somente o DDD. Se ask_field for null, não faça nenhuma pergunta.',
     '',
     (coletado && typeof coletado === 'object'
       ? (() => {
           const ja = [
             coletado.itens ? `itens=${coletado.itens}` : null,
-            coletado.bairro_saida ? `bairro_saida=${coletado.bairro_saida}` : null,
-            coletado.bairro_destino ? `bairro_destino=${coletado.bairro_destino}` : null,
+            coletado.endereco_saida ? `endereco_saida=${coletado.endereco_saida}` : null,
+            coletado.endereco_destino ? `endereco_destino=${coletado.endereco_destino}` : null,
             typeof coletado.ajudante === 'boolean' ? `ajudante=${coletado.ajudante ? 'sim' : 'não'}` : null,
             coletado.saida_tipo ? `saida_tipo=${coletado.saida_tipo}` : null,
             (typeof coletado.saida_elevador === 'boolean' ? `saida_elevador=${coletado.saida_elevador ? 'sim' : 'não'}` : null),
@@ -219,12 +221,12 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       saida_elevador: safeDados.saida_elevador ?? null,
       destino_tipo: safeDados.destino_tipo ?? null,
       destino_elevador: safeDados.destino_elevador ?? null,
-      bairro_saida: safeDados.bairro_saida ?? null,
-      bairro_destino: safeDados.bairro_destino ?? null,
+      endereco_saida: safeDados.endereco_saida ?? null,
+      endereco_destino: safeDados.endereco_destino ?? null,
       itens: safeDados.itens ?? null
     };
 
-    // [ALTERAÇÃO] Só incluir peças soltas se NÃO houver telefone completo
+    // Só incluir peças soltas se NÃO houver telefone completo
     if (!telefoneOK && telefoneParcial) dadosOut.telefone_parcial = telefoneParcial;
     if (!telefoneOK && dddInformado) dadosOut.ddd = dddInformado;
     if (safeDados.debug) dadosOut.debug = safeDados.debug;
@@ -237,8 +239,8 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
 
     const finalizavel =
       !!dadosOut.itens &&
-      !!dadosOut.bairro_saida &&
-      !!dadosOut.bairro_destino &&
+      !!dadosOut.endereco_saida &&
+      !!dadosOut.endereco_destino &&
       (safeDados.ajudante === true || safeDados.ajudante === false || dadosOut.ajudante === true || dadosOut.ajudante === false) &&
       !!dadosOut.saida_tipo &&
       !!dadosOut.destino_tipo &&
@@ -282,8 +284,8 @@ function buildFinalOrderPayload(nomePerfil, chatId, dados = {}, servidor = null)
       if (Array.isArray(dados.itens)) return dados.itens.join(', ');
       return dados.itens || null;
     })(),
-    bairro_saida: dados && dados.bairro_saida || null,
-    bairro_destino: dados && dados.bairro_destino || null,
+    endereco_saida: dados && dados.endereco_saida || null,
+    endereco_destino: dados && dados.endereco_destino || null,
     saida_tipo: dados && dados.saida_tipo || null,
     saida_elevador: dados && dados.saida_elevador || null,
     destino_tipo: dados && dados.destino_tipo || null,
