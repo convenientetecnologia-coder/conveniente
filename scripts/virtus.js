@@ -1311,8 +1311,6 @@ const REPLY_FIRST_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_FIRST_DELAY_MS ||
 const INTER_CHAT_DELAY_MIN_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MIN_MS || '5000', 10);
 const INTER_CHAT_DELAY_MAX_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MAX_MS || '20000', 10);
 
-const MAX_CHAT_AGE_MS = parseInt(process.env.VIRTUS_CHAT_MAX_AGE_MS || '28800000', 10); // 8h
-
 const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
 const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
 const filaEnvioMessenger = new Map();     // nomePerfil -> [ { chatId, resposta, key } ]
@@ -2066,7 +2064,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   const HIST_FILE = HIST_JSON_NAME(nome);
-  const NO_REPEAT_WINDOW_SEC = 48 * 3600; // 48h de bloqueio hardcoded para blindagem absoluta antiflood
+  const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
   const POLL_INTERVAL_MS = parseInt(process.env.VIRTUS_POLL_MS || '1000', 10);
   const MIN_REPLY_DELAY_MS = 0;
   const MAX_REPLY_DELAY_MS = 0;
@@ -3052,21 +3050,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const lastClienteTs = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
         const lastIaTs = Number((ultimaIA && ultimaIA.timestamp) || 0);
 
-        // Early gate por janela de 8h
-        const maxAgeOk = (() => {
-          const ts = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
-          if (!ts) return false;
-          return (Date.now() - ts) <= MAX_CHAT_AGE_MS;
-        })();
-        if (!maxAgeOk) {
-          logger.info('[RESPONDER][GATE_8H] Última msg do cliente > 8h — não responder', { nome, chatId });
-          try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }); } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-
         const stPrevGate = await getChatState(nome, chatId).catch(() => null);
         const lastIATsPrev = Number((stPrevGate && stPrevGate.lastIATs) || 0);
         const lastCLItsPrev = Number((stPrevGate && stPrevGate.lastCLIts) || 0);
@@ -3136,6 +3119,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Diretiva determinística: qual campo perguntar agora
           const directive = pedidos.getAskDirective(nome, chatId, novasMsgs, snap) || { askField: null, phase: 'none', reason: 'missing', nextField: null };
+          const allowSecond = false;
 
           // Log da diretiva para auditoria
           try {
@@ -3144,15 +3128,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Política de atendimento (burst 1):
           // - Responder a tudo o que o cliente disse nesta virada.
-          // - Fazer a pergunta definida pela diretiva (ask_field), e se allowSecondQuestion=true e nextField!=null, fazer também a pergunta do nextField.
+          // - Fazer SOMENTE a pergunta definida pela diretiva (ask_field), exceto a exceção telefone + próxima quando allowSecond=true.
           // - Nunca ecoar PII (telefone, DDD).
           
-          const systemAnswer = promptFretes.buildSystemPrompt({
-            askField: directive.askField,
-            allowSecondQuestion: !!directive.allowSecondQuestion,
-            nextField: directive.nextField || null,
-            phoneMode: directive.phoneMode || 'lite'
-          });
+          const systemAnswer = promptFretes.buildSystemPrompt({ askField: directive.askField, allowSecondQuestion: false });
           const userAnswer = promptFretes.buildUserPrompt({
             cidade: dataColetada.cidade || cidadeCtx,
             historico: historicoConversa,
@@ -3161,9 +3140,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             flags: { firstReply, telefone_ok, protest_count: protestCount },
             missingFields: missing,
             askField: directive.askField,
-            nextField: directive.nextField || null,
-            allowSecondQuestion: !!directive.allowSecondQuestion,
-            phoneMode: directive.phoneMode || 'lite'
+            nextField: null,
+            allowSecondQuestion: false
           });
 
           // Chama IA geradora
