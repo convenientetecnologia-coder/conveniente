@@ -1,13 +1,15 @@
 'use strict';
 
-function buildSystemPrompt({ askField = null, allowSecondQuestion = false } = {}) {
+function buildSystemPrompt({ askField = null, allowSecondQuestion = false, nextField = null, phoneMode = 'lite' } = {}) {
   return `
 Você é um(a) atendente humano(a) de fretes. Gere a resposta e metadados em JSON e somente JSON, exatamente no formato abaixo.
 
 Parâmetros de controle:
 
 ask_field: ${askField === null ? 'null' : String(askField)}
-allow_second_question: false
+next_field: ${nextField === null ? 'null' : String(nextField)}
+allow_second_question: ${allowSecondQuestion ? 'true' : 'false'}
+phone_mode: ${String(phoneMode || 'lite')}
 
 Valores permitidos para ask_field:
 
@@ -15,30 +17,40 @@ null | "itens" | "endereco_saida" | "endereco_destino" | "ajudante" | "saida_tip
 
 Regras determinísticas:
 
-    Cumprimente apenas se firstReply=true; caso contrário, não cumprimente e não use "Oi, tudo bem?" repetido.
+- Cumprimente apenas se firstReply=true; caso contrário, não cumprimente e não use saudações repetidas.
 
-    Responda naturalmente a tudo o que o cliente escreveu nesta virada, sem repetir informações que já foram coletadas, sem re-sumários a cada resposta e sem agradecer repetidas vezes. No máximo agradeça uma vez na conversa ou no encerramento.
+- Leia o histórico e LEIA também o que você mesmo já respondeu. Nunca repita conteúdo do cliente nem da sua própria resposta anterior. Não recapitule dados já informados. Não confirme com frases como "Entendi", "Perfeito", "Recebi", "Certo" etc. Vá direto ao ponto, de forma natural e enxuta.
 
-    Se ask_field for null: não faça perguntas.
+- Nunca reproduza números de telefone/DDD (nem mascarados) na "resposta". Telefones só nos metadados.
 
-    Se ask_field NÃO for null: faça exatamente UMA pergunta, no final da resposta, sobre o campo ask_field.
+- Se ask_field for null: não faça perguntas.
 
-    Se ask_field="telefone": peça apenas o WhatsApp (nunca peça "WhatsApp com DDD"). Não mencione DDD.
+- Se ask_field NÃO for null:
 
-    Se ask_field="ddd": peça somente o DDD (não peça o número completo novamente).
+    - Se allow_second_question=true e next_field!=null: faça EXATAMENTE DUAS perguntas, nesta ordem:
 
-    Nunca combine perguntas (ex.: "WhatsApp + outra coisa") na mesma mensagem. Uma pergunta por mensagem.
+        1) Pergunta sobre ask_field.
 
-    Se perguntarem preço/valor antes do WhatsApp e o telefone completo ainda não foi informado: explique brevemente que quem informa o valor é o motorista no WhatsApp e peça o WhatsApp (somente). Não mencione DDD.
+        2) Em seguida, pergunta sobre next_field.
 
-    Nunca ecoe números de telefone na "resposta". Telefones só nos metadados.
+      Não adicione nada além dessas duas perguntas.
 
-    Confirme somente o que for novo. Não fique recapitulando tudo que já foi informado a cada virada.
+    - Se allow_second_question=false: faça EXATAMENTE UMA pergunta, sobre ask_field.
+
+- Telefone:
+
+    - Quando ask_field="telefone" e phone_mode="lite": peça apenas o WhatsApp (não mencione DDD). Se allow_second_question=true e next_field != null, emende a pergunta do next_field na sequência.
+
+    - Quando ask_field="telefone" e phone_mode="full": peça o WhatsApp com DDD explicitamente ("com DDD"). Se allow_second_question=true e next_field != null, emende a pergunta do next_field na sequência.
+
+    - Quando ask_field="ddd": peça SOMENTE o DDD, e se allow_second_question=true e next_field != null, emende a pergunta do next_field na sequência.
+
+- Se perguntarem preço/valor e ainda não houver telefone completo: explique brevemente que o motorista informa o valor no WhatsApp e peça o WhatsApp. Aplique as regras acima de phone_mode/allow_second_question/next_field. Não mencione DDD no modo lite.
 
 SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 
 {
-"resposta": "texto a ser enviado ao cliente (humano, natural, sem redundâncias; inclua ao final exatamente UMA pergunta definida por ask_field)",
+"resposta": "texto a ser enviado ao cliente (humano, direto, sem redundâncias ou confirmações; no final, faça exatamente 1 ou 2 perguntas conforme as regras acima)",
 "telefone_extraido": "se detectar nº BR 10-11 dígitos completo (somente dígitos); senão null",
 "dados": {
 "itens": "...|null",
@@ -57,14 +69,14 @@ SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 
 Restrições:
 
-    resposta nunca vazia.
+- resposta nunca vazia.
 
-    Nunca inclua texto fora do JSON.
+- Nunca inclua texto fora do JSON.
 
-    Nunca inclua Markdown, comentários ou cercas de código. `.trim();
+- Nunca inclua Markdown, comentários ou cercas de código. `.trim();
 }
 
-function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, missingFields = [], askField = null, nextField = null, allowSecondQuestion = false }) {
+function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, missingFields = [], askField = null, nextField = null, allowSecondQuestion = false, phoneMode = 'lite' }) {
   const firstReply = !!(flags && flags.firstReply);
   const telefone_ok = !!(flags && flags.telefone_ok);
   const protestCount = typeof flags.protest_count === 'number' ? flags.protest_count : 0;
@@ -73,6 +85,7 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
     `ask_field: ${askField === null ? 'null' : String(askField)}`,
     `next_field: ${nextField === null ? 'null' : String(nextField)}`,
     `allow_second_question: ${allowSecondQuestion ? 'true' : 'false'}`,
+    `phone_mode: ${String(phoneMode || 'lite')}`,
     `firstReply: ${firstReply ? 'true' : 'false'}`,
     `telefone_ok: ${telefone_ok ? 'true' : 'false'}`,
     `protest_count: ${protestCount}`,
@@ -82,7 +95,7 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
   const header = [
     `Cidade do perfil: ${cidade || '—'}`,
     `Meta: ${meta}`,
-    'Nota: cumprimente apenas se firstReply=true; evite qualquer saudação repetida. Responda a tudo o que o cliente falou nesta virada de forma natural e enxuta. Ao final, faça exatamente 1 pergunta definida por ask_field. A pergunta deve ficar no FINAL da resposta. Não adicione perguntas de cortesia nem repita a mesma pergunta com sinônimos. Quando ask_field="telefone", peça somente o WhatsApp. Quando ask_field="ddd", peça somente o DDD. Se ask_field for null, não faça nenhuma pergunta.',
+    'Nota: leia suas próprias respostas anteriores e não repita conteúdo. Não use "Entendi/Recebi/Perfeito...". Vá direto ao ponto. Se allow_second_question=true e next_field!=null, faça EXATAMENTE duas perguntas (ask_field e depois next_field). Quando ask_field="telefone" use phone_mode=lite (sem DDD) ou full (com DDD explícito) conforme indicado. Se ask_field for null, não faça nenhuma pergunta.',
     '',
     (coletado && typeof coletado === 'object'
       ? (() => {
@@ -158,7 +171,12 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       respostaSan = respostaSan
         .replace(/\b\d{8,11}\b/g, '******')          // bloqueia sequências coladas de 8–11 dígitos
         .replace(/\+?\d[\d\s().-]{7,}\d/g, '******') // bloqueia números com separadores
-        .replace(/(\d[\s-]?){4,}/g, '******');       // ainda mais defensivo
+        .replace(/(\d[\s-]?){4,}/g, '******')       // ainda mais defensivo
+        .replace(/(?:^|\n)\s*recebi\s+o\s+ddd[\s\S]?(?:.|\n|$)/gi, ' ')
+        .replace(/(?:^|\n)\s*recebi\s+seu\s+whats[\s\S]?(?:.|\n|$)/gi, ' ')
+        .replace(/(?:^|\n)\s*ok[,!\s]\s*/gi, ' ')
+        .replace(/(?:^|\n)\s*entendi[,!\s]\s*/gi, ' ')
+        .trim();
     } catch {}
 
     // Base de extração (sem sanitizar), para não prejudicar detecção de números

@@ -272,7 +272,7 @@ class PedidoOrchestrator extends EventEmitter {
     const s = this._get(perfil, chatId) || this._set(perfil, chatId, {});
     s.flags = s.flags || {};
     s.flags.finalizedAt = now();
-    s.flags.finalizationFreezeUntil = now() + 10*60*1000;
+    s.flags.finalizationFreezeUntil = now() + 486060*1000;
     s.flags.sentToNotifierAt = s.flags.sentToNotifierAt || now();
     s.flags.sentType = tipo;
     this._set(perfil, chatId, s);
@@ -282,7 +282,7 @@ class PedidoOrchestrator extends EventEmitter {
     const s = this._get(perfil, chatId) || this._set(perfil, chatId, {});
     s.flags = s.flags || {};
     s.flags.finalizedAt = now();
-    s.flags.finalizationFreezeUntil = now() + 10*60*1000;
+    s.flags.finalizationFreezeUntil = now() + 486060*1000;
     this._set(perfil, chatId, s);
   }
 
@@ -416,6 +416,19 @@ class PedidoOrchestrator extends EventEmitter {
 
 const orchestrator = new PedidoOrchestrator();
 
+function getNextNonPhoneField(d = {}) {
+  // Ordem fixa sem campos de telefone
+  if (!d.itens) return 'itens';
+  if (!d.endereco_saida) return 'endereco_saida';
+  if (!d.endereco_destino) return 'endereco_destino';
+  if (typeof d.ajudante !== 'boolean') return 'ajudante';
+  if (!d.saida_tipo) return 'saida_tipo';
+  if (!d.destino_tipo) return 'destino_tipo';
+  if (d.saida_tipo === 'apartamento' && typeof d.saida_elevador !== 'boolean') return 'saida_elevador';
+  if (d.destino_tipo === 'apartamento' && typeof d.destino_elevador !== 'boolean') return 'destino_elevador';
+  return null;
+}
+
 /**
  * Diretiva determinística: "qual campo perguntar agora" + fase de WhatsApp.
  * Retorna: { askField, phase, reason, nextField }
@@ -427,16 +440,32 @@ const orchestrator = new PedidoOrchestrator();
 function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const s = orchestrator._get(perfil, chatId) || {};
   const data = (snapshot && snapshot.data) || (s && s.data) || {};
+  const counts = (s && s.askCounts) || {};
   const telOk = isValidPhoneBR(data.telefone);
 
-  // Intenção de preço → pedir somente o WhatsApp (telefone) se ainda não houver telefone completo
+  // 1) Preço antes do WhatsApp → pedir telefone AGORA (sempre emparelhado com a próxima pergunta não-telefone)
   if (!telOk && shouldAskWhatsappFirst({ historicoNovo: novasMsgs, dataAtual: data })) {
-    return { askField: 'telefone', phase: 'none', reason: 'price_intent', nextField: null };
+    const nextField = getNextNonPhoneField(data);
+    // Primeira pedida de preço: modo lite (não mencionar DDD); fallback para full depois
+    const phoneMode = (counts.telefone >= 2 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
+    return { askField: 'telefone', phase: 'none', reason: 'price_intent', nextField, allowSecondQuestion: true, phoneMode };
   }
 
-  // Próximo campo do fluxo (inclui política ddd -> telefone)
+  // 2) Próximo campo do fluxo (inclui ddd/telefone quando faltar)
   const next = getNextAskField(data);
-  return { askField: next || null, phase: 'none', reason: 'missing', nextField: null };
+  if (next === 'telefone') {
+    const nextField = getNextNonPhoneField(data);
+    // Se já tentamos pedir telefone mais de uma vez e não temos ddd nem parcial, sobe para "full" (pedir "com DDD")
+    const phoneMode = (counts.telefone >= 2 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
+    return { askField: 'telefone', phase: 'none', reason: 'missing', nextField, allowSecondQuestion: true, phoneMode };
+  }
+
+  if (next === 'ddd') {
+    const nextField = getNextNonPhoneField(data);
+    return { askField: 'ddd', phase: 'none', reason: 'missing', nextField, allowSecondQuestion: true, phoneMode: 'lite' };
+  }
+
+  return { askField: next || null, phase: 'none', reason: 'missing', nextField: null, allowSecondQuestion: false, phoneMode: 'lite' };
 }
 
 /**
