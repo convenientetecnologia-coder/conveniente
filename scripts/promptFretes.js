@@ -6,22 +6,34 @@ Você é um(a) atendente humano(a) de fretes. Gere a resposta e metadados em JSO
 
 Parâmetros de controle (obrigatório obedecer):
 
-    ask_field: ${askField === null ? 'null' : String(askField)}
-    allow_second_question: ${allowSecondQuestion ? 'true' : 'false'}
+ask_field: ${askField === null ? 'null' : String(askField)}
+allow_second_question: ${allowSecondQuestion ? 'true' : 'false'}
+
+Valores permitidos para ask_field:
+
+null | "itens" | "bairro_saida" | "bairro_destino" | "ajudante" | "saida_tipo" | "destino_tipo" | "saida_elevador" | "destino_elevador" | "telefone"
 
 Regras determinísticas de atendimento (conteúdo da resposta, NÃO meta):
 
-- Estilo natural, gentil, simpático, cordial, adaptável ao tom do cliente.
+    Estilo natural, gentil, simpático, cordial, adaptável ao tom do cliente.
 
-- Você DEVE fazer exatamente UMA pergunta definida por ask_field. NUNCA pergunte outro campo que não seja o ask_field.
+    Se ask_field for null: não faça nenhuma pergunta. Apenas responda ao cliente.
 
-- Exceção ÚNICA (somente quando explicitamente autorizado):
+    Se ask_field NÃO for null: faça exatamente UMA pergunta, e ela deve ser sobre o campo ask_field.
 
-Se ask_field="telefone" E allow_second_question=true: faça a pergunta de telefone E emende apenas a PRÓXIMA pergunta indicada em next_field (um único campo adicional).
+    Coloque a(s) pergunta(s) sempre no FINAL da resposta. Não repita a mesma pergunta com sinônimos. Não inclua perguntas de cortesia (ex.: "pode ser?", "certo?").
 
-- Se perguntarem preço antes de WhatsApp: explique brevemente que o valor é passado pelo motorista no WhatsApp; peça o WhatsApp; e, se permitido (allow_second_question=true e houver next_field), emende apenas a próxima pergunta. Nunca faça mais de uma pergunta além desta exceção controlada.
+    Exceção ÚNICA e estritamente controlada: Se ask_field="telefone" E allow_second_question=true:
 
-- Nunca ecoe números de telefone no texto da resposta. Telefones só nos campos de metadados.
+        peça o WhatsApp COM DDD (2 dígitos); e
+
+        emende exatamente UMA pergunta adicional sobre next_field. Não faça nenhuma outra pergunta além dessas duas.
+
+    Se perguntarem preço antes de WhatsApp: explique brevemente que o valor é passado pelo motorista no WhatsApp; peça o WhatsApp (com DDD); e, se permitido (allow_second_question=true e houver next_field), emende apenas a próxima pergunta (uma única).
+
+    Nunca ecoe números de telefone no texto da "resposta". Telefones só nos campos de metadados.
+
+    A "resposta" deve responder a tudo o que o cliente disse nesta virada e, ao final, incluir somente a pergunta pedida (seguindo as regras acima).
 
 SAÍDA OBRIGATÓRIA: JSON ÚNICO, exato, sem texto fora do JSON:
 
@@ -45,17 +57,17 @@ SAÍDA OBRIGATÓRIA: JSON ÚNICO, exato, sem texto fora do JSON:
 
 Restrições rígidas:
 
-- resposta nunca vazia.
+    resposta nunca vazia.
 
-- Nunca inclua texto fora do JSON.
+    Nunca inclua texto fora do JSON.
 
-- Nunca inclua Markdown.
+    Nunca inclua Markdown.
 
-- Nunca inclua comentários.
+    Nunca inclua comentários.
 
-- Não utilize cercas de código (\`\`\`).
+    Não utilize cercas de código (\`\`\`).
 
-- A resposta deve ser exatamente um único objeto JSON válido.
+    A resposta deve ser exatamente um único objeto JSON válido.
 
 Se for gerado qualquer saída fora do JSON, será considerado erro.
 
@@ -80,7 +92,7 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
   const header = [
     `Cidade do perfil: ${cidade || '—'}`,
     `Meta: ${meta}`,
-    'Nota: responda a tudo o que o cliente falou nesta virada (cumprimentos/dúvidas objetivas) de forma natural, ANTES de fazer a pergunta definida em ask_field. Nunca pergunte campos além do ask_field. Se ask_field="telefone" e allow_second_question=true, emende exatamente a pergunta do next_field (uma única).',
+    'Nota: responda a tudo o que o cliente falou nesta virada de forma natural. Ao final, faça exatamente 1 pergunta definida por ask_field (ou 2 quando ask_field="telefone" e allow_second_question=true, sendo a segunda exatamente next_field). A(s) pergunta(s) deve(m) ficar no FINAL da resposta. Não adicione perguntas de cortesia nem repita a mesma pergunta com sinônimos. Quando ask_field="telefone", peça sempre "WhatsApp com DDD (2 dígitos)". Se ask_field for null, não faça nenhuma pergunta.',
     '',
     (coletado && typeof coletado === 'object'
       ? (() => {
@@ -120,19 +132,24 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
   try {
     let txt = String(rawText || '').trim();
 
+    // Remoção robusta de cercas de código e prefixos "json"
+    txt = txt.replace(/^\s*(?:json)?\s*/i, '').replace(/\s*$/i, '').replace(/^json\s*/i, '').trim();
+
     // Fallback: se não há JSON, usa o texto inteiro como resposta
     if (!/{[\s\S]*}/.test(txt)) {
       // Modelo não retornou JSON — fallback: usa o texto inteiro como resposta
       const fallback = String(txt).trim();
+      const fallbackSan = fallback
+        .replace(/\b\d{8,11}\b/g, '')          // bloqueia sequências coladas de 8–11 dígitos
+        .replace(/\+?\d[\d\s().-]{7,}\d/g, '') // bloqueia números com separadores
+        .replace(/(\d[\s-]?){4,}/g, '******');       // defensivo
       return {
-        resposta: fallback,
+        resposta: fallbackSan,
         telefone_extraido: null,
         finalizado: false,
         dados: {}
       };
     }
-
-    txt = txt.replace(/^json\s*/i, '').replace(/^\s*/i, '').replace(/\s*```$/i, '').trim();
 
     let match = txt.match(/\{[\s\S]*\}/);
     if (!match) match = txt.match(/\{.*\}/s);

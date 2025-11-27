@@ -103,6 +103,17 @@ function hasPriceIntent(text) {
   return /(preco|valor|quanto\s+(custa|fica|sai)|cobra|orcamento)/.test(t);
 }
 
+const ALLOWED_ASK_FIELDS = Object.freeze([
+  'itens',
+  'bairro_saida',
+  'bairro_destino',
+  'ajudante',
+  'saida_tipo',
+  'destino_tipo',
+  'saida_elevador',
+  'destino_elevador'
+]);
+
 /**
  * Decide o próximo campo a perguntar COM ordem fixa e regras:
  * 1. itens
@@ -414,8 +425,12 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     const telCount = (s && s.askCounts && s.askCounts.telefone) || 0;
     const lastPhase = flags.whatsAskedPhase || null;
     const phase = (lastPhase === 'full' || telCount > 0) ? 'lite' : 'full';
-    const nextField = getNextAskField(data);
-    return { askField: 'telefone', phase, reason: 'price_intent', nextField: nextField || null };
+    let nextField = getNextAskField(data);
+    // Saneamento rígido do next_field para a exceção controlada telefone+próxima
+    if (nextField === 'telefone' || !ALLOWED_ASK_FIELDS.includes(nextField)) {
+      nextField = null;
+    }
+    return { askField: 'telefone', phase, reason: 'price_intent', nextField };
   }
 
   const next = getNextAskField(data);
@@ -431,6 +446,7 @@ function setWhatsPhase(perfil, chatId, phase) {
     const s = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
     s.flags = s.flags || {};
     s.flags.whatsAskedPhase = String(phase || 'full');
+    s.flags.hasAskedWhats = true;
     s.lastWhatsAskAt = now();
     orchestrator._set(perfil, chatId, s);
     try { issues.append(perfil, 'mil_action', `whats_phase_set chat=${chatId} phase=${phase}`); } catch {}

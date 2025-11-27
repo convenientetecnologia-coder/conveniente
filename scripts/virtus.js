@@ -805,6 +805,7 @@ async function enviarLoteNotificador(nomePerfil) {
 }
 
 function iniciarPollingRespostas(nomePerfil) {
+  if (!NOTIFICADOR_OUTBOUND) return;
   if (pollingIntervals.has(nomePerfil)) return;
   const id = setInterval(async () => {
     try {
@@ -846,6 +847,7 @@ function iniciarPollingRespostas(nomePerfil) {
 }
 
 function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, marcarRespondidoFn) {
+  if (!NOTIFICADOR_OUTBOUND) return;
   if (filaEnvioTimers.has(nomePerfil)) return;
 
   const id = setInterval(async () => {
@@ -864,8 +866,31 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     try {
       const respostaFinal = String(proximo.resposta || '').trim();
       
-      // GATE ANTI-DUPLICIDADE: só permite enviar se o cliente falou algo novo
+      // DEDUPE textual: se a última resposta enviada é igual, ACK e skip
       const st = await getChatState(nomePerfil, proximo.chatId).catch(() => null);
+      const lastIA = (st && st.ultimaRespostaEnviada) ? st.ultimaRespostaEnviada : '';
+      if (lastIA && normalize(lastIA) === normalize(respostaFinal)) {
+        try {
+          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              servidor: NOTIFICADOR_SERVIDOR,
+              perfil: nomePerfil,
+              chat_id: proximo.chatId
+            })
+          });
+        } catch {}
+        try {
+          stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'notifier_dedupe_skip', chatId: proximo.chatId });
+        } catch {}
+        try {
+          if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
+        } catch {}
+        return; // NÃO enviar para o Messenger
+      }
+      
+      // GATE ANTI-DUPLICIDADE: só permite enviar se o cliente falou algo novo
       const lastCLIts = Number(st && st.lastCLIts || 0);
       const lastIATs  = Number(st && st.lastIATs  || 0);
 
@@ -903,9 +928,9 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
 
-      // Atualiza lastIATs para acionar o gating e impedir reenvio futuro da mesma resposta
+      // Atualiza lastIATs e ultimaRespostaEnviada para acionar o gating e impedir reenvio futuro da mesma resposta
       try {
-        await setChatState(nomePerfil, proximo.chatId, { lastIATs: Date.now() });
+        await setChatState(nomePerfil, proximo.chatId, { lastIATs: Date.now(), ultimaRespostaEnviada: respostaFinal });
         if (typeof flushChatStateNow === 'function') {
           await flushChatStateNow(nomePerfil);
         }
@@ -1300,6 +1325,9 @@ const PROBE_FORCE_OPEN_MS  = parseInt(process.env.VIRTUS_PROBE_FORCE_OPEN_MS  ||
 
 const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io';
 const NOTIFICADOR_SERVIDOR = process.env.SERVIDOR_NOME || 'servidor1';
+
+const NOTIFICADOR_OUTBOUND = String(process.env.NOTIFICADOR_OUTBOUND || '0') === '1'; // 0 = desativado (padrão)
+const NOTIFICADOR_HISTORICO = String(process.env.NOTIFICADOR_HISTORICO || '0') === '1'; // 0 = não envia histórico (padrão)
 
 const NOTIFICADOR_ENVIO_LOTE_MS = parseInt(process.env.NOTIFICADOR_ENVIO_LOTE_MS || '10000', 10); // 10s
 const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '1100', 10);
@@ -1976,7 +2004,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let chatAtivo = null;
 
   // Debounce de 20s por chat/cliente
-  const DEBOUNCE_MS = parseInt(process.env.VIRTUS_DEBOUNCE_MS || '12000', 10);
+  const DEBOUNCE_MS = parseInt(process.env.VIRTUS_DEBOUNCE_MS || '3000', 10);
   const debounceTimers = new Map(); // chatId -> { timerId, startedAt, dueAt }
 
   function clearDebounce(chatId) {
@@ -3140,6 +3168,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return;
           }
 
+          // Log técnico do payload gerado (para auditoria)
+          try {
+            stepLog.appendJSONL(nome, 'virtus', { step: 'ai_send', chatId, len: (respostaSan||'').length, hash: sha1(respostaSan||'') });
+          } catch {}
+
+          // DEDUPE local por conteúdo: se a última mensagem enviada por mim é igual, não reenviar
+          const snapAntes = await getMySentSnapshot(pAtual).catch(() => ({ lastText: '' }));
+          if (normalize(snapAntes.lastText || '') === normalize(respostaSan)) {
+            logger.info('[DEDUPE] Última mensagem minha é idêntica — não reenviar', { nome, chatId });
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              lastIATs: Date.now(),
+              lastCLIts: lastClienteTs,
+              lastProbeAt: Date.now(),
+              ultimaRespostaEnviada: respostaSan
+            });
+            await flushChatStateNow(nome);
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+
           await waitForSendLockRelease(pAtual, 12000);
           await acquireSendGuard(pAtual, chatId);
           try {
@@ -3162,8 +3213,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 state: CHAT_STATES.AGUARDANDO,
                 lastIATs: Date.now(),
                 lastCLIts: lastClienteTs,
-                lastProbeAt: Date.now()
+                lastProbeAt: Date.now(),
+                ultimaRespostaEnviada: respostaSan
               });
+              await flushChatStateNow(nome);
             } catch {}
           } finally {
             releaseSendGuard(pAtual);
@@ -3171,14 +3224,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Enfileira o chat para o notificador (pipeline legado de respostas) — mantém compatibilidade
           try {
-            const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
-            adicionarChatParaEnvio(nome, {
-              chatId,
-              tipoServico,
-              historico: historicoConversa,
-              localizacao: localizacaoFormatada,
-              urlClassificado
-            });
+            if (NOTIFICADOR_HISTORICO) {
+              const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
+              adicionarChatParaEnvio(nome, {
+                chatId,
+                tipoServico,
+                historico: historicoConversa,
+                localizacao: localizacaoFormatada,
+                urlClassificado
+              });
+            }
           } catch {}
 
           // Remove pendência e encerra o fluxo (não cai no legado)
@@ -4303,7 +4358,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     
     try {
       await fazerHandshakeNotificador(nome);
-      iniciarPollingRespostas(nome);
+      if (NOTIFICADOR_OUTBOUND) {
+        iniciarPollingRespostas(nome);
+      }
       
       async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
       const MAX_TRIES = 2;
@@ -4425,7 +4482,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     }
     
-      iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      if (NOTIFICADOR_OUTBOUND) {
+        iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      }
       bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
