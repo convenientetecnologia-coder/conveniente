@@ -289,14 +289,72 @@ class PedidoOrchestrator extends EventEmitter {
   upsertFromIA(perfil, chatId, campos) {
     const s = this._get(perfil, chatId) || this._set(perfil, chatId, {});
     const cur = s.data || {};
-    const merged = Object.assign({}, cur, campos || {});
-    // consolidar telefone caso venha ddd + parcial
-    if (!merged.telefone && merged.ddd && merged.telefone_parcial) {
-      const comb = onlyDigits(merged.ddd) + onlyDigits(merged.telefone_parcial);
-      if (isValidPhoneBR(comb)) {
-        merged.telefone = comb; merged.ddd = null; merged.telefone_parcial = null;
+    const c = campos || {};
+    const merged = Object.assign({}, cur);
+
+    function cleanStr(v) { return String(v == null ? '' : v).trim(); }
+    function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
+    function isStopwordStr(t) { return /^conveniente(?:\s+contingencia)?$/i.test(String(t||'').trim()); }
+
+    function setIfMeaningful(k, v) {
+      if (v === undefined || v === null) return;
+
+      if (typeof v === 'boolean') {
+        merged[k] = v;
+        return;
+      }
+
+      if (k === 'telefone') {
+        const d = onlyDigits(v);
+        if (isValidPhoneBR(d)) merged.telefone = d;
+        return;
+      }
+
+      if (k === 'ddd') {
+        const d = onlyDigits(v);
+        if (/^[1-9]\d$/.test(d)) merged.ddd = d;
+        return;
+      }
+
+      if (k === 'telefone_parcial') {
+        const d = onlyDigits(v);
+        if (/^\d{8,9}$/.test(d)) merged.telefone_parcial = d;
+        return;
+      }
+
+      if (k === 'saida_tipo' || k === 'destino_tipo') {
+        const t = cleanStr(v).toLowerCase();
+        if (t === 'casa' || t === 'apartamento') merged[k] = t;
+        return;
+      }
+
+      // Demais strings (endereços, itens, cidade etc.)
+      const t = cleanStr(v);
+      if (!t) return;
+      if (isStopwordStr(t)) return; // ignora "Conveniente/Conveniente Contingencia"
+      merged[k] = t;
+    }
+
+    const KEYS = [
+      'itens','endereco_saida','endereco_destino','ajudante',
+      'saida_tipo','destino_tipo','saida_elevador','destino_elevador',
+      'telefone','ddd','telefone_parcial','cidade'
+    ];
+    for (const k of KEYS) {
+      if (Object.prototype.hasOwnProperty.call(c, k)) {
+        setIfMeaningful(k, c[k]);
       }
     }
+
+    // Montagem automática de telefone caso tenha DDD + parcial
+    if (!merged.telefone && merged.ddd && merged.telefone_parcial) {
+      const combinado = String(merged.ddd) + String(merged.telefone_parcial);
+      if (isValidPhoneBR(combinado)) {
+        merged.telefone = combinado;
+        delete merged.telefone_parcial;
+      }
+    }
+
     const patch = { data: merged };
     return this._set(perfil, chatId, patch);
   }
@@ -456,6 +514,20 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
       nextField,
       allowSecondQuestion: !!nextField,
       phoneMode
+    };
+  }
+
+  // Prioridade máxima: se o cliente mandou telefone PARCIAL e ainda não há DDD,
+  // peça o DDD AGORA (antes de qualquer outro campo), acoplando a próxima pergunta não-telefone.
+  if (!telOk && data && data.telefone_parcial && !data.ddd) {
+    const nextField = getNextNonPhoneField(data);
+    return {
+      askField: 'ddd',
+      phase: 'none',
+      reason: 'missing',
+      nextField,
+      allowSecondQuestion: !!nextField,
+      phoneMode: 'lite'
     };
   }
 

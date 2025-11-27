@@ -468,6 +468,7 @@ async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastCli
       const yn = interpretYesNo(lastClientText);
       if (yn !== null) {
         await atualizarDadosColetados(chatId, { dados: { ajudante: yn } });
+        await pedidos.upsertFromIA(perfil, chatId, { ajudante: yn });
         try { await issues.append(perfil, 'mil_action', `ajudante_inferido:${yn ? 'sim' : 'nao'} (via answer_shortcut)`); } catch {}
       }
     }
@@ -475,6 +476,7 @@ async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastCli
       const tipo = inferCasaApto(lastClientText);
       if (tipo) {
         await atualizarDadosColetados(chatId, { dados: { saida_tipo: tipo } });
+        await pedidos.upsertFromIA(perfil, chatId, { saida_tipo: tipo });
         try { await issues.append(perfil, 'mil_action', `saida_tipo_inferido:${tipo}`); } catch {}
       }
     }
@@ -482,6 +484,7 @@ async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastCli
       const tipo = inferCasaApto(lastClientText);
       if (tipo) {
         await atualizarDadosColetados(chatId, { dados: { destino_tipo: tipo } });
+        await pedidos.upsertFromIA(perfil, chatId, { destino_tipo: tipo });
         try { await issues.append(perfil, 'mil_action', `destino_tipo_inferido:${tipo}`); } catch {}
       }
     }
@@ -555,6 +558,7 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePag
         const ddd = tx.replace(/\D/g, '');
         if (ddd && ddd.length === 2) {
           await atualizarDadosColetados(chatId, { dados: { ddd } });
+          await pedidos.upsertFromIA(perfil, chatId, { ddd });
         }
       }
     } catch {}
@@ -566,6 +570,7 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePag
         const parcial = String(parts[parts.length - 1] || '').replace(/\D/g, '');
         if (parcial && (parcial.length === 8 || parcial.length === 9)) {
           await atualizarDadosColetados(chatId, { dados: { telefone_parcial: parcial } });
+          await pedidos.upsertFromIA(perfil, chatId, { telefone_parcial: parcial });
         }
       }
     } catch {}
@@ -3892,6 +3897,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       if (Object.keys(patch).length) {
         await atualizarDadosColetados(chatId, { dados: patch });
+        await pedidos.upsertFromIA(perfil, chatId, patch);
         logger.info('[VIRTUS_STATE] infer_enderecos', { nome: perfil, chatId, saida: patch.endereco_saida || null, destino: patch.endereco_destino || null });
         try { await issues.append(perfil, 'mil_action', `infer_enderecos saida="${patch.endereco_saida||''}" destino="${patch.endereco_destino||''}"`); } catch {}
       }
