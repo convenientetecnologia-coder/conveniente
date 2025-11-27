@@ -448,7 +448,7 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   // 1) Preço antes do WhatsApp → pedir telefone AGORA, emparelhado com a próxima pergunta não-telefone
   if (!telOk && shouldAskWhatsappFirst({ historicoNovo: novasMsgs, dataAtual: data })) {
     const nextField = getNextNonPhoneField(data);
-    const phoneMode = (counts.telefone >= 2 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
+    const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
     return {
       askField: 'telefone',
       phase: 'none',
@@ -464,7 +464,7 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
 
   if (next === 'telefone') {
     const nextField = getNextNonPhoneField(data);
-    const phoneMode = (counts.telefone >= 2 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
+    const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
     return {
       askField: 'telefone',
       phase: 'none',

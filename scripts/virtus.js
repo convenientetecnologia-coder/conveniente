@@ -3156,7 +3156,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             askField: directive.askField,
             allowSecondQuestion: !!directive.allowSecondQuestion,
             nextField: directive.nextField || null,
-            phoneMode: directive.phoneMode || 'lite'
+            phoneMode: directive.phoneMode || 'lite',
+            askReason: directive.reason || 'missing'
           });
 
           const userAnswer = promptFretes.buildUserPrompt({
@@ -3169,7 +3170,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             askField: directive.askField,
             nextField: directive.nextField || null,
             allowSecondQuestion: !!directive.allowSecondQuestion,
-            phoneMode: directive.phoneMode || 'lite'
+            phoneMode: directive.phoneMode || 'lite',
+            askReason: directive.reason || 'missing'
           });
 
           // Chama IA geradora

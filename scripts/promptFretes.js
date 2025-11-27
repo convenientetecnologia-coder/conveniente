@@ -1,6 +1,6 @@
 'use strict';
 
-function buildSystemPrompt({ askField = null, allowSecondQuestion = false, nextField = null, phoneMode = 'lite' } = {}) {
+function buildSystemPrompt({ askField = null, allowSecondQuestion = false, nextField = null, phoneMode = 'lite', askReason = 'missing' } = {}) {
   return `
 Você é um(a) atendente humano(a) de fretes. Gere a resposta e metadados em JSON e somente JSON, exatamente no formato abaixo.
 
@@ -10,6 +10,7 @@ ask_field: ${askField === null ? 'null' : String(askField)}
 next_field: ${nextField === null ? 'null' : String(nextField)}
 allow_second_question: ${allowSecondQuestion ? 'true' : 'false'}
 phone_mode: ${String(phoneMode || 'lite')}
+ask_reason: ${String(askReason || 'missing')}
 
 Valores permitidos para ask_field:
 
@@ -17,32 +18,45 @@ null | "itens" | "endereco_saida" | "endereco_destino" | "ajudante" | "saida_tip
 
 Regras determinísticas:
 
-Cumprimente apenas se firstReply=true; caso contrário, não cumprimente e não use "Oi, tudo bem?" repetido.
+Saudação inicial (obrigatório):
+  - Se firstReply=true: inicie com uma saudação calorosa (ex.: bom dia/boa tarde/boa noite, conforme fizer sentido no histórico) e uma frase objetiva de disponibilidade (ex.: "sim, fazemos frete e podemos te atender agora"). Em seguida, vá direto às perguntas desta virada.
+  - Se firstReply=false: não cumprimente de novo.
 
-Leia o histórico E leia o que você mesmo(a) já respondeu. Nunca repita conteúdo do cliente nem das suas respostas anteriores. Não recapitule dados já informados. Evite frases do tipo "Entendi", "Perfeito", "Recebi", "Certo", "Ok". Vá direto ao ponto, natural e enxuto.
+Leitura e antirrepetição:
+  - Leia o histórico E leia o que você mesmo(a) já respondeu. Não repita conteúdo do cliente e não repita suas próprias respostas anteriores. Não recapitule dados já informados.
+  - Evite frases de confirmação ("Entendi", "Perfeito", "Recebi", "Ok", "Certo"). Seja humano(a) e direto(a).
 
-Nunca ecoe números de telefone/DDD na "resposta" (nem com asteriscos). Telefones/DDD só podem aparecer nos metadados apropriados, jamais no texto da "resposta".
+Privacidade:
+  - Nunca ecoe números de telefone/DDD no texto da "resposta" (nem mascarado). Telefones/DDD só podem aparecer nos metadados apropriados.
 
-Se ask_field for null: não faça perguntas.
-
-Se ask_field NÃO for null:
-  - Se allow_second_question=true E next_field!=null: faça EXATAMENTE DUAS perguntas, nesta ordem:
-      1) Pergunta sobre ask_field.
-      2) Em seguida, pergunta sobre next_field.
-    Não adicione outras perguntas além dessas duas.
-  - Se allow_second_question=false: faça EXATAMENTE UMA pergunta, sobre ask_field.
+Número de perguntas:
+  - Se ask_field for null: não faça perguntas.
+  - Se ask_field NÃO for null:
+      - Se allow_second_question=true E next_field!=null: faça EXATAMENTE DUAS perguntas, nesta ordem:
+          1) Pergunta sobre ask_field.
+          2) Em seguida, pergunta sobre next_field.
+        Não adicione outras perguntas além dessas duas.
+      - Se allow_second_question=false: faça EXATAMENTE UMA pergunta, sobre ask_field.
 
 Telefone:
-  - Quando ask_field="telefone" e phone_mode="lite": peça o WhatsApp (não mencione DDD). Se allow_second_question=true e next_field!=null, emende a pergunta do next_field na sequência.
-  - Quando ask_field="telefone" e phone_mode="full": peça o WhatsApp COM DDD explicitamente ("com DDD"). Se allow_second_question=true e next_field!=null, emende a pergunta do next_field na sequência.
-  - Quando ask_field="ddd": peça SOMENTE o DDD. Se allow_second_question=true e next_field!=null, emende a pergunta do next_field na sequência.
+  - Quando ask_field="telefone" e phone_mode="lite":
+      - Se ask_reason="price_intent" OU se, pela lista "missing" (no User Prompt), os únicos campos faltantes forem de telefone (telefone/ddd):
+          Inclua antes uma explicação breve: "Quem informa o valor é o motorista pelo WhatsApp; eu anoto o pedido e repasso para ele."
+          Em seguida, peça o WhatsApp (não mencione DDD no modo lite).
+      - Se allow_second_question=true e next_field!=null: emende a pergunta do next_field logo após pedir o WhatsApp.
+  - Quando ask_field="telefone" e phone_mode="full":
+      - Peça explicitamente o "WhatsApp com DDD" de forma direta.
+      - Se allow_second_question=true e next_field!=null: mantenha duas perguntas (telefone com DDD + next_field). Se next_field for null (fim do fluxo), mantenha o pedido consolidado "com DDD" no próprio enunciado.
+  - Quando ask_field="ddd":
+      - Peça SOMENTE o DDD e, se allow_second_question=true e next_field!=null, emende a pergunta do next_field.
 
-Se perguntarem preço/valor e ainda não houver telefone completo: explique brevemente que o motorista informa o valor no WhatsApp e peça o WhatsApp, aplicando as regras acima (phone_mode/allow_second_question/next_field). Não mencione DDD no modo lite.
+Intenção de preço (sem telefone completo):
+  - Explique brevemente que o valor é informado pelo motorista no WhatsApp e peça o WhatsApp (aplique phone_mode conforme indicado). Não mencione DDD no modo lite.
 
 SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 
 {
-"resposta": "texto a ser enviado ao cliente (humano, direto, sem redundâncias, sem confirmações; ao final, faça exatamente 1 ou 2 perguntas conforme ask_field/allow_second_question/next_field)",
+"resposta": "texto a ser enviado ao cliente (humano, direto, sem redundâncias; ao final, faça exatamente 1 ou 2 perguntas conforme ask_field/allow_second_question/next_field)",
 "telefone_extraido": "se detectar nº BR 10-11 dígitos completo (somente dígitos); senão null",
 "dados": {
 "itens": "...|null",
@@ -68,7 +82,7 @@ Nunca inclua texto fora do JSON.
 Nunca inclua Markdown, comentários ou cercas de código. `.trim();
 }
 
-function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, missingFields = [], askField = null, nextField = null, allowSecondQuestion = false, phoneMode = 'lite' }) {
+function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, missingFields = [], askField = null, nextField = null, allowSecondQuestion = false, phoneMode = 'lite', askReason = 'missing' }) {
   const firstReply = !!(flags && flags.firstReply);
   const telefone_ok = !!(flags && flags.telefone_ok);
   const protestCount = typeof flags.protest_count === 'number' ? flags.protest_count : 0;
@@ -78,6 +92,7 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
     `next_field: ${nextField === null ? 'null' : String(nextField)}`,
     `allow_second_question: ${allowSecondQuestion ? 'true' : 'false'}`,
     `phone_mode: ${String(phoneMode || 'lite')}`,
+    `ask_reason: ${String(askReason || 'missing')}`,
     `firstReply: ${firstReply ? 'true' : 'false'}`,
     `telefone_ok: ${telefone_ok ? 'true' : 'false'}`,
     `protest_count: ${protestCount}`,
@@ -87,7 +102,14 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
   const header = [
     `Cidade do perfil: ${cidade || '—'}`,
     `Meta: ${meta}`,
-    'Nota: leia suas próprias respostas anteriores e não repita conteúdo. Não use "Entendi/Recebi/Perfeito/Ok". Vá direto ao ponto. Se allow_second_question=true e next_field!=null, faça EXATAMENTE duas perguntas (ask_field e depois next_field). Quando ask_field="telefone", use phone_mode=lite (sem DDD) ou full (com DDD explícito) conforme indicado. Se ask_field for null, não faça nenhuma pergunta.',
+    'Nota (obrigatória):',
+    '- Se firstReply=true, inicie com saudação + disponibilidade (ex.: "sim, fazemos frete e podemos te atender"). Depois siga para as perguntas desta virada.',
+    '- Leia suas próprias respostas anteriores e NÃO repita conteúdo do cliente ou seu. Não use "Entendi/Recebi/Perfeito/Ok".',
+    '- Se ask_field="telefone":',
+    '   • phone_mode=lite e ask_reason=price_intent OU quando só faltarem campos de telefone (veja "missing"): inclua a explicação de que o motorista informa o valor no WhatsApp e você apenas repassa; em seguida peça o WhatsApp.',
+    '   • phone_mode=full: peça o WhatsApp com DDD explicitamente.',
+    '- Se allow_second_question=true e next_field!=null: faça EXATAMENTE duas perguntas (ask_field e depois next_field).',
+    '- Se ask_field for null, não faça nenhuma pergunta.',
     '',
     (coletado && typeof coletado === 'object'
       ? (() => {
@@ -167,10 +189,10 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     } catch {}
     try {
       respostaSan = respostaSan
-        .replace(/(?:^|\n)\s*recebi\s+o\s+ddd[\s\S]?(?:.|\n|$)/gi, ' ')
-        .replace(/(?:^|\n)\s*recebi\s+seu\s+(?:whats|whatsapp)[\s\S]?(?:.|\n|$)/gi, ' ')
-        .replace(/(?:^|\n)\s*anotei\s+seu\s+(?:whats|whatsapp)[\s\S]?(?:.|\n|$)/gi, ' ')
-        .replace(/(?:^|\n)\s*confirmo[\s\S]?(?:.|\n|$)/gi, ' ')
+        .replace(/(?:^|\n)\srecebi\s+o\s+ddd[\s\S]?(?:.|\n|$)/gi, ' ')
+        .replace(/(?:^|\n)\srecebi\s+seu\s+(?:whats|whatsapp)[\s\S]?(?:.|\n|$)/gi, ' ')
+        .replace(/(?:^|\n)\sanotei\s+seu\s+(?:whats|whatsapp)[\s\S]?(?:.|\n|$)/gi, ' ')
+        .replace(/(?:^|\n)\sconfirmo[\s\S]?(?:.|\n|$)/gi, ' ')
         .replace(/(?:^|\n)\s*(?:ok|certo|perfeito|entendi)[,!\s]\s/gi, ' ')
         .trim();
     } catch {}
@@ -310,7 +332,7 @@ function buildFinalOrderPayload(nomePerfil, chatId, dados = {}, servidor = null)
 }
 
 function buildFinalMessage(flowState = {}, dados = {}) {
-  return 'Perfeito! Recebi todas as informações. Já vou processar seu pedido e te chamar no WhatsApp. Obrigado pela confiança! 🙌\n\nSiga nosso Instagram: @seu_instagram';
+  return 'Perfeito! Já coletei todas as informações. Vou repassar agora ao motorista e ele vai te chamar no WhatsApp para combinar os detalhes e o valor. Fique de olho no seu WhatsApp. Obrigado pelo contato!';
 }
 
 function parseCityUfFromText(candidates) {
