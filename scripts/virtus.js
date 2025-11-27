@@ -462,30 +462,68 @@ function inferCasaApto(raw) {
 async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastClientText) {
   try {
     const askedField = detectAskedFieldFromText(lastIaText || '');
-    if (!askedField) return;
 
+    async function setAndPropagate(patch, tag) {
+      await atualizarDadosColetados(chatId, { dados: patch });
+      try { await pedidos.upsertFromIA(perfil, chatId, patch); } catch {}
+      try {
+        if (tag) await issues.append(perfil, 'mil_action', `${tag} via answer_shortcut`);
+      } catch {}
+    }
+
+    // Ajudante: sim/não
     if (askedField === 'ajudante') {
       const yn = interpretYesNo(lastClientText);
       if (yn !== null) {
-        await atualizarDadosColetados(chatId, { dados: { ajudante: yn } });
-        await pedidos.upsertFromIA(perfil, chatId, { ajudante: yn });
-        try { await issues.append(perfil, 'mil_action', `ajudante_inferido:${yn ? 'sim' : 'nao'} (via answer_shortcut)`); } catch {}
+        await setAndPropagate({ ajudante: yn }, `ajudante_inferido:${yn ? 'sim' : 'nao'}`);
       }
     }
+
+    // Casa/Apartamento (saída)
     if (askedField === 'saida_tipo') {
       const tipo = inferCasaApto(lastClientText);
       if (tipo) {
-        await atualizarDadosColetados(chatId, { dados: { saida_tipo: tipo } });
-        await pedidos.upsertFromIA(perfil, chatId, { saida_tipo: tipo });
-        try { await issues.append(perfil, 'mil_action', `saida_tipo_inferido:${tipo}`); } catch {}
+        await setAndPropagate({ saida_tipo: tipo }, `saida_tipo_inferido:${tipo}`);
       }
     }
+
+    // Casa/Apartamento (destino)
     if (askedField === 'destino_tipo') {
       const tipo = inferCasaApto(lastClientText);
       if (tipo) {
-        await atualizarDadosColetados(chatId, { dados: { destino_tipo: tipo } });
-        await pedidos.upsertFromIA(perfil, chatId, { destino_tipo: tipo });
-        try { await issues.append(perfil, 'mil_action', `destino_tipo_inferido:${tipo}`); } catch {}
+        await setAndPropagate({ destino_tipo: tipo }, `destino_tipo_inferido:${tipo}`);
+      }
+    }
+
+    // Elevador (saída): sim/não
+    if (askedField === 'saida_elevador') {
+      const yn = interpretYesNo(lastClientText);
+      if (yn !== null) {
+        await setAndPropagate({ saida_elevador: yn }, `saida_elevador_inferido:${yn ? 'sim' : 'nao'}`);
+      }
+    }
+
+    // Elevador (destino): sim/não
+    if (askedField === 'destino_elevador') {
+      const yn = interpretYesNo(lastClientText);
+      if (yn !== null) {
+        await setAndPropagate({ destino_elevador: yn }, `destino_elevador_inferido:${yn ? 'sim' : 'nao'}`);
+      }
+    }
+
+    // Fallback extra: se o cliente respondeu sozinho "ap"/"apartamento" ou "casa"
+    // e NÃO conseguimos identificar askedField, tente atribuir ao campo que ainda falta.
+    if (!askedField) {
+      const tipoSolo = inferCasaApto(lastClientText);
+      if (tipoSolo) {
+        const st = await getChatState(perfil, chatId).catch(() => null);
+        const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
+
+        if (!dc || (!dc.destino_tipo && tipoSolo)) {
+          await setAndPropagate({ destino_tipo: tipoSolo }, `destino_tipo_inferido_fallback:${tipoSolo}`);
+        } else if (!dc.saida_tipo && tipoSolo) {
+          await setAndPropagate({ saida_tipo: tipoSolo }, `saida_tipo_inferido_fallback:${tipoSolo}`);
+        }
       }
     }
 
@@ -4013,45 +4051,37 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     } catch {}
 
-    // REGRA CRÍTICA: NUNCA envia pedido sem TELEFONE E CIDADE
+    // REGRA CRÍTICA: enviar IMEDIATO se tiver TELEFONE (com DDD) + CIDADE
     const temWhats = !!(cur.telefone && promptFretes.isValidBRPhoneWithDDD(cur.telefone));
     const temCidade = !!(cur.cidade && String(cur.cidade).trim());
-    
-    // Se não tem telefone OU não tem cidade: NÃO FAZ NADA (não envia, não inicia timer)
+
     if (!temWhats || !temCidade) {
-      return; // Aguarda telefone e cidade antes de qualquer ação
+      return; // Aguarda até termos telefone válido e cidade
     }
 
-    // A partir daqui, temos telefone E cidade válidos
-    const completos = !!(cur.itens && cur.endereco_saida && cur.endereco_destino &&
-      (cur.ajudante != null) && (cur.saida_tipo != null) && (cur.destino_tipo != null));
+    // Se já enviamos antes, não repete
+    if (pedidosEnviados.has(chatId)) return;
 
-    // Se WhatsApp e cidade chegaram, faltam campos, e timer NÃO existe: inicia timer de 10min
-    if (!completos && !timersFechamento.has(chatId)) {
-      await iniciarTimerFechamento(chatId, cur.telefone);
-    }
+    try {
+      await enviarPedidoParaNotificador(chatId, cur);
+      pedidosEnviados.add(chatId);
 
-    // Se WhatsApp, cidade E TODOS os campos foram preenchidos: cancela timer e envia imediatamente
-    if (completos) {
-      if (timersFechamento.has(chatId)) {
-        cancelarTimerFechamento(chatId);
-      }
-      if (!pedidosEnviados.has(chatId)) {
-        try {
-          await enviarPedidoParaNotificador(chatId, cur);
-          pedidosEnviados.add(chatId);
-          await enviarMensagemFinal(chatId);
-          await marcarRespondido(nome, chatId);
-          await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
-          await flushChatStateNow(nome);
-          try {
-            const telMask = cur.telefone ? maskPhoneLog(cur.telefone) : '';
-            logger.info('[FINALIZACAO] finalizado_imediato', { chatId, telefone: telMask });
-          } catch {}
-        } catch (e) {
-          logger.error('[FINALIZACAO] Erro ao finalizar chat', { nome, chatId, error: e && e.message || e });
-        }
-      }
+      // NÃO chamar enviarMensagemFinal aqui: a função enviarPedidoParaNotificador já envia a mensagem final neste script.
+      // Marcar respondido e finalizar estado local
+      await marcarRespondido(nome, chatId);
+      await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
+      await flushChatStateNow(nome);
+
+      // Congelar no orquestrador por 48h
+      try { await pedidos.markFinalizedAndFreeze(nome, chatId); } catch {}
+
+      try {
+        const telMask = cur.telefone ? maskPhoneLog(cur.telefone) : '';
+        logger.info('[FINALIZACAO] finalizado_imediato_any', { chatId, telefone: telMask });
+      } catch {}
+
+    } catch (e) {
+      logger.error('[FINALIZACAO] Erro ao finalizar chat (imediato)', { nome, chatId, error: (e && e.message) || e });
     }
   }
 
@@ -4247,7 +4277,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function enviarMensagemFinal(chatId) {
     const dados = dadosColetados && dadosColetados.get(chatId) || {};
-    const mensagem = promptFretes.buildFinalMessage({}, dados);
+    const mensagemBase = promptFretes.buildFinalMessage({}, dados);
+    const igCTA = [
+      'Obrigado pela confiança! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em instantes. Fique de olho!',
+      'Aproveitando: eu trabalho com marketing digital e atendo os pedidos aqui. Se puder dar uma força, segue nossa página no Instagram 😊',
+      'https://www.instagram.com/convenientetecnologia',
+      '@convenientetecnologia'
+    ].join('\n');
+    const mensagem = [mensagemBase, igCTA].filter(Boolean).join('\n\n');
     
     let p = await ensurePage().catch(() => null);
     if (!p) {

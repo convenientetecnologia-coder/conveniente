@@ -16,7 +16,7 @@ Valores permitidos para ask_field:
 
 null | "itens" | "endereco_saida" | "endereco_destino" | "ajudante" | "saida_tipo" | "destino_tipo" | "saida_elevador" | "destino_elevador" | "telefone" | "ddd"
 
-Regras determinísticas:
+Regras determinísticas e de obediência:
 
 Saudação inicial (obrigatório):
   - Se firstReply=true: inicie com uma saudação calorosa (ex.: bom dia/boa tarde/boa noite, conforme fizer sentido no histórico) e uma frase objetiva de disponibilidade (ex.: "sim, fazemos frete e podemos te atender agora"). Em seguida, vá direto às perguntas desta virada.
@@ -29,26 +29,28 @@ Leitura e antirrepetição:
 Privacidade:
   - Nunca ecoe números de telefone/DDD no texto da "resposta" (nem mascarado). Telefones/DDD só podem aparecer nos metadados apropriados.
 
-Número de perguntas:
+Número de perguntas (obediência rígida às diretivas):
   - Se ask_field for null: não faça perguntas.
   - Se ask_field NÃO for null:
       - Se allow_second_question=true E next_field!=null: faça EXATAMENTE DUAS perguntas, nesta ordem:
           1) Pergunta sobre ask_field.
-          2) Em seguida, pergunta sobre next_field.
-        Não adicione outras perguntas além dessas duas.
+          2) Em seguida, pergunta sobre next_field. Não adicione nenhuma outra pergunta além dessas duas.
       - Se allow_second_question=false: faça EXATAMENTE UMA pergunta, sobre ask_field.
 
 Telefone:
   - Quando ask_field="telefone" e phone_mode="lite":
-      - Se ask_reason="price_intent" OU se, pela lista "missing" (no User Prompt), os únicos campos faltantes forem de telefone (telefone/ddd):
-          Inclua antes uma explicação breve: "Quem informa o valor é o motorista pelo WhatsApp; eu anoto o pedido e repasso para ele."
-          Em seguida, peça o WhatsApp (não mencione DDD no modo lite).
+      - Se ask_reason="price_intent" OU se, pela lista "missing" (no User Prompt), os únicos campos faltantes forem de telefone (telefone/ddd): Inclua antes uma explicação breve: "Quem informa o valor é o motorista pelo WhatsApp; eu anoto o pedido e repasso para ele." Em seguida, peça o WhatsApp (não mencione DDD no modo lite).
       - Se allow_second_question=true e next_field!=null: emende a pergunta do next_field logo após pedir o WhatsApp.
   - Quando ask_field="telefone" e phone_mode="full":
       - Peça explicitamente o "WhatsApp com DDD" de forma direta.
       - Se allow_second_question=true e next_field!=null: mantenha duas perguntas (telefone com DDD + next_field). Se next_field for null (fim do fluxo), mantenha o pedido consolidado "com DDD" no próprio enunciado.
   - Quando ask_field="ddd":
       - Peça SOMENTE o DDD e, se allow_second_question=true e next_field!=null, emende a pergunta do next_field.
+
+Tri-state obrigatório para os campos perguntados:
+  - Para cada campo perguntado nesta virada (ask_field e, se houver, next_field), você DEVE preencher o valor correspondente em "dados" usando um dos seguintes tri-states (quando aplicável): • ajudante: true | false | "nao_respondeu" • saida_tipo: "casa" | "apartamento" | "nao_respondeu" • destino_tipo: "casa" | "apartamento" | "nao_respondeu" • saida_elevador: true | false | "nao_respondeu" • destino_elevador: true | false | "nao_respondeu"
+  - Use "nao_respondeu" EXCLUSIVAMENTE quando o cliente não tiver fornecido informação suficiente para o campo perguntado.
+  - Para campos de TEXTO (itens, endereco_saida, endereco_destino), não use "nao_respondeu": quando não houver informação, deixe null.
 
 Intenção de preço (sem telefone completo):
   - Explique brevemente que o valor é informado pelo motorista no WhatsApp e peça o WhatsApp (aplique phone_mode conforme indicado). Não mencione DDD no modo lite.
@@ -62,11 +64,11 @@ SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 "itens": "...|null",
 "endereco_saida": "...|null",
 "endereco_destino": "...|null",
-"ajudante": true|false|null,
-"saida_tipo": "casa"|"apartamento"|null,
-"saida_elevador": true|false|null,
-"destino_tipo": "casa"|"apartamento"|null,
-"destino_elevador": true|false|null,
+"ajudante": true|false|"nao_respondeu",
+"saida_tipo": "casa"|"apartamento"|"nao_respondeu",
+"saida_elevador": true|false|"nao_respondeu",
+"destino_tipo": "casa"|"apartamento"|"nao_respondeu",
+"destino_elevador": true|false|"nao_respondeu",
 "telefone_parcial": "8-9 dígitos ou null",
 "ddd": "2 dígitos ou null"
 },
@@ -154,12 +156,11 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
 
     // Fallback: se não há JSON, usa o texto inteiro como resposta
     if (!/{[\s\S]*}/.test(txt)) {
-      // Modelo não retornou JSON — fallback: usa o texto inteiro como resposta
       const fallback = String(txt).trim();
       const fallbackSan = fallback
         .replace(/\b\d{8,11}\b/g, '')          // bloqueia sequências coladas de 8–11 dígitos
         .replace(/\+?\d[\d\s().-]{7,}\d/g, '') // bloqueia números com separadores
-        .replace(/(\d[\s-]?){4,}/g, '******');       // defensivo
+        .replace(/(\d[\s-]?){4,}/g, '******'); // defensivo extra
       return {
         resposta: fallbackSan,
         telefone_extraido: null,
@@ -177,6 +178,10 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     const obj = JSON.parse(match[0]);
 
     function onlyDigits(s){ return String(s||'').replace(/\D/g,''); }
+    function norm(s) {
+      try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+      catch { return String(s||'').toLowerCase().trim(); }
+    }
 
     // Sempre mascarar qualquer número no texto de resposta (não ecoar telefone do cliente)
     const originalResposta = String(obj.resposta || '');
@@ -249,35 +254,60 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
       }
     }
 
-    // 5) Consolidar campos "dados"
+    // 5) Consolidar e normalizar campos "dados" (tri-state -> domínio)
     const safeDados = obj.dados && typeof obj.dados === 'object' ? obj.dados : {};
+
+    function toTriBool(v) {
+      if (v === true) return true;
+      if (v === false) return false;
+      const s = norm(v);
+      if (s === 'sim' || s === 'true' || s === 'verdadeiro') return true;
+      if (s === 'nao' || s === 'não' || s === 'false' || s === 'falso' || s === 'nao.') return false;
+      if (s === 'nao_respondeu') return null;
+      return (v == null) ? null : null;
+    }
+
+    function toCasaApto(v) {
+      const s = norm(v);
+      if (s === 'casa') return 'casa';
+      if (s === 'apartamento' || s === 'ap' || s === 'apto' || s === 'apt' || s === 'apt.') return 'apartamento';
+      if (s === 'nao_respondeu') return null;
+      return (v == null) ? null : null;
+    }
+
     const dadosOut = {
-      ajudante: safeDados.ajudante ?? null,
-      saida_tipo: safeDados.saida_tipo ?? null,
-      saida_elevador: safeDados.saida_elevador ?? null,
-      destino_tipo: safeDados.destino_tipo ?? null,
-      destino_elevador: safeDados.destino_elevador ?? null,
+      ajudante: toTriBool(safeDados.ajudante),
+      saida_tipo: toCasaApto(safeDados.saida_tipo),
+      saida_elevador: toTriBool(safeDados.saida_elevador),
+      destino_tipo: toCasaApto(safeDados.destino_tipo),
+      destino_elevador: toTriBool(safeDados.destino_elevador),
       endereco_saida: safeDados.endereco_saida ?? null,
       endereco_destino: safeDados.endereco_destino ?? null,
       itens: safeDados.itens ?? null
     };
 
     // Só incluir peças soltas se NÃO houver telefone completo
-    if (!telefoneOK && telefoneParcial) dadosOut.telefone_parcial = telefoneParcial;
-    if (!telefoneOK && dddInformado) dadosOut.ddd = dddInformado;
+    if (!telefoneOK && (safeDados.telefone_parcial != null)) {
+      const tp = onlyDigits(safeDados.telefone_parcial);
+      if (tp && (tp.length === 8 || tp.length === 9)) dadosOut.telefone_parcial = tp;
+    }
+    if (!telefoneOK && (safeDados.ddd != null)) {
+      const dd = onlyDigits(safeDados.ddd);
+      if (/^[1-9]\d$/.test(dd)) dadosOut.ddd = dd;
+    }
     if (safeDados.debug) dadosOut.debug = safeDados.debug;
 
     // 6) Critério de finalização real (obrigatório levantar elevador nos aptos)
     const isAptSaida = (dadosOut.saida_tipo === 'apartamento');
     const isAptDestino = (dadosOut.destino_tipo === 'apartamento');
-    const elevSaidaOk = !isAptSaida || (safeDados.saida_elevador === true || safeDados.saida_elevador === false || dadosOut.saida_elevador === true || dadosOut.saida_elevador === false);
-    const elevDestinoOk = !isAptDestino || (safeDados.destino_elevador === true || safeDados.destino_elevador === false || dadosOut.destino_elevador === true || dadosOut.destino_elevador === false);
+    const elevSaidaOk = !isAptSaida || (dadosOut.saida_elevador === true || dadosOut.saida_elevador === false);
+    const elevDestinoOk = !isAptDestino || (dadosOut.destino_elevador === true || dadosOut.destino_elevador === false);
 
     const finalizavel =
       !!dadosOut.itens &&
       !!dadosOut.endereco_saida &&
       !!dadosOut.endereco_destino &&
-      (safeDados.ajudante === true || safeDados.ajudante === false || dadosOut.ajudante === true || dadosOut.ajudante === false) &&
+      (dadosOut.ajudante === true || dadosOut.ajudante === false) &&
       !!dadosOut.saida_tipo &&
       !!dadosOut.destino_tipo &&
       elevSaidaOk &&

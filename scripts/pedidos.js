@@ -260,6 +260,13 @@ class PedidoOrchestrator extends EventEmitter {
     const s = this._get(perfil, chatId) || this._set(perfil, chatId, {});
     s.askCounts = s.askCounts || {};
     if (field) s.askCounts[field] = (s.askCounts[field] || 0) + 1;
+
+    s.flags = s.flags || {};
+    if (field) {
+      s.flags.lastAskedField = String(field);
+      s.flags.lastAskedAt = now();
+    }
+
     this._set(perfil, chatId, s);
     // Anti-loop: se exceder MAX_ASK_RETRIES e ainda faltar o campo → fallback humano
     const stillMissing = Array.isArray(s.missing) && s.missing.includes(field);
@@ -533,6 +540,35 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
 
   // 2) Próximo campo do fluxo (inclui ddd/telefone quando faltar)
   const next = getNextAskField(data);
+
+  // Anti-repetição: se o mesmo campo acabou de ser perguntado e o cliente já respondeu algo,
+  // não re-perguntar imediatamente — pule para o próximo campo não-telefone.
+  const stNow = orchestrator._get(perfil, chatId) || {};
+  const lastAskedField = stNow.flags && stNow.flags.lastAskedField;
+  const anyNewClient = Array.isArray(novasMsgs) && novasMsgs.length > 0;
+
+  if (next && lastAskedField && next === lastAskedField && anyNewClient && ((counts[next] || 0) >= 1)) {
+    const alt = getNextNonPhoneField(data);
+    if (alt) {
+      return {
+        askField: alt,
+        phase: 'none',
+        reason: 'missing',
+        nextField: null,
+        allowSecondQuestion: false,
+        phoneMode: 'lite'
+      };
+    } else {
+      return {
+        askField: null,
+        phase: 'none',
+        reason: 'missing',
+        nextField: null,
+        allowSecondQuestion: false,
+        phoneMode: 'lite'
+      };
+    }
+  }
 
   if (next === 'telefone') {
     const nextField = getNextNonPhoneField(data);
