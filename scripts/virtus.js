@@ -600,6 +600,8 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
   if (firstReply) {
     instr.push('Cumprimente de forma breve e educada.');
     instr.push('Informe que quem passa o valor/orçamento é o motorista pelo WhatsApp.');
+  } else {
+    instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
   }
 
   // Respostas às dúvidas recentes (curtas, objetivas)
@@ -611,6 +613,17 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
     instr.push('Responda de forma objetiva às perguntas do cliente (não invente informações).');
   } else {
     instr.push('Se houver algo a esclarecer na mensagem do cliente, responda de forma breve.');
+  }
+
+  const textoJanela = (Array.isArray(novasMsgs) ? novasMsgs : [])
+    .map(m => (m && m.texto ? String(m.texto) : ''))
+    .join(' ')
+    .toLowerCase();
+
+  const perguntouTempo = /quanto\s+tempo|quando|que\s+horas|vai\s+me\s+chamar|em\s+quanto/.test(textoJanela);
+
+  if (perguntouTempo) {
+    instr.push('Se perguntarem quando o motorista vai chamar, responda apenas: "em instantes".');
   }
 
   // Pergunta definida pela diretiva (pedido.js decide)
@@ -2923,25 +2936,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       _chatLockAcquired = true;
       }
 
-      // EARLY GATE 45s — não bloquear se houver pendingField ou missing no orquestrador
-      try {
-        const stGate = await getChatState(nome, chatId).catch(() => null);
-        const rDue = stGate && stGate.replyDueAt || 0;
-        const nowMs = Date.now();
-
-        const triggerReason = stGate && stGate.triggerReason;
-        // Só pula se não houver triggerReason explícito
-        if (rDue && nowMs < rDue && triggerReason !== 'fieldTimeout') {
-          const waitMs = Math.max(50, rDue - nowMs + 10);
-          setTimeout(() => {
-            try {
-              if (!fila.includes(chatId)) fila.push(chatId);
-              scheduleNextIfIdle();
-            } catch {}
-          }, waitMs);
-          return;
-        }
-      } catch {}
       
       try {
         await setChatState(nome, chatId, { lastProbeAt: Date.now() });
@@ -3128,7 +3122,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             estado: localizacao.estado 
           });
         } else {
-          logger.warn('[LOCALIZACAO] Localização NÃO encontrada', { nome, chatId, urlClassificado });
+          try {
+            const stWarn = await getChatState(nome, chatId).catch(() => null);
+            if (!stWarn || !stWarn.locWarnedNoLocation) {
+              logger.warn('[LOCALIZACAO] Localização NÃO encontrada', { nome, chatId, urlClassificado });
+              await setChatState(nome, chatId, { locWarnedNoLocation: true });
+            }
+          } catch {}
         }
 
         const tipoServico = await identificarTipoServico(nome);
@@ -3193,6 +3193,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const stGate2 = await getChatState(nome, chatId).catch(() => null);
         const triggerReason = stGate2 && stGate2.triggerReason;
         const shouldProceed = hasNewClient || triggerReason === 'fieldTimeout';
+
+        try {
+          const stGate = await getChatState(nome, chatId).catch(() => null);
+          const rDue = (stGate && stGate.replyDueAt) || 0;
+          const nowMs = Date.now();
+          const jaRespondi = !!(stGate && stGate.ultimaRespostaEnviada);
+          const tr = stGate && stGate.triggerReason;
+
+          if (!jaRespondi && rDue && nowMs < rDue && tr !== 'fieldTimeout' && !hasNewClient) {
+            const waitMs = Math.max(50, rDue - nowMs + 10);
+            setTimeout(() => {
+              try {
+                if (!fila.includes(chatId)) fila.push(chatId);
+                scheduleNextIfIdle();
+              } catch {}
+            }, waitMs);
+            return;
+          }
+        } catch {}
 
         if (!shouldProceed) {
           try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO }); } catch {}
@@ -3402,7 +3421,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               lastCLIts: lastClienteTs,
               ultimaRespostaEnviada: lastSent,
               ultimaRespostaEnviadaNorm: normalizeContent(lastSent),
-              triggerReason: null
+              triggerReason: null,
+              replyDueAt: null
             });
             await pendingDel(nome, chatId).catch(()=>{});
             fila = fila.filter(id => id !== chatId);
@@ -3431,7 +3451,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastCLIts: lastClienteTs,
                 ultimaRespostaEnviada: respostaSan,
                 ultimaRespostaEnviadaNorm: normalizeContent(respostaSan),
-                triggerReason: null
+                triggerReason: null,
+                replyDueAt: null
               });
               await flushChatStateNow(nome);
             } catch {}
