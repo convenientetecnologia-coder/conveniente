@@ -33,9 +33,13 @@ async function chatCompletion({ system, user, provider = 'groq', model, timeoutM
       if (provider === 'groq') {
         const apiKey = process.env.GROQ_API_KEY;
         const apiUrl = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
-        const mdl = model || process.env.GROQ_MODEL;
+        const mdl =
+          model
+          || (task === 'extract'
+            ? (process.env.GROQ_MODEL_EXTRACT || process.env.GROQ_MODEL)
+            : (process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL));
 
-        if (!apiKey || !mdl) throw new Error('GROQ_API_KEY/GROQ_MODEL ausentes');
+        if (!apiKey || !mdl) throw new Error('GROQ_API_KEY ou modelo ausente');
 
         const resp = await fetch(apiUrl, {
           method: 'POST',

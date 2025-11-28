@@ -214,7 +214,8 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
 
   let raw = '{}';
   try {
-    raw = await chatCompletion({ system, user, provider: 'groq', task: 'extract', timeoutMs: 22000, retries: 2 });
+    const model = process.env.GROQ_MODEL_EXTRACT || process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+    raw = await chatCompletion({ system, user, provider: 'groq', model, task: 'extract', timeoutMs: 22000, retries: 2 });
   } catch {
     raw = '{}';
   }
