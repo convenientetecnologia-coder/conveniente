@@ -1,3 +1,5 @@
+// iaExtractors.js
+
 'use strict';
 
 const { chatCompletion } = require('./inteligenciaArtificial.js');
@@ -108,9 +110,7 @@ function sanitizeExtracted(obj) {
 
     out.protesto = !!obj.protesto;
 
-    out.missing = Array.isArray(obj.missing) && obj.missing.length
-      ? obj.missing.map(String)
-      : computeMissing(out);
+    out.missing = computeMissing(out);
 
   } catch {
     out.missing = computeMissing(out);
@@ -154,6 +154,8 @@ Objetivo: Dado o histórico (cliente/ia), extraia e consolide os campos:
 - protesto: true|false (se houver sinais de irritação: "já falei", "olha acima", "você é burro?", "pare de perguntar", etc.)
 
 Regras:
+
+    Nunca inclua campos como "finalizado" ou "status"; não decida fluxo/envio. Apenas extraia dados.
 
 - Some mensagens fragmentadas. Se houver ddd e telefone_parcial, componha telefone se válido.
 
@@ -237,7 +239,7 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
   // Fallback e log se JSON inválido ou parse falhou
   const hasValidJson = firstJson && firstJson !== '{}' && parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0;
   if (!hasValidJson) {
-    try { require('./issues.js').append(perfil, 'pedidos_order_sent', `extractor_raw_invalid chat=${chatId}`); } catch {}
+    try { require('./issues.js').append(perfil, 'ia_extract_raw_invalid', `extractor_raw_invalid chat=${chatId}`); } catch {}
     
     // Fallback: usa texto da última mensagem do cliente como itens se não houver
     if (!sanitized.itens) {

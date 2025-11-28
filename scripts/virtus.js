@@ -2576,8 +2576,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try { st = await getChatState(nome, id); } catch {}
 
       const replyDue = st && st.replyDueAt || 0;
-      if (replyDue && Date.now() < replyDue) {
-        logger.info(`[FILA][${nome}] skip ${id} — aguardando janela 45s`, { replyDueAt: replyDue });
+      const snapAsk = pedidos.getSnapshot(nome, id);
+      const hasPendingField = !!(snapAsk && snapAsk.flags && snapAsk.flags.pendingField);
+      const needsAsk = Array.isArray(snapAsk && snapAsk.missing) && (snapAsk.missing.length > 0);
+      if (replyDue && Date.now() < replyDue && !hasPendingField && !needsAsk) {
+        logger.info(`[FILA][${nome}] skip ${id} — aguardando janela (sem pendingField/missing)`, { replyDueAt: replyDue });
         return;
       }
 
@@ -2853,22 +2856,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       }
 
-      // EARLY GATE 45s — não prosseguir se ainda dentro da janela
+      // EARLY GATE 45s — não bloquear se houver pendingField ou missing no orquestrador
       try {
         const stGate = await getChatState(nome, chatId).catch(() => null);
         const rDue = stGate && stGate.replyDueAt || 0;
         const nowMs = Date.now();
-        if (rDue && nowMs < rDue) {
+
+        const snapGate = pedidos.getSnapshot(nome, chatId);
+        const hasPendingField = !!(snapGate && snapGate.flags && snapGate.flags.pendingField);
+        const needsAsk = Array.isArray(snapGate && snapGate.missing) && (snapGate.missing.length > 0);
+
+        if (rDue && nowMs < rDue && !hasPendingField && !needsAsk) {
           const waitMs = Math.max(50, rDue - nowMs + 10);
-          logger.info('[RESPONDER][DELAY45S] aguardando janela por chat (early gate)', { nome, chatId, waitMs });
+          logger.info('[RESPONDER][DELAY45S] aguardando janela (sem pendingField/missing)', { nome, chatId, waitMs });
           setTimeout(() => {
             try {
               if (!fila.includes(chatId)) fila.push(chatId);
               scheduleNextIfIdle();
             } catch {}
           }, waitMs);
-          // Não liberar lock manualmente; o finally cuidará disso.
-          // Apenas sair cedo para não abrir UI nem coletar histórico.
           return;
         }
       } catch {}
@@ -3134,8 +3140,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // NOVO GATE: só responde SE o cliente falou ALGO NOVO desde a última IA/CLIts
         const hasNewClient = lastClienteTs && (lastClienteTs > Math.max(lastIATsPrev, lastIaTs, lastCLItsPrev));
 
-        if (!hasNewClient) {
-          logger.info('[RESPONDER][GATE] Sem novas mensagens do cliente — não responder', {
+        const snapAsk = pedidos.getSnapshot(nome, chatId);
+        const hasPendingField = !!(snapAsk && snapAsk.flags && snapAsk.flags.pendingField);
+        const needsAsk = Array.isArray(snapAsk && snapAsk.missing) && (snapAsk.missing.length > 0);
+        const shouldProceed = hasNewClient || hasPendingField || needsAsk;
+
+        if (!shouldProceed) {
+          logger.info('[RESPONDER][GATE] Sem novas mensagens e sem pendingField — não responder', {
             nome, chatId, lastClienteTs, lastIaTs, lastIATsPrev, lastCLItsPrev
           });
           try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO }); } catch {}
@@ -3245,6 +3256,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Parse da resposta: extrai APENAS o campo .resposta (nunca enviar JSON completo)
           const parsed = promptFretes.parseModelAnswerToDomain(respostaRawIA, ultimaCliente?.texto);
+          
+          // Atualiza orquestrador com dados extraídos desta virada (nunca finaliza pela IA)
+          try {
+            const patch = Object.assign({}, parsed.dados || {}, parsed.telefone_extraido ? { telefone: parsed.telefone_extraido } : {});
+            if (Object.keys(patch).length > 0) {
+              await pedidos.upsertFromIA(nome, chatId, patch);
+              await pedidos.finalizeIfReady(nome, chatId);
+            }
+          } catch {}
+          
           const textoAEnviar = String(parsed.resposta || '').trim();
           
           // Log parsed da resposta
@@ -3610,52 +3631,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               
               await marcarRespondido(nome, chatId);
               
-              // Se finalizado, processa finalização (IA já validou)
-              if (parsed.finalizado === true) {
-                try {
-                  await appendPedidoAudit(nome, chatId, 'finalizado_ia', {});
-                  
-                  // REGRA CRÍTICA: Verifica telefone E cidade antes de enviar
-                  const tel = parsed.telefone_extraido;
-                  const cidade = cidadePreferida || null;
-                  
-                  if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) {
-                    await appendPedidoAudit(nome, chatId, 'finalizado_blocked_no_whatsapp', {});
-                    logger.warn('[FINALIZACAO] IA marcou como finalizado, mas telefone inválido — não enviando', { nome, chatId });
-                    return; // Não envia sem telefone válido
-                  }
-                  
-                  if (!cidade || !String(cidade).trim()) {
-                    await appendPedidoAudit(nome, chatId, 'finalizado_blocked_no_city', {});
-                    logger.warn('[FINALIZACAO] IA marcou como finalizado, mas sem cidade — não enviando', { nome, chatId });
-                    return; // Não envia sem cidade
-                  }
-                  
-                  // Cancela timer se existir
-                  if (timersFechamento.has(chatId)) {
-                    cancelarTimerFechamento(chatId);
-                  }
-                  
-                  // Verifica se já foi enviado (anti-duplicidade via idempotência persistente)
-                  const already = await loadPedidoSent(nome, chatId);
-                  if (already) {
-                    await appendPedidoAudit(nome, chatId, 'finalizado_dedupe_skip', { sentAt: already.sentAt });
-                    return;
-                  }
-                  
-                  await enviarPedidoParaNotificador(chatId, {
-                    cidade: cidade,
-                    telefone: tel,
-                    ...parsed.dados
-                  });
-                  // Não precisa mais adicionar a pedidosEnviados aqui, pois markPedidoSent já faz isso
-                  await enviarMensagemFinal(chatId);
-                  await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
-                } catch (e) {
-                  await appendPedidoAudit(nome, chatId, 'finalizado_error', { error: e && e.message || String(e) });
-                  logger.error('[FINALIZACAO] Erro ao finalizar chat', { nome, chatId, error: e && e.message || e });
+              // Finalização é sempre decidida pelo orquestrador; atualizar dados e solicitar finalização central
+              try {
+                const patch = Object.assign({}, parsed.dados || {}, parsed.telefone_extraido ? { telefone: parsed.telefone_extraido } : {});
+                if (Object.keys(patch).length > 0) {
+                  await pedidos.upsertFromIA(nome, chatId, patch);
                 }
-              }
+                await pedidos.finalizeIfReady(nome, chatId);
+              } catch {}
             } finally {
               releaseSendGuard(pAtual);
             }
@@ -4055,38 +4038,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     } catch {}
 
-    // REGRA CRÍTICA: enviar IMEDIATO se tiver TELEFONE (com DDD) + CIDADE
-    const temWhats = !!(cur.telefone && promptFretes.isValidBRPhoneWithDDD(cur.telefone));
-    const temCidade = !!(cur.cidade && String(cur.cidade).trim());
-
-    if (!temWhats || !temCidade) {
-      return; // Aguarda até termos telefone válido e cidade
-    }
-
-    // Se já enviamos antes, não repete
-    if (pedidosEnviados.has(chatId)) return;
-
+    // Centraliza finalização no orquestrador
     try {
-      await enviarPedidoParaNotificador(chatId, cur);
-      pedidosEnviados.add(chatId);
-
-      // NÃO chamar enviarMensagemFinal aqui: a função enviarPedidoParaNotificador já envia a mensagem final neste script.
-      // Marcar respondido e finalizar estado local
-      await marcarRespondido(nome, chatId);
-      await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO });
-      await flushChatStateNow(nome);
-
-      // Congelar no orquestrador por 48h
-      try { await pedidos.markFinalizedAndFreeze(nome, chatId); } catch {}
-
-      try {
-        const telMask = cur.telefone ? maskPhoneLog(cur.telefone) : '';
-        logger.info('[FINALIZACAO] finalizado_imediato_any', { chatId, telefone: telMask });
-      } catch {}
-
-    } catch (e) {
-      logger.error('[FINALIZACAO] Erro ao finalizar chat (imediato)', { nome, chatId, error: (e && e.message) || e });
-    }
+      await pedidos.upsertFromIA(nome, chatId, cur);
+      await pedidos.finalizeIfReady(nome, chatId);
+    } catch {}
   }
 
   async function iniciarTimerFechamento(chatId, telefone) {
@@ -4579,6 +4535,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
       }
       bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      
+      pedidos.events.on('fieldTimeout', async ({ perfil, chatId, field }) => {
+        try {
+          if (perfil !== nome) return;
+          await setChatState(nome, chatId, { state: CHAT_STATES.PENDENTE, lastProbeAt: Date.now() });
+          try { stepLog.appendJSONL(nome, 'virtus', { step: 'field_timeout_enqueued', chatId, field }); } catch {}
+          if (!fila.includes(chatId)) {
+            fila.push(chatId);
+            scheduleNextIfIdle();
+          }
+        } catch {}
+      });
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
     }

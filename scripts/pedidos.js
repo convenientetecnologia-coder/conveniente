@@ -10,6 +10,7 @@ const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 const fileStore = require('./fileStore.js');
 const MAX_ASK_RETRIES = parseInt(process.env.MAX_ASK_RETRIES || '3', 10);
 const PHONE_ASK_COOLDOWN_MS = parseInt(process.env.PHONE_ASK_COOLDOWN_MS || '120000', 10); // 2 min de cooldown para pedir telefone/DDD novamente
+const FIELD_TTL_MS = parseInt(process.env.FIELD_TTL_MS || '60000', 10); // 60s para expirar um campo perguntado
 
 const ROOT = path.join(__dirname, '..', 'dados', 'perfis');
 function stateFile(perfil){ return path.join(ROOT, perfil, 'pedidos_state.json'); }
@@ -203,7 +204,7 @@ class PedidoOrchestrator extends EventEmitter {
     const cur = st.chats[chatId] || {
       createdAt: now(), updatedAt: now(),
       data: { itens:null,endereco_saida:null,endereco_destino:null,ajudante:null,saida_tipo:null,saida_elevador:null,destino_tipo:null,destino_elevador:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null },
-      flags: { firstIaReplied:false, greetDone:false, finalizedAt:null, finalizationFreezeUntil:null, sentToNotifierAt:null, hasAskedWhats:false, singleInactivityPingSent:false, sentType:null },
+      flags: { firstIaReplied:false, greetDone:false, finalizedAt:null, finalizationFreezeUntil:null, sentToNotifierAt:null, hasAskedWhats:false, singleInactivityPingSent:false, sentType:null, pendingField: null },
       timers: { startedAt: now(), incompleteWithWhatsDeadline: null, withoutWhatsDeadline: null },
       askCounts: { telefone:0, ddd:0, itens:0, endereco_saida:0, endereco_destino:0, ajudante:0, saida_tipo:0, destino_tipo:0, saida_elevador:0, destino_elevador:0 },
       lastWhatsAskAt: null,
@@ -268,6 +269,12 @@ class PedidoOrchestrator extends EventEmitter {
     if (field) {
       s.flags.lastAskedField = String(field);
       s.flags.lastAskedAt = now();
+      s.flags.pendingField = {
+        field: String(field || ''),
+        askedAt: now(),
+        expiresAt: now() + FIELD_TTL_MS,
+        attempts: s.askCounts[field] || 0
+      };
     }
 
     this._set(perfil, chatId, s);
@@ -365,7 +372,35 @@ class PedidoOrchestrator extends EventEmitter {
       }
     }
 
-    const patch = { data: merged };
+    // Limpar pendingField se o último campo perguntado recebeu resposta útil
+    const sBefore = this._get(perfil, chatId) || {};
+    const flagsCur = (sBefore && sBefore.flags) || {};
+    const askedField = flagsCur.lastAskedField;
+
+    function _hasFieldValue(d, field) {
+      if (!field) return false;
+      switch (String(field)) {
+        case 'itens': return !!(d.itens && String(d.itens).trim());
+        case 'endereco_saida': return !!(d.endereco_saida && String(d.endereco_saida).trim());
+        case 'endereco_destino': return !!(d.endereco_destino && String(d.endereco_destino).trim());
+        case 'ajudante': return (d.ajudante === true || d.ajudante === false);
+        case 'saida_tipo': return (d.saida_tipo === 'casa' || d.saida_tipo === 'apartamento');
+        case 'destino_tipo': return (d.destino_tipo === 'casa' || d.destino_tipo === 'apartamento');
+        case 'saida_elevador': return (d.saida_elevador === true || d.saida_elevador === false);
+        case 'destino_elevador': return (d.destino_elevador === true || d.destino_elevador === false);
+        case 'ddd': return /^[1-9]\d$/.test(String(d.ddd || ''));
+        case 'telefone_parcial': return /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
+        case 'telefone': return isValidPhoneBR(d.telefone);
+        default: return false;
+      }
+    }
+
+    let patch = { data: merged };
+    if (askedField && _hasFieldValue(merged, askedField)) {
+      const newFlags = Object.assign({}, flagsCur, { pendingField: null });
+      patch.flags = newFlags;
+    }
+
     return this._set(perfil, chatId, patch);
   }
 
@@ -387,24 +422,9 @@ class PedidoOrchestrator extends EventEmitter {
       }
     }
 
-    // Decisões determinísticas
-    if (this.readyToSendComplete(perfil, chatId)) {
-      const p = this._get(perfil, chatId);
-      if (p && !p.flags.sentToNotifierAt) {
-        const payload = Object.assign({}, p.data);
-        this.emit('orderSent', { perfil, chatId, tipo: 'completo', payload });
-        try {
-          const stepLog = require('./stepLog.js');
-          stepLog.appendJSONL(perfil, 'order_sent', { chatId, tipo: 'completo', payload });
-        } catch {}
-        // mark freeze e idempotência
-        this.markSentAndFreeze(perfil, chatId, 'completo');
-        this._audit('pedidos_order_sent', perfil, chatId, { tipo: 'completo', telefone_mask: maskPhone(payload.telefone), campos_faltantes_count: 0 });
-      }
-    } else {
-      // Com telefone completo: deadline de 10 min já foi armada em _set; _tick cuidará do envio incompleto
-      // Sem telefone: deadline de 10 min para ping único de inatividade; _tick cuidará do envio do ping
-    }
+    // Decisão centralizada de finalização
+    this.finalizeIfReady(perfil, chatId);
+
     return this._get(perfil, chatId);
   }
 
@@ -428,6 +448,43 @@ class PedidoOrchestrator extends EventEmitter {
     return !!ok;
   }
 
+  finalizeIfReady(perfil, chatId) {
+    const s = this._get(perfil, chatId);
+    if (!s) return false;
+    if (s.flags && s.flags.sentToNotifierAt) return false; // já enviado
+
+    // 1) Se está completo: enviar COMPLETO
+    if (this.readyToSendComplete(perfil, chatId)) {
+      const payload = Object.assign({}, s.data);
+      this.emit('orderSent', { perfil, chatId, tipo: 'completo', payload });
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'order_sent', { chatId, tipo: 'completo', payload });
+      } catch {}
+      this.markSentAndFreeze(perfil, chatId, 'completo');
+      this._audit('pedidos_order_sent', perfil, chatId, { tipo: 'completo', telefone_mask: maskPhone(payload.telefone), campos_faltantes_count: 0 });
+      return 'completo';
+    }
+
+    // 2) Se tem WhatsApp e estourou o prazo: enviar INCOMPLETO
+    if (isValidPhoneBR(s.data && s.data.telefone) &&
+        s.timers && s.timers.incompleteWithWhatsDeadline &&
+        s.timers.incompleteWithWhatsDeadline <= now() &&
+        !(s.flags && s.flags.sentToNotifierAt)) {
+      const payload = Object.assign({}, s.data);
+      this.emit('orderSent', { perfil, chatId, tipo: 'incompleto', payload });
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'order_sent', { chatId, tipo: 'incompleto', payload });
+      } catch {}
+      this.markSentAndFreeze(perfil, chatId, 'incompleto');
+      this._audit('pedidos_order_sent', perfil, chatId, { tipo: 'incompleto', telefone_mask: maskPhone(payload.telefone), campos_faltantes_count: (s.missing||[]).length });
+      return 'incompleto';
+    }
+
+    return false;
+  }
+
   _tick() {
     try {
       for (const [perfil, st] of this.cache.entries()) {
@@ -440,19 +497,48 @@ class PedidoOrchestrator extends EventEmitter {
           // janela de silêncio ativa? então não faça nada
           if (s.flags && s.flags.finalizationFreezeUntil && s.flags.finalizationFreezeUntil > now()) continue;
 
-          // 1) Incompleto com WhatsApp após 10min => enviar INCOMPLETO
+          // 0) TTL por campo pendente — se o cliente não respondeu no TTL, marque e avance
+          const pf = s.flags && s.flags.pendingField;
+          if (pf && pf.expiresAt && pf.expiresAt <= now()) {
+            const field = pf.field;
+            const dataBefore = Object.assign({}, s.data || {});
+            let touched = false;
+
+            // Para campos booleanos tri-state, marque "nao_respondeu" se ainda não houver booleano
+            if (field === 'ajudante') {
+              if (!(dataBefore.ajudante === true || dataBefore.ajudante === false)) {
+                dataBefore.ajudante = 'nao_respondeu';
+                touched = true;
+              }
+            } else if (field === 'saida_elevador') {
+              if (!(dataBefore.saida_elevador === true || dataBefore.saida_elevador === false)) {
+                dataBefore.saida_elevador = 'nao_respondeu';
+                touched = true;
+              }
+            } else if (field === 'destino_elevador') {
+              if (!(dataBefore.destino_elevador === true || dataBefore.destino_elevador === false)) {
+                dataBefore.destino_elevador = 'nao_respondeu';
+                touched = true;
+              }
+            }
+            // Para campos textuais e demais enumerações, não preenche automaticamente; permanecem null
+
+            s.askCounts = s.askCounts || {};
+            if (field) s.askCounts[field] = (s.askCounts[field] || 0) + 1;
+
+            s.flags.pendingField = null;
+            this._set(perfil, chatId, { data: dataBefore, flags: s.flags, askCounts: s.askCounts });
+
+            try { issues.append(perfil, 'mil_action', `field_timeout chat=${chatId} field=${field}`); } catch {}
+            this.emit('fieldTimeout', { perfil, chatId, field });
+          }
+
+          // 1) Incompleto com WhatsApp após 10min => delegar a finalizeIfReady()
           if (!s.flags.sentToNotifierAt &&
               isValidPhoneBR(s.data && s.data.telefone) &&
               s.timers && s.timers.incompleteWithWhatsDeadline &&
               s.timers.incompleteWithWhatsDeadline <= now()) {
-            const payload = Object.assign({}, s.data);
-            this.emit('orderSent', { perfil, chatId, tipo: 'incompleto', payload });
-            try {
-              const stepLog = require('./stepLog.js');
-              stepLog.appendJSONL(perfil, 'order_sent', { chatId, tipo: 'incompleto', payload });
-            } catch {}
-            this.markSentAndFreeze(perfil, chatId, 'incompleto');
-            this._audit('pedidos_order_sent', perfil, chatId, { tipo: 'incompleto', telefone_mask: maskPhone(payload.telefone), campos_faltantes_count: (s.missing||[]).length });
+            this.finalizeIfReady(perfil, chatId);
             continue;
           }
 
@@ -514,38 +600,8 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const counts = (s && s.askCounts) || {};
   const telOk = isValidPhoneBR(data.telefone);
 
-  // Flags e cooldown temporal de re-pergunta
-  const stFlags = (s && s.flags) || {};
-  const lastAskedField = stFlags.lastAskedField;
-  const lastAskedAt = stFlags.lastAskedAt || 0;
-  const nowMs = now();
-  const askedRecently = !!(lastAskedAt && (nowMs - lastAskedAt) < PHONE_ASK_COOLDOWN_MS);
-
-  // 1) Preço antes do WhatsApp → pedir telefone AGORA, emparelhado com a próxima pergunta não-telefone
+  // 1) Intenção de preço: pedir WhatsApp imediatamente (sem cooldown) e, se possível, emendar próxima não-telefone
   if (!telOk && shouldAskWhatsappFirst({ historicoNovo: novasMsgs, dataAtual: data })) {
-    // Anti-spam temporal para telefone
-    if (lastAskedField === 'telefone' && askedRecently) {
-      const alt = getNextNonPhoneField(data);
-      if (alt) {
-        return {
-          askField: alt,
-          phase: 'none',
-          reason: 'missing',
-          nextField: null,
-          allowSecondQuestion: false,
-          phoneMode: 'lite'
-        };
-      }
-      return {
-        askField: null,
-        phase: 'none',
-        reason: 'missing',
-        nextField: null,
-        allowSecondQuestion: false,
-        phoneMode: 'lite'
-      };
-    }
-
     const nextField = getNextNonPhoneField(data);
     const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
     return {
@@ -558,32 +614,8 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     };
   }
 
-  // Prioridade máxima: se o cliente mandou telefone PARCIAL e ainda não há DDD,
-  // peça o DDD AGORA (antes de qualquer outro campo), acoplando a próxima pergunta não-telefone.
+  // 2) Telefone parcial presente sem DDD: priorize pedir DDD (sem cooldown) e, se possível, emendar próxima não-telefone
   if (!telOk && data && data.telefone_parcial && !data.ddd) {
-    // Anti-spam temporal para DDD
-    if (lastAskedField === 'ddd' && askedRecently) {
-      const alt = getNextNonPhoneField(data);
-      if (alt) {
-        return {
-          askField: alt,
-          phase: 'none',
-          reason: 'missing',
-          nextField: null,
-          allowSecondQuestion: false,
-          phoneMode: 'lite'
-        };
-      }
-      return {
-        askField: null,
-        phase: 'none',
-        reason: 'missing',
-        nextField: null,
-        allowSecondQuestion: false,
-        phoneMode: 'lite'
-      };
-    }
-
     const nextField = getNextNonPhoneField(data);
     return {
       askField: 'ddd',
@@ -595,61 +627,10 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     };
   }
 
-  // 2) Próximo campo do fluxo (inclui ddd/telefone quando faltar)
+  // 3) Próximo campo do fluxo determinístico geral
   const next = getNextAskField(data);
 
-  // Anti-repetição: se o mesmo campo acabou de ser perguntado e o cliente já respondeu algo,
-  // não re-perguntar imediatamente — pule para o próximo campo não-telefone.
-  const stNow = orchestrator._get(perfil, chatId) || {};
-  const lastAskedField2 = stNow.flags && stNow.flags.lastAskedField;
-  const anyNewClient = Array.isArray(novasMsgs) && novasMsgs.length > 0;
-
-  if (next && lastAskedField2 && next === lastAskedField2 && anyNewClient && ((counts[next] || 0) >= 1)) {
-    const alt = getNextNonPhoneField(data);
-    if (alt) {
-      return {
-        askField: alt,
-        phase: 'none',
-        reason: 'missing',
-        nextField: null,
-        allowSecondQuestion: false,
-        phoneMode: 'lite'
-      };
-    } else {
-      return {
-        askField: null,
-        phase: 'none',
-        reason: 'missing',
-        nextField: null,
-        allowSecondQuestion: false,
-        phoneMode: 'lite'
-      };
-    }
-  }
-
-  // Cooldown temporal para 'telefone' e 'ddd' no caminho geral
   if (next === 'telefone') {
-    if (lastAskedField === 'telefone' && askedRecently) {
-      const alt = getNextNonPhoneField(data);
-      if (alt) {
-        return {
-          askField: alt,
-          phase: 'none',
-          reason: 'missing',
-          nextField: null,
-          allowSecondQuestion: false,
-          phoneMode: 'lite'
-        };
-      }
-      return {
-        askField: null,
-        phase: 'none',
-        reason: 'missing',
-        nextField: null,
-        allowSecondQuestion: false,
-        phoneMode: 'lite'
-      };
-    }
     const nextField = getNextNonPhoneField(data);
     const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
     return {
@@ -663,27 +644,6 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   }
 
   if (next === 'ddd') {
-    if (lastAskedField === 'ddd' && askedRecently) {
-      const alt = getNextNonPhoneField(data);
-      if (alt) {
-        return {
-          askField: alt,
-          phase: 'none',
-          reason: 'missing',
-          nextField: null,
-          allowSecondQuestion: false,
-          phoneMode: 'lite'
-        };
-      }
-      return {
-        askField: null,
-        phase: 'none',
-        reason: 'missing',
-        nextField: null,
-        allowSecondQuestion: false,
-        phoneMode: 'lite'
-      };
-    }
     const nextField = getNextNonPhoneField(data);
     return {
       askField: 'ddd',
@@ -696,7 +656,7 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   }
 
   return {
-    askField: next || null,
+    askField: next || null, // poderá ser null apenas quando não houver mais nada a perguntar
     phase: 'none',
     reason: 'missing',
     nextField: null,
@@ -757,5 +717,6 @@ module.exports = {
   shouldAskWhatsappFirst,
   getAskDirective,
   setWhatsPhase,
-  hasPriceIntent
+  hasPriceIntent,
+  finalizeIfReady: (perfil, chatId) => orchestrator.finalizeIfReady(perfil, chatId)
 };

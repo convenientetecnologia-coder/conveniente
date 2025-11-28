@@ -16,7 +16,7 @@ ask_reason: ${String(askReason || 'missing')}
 
 Valores permitidos para ask_field:
 
-null | "itens" | "endereco_saida" | "endereco_destino" | "ajudante" | "saida_tipo" | "destino_tipo" | "saida_elevador" | "destino_elevador" | "telefone" | "ddd"
+"itens" | "endereco_saida" | "endereco_destino" | "ajudante" | "saida_tipo" | "destino_tipo" | "saida_elevador" | "destino_elevador" | "telefone" | "ddd"
 
 Regras determinísticas e de obediência:
 
@@ -38,12 +38,14 @@ Atendimento de dúvidas (responder antes de perguntar):
   - Após responder a dúvida, faça as perguntas desta virada conforme as diretivas (veja seção a seguir). Não adicione perguntas extras.
 
 Número de perguntas (obediência rígida às diretivas):
-  - Se ask_field for null: não faça perguntas.
-  - Se ask_field NÃO for null:
-      - Se allow_second_question=true E next_field!=null: faça EXATAMENTE DUAS perguntas, nesta ordem:
-          1) Pergunta sobre ask_field.
-          2) Em seguida, pergunta sobre next_field. Não adicione nenhuma outra pergunta além dessas duas.
-      - Se allow_second_question=false: faça EXATAMENTE UMA pergunta, sobre ask_field.
+  - ask_field NUNCA será null. Sempre haverá um campo para perguntar. O backend é quem determina o fim do ciclo, não a IA.
+  - Se allow_second_question=true E next_field!=null: faça EXATAMENTE DUAS perguntas, nesta ordem:
+      1) Pergunta sobre ask_field.
+      2) Em seguida, pergunta sobre next_field. Não adicione nenhuma outra pergunta além dessas duas.
+  - Se allow_second_question=false: faça EXATAMENTE UMA pergunta, sobre ask_field.
+  - Sua resposta NUNCA pode ser apenas 'Ok', 'Anotado', 'Certo' ou variantes sem fazer perguntas. Se ask_field for fornecido (sempre será), a resposta DEVE conter explicitamente a(s) pergunta(s) exigida(s).
+  - Nunca finalize ou pare a coleta por decisão própria. Nunca declare 'finalizado', 'atendimento concluído', 'já coletei tudo', etc.
+  - Se não houver dúvidas do cliente para responder, siga direto para a(s) pergunta(s) determinada(s), sem frases soltas ou respostas 'neutras'.
 
 Telefone:
   - Quando ask_field="telefone" e phone_mode="lite":
@@ -79,9 +81,10 @@ SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 "destino_elevador": true|false|"nao_respondeu",
 "telefone_parcial": "8-9 dígitos ou null",
 "ddd": "2 dígitos ou null"
-},
-"finalizado": true|false
 }
+}
+
+IMPORTANTE: Nunca inclua o campo 'finalizado' na saída JSON. O backend é quem controla o fim do ciclo.
 
 Restrições:
 
@@ -121,7 +124,7 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
     '   • phone_mode=lite e ask_reason=price_intent OU quando só faltarem campos de telefone (veja "missing"): inclua a explicação de que o motorista informa o valor no WhatsApp e você apenas repassa; em seguida peça o WhatsApp.',
     '   • phone_mode=full: peça o WhatsApp com DDD explicitamente.',
     '- Se allow_second_question=true e next_field!=null: faça EXATAMENTE duas perguntas (ask_field e depois next_field).',
-    '- Se ask_field for null, não faça nenhuma pergunta.',
+    '- ask_field nunca será null; sempre faça a(s) pergunta(s) determinada(s) pelo backend (1 ou 2, conforme allow_second_question/next_field).',
     '',
     (coletado && typeof coletado === 'object'
       ? (() => {
@@ -171,8 +174,10 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
         .replace(/\b\d{8,11}\b/g, '')          // bloqueia sequências coladas de 8–11 dígitos
         .replace(/\+?\d[\d\s().-]{7,}\d/g, '') // bloqueia números com separadores
         .replace(/(\d[\s-]?){4,}/g, '******'); // defensivo extra
+      // Garantir que mesmo respostas vazias/"ok"/"anotado" retornem no campo resposta
+      const respostaFinal = (fallbackSan && fallbackSan.trim()) ? fallbackSan : String(rawText || '').trim();
       return {
-        resposta: fallbackSan,
+        resposta: respostaFinal,
         telefone_extraido: null,
         finalizado: false,
         dados: {}
@@ -182,7 +187,8 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     let match = txt.match(/\{[\s\S]*\}/);
     if (!match) match = txt.match(/\{.*\}/s);
     if (!match) {
-      return { resposta: '', telefone_extraido: null, finalizado: false, dados: {} };
+      const respostaFinal = String(rawText || '').trim();
+      return { resposta: respostaFinal, telefone_extraido: null, finalizado: false, dados: {} };
     }
 
     const obj = JSON.parse(match[0]);
@@ -307,43 +313,28 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     }
     if (safeDados.debug) dadosOut.debug = safeDados.debug;
 
-    // 6) Critério de finalização real (obrigatório levantar elevador nos aptos)
-    const isAptSaida = (dadosOut.saida_tipo === 'apartamento');
-    const isAptDestino = (dadosOut.destino_tipo === 'apartamento');
-    const elevSaidaOk = !isAptSaida || (dadosOut.saida_elevador === true || dadosOut.saida_elevador === false);
-    const elevDestinoOk = !isAptDestino || (dadosOut.destino_elevador === true || dadosOut.destino_elevador === false);
-
-    const finalizavel =
-      !!dadosOut.itens &&
-      !!dadosOut.endereco_saida &&
-      !!dadosOut.endereco_destino &&
-      (dadosOut.ajudante === true || dadosOut.ajudante === false) &&
-      !!dadosOut.saida_tipo &&
-      !!dadosOut.destino_tipo &&
-      elevSaidaOk &&
-      elevDestinoOk &&
-      !!telefoneOK;
-
     // Fallback duro — nunca devolve resposta vazia
-    if (!respostaSan || respostaSan.trim().length === 0) {
-      const fallback = String(rawText || '').trim();
-      return {
-        resposta: fallback,
-        telefone_extraido: telefoneOK || null,
-        finalizado: false,
-        dados: dadosOut
-      };
+    // Garantir que mesmo respostas vazias/"ok"/"anotado"/"certo" retornem no campo resposta
+    let respostaFinal = respostaSan || '';
+    if (!respostaFinal || respostaFinal.trim().length === 0) {
+      respostaFinal = String(rawText || '').trim();
+    }
+    // Se a resposta for apenas "ok"/"anotado"/"certo" (após sanitização), manter o texto original
+    const respostaLower = respostaFinal.toLowerCase().trim();
+    if (respostaLower === 'ok' || respostaLower === 'anotado' || respostaLower === 'certo' || respostaLower === 'perfeito' || respostaLower === 'entendi') {
+      respostaFinal = String(rawText || '').trim() || respostaFinal;
     }
 
     return {
-      resposta: respostaSan || '',
+      resposta: respostaFinal,
       telefone_extraido: telefoneOK || null,
-      finalizado: obj.finalizado === true && finalizavel,
+      finalizado: false,
       dados: dadosOut
     };
 
   } catch (e) {
-    return { resposta: '', telefone_extraido: null, finalizado: false, dados: {} };
+    const respostaFinal = String(rawText || '').trim();
+    return { resposta: respostaFinal, telefone_extraido: null, finalizado: false, dados: {} };
   }
 }
 
