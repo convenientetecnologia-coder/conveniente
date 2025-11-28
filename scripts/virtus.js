@@ -35,6 +35,22 @@ const fileStore = require('./fileStore.js');
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
 const AI_FIRST = true;
 
+// Funções de dedupe de mensagem
+function normalizeContent(s) {
+  return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+     .replace(/[{}[\]]/g, ' ')
+     .replace(/\s+/g,' ')
+     .trim().toLowerCase();
+}
+
+function nearEqual(a, b) {
+  const na = normalizeContent(a), nb = normalizeContent(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  return Math.abs(na.length - nb.length) <= 5 && (na.includes(nb) || nb.includes(na));
+}
+
 // Vinculação de eventos do orquestrador por perfil — evita múltiplos listeners
 const __pedidosEventBound = new Set();
 
@@ -369,6 +385,17 @@ function removeTelefonesCompletos(texto) {
   try { return String(texto||'').replace(/\b\d{8,11}\b/g, '******'); } catch { return String(texto||''); }
 }
 
+function isValidBRPhoneWithDDD(d) {
+  try {
+    const s = String(d || '').replace(/\D/g, '');
+    if (s.length === 11) return /^[1-9]{2}9\d{8}$/.test(s);
+    if (s.length === 10) return /^[1-9]{2}[2-9]\d{7}$/.test(s);
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function extractPlainTextFromMaybeJSON(raw) {
   try {
     let s = String(raw == null ? '' : raw);
@@ -410,10 +437,6 @@ function nextMissingField(dc = {}) {
   if (!dc.endereco_saida) return 'endereco_saida';
   if (!dc.endereco_destino) return 'endereco_destino';
   if (typeof dc.ajudante !== 'boolean') return 'ajudante';
-  if (!dc.saida_tipo) return 'saida_tipo';
-  if (!dc.destino_tipo) return 'destino_tipo';
-  if (dc.saida_tipo === 'apartamento' && typeof dc.saida_elevador !== 'boolean') return 'saida_elevador';
-  if (dc.destino_tipo === 'apartamento' && typeof dc.destino_elevador !== 'boolean') return 'destino_elevador';
   return null;
 }
 
@@ -431,7 +454,7 @@ async function bumpAskCount(perfil, chatId, field) {
 }
 
 function montarRespostaForcadaWhatsAppSemDDD(dados, askCounts = {}) {
-  const telOk = !!(dados && dados.telefone && promptFretes.isValidBRPhoneWithDDD(dados.telefone));
+  const telOk = !!(dados && dados.telefone && isValidBRPhoneWithDDD(dados.telefone));
   const temParcial = !!(dados && dados.telefone_parcial);
   const temDDD = !!(dados && dados.ddd);
 
@@ -464,10 +487,6 @@ function detectAskedFieldFromText(t) {
   // Endereço de destino
   if (/(endereco|endereço).*(destino|entrega)|para\s+onde|local\s+de\s+entrega/.test(n)) return 'endereco_destino';
   if (/ajudante/.test(n)) return 'ajudante';
-  if (/(casa|apartamento).*(sa[ií]da)|sa[ií]da.*(casa|apartamento)/.test(n)) return 'saida_tipo';
-  if (/(casa|apartamento).*(destino)|destino.*(casa|apartamento)/.test(n)) return 'destino_tipo';
-  if (/elevador.*sa[ií]da/.test(n)) return 'saida_elevador';
-  if (/elevador.*destino/.test(n)) return 'destino_elevador';
   if (/itens?|o que\s+(levar|transportar)/.test(n)) return 'itens';
   return null;
 }
@@ -491,12 +510,6 @@ function interpretYesNo(raw) {
   return null;
 }
 
-function inferCasaApto(raw) {
-  const t = normTxt(raw || '');
-  if (/\b(apartamento|apto|apt.?)\b/.test(t)) return 'apartamento';
-  if (/\b(casa)\b/.test(t)) return 'casa';
-  return null;
-}
 
 async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastClientText) {
   try {
@@ -510,59 +523,10 @@ async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastCli
       } catch {}
     }
 
-    // Ajudante: sim/não
     if (askedField === 'ajudante') {
       const yn = interpretYesNo(lastClientText);
       if (yn !== null) {
         await setAndPropagate({ ajudante: yn }, `ajudante_inferido:${yn ? 'sim' : 'nao'}`);
-      }
-    }
-
-    // Casa/Apartamento (saída)
-    if (askedField === 'saida_tipo') {
-      const tipo = inferCasaApto(lastClientText);
-      if (tipo) {
-        await setAndPropagate({ saida_tipo: tipo }, `saida_tipo_inferido:${tipo}`);
-      }
-    }
-
-    // Casa/Apartamento (destino)
-    if (askedField === 'destino_tipo') {
-      const tipo = inferCasaApto(lastClientText);
-      if (tipo) {
-        await setAndPropagate({ destino_tipo: tipo }, `destino_tipo_inferido:${tipo}`);
-      }
-    }
-
-    // Elevador (saída): sim/não
-    if (askedField === 'saida_elevador') {
-      const yn = interpretYesNo(lastClientText);
-      if (yn !== null) {
-        await setAndPropagate({ saida_elevador: yn }, `saida_elevador_inferido:${yn ? 'sim' : 'nao'}`);
-      }
-    }
-
-    // Elevador (destino): sim/não
-    if (askedField === 'destino_elevador') {
-      const yn = interpretYesNo(lastClientText);
-      if (yn !== null) {
-        await setAndPropagate({ destino_elevador: yn }, `destino_elevador_inferido:${yn ? 'sim' : 'nao'}`);
-      }
-    }
-
-    // Fallback extra: se o cliente respondeu sozinho "ap"/"apartamento" ou "casa"
-    // e NÃO conseguimos identificar askedField, tente atribuir ao campo que ainda falta.
-    if (!askedField) {
-      const tipoSolo = inferCasaApto(lastClientText);
-      if (tipoSolo) {
-        const st = await getChatState(perfil, chatId).catch(() => null);
-        const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
-
-        if (!dc || (!dc.destino_tipo && tipoSolo)) {
-          await setAndPropagate({ destino_tipo: tipoSolo }, `destino_tipo_inferido_fallback:${tipoSolo}`);
-        } else if (!dc.saida_tipo && tipoSolo) {
-          await setAndPropagate({ saida_tipo: tipoSolo }, `saida_tipo_inferido_fallback:${tipoSolo}`);
-        }
       }
     }
 
@@ -624,9 +588,92 @@ function detectClientDoubt(msg) {
   return patterns.some(rx => rx.test(text));
 }
 
+function hasAvailabilityIntent(text) {
+  const t = String(text||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  return /disponivel|disponível|ainda tem|tem ainda|esta disponivel|está disponivel|ta disponivel|tá disponivel/.test(t);
+}
+
+function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply = false, novasMsgs = [] }) {
+  const instr = [];
+
+  // Saudação e política de orçamento na primeira resposta
+  if (firstReply) {
+    instr.push('Cumprimente de forma breve e educada.');
+    instr.push('Informe que quem passa o valor/orçamento é o motorista pelo WhatsApp.');
+  }
+
+  // Respostas às dúvidas recentes (curtas, objetivas)
+  const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
+    .map(m => (m && m.texto ? String(m.texto) : ''))
+    .filter(t => /\?/.test(t))
+    .slice(0, 3);
+  if (perguntas.length > 0) {
+    instr.push('Responda de forma objetiva às perguntas do cliente (não invente informações).');
+  } else {
+    instr.push('Se houver algo a esclarecer na mensagem do cliente, responda de forma breve.');
+  }
+
+  // Pergunta definida pela diretiva (pedido.js decide)
+  if (directive && directive.askField) {
+    if (directive.askField === 'telefone') {
+      const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
+      const temDDD = !!(snapshotData && snapshotData.ddd);
+      if (temParcial && !temDDD) {
+        instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
+      } else {
+        instr.push('Peça o WhatsApp com DDD em uma única frase curta.');
+      }
+    }
+    if (directive.askField === 'itens') {
+      instr.push('Pergunte o que precisa transportar (itens).');
+    }
+    if (directive.askField === 'endereco_saida') {
+      instr.push('Pergunte o endereço de saída (pode ser informal: bairro, ponto de referência).');
+    }
+    if (directive.askField === 'endereco_destino') {
+      instr.push('Pergunte o endereço de destino (pode ser informal).');
+    }
+    if (directive.askField === 'ajudante') {
+      instr.push('Pergunte se precisa de ajudante (resposta sim ou não).');
+    }
+    if (directive.askField === 'descricao') {
+      instr.push('Pergunte se há alguma observação breve sobre a coleta/entrega.');
+    }
+
+    // Permite uma segunda pergunta quando a diretiva explicita (ex.: telefone + itens)
+    if (directive.allowSecondQuestion && directive.nextField) {
+      if (directive.nextField === 'itens') {
+        instr.push('Na sequência, pergunte também o que precisa transportar (itens).');
+      }
+      if (directive.nextField === 'endereco_saida') {
+        instr.push('Na sequência, pergunte também o endereço de saída (pode ser informal).');
+      }
+      if (directive.nextField === 'endereco_destino') {
+        instr.push('Na sequência, pergunte também o endereço de destino (pode ser informal).');
+      }
+    }
+  }
+
+  // Restrições de segurança e estilo
+  instr.push('Não repita números de telefone do cliente no texto.');
+  instr.push('Não crie perguntas além das listadas.');
+  instr.push('Seja breve, humano e profissional.');
+
+  return instr;
+}
+
 async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePageFn) {
   let protestedNow = false;
-  for (const m of (msgs || [])) {
+  const novasMsgs = Array.isArray(msgs) ? msgs : [];
+  
+  // Detecta "disponível?" e seta flag
+  if (novasMsgs.some(m => hasAvailabilityIntent(m && m.texto || ''))) {
+    try {
+      await setChatState(perfil, chatId, { askedAvailability: true });
+    } catch {}
+  }
+  
+  for (const m of novasMsgs) {
     const tx = String(m && m.texto || '').trim();
 
     // Detecta protesto
@@ -653,7 +700,7 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePag
       } catch {}
     }
 
-    // 1) Ajudante, casa/apto etc.
+    // 1) Ajudante
     try { await applyBinaryAnswersFromContext(perfil, chatId, lastIaText || '', tx); } catch {}
 
     // 2) Endereços
@@ -1047,11 +1094,9 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         if (proximo.key) {
           const setPend = getPendingSet(nomePerfil);
           setPend.delete(proximo.key);
-          logger.debug('[MESSENGER] Chave dedup liberada', { nomePerfil, chatId: proximo.chatId, key: proximo.key });
         }
       } catch {}
 
-      logger.info('[MESSENGER] Resposta enviada', { nomePerfil, chatId: proximo.chatId });
     } catch (e) {
       logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
       
@@ -1059,7 +1104,6 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         if (proximo.key) {
           const setPend = getPendingSet(nomePerfil);
           setPend.delete(proximo.key);
-          logger.debug('[MESSENGER] Chave dedup liberada após erro', { nomePerfil, chatId: proximo.chatId, key: proximo.key });
         }
       } catch {}
     }
@@ -1669,19 +1713,16 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
   try {
     const b = getBrowserFromPage(page);
     if (b && ((b._sendLock && b._sendLock.active) || (nome && b._robeActiveFor === nome))) {
-      logger.info('[VIRTUS][garantirMarketplace] sendLock/robeActive — não navegar/recarregar.', nome ? { nome } : {});
       return;
     }
   } catch {}
   
   if (/messenger.com\/marketplace\/t\//i.test(urlNow)) {
-    logger.info('[VIRTUS][garantirMarketplace] já está em página de chat — não navegar.', nome ? { nome } : {});
     return;
   }
   
   async function gotoInboxRobust(route) {
     try {
-      logger.info(`[VIRTUS][garantirMarketplace] Tentando rota: ${route}`, nome ? { nome } : {});
       await page.goto(`https://www.messenger.com${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
       
   try {
@@ -1705,7 +1746,6 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
       ]);
       
       if (ok) {
-        logger.info(`[VIRTUS][garantirMarketplace] UI pronta na rota: ${route}`, nome ? { nome } : {});
         return true;
       } else {
         logger.warn(`[VIRTUS][garantirMarketplace] Rota ${route} não encontrou anchors/rows`, nome ? { nome } : {});
@@ -1725,7 +1765,6 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
       const hasAnchor = await page.$('a[href^="/marketplace/t/"]').catch(() => null);
       const hasRow = await page.$('div[role="row"]').catch(() => null);
       if (hasAnchor || hasRow) {
-        logger.info('[VIRTUS][garantirMarketplace] UI já pronta na página atual');
         return;
       }
     } catch {}
@@ -1848,6 +1887,13 @@ async function getMySentSnapshot(p) {
 
 async function sendMessageSafe(p, campo, msg, nome, chatId) {
   try {
+    // DEDUPE: verifica se a mensagem é semelhante à última enviada
+    const stSend = await getChatState(nome, chatId).catch(()=>null);
+    const lastSent = stSend && (stSend.ultimaRespostaEnviada || stSend.ultimaRespostaEnviadaNorm) || '';
+    if (nearEqual(msg, lastSent)) {
+      return; // Não envia mensagem duplicada
+    }
+
     if (!campo || (await campo.evaluate(el => !el.isConnected).catch(()=>true))) {
       const sels = [
         'div[contenteditable="true"][role="textbox"]',
@@ -1931,10 +1977,8 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
     const expected = safeMsg.trim();
     const before = await getMySentSnapshot(p);
-    logger.debug('[MESSENGER] Snapshot antes do envio', { nome, chatId, beforeTotal: before.total });
 
     await p.keyboard.press('Enter');
-    logger.debug('[MESSENGER] Enter pressionado, aguardando confirmação robusta', { nome, chatId });
 
     function normalizeMsg(s) {
       try {
@@ -2043,17 +2087,13 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     }
     
     if (mensagemEnviada) {
-      logger.info('[MESSENGER] ✅ Mensagem confirmada', {
-        nome,
-        chatId,
-        beforeTotal: before.total,
-        metodo: sent ? 'contagem_aumentou_texto_coincide' : 'retry_sucesso'
-      });
-      
+      // Armazena ultimaRespostaEnviada e ultimaRespostaEnviadaNorm após envio
       try {
         await setChatState(nome, chatId, {
           state: CHAT_STATES.AGUARDANDO,
-          lastIATs: Date.now()
+          lastIATs: Date.now(),
+          ultimaRespostaEnviada: safeMsg,
+          ultimaRespostaEnviadaNorm: normalizeContent(safeMsg)
         });
       } catch {}
 
@@ -2114,7 +2154,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const t = debounceTimers.get(chatId);
     if (t && t.timerId) { try { clearTimeout(t.timerId); } catch {} }
     debounceTimers.delete(chatId);
-    logger.info('[DBNC] cleared', { nome, chatId });
   }
 
   async function scheduleDebounce(chatId) {
@@ -2132,7 +2171,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           });
         } catch {}
         if (process.env.VIRTUS_DEBUG === '1') {
-          logger.debug('[DBNC] skip reset — já existe timer ativo', { nome, chatId, dueAt: existing.dueAt });
         }
         return;
       }
@@ -2145,7 +2183,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const tid = setTimeout(async () => {
         try {
           debounceTimers.delete(chatId);
-          logger.info('[DBNC] fire — enfileirando', { nome, chatId });
           if (!fila.includes(chatId)) {
             fila.push(chatId);
             scheduleNextIfIdle();
@@ -2173,7 +2210,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       } catch {}
 
-      logger.info('[DBNC] buffer started/reset', { nome, chatId, dueAt });
 
     } catch (e) {
       logger.warn('[DBNC] schedule erro', { nome, chatId, error: e && e.message || e });
@@ -2522,17 +2558,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           p.waitForSelector('div[role="row"] span', { timeout: 5000 })
         ]);
       } catch {
-        logger.info(`[VIRTUS][${nome}] timeout curto aguardando anchors/rows`);
       }
 
       const todos = await coletaChatsMarketplaceTodos(p);
-      logger.info(`[VIRTUS][${nome}] coletaTodos: ${todos.length} itens`);
 
       const idsColetados = new Set(todos.map(c => c.id));
       for (const chatRespondido of chatsRespondidosParaVerificar) {
         if (!idsColetados.has(chatRespondido.id)) {
           todos.push(chatRespondido);
-          logger.info(`[VIRTUS][${nome}] Chat já respondido adicionado para verificação: ${chatRespondido.id}`);
         }
       }
 
@@ -2623,7 +2656,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function atualizaFila() {
     let mudancaFila = false;
     const chatsNovos = await coletaChatsMarketplaceRecentes();
-    logger.info(`[FILA][${nome}] recebidos da coleta: ${chatsNovos.length}`);
 
     const aguard = getSetAguardando(nome);
     const agoraMs = Date.now();
@@ -2645,24 +2677,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try { st = await getChatState(nome, id); } catch {}
 
       const replyDue = st && st.replyDueAt || 0;
-      const snapAsk = pedidos.getSnapshot(nome, id);
-      const hasPendingField = !!(snapAsk && snapAsk.flags && snapAsk.flags.pendingField);
-      const needsAsk = Array.isArray(snapAsk && snapAsk.missing) && (snapAsk.missing.length > 0);
-      if (replyDue && Date.now() < replyDue && !hasPendingField && !needsAsk) {
-        logger.info(`[FILA][${nome}] skip ${id} — aguardando janela (sem pendingField/missing)`, { replyDueAt: replyDue });
+      const triggerReason = st && st.triggerReason;
+      // Só pula se não houver triggerReason explícito
+      if (replyDue && Date.now() < replyDue && triggerReason !== 'fieldTimeout') {
         return;
       }
 
       const jaFoiRespondido = st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO);
       
       if (jaFoiRespondido) {
+        // NUNCA re-enfileira chats já respondidos, exceto se houver triggerReason explícito (fieldTimeout)
+        const triggerReason = st && st.triggerReason;
+        if (triggerReason !== 'fieldTimeout') {
+          return; // Não re-enfileira sem motivo explícito
+        }
         // Se está aguardando o notificador, respeite a janela e não rearme ainda
         if (aguard.has(id)) {
           const st2 = await getChatState(nome, id).catch(()=>null);
           const lastProbe2 = st2 && st2.lastProbeAt ? st2.lastProbeAt : 0;
           const awaitTtlMs = parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10);
           if ((Date.now() - lastProbe2) < awaitTtlMs) {
-            logger.info(`[FILA][${nome}] skip ${id} — aguardando notificador (janela ativa)`);
             return;
           }
           // TTL expirou: libere o aguardando para permitir novo debounce
@@ -2674,51 +2708,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         if (fila.includes(id)) {
-          logger.info(`[FILA][${nome}] skip ${id} — já está na fila`);
           return;
         }
 
-        // Anti-flood: evita re-enfileirar em janela muito curta
-        const last = lastProbeMap.get(id) || 0;
-        const MIN_RECHECK_MS = Math.max(PROBE_RECHECK_MIN_MS, Math.floor(DEBOUNCE_MS / 2));
-        const nowMs = Date.now();
-        if ((nowMs - last) < MIN_RECHECK_MS) {
-          if (process.env.VIRTUS_DEBUG === '1') {
-            logger.debug(`[FILA][${nome}] [DBNC] Skip reschedule responded — sondado há ${nowMs - last}ms (<${MIN_RECHECK_MS}ms)`, { chatId: id });
-          }
-          return;
+        // Apenas para fieldTimeout: re-enfileira
+        if (!fila.includes(id)) {
+          fila.push(id);
+          mudancaFila = true;
         }
-
-        // Marcamos que voltaremos a processar o chat (estado pendente) e rearmamos o debounce
-        try {
-          await setChatState(nome, id, {
-            state: CHAT_STATES.PENDENTE,
-            lastProbeAt: Date.now()
-          });
-        } catch {}
-
-        await scheduleDebounce(id);
-        lastProbeMap.set(id, nowMs);
-        logger.info(`[FILA][${nome}] [DBNC] Candidato ${id} bufferizado (respondido – rearmado)`);
-        mudancaFila = true;
         return;
       }
 
       if (fila.includes(id)) {
-        logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
         return;
       }
 
       if (st && st.state === 'erro_envio') {
-        logger.info(`[FILA][${nome}] ${id} estava em erro_envio — será testado novamente (fila permissiva).`);
       }
 
       if (aguard.has(id)) {
-        logger.info(`[FILA][${nome}] skip ${id} — aguardando notificador`);
         return;
       }
       if (fila.includes(id)) {
-        logger.info(`[FILA][${nome}] skip ${id} — já está na fila aguardando processamento`);
         return;
       }
 
@@ -2727,7 +2738,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const MIN_RECHECK_MS = Math.max(PROBE_RECHECK_MIN_MS, Math.floor(DEBOUNCE_MS / 2));
       if ((agoraMs - lastProbe) < MIN_RECHECK_MS) {
         if (process.env.VIRTUS_DEBUG === '1') {
-          logger.debug(`[FILA][${nome}] [DBNC] Skip reschedule — sondado há ${agoraMs - lastProbe}ms (<${MIN_RECHECK_MS}ms)`, { chatId: id });
         }
         return;
       }
@@ -2750,31 +2760,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       await scheduleDebounce(id);
       lastProbeMap.set(id, agoraMs);
-      logger.info(`[FILA][${nome}] [DBNC] Candidato ${id} bufferizado (${c.tempo})`);
       mudancaFila = true;
     })));
 
     if (mudancaFila) {
-      logger.info(`[FILA][${nome}] Atualizada: ${fila.length} chats pendentes`);
     }
     return mudancaFila;
   }
 
   function scheduleNextIfIdle() {
     if (!running) {
-      logger.debug('[FILA] Sistema não está rodando', { nome });
       return;
     }
     if (chatAtivo) {
-      logger.debug('[FILA] Chat ativo, aguardando...', { nome, chatAtivo });
       return;
     }
     if (filaChatTimer) {
-      logger.debug('[FILA] Timer já agendado, aguardando...', { nome, filaChatTimer });
       return;
     }
     if (!fila.length) {
-      logger.debug('[FILA] Fila vazia', { nome });
       return;
     }
 
@@ -2782,7 +2786,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const thr = GLOBAL_SEND_THROTTLE.get(nome);
     if (thr && thr.nextAllowedSendAt && Date.now() < thr.nextAllowedSendAt) {
       const wait = Math.max(50, thr.nextAllowedSendAt - Date.now() + 50);
-      logger.info('[FILA][THROTTLE] aguardando janela global', { nome, waitMs: wait });
       filaChatTimer = setTimeout(scheduleNextIfIdle, wait);
       return;
     }
@@ -2804,7 +2807,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const parsed = parseInt(env, 10);
       return Number.isFinite(parsed) ? parsed : 0;
     })();
-    logger.info('[FILA] Preparando atendimento do próximo chat', { nome, chatId: next, delay: delayMs, filaRestante: fila.length });
     filaChatTimer = setTimeout(async () => {
       try {
         filaChatTimer = null; // Limpa timer imediatamente
@@ -2839,7 +2841,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function responderChat(chatId) {
-    logger.info('[RESPONDER] Iniciando responderChat', { nome, chatId, filaLength: fila.length, chatAtivo });
     
     let _chatLockAcquired = false;
     try {
@@ -2894,7 +2895,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
       chatAtivo = chatId;
 
-      logger.info('[RESPONDER] Tentando adquirir lock', { nome, chatId });
       
       if (!chatLock.acquire(nome, chatId)) {
         logger.warn('[RESPONDER] Falha ao adquirir lock - tentando forçar liberação', { nome, chatId });
@@ -2902,7 +2902,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatLock.release(nome, chatId);
           await new Promise(r => setTimeout(r, 100));
           if (chatLock.acquire(nome, chatId)) {
-            logger.info('[RESPONDER] Lock adquirido após forçar liberação', { nome, chatId });
             _chatLockAcquired = true;
           } else {
             logger.warn('[RESPONDER] Falha ao adquirir lock mesmo após forçar liberação', { nome, chatId });
@@ -2922,7 +2921,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       } else {
       _chatLockAcquired = true;
-        logger.info('[RESPONDER] Lock adquirido com sucesso', { nome, chatId });
       }
 
       // EARLY GATE 45s — não bloquear se houver pendingField ou missing no orquestrador
@@ -2931,13 +2929,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const rDue = stGate && stGate.replyDueAt || 0;
         const nowMs = Date.now();
 
-        const snapGate = pedidos.getSnapshot(nome, chatId);
-        const hasPendingField = !!(snapGate && snapGate.flags && snapGate.flags.pendingField);
-        const needsAsk = Array.isArray(snapGate && snapGate.missing) && (snapGate.missing.length > 0);
-
-        if (rDue && nowMs < rDue && !hasPendingField && !needsAsk) {
+        const triggerReason = stGate && stGate.triggerReason;
+        // Só pula se não houver triggerReason explícito
+        if (rDue && nowMs < rDue && triggerReason !== 'fieldTimeout') {
           const waitMs = Math.max(50, rDue - nowMs + 10);
-          logger.info('[RESPONDER][DELAY45S] aguardando janela (sem pendingField/missing)', { nome, chatId, waitMs });
           setTimeout(() => {
             try {
               if (!fila.includes(chatId)) fila.push(chatId);
@@ -2953,7 +2948,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       } catch {}
       lastProbeMap.set(chatId, Date.now());
       
-      logger.info('[CONTEXTO] Iniciando processamento', { nome, chatId });
       stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
 
       try {
@@ -2974,13 +2968,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-        logger.info('[NAVEGACAO] Garantindo Marketplace UI', { nome, chatId });
         await maybeGuaranteeMarketplaceFast(p, nome);
-        logger.info('[NAVEGACAO] Marketplace UI garantida', { nome, chatId });
 
         let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
         if (!chatUrlMatches(urlNow, chatId)) {
-          logger.info('[NAVEGACAO] Abrindo chat pela primeira vez', { nome, chatId });
         let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
         await scrollChatsToTop(p, nome).catch(()=>{});
         await sleep(300);
@@ -3146,18 +3137,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await setChatState(nome, chatId, { state: CHAT_STATES.GERANDO });
         } catch {}
 
-        logger.info('[COLETA] Iniciando coleta de histórico', { nome, chatId });
         const historicoConversa = await extrairHistoricoConversa(p);
         
         await appendChatHistoryLog(nome, chatId, historicoConversa);
         
-        logger.info('[COLETA] Histórico coletado', { 
-          nome, 
-          chatId, 
-          totalMensagens: historicoConversa.length,
-          mensagensCliente: historicoConversa.filter(m => m.autor === 'cliente').length,
-          mensagensIA: historicoConversa.filter(m => m.autor === 'ia').length
-        });
 
         const ultimaIA = (() => {
           const iaMsgs = historicoConversa.filter(m => m.autor === 'ia');
@@ -3177,7 +3160,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try {
           const lastCli = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
           if (!lastCli || (Date.now() - lastCli) > MAX_CHAT_AGE_MS) {
-            logger.info('[RESPONDER][GATE_8H] Última msg do cliente > 8h — não responder', { nome, chatId });
             try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }); } catch {}
             try { await pendingDel(nome, chatId); } catch {}
             fila = fila.filter(id => id !== chatId);
@@ -3194,7 +3176,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Janela de novas mensagens do cliente desde a última IA
         const novasMsgs = getNewClientMessagesSince(historicoConversa, cutTs);
 
-        // Processa cada mensagem da janela, atualizando dados (ajudante/casa/apto/enderecos/ddd/parcial)
+        // Processa cada mensagem da janela, atualizando dados (ajudante/enderecos/ddd/parcial)
         await processNewClientBatch(nome, chatId, novasMsgs, (ultimaIA && ultimaIA.texto) || '', ensurePage);
 
         // Detecta intenção de preço em QUALQUER mensagem nova (não só a última)
@@ -3206,19 +3188,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           lastProbeAt: Date.now()
         });
 
-        // NOVO GATE: só responde SE o cliente falou ALGO NOVO desde a última IA/CLIts
+        // NOVO GATE: só responde SE o cliente falou ALGO NOVO desde a última IA/CLIts OU triggerReason === 'fieldTimeout'
         const hasNewClient = lastClienteTs && (lastClienteTs > Math.max(lastIATsPrev, lastIaTs, lastCLItsPrev));
-
-        const snapAsk = pedidos.getSnapshot(nome, chatId);
-        const hasPendingField = !!(snapAsk && snapAsk.flags && snapAsk.flags.pendingField);
-        const needsAsk = Array.isArray(snapAsk && snapAsk.missing) && (snapAsk.missing.length > 0);
-        const shouldProceed = hasNewClient || hasPendingField || needsAsk;
+        const stGate2 = await getChatState(nome, chatId).catch(() => null);
+        const triggerReason = stGate2 && stGate2.triggerReason;
+        const shouldProceed = hasNewClient || triggerReason === 'fieldTimeout';
 
         if (!shouldProceed) {
-          logger.info('[RESPONDER][GATE] Sem novas mensagens e sem pendingField — não responder', {
-            nome, chatId, lastClienteTs, lastIaTs, lastIATsPrev, lastCLItsPrev
-          });
           try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO }); } catch {}
+          try { await pendingDel(nome, chatId); } catch {}
+          fila = fila.filter(id => id !== chatId);
+          chatAtivo = null;
+          return;
+        }
+
+        // GATE FINAL: banir duplas seguidas — se última mensagem do histórico for do bot e não for fieldTimeout, não responde
+        const ultimaMsgHistorico = historicoConversa.length > 0 ? historicoConversa[historicoConversa.length - 1] : null;
+        if (ultimaMsgHistorico && ultimaMsgHistorico.autor === 'ia' && triggerReason !== 'fieldTimeout') {
+          try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, triggerReason: null }); } catch {}
           try { await pendingDel(nome, chatId); } catch {}
           fila = fila.filter(id => id !== chatId);
           chatAtivo = null;
@@ -3240,7 +3227,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Respeitar janela de silêncio (freeze) de 10 min após envio
           if (pedidos.isFinalized(nome, chatId)) {
-            logger.info('[AI-FIRST] Freeze ativo — não responder', { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
             fila = fila.filter(id => id !== chatId);
             chatAtivo = null;
@@ -3258,6 +3244,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const stForFlags = await getChatState(nome, chatId).catch(()=>null);
           const protestCount = (stForFlags && stForFlags.protestCount) || 0;
           const doubtCount = (stForFlags && stForFlags.doubtCount) || 0;
+          const askedAvailability = !!(stForFlags && stForFlags.askedAvailability);
 
           // Detecta se há dúvida nas novas mensagens
           const hasDoubtInBatch = novasMsgs.some(m => detectClientDoubt(m && m.texto || ''));
@@ -3286,7 +3273,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (fieldAttempts >= 3 && currentField) {
             const textoWhatsApp = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
             try {
-              await sendMessageSafe(ensurePage, chatId, textoWhatsApp);
+              const pAtual = await ensurePage().catch(() => null);
+              if (pAtual) {
+                let campo = await waitForComposer(pAtual, 10000);
+                if (!campo) campo = await refocusComposerNoReload(pAtual, chatId);
+                if (campo) {
+                  await waitForSendLockRelease(pAtual, 12000);
+                  await acquireSendGuard(pAtual, chatId);
+                  try {
+                    await sendMessageSafe(pAtual, campo, textoWhatsApp, nome, chatId);
+                  } finally {
+                    releaseSendGuard(pAtual);
+                  }
+                }
+              }
               try {
                 stepLog.appendJSONL(nome, 'virtus', { step: 'whatsapp_request_3_attempts', chatId, field: currentField, attempts: fieldAttempts });
               } catch {}
@@ -3311,27 +3311,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // - Fazer SOMENTE a pergunta definida pela diretiva (ask_field), exceto a exceção telefone + próxima quando allowSecond=true.
           // - Nunca ecoar PII (telefone, DDD).
           
-          // Constrói prompts com 1 ou 2 perguntas conforme diretiva (telefone/ddd + próxima pergunta)
-          const systemAnswer = promptFretes.buildSystemPrompt({
-            askField: directive.askField,
-            allowSecondQuestion: !!directive.allowSecondQuestion,
-            nextField: directive.nextField || null,
-            phoneMode: directive.phoneMode || 'lite',
-            askReason: directive.reason || 'missing'
+          // Constrói prompts conforme diretiva (tarefas explícitas)
+          const systemAnswer = promptFretes.buildSystemPrompt();
+
+          const instrucoes = buildInstrucoesFromDirective({
+            directive,
+            snapshotData: dataColetada,
+            firstReply,
+            novasMsgs
           });
 
           const userAnswer = promptFretes.buildUserPrompt({
-            cidade: dataColetada.cidade || cidadeCtx,
+            instrucoes,
             historico: historicoConversa,
-            coletado: dataColetada,
-            askCounts: (snap && snap.askCounts) || {},
-            flags: { firstReply, telefone_ok, protest_count: protestCount, has_doubt: hasDoubtInBatch },
-            missingFields: missing,
-            askField: directive.askField,
-            nextField: directive.nextField || null,
-            allowSecondQuestion: !!directive.allowSecondQuestion,
-            phoneMode: directive.phoneMode || 'lite',
-            askReason: directive.reason || 'missing'
+            mensagemCliente: (ultimaCliente && ultimaCliente.texto) || ''
           });
 
           // Chama IA geradora
@@ -3348,8 +3341,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               retries: 2
             });
             
-            // Log raw da IA
-            logger.info('[GROQ][RAW]', { nome, chatId, raw: (respostaRawIA||'').slice(0,300) });
           } catch (e) {
             logger.warn('[AI-FIRST] Falha IA geradora', { nome, chatId, error: (e && e.message) || String(e) });
             try { await pendingDel(nome, chatId); } catch {}
@@ -3358,24 +3349,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return;
           }
 
-          // Parse da resposta: extrai APENAS o campo .resposta (nunca enviar JSON completo)
-          const parsed = promptFretes.parseModelAnswerToDomain(respostaRawIA, ultimaCliente?.texto);
-          
-          // Atualiza orquestrador com dados extraídos desta virada (nunca finaliza pela IA)
-          try {
-            const patch = Object.assign({}, parsed.dados || {}, parsed.telefone_extraido ? { telefone: parsed.telefone_extraido } : {});
-            if (Object.keys(patch).length > 0) {
-              await pedidos.upsertFromIA(nome, chatId, patch);
-              await pedidos.finalizeIfReady(nome, chatId);
-            }
-          } catch {}
+          // Parse da resposta: extrai APENAS o campo .resposta
+          const parsed = promptFretes.parseModelAnswerToDomain(respostaRawIA);
           
           let textoAEnviar = String(parsed.resposta || '').trim();
           // Guarda extra: se ainda tiver cara de JSON, extraia texto humano
           textoAEnviar = extractPlainTextFromMaybeJSON(textoAEnviar);
           
-          // Log parsed da resposta
-          logger.info('[GROQ][PARSED]', { nome, chatId, resposta: (textoAEnviar||'').slice(0,180) });
           
           // Log se resposta explicativa foi enviada (quando há dúvida detectada)
           if (hasDoubtInBatch) {
@@ -3387,8 +3367,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Sanitização PII: nunca ecoar telefone do cliente
           const respostaSan = removeTelefonesCompletos(textoAEnviar);
           
-          // Log para auditoria (garantir que só texto puro vai ao Messenger)
-          logger.debug('[VIRTUS] Enviando só o texto da resposta:', { nome, chatId, textoAEnviar: textoAEnviar.substring(0, 100) });
 
           // Envio único no Messenger
           const pAtual = await ensurePage().catch(()=>null);
@@ -3414,19 +3392,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             stepLog.appendJSONL(nome, 'virtus', { step: 'ai_send', chatId, len: (respostaSan||'').length, hash: sha1(respostaSan||'') });
           } catch {}
 
-          // DEDUPE local por conteúdo: se a última mensagem enviada por mim é igual, não reenviar
-          const snapAntes = await getMySentSnapshot(pAtual).catch(() => ({ lastText: '' }));
-          if (normalize(snapAntes.lastText || '') === normalize(respostaSan)) {
-            logger.info('[DEDUPE] Última mensagem minha é idêntica — não reenviar', { nome, chatId });
+          // DEDUPE: verifica se a resposta é semelhante à última enviada
+          const stSend = await getChatState(nome, chatId).catch(()=>null);
+          const lastSent = stSend && (stSend.ultimaRespostaEnviada || stSend.ultimaRespostaEnviadaNorm) || '';
+          if (nearEqual(respostaSan, lastSent)) {
             await setChatState(nome, chatId, {
               state: CHAT_STATES.AGUARDANDO,
               lastIATs: Date.now(),
               lastCLIts: lastClienteTs,
-              lastProbeAt: Date.now(),
-              ultimaRespostaEnviada: respostaSan
+              ultimaRespostaEnviada: lastSent,
+              ultimaRespostaEnviadaNorm: normalizeContent(lastSent),
+              triggerReason: null
             });
-            await flushChatStateNow(nome);
-            try { await pendingDel(nome, chatId); } catch {}
+            await pendingDel(nome, chatId).catch(()=>{});
             fila = fila.filter(id => id !== chatId);
             chatAtivo = null;
             return;
@@ -3451,8 +3429,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 state: CHAT_STATES.AGUARDANDO,
                 lastIATs: Date.now(),
                 lastCLIts: lastClienteTs,
-                lastProbeAt: Date.now(),
-                ultimaRespostaEnviada: respostaSan
+                ultimaRespostaEnviada: respostaSan,
+                ultimaRespostaEnviadaNorm: normalizeContent(respostaSan),
+                triggerReason: null
               });
               await flushChatStateNow(nome);
             } catch {}
@@ -3498,12 +3477,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const statePrev = await getChatState(nome, chatId).catch(()=>null);
         const dcPrev = (statePrev && statePrev.dadosColetados) ? statePrev.dadosColetados : {};
         const telPrev = (dcPrev && dcPrev.telefone) || null;
-        const telefoneValidoNoState = !!(telPrev && promptFretes.isValidBRPhoneWithDDD(telPrev));
+        const telefoneValidoNoState = !!(telPrev && isValidBRPhoneWithDDD(telPrev));
 
         if (!AI_FIRST && dddIsolado && !telefoneValidoNoState) {
           // [LEGADO] Conteúdo do bloco permanece inalterado
           await atualizarDadosColetados(chatId, { dados: { ddd: lastTextPlain } });
-          logger.info('[VIRTUS_DDD] ddd_isolado', { nome, chatId, ddd: lastTextPlain });
           const askCountsNow = await getAskCounts(nome, chatId);
           const frases = [
             'Perfeito! Pode me enviar o número do WhatsApp?',
@@ -3523,7 +3501,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             let campo = await waitForComposer(pAtual0, 8000);
             if (!campo) campo = await refocusComposerNoReload(pAtual0, chatId);
             const out = removeTelefonesCompletos(msg);
-            logger.info('[VIRTUS_RESP] ddd_only_reply', { nome, chatId, sanitized: out !== msg });
             if (campo) await sendMessageSafe(pAtual0, campo, out, nome, chatId);
           }
           try { await pendingDel(nome, chatId); } catch {}
@@ -3557,7 +3534,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             let campo = await waitForComposer(pAtual0, 8000);
             if (!campo) campo = await refocusComposerNoReload(pAtual0, chatId);
             const out = removeTelefonesCompletos(msg);
-            logger.info('[VIRTUS_RESP] partial_only_reply', { nome, chatId, sanitized: out !== msg });
             if (campo) await sendMessageSafe(pAtual0, campo, out, nome, chatId);
           }
           try { await pendingDel(nome, chatId); } catch {}
@@ -3588,7 +3564,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             let campo = await waitForComposer(pAtualPrice, 8000);
             if (!campo) campo = await refocusComposerNoReload(pAtualPrice, chatId);
             const out = removeTelefonesCompletos(respostaWpp);
-            logger.info('[VIRTUS_RESP] price_intent_reply', { nome, chatId, sanitized: out !== respostaWpp });
             if (campo) await sendMessageSafe(pAtualPrice, campo, out, nome, chatId);
           }
           try { await pendingDel(nome, chatId); } catch {}
@@ -3603,11 +3578,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         {
           try {
-            logger.info('[CONTEXTO] Chamando Groq API', {
-              nome,
-              chatId,
-              historicoLength: Array.isArray(historicoConversa) ? historicoConversa.length : 0
-            });
             
             let cidadePreferida = null;
             try {
@@ -3644,14 +3614,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 task: 'answer'
               });
               
-              // Log raw da IA
-              logger.info('[GROQ][RAW]', { nome, chatId, raw: (modelRawResp||'').slice(0,300) });
               
               parsed = domain.parseModelAnswerToDomain(modelRawResp, ultimaCliente?.texto);
               
-              // Log parsed da resposta
               const respostaFinal = String(parsed.resposta || '').trim();
-              logger.info('[GROQ][PARSED]', { nome, chatId, resposta: (respostaFinal||'').slice(0,180) });
               
               // parsed.telefone_extraido só vem com DDD; se vier apenas parcial, parsed.dados.telefone_parcial é populado.
             } catch (e) {
@@ -3729,7 +3695,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // Mantido bloco abaixo para compatibilidade do fluxo legado.
 
             const respostaFinal = removeTelefonesCompletos(respostaFinalRaw);
-            logger.info('[VIRTUS_RESP] ok', { nome, chatId, sanitized: respostaFinal !== respostaFinalRaw });
             
             try {
               await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
@@ -3773,7 +3738,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               });
         } catch {}
 
-            logger.info('[GROQ] Resposta enviada com sucesso', { chatId, finalizado: parsed.finalizado, tel: parsed.telefone_extraido });
           } catch (e) {
             logger.error('[GROQ] Falha no fluxo direto', { chatId, error: e && e.message || e });
             try {
@@ -3836,19 +3800,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } finally {
       if (chatAtivo === chatId) {
         chatAtivo = null;
-        logger.info('[RESPONDER] chatAtivo liberado no finally', { nome, chatId });
       }
       try { clearDebounce(chatId); } catch {}
       
       try { 
         chatLock.release(nome, chatId);
-      if (_chatLockAcquired) {
-          logger.info('[RESPONDER] Lock liberado no finally', { nome, chatId });
-        } else {
-          logger.debug('[RESPONDER] Tentativa de liberar lock no finally (não estava adquirido)', { nome, chatId });
-        }
       } catch (e) {
-        logger.warn('[RESPONDER] Erro ao liberar lock no finally', { nome, chatId, error: e && e.message || e });
+        // Erro ao liberar lock - não é fatal
       }
       
       if (_chatLockAcquired) {
@@ -3866,7 +3824,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
-    logger.info(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`, { nome });
     let manifestFrozenUntil = 0;
     try {
       const manifest = await manifestStore.read(nome);
@@ -3928,7 +3885,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.warn('[FILA] sendLock ativo há >45s — liberando por watchdog', { nome });
           b._sendLock.active = false;
         } else {
-          logger.info('[FILA] sendLock ativo — skip garantirMarketplace nesta iteração.', { nome });
           return;
         }
       }
@@ -4002,7 +3958,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   const timersFechamento = new Map(); // chatId -> { inicio, telefone, expirado, expiraEm, timerId }
-  const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, saida_tipo, saida_elevador, destino_tipo, destino_elevador, endereco_saida, endereco_destino, itens }
+  const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, endereco_saida, endereco_destino, itens }
   const pedidosEnviados = new Set();  // chatId já enviados
 
   async function inferEnderecosFromText(perfil, chatId, lastText, lastIaText) {
@@ -4010,45 +3966,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const st = await getChatState(perfil, chatId).catch(()=>null);
     const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
 
-    try {
-      const txt = String(lastText || '');
-      const n = txt.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    const asked = detectAskedFieldFromText(lastIaText || '');
+    const cand = String(lastText || '').trim();
 
-      const isEndereco = s => /(\brua\b|\bav\.?\b|\bavenida\b|\btrav(\.|essa)\b|\brod(ovia)?\b|\bestrada\b|\bpraca\b|\bpraça\b|\balameda\b|\bcondom[ií]nio\b|\bn[ºo]?\b\s*\d+)/i.test(s);
+    if (!cand) return;
 
-      const askedFromIA = detectAskedFieldFromText(lastIaText || '');
-
-      const saidaPat = /\b(de|do|da|desde|buscar\s+em|pegar\s+em)\s+(.{4,160})$/i;
-      const destPat  = /\b(para|pra|pro|em|no|na|ao)\s+(.{4,160})$/i;
-
-      let enderecoSaida = null;
-      let enderecoDestino = null;
-
-      let mS = txt.match(saidaPat);
-      if (mS && isEndereco(mS[2])) enderecoSaida = mS[2].trim().replace(/[\s,.;:!?]+$/,'');
-      let mD = txt.match(destPat);
-      if (mD && isEndereco(mD[2])) enderecoDestino = mD[2].trim().replace(/[\s,.;:!?]+$/,'');
-
-      if (!enderecoSaida && !enderecoDestino) {
-        const single = txt.trim();
-        if (isEndereco(single) && single.length >= 6) {
-          if (askedFromIA === 'endereco_saida' && !dc.endereco_saida) enderecoSaida = single;
-          else if (askedFromIA === 'endereco_destino' && !dc.endereco_destino) enderecoDestino = single;
-        }
-      }
-
+    // Aceite endereço informal (qualquer frase com pelo menos 4 chars, sem exigir padrão rua/av.)
+    if (cand.length >= 4) {
       const patch = {};
-      if (enderecoSaida && !dc.endereco_saida) patch.endereco_saida = enderecoSaida;
-      if (enderecoDestino && !dc.endereco_destino) patch.endereco_destino = enderecoDestino;
+
+      if (!dc.endereco_saida && (asked === 'endereco_saida' || (!dc.endereco_saida && asked === 'itens'))) {
+        patch.endereco_saida = cand;
+      } else if (!dc.endereco_destino && (asked === 'endereco_destino' || (!dc.endereco_destino && asked === 'endereco_saida'))) {
+        patch.endereco_destino = cand;
+      }
 
       if (Object.keys(patch).length) {
         await atualizarDadosColetados(chatId, { dados: patch });
         await pedidos.upsertFromIA(perfil, chatId, patch);
-        logger.info('[VIRTUS_STATE] infer_enderecos', { nome: perfil, chatId, saida: patch.endereco_saida || null, destino: patch.endereco_destino || null });
-        try { await issues.append(perfil, 'mil_action', `infer_enderecos saida="${patch.endereco_saida||''}" destino="${patch.endereco_destino||''}"`); } catch {}
+        try { await issues.append(perfil, 'mil_action', `infer_enderecos (informal) saida="${patch.endereco_saida||''}" destino="${patch.endereco_destino||''}"`); } catch {}
       }
-
-    } catch {}
+    }
   }
 
   async function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
@@ -4065,7 +4003,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         cur.telefone_parcial = dig;
       }
     }
-    const keys = ['ajudante','saida_tipo','saida_elevador','destino_tipo','destino_elevador','endereco_saida','endereco_destino','itens','data_hora','telefone_parcial'];
+    const keys = ['ajudante','endereco_saida','endereco_destino','itens','data_hora','telefone_parcial'];
     for (const k of keys) {
       if (dados && dados[k] != null) {
         if (k === 'telefone_parcial') {
@@ -4095,7 +4033,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       if (semTelefone && temDDD && temParcial) {
         const combinado = String(curDc.ddd).replace(/\D/g,'') + String(curDc.telefone_parcial).replace(/\D/g,'');
-        if (promptFretes.isValidBRPhoneWithDDD(combinado)) {
+        if (isValidBRPhoneWithDDD(combinado)) {
           curDc.telefone = combinado;
           delete curDc.telefone_parcial;
           await setChatState(nome, chatId, { dadosColetados: curDc, lastWhatsReminderAt: Date.now() });
@@ -4118,14 +4056,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const hasES = !!dcNow.endereco_saida;
       const hasED = !!dcNow.endereco_destino;
       const hasAj = (typeof dcNow.ajudante === 'boolean');
-      const hasST = !!dcNow.saida_tipo;
-      const hasDT = !!dcNow.destino_tipo;
-      const needsSE = (dcNow.saida_tipo === 'apartamento') ? (typeof dcNow.saida_elevador === 'boolean') : true;
-      const needsDE = (dcNow.destino_tipo === 'apartamento') ? (typeof dcNow.destino_elevador === 'boolean') : true;
-      const temWhatsLocal = !!(dcNow.telefone && promptFretes.isValidBRPhoneWithDDD(dcNow.telefone));
+      const temWhatsLocal = !!(dcNow.telefone && isValidBRPhoneWithDDD(dcNow.telefone));
 
       const camposOkSemTelefone =
-        hasIt && hasES && hasED && hasAj && hasST && hasDT && needsSE && needsDE && !temWhatsLocal;
+        hasIt && hasES && hasED && hasAj && !temWhatsLocal;
 
       if (camposOkSemTelefone) {
         const phase = (stNow && stNow.whatsAskedPhase) || 'none';
@@ -4226,9 +4160,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       await issues.append(nome, 'mil_action', `timer_expired chat=${chatId} cidade="${cidade||''}" tel="${telMask||''}"`);
     } catch {}
 
-    await appendPedidoAudit(nome, chatId, 'timer_expired', { telOk: !!(tel && promptFretes.isValidBRPhoneWithDDD(tel)), cidadeOk: !!(cidade && String(cidade).trim()) });
+    await appendPedidoAudit(nome, chatId, 'timer_expired', { telOk: !!(tel && isValidBRPhoneWithDDD(tel)), cidadeOk: !!(cidade && String(cidade).trim()) });
 
-    if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) { timersFechamento.delete(chatId); return; }
+    if (!tel || !isValidBRPhoneWithDDD(tel)) { timersFechamento.delete(chatId); return; }
     if (!cidade || !String(cidade).trim()) { timersFechamento.delete(chatId); return; }
 
     if (!chatLock.acquire(nome, chatId)) {
@@ -4288,7 +4222,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       const totalDados = dadosColetados ? dadosColetados.size : 0;
       const totalTimers = timersFechamento ? timersFechamento.size : 0;
-      logger.info('[VIRTUS] Restauração completa', { nome, dadosColetados: totalDados, timersAtivos: totalTimers });
 
     } catch (e) {
       logger.warn('[TIMER] Erro ao restaurar timers', { error: e && e.message || e });
@@ -4304,7 +4237,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const cidade = dados && dados.cidade;
     await appendPedidoAudit(nome, chatId, 'send_attempt', { cidade, telefone: tel });
 
-    if (!tel || !promptFretes.isValidBRPhoneWithDDD(tel)) {
+    if (!tel || !isValidBRPhoneWithDDD(tel)) {
       await appendPedidoAudit(nome, chatId, 'blocked_no_whatsapp', {});
       return;
     }
@@ -4318,7 +4251,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     let __acquired = false;
     for (let i = 0; i < 2; i++) {
       if (chatLock.acquire(nome, chatId)) { __acquired = true; break; }
-      await sleep(250 + Math.floor(Math.random() * 200)); // backoff curto (250–450ms)
+      await sleep(250 + Math.floor(Math.random() * 200));
     }
     if (!__acquired) {
       await appendPedidoAudit(nome, chatId, 'lock_busy_skip', {});
@@ -4331,7 +4264,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-      const payload = promptFretes.buildFinalOrderPayload(nome, chatId, dados, NOTIFICADOR_SERVIDOR);
+      const payload = {
+        servidor: NOTIFICADOR_SERVIDOR,
+        perfil: nome,
+        chat_id: chatId,
+        telefone: tel,
+        cidade: cidade,
+        itens: dados.itens || null,
+        endereco_saida: dados.endereco_saida || null,
+        endereco_destino: dados.endereco_destino || null,
+        ajudante: (typeof dados.ajudante === 'boolean') ? dados.ajudante : null,
+        descricao: dados.descricao || null
+      };
+
       const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
       let resp = null, bodyText = '';
       try {
@@ -4362,17 +4307,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function enviarMensagemFinal(chatId) {
-    const dados = dadosColetados && dadosColetados.get(chatId) || {};
-    const mensagemBase = promptFretes.buildFinalMessage({}, dados);
+    const msgBase = 'Perfeito! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em instantes para combinar os detalhes e informar o orçamento. Qualquer coisa, fico por aqui.';
     const igCTA = [
-      'Obrigado pela confiança! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em instantes. Fique de olho!',
-      'Aproveitando: eu trabalho com marketing digital e atendo os pedidos aqui. Se puder dar uma força, segue nossa página no Instagram 😊',
+      'Aproveitando: se puder dar uma força, siga nossa página no Instagram 😊',
       'https://www.instagram.com/convenientetecnologia',
       '@convenientetecnologia'
     ].join('\n');
-    const mensagem = [mensagemBase, igCTA].filter(Boolean).join('\n\n');
+    const mensagem = [msgBase, igCTA].join('\n\n');
 
-    // Evitar duplicidade: se já foi enviada há pouco tempo, não repetir
+    // Idempotência: não repetir se enviada recentemente
     try {
       const st = await getChatState(nome, chatId).catch(() => null);
       if (st && st.finalMsgSentAt && (Date.now() - Number(st.finalMsgSentAt)) < 10 * 60 * 1000) {
@@ -4393,17 +4336,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       try {
-        const expectedPath = `/marketplace/t/${chatId}/`;
-        let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-        if (!urlNow.includes(expectedPath)) {
-          logger.warn('[MENSAGEM_FINAL] URL não corresponde ao chat', { nome, chatId, urlNow, attempt });
-          if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
-            await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
-            continue;
-          }
-          return;
-        }
-
         const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
         if (!okOn) {
           logger.warn('[MENSAGEM_FINAL] Chat não confirmado', { nome, chatId, attempt });
@@ -4416,7 +4348,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let campo = await waitForComposer(p, 8000);
         if (!campo) {
-          logger.info('[MENSAGEM_FINAL] Composer não encontrado, tentando refocus', { nome, chatId, attempt });
           const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
           campo = await refocusComposerNoReload(p, chatId, anchorSel);
         }
@@ -4439,7 +4370,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await setChatState(nome, chatId, { finalMsgSentAt: Date.now() });
             await flushChatStateNow(nome);
           } catch {}
-          logger.info('[MESSENGER] Mensagem final enviada', { chatId, attempt });
           return;
         } finally {
           releaseSendGuard(p);
@@ -4567,7 +4497,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           } catch {}
           
-          logger.debug('[MESSENGER] Tentativa de envio', { nome, chatId, attempt, maxTries: MAX_TRIES });
           
           let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
@@ -4582,7 +4511,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           
           let campo = await waitForComposer(p, 10000);
           if (!campo) {
-            logger.info('[MESSENGER] Composer não encontrado, tentando refocus', { nome, chatId });
             const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
             campo = await refocusComposerNoReload(p, chatId, anchorSel);
           }
@@ -4606,7 +4534,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             releaseSendGuard(p);
           }
           
-          logger.info('[MESSENGER] ✅✅✅ Enviada (robusta)', { nome, chatId, attempt });
           return true;
         } catch (err) {
           lastErr = err;
@@ -4660,7 +4587,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       pedidos.events.on('fieldTimeout', async ({ perfil, chatId, field }) => {
         try {
           if (perfil !== nome) return;
-          await setChatState(nome, chatId, { state: CHAT_STATES.PENDENTE, lastProbeAt: Date.now() });
+          await setChatState(nome, chatId, { state: CHAT_STATES.PENDENTE, lastProbeAt: Date.now(), triggerReason: 'fieldTimeout' });
           try { stepLog.appendJSONL(nome, 'virtus', { step: 'field_timeout_enqueued', chatId, field }); } catch {}
           if (!fila.includes(chatId)) {
             fila.push(chatId);
@@ -4675,7 +4602,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // Restaura dados coletados e timers do disco ao reiniciar
     try {
       await resumeTimers();
-      logger.info('[VIRTUS] Dados coletados e timers restaurados do disco', { nome });
     } catch (e) {
       logger.warn('[VIRTUS] Erro ao restaurar dados/timers do disco', { nome, error: e && e.message || e });
     }
@@ -4685,14 +4611,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     
     setTimeout(() => {
       if (running && epochOk()) {
-        logger.info('[FILA] Kick inicial (3s) — forçando atualização de fila', { nome });
         atualizaFila().catch(() => {});
       }
     }, 3000);
     
     setTimeout(() => {
       if (running && epochOk()) {
-        logger.info('[FILA] Kick inicial (10s) — forçando atualização de fila', { nome });
         atualizaFila().catch(() => {});
       }
     }, 10000);

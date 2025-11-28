@@ -19,17 +19,13 @@ function isValidBRPhoneWithDDD(d) {
 function computeMissing(data) {
   const d = data || {};
   const missing = [];
+  // WhatsApp completo (com DDD) é obrigatório
+  if (!isValidBRPhoneWithDDD(d.telefone)) missing.push('telefone');
+  // Coleta mínima obrigatória do pedido
   if (!d.itens) missing.push('itens');
   if (!d.endereco_saida) missing.push('endereco_saida');
   if (!d.endereco_destino) missing.push('endereco_destino');
-  if (typeof d.ajudante !== 'boolean') missing.push('ajudante');
-  if (!d.saida_tipo) missing.push('saida_tipo');
-  if (!d.destino_tipo) missing.push('destino_tipo');
-  if (d.saida_tipo === 'apartamento' && typeof d.saida_elevador !== 'boolean') missing.push('saida_elevador');
-  if (d.destino_tipo === 'apartamento' && typeof d.destino_elevador !== 'boolean') missing.push('destino_elevador');
-  // Cidade e Telefone são obrigatórios para envio final
-  if (!d.cidade) missing.push('cidade');
-  if (!d.telefone) missing.push('telefone');
+  // "ajudante", "cidade", "descricao" NÃO bloqueiam o pedido!
   return missing;
 }
 
@@ -38,15 +34,12 @@ function sanitizeExtracted(obj) {
     itens: null,
     endereco_saida: null,
     endereco_destino: null,
-    ajudante: null,
-    saida_tipo: null,
-    saida_elevador: null,
-    destino_tipo: null,
-    destino_elevador: null,
+    ajudante: null, // opcional
     telefone: null,
     ddd: null,
     telefone_parcial: null,
     cidade: null,
+    descricao: null, // NOVO campo, livre
     missing: [],
     protesto: false
   };
@@ -58,42 +51,26 @@ function sanitizeExtracted(obj) {
     }
 
     const onlyDigits = s => String(s||'').replace(/\D/g,'');
-    const normTxt = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
     const pickStr = v => {
       if (v == null) return null;
       let s = String(v).trim();
       if (!s) return null;
-      if (s.length > 180) s = s.slice(0,180);
+      if (s.length > 300) s = s.slice(0,300);
       return s;
     };
     const pickBool = v => (v === true ? true : (v === false ? false : null));
-    const pickTipo = v => {
-      const t = normTxt(v);
-      if (/ap|apt|apto|apart/.test(t)) return 'apartamento';
-      if (t.includes('apartamento')) return 'apartamento';
-      if (t.includes('casa')) return 'casa';
-      return null;
-    };
 
     out.itens = pickStr(obj.itens);
-    out.endereco_saida = pickStr(obj.endereco_saida);
-    out.endereco_destino = pickStr(obj.endereco_destino);
-    out.ajudante = pickBool(obj.ajudante);
-    out.saida_tipo = pickTipo(obj.saida_tipo);
-    out.destino_tipo = pickTipo(obj.destino_tipo);
-    out.saida_elevador = pickBool(obj.saida_elevador);
-    out.destino_elevador = pickBool(obj.destino_elevador);
+    out.endereco_saida = pickStr(obj.endereco_saida);     // aceita informal
+    out.endereco_destino = pickStr(obj.endereco_destino); // aceita informal
+    out.ajudante = pickBool(obj.ajudante);                // opcional
     out.cidade = pickStr(obj.cidade);
+    out.descricao = pickStr(obj.descricao);
 
     const telFull = onlyDigits(obj.telefone);
     const ddd = onlyDigits(obj.ddd);
     const parcial = onlyDigits(obj.telefone_parcial);
-
-    const isValidBR = s => {
-      if (s.length === 11) return /^[1-9]{2}9\d{8}$/.test(s);
-      if (s.length === 10) return /^[1-9]{2}[2-9]\d{7}$/.test(s);
-      return false;
-    };
+    const isValidBR = isValidBRPhoneWithDDD;
 
     if (isValidBR(telFull)) {
       out.telefone = telFull;
@@ -109,9 +86,7 @@ function sanitizeExtracted(obj) {
     }
 
     out.protesto = !!obj.protesto;
-
     out.missing = computeMissing(out);
-
   } catch {
     out.missing = computeMissing(out);
   }
@@ -121,68 +96,55 @@ function sanitizeExtracted(obj) {
 
 function buildSystemPrompt() {
   return `
-Você é um extrator determinístico. Saída: um JSON ÚNICO e NADA mais.
+Você é um extrator determinístico. Saída: APENAS UM JSON, sem texto extra.
 
-Objetivo: Dado o histórico (cliente/ia), extraia e consolide os campos:
+Objetivo: a partir do histórico, consolidar:
 
-- itens: string|null
+- telefone: "10–11 dígitos (BR) com DDD" ou null
 
-- endereco_saida: string|null (endereço completo)
+- ddd: "2 dígitos" ou null (se cliente mandou separado)
 
-- endereco_destino: string|null (endereço completo)
+- telefone_parcial: "8–9 dígitos" ou null (sem DDD)
 
-- ajudante: true|false|null
+- itens: string | null (o que precisa transportar)
 
-- saida_tipo: "casa"|"apartamento"|null (normalize: ap/apto/apt/apart → "apartamento")
+- endereco_saida: string | null (aceita informal: bairro, ponto de referência)
 
-- saida_elevador: true|false|null (somente se saida_tipo="apartamento")
+- endereco_destino: string | null (aceita informal)
 
-- destino_tipo: "casa"|"apartamento"|null (normalize aptos etc.)
+- ajudante: true|false|null (opcional, não trava o pedido)
 
-- destino_elevador: true|false|null (somente se destino_tipo="apartamento")
+- descricao: string | null (resumo/concat do que o cliente informou — livre)
 
-- telefone: string (10–11 dígitos, BR) ou null (somente completo + DDD)
+- cidade: string | null (se houver)
 
-- ddd: 2 dígitos ou null (se cliente mandou DDD isolado)
+- missing: ["telefone", "itens", "endereco_saida", "endereco_destino"] — apenas esses
 
-- telefone_parcial: 8–9 dígitos ou null (se cliente mandou apenas número sem DDD)
-
-- cidade: string|null
-
-- missing: array [campos faltantes]
-
-- protesto: true|false (se houver sinais de irritação: "já falei", "olha acima", "você é burro?", "pare de perguntar", etc.)
+- protesto: true|false (se houver reclamações tipo "já falei", "pare de perguntar"...)
 
 Regras:
 
-    Nunca inclua campos como "finalizado" ou "status"; não decida fluxo/envio. Apenas extraia dados.
+- Endereços informais são válidos. NÃO normalize para "casa/apartamento/elevador".
 
-- Some mensagens fragmentadas. Se houver ddd e telefone_parcial, componha telefone se válido.
+- NÃO extraia/normalize tipo de imóvel ou elevador.
 
-- Nunca ecoe PII ou números de telefone fora do campo correto.
+- Se veio ddd separadamente e telefone parcial, monte telefone com DDD quando válido.
 
-- Normalize casa/apartamento (aceite variações: ap, apt, apto, apart).
+- Retorne APENAS o JSON final (sem frases).
 
-- Se detectar protestos, marque protesto: true.
-
-- Missing considera obrigatórios: itens, endereco_saida, endereco_destino, ajudante, saida_tipo, destino_tipo, (saida_elevador e destino_elevador se "apartamento"), cidade, telefone.
-
-Saída OBRIGATÓRIA (apenas JSON, NUNCA TEXTO solto):
+Formato OBRIGATÓRIO:
 
 {
- "itens": "...|null",
- "endereco_saida": "...|null",
- "endereco_destino": "...|null",
+ "telefone": "string|null",
+ "ddd": "string|null",
+ "telefone_parcial": "string|null",
+ "itens": "string|null",
+ "endereco_saida": "string|null",
+ "endereco_destino": "string|null",
  "ajudante": true|false|null,
- "saida_tipo": "casa"|"apartamento"|null,
- "saida_elevador": true|false|null,
- "destino_tipo": "casa"|"apartamento"|null,
- "destino_elevador": true|false|null,
- "telefone": "10-11 dígitos ou null",
- "ddd": "2 dígitos ou null",
- "telefone_parcial": "8-9 dígitos ou null",
- "cidade": "...|null",
- "missing": ["lista de campos faltantes"],
+ "descricao": "string|null",
+ "cidade": "string|null",
+ "missing": ["..."],
  "protesto": true|false
 }
 `.trim();
@@ -229,6 +191,14 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
   try { parsed = JSON.parse(firstJson); } catch { parsed = {}; }
 
   const sanitized = sanitizeExtracted(parsed);
+  
+  // Preenche descricao se estiver vazia, concatenando mensagens do cliente
+  try {
+    const textoHistorico = (Array.isArray(mensagens) ? mensagens : []).filter(m => m && m.autor === 'cliente').map(m => m.texto).join(' | ').slice(0, 600);
+    if (!sanitized.descricao && textoHistorico) {
+      sanitized.descricao = textoHistorico;
+    }
+  } catch {}
   
   try {
     const stepLog = require('./stepLog.js');

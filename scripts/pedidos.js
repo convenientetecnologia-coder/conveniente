@@ -72,16 +72,10 @@ function maskPhone(d) {
 function computeMissing(data) {
   const d = data || {};
   const missing = [];
+  if (!isValidPhoneBR(d.telefone)) missing.push('telefone');
   if (!d.itens) missing.push('itens');
   if (!d.endereco_saida) missing.push('endereco_saida');
   if (!d.endereco_destino) missing.push('endereco_destino');
-  if (typeof d.ajudante !== 'boolean') missing.push('ajudante');
-  if (!d.saida_tipo) missing.push('saida_tipo');
-  if (!d.destino_tipo) missing.push('destino_tipo');
-  if (d.saida_tipo === 'apartamento' && typeof d.saida_elevador !== 'boolean') missing.push('saida_elevador');
-  if (d.destino_tipo === 'apartamento' && typeof d.destino_elevador !== 'boolean') missing.push('destino_elevador');
-  if (!d.cidade) missing.push('cidade');
-  if (!d.telefone) missing.push('telefone');
   return missing;
 }
 function isValidPhoneBR(d) {
@@ -112,61 +106,24 @@ const ALLOWED_ASK_FIELDS = Object.freeze([
   'endereco_saida',
   'endereco_destino',
   'ajudante',
-  'saida_tipo',
-  'destino_tipo',
-  'saida_elevador',
-  'destino_elevador',
   'ddd',
-  'telefone'
+  'telefone',
+  'descricao'
 ]);
 
-/**
- * Decide o próximo campo a perguntar COM ordem fixa e regras:
- * 1. itens
- * 2. endereco_saida
- * 3. endereco_destino
- * 4. ajudante
- * 5. saida_tipo
- * 6. destino_tipo
- * 7. saida_elevador (se apt)
- * 8. destino_elevador (se apt)
- * 9. telefone
- * Observação: cidade NÃO é perguntada no fluxo do chat ao cliente.
- */
-function getNextAskField(data = {}) {
-  const d = data || {};
+function getNextAskField(d = {}) {
+  if (!isValidPhoneBR(d.telefone)) return 'telefone';
   if (!d.itens) return 'itens';
   if (!d.endereco_saida) return 'endereco_saida';
   if (!d.endereco_destino) return 'endereco_destino';
   if (typeof d.ajudante !== 'boolean') return 'ajudante';
-  if (!d.saida_tipo) return 'saida_tipo';
-  if (!d.destino_tipo) return 'destino_tipo';
-  if (d.saida_tipo === 'apartamento' && typeof d.saida_elevador !== 'boolean') return 'saida_elevador';
-  if (d.destino_tipo === 'apartamento' && typeof d.destino_elevador !== 'boolean') return 'destino_elevador';
-
-  // Política telefone:
-  // 1) Se já houver telefone completo válido, nada a perguntar.
-  if (isValidPhoneBR(d.telefone)) return null;
-
-  // 2) Se houver apenas telefone_parcial e não houver ddd, pedir APENAS o ddd.
-  if (!d.ddd && d.telefone_parcial) return 'ddd';
-
-  // 3) Caso contrário, pedir o telefone (WhatsApp).
-  return 'telefone';
+  // "ajudante" é a última pergunta relevante; tudo opcional após isso
+  return null;
 }
 
-/**
- * Deve pedir WhatsApp agora (primeira prioridade) se houver intenção de preço,
- * e ainda não houver telefone completo válido.
- */
 function shouldAskWhatsappFirst({ historicoNovo = [], dataAtual = {} } = {}) {
   const telOk = isValidPhoneBR(dataAtual && dataAtual.telefone);
-  if (telOk) return false;
-  for (const m of (historicoNovo || [])) {
-    const txt = (m && m.texto) || '';
-    if (hasPriceIntent(txt)) return true;
-  }
-  return false;
+  return !telOk; // sempre priorize WhatsApp até ter telefone válido
 }
 
 /* ===================== FIM — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
@@ -203,10 +160,10 @@ class PedidoOrchestrator extends EventEmitter {
     const st = this._load(perfil);
     const cur = st.chats[chatId] || {
       createdAt: now(), updatedAt: now(),
-      data: { itens:null,endereco_saida:null,endereco_destino:null,ajudante:null,saida_tipo:null,saida_elevador:null,destino_tipo:null,destino_elevador:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null },
+      data: { itens:null,endereco_saida:null,endereco_destino:null,ajudante:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null,descricao:null },
       flags: { firstIaReplied:false, greetDone:false, finalizedAt:null, finalizationFreezeUntil:null, sentToNotifierAt:null, hasAskedWhats:false, singleInactivityPingSent:false, sentType:null, pendingField: null },
       timers: { startedAt: now(), incompleteWithWhatsDeadline: null, withoutWhatsDeadline: null },
-      askCounts: { telefone:0, ddd:0, itens:0, endereco_saida:0, endereco_destino:0, ajudante:0, saida_tipo:0, destino_tipo:0, saida_elevador:0, destino_elevador:0 },
+      askCounts: { telefone:0, ddd:0, itens:0, endereco_saida:0, endereco_destino:0, ajudante:0, descricao:0 },
       lastWhatsAskAt: null,
       missing: []
     };
@@ -345,11 +302,6 @@ class PedidoOrchestrator extends EventEmitter {
         return;
       }
 
-      if (k === 'saida_tipo' || k === 'destino_tipo') {
-        const t = cleanStr(v).toLowerCase();
-        if (t === 'casa' || t === 'apartamento') merged[k] = t;
-        return;
-      }
 
       // Demais strings (endereços, itens, cidade etc.)
       const t = cleanStr(v);
@@ -360,8 +312,7 @@ class PedidoOrchestrator extends EventEmitter {
 
     const KEYS = [
       'itens','endereco_saida','endereco_destino','ajudante',
-      'saida_tipo','destino_tipo','saida_elevador','destino_elevador',
-      'telefone','ddd','telefone_parcial','cidade'
+      'telefone','ddd','telefone_parcial','cidade','descricao'
     ];
     for (const k of KEYS) {
       if (Object.prototype.hasOwnProperty.call(c, k)) {
@@ -390,13 +341,10 @@ class PedidoOrchestrator extends EventEmitter {
         case 'endereco_saida': return !!(d.endereco_saida && String(d.endereco_saida).trim());
         case 'endereco_destino': return !!(d.endereco_destino && String(d.endereco_destino).trim());
         case 'ajudante': return (d.ajudante === true || d.ajudante === false);
-        case 'saida_tipo': return (d.saida_tipo === 'casa' || d.saida_tipo === 'apartamento');
-        case 'destino_tipo': return (d.destino_tipo === 'casa' || d.destino_tipo === 'apartamento');
-        case 'saida_elevador': return (d.saida_elevador === true || d.saida_elevador === false);
-        case 'destino_elevador': return (d.destino_elevador === true || d.destino_elevador === false);
         case 'ddd': return /^[1-9]\d$/.test(String(d.ddd || ''));
         case 'telefone_parcial': return /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
         case 'telefone': return isValidPhoneBR(d.telefone);
+        case 'descricao': return !!(d.descricao && String(d.descricao).trim());
         default: return false;
       }
     }
@@ -415,6 +363,15 @@ class PedidoOrchestrator extends EventEmitter {
     const allMsgs = Array.isArray(mensagensDoCliente) ? mensagensDoCliente : [];
     const campos = await extractOrderFieldsLLM({ perfil, chatId, mensagens: allMsgs, contexto: contexto || {} });
     const snap = this.upsertFromIA(perfil, chatId, campos);
+
+    // Preenche descricao se estiver vazia, concatenando mensagens do cliente
+    try {
+      const textoHistorico = (Array.isArray(mensagensDoCliente) ? mensagensDoCliente : []).filter(m => m && m.autor === 'cliente').map(m => m.texto).join(' | ').slice(0, 600);
+      if (!snap.data.descricao && textoHistorico) {
+        snap.data.descricao = textoHistorico;
+        this._set(perfil, chatId, { data: snap.data });
+      }
+    } catch {}
 
     // Anti-loop: verifica se algum campo faltante excedeu MAX_ASK_RETRIES (apenas logar, sem fallback humano)
     const sNow = this._get(perfil, chatId);
@@ -444,19 +401,12 @@ class PedidoOrchestrator extends EventEmitter {
     const s = this._get(perfil, chatId);
     if (!s) return false;
     const d = s.data || {};
-    if (s.flags && s.flags.sentToNotifierAt) return false; // idempotência
+    if (s.flags && s.flags.sentToNotifierAt) return false;
     const ok =
+      isValidPhoneBR(d.telefone) &&
       !!d.itens &&
       !!d.endereco_saida &&
-      !!d.endereco_destino &&
-      (d.ajudante === true || d.ajudante === false) &&
-      !!d.saida_tipo &&
-      !!d.destino_tipo &&
-      (d.saida_tipo !== 'apartamento' || (typeof d.saida_elevador === 'boolean')) &&
-      (d.destino_tipo !== 'apartamento' || (typeof d.destino_elevador === 'boolean')) &&
-      !!d.cidade &&
-      !!d.telefone &&
-      isValidPhoneBR(d.telefone);
+      !!d.endereco_destino;
     return !!ok;
   }
 
@@ -522,16 +472,6 @@ class PedidoOrchestrator extends EventEmitter {
                 dataBefore.ajudante = 'nao_respondeu';
                 touched = true;
               }
-            } else if (field === 'saida_elevador') {
-              if (!(dataBefore.saida_elevador === true || dataBefore.saida_elevador === false)) {
-                dataBefore.saida_elevador = 'nao_respondeu';
-                touched = true;
-              }
-            } else if (field === 'destino_elevador') {
-              if (!(dataBefore.destino_elevador === true || dataBefore.destino_elevador === false)) {
-                dataBefore.destino_elevador = 'nao_respondeu';
-                touched = true;
-              }
             }
             // Para campos textuais e demais enumerações, não preenche automaticamente; permanecem null
 
@@ -589,91 +529,90 @@ function getNextNonPhoneField(d = {}) {
   if (!d.endereco_saida) return 'endereco_saida';
   if (!d.endereco_destino) return 'endereco_destino';
   if (typeof d.ajudante !== 'boolean') return 'ajudante';
-  if (!d.saida_tipo) return 'saida_tipo';
-  if (!d.destino_tipo) return 'destino_tipo';
-  if (d.saida_tipo === 'apartamento' && typeof d.saida_elevador !== 'boolean') return 'saida_elevador';
-  if (d.destino_tipo === 'apartamento' && typeof d.destino_elevador !== 'boolean') return 'destino_elevador';
   return null;
 }
 
-/**
- * Diretiva determinística: "qual campo perguntar agora" + acoplamento de próxima pergunta e modo de telefone.
- * Retorna: { askField, phase, reason, nextField, allowSecondQuestion, phoneMode }
- *   - askField: 'itens'|'endereco_saida'|'endereco_destino'|'ajudante'|'saida_tipo'|'destino_tipo'|'saida_elevador'|'destino_elevador'|'ddd'|'telefone'|null
- *   - phase: 'full'|'lite'|'none'
- *   - reason: 'price_intent' ou 'missing'
- *   - nextField: próximo campo não-telefone da sequência, ou null se não houver
- *   - allowSecondQuestion: true|false — se true e nextField != null, a IA deve fazer 2 perguntas (askField e depois nextField)
- *   - phoneMode: 'lite' (não menciona DDD) ou 'full' (pede "com DDD")
- */
 function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const s = orchestrator._get(perfil, chatId) || {};
   const data = (snapshot && snapshot.data) || (s && s.data) || {};
   const counts = (s && s.askCounts) || {};
   const telOk = isValidPhoneBR(data.telefone);
+  const firstReply = !(s && s.flags && (s.flags.firstIaReplied || s.flags.greetDone));
 
-  // 1) Intenção de preço: pedir WhatsApp imediatamente (sem cooldown) e, se possível, emendar próxima não-telefone
-  if (!telOk && shouldAskWhatsappFirst({ historicoNovo: novasMsgs, dataAtual: data })) {
-    const nextField = getNextNonPhoneField(data);
-    const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
+  // PRIMEIRA MENSAGEM: askField=telefone, nextField=itens (perguntar as 2 juntas na mesma mensagem)
+  if (!telOk && firstReply) {
     return {
       askField: 'telefone',
-      phase: 'none',
-      reason: 'price_intent',
-      nextField,
-      allowSecondQuestion: !!nextField,
-      phoneMode
+      phase: 'first_contact',
+      reason: 'first_contact',
+      nextField: 'itens',
+      allowSecondQuestion: true,
+      phoneMode: 'full'
     };
   }
 
-  // 2) Telefone parcial presente sem DDD: priorize pedir DDD (sem cooldown) e, se possível, emendar próxima não-telefone
-  if (!telOk && data && data.telefone_parcial && !data.ddd) {
-    const nextField = getNextNonPhoneField(data);
-    return {
-      askField: 'ddd',
-      phase: 'none',
-      reason: 'missing',
-      nextField,
-      allowSecondQuestion: !!nextField,
-      phoneMode: 'lite'
-    };
-  }
-
-  // 3) Próximo campo do fluxo determinístico geral
+  // Ordem do funil após primeira mensagem
   const next = getNextAskField(data);
 
   if (next === 'telefone') {
-    const nextField = getNextNonPhoneField(data);
-    const phoneMode = (counts.telefone >= 1 && !data.ddd && !data.telefone_parcial) ? 'full' : 'lite';
     return {
       askField: 'telefone',
       phase: 'none',
       reason: 'missing',
-      nextField,
-      allowSecondQuestion: !!nextField,
-      phoneMode
+      nextField: null,
+      allowSecondQuestion: false,
+      phoneMode: 'full'
     };
   }
-
-  if (next === 'ddd') {
-    const nextField = getNextNonPhoneField(data);
+  if (next === 'itens') {
     return {
-      askField: 'ddd',
+      askField: 'itens',
       phase: 'none',
       reason: 'missing',
-      nextField,
-      allowSecondQuestion: !!nextField,
-      phoneMode: 'lite'
+      nextField: null,
+      allowSecondQuestion: false,
+      phoneMode: 'full'
+    };
+  }
+  if (next === 'endereco_saida') {
+    return {
+      askField: 'endereco_saida',
+      phase: 'none',
+      reason: 'missing',
+      nextField: null,
+      allowSecondQuestion: false,
+      phoneMode: 'full'
+    };
+  }
+  if (next === 'endereco_destino') {
+    return {
+      askField: 'endereco_destino',
+      phase: 'none',
+      reason: 'missing',
+      nextField: null,
+      allowSecondQuestion: false,
+      phoneMode: 'full'
+    };
+  }
+  if (next === 'ajudante') {
+    return {
+      askField: 'ajudante',
+      phase: 'none',
+      reason: 'optional',
+      nextField: null,
+      allowSecondQuestion: false,
+      phoneMode: 'full'
     };
   }
 
+  // Ao final, pergunta descrição opcional
   return {
-    askField: next || null, // poderá ser null apenas quando não houver mais nada a perguntar
+    askField: 'descricao',
     phase: 'none',
-    reason: 'missing',
+    reason: 'optional',
     nextField: null,
     allowSecondQuestion: false,
-    phoneMode: 'lite'
+    phoneMode: 'full'
   };
 }
 
