@@ -220,7 +220,7 @@ class PedidoOrchestrator extends EventEmitter {
     if (next.data && isValidPhoneBR(next.data.telefone)) {
       if (!next.timers.incompleteWithWhatsDeadline) next.timers.incompleteWithWhatsDeadline = now() + 10*60*1000;
       next.timers.withoutWhatsDeadline = null;
-    } else {
+  } else {
       if (!next.timers.withoutWhatsDeadline) next.timers.withoutWhatsDeadline = now() + 10*60*1000;
       next.timers.incompleteWithWhatsDeadline = null;
     }
@@ -278,10 +278,16 @@ class PedidoOrchestrator extends EventEmitter {
     }
 
     this._set(perfil, chatId, s);
-    // Anti-loop: se exceder MAX_ASK_RETRIES e ainda faltar o campo → fallback humano
+    // Anti-loop: se exceder MAX_ASK_RETRIES e ainda faltar o campo → apenas logar (sem fallback humano)
     const stillMissing = Array.isArray(s.missing) && s.missing.includes(field);
     if (field && stillMissing && s.askCounts[field] >= MAX_ASK_RETRIES) {
-      fallbackToHuman(perfil, chatId, `max_retries_${field}`);
+      try {
+        issues.append(perfil, 'pedidos_max_ask_retries', `campo=${field} chat=${chatId} tentativas=${s.askCounts[field]}`);
+      } catch {}
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'pedidos_max_ask_retries', { chatId, field, attempts: s.askCounts[field] });
+      } catch {}
     }
   }
 
@@ -410,13 +416,19 @@ class PedidoOrchestrator extends EventEmitter {
     const campos = await extractOrderFieldsLLM({ perfil, chatId, mensagens: allMsgs, contexto: contexto || {} });
     const snap = this.upsertFromIA(perfil, chatId, campos);
 
-    // Anti-loop: verifica se algum campo faltante excedeu MAX_ASK_RETRIES
+    // Anti-loop: verifica se algum campo faltante excedeu MAX_ASK_RETRIES (apenas logar, sem fallback humano)
     const sNow = this._get(perfil, chatId);
     if (sNow && sNow.askCounts) {
       for (const miss of (sNow.missing||[])) {
         const tries = sNow.askCounts[miss] || 0;
         if (tries >= MAX_ASK_RETRIES) {
-          fallbackToHuman(perfil, chatId, `max_retries_${miss}`);
+          try {
+            issues.append(perfil, 'pedidos_max_ask_retries', `campo=${miss} chat=${chatId} tentativas=${tries}`);
+          } catch {}
+          try {
+            const stepLog = require('./stepLog.js');
+            stepLog.appendJSONL(perfil, 'pedidos_max_ask_retries', { chatId, field: miss, attempts: tries });
+          } catch {}
           break;
         }
       }
@@ -684,19 +696,21 @@ function setWhatsPhase(perfil, chatId, phase) {
 
 async function fallbackToHuman(perfil, chatId, reason) {
   try {
-    await fileStore.withDesiredFileLockUpdate(desired => {
-      desired.perfis = desired.perfis || {};
-      desired.perfis[perfil] = { ...(desired.perfis[perfil] || {}), humanHold: true };
-      return desired;
-    });
-    try { issues.append(perfil, 'mil_action', `handoff_to_human chat=${chatId} reason=${reason||''}`); } catch {}
+    // Apenas logar; NÃO acionar eventos/outros fluxos de handoff humano
+    // O Virtus é responsável por enviar mensagem educativa pedindo WhatsApp quando necessário
+    try { 
+      issues.append(perfil, 'pedidos_fallback_to_human_disabled', `chat=${chatId} reason=${reason||''}`);
+    } catch {}
     try {
       const stepLog = require('./stepLog.js');
-      stepLog.appendJSONL(perfil, 'handoff_to_human', { chatId, reason });
+      stepLog.appendJSONL(perfil, 'pedidos_fallback_to_human_disabled', { chatId, reason: reason || '' });
     } catch {}
-    orchestrator.emit('handoffToHuman', { perfil, chatId, reason });
+    // NÃO acionar eventos/outros fluxos
+    // orchestrator.emit('handoffToHuman', { perfil, chatId, reason }); // DESABILITADO
   } catch (e) {
-    try { issues.append(perfil, 'mil_action', `handoff_to_human_failed chat=${chatId} reason=${(e&&e.message)||e}`); } catch {}
+    try { 
+      issues.append(perfil, 'pedidos_fallback_to_human_disabled_error', `chat=${chatId} reason=${(e&&e.message)||e}`);
+    } catch {}
   }
 }
 

@@ -76,15 +76,18 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
 
   pedidos.events.on('handoffToHuman', async ({ perfil, chatId, reason }) => {
     try {
-      // Marca humanHold (já setado no pedidos), envia mensagem educativa de transição
-      const texto = 'Beleza! Vou te colocar com um colega para te atender com calma. Obrigado pela paciência.';
+      // Nunca transfere para humano no Messenger; apenas orienta cliente a informar WhatsApp
+      const texto = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
       if (typeof enviarRespostaMessengerSeguraFn === 'function') {
         try {
           await enviarRespostaMessengerSeguraFn(chatId, texto);
           if (typeof marcarRespondidoFn === 'function') await marcarRespondidoFn(chatId);
-          await issues.append(perfil, 'mil_action', `handoff_msg_sent chat=${chatId} reason=${reason||''}`);
+          try {
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'whatsapp_request_sent', chatId, reason: reason || '' });
+          } catch {}
+          await issues.append(perfil, 'mil_action', `whatsapp_request_sent chat=${chatId} reason=${reason||''}`);
         } catch (e) {
-          await issues.append(perfil, 'mil_action', `handoff_msg_send_fail chat=${chatId} ${e && e.message || e}`);
+          await issues.append(perfil, 'mil_action', `whatsapp_request_send_fail chat=${chatId} ${e && e.message || e}`);
         }
       }
     } catch {}
@@ -604,6 +607,23 @@ function detectProtestText(t) {
   );
 }
 
+function detectClientDoubt(msg) {
+  const patterns = [
+    /como assim/i,
+    /n[ãa]o entendi/i,
+    /explica/i,
+    /o que (é|eh|significa)/i,
+    /não ficou claro/i,
+    /n[ãa]o sei/i,
+    /não compreendi/i,
+    /não peguei/i,
+    /poderia explicar/i,
+    /que significa/i
+  ];
+  const text = String(msg || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return patterns.some(rx => rx.test(text));
+}
+
 async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePageFn) {
   let protestedNow = false;
   for (const m of (msgs || [])) {
@@ -617,6 +637,19 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePag
         const pc = ((st && st.protestCount) || 0) + 1;
         await setChatState(perfil, chatId, { protestCount: pc, lastProbeAt: Date.now() });
         await issues.append(perfil, 'mil_action', `protest_detected chat=${chatId} count=${pc}`);
+      } catch {}
+    }
+
+    // Detecta dúvida/confusão
+    if (detectClientDoubt(tx)) {
+      try {
+        const st = await getChatState(perfil, chatId).catch(()=>null);
+        const doubtCount = ((st && st.doubtCount) || 0) + 1;
+        await setChatState(perfil, chatId, { doubtCount, lastProbeAt: Date.now() });
+        try {
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'duvida_detectada', chatId, doubtCount, texto: tx.slice(0, 100) });
+        } catch {}
+        await issues.append(perfil, 'mil_action', `duvida_detectada chat=${chatId} count=${doubtCount}`);
       } catch {}
     }
 
@@ -672,7 +705,7 @@ async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePag
               await waitForSendLockRelease(p, 12000);
               await acquireSendGuard(p, chatId);
               try {
-                await sendMessageSafe(p, campo, 'Entendi, vou te colocar com um colega agora. Obrigado pela paciência!', perfil, chatId);
+                await sendMessageSafe(p, campo, 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.', perfil, chatId);
               } finally { releaseSendGuard(p); }
             }
           }
@@ -3224,6 +3257,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Monta flags e diretiva determinística (pedido decide o que perguntar)
           const stForFlags = await getChatState(nome, chatId).catch(()=>null);
           const protestCount = (stForFlags && stForFlags.protestCount) || 0;
+          const doubtCount = (stForFlags && stForFlags.doubtCount) || 0;
+
+          // Detecta se há dúvida nas novas mensagens
+          const hasDoubtInBatch = novasMsgs.some(m => detectClientDoubt(m && m.texto || ''));
+          if (hasDoubtInBatch) {
+            try {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'duvida_detectada_batch', chatId, doubtCount });
+            } catch {}
+          }
 
           // Diretiva determinística: qual campo perguntar agora
           const directive = pedidos.getAskDirective(nome, chatId, novasMsgs, snap) || {
@@ -3234,6 +3276,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             phase: 'none',
             reason: 'missing'
           };
+
+          // Verifica se há 3 tentativas no mesmo campo (anti-looping)
+          const askCounts = (snap && snap.askCounts) || {};
+          const currentField = directive && directive.askField;
+          const fieldAttempts = currentField ? (askCounts[currentField] || 0) : 0;
+          
+          // Se houver 3 tentativas no mesmo campo, enviar mensagem de WhatsApp
+          if (fieldAttempts >= 3 && currentField) {
+            const textoWhatsApp = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
+            try {
+              await sendMessageSafe(ensurePage, chatId, textoWhatsApp);
+              try {
+                stepLog.appendJSONL(nome, 'virtus', { step: 'whatsapp_request_3_attempts', chatId, field: currentField, attempts: fieldAttempts });
+              } catch {}
+              await issues.append(nome, 'mil_action', `whatsapp_request_3_attempts chat=${chatId} field=${currentField} attempts=${fieldAttempts}`);
+              try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }); } catch {}
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            } catch (e) {
+              logger.warn('[AI-FIRST] Falha ao enviar mensagem WhatsApp após 3 tentativas', { nome, chatId, error: (e && e.message) || String(e) });
+            }
+          }
 
           // Log da diretiva para auditoria
           try {
@@ -3259,7 +3325,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             historico: historicoConversa,
             coletado: dataColetada,
             askCounts: (snap && snap.askCounts) || {},
-            flags: { firstReply, telefone_ok, protest_count: protestCount },
+            flags: { firstReply, telefone_ok, protest_count: protestCount, has_doubt: hasDoubtInBatch },
             missingFields: missing,
             askField: directive.askField,
             nextField: directive.nextField || null,
@@ -3310,6 +3376,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           
           // Log parsed da resposta
           logger.info('[GROQ][PARSED]', { nome, chatId, resposta: (textoAEnviar||'').slice(0,180) });
+          
+          // Log se resposta explicativa foi enviada (quando há dúvida detectada)
+          if (hasDoubtInBatch) {
+            try {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'resposta_explicativa_enviada', chatId, doubtCount });
+            } catch {}
+          }
           
           // Sanitização PII: nunca ecoar telefone do cliente
           const respostaSan = removeTelefonesCompletos(textoAEnviar);
