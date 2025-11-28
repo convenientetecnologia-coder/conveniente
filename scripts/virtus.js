@@ -366,6 +366,42 @@ function removeTelefonesCompletos(texto) {
   try { return String(texto||'').replace(/\b\d{8,11}\b/g, '******'); } catch { return String(texto||''); }
 }
 
+function extractPlainTextFromMaybeJSON(raw) {
+  try {
+    let s = String(raw == null ? '' : raw);
+    if (!s) return '';
+
+    // Se contiver um objeto JSON, tenta parsear e pegar "resposta"
+    const m = s.match(/\{[\s\S]*\}/);
+    if (m && m[0]) {
+      try {
+        const obj = JSON.parse(m[0]);
+        if (obj && typeof obj.resposta === 'string' && obj.resposta.trim()) {
+          return obj.resposta.replace(/\r?\n+/g, ' ').trim();
+        }
+      } catch {}
+    }
+
+    // Se tiver a chave "resposta" no texto, extrai via regex
+    const r = s.match(/"resposta"\s*:\s*"((?:\\.|[^"\\])*)"/i);
+    if (r && r[1]) {
+      return r[1].replace(/\\"/g, '"').replace(/\r?\n+/g, ' ').trim();
+    }
+
+    // Se parecer JSON (chaves/colchetes), remova e achate
+    if (/^\s*[{[]/.test(s) || /"dados"\s*:/.test(s)) {
+      s = s.replace(/[{}[\]]/g, ' ').replace(/"[^"]*"\s*:/g, ' ').replace(/\r?\n+/g, ' ');
+    }
+
+    // Achatar quebras de linha por segurança
+    s = s.replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').trim();
+    return s;
+
+  } catch {
+    return String(raw || '').replace(/\r?\n+/g, ' ').trim();
+  }
+}
+
 function nextMissingField(dc = {}) {
   if (!dc.itens) return 'itens';
   if (!dc.endereco_saida) return 'endereco_saida';
@@ -1836,7 +1872,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       campo
     ).catch(()=>{});
 
-    const toSend = String(msg || '');
+    const toSend = String(msg || '').replace(/\r?\n+/g, ' ');
     const safeMsg = sanitizeOutgoing(removeTelefonesCompletos(toSend));
     const jitter = () => 8 + Math.floor(Math.random() * 7); // 8–14ms por caractere
     try {
@@ -3266,7 +3302,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           } catch {}
           
-          const textoAEnviar = String(parsed.resposta || '').trim();
+          let textoAEnviar = String(parsed.resposta || '').trim();
+          // Guarda extra: se ainda tiver cara de JSON, extraia texto humano
+          textoAEnviar = extractPlainTextFromMaybeJSON(textoAEnviar);
           
           // Log parsed da resposta
           logger.info('[GROQ][PARSED]', { nome, chatId, resposta: (textoAEnviar||'').slice(0,180) });
@@ -3603,6 +3641,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
 
             let respostaFinalRaw = String(parsed.resposta || '').trim();
+            respostaFinalRaw = extractPlainTextFromMaybeJSON(respostaFinalRaw);
             
             // [DESATIVADO NESTE FLUXO] prefixo FULL por intenção de preço agora é controlado pela diretiva do pedido + prompt (ask_field).
             // Mantido bloco abaixo para compatibilidade do fluxo legado.

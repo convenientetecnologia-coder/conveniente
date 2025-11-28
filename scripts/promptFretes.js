@@ -164,20 +164,35 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
   try {
     let txt = String(rawText || '').trim();
 
+    // Remoção forte de cercas de código e prefixos
+    txt = txt.replace(/^\s*(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    // Remove prefixo "json" solto em início de linha
+    txt = txt.replace(/^\s*json\s*$/im, '').trim();
+
     // Remoção robusta de cercas de código e prefixos "json"
     txt = txt.replace(/^\s*(?:json)?\s*/i, '').replace(/\s*$/i, '').replace(/^json\s*/i, '').trim();
 
     // Fallback: se não há JSON, usa o texto inteiro como resposta
     if (!/{[\s\S]*}/.test(txt)) {
       const fallback = String(txt).trim();
-      const fallbackSan = fallback
+      // Tenta extrair apenas a propriedade "resposta" se houver no texto
+      let respostaOnly = null;
+      try {
+        const m = fallback.match(/"resposta"\s*:\s*"((?:\\.|[^"\\])*)"/i);
+        if (m && m[1]) {
+          respostaOnly = m[1].replace(/\\"/g, '"');
+        }
+      } catch {}
+      const base = respostaOnly || fallback;
+      const baseSan = String(base)
         .replace(/\b\d{8,11}\b/g, '')          // bloqueia sequências coladas de 8–11 dígitos
         .replace(/\+?\d[\d\s().-]{7,}\d/g, '') // bloqueia números com separadores
-        .replace(/(\d[\s-]?){4,}/g, '******'); // defensivo extra
-      // Garantir que mesmo respostas vazias/"ok"/"anotado" retornem no campo resposta
-      const respostaFinal = (fallbackSan && fallbackSan.trim()) ? fallbackSan : String(rawText || '').trim();
+        .replace(/(\d[\s-]?){4,}/g, '*****')  // defensivo extra
+        .replace(/[{}[\]]/g, ' ')              // remove colchetes/chaves se sobraram
+        .replace(/\r?\n+/g, ' ')               // achata múltiplas linhas
+        .trim();
       return {
-        resposta: respostaFinal,
+        resposta: baseSan,
         telefone_extraido: null,
         finalizado: false,
         dados: {}
@@ -324,6 +339,20 @@ function parseModelAnswerToDomain(rawText, lastClientText) {
     if (respostaLower === 'ok' || respostaLower === 'anotado' || respostaLower === 'certo' || respostaLower === 'perfeito' || respostaLower === 'entendi') {
       respostaFinal = String(rawText || '').trim() || respostaFinal;
     }
+
+    // Guarda final: se por algum motivo "resposta" parecer JSON, extraia texto humano
+    try {
+      if (typeof respostaFinal === 'string' && /{.*"resposta"\s*:/.test(txt)) {
+        const m = txt.match(/"resposta"\s*:\s*"((?:\\.|[^"\\])*)"/i);
+        if (m && m[1]) {
+          respostaFinal = m[1].replace(/\\"/g, '"').replace(/\r?\n+/g, ' ').trim();
+        }
+      }
+      // Evita enviar JSON ou blocos grandes por engano
+      if (/^\s*[{[]/.test(respostaFinal) || /"dados"\s*:/.test(respostaFinal)) {
+        respostaFinal = respostaFinal.replace(/[{}[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+    } catch {}
 
     return {
       resposta: respostaFinal,
