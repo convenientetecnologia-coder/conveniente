@@ -626,6 +626,14 @@ function sanitizeOutgoing(text) {
     s = s.replace(/[ \t]+/g, ' ');                   // Espaços múltiplos
     s = s.replace(/\s+([,.!?;:])/g, '$1');           // Espaço antes de pontuação
     s = s.replace(/([,.!?;:]){2,}/g, '$1');          // Pontuação repetida
+    
+    // Remove qualquer orientação sobre DDD no pedido de telefone
+    s = s.replace(/\s*((?:n[uú]mero\s+)?(?:com|sem)\s+ddd)\s*/gi, ' ');
+    s = s.replace(/\b(?:n[uú]mero\s+)?(?:com|sem)\s+ddd\b/gi, ' ');
+    
+    // Normaliza espaços novamente após remoções
+    s = s.replace(/\s{2,}/g, ' ').trim();
+    
     return s.trim();
   } catch {
     return String(text || '').trim();
@@ -2544,7 +2552,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       const todos = await coletaChatsMarketplaceTodos(p);
-      logger.info(`[VIRTUS][${nome}] coletaTodos: ${todos.length} itens`);
 
       const idsColetados = new Set(todos.map(c => c.id));
       for (const chatRespondido of chatsRespondidosParaVerificar) {
@@ -2641,7 +2648,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function atualizaFila() {
     let mudancaFila = false;
     const chatsNovos = await coletaChatsMarketplaceRecentes();
-    logger.info(`[FILA][${nome}] recebidos da coleta: ${chatsNovos.length}`);
 
     const aguard = getSetAguardando(nome);
     const agoraMs = Date.now();
@@ -3835,7 +3841,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
-    logger.info(`[FILA] tick — running=${running} fila=${fila.length} chatAtivo=${chatAtivo || '-'}`, { nome });
     let manifestFrozenUntil = 0;
     try {
       const manifest = await manifestStore.read(nome);

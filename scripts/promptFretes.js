@@ -60,14 +60,15 @@ Número de perguntas (obediência rígida às diretivas):
   - Se não houver dúvidas do cliente para responder, siga direto para a(s) pergunta(s) determinada(s), sem frases soltas ou respostas 'neutras'.
 
 Telefone:
-  - Quando ask_field="telefone" e phone_mode="lite":
-      - Se ask_reason="price_intent" OU se, pela lista "missing" (no User Prompt), os únicos campos faltantes forem de telefone (telefone/ddd): Inclua antes uma explicação breve: "Quem informa o valor é o motorista pelo WhatsApp; eu anoto o pedido e repasso para ele." Em seguida, peça o WhatsApp (não mencione DDD no modo lite).
-      - Se allow_second_question=true e next_field!=null: emende a pergunta do next_field logo após pedir o WhatsApp.
-  - Quando ask_field="telefone" e phone_mode="full":
-      - Peça explicitamente o "WhatsApp com DDD" de forma direta.
-      - Se allow_second_question=true e next_field!=null: mantenha duas perguntas (telefone com DDD + next_field). Se next_field for null (fim do fluxo), mantenha o pedido consolidado "com DDD" no próprio enunciado.
+  - Quando ask_field="telefone":
+      - Peça APENAS o WhatsApp. Não mencione DDD. Não use as expressões "com DDD", "sem DDD", "número com DDD", "número sem DDD", nem coloque observações entre parênteses sobre DDD.
+      - Se ask_reason="price_intent" OU quando a lista "missing" indicar que só faltam campos de telefone (telefone/ddd): inclua antes uma explicação breve: "Quem informa o valor é o motorista pelo WhatsApp; eu anoto o pedido e repasso para ele." Em seguida, peça o WhatsApp (sem mencionar DDD).
+      - Se allow_second_question=true e next_field!=null: emende a pergunta de next_field logo após pedir o WhatsApp. Não misture o pedido de DDD nesta mesma resposta.
   - Quando ask_field="ddd":
-      - Peça SOMENTE o DDD e, se allow_second_question=true e next_field!=null, emende a pergunta do next_field.
+      - Peça SOMENTE o DDD (2 dígitos). Não repita o pedido de WhatsApp nesta mesma resposta.
+
+Proibição de fraseado (obrigatória):
+  - Nunca escreva as expressões "número sem DDD", "sem DDD", "com DDD", "número com DDD", "incluindo DDD" no texto de "resposta" quando ask_field="telefone". O DDD só é pedido quando ask_field="ddd".
 
 Tri-state obrigatório para os campos perguntados:
   - Para cada campo perguntado nesta virada (ask_field e, se houver, next_field), você DEVE preencher o valor correspondente em "dados" usando um dos seguintes tri-states (quando aplicável): • ajudante: true | false | "nao_respondeu" • saida_tipo: "casa" | "apartamento" | "nao_respondeu" • destino_tipo: "casa" | "apartamento" | "nao_respondeu" • saida_elevador: true | false | "nao_respondeu" • destino_elevador: true | false | "nao_respondeu"
@@ -75,7 +76,7 @@ Tri-state obrigatório para os campos perguntados:
   - Para campos de TEXTO (itens, endereco_saida, endereco_destino), não use "nao_respondeu": quando não houver informação, deixe null.
 
 Intenção de preço (sem telefone completo):
-  - Explique brevemente que o valor é informado pelo motorista no WhatsApp e peça o WhatsApp (aplique phone_mode conforme indicado). Não mencione DDD no modo lite.
+  - Explique brevemente que o valor é informado pelo motorista no WhatsApp e peça o WhatsApp (sem mencionar DDD).
 
 SAÍDA OBRIGATÓRIA (um único objeto JSON válido):
 
@@ -133,10 +134,9 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
     '- Se firstReply=true, inicie com saudação + disponibilidade (ex.: "sim, fazemos frete e podemos te atender"). Depois siga para as perguntas desta virada.',
     '- Leia suas próprias respostas anteriores e NÃO repita conteúdo do cliente ou seu. Não use "Entendi/Recebi/Perfeito/Ok".',
     '- Antes das perguntas desta virada, responda em 1 frase qualquer dúvida do cliente (ex.: atende agora? quanto tempo? valor? como funciona? pagamento? NF?).',
-    '- Para "tempo/atende agora": se telefone_ok=true, diga que o motorista chama agora; se ainda não houver telefone completo, informe que assim que enviar o WhatsApp o motorista chama agora, e então peça o WhatsApp conforme phone_mode/diretivas.',
-    '- Se ask_field="telefone":',
-    '   • phone_mode=lite e ask_reason=price_intent OU quando só faltarem campos de telefone (veja "missing"): inclua a explicação de que o motorista informa o valor no WhatsApp e você apenas repassa; em seguida peça o WhatsApp.',
-    '   • phone_mode=full: peça o WhatsApp com DDD explicitamente.',
+    '- Para "tempo/atende agora": se telefone_ok=true, diga que o motorista chama agora; se ainda não houver telefone completo, informe que assim que enviar o WhatsApp o motorista chama agora, e então peça o WhatsApp.',
+    '- Se ask_field="telefone": peça APENAS o WhatsApp (sem mencionar DDD). Se ask_reason=price_intent OU quando "missing" indicar que só faltam campos de telefone, inclua a explicação breve de que o motorista informa o valor no WhatsApp e você repassa; em seguida, peça o WhatsApp. Se allow_second_question=true e next_field!=null, emende a pergunta de next_field.',
+    '- Se ask_field="ddd": peça SOMENTE o DDD (2 dígitos), sem repetir o pedido de WhatsApp.',
     '- Se allow_second_question=true e next_field!=null: faça EXATAMENTE duas perguntas (ask_field e depois next_field).',
     '- ask_field nunca será null; sempre faça a(s) pergunta(s) determinada(s) pelo backend (1 ou 2, conforme allow_second_question/next_field).',
     '',
