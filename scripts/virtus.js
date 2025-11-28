@@ -217,6 +217,10 @@ function chatLogPath(perfil, chatId) {
   return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.jsonl`);
 }
 
+function chatClientLogPath(perfil, chatId) {
+  return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.cliente.jsonl`);
+}
+
 // Helpers de idempotência persistente e log forense
 function pedidoSentFile(perfil, chatId) {
   return path.join(__dirname, '..', 'dados', 'perfis', perfil, 'chats', `${chatId}.pedido.json`);
@@ -272,8 +276,14 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
     const novos = (historicoArr||[]).filter(m => Number(m.timestamp||0) > lastTs);
     if (!novos.length) return;
     await fs.mkdir(path.dirname(file), { recursive: true });
+
+    const fileCliente = chatClientLogPath(perfil, chatId);
+
     for (const m of novos) {
       fsRaw.appendFileSync(file, JSON.stringify(m)+'\n', 'utf8');
+      if (m && m.autor === 'cliente') {
+        try { fsRaw.appendFileSync(fileCliente, JSON.stringify(m)+'\n', 'utf8'); } catch {}
+      }
     }
     const maxTs = Math.max(...novos.map(m=>Number(m.timestamp||0)));
     await setChatState(perfil, chatId, { chatLogLastTs: maxTs || Date.now() });
@@ -285,6 +295,47 @@ async function appendIaLine(perfil, chatId, texto) {
   const file = chatLogPath(perfil, chatId);
   try { fsRaw.mkdirSync(path.dirname(file), { recursive: true }); fsRaw.appendFileSync(file, JSON.stringify(obj)+'\n', 'utf8'); } catch {}
   try { await setChatState(perfil, chatId, { chatLogLastTs: obj.timestamp }); } catch {}
+}
+
+function readJsonLinesSafe(file) {
+  try {
+    if (!fsRaw.existsSync(file)) return [];
+    const txt = fsRaw.readFileSync(file, 'utf8');
+    if (!txt) return [];
+    const lines = txt.split(/\r?\n/).filter(Boolean);
+    const arr = [];
+    for (const l of lines) {
+      try { arr.push(JSON.parse(l)); } catch {}
+    }
+    return arr;
+  } catch {
+    return [];
+  }
+}
+
+async function buildDescricaoFromLog(perfil, chatId, { maxLen = 1800 } = {}) {
+  try {
+    const file = chatLogPath(perfil, chatId);
+    const arr = readJsonLinesSafe(file);
+    if (!arr.length) return null;
+
+    // Ordena por timestamp ascendente
+    arr.sort((a,b) => Number(a.timestamp||0) - Number(b.timestamp||0));
+
+    // Formata "Cliente:" / "Atendente:"
+    const linhas = arr.map(m => {
+      const who = m.autor === 'ia' ? 'Atendente' : 'Cliente';
+      const txt = String(m.texto || '').replace(/\s+/g,' ').trim();
+      return `${who}: ${txt}`;
+    });
+
+    let desc = linhas.join('\n');
+    if (desc.length > maxLen) desc = desc.slice(0, maxLen) + '...';
+    return desc;
+
+  } catch {
+    return null;
+  }
 }
 
 
@@ -4250,6 +4301,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       const payload = promptFretes.buildFinalOrderPayload(nome, chatId, dados, NOTIFICADOR_SERVIDOR);
+      const descricao = await buildDescricaoFromLog(nome, chatId);
+      payload.descricao = descricao || null;
       const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
       let resp = null, bodyText = '';
       try {

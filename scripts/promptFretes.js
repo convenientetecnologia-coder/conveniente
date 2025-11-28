@@ -2,6 +2,17 @@
 
 'use strict';
 
+function periodoAgora() {
+  try {
+    const h = new Date().getHours();
+    if (h >= 5 && h <= 11) return 'manha';
+    if (h >= 12 && h <= 17) return 'tarde';
+    return 'noite';
+  } catch {
+    return 'manha';
+  }
+}
+
 function buildSystemPrompt({ askField = null, allowSecondQuestion = false, nextField = null, phoneMode = 'lite', askReason = 'missing' } = {}) {
   return `
 Você é um(a) atendente humano(a) de fretes. Gere a resposta e metadados em JSON e somente JSON, exatamente no formato abaixo.
@@ -22,6 +33,7 @@ Regras determinísticas e de obediência:
 
 Saudação inicial (obrigatório):
   - Se firstReply=true: inicie com uma saudação calorosa (ex.: bom dia/boa tarde/boa noite, conforme fizer sentido no histórico) e uma frase objetiva de disponibilidade (ex.: "sim, fazemos frete e podemos te atender agora"). Em seguida, vá direto às perguntas desta virada.
+  - Use a saudação exata de acordo com "periodo" informado no User Prompt: Bom dia (05:00–11:59), Boa tarde (12:00–17:59), Boa noite (18:00–04:59).
   - Se firstReply=false: não cumprimente de novo.
 
 Leitura e antirrepetição:
@@ -99,6 +111,7 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
   const firstReply = !!(flags && flags.firstReply);
   const telefone_ok = !!(flags && flags.telefone_ok);
   const protestCount = typeof flags.protest_count === 'number' ? flags.protest_count : 0;
+  const periodo = periodoAgora();
 
   const meta = [
     `ask_field: ${askField === null ? 'null' : String(askField)}`,
@@ -109,7 +122,8 @@ function buildUserPrompt({ cidade, historico, coletado, askCounts, flags = {}, m
     `firstReply: ${firstReply ? 'true' : 'false'}`,
     `telefone_ok: ${telefone_ok ? 'true' : 'false'}`,
     `protest_count: ${protestCount}`,
-    `missing: ${JSON.stringify(Array.isArray(missingFields) ? missingFields : [])}`
+    `missing: ${JSON.stringify(Array.isArray(missingFields) ? missingFields : [])}`,
+    `periodo: ${periodo}`
   ].join(' | ');
 
   const header = [
