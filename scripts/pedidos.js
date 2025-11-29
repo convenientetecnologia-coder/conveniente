@@ -4,12 +4,17 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const EventEmitter = require('events');
 const issues = require('./issues.js');
 const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 const fileStore = require('./fileStore.js');
 const promptFretes = require('./promptFretes.js');
 const { chatCompletion } = require('./inteligenciaArtificial.js');
+
+function sha1(str) {
+  return crypto.createHash('sha1').update(String(str || ''), 'utf8').digest('hex');
+}
 const MAX_ASK_RETRIES = parseInt(process.env.MAX_ASK_RETRIES || '3', 10);
 const PHONE_ASK_COOLDOWN_MS = parseInt(process.env.PHONE_ASK_COOLDOWN_MS || '120000', 10); // 2 min de cooldown para pedir telefone/DDD novamente
 const FIELD_TTL_MS = parseInt(process.env.FIELD_TTL_MS || '60000', 10); // 60s para expirar um campo perguntado
@@ -85,6 +90,121 @@ function isValidPhoneBR(d) {
   if (s.length === 11) return /^[1-9]{2}9\d{8}$/.test(s);
   if (s.length === 10) return /^[1-9]{2}[2-9]\d{7}$/.test(s);
   return false;
+}
+
+function normalizeContent(s) {
+  try {
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/\s+/g,' ').trim().toLowerCase();
+  } catch {
+    return String(s || '').trim().toLowerCase();
+  }
+}
+
+function computeClientCursor(historico = []) {
+  try {
+    const msgs = (Array.isArray(historico) ? historico : []).filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
+    const count = msgs.length;
+    const digest = count ? sha1(msgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|')) : '';
+    const lastNorm = count ? normalizeContent(msgs[count - 1].texto || '') : '';
+    return { count, digest, lastNorm };
+  } catch {
+    return { count: 0, digest: '', lastNorm: '' };
+  }
+}
+
+function unifyClientMessages(novasMsgs = [], historico = []) {
+  // Preferir delta (novas mensagens); fallback para últimas 5 do histórico do cliente
+  let blocos = [];
+
+  if (Array.isArray(novasMsgs) && novasMsgs.length) {
+    blocos = novasMsgs.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim()).map(m => String(m.texto || '').trim());
+  }
+
+  if (!blocos.length) {
+    const base = (Array.isArray(historico) ? historico : []).filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
+    blocos = base.slice(-5).map(m => String(m.texto || '').trim());
+  }
+
+  // Dedup simples dentro do bloco
+  const seen = new Set();
+  const uniq = [];
+  for (const t of blocos) {
+    const n = normalizeContent(t);
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    uniq.push(t);
+  }
+
+  return uniq.join(' ');
+}
+
+function detectDoubtsSimple(text) {
+  const t = normalizeContent(text || '');
+  const duvidas = [];
+  if (!t) return duvidas;
+
+  if (/(preco|valor|quanto\s+(custa|fica|sai)|orcamento|cobra)/.test(t)) duvidas.push('Pergunta sobre valor/orçamento');
+  if (/(quando|em\s+quanto\s+tempo|que\s+horas|vai\s+me\s+chamar|tempo)/.test(t)) duvidas.push('Pergunta sobre quando o motorista entra em contato');
+  if (/(disponivel|ainda\s+tem|tem\s+agora|ta\s+disponivel|tá\s+disponivel)/.test(t)) duvidas.push('Pergunta sobre disponibilidade');
+  if (/(como\s+funciona|nao\s+entendi|explica|pode\s+explicar)/.test(t)) duvidas.push('Dúvida de funcionamento');
+
+  return duvidas;
+}
+
+function describeAskField(field) {
+  switch (String(field || '')) {
+    case 'telefone': return 'seu WhatsApp com DDD';
+    case 'ddd': return 'apenas o DDD (2 dígitos) do seu WhatsApp';
+    case 'telefone_parcial': return 'o número do WhatsApp (sem DDD), com 8 ou 9 dígitos';
+    case 'itens': return 'o que você precisa transportar';
+    case 'endereco_saida': return 'o endereço de saída (pode ser bairro/ponto de referência)';
+    case 'endereco_destino': return 'o endereço de destino (pode ser bairro/ponto de referência)';
+    case 'ajudante': return 'se precisa de ajudante (sim ou não)';
+    case 'descricao': return 'alguma observação breve (opcional)';
+    default: return '';
+  }
+}
+
+function buildUserOrchestrationPrompt({ clienteUnificado = '', dados = {}, faltantes = [], duvidas = [], proximaPergunta = '', instrucoes = [] } = {}) {
+  // NUNCA incluir números de telefone do cliente no prompt; descreva presença/ausência apenas.
+  const dataView = {
+    itens: !!(dados && dados.itens),
+    endereco_saida: !!(dados && dados.endereco_saida),
+    endereco_destino: !!(dados && dados.endereco_destino),
+    ajudante: (typeof (dados && dados.ajudante) === 'boolean') ? String(dados.ajudante) : 'indefinido',
+    telefone: isValidPhoneBR(dados && dados.telefone) ? 'presente' : 'ausente',
+    ddd: (dados && /^[1-9]\d$/.test(String(dados.ddd || ''))) ? 'presente' : 'ausente',
+    telefone_parcial: (dados && /^\d{8,9}$/.test(String(dados.telefone_parcial || ''))) ? 'presente' : 'ausente',
+    cidade: (dados && dados.cidade) ? 'presente' : 'ausente'
+  };
+
+  const faltas = (faltantes || []).slice(0);
+  const proxLabel = describeAskField(proximaPergunta);
+
+  const lines = [];
+  lines.push('Mensagens do cliente (unificadas):');
+  lines.push(clienteUnificado ? `"""${clienteUnificado}"""` : '"""(sem conteúdo adicional)"""');
+  lines.push('');
+  lines.push('Dados já coletados (apenas sinalizar se presentes/ausentes):');
+  lines.push(JSON.stringify(dataView));
+  lines.push('');
+  lines.push('Falta coletar (ordem do funil):');
+  lines.push(faltas.length ? faltas.join(', ') : 'nada');
+  lines.push('');
+  lines.push('Dúvidas detectadas:');
+  lines.push(duvidas.length ? ('- ' + duvidas.join('\n- ')) : 'nenhuma');
+  lines.push('');
+  lines.push('Próxima pergunta obrigatória:');
+  lines.push(proxLabel || 'nenhuma');
+  lines.push('');
+  lines.push('Instruções:');
+  lines.push('- Responda às dúvidas de forma breve e objetiva (sem inventar).');
+  lines.push('- Sempre finalize com a próxima pergunta do funil (não envie mensagem apenas tirando dúvidas).');
+  lines.push('- Seja humano, simpático e direto; varie micro expressões e evite repetir frases.');
+  for (const i of (instrucoes || [])) lines.push('- ' + i);
+
+  return lines.join('\n');
 }
 
 /* ===================== INÍCIO — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
@@ -787,36 +907,66 @@ async function fallbackToHuman(perfil, chatId, reason) {
 
 async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {}, novasMsgs = [] } = {}) {
   try {
+    // 0) Calcula cursor determinístico do cliente
+    const cursor = computeClientCursor(historico);
+    const sPrev = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
+
     // 1) Extrai/consolida dados do histórico (IA extratora) e atualiza snapshot
     const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
 
     // 2) Respeita janela de silêncio (finalização ativa)
     if (module.exports.isFinalized(perfil, chatId)) {
-      return false;
+      return {
+        mensagemParaCliente: '',
+        dadosExtraidosAtualizados: (snapAfter && snapAfter.data) || {},
+        proximaPergunta: null,
+        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
+      };
     }
 
     // 3) Snapshot atual e diretiva determinística
     const snap = module.exports.getSnapshot(perfil, chatId);
-    const dataColetada = (snap && snap.data) || {};
+    const dadosColetados = (snap && snap.data) || {};
     const firstReply = module.exports.shouldGreetFirstReply(perfil, chatId);
     const directive = module.exports.getAskDirective(perfil, chatId, novasMsgs, snap);
+    const proximaPergunta = directive && directive.askField ? String(directive.askField) : null;
 
-    // 4) Monta prompts e gera resposta humana (IA geradora)
+    // 4) Unifica mensagens do cliente e identifica dúvidas
+    const clienteUnificado = unifyClientMessages(novasMsgs, historico);
+    const duvidas = detectDoubtsSimple(clienteUnificado);
+    const faltantes = computeMissing(dadosColetados);
+
+    // 5) GATE anti-duplicidade por cursor (não gerar/emitir para o mesmo cursor)
+    const lastRC = (sPrev && sPrev.flags && sPrev.flags.lastRepliedCursorCount) || 0;
+    const lastRD = (sPrev && sPrev.flags && sPrev.flags.lastRepliedCursorDigest) || '';
+    const sameCursor = !!(cursor.count && cursor.digest && cursor.count === lastRC && cursor.digest === lastRD);
+
+    // 6) Se for o mesmo cursor: não gerar texto de novo; somente retorna objeto informativo
+    if (sameCursor) {
+      return {
+        mensagemParaCliente: '',
+        dadosExtraidosAtualizados: dadosColetados,
+        proximaPergunta,
+        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
+      };
+    }
+
+    // 7) Monta prompts e gera resposta humana (IA geradora)
     const systemPrompt = promptFretes.buildSystemPrompt();
     const instrucoes = buildInstrucoesFromDirective({
       directive,
-      snapshotData: dataColetada,
+      snapshotData: dadosColetados,
       firstReply,
       novasMsgs
     });
 
-    const userPrompt = promptFretes.buildUserPrompt({
-      instrucoes,
-      historico,
-      mensagemCliente: (() => {
-        const arr = Array.isArray(historico) ? historico.filter(m => m && m.autor === 'cliente') : [];
-        return arr.length ? String(arr[arr.length - 1].texto || '') : '';
-      })()
+    const userPrompt = buildUserOrchestrationPrompt({
+      clienteUnificado,
+      dados: dadosColetados,
+      faltantes,
+      duvidas,
+      proximaPergunta,
+      instrucoes
     });
 
     const model = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
@@ -834,7 +984,7 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
     const texto = String(parsed && parsed.resposta != null ? parsed.resposta : raw).trim();
     const textoSan = removeTelefonesCompletos(texto);
 
-    // 5) Atualiza contadores e fase do funil
+    // 8) Atualiza contadores e fase do funil (apenas se vamos responder agora)
     try {
       module.exports.markIaReplied(perfil, chatId);
       if (directive && directive.askField) {
@@ -845,17 +995,37 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       }
     } catch {}
 
-    // 6) Emite para o Virtus enviar no Messenger
+    // 9) Emite para o Virtus enviar no Messenger
     orchestrator.emit('replyReady', { perfil, chatId, texto: textoSan });
 
-    // 7) Verifica finalização (pedido completo/incompleto)
+    // 10) Armazena cursor respondido (para evitar duplicidade futura)
+    try {
+      const cur = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
+      cur.flags = cur.flags || {};
+      cur.flags.lastRepliedCursorCount = cursor.count || 0;
+      cur.flags.lastRepliedCursorDigest = cursor.digest || '';
+      orchestrator._set(perfil, chatId, cur);
+    } catch {}
+
+    // 11) Verifica finalização (pedido completo/incompleto)
     try { module.exports.finalizeIfReady(perfil, chatId); } catch {}
 
-    return true;
+    // 12) Retorno padrão exigido
+    return {
+      mensagemParaCliente: textoSan,
+      dadosExtraidosAtualizados: (module.exports.getSnapshot(perfil, chatId).data) || {},
+      proximaPergunta,
+      tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
+    };
 
   } catch (e) {
     try { issues.append(perfil, 'ingest_from_virtus_fail', `chat=${chatId} err=${(e && e.message) || e}`); } catch {}
-    return false;
+    return {
+      mensagemParaCliente: '',
+      dadosExtraidosAtualizados: (module.exports.getSnapshot(perfil, chatId).data) || {},
+      proximaPergunta: null,
+      tudoColetado: false
+    };
   }
 }
 
@@ -870,6 +1040,7 @@ module.exports = {
   markFinalizedAndFreeze: (perfil, chatId) => orchestrator.markFinalizedAndFreeze(perfil, chatId),
   upsertFromIA: (perfil, chatId, campos) => orchestrator.upsertFromIA(perfil, chatId, campos),
   upsertFromHistoryLLM: (perfil, chatId, mensagens, opts) => orchestrator.upsertFromHistoryLLM(perfil, chatId, mensagens, opts),
+  readyToSendComplete: (perfil, chatId) => orchestrator.readyToSendComplete(perfil, chatId),
 
   // ===== ADIÇÕES EXPORTADAS PARA CONTROLE DETERMINÍSTICO DO FLUXO =====
   getNextAskField,
