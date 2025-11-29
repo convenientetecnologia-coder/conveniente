@@ -238,16 +238,41 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
     const promptFretes = require('./promptFretes.js');
     const browser = controller.browser;
 
-    // Helper: extrai URL do item a partir da página de chat
-    async function _descobrirUrlClassificadoSeNecessario(page) {
+    // Helper: abre o chat na aba principal (mainPage), extrai URL do item e restaura a inbox
+    async function _descobrirUrlClassificadoSeNecessario() {
       if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
         return urlClassificado;
       }
+
+      const chatUrl = `https://www.messenger.com/marketplace/t/${chatId}/`;
+
+      // Garante a mainPage do perfil (onde o Messenger expõe o link do item no chat)
+      let main = controller.mainPage;
       try {
-        const chatUrl = `https://www.messenger.com/marketplace/t/${chatId}/`;
-        await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-        await new Promise(r => setTimeout(r, 500));
-        const found = await page.evaluate(() => {
+        if (!main) {
+          const pages = await browser.pages().catch(() => []);
+          main = (Array.isArray(pages) && pages[0]) ? pages[0] : null;
+          if (main) controller.mainPage = main;
+        }
+      } catch {}
+      if (!main) return null;
+
+      // Trava o Virtus com sendLock (owner='city') durante a navegação do chat
+      try {
+        browser._sendLock = browser._sendLock || {};
+        browser._sendLock.active = true;
+        browser._sendLock.owner = 'city';
+        browser._sendLock.chatId = chatId;
+        browser._sendLock.since = Date.now();
+      } catch {}
+
+      try {
+        // Abre o chat na mainPage
+        await main.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 600));
+
+        // Extrai URL do classificado a partir do DOM do chat
+        const found = await main.evaluate(() => {
           const fixAbs = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
           const anchors = Array.from(document.querySelectorAll('a'));
           for (const a of anchors) {
@@ -258,9 +283,22 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
           }
           return null;
         });
-        return found;
+
+        // Restaura a inbox/marketplace após extrair a URL (ambiente consistente pro Virtus)
+        try {
+          await main.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        } catch {}
+
+        return found || null;
       } catch {
         return null;
+      } finally {
+        // Libera o sendLock do owner 'city'
+        try {
+          if (browser && browser._sendLock && browser._sendLock.owner === 'city') {
+            browser._sendLock.active = false;
+          }
+        } catch {}
       }
     }
 
@@ -297,8 +335,8 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
         novaAba._buscaLocalizacaoChatId = chatId;
       } catch {}
 
-      // Descobre URL do classificado se necessário
-      let targetUrl = await _descobrirUrlClassificadoSeNecessario(novaAba);
+      // Descobre URL do classificado abrindo o chat na mainPage (com sendLock)
+      let targetUrl = await _descobrirUrlClassificadoSeNecessario();
       if (!targetUrl || typeof targetUrl !== 'string') {
         try {
           logger.warn('[LOCALIZACAO] Localização NÃO encontrada (sem url do item)', { nomePerfil, chatId, urlClassificado });
