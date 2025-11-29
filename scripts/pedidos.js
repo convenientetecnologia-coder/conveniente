@@ -107,17 +107,26 @@ const ALLOWED_ASK_FIELDS = Object.freeze([
   'endereco_destino',
   'ajudante',
   'ddd',
+  'telefone_parcial',
   'telefone',
   'descricao'
 ]);
 
 function getNextAskField(d = {}) {
-  if (!isValidPhoneBR(d.telefone)) return 'telefone';
+  const telValido = isValidPhoneBR(d && d.telefone);
+  const hasParcial = /^\d{8,9}$/.test(String((d && d.telefone_parcial) || ''));
+  const hasDDD = /^[1-9]\d$/.test(String((d && d.ddd) || ''));
+
+  if (!telValido) {
+    if (hasParcial && !hasDDD) return 'ddd';
+    if (hasDDD && !hasParcial) return 'telefone_parcial';
+    return 'telefone';
+  }
+
   if (!d.itens) return 'itens';
   if (!d.endereco_saida) return 'endereco_saida';
   if (!d.endereco_destino) return 'endereco_destino';
   if (typeof d.ajudante !== 'boolean') return 'ajudante';
-  // "ajudante" é a última pergunta relevante; tudo opcional após isso
   return null;
 }
 
@@ -163,7 +172,7 @@ class PedidoOrchestrator extends EventEmitter {
       data: { itens:null,endereco_saida:null,endereco_destino:null,ajudante:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null,descricao:null },
       flags: { firstIaReplied:false, greetDone:false, finalizedAt:null, finalizationFreezeUntil:null, sentToNotifierAt:null, hasAskedWhats:false, singleInactivityPingSent:false, sentType:null, pendingField: null },
       timers: { startedAt: now(), incompleteWithWhatsDeadline: null, withoutWhatsDeadline: null },
-      askCounts: { telefone:0, ddd:0, itens:0, endereco_saida:0, endereco_destino:0, ajudante:0, descricao:0 },
+      askCounts: { telefone:0, ddd:0, telefone_parcial:0, itens:0, endereco_saida:0, endereco_destino:0, ajudante:0, descricao:0 },
       lastWhatsAskAt: null,
       missing: []
     };
@@ -219,6 +228,16 @@ class PedidoOrchestrator extends EventEmitter {
 
   recordAsk(perfil, chatId, field) {
     const s = this._get(perfil, chatId) || this._set(perfil, chatId, {});
+    const dataNow = (s && s.data) || {};
+
+    // Remapeia pedido "telefone" para sub-etapas corretas quando já houve progresso parcial
+    if (field === 'telefone' && !isValidPhoneBR(dataNow.telefone)) {
+      const hasParcial = /^\d{8,9}$/.test(String(dataNow.telefone_parcial || ''));
+      const hasDDD = /^[1-9]\d$/.test(String(dataNow.ddd || ''));
+      if (hasParcial && !hasDDD) field = 'ddd';
+      else if (hasDDD && !hasParcial) field = 'telefone_parcial';
+    }
+
     s.askCounts = s.askCounts || {};
     if (field) s.askCounts[field] = (s.askCounts[field] || 0) + 1;
 
@@ -235,6 +254,7 @@ class PedidoOrchestrator extends EventEmitter {
     }
 
     this._set(perfil, chatId, s);
+
     // Anti-loop: se exceder MAX_ASK_RETRIES e ainda faltar o campo → apenas logar (sem fallback humano)
     const stillMissing = Array.isArray(s.missing) && s.missing.includes(field);
     if (field && stillMissing && s.askCounts[field] >= MAX_ASK_RETRIES) {
@@ -343,7 +363,12 @@ class PedidoOrchestrator extends EventEmitter {
         case 'ajudante': return (d.ajudante === true || d.ajudante === false);
         case 'ddd': return /^[1-9]\d$/.test(String(d.ddd || ''));
         case 'telefone_parcial': return /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
-        case 'telefone': return isValidPhoneBR(d.telefone);
+        case 'telefone': {
+          const hasFull = isValidPhoneBR(d.telefone);
+          const hasParcial = /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
+          const hasDDD = /^[1-9]\d$/.test(String(d.ddd || ''));
+          return !!(hasFull || hasParcial || hasDDD);
+        }
         case 'descricao': return !!(d.descricao && String(d.descricao).trim());
         default: return false;
       }
@@ -557,6 +582,26 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   if (next === 'telefone') {
     return {
       askField: 'telefone',
+      phase: 'none',
+      reason: 'missing',
+      nextField: null,
+      allowSecondQuestion: false,
+      phoneMode: 'full'
+    };
+  }
+  if (next === 'ddd') {
+    return {
+      askField: 'ddd',
+      phase: 'none',
+      reason: 'missing',
+      nextField: null,
+      allowSecondQuestion: false,
+      phoneMode: 'full'
+    };
+  }
+  if (next === 'telefone_parcial') {
+    return {
+      askField: 'telefone_parcial',
       phase: 'none',
       reason: 'missing',
       nextField: null,

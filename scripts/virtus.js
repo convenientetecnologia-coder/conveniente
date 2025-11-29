@@ -623,7 +623,7 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
   const perguntouTempo = /quanto\s+tempo|quando|que\s+horas|vai\s+me\s+chamar|em\s+quanto/.test(textoJanela);
 
   if (perguntouTempo) {
-    instr.push('Se perguntarem quando o motorista vai chamar, responda apenas: "em instantes".');
+    instr.push('Se perguntarem quando o motorista vai chamar, responda apenas: "em alguns minutinhos".');
   }
 
   // Pergunta definida pela diretiva (pedido.js decide)
@@ -636,6 +636,12 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
       } else {
         instr.push('Peça o WhatsApp com DDD em uma única frase curta.');
       }
+    }
+    if (directive.askField === 'ddd') {
+      instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
+    }
+    if (directive.askField === 'telefone_parcial') {
+      instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos. Não repita o número do cliente.');
     }
     if (directive.askField === 'itens') {
       instr.push('Pergunte o que precisa transportar (itens).');
@@ -3314,7 +3320,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           
           // Se houver 3 tentativas no mesmo campo, enviar mensagem de WhatsApp
           if (fieldAttempts >= 3 && currentField) {
-            const textoWhatsApp = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
+            let texto;
+            if (currentField === 'ddd') {
+              texto = 'Faltou só o DDD (2 dígitos) do seu Whats. Pode me informar, por favor?';
+            } else if (currentField === 'telefone_parcial') {
+              texto = 'Pode me enviar o número do seu WhatsApp (sem DDD)? São 8 ou 9 dígitos.';
+            } else {
+              texto = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
+            }
             try {
               const pAtual = await ensurePage().catch(() => null);
               if (pAtual) {
@@ -3324,7 +3337,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   await waitForSendLockRelease(pAtual, 12000);
                   await acquireSendGuard(pAtual, chatId);
                   try {
-                    await sendMessageSafe(pAtual, campo, textoWhatsApp, nome, chatId);
+                    await sendMessageSafe(pAtual, campo, texto, nome, chatId);
                   } finally {
                     releaseSendGuard(pAtual);
                   }
@@ -4352,7 +4365,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function enviarMensagemFinal(chatId) {
-    const msgBase = 'Perfeito! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em instantes para combinar os detalhes e informar o orçamento. Qualquer coisa, fico por aqui.';
+    const msgBase = 'Perfeito! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em alguns minutinhos para combinar os detalhes e informar o orçamento. Qualquer coisa, fico por aqui.';
     const igCTA = [
       'Aproveitando: se puder dar uma força, siga nossa página no Instagram 😊',
       'https://www.instagram.com/convenientetecnologia',
