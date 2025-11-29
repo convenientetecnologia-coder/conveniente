@@ -2572,7 +2572,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try {
         const todosEstados = await loadChatState(nome).catch(() => ({}));
         for (const [chatId, st] of Object.entries(todosEstados || {})) {
-          if (st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO)) {
+          if (st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO || st.state === CHAT_STATES.PENDENTE)) {
             chatsRespondidosParaVerificar.push({ id: chatId, tempo: 'agora', jaRespondido: true });
           }
         }
@@ -3911,6 +3911,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
+  async function maybeEnqueueDueChats() {
+    try {
+      const stAll = await loadChatState(nome).catch(() => ({}));
+      const now = Date.now();
+      for (const [chatId, st] of Object.entries(stAll || {})) {
+        if (!st) continue;
+        const dueAt = Number(st.replyDueAt || 0);
+        const state = st.state;
+        if (dueAt && now >= dueAt && (state === CHAT_STATES.PENDENTE || state === CHAT_STATES.AGUARDANDO)) {
+          if (!fila.includes(chatId) && chatAtivo !== chatId) {
+            fila.push(chatId);
+          }
+        }
+      }
+      scheduleNextIfIdle();
+    } catch {}
+  }
+
   async function filaManagerLoop() {
     if (!running || !epochOk()) return;
     let manifestFrozenUntil = 0;
@@ -3982,6 +4000,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       await atualizaFila();
       scheduleNextIfIdle();
       resetRecoverBackoff();
+      await maybeEnqueueDueChats();
 
       if (scrollInterval == null) {
         scrollInterval = setInterval(async () => {
@@ -4508,14 +4527,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
           await setChatState(nome, chatId, patch);
 
-          // Só agenda atendimento se cidade foi encontrada
+          // Janela de resposta após coletar cidade (20–60s); não enfileirar aqui
           if (loc && loc.cidade && loc.estado) {
-            const st2 = await getChatState(nome, chatId).catch(() => null);
-            const jaResp = !!(st2 && st2.ultimaRespostaEnviada);
-            if (!jaResp && !fila.includes(chatId) && chatAtivo !== chatId) {
-              fila.push(chatId);
-              scheduleNextIfIdle();
-            }
+            const nowMs = Date.now();
+            const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
+            await setChatState(nome, chatId, { replyDueAt: nowMs + delay });
           }
         } catch {}
       });
