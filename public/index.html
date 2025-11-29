@@ -1707,10 +1707,7 @@
         const cpuOk  = (cpu === 0) ? true : (cpu <= 90);
         const memOk  = freeMB >= minFreeMB;
         return cpuOk && memOk;
-      }, { timeoutMs: 900000, intervalMs: 1200 }); // Timeout: 15 minutos
-      if (!ok) {
-        alert('Não foi possível garantir recursos suficientes (RAM/CPU) para continuar. Abertura interrompida.');
-      }
+      }, { timeoutMs: 0x7fffffff, intervalMs: 1200 });
       return ok;
     }
 

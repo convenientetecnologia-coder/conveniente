@@ -764,70 +764,32 @@ module.exports = (app, workerClient, fileStore) => {
         try { await issues.append(p.nome, 'mil_action', 'human_hold=false (bulk_open_all)'); } catch {}
       }
 
-      // 2) Loop de abertura + start-work (sequencial) com checagem de recursos
+      // 2) Loop de abertura + start-work (sequencial)
       const results = [];
-      let recursosOk = true;
-
       for (const p of perfisArr) {
         const nome = p.nome;
         let okActivate = false, okStart = false, err = null;
 
-        // 1) Cheque recursos via worker status/supervisor antes de cada activate
-        try {
-          const st = await workerClient.sendWorkerCommand('get-status', {}, { timeoutMs: 25000 });
-          const sys = st && st.sys;
-          const minMB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
-
-          if (!sys || !sys.mem || sys.mem.freeMB < minMB || (sys.cpu && sys.cpu.percent >= 90)) {
-            recursosOk = false;
-            err = `RAM/CPU insuficientes (RAM livre: ${sys && sys.mem ? sys.mem.freeMB : 'N/A'}MB, CPU: ${sys && sys.cpu ? sys.cpu.percent : 'N/A'}%)`;
-            results.push({ nome, activate: false, start: false, error: err });
-            continue;
-          }
-        } catch (e) {
-          recursosOk = false;
-          err = (e && e.message) || String(e);
-          results.push({ nome, activate: false, start: false, error: 'Falha ao verificar recursos: ' + err });
-          continue;
-        }
-
-        // 2) Activate
         try {
           const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 });
-          if (!r1 || !r1.ok) {
-            err = (r1 && r1.error) || 'activate_failed';
-            recursosOk = false;
-            results.push({ nome, activate: false, start: false, error: err });
-            continue;
-          }
-          okActivate = true;
+          okActivate = !!(r1 && r1.ok);
         } catch (e) {
           err = (e && e.message) || String(e);
-          recursosOk = false;
-          results.push({ nome, activate: false, start: false, error: 'Ativação negada: ' + err });
-          continue;
         }
 
-        // 3) Start work, só se ativo OK
-        try {
-          const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 });
-          if (!r2 || !r2.ok) {
-            err = (r2 && r2.error) || 'start_failed';
-            recursosOk = false;
-            results.push({ nome, activate: okActivate, start: false, error: err });
-            continue;
+        if (okActivate) {
+          try {
+            const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 });
+            okStart = !!(r2 && r2.ok);
+          } catch (e) {
+            err = (e && e.message) || String(e);
           }
-          okStart = true;
-          results.push({ nome, activate: okActivate, start: okStart, error: null });
-        } catch (e) {
-          err = (e && e.message) || String(e);
-          recursosOk = false;
-          results.push({ nome, activate: okActivate, start: false, error: 'Start work falhou: ' + err });
-          continue;
         }
 
-        // Aguarda ~1s entre cada perfil para evitar sobrecarga
-        await new Promise(r => setTimeout(r, 1000));
+        results.push({ nome, activate: okActivate, start: okStart, error: err || null });
+
+        // pequeno respiro (igual ao front local)
+        await new Promise(r => setTimeout(r, 800));
       }
 
       return res.json({ ok: true, total: perfisArr.length, results });

@@ -298,5 +298,5 @@ module.exports = {
   writeJsonSafe,
   normalizeCookies,
   getCoords,
-  getAvailableMB
+  getAvailableMB,
 };

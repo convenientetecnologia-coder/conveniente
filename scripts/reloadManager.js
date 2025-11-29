@@ -4,7 +4,6 @@ const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 const browserHelper = require('./browser.js');
 const utils = require('./utils.js');
-const fileStore = require('./fileStore.js');
 
 const RELOAD_INTERVAL_MS = parseInt(process.env.RELOAD_INTERVAL_MS || '7200000', 10); // 2h
 const RELOAD_BATCH_SIZE = parseInt(process.env.RELOAD_BATCH_SIZE || '3', 10);        // 3 por vez
@@ -56,20 +55,9 @@ function safeSkipReason(nome, reason) {
   logger.info('[RELOAD] skip - ' + reason, { nome });
 }
 
-function perfilEstaCongelado(nome) {
-  return typeof fileStore.getPerfilFrozenUntil === 'function' && fileStore.getPerfilFrozenUntil(nome) > Date.now();
-}
-
 async function processReload(nome, controllers, robeMeta) {
   if (!controllers || !controllers.get) return;
   if (reloadInProgress.has(nome)) return;
-
-  // PATCH — skip perfis frozen (antes de processar reload)
-  if (perfilEstaCongelado(nome)) {
-    logger.info('[RELOAD] skip: perfil congelado em reloadQueue/processReload', { nome });
-    return;
-  }
-
   reloadInProgress.add(nome);
   reloadQueue.delete(nome);
   try {
@@ -175,17 +163,7 @@ async function processReloadQueue(controllers, robeMeta) {
   const batch = Array.from(reloadQueue).slice(0, capacity);
   for (const nome of batch) reloadQueue.delete(nome);
   if (!batch.length) return;
-
-  // PATCH — skip perfis frozen (antes de processar batch)
-  const batchFiltered = batch.filter(nome => {
-    if (perfilEstaCongelado(nome)) {
-      logger.info('[RELOAD] skip: perfil congelado em reloadQueue/processReload', { nome });
-      return false;
-    }
-    return true;
-  });
-
-  await Promise.all(batchFiltered.map(async (nome) => {
+  await Promise.all(batch.map(async (nome) => {
     try { await processReload(nome, controllers, robeMeta); }
     catch (e) { logger.error('[RELOAD] erro no item da fila', { nome, error: (e && e.message) || String(e) }); }
   }));
@@ -196,12 +174,6 @@ function schedulePeriodic(controllers) {
   try {
     const now = Date.now();
     for (const [nome, ctrl] of controllers.entries()) {
-      // PATCH — skip perfis frozen (antes de agendar cycle)
-      if (perfilEstaCongelado(nome)) {
-        logger.info('[RELOAD] skip: perfil congelado', { nome });
-        continue;
-      }
-
       // Somente perfis ativos
       if (!ctrl || !isBrowserConnected(ctrl)) continue;
       const last = lastReloadTimes.get(nome) || now; // primeira rodada daqui a 2h
