@@ -975,7 +975,14 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
     } catch {}
 
     // Emite resposta consolidada
-    orchestrator.emit('replyReady', { perfil, chatId, texto: textoSan });
+    orchestrator.emit('replyReady', {
+      perfil,
+      chatId,
+      texto: textoSan,
+      cursorCount: cursor.count || 0,
+      cursorDigest: cursor.digest || '',
+      cursorSig: sig
+    });
 
     // Marca cursor respondido e limpa in-flight
     try {

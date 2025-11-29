@@ -189,14 +189,31 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
   });
 
   // Resposta pronta pelo pedidos.js -> enviar no Messenger (com gate por cursor)
-  pedidos.events.on('replyReady', async ({ perfil, chatId, texto }) => {
+  pedidos.events.on('replyReady', async ({ perfil, chatId, texto, cursorCount, cursorDigest, cursorSig }) => {
     try {
       if (perfil !== nome) return;
       const payload = String(texto || '').trim();
       if (!payload) return;
 
-      // Gate por cursor (não enfileira se já respondemos a este cursor)
+      // Cursor do evento (forte)
+      const evCount = Number(cursorCount || 0);
+      const evDigest = String(cursorDigest || '');
+      const evSig = String(cursorSig || (evCount && evDigest ? `${evCount}|${evDigest}` : ''));
+
+      // Throttle curto por cursorSig (2s)
       let stCur = await getChatState(nome, chatId).catch(()=>null);
+      const lastEvMap = (stCur && stCur.lastReplyEvMap) || {};
+      const nowMs = Date.now();
+      if (evSig && lastEvMap[evSig] && (nowMs - lastEvMap[evSig]) < 2000) {
+        try { stepLog.appendJSONL(nome, 'virtus', { step: 'reply_throttle_same_cursor', chatId, evSig }); } catch {}
+        return;
+      }
+      if (evSig) {
+        lastEvMap[evSig] = nowMs;
+        await setChatState(nome, chatId, { lastReplyEvMap: lastEvMap });
+      }
+
+      // Gate adicional por chats_state já respondido (mantido como salvaguarda)
       const cCount = Number(stCur && stCur.clientCursorCount || 0);
       const cDigest = stCur && stCur.clientCursorDigest || '';
       const rCount = Number(stCur && stCur.repliedCursorCount || 0);
@@ -208,12 +225,16 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         return;
       }
 
+      // Enfileira com overrides e assinatura de cursor do evento
       await queueMessengerSend(nome, {
         chatId,
         resposta: payload,
         key: `replyReady|${chatId}|${sha1(payload)}|${Date.now()}`,
         fromNotifier: false,
-        origin: 'replyReady'
+        origin: 'replyReady',
+        cursorSig: evSig,
+        cursorCountOverride: evCount || undefined,
+        cursorDigestOverride: evDigest || undefined
       });
 
     } catch {}
@@ -1488,28 +1509,38 @@ const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
 
-async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotifier = false, origin = '' }) {
+async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotifier = false, origin = '', cursorSig = '', cursorCountOverride, cursorDigestOverride }) {
   try {
     const payload = String(resposta || '').trim();
     if (!payload) return false;
 
     // Snapshot do cursor do cliente no momento da fila
     const st = await getChatState(nomePerfil, chatId).catch(()=>null);
-    const cCount = Number(st && st.clientCursorCount || 0);
-    const cDigest = st && st.clientCursorDigest || '';
+
+    // Usa override do evento se vier; fallback para chats_state
+    const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : (st && st.clientCursorCount || 0));
+    const cDigest = (typeof cursorDigestOverride === 'string') ? cursorDigestOverride : (st && st.clientCursorDigest || '');
+
+    // Assinatura forte para dedupe
+    const sig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
 
     if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
     const fila = filaEnvioMessenger.get(nomePerfil);
 
-    // Anti-duplicidade de fila por cursor: se já existe item para o mesmo chatId e mesmo cursor, SKIP
-    const existeMesmoCursor = fila.some(it =>
-      it && it.chatId === chatId &&
-      Number(it.cursorCount || 0) === cCount &&
-      String(it.cursorDigest || '') === cDigest
-    );
+    // Dedupe por cursorSig (forte). Fallback: (count,digest) se não houver sig
+    const existeMesmoCursor = sig
+      ? fila.some(it => it && it.chatId === chatId && it.cursorSig === sig)
+      : fila.some(it =>
+          it && it.chatId === chatId &&
+          Number(it.cursorCount || 0) === cCount &&
+          String(it.cursorDigest || '') === cDigest
+        );
 
     if (existeMesmoCursor) {
-      try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_same_cursor', chatId, cCount, cDigest, origin }); } catch {}
+      try {
+        const step = sig ? 'queue_skip_same_cursor_sig' : 'queue_skip_same_cursor';
+        stepLog.appendJSONL(nomePerfil, 'virtus', { step, chatId, sig, cCount, cDigest, origin });
+      } catch {}
       return false;
     }
 
@@ -1520,10 +1551,11 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       fromNotifier: !!fromNotifier,
       cursorCount: cCount,
       cursorDigest: cDigest,
+      cursorSig: sig || '',
       origin: origin || ''
     });
 
-    try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, cCount, cDigest, origin }); } catch {}
+    try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, sig, cCount, cDigest, origin }); } catch {}
     return true;
 
   } catch {
