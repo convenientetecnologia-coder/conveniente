@@ -206,6 +206,7 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
       const nowMs = Date.now();
       if (evSig && lastEvMap[evSig] && (nowMs - lastEvMap[evSig]) < 2000) {
         try { stepLog.appendJSONL(nome, 'virtus', { step: 'reply_throttle_same_cursor', chatId, evSig }); } catch {}
+        try { logger.info('[REPLY] throttle_same_cursor', { nome, chatId, evSig }); } catch {}
         return;
       }
       if (evSig) {
@@ -213,7 +214,7 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         await setChatState(nome, chatId, { lastReplyEvMap: lastEvMap });
       }
 
-      // Gate adicional por chats_state já respondido (mantido como salvaguarda)
+      // Gate adicional por chats_state já respondido (fallback/salvaguarda)
       const cCount = Number(stCur && stCur.clientCursorCount || 0);
       const cDigest = stCur && stCur.clientCursorDigest || '';
       const rCount = Number(stCur && stCur.repliedCursorCount || 0);
@@ -221,11 +222,11 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
 
       if (cCount && cDigest && rCount === cCount && rDigest && rDigest === cDigest) {
         try { stepLog.appendJSONL(nome, 'virtus', { step: 'reply_skip_same_cursor', chatId, cCount, cDigest }); } catch {}
-        try { issues && issues.append && issues.append(nome, 'reply_skip_same_cursor', `chat=${chatId} count=${cCount}`); } catch {}
+        try { logger.info('[REPLY] skip_same_cursor(fallback)', { nome, chatId, cCount, cDigest }); } catch {}
         return;
       }
 
-      // Enfileira com overrides e assinatura de cursor do evento
+      // Enfileira com overrides e assinatura do evento
       await queueMessengerSend(nome, {
         chatId,
         resposta: payload,
@@ -236,6 +237,8 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         cursorCountOverride: evCount || undefined,
         cursorDigestOverride: evDigest || undefined
       });
+
+      try { logger.info('[REPLY] queued', { nome, chatId, evSig }); } catch {}
 
     } catch {}
   });
@@ -1541,6 +1544,7 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
         const step = sig ? 'queue_skip_same_cursor_sig' : 'queue_skip_same_cursor';
         stepLog.appendJSONL(nomePerfil, 'virtus', { step, chatId, sig, cCount, cDigest, origin });
       } catch {}
+      try { logger.info('[QUEUE] skip_same_cursor', { nomePerfil, chatId, sig, cCount, cDigest, origin }); } catch {}
       return false;
     }
 
@@ -1556,6 +1560,7 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     });
 
     try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, sig, cCount, cDigest, origin }); } catch {}
+    try { logger.info('[QUEUE] add', { nomePerfil, chatId, sig, cCount, cDigest, origin }); } catch {}
     return true;
 
   } catch {
@@ -2565,6 +2570,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             (clientCount > prevCount) ||
             (clientCount > 0 && clientCount === prevCount && clientDigest && prevDigest && clientDigest !== prevDigest);
 
+          try {
+            logger.info('[SCAN] cursor_eval', { nome, chatId, prevCount, prevDigest, clientCount, clientDigest, changed });
+            stepLog.appendJSONL(nome, 'virtus_scan', { phase: 'cursor_eval', chatId, prevCount, prevDigest, clientCount, clientDigest, changed, ts: Date.now() });
+          } catch {}
+
           if (!changed) {
             await setChatState(nome, chatId, {
               state: CHAT_STATES.AGUARDANDO,
@@ -2597,10 +2607,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
 
           // Envia historicoSan (não bruto) para o orquestrador
+          try {
+            logger.info('[SCAN] ingest_call', { nome, chatId, cCount: clientCount, cDigest: clientDigest });
+            stepLog.appendJSONL(nome, 'virtus_scan', { phase: 'ingest_call', chatId, cCount: clientCount, cDigest: clientDigest, ts: Date.now() });
+          } catch {}
+
           await pedidos.ingestFromVirtus(nome, chatId, {
             historico: historicoSan,
             contexto: { cidade: cidadeCtx || null },
-            novasMsgs
+            novasMsgs,
+            cursor: { count: clientCount, digest: clientDigest }
           });
 
           // Atualiza cursor do cliente APÓS ingest
