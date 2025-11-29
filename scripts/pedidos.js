@@ -107,9 +107,10 @@ function computeClientCursor(historico = []) {
     const count = msgs.length;
     const digest = count ? sha1(msgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|')) : '';
     const lastNorm = count ? normalizeContent(msgs[count - 1].texto || '') : '';
-    return { count, digest, lastNorm };
+    const lastTs = count ? Number(msgs[count - 1].timestamp || 0) : 0;
+    return { count, digest, lastNorm, lastTs };
   } catch {
-    return { count: 0, digest: '', lastNorm: '' };
+    return { count: 0, digest: '', lastNorm: '', lastTs: 0 };
   }
 }
 
@@ -896,15 +897,9 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       };
     }
 
-    // Idempotência forte: se já respondemos a este cursor OU já existe emissão in-flight para este cursor, SKIP
-    const lastRC = (sPrev.flags && sPrev.flags.lastRepliedCursorCount) || 0;
-    const lastRD = (sPrev.flags && sPrev.flags.lastRepliedCursorDigest) || '';
+    // Idempotência forte: se já existe emissão in-flight para este cursor, SKIP
     const inFlightSig = (sPrev.flags && sPrev.flags.emitInFlightSig) || '';
-
-    if (cursor.count && cursor.digest && (
-      (lastRC === cursor.count && lastRD === cursor.digest) ||
-      inFlightSig === sig
-    )) {
+    if (inFlightSig === sig) {
       return {
         mensagemParaCliente: '',
         dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
@@ -981,15 +976,14 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       texto: textoSan,
       cursorCount: cursor.count || 0,
       cursorDigest: cursor.digest || '',
-      cursorSig: sig
+      cursorSig: sig,
+      lastClientTs: cursor.lastTs || 0
     });
 
-    // Marca cursor respondido e limpa in-flight
+    // Limpa in-flight
     try {
       const sNow = orchestrator._get(perfil, chatId) || {};
       sNow.flags = sNow.flags || {};
-      sNow.flags.lastRepliedCursorCount = cursor.count || 0;
-      sNow.flags.lastRepliedCursorDigest = cursor.digest || '';
       sNow.flags.emitInFlightSig = ''; // libera trava
       orchestrator._set(perfil, chatId, sNow);
     } catch {}

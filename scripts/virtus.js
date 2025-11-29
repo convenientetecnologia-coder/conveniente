@@ -73,6 +73,10 @@ function isNoiseNorm(n) {
   // Linhas curtas com tempo relativo, sem conteúdo semântico
   if (/\b(min|mins?|minuto|minutos|hora|horas|day|days|dia|dias)\b/.test(t) && t.length <= 40) return true;
 
+  // Status de mensagem (enviado, entregue, visto, etc)
+  if (/^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(t)) return true;
+  if (/\b(you\s+sent|voc[eê]\s+enviou)\b/.test(t)) return true;
+
   return false;
 }
 
@@ -98,7 +102,9 @@ function explodeAndFilterLines(entry, ultimaIaNorm) {
     if (isNoiseNorm(ln)) continue;
 
     // Anti-eco: se for mensagem do cliente idêntica à última IA enviada, ignore
-    if (autor === 'cliente' && ultimaIaNorm && ln === ultimaIaNorm) continue;
+    if (autor === 'cliente' && ultimaIaNorm) {
+      if (nearEqual(ln, ultimaIaNorm)) continue;
+    }
 
     out.push({ autor, texto: line, timestamp: ts });
   }
@@ -189,24 +195,24 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
   });
 
   // Resposta pronta pelo pedidos.js -> enviar no Messenger (com gate por cursor)
-  pedidos.events.on('replyReady', async ({ perfil, chatId, texto, cursorCount, cursorDigest, cursorSig }) => {
+  pedidos.events.on('replyReady', async ({ perfil, chatId, texto, cursorCount, cursorDigest, cursorSig, lastClientTs }) => {
     try {
       if (perfil !== nome) return;
       const payload = String(texto || '').trim();
       if (!payload) return;
 
-      // Cursor do evento (forte)
       const evCount = Number(cursorCount || 0);
       const evDigest = String(cursorDigest || '');
       const evSig = String(cursorSig || (evCount && evDigest ? `${evCount}|${evDigest}` : ''));
+      const evLastTs = Number(lastClientTs || 0) || undefined;
 
-      // Throttle curto por cursorSig (2s)
+      // Throttle por cursorSig (já existente — não modifique)
       let stCur = await getChatState(nome, chatId).catch(()=>null);
       const lastEvMap = (stCur && stCur.lastReplyEvMap) || {};
       const nowMs = Date.now();
       if (evSig && lastEvMap[evSig] && (nowMs - lastEvMap[evSig]) < 2000) {
-        try { stepLog.appendJSONL(nome, 'virtus', { step: 'reply_throttle_same_cursor', chatId, evSig }); } catch {}
-        try { logger.info('[REPLY] throttle_same_cursor', { nome, chatId, evSig }); } catch {}
+        await stepLog.appendJSONL(nome, 'virtus', { step: 'reply_throttle_same_cursor', chatId, evSig });
+        logger.info('[REPLY] throttle_same_cursor', { nome, chatId, evSig });
         return;
       }
       if (evSig) {
@@ -214,19 +220,20 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         await setChatState(nome, chatId, { lastReplyEvMap: lastEvMap });
       }
 
-      // Gate adicional por chats_state já respondido (fallback/salvaguarda)
+      // Gate fallback por repliedCursor* permanece igual
+
       const cCount = Number(stCur && stCur.clientCursorCount || 0);
       const cDigest = stCur && stCur.clientCursorDigest || '';
       const rCount = Number(stCur && stCur.repliedCursorCount || 0);
       const rDigest = stCur && stCur.repliedCursorDigest || '';
 
       if (cCount && cDigest && rCount === cCount && rDigest && rDigest === cDigest) {
-        try { stepLog.appendJSONL(nome, 'virtus', { step: 'reply_skip_same_cursor', chatId, cCount, cDigest }); } catch {}
-        try { logger.info('[REPLY] skip_same_cursor(fallback)', { nome, chatId, cCount, cDigest }); } catch {}
+        await stepLog.appendJSONL(nome, 'virtus', { step: 'reply_skip_same_cursor', chatId, cCount, cDigest });
+        logger.info('[REPLY] skip_same_cursor(fallback)', { nome, chatId, cCount, cDigest });
         return;
       }
 
-      // Enfileira com overrides e assinatura do evento
+      // Enfileira resposta — passe lastClientTsOverride!
       await queueMessengerSend(nome, {
         chatId,
         resposta: payload,
@@ -235,10 +242,11 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         origin: 'replyReady',
         cursorSig: evSig,
         cursorCountOverride: evCount || undefined,
-        cursorDigestOverride: evDigest || undefined
+        cursorDigestOverride: evDigest || undefined,
+        lastClientTsOverride: evLastTs
       });
 
-      try { logger.info('[REPLY] queued', { nome, chatId, evSig }); } catch {}
+      logger.info('[REPLY] queued', { nome, chatId, evSig });
 
     } catch {}
   });
@@ -1014,9 +1022,22 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         return;
       }
       
+      let ok = true;
       if (enviarRespostaMessengerSeguraFn) {
-        await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
+        ok = await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
       }
+      if (!ok) {
+        proximo.__tries = (proximo.__tries || 0) + 1;
+        if (proximo.__tries <= 2) {
+          fila.push(proximo); // requeue preserving earliestSendAt
+          logger.warn('[QUEUE] requeue_after_send_fail', { nomePerfil, chatId: proximo.chatId, tries: proximo.__tries });
+        } else {
+          logger.error('[QUEUE] drop_after_max_retries', { nomePerfil, chatId: proximo.chatId });
+        }
+        if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
+        return;
+      }
+
       ultimaRespostaMessenger.set(nomePerfil, Date.now());
 
       if (marcarRespondidoFn) {
@@ -1025,17 +1046,12 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
 
-      // Atualiza lastIATs, ultimaRespostaEnviada e cursor respondido
+      // Atualiza lastIATs e repliedCursor* COM SNAPSHOT DO ITEM
       try {
-        const st2 = await getChatState(nomePerfil, proximo.chatId).catch(() => null);
-        const cCount2 = Number(st2 && st2.clientCursorCount || 0);
-        const cDigest2 = st2 && st2.clientCursorDigest || '';
         await setChatState(nomePerfil, proximo.chatId, {
           lastIATs: Date.now(),
-          ultimaRespostaEnviada: respostaFinal,
-          ultimaRespostaEnviadaNorm: normalizeContent(respostaFinal),
-          repliedCursorCount: cCount2,
-          repliedCursorDigest: cDigest2
+          repliedCursorCount: (typeof proximo.cursorCount === 'number') ? proximo.cursorCount : 0,
+          repliedCursorDigest: proximo.cursorDigest || ''
         });
         if (typeof flushChatStateNow === 'function') {
           await flushChatStateNow(nomePerfil);
@@ -1250,6 +1266,7 @@ async function extrairHistoricoConversa(page) {
             if (/^\d{1,2}:\d{2}$/.test(stopNorm)) continue;  // "03:26"
             if (/^(hoje|ontem)\b/.test(stopNorm)) continue;
             if (/^\s*[·•]\s*$/.test(textoLimpo)) continue;
+            if (/^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(stopNorm)) continue;
           } catch {}
 
           out.push({
@@ -1541,7 +1558,7 @@ const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
 
-async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotifier = false, origin = '', cursorSig = '', cursorCountOverride, cursorDigestOverride }) {
+async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotifier = false, origin = '', cursorSig = '', cursorCountOverride, cursorDigestOverride, lastClientTsOverride }) {
   try {
     const payload = String(resposta || '').trim();
     if (!payload) return false;
@@ -1549,17 +1566,23 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     // Snapshot de estado atual do chat
     const st = await getChatState(nomePerfil, chatId).catch(()=>null);
 
-    // Usa override do evento se vier; fallback para chats_state
     const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : (st && st.clientCursorCount || 0));
     const cDigest = (typeof cursorDigestOverride === 'string') ? cursorDigestOverride : (st && st.clientCursorDigest || '');
 
-    // Assinatura forte para dedupe
     const sig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
 
     if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
     const fila = filaEnvioMessenger.get(nomePerfil);
 
-    // Dedupe por cursorSig (forte). Fallback: (count,digest) se não houver sig
+    // Coalescência por chatId: se for replyReady, apague todos os outros replyReady desse chat
+    if (origin === 'replyReady') {
+      for (let i = fila.length - 1; i >= 0; i--) {
+        const it = fila[i];
+        if (it && it.chatId === chatId && it.origin === 'replyReady') fila.splice(i, 1);
+      }
+    }
+
+    // Dedupe por cursorSig (já existente, mantenha)
     const existeMesmoCursor = sig
       ? fila.some(it => it && it.chatId === chatId && it.cursorSig === sig)
       : fila.some(it =>
@@ -1577,13 +1600,13 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       return false;
     }
 
-    // Calcula janela de espera (20–60s) para respostas do pedidos.js (replyReady), ancorada em lastCLIts
+    // earliestSendAt para replyReady, ancorado NO lastClientTsOverride
     let earliestSendAt = undefined;
     if (origin === 'replyReady') {
-      const base = Number(st && st.lastCLIts || 0);
+      const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0)
+        ? lastClientTsOverride
+        : Date.now();
       const jitter = WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
-      // Se não houver lastCLIts, ancorar no agora
-      const anchor = base > 0 ? base : Date.now();
       earliestSendAt = anchor + jitter;
 
       try {
@@ -1610,7 +1633,8 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       cursorDigest: cDigest,
       cursorSig: sig || '',
       origin: origin || '',
-      earliestSendAt // pode ser undefined para mensagens que não são replyReady
+      earliestSendAt, // pode ser undefined para mensagens que não são replyReady
+      lastClientTs: lastClientTsOverride || 0
     });
 
     try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, sig, cCount, cDigest, origin, earliestSendAt, ts: Date.now() }); } catch {}
