@@ -51,6 +51,94 @@ function nearEqual(a, b) {
   return Math.abs(na.length - nb.length) <= 5 && (na.includes(nb) || nb.includes(na));
 }
 
+function isNoiseNorm(n) {
+  const s = String(n || '').trim();
+  if (!s) return true;
+  // Normaliza
+  const t = normalizeContent(s);
+  if (!t) return true;
+
+  // Lixos comuns do Messenger/Marketplace
+  if (t === 'inserir') return true;
+  if (t === 'mensagem nao lida' || t === 'mensagem não lida') return true;
+  if (/^\d{1,2}:\d{2}$/.test(t)) return true;              // "03:26"
+  if (/^(hoje|ontem)\b/.test(t)) return true;
+  if (/^\s*[·•]\s*$/.test(s)) return true;                 // bullet solto
+  if (/^voce:|^v[oó]ce:|^you:/.test(t)) return true;       // prefixos de autoria no texto
+  if (/^voce\s+enviou\b|^you\s+sent\b/.test(t)) return true;
+  if (/^\W+$/.test(s)) return true;                        // só sinais
+  // Marcas do cabeçalho "Conveniente …" (curtas)
+  if (/\bconveniente\b/.test(t) && t.length <= 80) return true;
+
+  // Linhas curtas com tempo relativo, sem conteúdo semântico
+  if (/\b(min|mins?|minuto|minutos|hora|horas|day|days|dia|dias)\b/.test(t) && t.length <= 40) return true;
+
+  return false;
+}
+
+function explodeAndFilterLines(entry, ultimaIaNorm) {
+  const out = [];
+  const ts = Number(entry && entry.timestamp || Date.now());
+  const autor = entry && entry.autor === 'ia' ? 'ia' : 'cliente';
+  const raw = String(entry && entry.texto || '');
+
+  const parts = raw.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
+
+  for (const line of parts) {
+    const ln = normalizeContent(line);
+    if (!ln) continue;
+
+    // "Você:"/"You:" no início: trata como IA somente se a autoria já vier 'ia'
+    if (/^voce:|^v[oó]ce:|^you:/.test(ln)) {
+      if (autor === 'ia') out.push({ autor: 'ia', texto: line, timestamp: ts });
+      continue; // se não for IA, ignora a linha (Messenger ecoa prefixo)
+    }
+
+    // Ruído
+    if (isNoiseNorm(ln)) continue;
+
+    // Anti-eco: se for mensagem do cliente idêntica à última IA enviada, ignore
+    if (autor === 'cliente' && ultimaIaNorm && ln === ultimaIaNorm) continue;
+
+    out.push({ autor, texto: line, timestamp: ts });
+  }
+
+  return out;
+}
+
+function sanitizeHistoricoRecords(historico, ultimaIaNorm) {
+  const rows = Array.isArray(historico) ? historico : [];
+  const exploded = [];
+
+  for (const e of rows) {
+    const items = explodeAndFilterLines(e, ultimaIaNorm);
+    for (const it of items) exploded.push(it);
+  }
+
+  // Ordena e garante monotonicidade
+  exploded.sort((a,b) => (Number(a.timestamp||0) - Number(b.timestamp||0)));
+  for (let i=1;i<exploded.length;i++) {
+    if (Number(exploded[i].timestamp) <= Number(exploded[i-1].timestamp)) {
+      exploded[i].timestamp = Number(exploded[i-1].timestamp) + 1;
+    }
+  }
+
+  // Dedup curta janela por autor: mensagens iguais em <=2.5s viram ruído
+  const dedup = [];
+  const lastByAutor = { ia: {norm:'', ts:0}, cliente:{norm:'', ts:0} };
+  for (const m of exploded) {
+    const n = normalizeContent(m.texto);
+    if (!n) continue;
+    const prev = lastByAutor[m.autor] || { norm:'', ts:0 };
+    const delta = Math.abs(Number(m.timestamp||0) - Number(prev.ts||0));
+    if (prev.norm && nearEqual(n, prev.norm) && delta <= 2500) continue;
+    dedup.push(m);
+    lastByAutor[m.autor] = { norm:n, ts: Number(m.timestamp||0) };
+  }
+
+  return dedup;
+}
+
 // Vinculação de eventos do orquestrador por perfil — evita múltiplos listeners
 const __pedidosEventBound = new Set();
 
@@ -1026,24 +1114,24 @@ async function extrairHistoricoConversa(page) {
 
           if (!t) return 0;
           if (/\bagora\b|just now|now/i.test(raw)) return now;
-          
+
           let m = t.match(/\b(\d+)\s*(s|seg|second|seconds?)\b/);
           if (m) return now - (parseInt(m[1], 10) * 1000);
-          
+
           m = t.match(/\b(\d+)\s*(min|mins?|minute|minuto)\b/);
           if (m) return now - (parseInt(m[1], 10) * 60000);
-          
+
           m = t.match(/\b(\d+)\s*(h|hora|horas|hour|hours?)\b/);
           if (m) return now - (parseInt(m[1], 10) * 3600000);
-          
+
           m = t.match(/\b(\d+)\s*(d|dia|dias|day|days)\b/);
           if (m) return now - (parseInt(m[1], 10) * 86400000);
-          
+
           if (/\bontem\b|yesterday\b/.test(t)) return now - 86400000;
-          
+
           const dp = Date.parse(raw);
           if (Number.isFinite(dp)) return dp;
-          
+
           return 0;
         } catch {
           return 0;
@@ -1055,8 +1143,8 @@ async function extrairHistoricoConversa(page) {
 
       for (const r of rows) {
         try {
-          const txt = (r.innerText || r.textContent || '').trim();
-          if (!txt) continue;
+          const rawTxt = (r.innerText || r.textContent || '').trim();
+          if (!rawTxt) continue;
 
           let isMine = false;
           try {
@@ -1066,9 +1154,11 @@ async function extrairHistoricoConversa(page) {
             }
           } catch {}
 
-          const n = norm(txt);
-          if (/\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(n)) isMine = true;
+          const nraw = norm(rawTxt);
+          if (/\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(nraw)) isMine = true;
+          if (/^\s*(voc[eê]:|voce:|you:)\b/i.test(rawTxt)) isMine = true; // NOVO: autoria por prefixo
 
+          // Extrai timestamp do abbr
           let ts = 0;
           try {
             const ab = r.querySelector('abbr[aria-label]');
@@ -1085,13 +1175,23 @@ async function extrairHistoricoConversa(page) {
             }
           } catch {}
 
-          const textoLimpo = txt.replace(/^(você\s+enviou|you\s+sent)[:\s]*/i, '').trim();
+          // Remove rótulos "você enviou/you sent" e também "Você:"/"You:"
+          const textoLimpo = rawTxt
+            .replace(/^(você\s+enviou|you\s+sent)[:\s]*/i, '')
+            .replace(/^\s*(voc[eê]:|voce:|you:)\s*/i, '')
+            .trim();
+
           if (!textoLimpo) continue;
 
-          // Filtro hard de ruído: ignora headers/logos ("Conveniente")
+          // Filtro bruto de ruído
           try {
             const stopNorm = (textoLimpo || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
             if (/^conveniente(?:\s+contingencia)?$/.test(stopNorm)) continue;
+            if (stopNorm === 'inserir') continue;
+            if (/^mensagem\s+nao\s+lida/.test(stopNorm)) continue;
+            if (/^\d{1,2}:\d{2}$/.test(stopNorm)) continue;  // "03:26"
+            if (/^(hoje|ontem)\b/.test(stopNorm)) continue;
+            if (/^\s*[·•]\s*$/.test(textoLimpo)) continue;
           } catch {}
 
           out.push({
@@ -1103,8 +1203,8 @@ async function extrairHistoricoConversa(page) {
       }
 
       out.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-      
-      // Monotonicidade: garante que timestamps nunca sejam iguais ou menores que o anterior
+
+      // Monotonicidade de timestamps
       for (let i = 1; i < out.length; i++) {
         const prev = Number(out[i - 1].timestamp || 0);
         const cur  = Number(out[i].timestamp || 0);
@@ -1112,7 +1212,7 @@ async function extrairHistoricoConversa(page) {
           out[i].timestamp = prev + 1;
         }
       }
-      
+
       return out;
     });
 
@@ -1336,6 +1436,13 @@ const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
 // Variáveis globais para controle de backoff e falhas
 let recoverBackoffMs = 0;
 const failCounts = new Map();
+function setFailCount(chatId, n) {
+  if (!failCounts.has(chatId) && failCounts.size >= 1000) {
+    const first = failCounts.keys().next().value;
+    if (first !== undefined) failCounts.delete(first);
+  }
+  failCounts.set(chatId, n);
+}
 
 const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
 const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
@@ -1945,6 +2052,11 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
         });
       } catch {}
 
+      // NOVO: registra imediatamente a linha 'ia' no JSONL para blindar o histórico em disco
+      try {
+        await appendIaLine(nome, chatId, safeMsg);
+      } catch {}
+
     }
 
   } finally {
@@ -2271,23 +2383,21 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
 
           const historicoConversa = await extrairHistoricoConversa(p);
-          if (!Array.isArray(historicoConversa) || !historicoConversa.length) {
+
+          // Constroi histórico sanitizado com base na última IA enviada
+          const ultimaIaNorm = stPrev && stPrev.ultimaRespostaEnviadaNorm ? String(stPrev.ultimaRespostaEnviadaNorm) : '';
+          const historicoSan = sanitizeHistoricoRecords(historicoConversa, ultimaIaNorm);
+
+          if (!Array.isArray(historicoSan) || !historicoSan.length) {
             await setChatState(nome, chatId, { lastScanAt: Date.now() });
             continue;
           }
-          await appendChatHistoryLog(nome, chatId, historicoConversa);
 
-          // Filtra mensagens do cliente
-          let clientMsgs = historicoConversa.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
+          // Persistência imediata do histórico sanitizado
+          await appendChatHistoryLog(nome, chatId, historicoSan);
 
-          // Blindagem anti-eco: se a última "cliente" for igual à última IA enviada, excluir do tail
-          const lastBotNorm = stPrev && stPrev.ultimaRespostaEnviadaNorm ? String(stPrev.ultimaRespostaEnviadaNorm) : '';
-          if (clientMsgs.length && lastBotNorm) {
-            const tailNorm = normalizeContent(clientMsgs[clientMsgs.length - 1].texto || '');
-            if (tailNorm && tailNorm === normalizeContent(lastBotNorm)) {
-              clientMsgs = clientMsgs.slice(0, -1);
-            }
-          }
+          // Filtra somente mensagens do cliente (sanitizadas)
+          const clientMsgs = historicoSan.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
 
           // Janela de 8 horas
           const lastClientTs = clientMsgs.length ? Number(clientMsgs[clientMsgs.length - 1].timestamp || 0) : 0;
@@ -2307,7 +2417,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           } catch {}
 
-          // Cursor determinístico do CLIENTE (count + digest dos últimos 10 textos normalizados)
+          // Cursor determinístico do cliente: count + digest (últimas 10 mensagens normalizadas)
           const clientCount = clientMsgs.length;
           const clientDigest = clientCount
             ? sha1(clientMsgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|'))
@@ -2333,7 +2443,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             continue;
           }
 
-          // novasMsgs: apenas o delta
+          // Delta de novas mensagens
           let novasMsgs = [];
           if (clientCount > prevCount) {
             novasMsgs = clientMsgs.slice(prevCount);
@@ -2352,8 +2462,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (stLoc2 && stLoc2.cidade) cidadeCtx = stLoc2.cidade;
           }
 
+          // Envia historicoSan (não bruto) para o orquestrador
           await pedidos.ingestFromVirtus(nome, chatId, {
-            historico: historicoConversa,
+            historico: historicoSan,
             contexto: { cidade: cidadeCtx || null },
             novasMsgs
           });
