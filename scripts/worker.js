@@ -5,6 +5,308 @@ const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 const browserHelper = require('./browser.js');
+
+// ====== INÍCIO: LOCK GLOBAL DE LOCALIZAÇÃO (arquivo) ======
+const LOC_GLOBAL_LOCK_FILE = path.join(__dirname, '..', 'dados', 'loc_global.lock');
+
+async function acquireGlobalLocLock(timeoutMs = 60000) {
+  const start = Date.now();
+  while ((Date.now() - start) < timeoutMs) {
+    try {
+      const fd = fs.openSync(LOC_GLOBAL_LOCK_FILE, 'wx');
+      try {
+        fs.writeFileSync(fd, String(Date.now()), 'utf8');
+        fs.fsyncSync(fd);
+      } finally {
+        try { fs.closeSync(fd); } catch {}
+      }
+      try { logger.info('[LOCALIZACAO][LOCK] ACQUIRED', { file: LOC_GLOBAL_LOCK_FILE }); } catch {}
+      return true;
+    } catch {
+      try {
+        const st = fs.statSync(LOC_GLOBAL_LOCK_FILE);
+        const age = Date.now() - st.mtimeMs;
+        if (age > 45 * 1000) {
+          try { fs.unlinkSync(LOC_GLOBAL_LOCK_FILE); } catch {}
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, 25));
+    }
+  }
+  try { logger.warn('[LOCALIZACAO][LOCK] TIMEOUT', { file: LOC_GLOBAL_LOCK_FILE, timeoutMs }); } catch {}
+  return false;
+}
+
+function releaseGlobalLocLock() {
+  try { fs.unlinkSync(LOC_GLOBAL_LOCK_FILE); } catch {}
+  try { logger.info('[LOCALIZACAO][LOCK] RELEASED', { file: LOC_GLOBAL_LOCK_FILE }); } catch {}
+}
+// ====== FIM: LOCK GLOBAL DE LOCALIZAÇÃO (arquivo) ======
+
+// Snapshot status throttle (evita overkill em ambientes multi-perfil)
+let _lastSnapAt = 0;
+
+// ====== INÍCIO: FILA GLOBAL DE BUSCA DE LOCALIZAÇÃO (sem ciclo) ======
+const filaBuscaLocalizacao = [];
+let processandoBuscaLocalizacao = false;
+
+// Registra no global para uso pelo Virtus (sem require de worker.js)
+global.__buscaLocalizacaoVirtus = {
+  adicionarBuscaLocalizacao: (chatId, urlClassificado, nomePerfil, callback) => {
+    try {
+      filaBuscaLocalizacao.push({ chatId, urlClassificado, nomePerfil, callback });
+      processarFilaBuscaLocalizacao();
+    } catch (e) {
+      logger.error('[LOCALIZACAO] Falha ao enfileirar', { chatId, error: e && e.message || e });
+      try { callback && callback(null); } catch {}
+    }
+  }
+};
+
+async function processarFilaBuscaLocalizacao() {
+  if (processandoBuscaLocalizacao) return;
+  if (filaBuscaLocalizacao.length === 0) return;
+
+  processandoBuscaLocalizacao = true;
+  const item = filaBuscaLocalizacao.shift();
+
+  try {
+    const localizacao = await buscarLocalizacaoClassificado(
+      item.chatId,
+      item.urlClassificado,
+      item.nomePerfil
+    );
+    try { item.callback(localizacao || null); } catch {}
+  } catch (e) {
+    logger.error('[LOCALIZACAO] Erro ao buscar localização', { chatId: item.chatId, error: e && e.message || e });
+    try { item.callback(null); } catch {}
+  } finally {
+    processandoBuscaLocalizacao = false;
+    setTimeout(() => processarFilaBuscaLocalizacao(), 2000); // 2s entre buscas
+  }
+}
+
+async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil) {
+  // NOTA: 'controllers' será declarado mais adiante no arquivo. A função só será executada
+  // depois que 'controllers' existir (quando Virtus chamar a fila). Isso é seguro.
+
+  // Resolve controller pelo global ou escopo local
+  const ctrlGlobal = (global && global.controllers) ? global.controllers.get(nomePerfil) : null;
+  let ctrl = ctrlGlobal;
+  try {
+    if (!ctrl) {
+      // eslint-disable-next-line no-undef
+      if (typeof controllers !== 'undefined') {
+        // eslint-disable-next-line no-undef
+        ctrl = controllers.get(nomePerfil);
+      }
+    }
+  } catch {}
+
+  if (!ctrl || !ctrl.browser) return null;
+
+  return await _execBusca(ctrl);
+
+  async function _execBusca(controller) {
+    const promptFretes = require('./promptFretes.js');
+    const browser = controller.browser;
+
+    // Helper: extrai URL do item a partir da página de chat
+    async function _descobrirUrlClassificadoSeNecessario(page) {
+      if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
+        return urlClassificado;
+      }
+      try {
+        const chatUrl = `https://www.messenger.com/marketplace/t/${chatId}/`;
+        await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 500));
+        const found = await page.evaluate(() => {
+          const fixAbs = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
+          const anchors = Array.from(document.querySelectorAll('a'));
+          for (const a of anchors) {
+            const href = a.getAttribute('href') || a.href || '';
+            if (href && href.includes('/marketplace/item/') && !href.includes('/marketplace/t/')) {
+              return fixAbs(href);
+            }
+          }
+          return null;
+        });
+        return found;
+      } catch {
+        return null;
+      }
+    }
+
+    // Flag global ANTES de newPage
+    let buscaId = '';
+    let lockAcquired = false;
+    let novaAba = null;
+
+    try {
+      // Garante estrutura para flags de busca
+      if (!browser._buscasLocalizacaoAtivas) {
+        browser._buscasLocalizacaoAtivas = new Set();
+      }
+      buscaId = `busca_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      browser._buscasLocalizacaoAtivas.add(buscaId);
+      try {
+        logger.info('[LOCALIZACAO] Flag adicionada', { nomePerfil, buscaId, flagSize: browser._buscasLocalizacaoAtivas.size });
+      } catch {}
+
+      // Adquiri lock global (1 coleta por vez no servidor inteiro)
+      lockAcquired = await acquireGlobalLocLock(60000);
+      if (!lockAcquired) {
+        try {
+          logger.warn('[LOCALIZACAO] Lock global não adquirido (timeout)', { nomePerfil, chatId });
+        } catch {}
+        return null;
+      }
+
+      // Abre nova aba PROTEGIDA (pruner respeita esta marca)
+      novaAba = await browser.newPage();
+      try {
+        novaAba._buscaLocalizacao = true;
+        novaAba._buscaLocalizacaoSince = Date.now();
+        novaAba._buscaLocalizacaoChatId = chatId;
+      } catch {}
+
+      // Descobre URL do classificado se necessário
+      let targetUrl = await _descobrirUrlClassificadoSeNecessario(novaAba);
+      if (!targetUrl || typeof targetUrl !== 'string') {
+        try {
+          logger.warn('[LOCALIZACAO] Localização NÃO encontrada (sem url do item)', { nomePerfil, chatId, urlClassificado });
+        } catch {}
+        return null;
+      }
+
+      // Vai para a página do classificado
+      await novaAba.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+
+      // Apenas scraping DOM - coleta candidatos de texto, SEM parsing
+      const candidates = await novaAba.evaluate(() => {
+        try {
+          function isVisible(el) {
+            try {
+              const st = window.getComputedStyle(el);
+              if (!st) return false;
+              if (st.visibility === 'hidden' || st.display === 'none') return false;
+              const r = el.getBoundingClientRect();
+              return !!(r && r.width > 0 && r.height > 0);
+            } catch { return false; }
+          }
+          const candidates = [];
+
+          // Estratégia 1 — Anchor de localização do Marketplace
+          {
+            const anchors = Array.from(document.querySelectorAll('a[role="link"][href^="/marketplace/"], a[href^="/marketplace/"]'))
+              .filter(a => {
+                const href = (a.getAttribute('href') || '').trim();
+                return href && !/\/t\//i.test(href) && !/\/item\//i.test(href);
+              });
+            for (const a of anchors) {
+              if (!isVisible(a)) continue;
+              const texts = [
+                (a.innerText || a.textContent || '').trim(),
+                ...Array.from(a.querySelectorAll('span')).map(s => (s.innerText || s.textContent || '').trim())
+              ].filter(Boolean);
+              candidates.push(...texts);
+            }
+          }
+
+          // Estratégia 2 — Spans e Divs visíveis
+          {
+            const nodes = Array.from(document.querySelectorAll('span,div'));
+            for (const el of nodes) {
+              if (!isVisible(el)) continue;
+              const txt = (el.innerText || el.textContent || '').trim();
+              if (txt) candidates.push(txt);
+            }
+          }
+
+          // Estratégia 3 — Cabeçalhos/regiões principais
+          {
+            const regs = [
+              document.querySelector('header'),
+              document.querySelector('[role="main"]'),
+              document.querySelector('[data-pagelet*="Marketplace"]')
+            ].filter(Boolean);
+            for (const r of regs) {
+              const lines = ((r.innerText || r.textContent || '') || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
+              candidates.push(...lines);
+            }
+          }
+
+          // Estratégia 4 — Último recurso: fullText
+          {
+            const full = (document.body && (document.body.innerText || document.body.textContent) || '');
+            if (full) {
+              const parts = full.split(/\n+/).map(x => x.trim()).filter(Boolean);
+              candidates.push(...parts);
+            }
+          }
+
+          return candidates;
+        } catch {
+          return [];
+        }
+      });
+
+      // Parsing pelo domínio do promptFretes
+      const finalLocal = promptFretes.parseCityUfFromText(candidates);
+
+      if (finalLocal && finalLocal.cidade && finalLocal.estado) {
+        try {
+          logger.info('[LOCALIZACAO] Localização encontrada no classificado', {
+            nomePerfil,
+            chatId,
+            cidade: finalLocal.cidade,
+            estado: finalLocal.estado,
+            urlClassificado: targetUrl
+          });
+        } catch {}
+      } else {
+        try {
+          logger.warn('[LOCALIZACAO] Localização NÃO encontrada no classificado', {
+            nomePerfil,
+            chatId,
+            urlClassificado: targetUrl
+          });
+        } catch {}
+      }
+
+      return finalLocal || null;
+    } catch (e) {
+      try {
+        logger.error('[LOCALIZACAO] Erro ao buscar localização', { nomePerfil, chatId, error: (e && e.message) || e });
+      } catch {}
+      return null;
+    } finally {
+      // Fechamento e limpeza garantidos
+      try { if (novaAba) await novaAba.close({ runBeforeUnload: false }); } catch {}
+      try { if (browser._buscasLocalizacaoAtivas) browser._buscasLocalizacaoAtivas.delete(buscaId); } catch {}
+      try { if (novaAba) { delete novaAba._buscaLocalizacao; delete novaAba._buscaLocalizacaoSince; delete novaAba._buscaLocalizacaoChatId; } } catch {}
+      try {
+        logger.info('[LOCALIZACAO] Flag removida/aba fechada', {
+          nomePerfil, buscaId, flagSize: (browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size) || 0
+        });
+      } catch {}
+      if (lockAcquired) {
+        try { releaseGlobalLocLock(); } catch {}
+      }
+    }
+  }
+}
+
+// expõe no module.exports para ambientes que realmente façam require deste arquivo
+module.exports = module.exports || {};
+module.exports.adicionarBuscaLocalizacao = global.__buscaLocalizacaoVirtus.adicionarBuscaLocalizacao;
+module.exports.processarFilaBuscaLocalizacao = processarFilaBuscaLocalizacao;
+module.exports.buscarLocalizacaoClassificado = buscarLocalizacaoClassificado;
+
+// também deixa controllers acessível via global para a função acima
+// (será atualizado quando controllers for definido mais abaixo no arquivo)
+// ====== FIM: FILA GLOBAL DE BUSCA DE LOCALIZAÇÃO ======
+
 const virtusHelper = require('./virtus.js');
 const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
@@ -416,7 +718,7 @@ async function killProcessTreeByRootPid(pid) {
 
 async function killStrayChromes() {
   // Intencionalmente no-op: 110% sem WMI/PowerShell e sem ps-list
-  return;
+      return;
 }
 
 try {
@@ -596,6 +898,8 @@ await issues.append(nome, type, msg);
 }
 
 const controllers = new Map();
+// Atualiza global.controllers para uso pela fila de busca de localização
+global.controllers = controllers;
 
 const robeMeta = {};
 
@@ -790,6 +1094,22 @@ async function activateOnce(nome, source = '') {
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
         }
+
+        // PÓS-ACTIVATE: CHECK DE HEADROOM (RAM) IMEDIATAMENTE DEPOIS DE ABRIR PERFIL
+        if (HEADROOM_AFTER_OPEN_MB > 0) {
+          const freeMB = getAvailableMB();
+          if (freeMB < HEADROOM_AFTER_OPEN_MB) {
+            try { browser && browser.close && await browser.close(); } catch {}
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+            setKillGuard(nome, 30000);
+            await reportAction(nome, 'open_rollback_memory', `Memória livre após abrir perfil caiu abaixo do headroom (${freeMB}MB < ${HEADROOM_AFTER_OPEN_MB}MB)`);
+            logger.warn(`[OPEN] rollback por swap/headroom`, { nome, freeMB, limit:HEADROOM_AFTER_OPEN_MB });
+            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+            return { ok:false, error:'headroom_below_min_after_open', freeMB, limit:HEADROOM_AFTER_OPEN_MB };
+          }
+        }
+
         const proc = browser.process && browser.process();
         if (proc && proc.pid && Number.isFinite(proc.pid)) {
           robeMeta[nome] = robeMeta[nome] || {};
@@ -814,6 +1134,17 @@ async function activateOnce(nome, source = '') {
           }, 2000);
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+
+        // [NAV_INIT] garantir UI do Marketplace após abrir o browser (sem usar o chat ativo!)
+        try {
+          const pages = await browser.pages().catch(()=>[]);
+          const main = pages && pages[0];
+          if (main) {
+            await browserHelper.gotoMessengerMarketplace(main, nome);
+          }
+        } catch (e) {
+          logger.warn('[NAV_INIT] falha ao preparar marketplace', { nome, error: (e && e.message)||String(e) });
+        }
 
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activatedAt = Date.now();
@@ -1061,6 +1392,16 @@ function getWorkingProfileNames() {
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
+    const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000; // 60s de proteção
+    const now = Date.now();
+
+    // BLOQUEIO CRÍTICO: Flag global ativa => nunca fechar
+    try {
+      if (browser && browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
+        return;
+      }
+    } catch {}
+
     const pages = await browser.pages();
     let closed = 0;
 
@@ -1068,13 +1409,27 @@ async function closeExtraPages(browser, mainPage, nome) {
     const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
     const inRobe = (browser && browser._robeActiveFor === nome) || (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true);
     const inConfig = ctrl && ctrl.configurando === true;
-    const inHuman = ctrl && ctrl.humanControl === true;
+    const inHuman  = ctrl && ctrl.humanControl === true;
+
+    function isProtectedBusca(p) {
+      try {
+        if (p._buscaLocalizacao === true) {
+          const age = now - (p._buscaLocalizacaoSince || 0);
+          if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) return true;
+          try { delete p._buscaLocalizacao; } catch {}
+          try { delete p._buscaLocalizacaoSince; } catch {}
+          try { delete p._buscaLocalizacaoChatId; } catch {}
+        }
+      } catch {}
+      return false;
+    }
 
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       for (const p of pages) {
         try {
           if (mainPage && p === mainPage) continue;
           if (!mainPage && pages[0] && p === pages[0]) continue;
+          if (isProtectedBusca(p)) continue;
           let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
             await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1087,12 +1442,21 @@ async function closeExtraPages(browser, mainPage, nome) {
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       const again = await browser.pages();
       for (const p of again) {
+        try {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && again[0] && p === again[0]) continue;
+          // PROTEÇÃO DUPLA: flag global + marcação
+          try {
+            if (browser && browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
+              continue;
+            }
+          } catch {}
+          if (isProtectedBusca(p)) continue;
         let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
         closed++;
+        } catch {}
       }
     }
 
@@ -1113,6 +1477,16 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
     try {
+      const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
+      const now = Date.now();
+      try {
+        const pages = await browser.pages();
+        const hasBusca = Array.isArray(pages) && pages.some(p => p._buscaLocalizacao === true && (now - (p._buscaLocalizacaoSince || 0)) < MAX_BUSCA_LOCALIZACAO_AGE_MS);
+        if (hasBusca) {
+          // Se há busca em andamento recentíssima, não fecha nada nessa passada.
+          return;
+        }
+      } catch {}
       await closeExtraPages(browser, mainPage, nome);
     } catch (e) {
       if (process.env.PRUNE_DEBUG === '1') {
@@ -1288,8 +1662,8 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
             const arr = Array.isArray(obj && obj.traceEvents) ? obj.traceEvents : [];
             for (const e of arr) {
               if (e && typeof e.pid === 'number') pids.add(e.pid);
-            }
-          } catch {} 
+      }
+    } catch {}
         } finally {
           resolve(Array.from(pids));
         }
@@ -1309,7 +1683,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
     const res = await tracingComplete;
     try { await session.detach && session.detach().catch(()=>{}); } catch {}
     return Array.isArray(res) ? res : [];
-  } catch {
+        } catch {
     return [];
   }
 }
@@ -1317,7 +1691,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
 async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}) {
   try {
     if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) return [];
-    robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome] = robeMeta[nome] || {};
     const cache = robeMeta[nome]._pidCache || { pids: [], ts: 0 };
     const expired = (Date.now() - cache.ts) > PIDS_CACHE_TTL_MS;
     if (!forceRefresh && !expired && Array.isArray(cache.pids) && cache.pids.length) {
@@ -1348,8 +1722,8 @@ async function ramCpuMonitorTick() {
     const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000);
     const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-    return;
-  }
+              return;
+            }
 
   _ramTickBusy = true;
   const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '12000', 10); // 12s padrão Windows
@@ -1362,8 +1736,8 @@ async function ramCpuMonitorTick() {
       for (const nome of Object.keys(robeMeta)) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].ramMB = null;
-        robeMeta[nome].cpuPercent = null;
-      }
+            robeMeta[nome].cpuPercent = null;
+          }
       await snapshotStatusAndWrite();
       return;
     }
@@ -1408,8 +1782,8 @@ async function ramCpuMonitorTick() {
         const RAM_CORRECTION_FACTOR = parseFloat(process.env.RAM_CORRECTION_FACTOR || '0.435'); // 0.435 = ~43.5% (ajuste fino)
         const pids = await getControllerPidsCached(nome, ctrl, { forceRefresh: false });
         let totalMB = 0;
-        if (Array.isArray(pids) && pids.length) {
-          for (const pid of pids) {
+          if (Array.isArray(pids) && pids.length) {
+              for (const pid of pids) {
             const v = pidMemMap[pid];
             if (typeof v === 'number' && v >= 0) totalMB += v;
           }
@@ -1436,14 +1810,14 @@ async function ramCpuMonitorTick() {
 
       } catch {
         try {
-          robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = null;
           robeMeta[nome].cpuPercent = null;
         } catch {}
       }
     }
 
-    await snapshotStatusAndWrite();
+  await snapshotStatusAndWrite();
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
   } finally {
@@ -1694,8 +2068,11 @@ async function robeTickGlobal() {
   }
 }
 
-setInterval(robeTickGlobal, 7000);
-setTimeout(robeTickGlobal, 3500);
+// Intervalo do robeTickGlobal controlável por env (padrão 3000ms para maior reatividade)
+const ROBE_TICK_INTERVAL_MS = parseInt(process.env.ROBE_TICK_INTERVAL_MS || '3000', 10);
+const ROBE_TICK_INITIAL_MS = Math.floor(ROBE_TICK_INTERVAL_MS / 2);
+setInterval(robeTickGlobal, ROBE_TICK_INTERVAL_MS);
+setTimeout(robeTickGlobal, ROBE_TICK_INITIAL_MS);
 
 async function fotosGcTick() {
   try {
@@ -1896,7 +2273,7 @@ const handlers = {
   async ['criar-perfil']({ cidade, cookies }) {
     logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
     if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
-    if (!fs.existsExists(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
+    if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
@@ -2675,6 +3052,10 @@ const handlers = {
 };
 
 async function snapshotStatusAndWrite() {
+  // Throttle: limita frequência de writes (800ms mínimo entre writes)
+  if ((Date.now() - _lastSnapAt) < 800) return;
+  _lastSnapAt = Date.now();
+
 _statusLock = _statusLock.then(async () => {
 try {
 try {
@@ -3546,6 +3927,18 @@ async function isPageLikelyAlive(page, nome) {
 }
 
 async function recoveryStep(nome, page, step) {
+  // BLOQUEIO: não recuperar se Virtus ativo e na URL de chat
+  try {
+    const urlNow = page && typeof page.url === 'function' ? (page.url() || '') : '';
+    const ctrl = controllers.get(nome);
+    const virtusOn = !!(ctrl && ctrl.trabalhando && !ctrl.humanControl && !ctrl.configurando);
+    if (/messenger\.com\/marketplace\/t\/\d+/.test(urlNow) && virtusOn) {
+      try { await issues.append(nome, 'mil_action', 'health_recovery_skip_on_chat'); } catch {}
+      logger.warn('[NURSE_RECOVER_SKIP] Em chat ativo da Virtus — NUNCA reload/goto para recuperar', { nome, urlNow });
+      return false;
+    }
+  } catch {}
+  
   const st = getHealth(nome);
   const now = Date.now();
   if (st.nextTryAt && st.nextTryAt > now) return false;
@@ -3743,13 +4136,19 @@ setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
 async function periodicAboutBlankCleanup() {
   try {
     const issues = require('./issues.js');
+    const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
+    const now = Date.now();
     let totalClosed = 0;
 
     for (const [nome, ctrl] of controllers.entries()) {
       try {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
 
-        // Proteções: não limpa se Robe está ativo, configurando, ou em modo humano
+        // BLOQUEIO: flag global ativa
+        try {
+          if (ctrl.browser._buscasLocalizacaoAtivas && ctrl.browser._buscasLocalizacaoAtivas.size > 0) continue;
+        } catch {}
+
         const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
         const inConfig = ctrl.configurando === true;
@@ -3757,48 +4156,48 @@ async function periodicAboutBlankCleanup() {
 
         if (inRobe || sendLockActive || inConfig || inHuman) continue;
 
-        // Varre todas as páginas procurando about:blank órfãs
         const pages = await ctrl.browser.pages().catch(() => []);
         if (!Array.isArray(pages) || pages.length <= 1) continue;
 
-        const mainPage = ctrl.mainPage || pages[0];
-        
-        // Proteção extra: verifica se há create item aberto (só verifica uma vez)
-        const hasCreateItem = pages.some(pg => {
+        // Se há qualquer aba marcada nesta janela, também aborta
+        const hasMarked = pages.some(p => {
           try {
-            const u = pg.url ? pg.url() : '';
-            return /facebook\.com\/marketplace\/create\/item/i.test(u);
-          } catch { return false; }
+            if (p._buscaLocalizacao === true) {
+              const age = now - (p._buscaLocalizacaoSince || 0);
+              return age < MAX_BUSCA_LOCALIZACAO_AGE_MS;
+            }
+          } catch {}
+          return false;
         });
-        
-        // Se há create item, não limpa (pode ser que o Robe esteja prestes a usar)
+
+        if (hasMarked) continue;
+
+        const mainPage = ctrl.mainPage || pages[0];
+
+        const hasCreateItem = pages.some(pg => {
+          try { const u = pg.url ? pg.url() : ''; return /facebook\.com\/marketplace\/create\/item/i.test(u); }
+          catch { return false; }
+        });
+
         if (hasCreateItem) continue;
 
         let closed = 0;
 
         for (const p of pages) {
           try {
-            // Nunca fecha a página principal
             if (p === mainPage) continue;
-            if (!mainPage && p === pages[0]) continue;
-
-            // Verifica se é about:blank
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-            if (!url || url !== 'about:blank') continue;
-
-            // Fecha a aba about:blank órfã
-            // (já verificamos que não há Robe ativo e não há create item)
-            await p.close({ runBeforeUnload: false }).catch(() => {});
-            closed++;
+            if (!url || url === 'about:blank') {
+              await p.close({ runBeforeUnload: false }).catch(() => {});
+              closed++;
+            }
           } catch {}
         }
 
         if (closed > 0) {
           totalClosed += closed;
-          try {
-            await issues.append(nome, 'mil_action', `periodic_cleanup_aboutblank n=${closed}`);
-          } catch {}
+          try { await issues.append(nome, 'mil_action', `periodic_cleanup_aboutblank n=${closed}`); } catch {}
         }
       } catch (e) {
         if (process.env.PRUNE_DEBUG === '1') {

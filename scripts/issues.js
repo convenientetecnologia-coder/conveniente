@@ -9,6 +9,50 @@ const DADOS_DIR  = path.join(__dirname, '..', 'dados');
 const PERFIS_DIR = path.join(DADOS_DIR, 'perfis');
 const MAX_ISSUES = parseInt(process.env.ISSUES_MAX || '200', 10);
 
+// Bufferização para I/O otimizado (flush em bloco a cada 80ms)
+const _buffers = new Map(); // file -> array de entries
+let _flushTimer = null;
+
+function scheduleFlush() {
+  if (_flushTimer) return;
+  _flushTimer = setTimeout(() => {
+    const entries = Array.from(_buffers.entries());
+    _buffers.clear();
+    _flushTimer = null;
+    for (const [file, list] of entries) {
+      try {
+        // Lê o arquivo existente, adiciona novos entries, aplica limite MAX_ISSUES
+        const arr = readJsonSafe(file, []);
+        const existingList = Array.isArray(arr) ? arr : [];
+        existingList.push(...list);
+        // Mantém apenas os últimos MAX_ISSUES
+        if (existingList.length > MAX_ISSUES) {
+          existingList.splice(0, existingList.length - MAX_ISSUES);
+        }
+        // Escreve atomicamente
+        const ok = writeJsonAtomic(file, existingList);
+        if (!ok) {
+          // Fallback: tente registrar em issues_fallback.log global (append-only)
+          try {
+            const fbFile = path.join(DADOS_DIR, 'issues_fallback.log');
+            for (const entry of list) {
+              fs.appendFileSync(fbFile, `[${path.basename(path.dirname(file))}] ${JSON.stringify(entry)}\n`);
+            }
+          } catch {}
+        }
+      } catch (e) {
+        // Fallback em caso de erro
+        try {
+          const fbFile = path.join(DADOS_DIR, 'issues_fallback.log');
+          for (const entry of list) {
+            fs.appendFileSync(fbFile, `[${path.basename(path.dirname(file))}] ${JSON.stringify({fail: true, error: e && e.message || String(e), ...entry})}\n`);
+          }
+        } catch {}
+      }
+    }
+  }, 80);
+}
+
 // Somente os tipos abaixo são considerados ERROS de operação (Virtus/Robe)
 const ERROR_TYPES = new Set([
   'browser_disconnected',
@@ -38,7 +82,7 @@ function writeJsonAtomic(file, obj) {
     const fd = fs.openSync(tmp, 'w');
     try {
       fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
-      fs.fsyncSync(fd); // **militar: flush garantido no disco**
+      fs.fsyncSync(fd); // militar: flush garantido no disco
     } finally {
       fs.closeSync(fd);
     }
@@ -73,7 +117,7 @@ function _serialize(nome, fn) {
   const key = String(nome || '');
   const prev = _locks.get(key) || Promise.resolve();
   const next = prev.then(() => Promise.resolve(fn()))
-                   .finally(() => { if (_locks.get(key) === next) _locks.delete(key); });
+    .finally(() => { if (_locks.get(key) === next) _locks.delete(key); });
   _locks.set(key, next);
   return next;
 }
@@ -134,7 +178,20 @@ const ISSUE_TYPES_SET = new Set([
   'login_required_detected',
   'login_required_cleared',
   'account_banned_detected',
-  'account_banned_cleared'
+  'account_banned_cleared',
+  // [NOVOS TIPOS] Pedidas de WhatsApp e composição de telefone (telemetria tipada)
+  'phone_ask_price_intent',
+  'phone_ask_ddd_isolado',
+  'phone_ask_parcial_numero',
+  'phone_ask_reminder',
+  'phone_compose_ok',
+  // [NOVOS TIPOS] Orquestrador IA-first (pedidos)
+  'pedidos_order_sent',
+  'pedidos_inactivity_ping_sent',
+  'pedidos_freeze_window_enter',
+  'order_sent_notifier_fail',
+  'inactivity_ping_send_fail',
+  'pedido_audit'
 ]);
 
 function padronizaType(type) {
@@ -224,34 +281,12 @@ function append(nome, type, message) {
     }
   };
 
-  return _serialize(nome, () => {
-    try {
-      const arr = readJsonSafe(file, []);
-      const list = Array.isArray(arr) ? arr : [];
-      list.push(entry);
-      if (list.length > MAX_ISSUES) {
-        // mantêm apenas os últimos MAX_ISSUES
-        list.splice(0, list.length - MAX_ISSUES);
-      }
-      const ok = writeJsonAtomic(file, list);
-      if (!ok) {
-        // Fallback: tente registrar em issues_fallback.log global (append-only)
-        try {
-          const fbFile = path.join(DADOS_DIR, 'issues_fallback.log');
-          fs.appendFileSync(fbFile, `[${nome}] ${JSON.stringify(entry)}\n`);
-        } catch {}
-        return { ok: false, error: 'write failed', file };
-      }
-      return { ok: true, file, size: list.length, entry };
-    } catch (e) {
-      // Também registra fallback, já que o serialize/try pode falhar
-      try {
-        const fbFile = path.join(DADOS_DIR, 'issues_fallback.log');
-        fs.appendFileSync(fbFile, `[${nome}] ${JSON.stringify({fail: true, error: e && e.message || String(e), ...entry})}\n`);
-      } catch {}
-      return { ok: false, error: e && e.message || String(e), file };
-    }
-  });
+  // Bufferiza:
+  const cur = _buffers.get(file) || [];
+  cur.push(entry);
+  _buffers.set(file, cur);
+  scheduleFlush();
+  return { ok: true, file };
 }
 
 function list(nome) {
