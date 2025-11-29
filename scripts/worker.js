@@ -238,7 +238,8 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
     const promptFretes = require('./promptFretes.js');
     const browser = controller.browser;
 
-    // Helper: abre o chat na aba principal (mainPage), extrai URL do item e restaura a inbox
+    // Helper: abre o chat na mainPage, tenta âncoras, tenta menu "More options", tenta clicar o cartão Marketplace,
+    // captura a URL do item por navegação e/ou varredura, restaura a inbox e libera sendLock.
     async function _descobrirUrlClassificadoSeNecessario() {
       if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
         return urlClassificado;
@@ -246,7 +247,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
       const chatUrl = `https://www.messenger.com/marketplace/t/${chatId}/`;
 
-      // Garante a mainPage do perfil (onde o Messenger expõe o link do item no chat)
+      // Garante a mainPage (aba zero do Virtus)
       let main = controller.mainPage;
       try {
         if (!main) {
@@ -257,7 +258,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
       } catch {}
       if (!main) return null;
 
-      // Trava o Virtus com sendLock (owner='city') durante a navegação do chat
+      // sendLock para exclusão mútua com Virtus
       try {
         browser._sendLock = browser._sendLock || {};
         browser._sendLock.active = true;
@@ -266,30 +267,133 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
         browser._sendLock.since = Date.now();
       } catch {}
 
-      try {
-        // Abre o chat na mainPage
-        await main.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-        await new Promise(r => setTimeout(r, 600));
-
-        // Extrai URL do classificado a partir do DOM do chat
-        const found = await main.evaluate(() => {
+      // Utilitário: varre âncoras por item
+      async function scanAnchorsForItem() {
+        return await main.evaluate(() => {
           const fixAbs = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
-          const anchors = Array.from(document.querySelectorAll('a'));
+          // 1) Âncoras diretas de item
+          const anchors = Array.from(document.querySelectorAll('a[href]'));
           for (const a of anchors) {
-            const href = a.getAttribute('href') || a.href || '';
+            const href = (a.getAttribute('href') || a.href || '').trim();
+            if (!href) continue;
+            if (href.includes('/marketplace/item/') && !href.includes('/marketplace/t/')) {
+              return fixAbs(href);
+            }
+          }
+          // 2) Anchors em dialogs/overlays
+          const dialogAnchors = Array.from(document.querySelectorAll('div[role="dialog"] a[href]'));
+          for (const a of dialogAnchors) {
+            const href = (a.getAttribute('href') || a.href || '').trim();
             if (href && href.includes('/marketplace/item/') && !href.includes('/marketplace/t/')) {
+              return fixAbs(href);
+            }
+          }
+          // 3) Alternativas (algumas builds usam /commerce/listing/)
+          for (const a of anchors) {
+            const href = (a.getAttribute('href') || a.href || '').trim();
+            if ((/\/commerce\/listing\//i.test(href) || /\/marketplace\/.*listing/i.test(href)) && !href.includes('/marketplace/t/')) {
               return fixAbs(href);
             }
           }
           return null;
         });
+      }
 
-        // Restaura a inbox/marketplace após extrair a URL (ambiente consistente pro Virtus)
+      // Utilitário: tenta clicar "More options" e re-varrer âncoras
+      async function tryMoreOptionsThenScan() {
+        const moreSel = '[aria-label*="More options"],[aria-label*="Mais opções"]';
+        try {
+          const btn = await main.$(moreSel);
+          if (btn) {
+            await btn.click({ delay: 30 }).catch(() => {});
+            await main.waitForTimeout(700);
+            return await scanAnchorsForItem();
+          }
+        } catch {}
+        return null;
+      }
+
+      // Utilitário: clica no cartão "Marketplace" do cabeçalho e tenta capturar navegação/URL,
+      // depois re-varre âncoras caso permaneça no Messenger.
+      async function clickCardAndCaptureUrl() {
+        // 1) Dispara clique no possível cartão "Marketplace" (ou bloco pai)
+        const clicked = await main.evaluate(() => {
+          function isVisible(el) {
+            try {
+              const st = window.getComputedStyle(el);
+              if (!st) return false;
+              if (st.visibility === 'hidden' || st.display === 'none') return false;
+              const r = el.getBoundingClientRect();
+              return !!(r && r.width > 0 && r.height > 0);
+            } catch { return false; }
+          }
+          // Busca um span com texto "Marketplace"
+          const spans = Array.from(document.querySelectorAll('span'));
+          const mk = spans.find(s => /marketplace/i.test((s.innerText || s.textContent || '').trim()));
+          if (!mk) return false;
+          // Sobe até um contêiner clicável
+          let node = mk;
+          for (let i = 0; i < 8 && node; i++) {
+            if (node.tagName && (node.tagName.toLowerCase() === 'a' || node.getAttribute?.('role') === 'button')) {
+              if (isVisible(node)) { node.click(); return true; }
+            }
+            node = node.parentElement;
+          }
+          // Fallback: clica no ancestral visível mais próximo
+          node = mk;
+          for (let i = 0; i < 8 && node; i++) {
+            if (isVisible(node) && typeof node.click === 'function') { node.click(); return true; }
+            node = node.parentElement;
+          }
+          return false;
+        });
+
+        // 2) Espera navegação para item (facebook.com/marketplace/item/...) OU re-varre âncoras
+        if (clicked) {
+          // aguarda possível navegação cross-domain
+          await Promise.race([
+            main.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 6000 }).catch(() => null),
+            main.waitForFunction(() => /facebook\.com\/marketplace\/item\//i.test(location.href), { timeout: 6000 }).catch(() => null)
+          ]).catch(() => null);
+
+          // Se já navegou para o item, captura a URL
+          try {
+            const u = typeof main.url === 'function' ? (main.url() || '') : '';
+            if (/facebook\.com\/marketplace\/item\//i.test(u)) {
+              return u;
+            }
+          } catch {}
+
+          // Caso tenha aberto overlay interno, tenta re-varrer âncoras
+          const viaScan = await scanAnchorsForItem();
+          if (viaScan) return viaScan;
+        }
+        return null;
+      }
+
+      let foundUrl = null;
+      try {
+        // 0) Ir para o chat
+        await main.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await main.waitForTimeout(700);
+
+        // 1) Tenta âncoras diretas
+        foundUrl = await scanAnchorsForItem();
+        if (!foundUrl) {
+          // 2) Tenta menu "More options"
+          foundUrl = await tryMoreOptionsThenScan();
+        }
+        if (!foundUrl) {
+          // 3) Tenta clicar o cartão "Marketplace" e capturar navegação/âncoras
+          foundUrl = await clickCardAndCaptureUrl();
+        }
+
+        // Restaura a inbox/marketplace (sempre)
         try {
           await main.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
         } catch {}
 
-        return found || null;
+        return foundUrl || null;
       } catch {
         return null;
       } finally {
