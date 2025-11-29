@@ -164,18 +164,13 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
     try {
       if (perfil !== nome) return;
       const texto = 'Vamos dar continuidade? Me passa seu WhatsApp que peço pro motorista te chamar e tirar as dúvidas por lá.';
-      const payload = String(texto || '').trim();
-      if (!payload) return;
-
-      if (!filaEnvioMessenger.has(nome)) filaEnvioMessenger.set(nome, []);
-      filaEnvioMessenger.get(nome).push({
+      await queueMessengerSend(nome, {
         chatId,
-        resposta: payload,
-        key: `inactivity|${chatId}|${sha1(payload)}|${Date.now()}`,
-        fromNotifier: false
+        resposta: texto,
+        key: `inactivity|${chatId}|${sha1(texto)}|${Date.now()}`,
+        fromNotifier: false,
+        origin: 'inactivityPing'
       });
-
-      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'inactivity_ping_queued', chatId }); } catch {}
     } catch {}
   });
 
@@ -183,21 +178,13 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
     try {
       if (perfil !== nome) return;
       const texto = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
-      const payload = String(texto || '').trim();
-      if (!payload) return;
-
-      if (!filaEnvioMessenger.has(nome)) filaEnvioMessenger.set(nome, []);
-      filaEnvioMessenger.get(nome).push({
+      await queueMessengerSend(nome, {
         chatId,
-        resposta: payload,
-        key: `handoff|${chatId}|${sha1(payload)}|${Date.now()}`,
-        fromNotifier: false
+        resposta: texto,
+        key: `handoff|${chatId}|${sha1(texto)}|${Date.now()}`,
+        fromNotifier: false,
+        origin: 'handoffToHuman'
       });
-
-      try {
-        stepLog.appendJSONL(perfil, 'virtus', { step: 'handoff_whatsapp_request_queued', chatId, reason: reason || '' });
-        await issues.append(perfil, 'mil_action', `whatsapp_request_QUEUED chat=${chatId} reason=${reason||''}`);
-      } catch {}
     } catch {}
   });
 
@@ -221,15 +208,13 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         return;
       }
 
-      if (!filaEnvioMessenger.has(nome)) filaEnvioMessenger.set(nome, []);
-      filaEnvioMessenger.get(nome).push({
+      await queueMessengerSend(nome, {
         chatId,
         resposta: payload,
         key: `replyReady|${chatId}|${sha1(payload)}|${Date.now()}`,
-        fromNotifier: false
+        fromNotifier: false,
+        origin: 'replyReady'
       });
-
-      try { stepLog.appendJSONL(nome, 'virtus', { step: 'reply_queued', chatId }); } catch {}
 
     } catch {}
   });
@@ -893,12 +878,12 @@ function iniciarPollingRespostas(nomePerfil) {
           if (!filaRespostas.has(nomePerfil)) filaRespostas.set(nomePerfil, []);
           filaRespostas.get(nomePerfil).push(resp);
           
-          if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
-          filaEnvioMessenger.get(nomePerfil).push({ 
-            chatId: resp.chat_id, 
-            resposta: respostaSan, 
+          await queueMessengerSend(nomePerfil, {
+            chatId: resp.chat_id,
+            resposta: respostaSan,
             key,
-            fromNotifier: true
+            fromNotifier: true,
+            origin: 'notifier_polling'
           });
           
           perfilKeySet.add(key);
@@ -1068,23 +1053,55 @@ async function extrairUrlClassificado(page, chatId) {
   try {
     const url = await page.evaluate(() => {
       const fixAbsolute = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
-      const anchors = Array.from(document.querySelectorAll('a'));
-      for (const a of anchors) {
+      const as = Array.from(document.querySelectorAll('a[href]'));
+
+      // 1) Preferir a página do item do Marketplace (mais informativa)
+      for (const a of as) {
         const href = a.getAttribute('href') || a.href || '';
-        if (href && href.includes('/marketplace/item/')) {
-          if (!href.includes('/marketplace/t/')) return fixAbsolute(href);
-        }
-      }
-      for (const a of anchors) {
-        const href = a.getAttribute('href') || a.href || '';
-        if (href && href.includes('/marketplace/') && !href.includes('/marketplace/t/') && !href.includes('/marketplace/profile/')) {
+        if (!href) continue;
+        if (href.includes('/marketplace/item/') && !href.includes('/marketplace/t/')) {
           return fixAbsolute(href);
         }
       }
+
+      // 2) Se não houver item, usar o perfil do comprador ("View buyer"/"Ver comprador")
+      //    Ex.: https://www.facebook.com/marketplace/profile/...
+      //    Procura primeiro por aria-label, depois por qualquer /marketplace/profile/
+      const headerProfileAnchor =
+        document.querySelector('a[aria-label*="View buyer" i]') ||
+        document.querySelector('a[aria-label*="Ver comprador" i]') ||
+        null;
+
+      if (headerProfileAnchor) {
+        const h = headerProfileAnchor.getAttribute('href') || headerProfileAnchor.href || '';
+        if (h && h.includes('/marketplace/profile/') && !h.includes('/marketplace/t/')) {
+          return fixAbsolute(h);
+        }
+      }
+
+      for (const a of as) {
+        const href = a.getAttribute('href') || a.href || '';
+        if (!href) continue;
+        if (href.includes('/marketplace/profile/') && !href.includes('/marketplace/t/')) {
+          return fixAbsolute(href);
+        }
+      }
+
+      // 3) Fallback: qualquer outro /marketplace/ que não seja do chat (/t/)
+      for (const a of as) {
+        const href = a.getAttribute('href') || a.href || '';
+        if (!href) continue;
+        if (href.includes('/marketplace/') && !href.includes('/marketplace/t/')) {
+          return fixAbsolute(href);
+        }
+      }
+
       return null;
     });
     return url || null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 async function extrairHistoricoConversa(page) {
@@ -1470,6 +1487,49 @@ function clearAguardTimer(nomePerfil, chatId) {
 const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
+
+async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotifier = false, origin = '' }) {
+  try {
+    const payload = String(resposta || '').trim();
+    if (!payload) return false;
+
+    // Snapshot do cursor do cliente no momento da fila
+    const st = await getChatState(nomePerfil, chatId).catch(()=>null);
+    const cCount = Number(st && st.clientCursorCount || 0);
+    const cDigest = st && st.clientCursorDigest || '';
+
+    if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
+    const fila = filaEnvioMessenger.get(nomePerfil);
+
+    // Anti-duplicidade de fila por cursor: se já existe item para o mesmo chatId e mesmo cursor, SKIP
+    const existeMesmoCursor = fila.some(it =>
+      it && it.chatId === chatId &&
+      Number(it.cursorCount || 0) === cCount &&
+      String(it.cursorDigest || '') === cDigest
+    );
+
+    if (existeMesmoCursor) {
+      try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_same_cursor', chatId, cCount, cDigest, origin }); } catch {}
+      return false;
+    }
+
+    fila.push({
+      chatId,
+      resposta: payload,
+      key: key || (`q|${chatId}|${sha1(payload)}|${Date.now()}`),
+      fromNotifier: !!fromNotifier,
+      cursorCount: cCount,
+      cursorDigest: cDigest,
+      origin: origin || ''
+    });
+
+    try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, cCount, cDigest, origin }); } catch {}
+    return true;
+
+  } catch {
+    return false;
+  }
+}
 
 const pendingKeysPorPerfil = new Map(); // nomePerfil -> Set(keys)
 
