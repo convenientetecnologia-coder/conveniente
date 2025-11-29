@@ -558,7 +558,8 @@ function composeWhatsAskLite(dados = {}) {
 
 function getNewClientMessagesSince(historico, cutTs) {
   try {
-    return (historico || []).filter(m => m && m.autor === 'cliente' && Number(m.timestamp || 0) > Number(cutTs || 0));
+    const base = Number(cutTs || 0);
+    return (historico || []).filter(m => m && m.autor === 'cliente' && Number(m.timestamp || 0) >= base);
   } catch {
     return [];
   }
@@ -2201,6 +2202,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { clearTimeout(existing.timerId); } catch {}
       }
 
+      // Janela de resposta: define replyDueAt somente se não houver ou se já passou
+      try {
+        const stPrev = await getChatState(nome, chatId).catch(() => null);
+        const existingDue = Number(stPrev && stPrev.replyDueAt || 0);
+        const nowMs2 = Date.now();
+        if (!existingDue || nowMs2 >= existingDue) {
+          const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
+          await setChatState(nome, chatId, { replyDueAt: nowMs2 + delay });
+        }
+      } catch {}
+
       const tid = setTimeout(async () => {
         try {
           debounceTimers.delete(chatId);
@@ -2698,13 +2710,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       let st = null;
       try { st = await getChatState(nome, id); } catch {}
 
-      const replyDue = st && st.replyDueAt || 0;
-      const triggerReason = st && st.triggerReason;
-      const jaRespondi = !!(st && st.ultimaRespostaEnviada);
+      const replyDue = Number(st && st.replyDueAt || 0);
       const nowMs = Date.now();
-      // Só bloqueia se não houver resposta ainda e não houver triggerReason explícito
-      if (!jaRespondi && replyDue && nowMs < replyDue && triggerReason !== 'fieldTimeout') {
-        return;
+      if (replyDue && nowMs < replyDue) {
+        return; // NUNCA atender antes da janela: vale para qualquer motivo (inclusive fieldTimeout)
       }
 
       const jaFoiRespondido = st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO);
@@ -2896,6 +2905,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
+
+    // GATE DE JANELA DE RESPOSTA POR CHAT (20–60s)
+    try {
+      const stTime = await getChatState(nome, chatId).catch(() => null);
+      let dueAt = Number(stTime && stTime.replyDueAt || 0);
+      const nowMs = Date.now();
+
+      // Se não há janela ainda, define e aguarda; se há e ainda não venceu, aguarda.
+      if (!dueAt || nowMs < dueAt) {
+        if (!dueAt) {
+          const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
+          dueAt = nowMs + delay;
+          await setChatState(nome, chatId, { replyDueAt: dueAt });
+        }
+        // Reagendamento natural: tira da fila agora; atualiza marcadores; deixa o loop recolocar quando vencer.
+        try { await pendingDel(nome, chatId); } catch {}
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+    } catch {}
+
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
       if (!browser || browser.isConnected?.() === false) {
         logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
@@ -4694,12 +4725,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       pedidos.events.on('fieldTimeout', async ({ perfil, chatId, field }) => {
         try {
           if (perfil !== nome) return;
-          await setChatState(nome, chatId, { state: CHAT_STATES.PENDENTE, lastProbeAt: Date.now(), triggerReason: 'fieldTimeout' });
+
+          const nowMs = Date.now();
+          const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
+          await setChatState(nome, chatId, {
+            state: CHAT_STATES.PENDENTE,
+            lastProbeAt: nowMs,
+            triggerReason: 'fieldTimeout',
+            replyDueAt: nowMs + delay
+          });
           try { stepLog.appendJSONL(nome, 'virtus', { step: 'field_timeout_enqueued', chatId, field }); } catch {}
-          if (!fila.includes(chatId)) {
-            fila.push(chatId);
-            scheduleNextIfIdle();
-          }
+          // Não forçar push imediato na fila; atualizaFila vai enfileirar quando replyDueAt vencer
         } catch {}
       });
     } catch (e) {
