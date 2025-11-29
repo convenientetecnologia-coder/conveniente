@@ -203,6 +203,10 @@ function buildUserOrchestrationPrompt({ clienteUnificado = '', dados = {}, falta
   lines.push('- Responda às dúvidas de forma breve e objetiva (sem inventar).');
   lines.push('- Sempre finalize com a próxima pergunta do funil (não envie mensagem apenas tirando dúvidas).');
   lines.push('- Seja humano, simpático e direto; varie micro expressões e evite repetir frases.');
+  lines.push('Produza UMA ÚNICA mensagem. Nada de segunda mensagem, lembrete, "aguarde", "vou te chamar" ou "já volto".');
+  lines.push('Na mesma mensagem, sempre componha nesta ordem: 1) responda as dúvidas do cliente (inclusive protestos) em 1–2 frases; 2) SE ainda não coletamos o WhatsApp, peça o WhatsApp com DDD e explique: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."; 3) finalize com a próxima pergunta obrigatória do funil.');
+  lines.push('Não repita frases prontas. Varie microexpressões mantendo o tom profissional humano.');
+  lines.push('Não quebre em mensagens separadas — conteúdo todo em uma frase composta, com pontos curtos.');
   for (const i of (instrucoes || [])) lines.push('- ' + i);
 
   return lines.join('\n');
@@ -272,7 +276,11 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
     instr.push('Na MESMA mensagem, pergunte também o que precisa transportar (itens).');
   } else {
     instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
-    instr.push('Não peça WhatsApp novamente (já foi solicitado).');
+    // Se ainda não temos telefone válido, pedir WhatsApp COM DDD e explicar o fluxo do motorista
+    const telOk = !!(snapshotData && snapshotData.telefone && String(snapshotData.telefone).replace(/\D/g,'').length >= 10);
+    if (!telOk) {
+      instr.push('Inclua, no mesmo texto, o pedido do WhatsApp com DDD e a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
+    }
   }
 
   const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
@@ -300,15 +308,19 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
       const temDDD = !!(snapshotData && snapshotData.ddd);
       if (temParcial && !temDDD) {
         instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
+        instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
       } else {
         instr.push('Peça o WhatsApp com DDD em uma única frase curta.');
+        instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
       }
     }
     if (directive.askField === 'ddd') {
       instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
+      instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
     }
     if (directive.askField === 'telefone_parcial') {
       instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos. Não repita o número do cliente.');
+      instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
     }
     if (directive.askField === 'itens') {
       instr.push('Pergunte o que precisa transportar (itens).');
@@ -726,24 +738,24 @@ class PedidoOrchestrator extends EventEmitter {
               isValidPhoneBR(s.data && s.data.telefone) &&
               s.timers && s.timers.incompleteWithWhatsDeadline &&
               s.timers.incompleteWithWhatsDeadline <= now()) {
+            // 2) Com WhatsApp válido e incompleto há 10min => UM ping e ENCERRA
+            if (!(s.flags && s.flags.singleInactivityPingSent === true)) {
+              this.emit('inactivityPing', { perfil, chatId });
+              try {
+                const stepLog = require('./stepLog.js');
+                stepLog.appendJSONL(perfil, 'inactivity_ping', { chatId, withWhats: true });
+              } catch {}
+              s.flags = s.flags || {};
+              s.flags.singleInactivityPingSent = true;
+              this._set(perfil, chatId, s);
+              this._audit('pedidos_inactivity_ping_sent', perfil, chatId, { withWhats: true });
+
+              // Envia INCOMPLETO ao notificador e congela janela
+              this.finalizeIfReady(perfil, chatId);
+              continue;
+            }
             this.finalizeIfReady(perfil, chatId);
             continue;
-          }
-
-          // 2) Sem WhatsApp após 10min => UM ping de inatividade pedindo WhatsApp
-          if ((!s.data || !isValidPhoneBR(s.data.telefone)) &&
-              s.timers && s.timers.withoutWhatsDeadline &&
-              s.timers.withoutWhatsDeadline <= now() &&
-              !(s.flags && s.flags.singleInactivityPingSent === true)) {
-            this.emit('inactivityPing', { perfil, chatId });
-            try {
-              const stepLog = require('./stepLog.js');
-              stepLog.appendJSONL(perfil, 'inactivity_ping', { chatId });
-            } catch {}
-            s.flags = s.flags || {};
-            s.flags.singleInactivityPingSent = true;
-            this._set(perfil, chatId, s);
-            this._audit('pedidos_inactivity_ping_sent', perfil, chatId, {});
           }
         }
       }
@@ -897,6 +909,17 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       };
     }
 
+    // Blindagem: apenas UMA resposta por cursor do cliente
+    const alreadyRepliedSig = (sPrev && sPrev.flags && sPrev.flags.lastRepliedCursorSig) || '';
+    if (alreadyRepliedSig === sig) {
+      return {
+        mensagemParaCliente: '',
+        dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
+        proximaPergunta: null,
+        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
+      };
+    }
+
     // Idempotência forte: se já existe emissão in-flight para este cursor, SKIP
     const inFlightSig = (sPrev.flags && sPrev.flags.emitInFlightSig) || '';
     if (inFlightSig === sig) {
@@ -979,6 +1002,14 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       cursorSig: sig,
       lastClientTs: cursor.lastTs || 0
     });
+
+    // Marca cursor respondido
+    try {
+      const sNow2 = orchestrator._get(perfil, chatId) || {};
+      sNow2.flags = sNow2.flags || {};
+      sNow2.flags.lastRepliedCursorSig = sig;
+      orchestrator._set(perfil, chatId, sNow2);
+    } catch {}
 
     // Limpa in-flight
     try {

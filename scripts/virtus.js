@@ -169,7 +169,7 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
   pedidos.events.on('inactivityPing', async ({ perfil, chatId }) => {
     try {
       if (perfil !== nome) return;
-      const texto = 'Vamos dar continuidade? Me passa seu WhatsApp que peço pro motorista te chamar e tirar as dúvidas por lá.';
+      const texto = 'Perfeito, já encaminhei seu contato ao motorista. Ele te chama no WhatsApp em alguns minutinhos para passar o orçamento certinho. Qualquer coisa, é só responder aqui.';
       await queueMessengerSend(nome, {
         chatId,
         resposta: texto,
@@ -666,13 +666,6 @@ function sanitizeOutgoing(text) {
   }
 }
 
-function composeWhatsAskFull(dados = {}) {
-  return 'Quem passa o orçamento é o motorista. Eu já anotei seu pedido e vou repassar para ele. Me passa seu WhatsApp, por favor? Ele te chama no WhatsApp e te informa o valor.';
-}
-
-function composeWhatsAskLite(dados = {}) {
-  return 'Perfeito! Coletamos tudo. Pode me enviar o seu WhatsApp? O motorista te chama e te informa o orçamento.';
-}
 
 function getNewClientMessagesSince(historico, cutTs) {
   try {
@@ -2813,51 +2806,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     } catch {}
 
-    // === FINAL: só falta telefone (whats) — pedir UMA vez (full se nunca pedimos; lite se já pedimos no meio) ===
-    try {
-      const stNow = await getChatState(nome, chatId).catch(()=>null);
-      const dcNow = (stNow && stNow.dadosColetados) ? stNow.dadosColetados : (dadosColetados.get(chatId) || {});
-
-      const hasIt = !!dcNow.itens;
-      const hasES = !!dcNow.endereco_saida;
-      const hasED = !!dcNow.endereco_destino;
-      const hasAj = (typeof dcNow.ajudante === 'boolean');
-      const temWhatsLocal = !!(dcNow.telefone && isValidBRPhoneWithDDD(dcNow.telefone));
-
-      const camposOkSemTelefone =
-        hasIt && hasES && hasED && hasAj && !temWhatsLocal;
-
-      if (camposOkSemTelefone) {
-        const phase = (stNow && stNow.whatsAskedPhase) || 'none';
-        const endSent = !!(stNow && stNow.whatsEndAskSent);
-        if (!endSent) {
-          let msg;
-          const patch = { whatsEndAskSent: true };
-          if (phase === 'none') {
-            msg = composeWhatsAskFull(dcNow);
-            patch.whatsAskedPhase = 'full';
-          } else {
-            msg = composeWhatsAskLite(dcNow);
-          }
-
-          const pRef = await ensurePage().catch(()=>null);
-          if (pRef) {
-            await waitForSendLockRelease(pRef, 12000);
-            await acquireSendGuard(pRef, chatId);
-            try {
-              let campo = await waitForComposer(pRef, 8000);
-              if (!campo) campo = await refocusComposerNoReload(pRef, chatId);
-              if (campo) await sendMessageSafe(pRef, campo, removeTelefonesCompletos(msg), nome, chatId);
-            } finally {
-              releaseSendGuard(pRef);
-            }
-          }
-          await bumpAskCount(nome, chatId, 'telefone');
-          await setChatState(nome, chatId, patch);
-          await flushChatStateNow(nome);
-        }
-      }
-    } catch {}
+    // === FINAL: só falta telefone (whats) — delegação exclusiva ao orquestrador (pedidos.js). Nada de envio direto aqui. ===
+    // intencionalmente vazio — o pedidos.js fará a pergunta de WhatsApp dentro da resposta consolidada.
 
     // Centraliza finalização no orquestrador
     try {
