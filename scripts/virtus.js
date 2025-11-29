@@ -938,6 +938,31 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     const proximo = fila.shift();
     if (!proximo) return;
 
+    // Gating por janela de espera (20–60s após a última mensagem do cliente), apenas para replyReady
+    try {
+      const agoraCheck = Date.now();
+      if (proximo.origin === 'replyReady' && typeof proximo.earliestSendAt === 'number' && agoraCheck < proximo.earliestSendAt) {
+        const restante = proximo.earliestSendAt - agoraCheck;
+
+        // Reposiciona no fim da fila e aguarda próxima iteração
+        fila.push(proximo);
+
+        try {
+          stepLog.appendJSONL(nomePerfil, 'virtus', {
+            step: 'queue_defer_earliest',
+            chatId: proximo.chatId,
+            earliestSendAt: proximo.earliestSendAt,
+            remainingMs: restante,
+            ts: Date.now()
+          });
+          logger.info('[QUEUE] defer_earliest', { nomePerfil, chatId: proximo.chatId, earliestSendAt: proximo.earliestSendAt, remainingMs: restante });
+        } catch {}
+
+        return; // não envia agora; aguardará a próxima passada do loop
+
+      }
+    } catch {}
+
     try {
       const respostaFinal = String(proximo.resposta || '').trim();
       
@@ -1458,6 +1483,10 @@ const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '1
 const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '20000', 10); // 20s
 const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '60000', 10); // 60s
 
+// Janela de espera por conversa (antes de responder o cliente)
+const WAIT_BEFORE_REPLY_MIN_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MIN_MS || '20000', 10); // 20s
+const WAIT_BEFORE_REPLY_MAX_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MAX_MS || '60000', 10); // 60s
+
 const VIRTUS_FINAL_MSG_MAX_TRIES = parseInt(process.env.VIRTUS_FINAL_MSG_MAX_TRIES || '2', 10); // tentativas no envio da mensagem final
 const VIRTUS_FINAL_MSG_RETRY_MIN_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MIN_MS || '600', 10); // 600ms
 const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MAX_MS || '900', 10); // 900ms
@@ -1517,7 +1546,7 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     const payload = String(resposta || '').trim();
     if (!payload) return false;
 
-    // Snapshot do cursor do cliente no momento da fila
+    // Snapshot de estado atual do chat
     const st = await getChatState(nomePerfil, chatId).catch(()=>null);
 
     // Usa override do evento se vier; fallback para chats_state
@@ -1548,6 +1577,30 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       return false;
     }
 
+    // Calcula janela de espera (20–60s) para respostas do pedidos.js (replyReady), ancorada em lastCLIts
+    let earliestSendAt = undefined;
+    if (origin === 'replyReady') {
+      const base = Number(st && st.lastCLIts || 0);
+      const jitter = WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
+      // Se não houver lastCLIts, ancorar no agora
+      const anchor = base > 0 ? base : Date.now();
+      earliestSendAt = anchor + jitter;
+
+      try {
+        stepLog.appendJSONL(nomePerfil, 'virtus', {
+          step: 'queue_set_earliest',
+          chatId,
+          sig,
+          anchor,
+          jitter,
+          earliestSendAt,
+          origin,
+          ts: Date.now()
+        });
+        logger.info('[QUEUE] earliest_set', { nomePerfil, chatId, sig, anchor, jitter, earliestSendAt, origin });
+      } catch {}
+    }
+
     fila.push({
       chatId,
       resposta: payload,
@@ -1556,11 +1609,12 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       cursorCount: cCount,
       cursorDigest: cDigest,
       cursorSig: sig || '',
-      origin: origin || ''
+      origin: origin || '',
+      earliestSendAt // pode ser undefined para mensagens que não são replyReady
     });
 
-    try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, sig, cCount, cDigest, origin }); } catch {}
-    try { logger.info('[QUEUE] add', { nomePerfil, chatId, sig, cCount, cDigest, origin }); } catch {}
+    try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, sig, cCount, cDigest, origin, earliestSendAt, ts: Date.now() }); } catch {}
+    try { logger.info('[QUEUE] add', { nomePerfil, chatId, sig, cCount, cDigest, origin, earliestSendAt }); } catch {}
     return true;
 
   } catch {
