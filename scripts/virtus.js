@@ -491,6 +491,121 @@ function detectAskedFieldFromText(t) {
   return null;
 }
 
+function detectPhoneAskFromText(t) {
+  const n = normTxt(t || '');
+  const asksWhats = /(whats(app)?|contato.whats|n[úu]mero.(whats|telefone)|seu\s+whats|seu\s+whatsapp|telefone\s*(com|c\/)\sddd|whatsapp\s(com|c\/)\sddd)/.test(n);
+  const asksDDD = /\bddd\b|c[oó]digo\s+de\s+[áa]rea/.test(n);
+  const asksSemDDD = /(sem\sddd|apenas\so\sn[uú]mero|s[oó]\so\sn[uú]mero|n[uú]mero\ssem\sddd)/.test(n);
+  return {
+    telefone: asksWhats,
+    ddd: asksDDD,
+    telefone_parcial: asksSemDDD
+  };
+}
+
+function buildDeterministicAsk(directive, snapshotData = {}) {
+  if (!directive || !directive.askField) return '';
+  const f = String(directive.askField);
+  const hasParcial = !!(snapshotData && snapshotData.telefone_parcial);
+  const hasDDD = !!(snapshotData && snapshotData.ddd);
+  let parts = [];
+
+  if (f === 'telefone') {
+    if (hasParcial && !hasDDD) {
+      parts.push('Preciso apenas do DDD (2 dígitos) para completar o seu WhatsApp. Qual é o DDD?');
+    } else {
+      parts.push('Pode me informar o seu WhatsApp com DDD, por favor?');
+    }
+  } else if (f === 'ddd') {
+    parts.push('Pode me informar o DDD (2 dígitos), por favor?');
+  } else if (f === 'telefone_parcial') {
+    parts.push('Pode me enviar o número do seu WhatsApp (sem DDD)? São 8 ou 9 dígitos.');
+  } else if (f === 'itens') {
+    parts.push('O que você precisa transportar?');
+  } else if (f === 'endereco_saida') {
+    parts.push('Qual é o endereço de saída? Pode ser informal (bairro ou ponto de referência).');
+  } else if (f === 'endereco_destino') {
+    parts.push('Qual é o endereço de destino? Pode ser informal.');
+  } else if (f === 'ajudante') {
+    parts.push('Você vai precisar de ajudante? (sim ou não)');
+  } else if (f === 'descricao') {
+    parts.push('Tem alguma observação rápida sobre a coleta/entrega?');
+  }
+
+  if (directive.allowSecondQuestion && directive.nextField) {
+    const nf = String(directive.nextField);
+    if (nf === 'itens') parts.push('E o que você precisa transportar?');
+    if (nf === 'endereco_saida') parts.push('E qual é o endereço de saída? Pode ser informal.');
+    if (nf === 'endereco_destino') parts.push('E qual é o endereço de destino? Pode ser informal.');
+    if (nf === 'telefone') parts.push('E pode me informar o seu WhatsApp com DDD, por favor?');
+  }
+
+  return parts.filter(Boolean).join(' ');
+}
+
+function enforceDirectiveAsk(directive, snapshotData, iaText, novasMsgs = []) {
+  try {
+    let txt = String(iaText || '').trim();
+    if (!directive || !directive.askField) {
+      return txt; // sem diretiva de pergunta, não força nada
+    }
+
+    const askedBasic = detectAskedFieldFromText(txt);        // itens/endereço/ajudante/descricao (heurística)
+    const phoneFlags = detectPhoneAskFromText(txt);          // telefone/ddd/telefone_parcial
+    const f = String(directive.askField);
+
+    let compliant = false;
+    if (f === 'itens' && askedBasic === 'itens') compliant = true;
+    else if (f === 'endereco_saida' && askedBasic === 'endereco_saida') compliant = true;
+    else if (f === 'endereco_destino' && askedBasic === 'endereco_destino') compliant = true;
+    else if (f === 'ajudante' && askedBasic === 'ajudante') compliant = true;
+    else if (f === 'descricao') compliant = /\?/.test(normTxt(txt)); // exige pergunta explícita
+    else if (f === 'telefone') {
+      const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
+      const temDDD = !!(snapshotData && snapshotData.ddd);
+      if (temParcial && !temDDD) compliant = !!phoneFlags.ddd;
+      else compliant = !!phoneFlags.telefone;
+    } else if (f === 'ddd') compliant = !!phoneFlags.ddd;
+    else if (f === 'telefone_parcial') compliant = !!phoneFlags.telefone_parcial;
+
+    const onlyTiming = /^em alguns minutinhos\.?$/i.test(txt) || /^em alguns minutinhos$/i.test(txt);
+    if (!compliant || onlyTiming) {
+      const det = buildDeterministicAsk(directive, snapshotData);
+      if (det) {
+        if (/alguns\s+minutinhos/i.test(normTxt(txt))) {
+          txt = `${txt.trim()} ${det}`.trim();
+        } else if (txt) {
+          txt = `${txt.trim()} ${det}`.trim();
+        } else {
+          txt = det.trim();
+        }
+      }
+    }
+
+    if (directive.allowSecondQuestion && directive.nextField) {
+      const nf = String(directive.nextField);
+      const txtNorm = normTxt(txt);
+      const askedNext = detectAskedFieldFromText(txt);
+      const phoneN = detectPhoneAskFromText(txt);
+      let nextCompliant = false;
+      if (nf === 'itens' && askedNext === 'itens') nextCompliant = true;
+      else if (nf === 'endereco_saida' && askedNext === 'endereco_saida') nextCompliant = true;
+      else if (nf === 'endereco_destino' && askedNext === 'endereco_destino') nextCompliant = true;
+      else if (nf === 'telefone' && (phoneN.telefone || phoneN.ddd || phoneN.telefone_parcial)) nextCompliant = true;
+
+      if (!nextCompliant) {
+        const plus = buildDeterministicAsk({ askField: nf, allowSecondQuestion: false }, snapshotData);
+        if (plus) txt = `${txt} ${plus}`.trim();
+      }
+    }
+
+    return txt;
+  } catch {
+    const det = buildDeterministicAsk(directive, snapshotData);
+    return det || String(iaText || '').trim();
+  }
+}
+
 function normTxt(s) {
   try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
   catch { return String(s||'').toLowerCase(); }
@@ -3344,9 +3459,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             reason: 'missing'
           };
 
+          // Diretiva efetiva: se o pedidos não trouxe askField, use o primeiro "missing" do próprio snapshot do pedidos.
+          // Se ainda assim não houver, não chamamos a IA (sem autorização) e aguardamos a próxima janela.
+          const effectiveDirective = (directive && directive.askField)
+            ? directive
+            : ((Array.isArray(missing) && missing[0])
+              ? { askField: missing[0], nextField: null, allowSecondQuestion: false, phoneMode: 'lite', phase: 'none', reason: 'missing_fallback' }
+              : null);
+
+          // Se não há diretiva efetiva e não é primeira resposta, não gera texto algum.
+          if (!effectiveDirective && !firstReply) {
+            try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, triggerReason: null }); } catch {}
+            try { await pendingDel(nome, chatId); } catch {}
+            fila = fila.filter(id => id !== chatId);
+            chatAtivo = null;
+            return;
+          }
+
+          // Atualize logs de auditoria para refletir a diretiva efetiva
+          try { stepLog.appendJSONL(nome, 'virtus', { step: 'ask_directive', chatId, directive: effectiveDirective || directive }); } catch {}
+
           // Verifica se há 3 tentativas no mesmo campo (anti-looping)
           const askCounts = (snap && snap.askCounts) || {};
-          const currentField = directive && directive.askField;
+          const currentField = effectiveDirective && effectiveDirective.askField;
           const fieldAttempts = currentField ? (askCounts[currentField] || 0) : 0;
           
           // Se houver 3 tentativas no mesmo campo, enviar mensagem de WhatsApp
@@ -3388,11 +3523,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           }
 
-          // Log da diretiva para auditoria
-          try {
-            stepLog.appendJSONL(nome, 'virtus', { step: 'ask_directive', chatId, directive });
-          } catch {}
-
           // Política de atendimento (burst 1):
           // - Responder a tudo o que o cliente disse nesta virada.
           // - Fazer SOMENTE a pergunta definida pela diretiva (ask_field), exceto a exceção telefone + próxima quando allowSecond=true.
@@ -3402,7 +3532,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const systemAnswer = promptFretes.buildSystemPrompt();
 
           const instrucoes = buildInstrucoesFromDirective({
-            directive,
+            directive: effectiveDirective,
             snapshotData: dataColetada,
             firstReply,
             novasMsgs
@@ -3430,10 +3560,61 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
           } catch (e) {
             logger.warn('[AI-FIRST] Falha IA geradora', { nome, chatId, error: (e && e.message) || String(e) });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
+            try {
+              const fallbackTxt = buildDeterministicAsk(effectiveDirective, dataColetada) || 'Certo! Vamos avançar.';
+              let pAtual = await ensurePage().catch(()=>null);
+              if (!pAtual) {
+                try { await pendingDel(nome, chatId); } catch {}
+                fila = fila.filter(id => id !== chatId);
+                chatAtivo = null;
+                return;
+              }
+              let campoEnvio = await waitForComposer(pAtual, 10000);
+              if (!campoEnvio) campoEnvio = await refocusComposerNoReload(pAtual, chatId);
+              if (!campoEnvio) {
+                try { await pendingDel(nome, chatId); } catch {}
+                fila = fila.filter(id => id !== chatId);
+                chatAtivo = null;
+                return;
+              }
+              const out = removeTelefonesCompletos(fallbackTxt);
+              await waitForSendLockRelease(pAtual, 12000);
+              await acquireSendGuard(pAtual, chatId);
+              try {
+                await sendMessageSafe(pAtual, campoEnvio, out, nome, chatId);
+                await appendIaLine(nome, chatId, out);
+                try {
+                  pedidos.markIaReplied(nome, chatId);
+                  if (effectiveDirective && effectiveDirective.askField) {
+                    pedidos.recordAsk(nome, chatId, effectiveDirective.askField);
+                    if (effectiveDirective.askField === 'telefone') {
+                      pedidos.setWhatsPhase(nome, chatId, effectiveDirective.phase || 'full');
+                    }
+                  }
+                  await setChatState(nome, chatId, {
+                    state: CHAT_STATES.AGUARDANDO,
+                    lastIATs: Date.now(),
+                    lastCLIts: lastClienteTs,
+                    ultimaRespostaEnviada: out,
+                    ultimaRespostaEnviadaNorm: normalizeContent(out),
+                    triggerReason: null,
+                    replyDueAt: null
+                  });
+                  await flushChatStateNow(nome);
+                } catch {}
+              } finally {
+                releaseSendGuard(pAtual);
+              }
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            } catch {
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
           }
 
           // Parse da resposta: extrai APENAS o campo .resposta
@@ -3452,7 +3633,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
           
           // Sanitização PII: nunca ecoar telefone do cliente
-          const respostaSan = removeTelefonesCompletos(textoAEnviar);
+          let respostaSan = removeTelefonesCompletos(textoAEnviar);
+
+          // ENFORCER: garantir que a resposta inclua a pergunta mandatória da diretiva do pedidos.js
+          respostaSan = enforceDirectiveAsk(effectiveDirective, dataColetada, respostaSan, novasMsgs);
           
 
           // Envio único no Messenger
@@ -3507,10 +3691,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // Marca IA replied + askCount conforme diretiva aprovada
             try {
               pedidos.markIaReplied(nome, chatId);
-              if (directive && directive.askField) {
-                pedidos.recordAsk(nome, chatId, directive.askField);
-                if (directive.askField === 'telefone') {
-                  pedidos.setWhatsPhase(nome, chatId, directive.phase || 'full');
+              if (effectiveDirective && effectiveDirective.askField) {
+                pedidos.recordAsk(nome, chatId, effectiveDirective.askField);
+                if (effectiveDirective.askField === 'telefone') {
+                  pedidos.setWhatsPhase(nome, chatId, effectiveDirective.phase || 'full');
                 }
               }
               await setChatState(nome, chatId, {
@@ -4713,7 +4897,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           chatId, 
           error: msgErr 
         }, lastErr);
-        throw lastErr;
+        return false; // NÃO lança exceção; evita quebrar o pipeline
       }
       
       return false;
