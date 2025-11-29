@@ -108,9 +108,9 @@ Objetivo: a partir do histórico, consolidar:
 
 - itens: string | null (o que precisa transportar)
 
-- endereco_saida: string | null (aceita informal: bairro, ponto de referência)
+- endereco_saida: string | null (aceita informal: bairro, ponto de referência, termos curtos; nunca rejeite formas como "parque", "centro", "aldeião", "ali pro kobrasol", "mercado")
 
-- endereco_destino: string | null (aceita informal)
+- endereco_destino: string | null (aceita informal: termos curtos, como acima)
 
 - ajudante: true|false|null (opcional, não trava o pedido)
 
@@ -124,7 +124,9 @@ Objetivo: a partir do histórico, consolidar:
 
 Regras:
 
-- Endereços informais são válidos. NÃO normalize para "casa/apartamento/elevador".
+- Endereços informais e curtos são válidos: aceite exemplos como "parque", "centro", "aldeião", "ali pro kobrasol", "mercado".
+
+- NUNCA normalize para "casa/apartamento/elevador". NUNCA pedir ou sugerir formato "rua/número/bairro".
 
 - NÃO extraia/normalize tipo de imóvel ou elevador.
 

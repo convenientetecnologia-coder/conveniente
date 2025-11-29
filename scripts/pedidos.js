@@ -168,7 +168,6 @@ function describeAskField(field) {
 }
 
 function buildUserOrchestrationPrompt({ clienteUnificado = '', dados = {}, faltantes = [], duvidas = [], proximaPergunta = '', instrucoes = [] } = {}) {
-  // NUNCA incluir números de telefone do cliente no prompt; descreva presença/ausência apenas.
   const dataView = {
     itens: !!(dados && dados.itens),
     endereco_saida: !!(dados && dados.endereco_saida),
@@ -204,9 +203,11 @@ function buildUserOrchestrationPrompt({ clienteUnificado = '', dados = {}, falta
   lines.push('- Sempre finalize com a próxima pergunta do funil (não envie mensagem apenas tirando dúvidas).');
   lines.push('- Seja humano, simpático e direto; varie micro expressões e evite repetir frases.');
   lines.push('Produza UMA ÚNICA mensagem. Nada de segunda mensagem, lembrete, "aguarde", "vou te chamar" ou "já volto".');
-  lines.push('Na mesma mensagem, sempre componha nesta ordem: 1) responda as dúvidas do cliente (inclusive protestos) em 1–2 frases; 2) SE ainda não coletamos o WhatsApp, peça o WhatsApp com DDD e explique: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."; 3) finalize com a próxima pergunta obrigatória do funil.');
-  lines.push('Não repita frases prontas. Varie microexpressões mantendo o tom profissional humano.');
-  lines.push('Não quebre em mensagens separadas — conteúdo todo em uma frase composta, com pontos curtos.');
+  lines.push('Na mesma mensagem, componha: 1) responda dúvidas/protestos em 1–2 frases; 2) faça APENAS a pergunta indicada nas instruções do funil (não peça WhatsApp nem repita a frase do motorista/WhatsApp a menos que as instruções digam explicitamente); 3) finalize.');
+  lines.push('Jamais ecoe ou confirme o que o cliente disse; não use "entendi", "vi que", "obrigado pelos dados", "certo, você informou...".');
+  lines.push('Proibido repetir a explicação do orçamento/via motorista/WhatsApp depois da primeira resposta.');
+  lines.push('Se já recebemos número sem DDD, peça APENAS o que faltar (DDD ou número sem DDD), conforme instruções.');
+  lines.push('Não quebre em mensagens separadas — conteúdo todo em uma única mensagem.');
   for (const i of (instrucoes || [])) lines.push('- ' + i);
 
   return lines.join('\n');
@@ -271,16 +272,12 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
 
   if (firstReply) {
     instr.push('Cumprimente de forma breve e educada.');
-    instr.push('Informe que quem passa o valor/orçamento é o motorista pelo WhatsApp.');
+    instr.push('Inclua exatamente uma vez a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
     instr.push('Peça o WhatsApp com DDD APENAS nesta primeira resposta.');
     instr.push('Na MESMA mensagem, pergunte também o que precisa transportar (itens).');
   } else {
     instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
-    // Se ainda não temos telefone válido, pedir WhatsApp COM DDD e explicar o fluxo do motorista
-    const telOk = !!(snapshotData && snapshotData.telefone && String(snapshotData.telefone).replace(/\D/g,'').length >= 10);
-    if (!telOk) {
-      instr.push('Inclua, no mesmo texto, o pedido do WhatsApp com DDD e a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
-    }
+    instr.push('NÃO repita a explicação do orçamento/WhatsApp nas mensagens seguintes.');
   }
 
   const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
@@ -307,12 +304,13 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
       const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
       const temDDD = !!(snapshotData && snapshotData.ddd);
       if (temParcial && !temDDD) {
-        instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
-        instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
+        instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita nem reformule o número do cliente.');
+      } else if (temDDD && !temParcial) {
+        instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos.');
       } else {
-        instr.push('Peça o WhatsApp com DDD em uma única frase curta.');
-        instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
+        instr.push('Peça o WhatsApp com DDD em uma única frase curta. Sem explicação do fluxo do motorista.');
       }
+      instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
     }
     if (directive.askField === 'ddd') {
       instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
@@ -351,6 +349,7 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
     }
   }
 
+  instr.push('Jamais ecoe ou confirme o que o cliente disse; não use "entendi", "vi que", "obrigado pelos dados".');
   instr.push('Não repita números de telefone do cliente no texto.');
   instr.push('Não crie perguntas além das listadas.');
   instr.push('Seja breve, humano e profissional.');
