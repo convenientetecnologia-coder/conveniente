@@ -235,8 +235,104 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
   return await _execBusca(ctrl);
 
   async function _execBusca(controller) {
-    const promptFretes = require('./promptFretes.js');
     const browser = controller.browser;
+
+    // ====== INÍCIO: EXTRATOR ROBUSTO DE CIDADE/UF NO ANÚNCIO ======
+    async function _extractCityUF(page, candidates = []) {
+      const UF_SET = new Set(['AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG','PA','PB','PR','PE','PI','RJ','RN','RS','RO','RR','SC','SP','SE','TO']);
+
+      function _parseLineCityUf(s) {
+        if (!s) return null;
+        const str = String(s).trim();
+        const m = /([A-Za-zÀ-ÿ0-9 .\-']+),\s*([A-Za-z]{2})\b/.exec(str);
+        if (!m) return null;
+        const cidade = (m[1] || '').trim();
+        const uf = (m[2] || '').toUpperCase();
+        if (!cidade || !UF_SET.has(uf)) return null;
+        return { cidade, estado: uf };
+      }
+
+      function _parseFromCandidates(list) {
+        for (const s of (list || [])) {
+          const out = _parseLineCityUf(s);
+          if (out) return out;
+        }
+        return null;
+      }
+
+      // 1) Tentativa direta por seletores — spans e anchors visíveis no anúncio
+      const direct = await page.evaluate(() => {
+        function isVisible(el) {
+          try {
+            const st = window.getComputedStyle(el);
+            if (!st) return false;
+            if (st.visibility === 'hidden' || st.display === 'none') return false;
+            const r = el.getBoundingClientRect();
+            return !!(r && r.width > 0 && r.height > 0);
+          } catch { return false; }
+        }
+        function pickText(el) {
+          return (el && (el.innerText || el.textContent) || '').trim();
+        }
+        const out = [];
+
+        // a) Spans visíveis com padrão "Cidade, UF"
+        const spans = Array.from(document.querySelectorAll('span'));
+        for (const s of spans) {
+          if (!isVisible(s)) continue;
+          const t = pickText(s);
+          if (t) out.push(t);
+        }
+
+        // b) Anchors do Marketplace (ex.: "Anunciado em <a ...>Florianópolis, SC</a>")
+        const anchors = Array.from(document.querySelectorAll('a[href^="/marketplace/"], a[href*="/marketplace/"]'));
+        for (const a of anchors) {
+          if (!isVisible(a)) continue;
+          const t = pickText(a);
+          if (t) out.push(t);
+        }
+
+        // c) Regiões principais (header, main, pagelet Marketplace)
+        const regs = [
+          document.querySelector('header'),
+          document.querySelector('[role="main"]'),
+          document.querySelector('[data-pagelet*="Marketplace"]')
+        ].filter(Boolean);
+        for (const r of regs) {
+          const txt = pickText(r);
+          if (txt) {
+            const lines = txt.split(/\n+/).map(s => s.trim()).filter(Boolean);
+            out.push(...lines);
+          }
+        }
+
+        return out;
+      });
+
+      let best = _parseFromCandidates(direct);
+      if (best) return best;
+
+      // 2) Fallback: usa candidatos já coletados
+      best = _parseFromCandidates(candidates);
+      if (best) return best;
+
+      // 3) Fallback final: meta/title/og:description
+      const metaText = await page.evaluate(() => {
+        try {
+          const arr = [];
+          const title = (document.title || '').trim();
+          if (title) arr.push(title);
+          const md = document.querySelector('meta[name="description"]');
+          if (md && md.content) arr.push(md.content.trim());
+          const ogd = document.querySelector('meta[property="og:description"]');
+          if (ogd && ogd.content) arr.push(ogd.content.trim());
+          return arr.join('\n');
+        } catch { return ''; }
+      });
+      best = _parseFromCandidates([metaText].concat(candidates || []));
+      return best || null;
+    }
+    // ====== FIM: EXTRATOR ROBUSTO DE CIDADE/UF NO ANÚNCIO ======
 
     // Helper: abrir chat por clique (sem navegar), extrair URL do item do DOM do chat e liberar sendLock.
     async function _descobrirUrlClassificadoSeNecessario() {
@@ -423,6 +519,13 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
       // Vai para a página do classificado
       await novaAba.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
 
+      // Aguarda elementos do anúncio surgirem (sem travar o fluxo)
+      await Promise.race([
+        novaAba.waitForSelector('a[href^="/marketplace/"]', { timeout: 8000 }).catch(() => null),
+        novaAba.waitForSelector('span', { timeout: 8000 }).catch(() => null),
+        new Promise(r => setTimeout(r, 1500))
+      ]).catch(() => {});
+
       // Apenas scraping DOM - coleta candidatos de texto, SEM parsing
       const candidates = await novaAba.evaluate(() => {
         try {
@@ -492,8 +595,8 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
         }
       });
 
-      // Parsing pelo domínio do promptFretes
-      const finalLocal = promptFretes.parseCityUfFromText(candidates);
+      // Parsing robusto local (sem dependência externa)
+      const finalLocal = await _extractCityUF(novaAba, candidates);
 
       if (finalLocal && finalLocal.cidade && finalLocal.estado) {
         try {
