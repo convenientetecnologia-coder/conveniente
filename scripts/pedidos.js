@@ -8,6 +8,8 @@ const EventEmitter = require('events');
 const issues = require('./issues.js');
 const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 const fileStore = require('./fileStore.js');
+const promptFretes = require('./promptFretes.js');
+const { chatCompletion } = require('./inteligenciaArtificial.js');
 const MAX_ASK_RETRIES = parseInt(process.env.MAX_ASK_RETRIES || '3', 10);
 const PHONE_ASK_COOLDOWN_MS = parseInt(process.env.PHONE_ASK_COOLDOWN_MS || '120000', 10); // 2 min de cooldown para pedir telefone/DDD novamente
 const FIELD_TTL_MS = parseInt(process.env.FIELD_TTL_MS || '60000', 10); // 60s para expirar um campo perguntado
@@ -133,6 +135,91 @@ function getNextAskField(d = {}) {
 function shouldAskWhatsappFirst({ historicoNovo = [], dataAtual = {} } = {}) {
   const telOk = isValidPhoneBR(dataAtual && dataAtual.telefone);
   return !telOk; // sempre priorize WhatsApp até ter telefone válido
+}
+
+function removeTelefonesCompletos(texto) {
+  try { return String(texto||'').replace(/\b\d{8,11}\b/g, '******'); } catch { return String(texto||''); }
+}
+
+function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply = false, novasMsgs = [] }) {
+  const instr = [];
+
+  if (firstReply) {
+    instr.push('Cumprimente de forma breve e educada.');
+    instr.push('Informe que quem passa o valor/orçamento é o motorista pelo WhatsApp.');
+  } else {
+    instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
+  }
+
+  const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
+    .map(m => (m && m.texto ? String(m.texto) : ''))
+    .filter(t => /\?/.test(t))
+    .slice(0, 3);
+  if (perguntas.length > 0) {
+    instr.push('Responda de forma objetiva às perguntas do cliente (não invente informações).');
+  } else {
+    instr.push('Se houver algo a esclarecer na mensagem do cliente, responda de forma breve.');
+  }
+
+  const textoJanela = (Array.isArray(novasMsgs) ? novasMsgs : [])
+    .map(m => (m && m.texto ? String(m.texto) : ''))
+    .join(' ')
+    .toLowerCase();
+  const perguntouTempo = /quanto\s+tempo|quando|que\s+horas|vai\s+me\s+chamar|em\s+quanto/.test(textoJanela);
+  if (perguntouTempo) {
+    instr.push('Se perguntarem quando o motorista vai chamar, responda apenas: "em alguns minutinhos".');
+  }
+
+  if (directive && directive.askField) {
+    if (directive.askField === 'telefone') {
+      const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
+      const temDDD = !!(snapshotData && snapshotData.ddd);
+      if (temParcial && !temDDD) {
+        instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
+      } else {
+        instr.push('Peça o WhatsApp com DDD em uma única frase curta.');
+      }
+    }
+    if (directive.askField === 'ddd') {
+      instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
+    }
+    if (directive.askField === 'telefone_parcial') {
+      instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos. Não repita o número do cliente.');
+    }
+    if (directive.askField === 'itens') {
+      instr.push('Pergunte o que precisa transportar (itens).');
+    }
+    if (directive.askField === 'endereco_saida') {
+      instr.push('Pergunte o endereço de saída (pode ser informal: bairro, ponto de referência).');
+    }
+    if (directive.askField === 'endereco_destino') {
+      instr.push('Pergunte o endereço de destino (pode ser informal).');
+    }
+    if (directive.askField === 'ajudante') {
+      instr.push('Pergunte se precisa de ajudante (resposta sim ou não).');
+    }
+    if (directive.askField === 'descricao') {
+      instr.push('Pergunte se há alguma observação breve sobre a coleta/entrega.');
+    }
+
+    if (directive.allowSecondQuestion && directive.nextField) {
+      if (directive.nextField === 'itens') {
+        instr.push('Na sequência, pergunte também o que precisa transportar (itens).');
+      }
+      if (directive.nextField === 'endereco_saida') {
+        instr.push('Na sequência, pergunte também o endereço de saída (pode ser informal).');
+      }
+      if (directive.nextField === 'endereco_destino') {
+        instr.push('Na sequência, pergunte também o endereço de destino (pode ser informal).');
+      }
+    }
+  }
+
+  instr.push('Não repita números de telefone do cliente no texto.');
+  instr.push('Não crie perguntas além das listadas.');
+  instr.push('Seja breve, humano e profissional.');
+
+  return instr;
 }
 
 /* ===================== FIM — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
@@ -698,6 +785,80 @@ async function fallbackToHuman(perfil, chatId, reason) {
   }
 }
 
+async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {}, novasMsgs = [] } = {}) {
+  try {
+    // 1) Extrai/consolida dados do histórico (IA extratora) e atualiza snapshot
+    const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
+
+    // 2) Respeita janela de silêncio (finalização ativa)
+    if (module.exports.isFinalized(perfil, chatId)) {
+      return false;
+    }
+
+    // 3) Snapshot atual e diretiva determinística
+    const snap = module.exports.getSnapshot(perfil, chatId);
+    const dataColetada = (snap && snap.data) || {};
+    const firstReply = module.exports.shouldGreetFirstReply(perfil, chatId);
+    const directive = module.exports.getAskDirective(perfil, chatId, novasMsgs, snap);
+
+    // 4) Monta prompts e gera resposta humana (IA geradora)
+    const systemPrompt = promptFretes.buildSystemPrompt();
+    const instrucoes = buildInstrucoesFromDirective({
+      directive,
+      snapshotData: dataColetada,
+      firstReply,
+      novasMsgs
+    });
+
+    const userPrompt = promptFretes.buildUserPrompt({
+      instrucoes,
+      historico,
+      mensagemCliente: (() => {
+        const arr = Array.isArray(historico) ? historico.filter(m => m && m.autor === 'cliente') : [];
+        return arr.length ? String(arr[arr.length - 1].texto || '') : '';
+      })()
+    });
+
+    const model = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    const raw = await chatCompletion({
+      system: systemPrompt,
+      user: userPrompt,
+      provider: 'groq',
+      model,
+      task: 'answer',
+      timeoutMs: 22000,
+      retries: 2
+    });
+
+    const parsed = promptFretes.parseModelAnswerToDomain(raw);
+    const texto = String(parsed && parsed.resposta != null ? parsed.resposta : raw).trim();
+    const textoSan = removeTelefonesCompletos(texto);
+
+    // 5) Atualiza contadores e fase do funil
+    try {
+      module.exports.markIaReplied(perfil, chatId);
+      if (directive && directive.askField) {
+        module.exports.recordAsk(perfil, chatId, directive.askField);
+        if (directive.askField === 'telefone') {
+          module.exports.setWhatsPhase(perfil, chatId, directive.phase || 'full');
+        }
+      }
+    } catch {}
+
+    // 6) Emite para o Virtus enviar no Messenger
+    orchestrator.emit('replyReady', { perfil, chatId, texto: textoSan });
+
+    // 7) Verifica finalização (pedido completo/incompleto)
+    try { module.exports.finalizeIfReady(perfil, chatId); } catch {}
+
+    return true;
+
+  } catch (e) {
+    try { issues.append(perfil, 'ingest_from_virtus_fail', `chat=${chatId} err=${(e && e.message) || e}`); } catch {}
+    return false;
+  }
+}
+
 module.exports = {
   events: orchestrator, // emitter: 'orderSent', 'inactivityPing'
   getSnapshot: (perfil, chatId) => orchestrator.getSnapshot(perfil, chatId),
@@ -716,5 +877,8 @@ module.exports = {
   getAskDirective,
   setWhatsPhase,
   hasPriceIntent,
-  finalizeIfReady: (perfil, chatId) => orchestrator.finalizeIfReady(perfil, chatId)
+  finalizeIfReady: (perfil, chatId) => orchestrator.finalizeIfReady(perfil, chatId),
+
+  // NOVO: ponto de integração Virtus -> Pedidos
+  ingestFromVirtus
 };

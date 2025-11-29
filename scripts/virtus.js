@@ -33,7 +33,7 @@ const pedidos = require('./pedidos.js');
 const fileStore = require('./fileStore.js');
 
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
-const AI_FIRST = true;
+const AI_FIRST = false;
 
 // Funções de dedupe de mensagem
 function normalizeContent(s) {
@@ -105,6 +105,33 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         } catch (e) {
           await issues.append(perfil, 'mil_action', `whatsapp_request_send_fail chat=${chatId} ${e && e.message || e}`);
         }
+      }
+    } catch {}
+  });
+
+  // Resposta pronta pelo pedidos.js -> enviar no Messenger
+  pedidos.events.on('replyReady', async ({ perfil, chatId, texto }) => {
+    try {
+      if (perfil !== nome) return;
+      const payload = String(texto || '').trim();
+      if (!payload) return;
+
+      if (typeof enviarRespostaMessengerSeguraFn === 'function') {
+        const ok = await enviarRespostaMessengerSeguraFn(chatId, payload);
+        if (ok && typeof marcarRespondidoFn === 'function') {
+          await marcarRespondidoFn(chatId);
+        }
+        try {
+          await setChatState(nome, chatId, {
+            state: CHAT_STATES.AGUARDANDO,
+            lastIATs: Date.now(),
+            ultimaRespostaEnviada: payload,
+            ultimaRespostaEnviadaNorm: normalizeContent(payload),
+            triggerReason: null,
+            replyDueAt: null
+          });
+          await flushChatStateNow(nome);
+        } catch {}
       }
     } catch {}
   });
@@ -220,8 +247,6 @@ async function installChatFeedObserver(page, nome, onChat) {
   });
 }
 
-const { chatCompletion } = require('./inteligenciaArtificial.js');
-const promptFretes = require('./promptFretes.js');
 
 const VIRTUS_INPUT_LOCKS = new Map();
 function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
@@ -491,120 +516,6 @@ function detectAskedFieldFromText(t) {
   return null;
 }
 
-function detectPhoneAskFromText(t) {
-  const n = normTxt(t || '');
-  const asksWhats = /(whats(app)?|contato.whats|n[úu]mero.(whats|telefone)|seu\s+whats|seu\s+whatsapp|telefone\s*(com|c\/)\sddd|whatsapp\s(com|c\/)\sddd)/.test(n);
-  const asksDDD = /\bddd\b|c[oó]digo\s+de\s+[áa]rea/.test(n);
-  const asksSemDDD = /(sem\sddd|apenas\so\sn[uú]mero|s[oó]\so\sn[uú]mero|n[uú]mero\ssem\sddd)/.test(n);
-  return {
-    telefone: asksWhats,
-    ddd: asksDDD,
-    telefone_parcial: asksSemDDD
-  };
-}
-
-function buildDeterministicAsk(directive, snapshotData = {}) {
-  if (!directive || !directive.askField) return '';
-  const f = String(directive.askField);
-  const hasParcial = !!(snapshotData && snapshotData.telefone_parcial);
-  const hasDDD = !!(snapshotData && snapshotData.ddd);
-  let parts = [];
-
-  if (f === 'telefone') {
-    if (hasParcial && !hasDDD) {
-      parts.push('Preciso apenas do DDD (2 dígitos) para completar o seu WhatsApp. Qual é o DDD?');
-    } else {
-      parts.push('Pode me informar o seu WhatsApp com DDD, por favor?');
-    }
-  } else if (f === 'ddd') {
-    parts.push('Pode me informar o DDD (2 dígitos), por favor?');
-  } else if (f === 'telefone_parcial') {
-    parts.push('Pode me enviar o número do seu WhatsApp (sem DDD)? São 8 ou 9 dígitos.');
-  } else if (f === 'itens') {
-    parts.push('O que você precisa transportar?');
-  } else if (f === 'endereco_saida') {
-    parts.push('Qual é o endereço de saída? Pode ser informal (bairro ou ponto de referência).');
-  } else if (f === 'endereco_destino') {
-    parts.push('Qual é o endereço de destino? Pode ser informal.');
-  } else if (f === 'ajudante') {
-    parts.push('Você vai precisar de ajudante? (sim ou não)');
-  } else if (f === 'descricao') {
-    parts.push('Tem alguma observação rápida sobre a coleta/entrega?');
-  }
-
-  if (directive.allowSecondQuestion && directive.nextField) {
-    const nf = String(directive.nextField);
-    if (nf === 'itens') parts.push('E o que você precisa transportar?');
-    if (nf === 'endereco_saida') parts.push('E qual é o endereço de saída? Pode ser informal.');
-    if (nf === 'endereco_destino') parts.push('E qual é o endereço de destino? Pode ser informal.');
-    if (nf === 'telefone') parts.push('E pode me informar o seu WhatsApp com DDD, por favor?');
-  }
-
-  return parts.filter(Boolean).join(' ');
-}
-
-function enforceDirectiveAsk(directive, snapshotData, iaText, novasMsgs = []) {
-  try {
-    let txt = String(iaText || '').trim();
-    if (!directive || !directive.askField) {
-      return txt; // sem diretiva de pergunta, não força nada
-    }
-
-    const askedBasic = detectAskedFieldFromText(txt);        // itens/endereço/ajudante/descricao (heurística)
-    const phoneFlags = detectPhoneAskFromText(txt);          // telefone/ddd/telefone_parcial
-    const f = String(directive.askField);
-
-    let compliant = false;
-    if (f === 'itens' && askedBasic === 'itens') compliant = true;
-    else if (f === 'endereco_saida' && askedBasic === 'endereco_saida') compliant = true;
-    else if (f === 'endereco_destino' && askedBasic === 'endereco_destino') compliant = true;
-    else if (f === 'ajudante' && askedBasic === 'ajudante') compliant = true;
-    else if (f === 'descricao') compliant = /\?/.test(normTxt(txt)); // exige pergunta explícita
-    else if (f === 'telefone') {
-      const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
-      const temDDD = !!(snapshotData && snapshotData.ddd);
-      if (temParcial && !temDDD) compliant = !!phoneFlags.ddd;
-      else compliant = !!phoneFlags.telefone;
-    } else if (f === 'ddd') compliant = !!phoneFlags.ddd;
-    else if (f === 'telefone_parcial') compliant = !!phoneFlags.telefone_parcial;
-
-    const onlyTiming = /^em alguns minutinhos\.?$/i.test(txt) || /^em alguns minutinhos$/i.test(txt);
-    if (!compliant || onlyTiming) {
-      const det = buildDeterministicAsk(directive, snapshotData);
-      if (det) {
-        if (/alguns\s+minutinhos/i.test(normTxt(txt))) {
-          txt = `${txt.trim()} ${det}`.trim();
-        } else if (txt) {
-          txt = `${txt.trim()} ${det}`.trim();
-        } else {
-          txt = det.trim();
-        }
-      }
-    }
-
-    if (directive.allowSecondQuestion && directive.nextField) {
-      const nf = String(directive.nextField);
-      const txtNorm = normTxt(txt);
-      const askedNext = detectAskedFieldFromText(txt);
-      const phoneN = detectPhoneAskFromText(txt);
-      let nextCompliant = false;
-      if (nf === 'itens' && askedNext === 'itens') nextCompliant = true;
-      else if (nf === 'endereco_saida' && askedNext === 'endereco_saida') nextCompliant = true;
-      else if (nf === 'endereco_destino' && askedNext === 'endereco_destino') nextCompliant = true;
-      else if (nf === 'telefone' && (phoneN.telefone || phoneN.ddd || phoneN.telefone_parcial)) nextCompliant = true;
-
-      if (!nextCompliant) {
-        const plus = buildDeterministicAsk({ askField: nf, allowSecondQuestion: false }, snapshotData);
-        if (plus) txt = `${txt} ${plus}`.trim();
-      }
-    }
-
-    return txt;
-  } catch {
-    const det = buildDeterministicAsk(directive, snapshotData);
-    return det || String(iaText || '').trim();
-  }
-}
 
 function normTxt(s) {
   try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
@@ -626,29 +537,6 @@ function interpretYesNo(raw) {
 }
 
 
-async function applyBinaryAnswersFromContext(perfil, chatId, lastIaText, lastClientText) {
-  try {
-    const askedField = detectAskedFieldFromText(lastIaText || '');
-
-    async function setAndPropagate(patch, tag) {
-      await atualizarDadosColetados(chatId, { dados: patch });
-      try { await pedidos.upsertFromIA(perfil, chatId, patch); } catch {}
-      try {
-        if (tag) await issues.append(perfil, 'mil_action', `${tag} via answer_shortcut`);
-      } catch {}
-    }
-
-    if (askedField === 'ajudante') {
-      const yn = interpretYesNo(lastClientText);
-      if (yn !== null) {
-        await setAndPropagate({ ajudante: yn }, `ajudante_inferido:${yn ? 'sim' : 'nao'}`);
-      }
-    }
-
-  } catch (e) {
-    try { await issues.append(perfil, 'mil_action', `applyBinaryAnswersFromContext_error:${(e && e.message) || e}`); } catch {}
-  }
-}
 
 function sanitizeOutgoing(text) {
   try {
@@ -709,193 +597,6 @@ function hasAvailabilityIntent(text) {
   return /disponivel|disponível|ainda tem|tem ainda|esta disponivel|está disponivel|ta disponivel|tá disponivel/.test(t);
 }
 
-function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply = false, novasMsgs = [] }) {
-  const instr = [];
-
-  // Saudação e política de orçamento na primeira resposta
-  if (firstReply) {
-    instr.push('Cumprimente de forma breve e educada.');
-    instr.push('Informe que quem passa o valor/orçamento é o motorista pelo WhatsApp.');
-  } else {
-    instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
-  }
-
-  // Respostas às dúvidas recentes (curtas, objetivas)
-  const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
-    .map(m => (m && m.texto ? String(m.texto) : ''))
-    .filter(t => /\?/.test(t))
-    .slice(0, 3);
-  if (perguntas.length > 0) {
-    instr.push('Responda de forma objetiva às perguntas do cliente (não invente informações).');
-  } else {
-    instr.push('Se houver algo a esclarecer na mensagem do cliente, responda de forma breve.');
-  }
-
-  const textoJanela = (Array.isArray(novasMsgs) ? novasMsgs : [])
-    .map(m => (m && m.texto ? String(m.texto) : ''))
-    .join(' ')
-    .toLowerCase();
-
-  const perguntouTempo = /quanto\s+tempo|quando|que\s+horas|vai\s+me\s+chamar|em\s+quanto/.test(textoJanela);
-
-  if (perguntouTempo) {
-    instr.push('Se perguntarem quando o motorista vai chamar, responda apenas: "em alguns minutinhos".');
-  }
-
-  // Pergunta definida pela diretiva (pedido.js decide)
-  if (directive && directive.askField) {
-    if (directive.askField === 'telefone') {
-      const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
-      const temDDD = !!(snapshotData && snapshotData.ddd);
-      if (temParcial && !temDDD) {
-        instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
-      } else {
-        instr.push('Peça o WhatsApp com DDD em uma única frase curta.');
-      }
-    }
-    if (directive.askField === 'ddd') {
-      instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
-    }
-    if (directive.askField === 'telefone_parcial') {
-      instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos. Não repita o número do cliente.');
-    }
-    if (directive.askField === 'itens') {
-      instr.push('Pergunte o que precisa transportar (itens).');
-    }
-    if (directive.askField === 'endereco_saida') {
-      instr.push('Pergunte o endereço de saída (pode ser informal: bairro, ponto de referência).');
-    }
-    if (directive.askField === 'endereco_destino') {
-      instr.push('Pergunte o endereço de destino (pode ser informal).');
-    }
-    if (directive.askField === 'ajudante') {
-      instr.push('Pergunte se precisa de ajudante (resposta sim ou não).');
-    }
-    if (directive.askField === 'descricao') {
-      instr.push('Pergunte se há alguma observação breve sobre a coleta/entrega.');
-    }
-
-    // Permite uma segunda pergunta quando a diretiva explicita (ex.: telefone + itens)
-    if (directive.allowSecondQuestion && directive.nextField) {
-      if (directive.nextField === 'itens') {
-        instr.push('Na sequência, pergunte também o que precisa transportar (itens).');
-      }
-      if (directive.nextField === 'endereco_saida') {
-        instr.push('Na sequência, pergunte também o endereço de saída (pode ser informal).');
-      }
-      if (directive.nextField === 'endereco_destino') {
-        instr.push('Na sequência, pergunte também o endereço de destino (pode ser informal).');
-      }
-    }
-  }
-
-  // Restrições de segurança e estilo
-  instr.push('Não repita números de telefone do cliente no texto.');
-  instr.push('Não crie perguntas além das listadas.');
-  instr.push('Seja breve, humano e profissional.');
-
-  return instr;
-}
-
-async function processNewClientBatch(perfil, chatId, msgs, lastIaText, ensurePageFn) {
-  let protestedNow = false;
-  const novasMsgs = Array.isArray(msgs) ? msgs : [];
-  
-  // Detecta "disponível?" e seta flag
-  if (novasMsgs.some(m => hasAvailabilityIntent(m && m.texto || ''))) {
-    try {
-      await setChatState(perfil, chatId, { askedAvailability: true });
-    } catch {}
-  }
-  
-  for (const m of novasMsgs) {
-    const tx = String(m && m.texto || '').trim();
-
-    // Detecta protesto
-    if (detectProtestText(tx)) {
-      protestedNow = true;
-      try {
-        const st = await getChatState(perfil, chatId).catch(()=>null);
-        const pc = ((st && st.protestCount) || 0) + 1;
-        await setChatState(perfil, chatId, { protestCount: pc, lastProbeAt: Date.now() });
-        await issues.append(perfil, 'mil_action', `protest_detected chat=${chatId} count=${pc}`);
-      } catch {}
-    }
-
-    // Detecta dúvida/confusão
-    if (detectClientDoubt(tx)) {
-      try {
-        const st = await getChatState(perfil, chatId).catch(()=>null);
-        const doubtCount = ((st && st.doubtCount) || 0) + 1;
-        await setChatState(perfil, chatId, { doubtCount, lastProbeAt: Date.now() });
-        try {
-          stepLog.appendJSONL(perfil, 'virtus', { step: 'duvida_detectada', chatId, doubtCount, texto: tx.slice(0, 100) });
-        } catch {}
-        await issues.append(perfil, 'mil_action', `duvida_detectada chat=${chatId} count=${doubtCount}`);
-      } catch {}
-    }
-
-    // 1) Ajudante
-    try { await applyBinaryAnswersFromContext(perfil, chatId, lastIaText || '', tx); } catch {}
-
-    // 2) Endereços
-    try { await inferEnderecosFromText(perfil, chatId, tx, lastIaText || ''); } catch {}
-
-    // 3) DDD isolado
-    try {
-      if (/^\s*[1-9]\d\s*$/.test(tx)) {
-        const ddd = tx.replace(/\D/g, '');
-        if (ddd && ddd.length === 2) {
-          await atualizarDadosColetados(chatId, { dados: { ddd } });
-          await pedidos.upsertFromIA(perfil, chatId, { ddd });
-        }
-      }
-    } catch {}
-
-    // 4) Número parcial (8–9 dígitos)
-    try {
-      const parts = tx.match(/\b(\d{8,9})\b/g) || [];
-      if (parts.length > 0) {
-        const parcial = String(parts[parts.length - 1] || '').replace(/\D/g, '');
-        if (parcial && (parcial.length === 8 || parcial.length === 9)) {
-          await atualizarDadosColetados(chatId, { dados: { telefone_parcial: parcial } });
-          await pedidos.upsertFromIA(perfil, chatId, { telefone_parcial: parcial });
-        }
-      }
-    } catch {}
-  }
-
-  // Se protestou recentemente, contar e acionar handoff após 3 protestos
-  if (protestedNow) {
-    try {
-      const st = await getChatState(perfil, chatId).catch(()=>null);
-      const pc = (st && st.protestCount) || 1;
-      if (pc >= 3) {
-        // Ativa handoff humano definitivo
-        await fileStore.withDesiredFileLockUpdate(desired => {
-          desired.perfis = desired.perfis || {};
-          desired.perfis[perfil] = { ...(desired.perfis[perfil] || {}), humanHold: true };
-          return desired;
-        });
-        await issues.append(perfil, 'mil_action', `handoff_to_human_by_protest chat=${chatId}`);
-        try {
-          const p = ensurePageFn ? await ensurePageFn().catch(()=>null) : null;
-          if (p) {
-            let campo = await waitForComposer(p, 6000);
-            if (!campo) campo = await refocusComposerNoReload(p, chatId);
-            if (campo) {
-              await waitForSendLockRelease(p, 12000);
-              await acquireSendGuard(p, chatId);
-              try {
-                await sendMessageSafe(p, campo, 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.', perfil, chatId);
-              } finally { releaseSendGuard(p); }
-            }
-          }
-        } catch {}
-      }
-    } catch {}
-  }
-}
 
 async function waitForSendLockRelease(p, maxMs = 15000) {
   try {
@@ -3352,9 +3053,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Janela de novas mensagens do cliente desde a última IA
         const novasMsgs = getNewClientMessagesSince(historicoConversa, cutTs);
 
-        // Processa cada mensagem da janela, atualizando dados (ajudante/enderecos/ddd/parcial)
-        await processNewClientBatch(nome, chatId, novasMsgs, (ultimaIA && ultimaIA.texto) || '', ensurePage);
-
         // Detecta intenção de preço em QUALQUER mensagem nova (não só a última)
         const priceIntentBatch = novasMsgs.some(m => hasPriceIntent(m && m.texto || ''));
 
@@ -3407,646 +3105,38 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // ======================= INÍCIO PIPELINE IA-FIRST (EXTRAÇÃO + RESPOSTA) =======================
+      // === Virtus não chama IA. Encaminha histórico ao pedidos.js e aguarda replyReady ===
+      try {
+        // Contexto de cidade (manifest > classificado)
+        let cidadeCtx = null;
         try {
-          // Contexto de cidade: usa manifest primeiro, senão localizacao do classificado
-          let cidadeCtx = null;
-          try {
-            const man = await manifestStore.read(nome).catch(()=>null);
-            cidadeCtx = (man && man.cidade) ? man.cidade : null;
-          } catch {}
-          if (!cidadeCtx && localizacao && localizacao.cidade) cidadeCtx = localizacao.cidade;
-
-          // Atualiza snapshot via IA extratora (JSON puro) — orquestrador decide timers e missing
-          await pedidos.upsertFromHistoryLLM(nome, chatId, historicoConversa, { contexto: { cidade: cidadeCtx } });
-
-          // Respeitar janela de silêncio (freeze) de 10 min após envio
-          if (pedidos.isFinalized(nome, chatId)) {
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-
-          // Snapshot atual do pedido
-          const snap = pedidos.getSnapshot(nome, chatId);
-          const dataColetada = snap && snap.data ? snap.data : {};
-          const missing = Array.isArray(snap && snap.missing) ? snap.missing.slice(0) : [];
-          const telefone_ok = !!(dataColetada.telefone && String(dataColetada.telefone).trim().length >= 10);
-          const firstReply = pedidos.shouldGreetFirstReply(nome, chatId);
-
-          // Monta flags e diretiva determinística (pedido decide o que perguntar)
-          const stForFlags = await getChatState(nome, chatId).catch(()=>null);
-          const protestCount = (stForFlags && stForFlags.protestCount) || 0;
-          const doubtCount = (stForFlags && stForFlags.doubtCount) || 0;
-          const askedAvailability = !!(stForFlags && stForFlags.askedAvailability);
-
-          // Detecta se há dúvida nas novas mensagens
-          const hasDoubtInBatch = novasMsgs.some(m => detectClientDoubt(m && m.texto || ''));
-          if (hasDoubtInBatch) {
-            try {
-              stepLog.appendJSONL(nome, 'virtus', { step: 'duvida_detectada_batch', chatId, doubtCount });
-            } catch {}
-          }
-
-          // Diretiva determinística: qual campo perguntar agora
-          const directive = pedidos.getAskDirective(nome, chatId, novasMsgs, snap) || {
-            askField: null,
-            nextField: null,
-            allowSecondQuestion: false,
-            phoneMode: 'lite',
-            phase: 'none',
-            reason: 'missing'
-          };
-
-          // Diretiva efetiva: se o pedidos não trouxe askField, use o primeiro "missing" do próprio snapshot do pedidos.
-          // Se ainda assim não houver, não chamamos a IA (sem autorização) e aguardamos a próxima janela.
-          const effectiveDirective = (directive && directive.askField)
-            ? directive
-            : ((Array.isArray(missing) && missing[0])
-              ? { askField: missing[0], nextField: null, allowSecondQuestion: false, phoneMode: 'lite', phase: 'none', reason: 'missing_fallback' }
-              : null);
-
-          // Se não há diretiva efetiva e não é primeira resposta, não gera texto algum.
-          if (!effectiveDirective && !firstReply) {
-            try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, triggerReason: null }); } catch {}
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-
-          // Atualize logs de auditoria para refletir a diretiva efetiva
-          try { stepLog.appendJSONL(nome, 'virtus', { step: 'ask_directive', chatId, directive: effectiveDirective || directive }); } catch {}
-
-          // Verifica se há 3 tentativas no mesmo campo (anti-looping)
-          const askCounts = (snap && snap.askCounts) || {};
-          const currentField = effectiveDirective && effectiveDirective.askField;
-          const fieldAttempts = currentField ? (askCounts[currentField] || 0) : 0;
-          
-          // Se houver 3 tentativas no mesmo campo, enviar mensagem de WhatsApp
-          if (fieldAttempts >= 3 && currentField) {
-            let texto;
-            if (currentField === 'ddd') {
-              texto = 'Faltou só o DDD (2 dígitos) do seu Whats. Pode me informar, por favor?';
-            } else if (currentField === 'telefone_parcial') {
-              texto = 'Pode me enviar o número do seu WhatsApp (sem DDD)? São 8 ou 9 dígitos.';
-            } else {
-              texto = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
-            }
-            try {
-              const pAtual = await ensurePage().catch(() => null);
-              if (pAtual) {
-                let campo = await waitForComposer(pAtual, 10000);
-                if (!campo) campo = await refocusComposerNoReload(pAtual, chatId);
-                if (campo) {
-                  await waitForSendLockRelease(pAtual, 12000);
-                  await acquireSendGuard(pAtual, chatId);
-                  try {
-                    await sendMessageSafe(pAtual, campo, texto, nome, chatId);
-                  } finally {
-                    releaseSendGuard(pAtual);
-                  }
-                }
-              }
-              try {
-                stepLog.appendJSONL(nome, 'virtus', { step: 'whatsapp_request_3_attempts', chatId, field: currentField, attempts: fieldAttempts });
-              } catch {}
-              await issues.append(nome, 'mil_action', `whatsapp_request_3_attempts chat=${chatId} field=${currentField} attempts=${fieldAttempts}`);
-              try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }); } catch {}
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            } catch (e) {
-              logger.warn('[AI-FIRST] Falha ao enviar mensagem WhatsApp após 3 tentativas', { nome, chatId, error: (e && e.message) || String(e) });
-            }
-          }
-
-          // Política de atendimento (burst 1):
-          // - Responder a tudo o que o cliente disse nesta virada.
-          // - Fazer SOMENTE a pergunta definida pela diretiva (ask_field), exceto a exceção telefone + próxima quando allowSecond=true.
-          // - Nunca ecoar PII (telefone, DDD).
-          
-          // Constrói prompts conforme diretiva (tarefas explícitas)
-          const systemAnswer = promptFretes.buildSystemPrompt();
-
-          const instrucoes = buildInstrucoesFromDirective({
-            directive: effectiveDirective,
-            snapshotData: dataColetada,
-            firstReply,
-            novasMsgs
-          });
-
-          const userAnswer = promptFretes.buildUserPrompt({
-            instrucoes,
-            historico: historicoConversa,
-            mensagemCliente: (ultimaCliente && ultimaCliente.texto) || ''
-          });
-
-          // Chama IA geradora
-          let respostaRawIA = '';
-          try {
-            const modelAnswer = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-            respostaRawIA = await chatCompletion({
-              system: systemAnswer,
-              user: userAnswer,
-              provider: 'groq',
-              model: modelAnswer,
-              task: 'answer',
-              timeoutMs: 22000,
-              retries: 2
-            });
-            
-          } catch (e) {
-            logger.warn('[AI-FIRST] Falha IA geradora', { nome, chatId, error: (e && e.message) || String(e) });
-            try {
-              const fallbackTxt = buildDeterministicAsk(effectiveDirective, dataColetada) || 'Certo! Vamos avançar.';
-              let pAtual = await ensurePage().catch(()=>null);
-              if (!pAtual) {
-                try { await pendingDel(nome, chatId); } catch {}
-                fila = fila.filter(id => id !== chatId);
-                chatAtivo = null;
-                return;
-              }
-              let campoEnvio = await waitForComposer(pAtual, 10000);
-              if (!campoEnvio) campoEnvio = await refocusComposerNoReload(pAtual, chatId);
-              if (!campoEnvio) {
-                try { await pendingDel(nome, chatId); } catch {}
-                fila = fila.filter(id => id !== chatId);
-                chatAtivo = null;
-                return;
-              }
-              const out = removeTelefonesCompletos(fallbackTxt);
-              await waitForSendLockRelease(pAtual, 12000);
-              await acquireSendGuard(pAtual, chatId);
-              try {
-                await sendMessageSafe(pAtual, campoEnvio, out, nome, chatId);
-                await appendIaLine(nome, chatId, out);
-                try {
-                  pedidos.markIaReplied(nome, chatId);
-                  if (effectiveDirective && effectiveDirective.askField) {
-                    pedidos.recordAsk(nome, chatId, effectiveDirective.askField);
-                    if (effectiveDirective.askField === 'telefone') {
-                      pedidos.setWhatsPhase(nome, chatId, effectiveDirective.phase || 'full');
-                    }
-                  }
-                  await setChatState(nome, chatId, {
-                    state: CHAT_STATES.AGUARDANDO,
-                    lastIATs: Date.now(),
-                    lastCLIts: lastClienteTs,
-                    ultimaRespostaEnviada: out,
-                    ultimaRespostaEnviadaNorm: normalizeContent(out),
-                    triggerReason: null,
-                    replyDueAt: null
-                  });
-                  await flushChatStateNow(nome);
-                } catch {}
-              } finally {
-                releaseSendGuard(pAtual);
-              }
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            } catch {
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
-          }
-
-          // Parse da resposta: extrai APENAS o campo .resposta
-          const parsed = promptFretes.parseModelAnswerToDomain(respostaRawIA);
-          
-          let textoAEnviar = String(parsed.resposta || '').trim();
-          // Guarda extra: se ainda tiver cara de JSON, extraia texto humano
-          textoAEnviar = extractPlainTextFromMaybeJSON(textoAEnviar);
-          
-          
-          // Log se resposta explicativa foi enviada (quando há dúvida detectada)
-          if (hasDoubtInBatch) {
-            try {
-              stepLog.appendJSONL(nome, 'virtus', { step: 'resposta_explicativa_enviada', chatId, doubtCount });
-            } catch {}
-          }
-          
-          // Sanitização PII: nunca ecoar telefone do cliente
-          let respostaSan = removeTelefonesCompletos(textoAEnviar);
-
-          // ENFORCER: garantir que a resposta inclua a pergunta mandatória da diretiva do pedidos.js
-          respostaSan = enforceDirectiveAsk(effectiveDirective, dataColetada, respostaSan, novasMsgs);
-          
-
-          // Envio único no Messenger
-          const pAtual = await ensurePage().catch(()=>null);
-          if (!pAtual) {
-            logger.warn('[AI-FIRST] Page indisponível para envio', { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-          let campoEnvio = await waitForComposer(pAtual, 10000);
-          if (!campoEnvio) campoEnvio = await refocusComposerNoReload(pAtual, chatId);
-          if (!campoEnvio) {
-            logger.warn('[AI-FIRST] Composer indisponível para envio', { nome, chatId });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-
-          // Log técnico do payload gerado (para auditoria)
-          try {
-            stepLog.appendJSONL(nome, 'virtus', { step: 'ai_send', chatId, len: (respostaSan||'').length, hash: sha1(respostaSan||'') });
-          } catch {}
-
-          // DEDUPE: verifica se a resposta é semelhante à última enviada
-          const stSend = await getChatState(nome, chatId).catch(()=>null);
-          const lastSent = stSend && (stSend.ultimaRespostaEnviada || stSend.ultimaRespostaEnviadaNorm) || '';
-          if (nearEqual(respostaSan, lastSent)) {
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              lastIATs: Date.now(),
-              lastCLIts: lastClienteTs,
-              ultimaRespostaEnviada: lastSent,
-              ultimaRespostaEnviadaNorm: normalizeContent(lastSent),
-              triggerReason: null,
-              replyDueAt: null
-            });
-            await pendingDel(nome, chatId).catch(()=>{});
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-
-          await waitForSendLockRelease(pAtual, 12000);
-          await acquireSendGuard(pAtual, chatId);
-          try {
-            await sendMessageSafe(pAtual, campoEnvio, respostaSan, nome, chatId);
-            await appendIaLine(nome, chatId, respostaSan);
-
-            // Marca IA replied + askCount conforme diretiva aprovada
-            try {
-              pedidos.markIaReplied(nome, chatId);
-              if (effectiveDirective && effectiveDirective.askField) {
-                pedidos.recordAsk(nome, chatId, effectiveDirective.askField);
-                if (effectiveDirective.askField === 'telefone') {
-                  pedidos.setWhatsPhase(nome, chatId, effectiveDirective.phase || 'full');
-                }
-              }
-              await setChatState(nome, chatId, {
-                state: CHAT_STATES.AGUARDANDO,
-                lastIATs: Date.now(),
-                lastCLIts: lastClienteTs,
-                ultimaRespostaEnviada: respostaSan,
-                ultimaRespostaEnviadaNorm: normalizeContent(respostaSan),
-                triggerReason: null,
-                replyDueAt: null
-              });
-              await flushChatStateNow(nome);
-            } catch {}
-          } finally {
-            releaseSendGuard(pAtual);
-          }
-
-          // Enfileira o chat para o notificador (pipeline legado de respostas) — mantém compatibilidade
-          try {
-            if (NOTIFICADOR_HISTORICO) {
-              const localizacaoFormatada = formatarLocalizacaoParaPlanilha(localizacao);
-              adicionarChatParaEnvio(nome, {
-                chatId,
-                tipoServico,
-                historico: historicoConversa,
-                localizacao: localizacaoFormatada,
-                urlClassificado
-              });
-            }
-          } catch {}
-
-          // Remove pendência e encerra o fluxo (não cai no legado)
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-
-        } catch (e) {
-          logger.warn('[AI-FIRST] Erro inesperado no pipeline IA-first', { nome, chatId, error: (e && e.message) || String(e) });
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-        // ======================= FIM PIPELINE IA-FIRST =======================
-
-        // DDD isolado e número parcial (antes do LLM)
-        const lastTextPlain = String(ultimaCliente?.texto || '').trim();
-        const dddIsolado = /^[1-9]\d$/.test(lastTextPlain);
-        const parcialMatch = lastTextPlain.match(/\b(\d{8,9})\b/);
-        const parcialOk = parcialMatch && parcialMatch[1] && (parcialMatch[1].length === 8 || parcialMatch[1].length === 9);
-
-        const statePrev = await getChatState(nome, chatId).catch(()=>null);
-        const dcPrev = (statePrev && statePrev.dadosColetados) ? statePrev.dadosColetados : {};
-        const telPrev = (dcPrev && dcPrev.telefone) || null;
-        const telefoneValidoNoState = !!(telPrev && isValidBRPhoneWithDDD(telPrev));
-
-        if (!AI_FIRST && dddIsolado && !telefoneValidoNoState) {
-          // [LEGADO] Conteúdo do bloco permanece inalterado
-          await atualizarDadosColetados(chatId, { dados: { ddd: lastTextPlain } });
-          const askCountsNow = await getAskCounts(nome, chatId);
-          const frases = [
-            'Perfeito! Pode me enviar o número do WhatsApp?',
-            'Legal! Me manda o número do WhatsApp, por favor?',
-            'Show! Me envia o número do WhatsApp?'
-          ];
-          const msg = frases[(askCountsNow.telefone || 0) % frases.length];
-          await bumpAskCount(nome, chatId, 'telefone');
-
-          // Debounce central — registra pedida e flush imediato seguro
-          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
-          await flushChatStateNow(nome);
-          try { await issues.append(nome, 'phone_ask_ddd_isolado', `chat=${chatId}`); } catch {}
-
-          const pAtual0 = await ensurePage().catch(()=>null);
-          if (pAtual0) {
-            let campo = await waitForComposer(pAtual0, 8000);
-            if (!campo) campo = await refocusComposerNoReload(pAtual0, chatId);
-            const out = removeTelefonesCompletos(msg);
-            if (campo) await sendMessageSafe(pAtual0, campo, out, nome, chatId);
-          }
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-        // IA-FIRST: seguir para o LLM sem atalho.
-
-        if (!AI_FIRST && parcialOk && !telefoneValidoNoState) {
-          // [LEGADO] Conteúdo do bloco permanece inalterado
-          const parcialNum = parcialMatch[1];
-          await atualizarDadosColetados(chatId, { dados: { telefone_parcial: parcialNum } });
-          logger.info('[VIRTUS_PHONE_ASSEMBLY] parcial_detected', { nome, chatId, parcial: `****${parcialNum.slice(-4)}` });
-          const askCountsNow = await getAskCounts(nome, chatId);
-          const frasesDdd = [
-            'Perfeito! Me confirma só o DDD do seu WhatsApp?',
-            'Certo! Qual é o DDD do seu WhatsApp?',
-            'Ótimo! Qual o DDD do WhatsApp?'
-          ];
-          const msg = frasesDdd[(askCountsNow.ddd || 0) % frasesDdd.length];
-          await bumpAskCount(nome, chatId, 'ddd');
-
-          // Debounce central — registra pedida e flush imediato seguro
-          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
-          await flushChatStateNow(nome);
-          try { await issues.append(nome, 'phone_ask_parcial_numero', `chat=${chatId}`); } catch {}
-
-          const pAtual0 = await ensurePage().catch(()=>null);
-          if (pAtual0) {
-            let campo = await waitForComposer(pAtual0, 8000);
-            if (!campo) campo = await refocusComposerNoReload(pAtual0, chatId);
-            const out = removeTelefonesCompletos(msg);
-            if (campo) await sendMessageSafe(pAtual0, campo, out, nome, chatId);
-          }
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-        // IA-FIRST: seguir para o LLM sem atalho.
-
-        if (!AI_FIRST && hasPriceIntent(lastTextPlain) && !telefoneValidoNoState) {
-          // [LEGADO] Conteúdo do bloco permanece inalterado
-          logger.info('[VIRTUS_PRICE_INTENT] detectado', { nome, chatId });
-          const askCountsNow = await getAskCounts(nome, chatId);
-          const stPrev2 = await getChatState(nome, chatId).catch(()=>null);
-          const dadosColetadosNow = (stPrev2 && stPrev2.dadosColetados) ? stPrev2.dadosColetados : {};
-          const respostaWpp = montarRespostaForcadaWhatsAppSemDDD(dadosColetadosNow, askCountsNow);
-          const pedeDDD = (!!(dadosColetadosNow && dadosColetadosNow.telefone_parcial) && !(dadosColetadosNow && dadosColetadosNow.ddd));
-          await bumpAskCount(nome, chatId, pedeDDD ? 'ddd' : 'telefone');
-          logger.info('[VIRTUS_WPP_REQ] override', { nome, chatId });
-
-          // Debounce central — registra pedida e flush imediato seguro
-          await setChatState(nome, chatId, { lastWhatsReminderAt: Date.now() });
-          await flushChatStateNow(nome);
-          try { await issues.append(nome, 'phone_ask_price_intent', `chat=${chatId}`); } catch {}
-
-          const pAtualPrice = await ensurePage().catch(()=>null);
-          if (pAtualPrice) {
-            let campo = await waitForComposer(pAtualPrice, 8000);
-            if (!campo) campo = await refocusComposerNoReload(pAtualPrice, chatId);
-            const out = removeTelefonesCompletos(respostaWpp);
-            if (campo) await sendMessageSafe(pAtualPrice, campo, out, nome, chatId);
-          }
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-        // IA-FIRST: seguir para o LLM sem atalho.
-
-
-        const pAtual = await ensurePage().catch(()=>null);
-
-        {
-          try {
-            
-            let cidadePreferida = null;
-            try {
-              const man = await manifestStore.read(nome).catch(()=>null);
-              cidadePreferida = (man && man.cidade) ? man.cidade : null;
-            } catch {}
-            if (!cidadePreferida && localizacao && localizacao.cidade) {
-              cidadePreferida = localizacao.cidade;
-            }
-
-            if (Date.now() - responderStartedAt > 30000) {
-              await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
-              logger.warn('[RESPOSTA] Deadline por chat excedido — abortando com erro_envio', { nome, chatId });
-              return;
-            }
-            
-            const domain = promptFretes;
-            
-            const systemPrompt = domain.buildSystemPrompt();
-            const coletadoHint = stPrevGate && stPrevGate.dadosColetados ? stPrevGate.dadosColetados : null;
-            const priceIntent = hasPriceIntent(ultimaCliente?.texto || '');
-            const flags = { pedidoPreco: priceIntent };
-            const askCountsNow = await getAskCounts(nome, chatId);
-            const userPrompt = domain.buildUserPrompt({ cidade: cidadePreferida, historico: historicoConversa, coletado: coletadoHint, askCounts: askCountsNow });
-            
-            let parsed;
-            try {
-              const modelAnswer = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-              const modelRawResp = await chatCompletion({
-                system: systemPrompt,
-                user: userPrompt,
-                provider: 'groq',
-                model: modelAnswer,
-                task: 'answer'
-              });
-              
-              
-              parsed = domain.parseModelAnswerToDomain(modelRawResp, ultimaCliente?.texto);
-              
-              const respostaFinal = String(parsed.resposta || '').trim();
-              
-              // parsed.telefone_extraido só vem com DDD; se vier apenas parcial, parsed.dados.telefone_parcial é populado.
-            } catch (e) {
-              logger.error('[GROQ] Erro ao chamar IA ou parsear resposta', { nome, chatId, error: e && e.message || e });
-            try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
-
-            atualizarDadosColetados(chatId, {
-              cidade: cidadePreferida || null,
-              telefone: parsed.telefone_extraido || null,
-              dados: parsed.dados || {}
-            });
-
-
-            const pAtual = await ensurePage().catch(() => null);
-            if (!pAtual) {
-              logger.warn('[GROQ] Page indisponível', { nome, chatId });
-              await setChatState(nome, chatId, { state: 'erro_envio', erroTimestamp: Date.now() });
-              try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-
-            let urlNow = (typeof pAtual.url === 'function') ? (pAtual.url() || '') : '';
-            if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(pAtual, chatId, { timeoutMs: 0 }))) {
-              logger.warn('[GROQ] URL/contexto não corresponde (sem navegação). Cooldown.', { nome, chatId, urlNow });
-              const prev = await getChatState(nome, chatId).catch(()=>null);
-              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-              await setChatState(nome, chatId, {
-                state: CHAT_STATES.AGUARDANDO,
-                sendAttempts: attempts,
-                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                lastProbeAt: Date.now()
-              });
-    try { await pendingDel(nome, chatId); } catch {}
-    fila = fila.filter(id => id !== chatId);
-    chatAtivo = null;
-    return;
-  }
-
-            let campoEnvio = await waitForComposer(pAtual, 10000);
-            if (!campoEnvio) {
-              logger.info('[GROQ] Composer não encontrado, tentando refocus', { nome, chatId });
-              campoEnvio = await refocusComposerNoReload(pAtual, chatId, anchorSel);
-            }
-            // Observação: o modelo está orientado a não misturar pedido de DDD com outras perguntas.
-            // Este client apenas envia a resposta gerada, sem concatenar outras perguntas.
-
-            if (!campoEnvio) {
-              logger.warn('[GROQ] Composer indisponível após refocus - marcando cooldown', { nome, chatId });
-              const prev = await getChatState(nome, chatId).catch(()=>null);
-              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-              await setChatState(nome, chatId, {
-                state: 'erro_envio',
-                erroTimestamp: Date.now(),
-                sendAttempts: attempts,
-                cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-                ultimoProbeCLIts: Date.now(),
-                lastProbeAt: Date.now()
-              });
-              try { await pendingDel(nome, chatId); } catch {}
-              fila = fila.filter(id => id !== chatId);
-              chatAtivo = null;
-              return;
-            }
-
-            let respostaFinalRaw = String(parsed.resposta || '').trim();
-            respostaFinalRaw = extractPlainTextFromMaybeJSON(respostaFinalRaw);
-            
-            // [DESATIVADO NESTE FLUXO] prefixo FULL por intenção de preço agora é controlado pela diretiva do pedido + prompt (ask_field).
-            // Mantido bloco abaixo para compatibilidade do fluxo legado.
-
-            const respostaFinal = removeTelefonesCompletos(respostaFinalRaw);
-            
-            try {
-              await setChatState(nome, chatId, { state: CHAT_STATES.ENVIANDO });
-            } catch {}
-
-            await acquireSendGuard(pAtual, chatId);
-            try {
-              await setChatState(nome, chatId, {
-                ultimaRespostaEnviada: respostaFinal,
-                lastProbeAt: Date.now()
-              });
-              // OBS: não solicitar novamente WhatsApp aqui; o modelo já é instruído a não repetir,
-              // e o estado (dadosColetados) impede finalização sem DDD.
-              
-              const askedField = detectAskedFieldFromText(respostaFinal);
-              if (askedField) await bumpAskCount(nome, chatId, askedField);
-              
-              await sendMessageSafe(pAtual, campoEnvio, respostaFinal, nome, chatId);
-              await appendIaLine(nome, chatId, respostaFinal);
-              
-              await marcarRespondido(nome, chatId);
-              
-              // Finalização é sempre decidida pelo orquestrador; atualizar dados e solicitar finalização central
-              try {
-                const patch = Object.assign({}, parsed.dados || {}, parsed.telefone_extraido ? { telefone: parsed.telefone_extraido } : {});
-                if (Object.keys(patch).length > 0) {
-                  await pedidos.upsertFromIA(nome, chatId, patch);
-                }
-                await pedidos.finalizeIfReady(nome, chatId);
-              } catch {}
-            } finally {
-              releaseSendGuard(pAtual);
-            }
-
-            try {
-              await setChatState(nome, chatId, {
-                state: CHAT_STATES.AGUARDANDO,
-                lastIATs: Date.now(),
-                lastCLIts: lastClienteTs, // NOVO: só agora persistimos o "último cliente visto"!
-                lastProbeAt: Date.now()
-              });
+          const man = await manifestStore.read(nome).catch(()=>null);
+          cidadeCtx = (man && man.cidade) ? man.cidade : null;
         } catch {}
-
-          } catch (e) {
-            logger.error('[GROQ] Falha no fluxo direto', { chatId, error: e && e.message || e });
-            try {
-              const prev = await getChatState(nome, chatId);
-              const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-              const baseMin = 2; // 2min base
-              const nextMs = Math.min(5 * 60 * 1000, Math.pow(2, attempts - 1) * baseMin * 60 * 1000); // max 5min
-
-              if (attempts >= 3) {
-                await setChatState(nome, chatId, {
-                  state: 'erro_envio',
-                  sendAttempts: attempts,
-                  erroTimestamp: Date.now(),
-                  ultimoProbeCLIts: Date.now()
-                });
-                await logIssue(nome, 'virtus_send_failed', `erro_envio após ${attempts} tentativas (chat ${chatId})`);
-              } else {
-                await setChatState(nome, chatId, {
-                  state: CHAT_STATES.AGUARDANDO,
-                  sendAttempts: attempts,
-                  cooldownUntil: Date.now() + nextMs,
-                  ultimoProbeCLIts: Date.now()
-                });
-                await logIssue(nome, 'virtus_send_failed', `retry_schedule attempt=${attempts} in=${Math.round(nextMs/1000)}s chat=${chatId}`);
-              }
-            } catch {}
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
+        if (!cidadeCtx && localizacao && localizacao.cidade) {
+          cidadeCtx = localizacao.cidade;
         }
-        
-        // Removido: adicionarChatParaEnvio duplicado (já chamado no pipeline IA-FIRST)
 
+        // Encaminha histórico + contexto + janela ao orquestrador (pedidos.js)
+        await pedidos.ingestFromVirtus(nome, chatId, {
+          historico: historicoConversa,
+          contexto: { cidade: cidadeCtx },
+          novasMsgs
+        });
+
+        // Virtus não envia aqui; espera o evento replyReady.
+        try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, triggerReason: null, lastProbeAt: Date.now() }); } catch {}
         try { await pendingDel(nome, chatId); } catch {}
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      } catch (e) {
+        logger.warn('[VIRTUS] Falha ao encaminhar chat ao pedidos.js', { nome, chatId, error: (e && e.message) || String(e) });
+        try { await pendingDel(nome, chatId); } catch {}
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
         fila = fila.filter(id => id !== chatId);
         chatAtivo = null;
         
