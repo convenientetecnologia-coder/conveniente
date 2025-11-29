@@ -238,16 +238,13 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
     const promptFretes = require('./promptFretes.js');
     const browser = controller.browser;
 
-    // Helper: abre o chat na mainPage, tenta âncoras, tenta menu "More options", tenta clicar o cartão Marketplace,
-    // captura a URL do item por navegação e/ou varredura, restaura a inbox e libera sendLock.
+    // Helper: abrir chat por clique (sem navegar), extrair URL do item do DOM do chat e liberar sendLock.
     async function _descobrirUrlClassificadoSeNecessario() {
       if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
         return urlClassificado;
       }
 
-      const chatUrl = `https://www.messenger.com/marketplace/t/${chatId}/`;
-
-      // Garante a mainPage (aba zero do Virtus)
+      // Aba zero (Messenger) controlada pelo Virtus
       let main = controller.mainPage;
       try {
         if (!main) {
@@ -258,7 +255,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
       } catch {}
       if (!main) return null;
 
-      // sendLock para exclusão mútua com Virtus
+      // Exclusão mútua: trava Virtus enquanto clicamos/extraímos
       try {
         browser._sendLock = browser._sendLock || {};
         browser._sendLock.active = true;
@@ -267,142 +264,117 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
         browser._sendLock.since = Date.now();
       } catch {}
 
-      // Utilitário: varre âncoras por item
-      async function scanAnchorsForItem() {
-        return await main.evaluate(() => {
-          const fixAbs = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
-          // 1) Âncoras diretas de item
-          const anchors = Array.from(document.querySelectorAll('a[href]'));
-          for (const a of anchors) {
-            const href = (a.getAttribute('href') || a.href || '').trim();
-            if (!href) continue;
-            if (href.includes('/marketplace/item/') && !href.includes('/marketplace/t/')) {
-              return fixAbs(href);
+      const CLICK_TIMEOUT = 6500;
+      const WAIT_ITEM_TIMEOUT = 6000;
+
+      try {
+        // 1) Já está no chat desse chatId?
+        let onChat = false;
+        try {
+          onChat = await main.evaluate((cid) => {
+            try { return location && location.pathname && location.pathname.includes('/marketplace/t/' + cid); }
+            catch { return false; }
+          }, chatId).catch(() => false);
+        } catch {}
+
+        // 2) Se não está, clicar no anchor do chat (sem goto)
+        if (!onChat) {
+          const clicked = await main.evaluate(async (cid) => {
+            function isVisible(el) {
+              try {
+                const st = window.getComputedStyle(el);
+                if (!st) return false;
+                if (st.visibility === 'hidden' || st.display === 'none') return false;
+                const r = el.getBoundingClientRect();
+                return !!(r && r.width > 0 && r.height > 0);
+              } catch { return false; }
             }
-          }
-          // 2) Anchors em dialogs/overlays
-          const dialogAnchors = Array.from(document.querySelectorAll('div[role="dialog"] a[href]'));
-          for (const a of dialogAnchors) {
-            const href = (a.getAttribute('href') || a.href || '').trim();
-            if (href && href.includes('/marketplace/item/') && !href.includes('/marketplace/t/')) {
-              return fixAbs(href);
+            function gridRoot() {
+              let g = document.querySelector('div[role="grid"]');
+              if (!g) {
+                const pagelet = document.querySelector('div[data-pagelet="MWThreadList"]');
+                if (pagelet) g = pagelet.querySelector('div[role="grid"]');
+              }
+              return g || document.body;
             }
-          }
-          // 3) Alternativas (algumas builds usam /commerce/listing/)
-          for (const a of anchors) {
-            const href = (a.getAttribute('href') || a.href || '').trim();
-            if ((/\/commerce\/listing\//i.test(href) || /\/marketplace\/.*listing/i.test(href)) && !href.includes('/marketplace/t/')) {
-              return fixAbs(href);
+
+            const root = gridRoot();
+            try { root.scrollTop = 0; } catch {}
+            const sel = 'a[href^="/marketplace/t/"]';
+            const findAnchor = () => Array.from(document.querySelectorAll(sel)).find(a => {
+              const href = a.getAttribute('href') || a.href || '';
+              return href.includes('/marketplace/t/' + cid);
+            });
+
+            let anchor = findAnchor();
+            if (!anchor) {
+              // pequena varredura para cima, sem navegar
+              for (let i = 0; i < 6 && !anchor; i++) {
+                try { root.scrollTop = Math.max(0, root.scrollTop - 400); } catch {}
+                anchor = findAnchor();
+              }
             }
+            if (anchor && isVisible(anchor)) {
+              try { anchor.focus && anchor.focus(); } catch {}
+              try { anchor.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+              try { anchor.click(); } catch {}
+              return true;
+            }
+            return false;
+          }, chatId);
+
+          if (clicked) {
+            // Aguarda a rota mudar para o chat, sem usar goto/reload
+            await Promise.race([
+              main.waitForFunction(
+                (cid) => (location && location.pathname && location.pathname.includes('/marketplace/t/' + cid)),
+                { timeout: CLICK_TIMEOUT },
+                chatId
+              ).catch(() => null),
+              new Promise(r => setTimeout(r, CLICK_TIMEOUT))
+            ]).catch(() => {});
           }
+        }
+
+        // 3) Confirma se estamos no chat
+        try {
+          onChat = await main.evaluate((cid) => {
+            try { return location && location.pathname && location.pathname.includes('/marketplace/t/' + cid); }
+            catch { return false; }
+          }, chatId).catch(() => false);
+        } catch {}
+        if (!onChat) return null;
+
+        // 4) Espera breve e extrai âncora de item do DOM do chat
+        await Promise.race([
+          main.waitForFunction(() => !!document.querySelector('a[href*="/marketplace/item/"]'), { timeout: WAIT_ITEM_TIMEOUT }).catch(() => null),
+          new Promise(r => setTimeout(r, WAIT_ITEM_TIMEOUT))
+        ]).catch(() => {});
+
+        const found = await main.evaluate(() => {
+          const fixAbs = (h) => (!h ? null : (h.startsWith('http') ? h : ('https://www.facebook.com' + h)));
+          const list = Array.from(document.querySelectorAll('a[href]'));
+          // Item anchor
+          const a1 = list.find(el => {
+            const href = el.getAttribute('href') || el.href || '';
+            return href.includes('/marketplace/item/') && !href.includes('/marketplace/t/');
+          });
+          if (a1) return fixAbs(a1.getAttribute('href') || a1.href || '');
+          // Alternativo /commerce/listing/
+          const a2 = list.find(el => {
+            const href = el.getAttribute('href') || el.href || '';
+            return (/\/commerce\/listing\//i.test(href) || /\/marketplace\/.*listing/i.test(href)) && !href.includes('/marketplace/t/');
+          });
+          if (a2) return fixAbs(a2.getAttribute('href') || a2.href || '');
           return null;
         });
-      }
 
-      // Utilitário: tenta clicar "More options" e re-varrer âncoras
-      async function tryMoreOptionsThenScan() {
-        const moreSel = '[aria-label*="More options"],[aria-label*="Mais opções"]';
-        try {
-          const btn = await main.$(moreSel);
-          if (btn) {
-            await btn.click({ delay: 30 }).catch(() => {});
-            await main.waitForTimeout(700);
-            return await scanAnchorsForItem();
-          }
-        } catch {}
-        return null;
-      }
-
-      // Utilitário: clica no cartão "Marketplace" do cabeçalho e tenta capturar navegação/URL,
-      // depois re-varre âncoras caso permaneça no Messenger.
-      async function clickCardAndCaptureUrl() {
-        // 1) Dispara clique no possível cartão "Marketplace" (ou bloco pai)
-        const clicked = await main.evaluate(() => {
-          function isVisible(el) {
-            try {
-              const st = window.getComputedStyle(el);
-              if (!st) return false;
-              if (st.visibility === 'hidden' || st.display === 'none') return false;
-              const r = el.getBoundingClientRect();
-              return !!(r && r.width > 0 && r.height > 0);
-            } catch { return false; }
-          }
-          // Busca um span com texto "Marketplace"
-          const spans = Array.from(document.querySelectorAll('span'));
-          const mk = spans.find(s => /marketplace/i.test((s.innerText || s.textContent || '').trim()));
-          if (!mk) return false;
-          // Sobe até um contêiner clicável
-          let node = mk;
-          for (let i = 0; i < 8 && node; i++) {
-            if (node.tagName && (node.tagName.toLowerCase() === 'a' || node.getAttribute?.('role') === 'button')) {
-              if (isVisible(node)) { node.click(); return true; }
-            }
-            node = node.parentElement;
-          }
-          // Fallback: clica no ancestral visível mais próximo
-          node = mk;
-          for (let i = 0; i < 8 && node; i++) {
-            if (isVisible(node) && typeof node.click === 'function') { node.click(); return true; }
-            node = node.parentElement;
-          }
-          return false;
-        });
-
-        // 2) Espera navegação para item (facebook.com/marketplace/item/...) OU re-varre âncoras
-        if (clicked) {
-          // aguarda possível navegação cross-domain
-          await Promise.race([
-            main.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 6000 }).catch(() => null),
-            main.waitForFunction(() => /facebook\.com\/marketplace\/item\//i.test(location.href), { timeout: 6000 }).catch(() => null)
-          ]).catch(() => null);
-
-          // Se já navegou para o item, captura a URL
-          try {
-            const u = typeof main.url === 'function' ? (main.url() || '') : '';
-            if (/facebook\.com\/marketplace\/item\//i.test(u)) {
-              return u;
-            }
-          } catch {}
-
-          // Caso tenha aberto overlay interno, tenta re-varrer âncoras
-          const viaScan = await scanAnchorsForItem();
-          if (viaScan) return viaScan;
-        }
-        return null;
-      }
-
-      let foundUrl = null;
-      try {
-        // 0) Ir para o chat
-        await main.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-        await main.waitForTimeout(700);
-
-        // 1) Tenta âncoras diretas
-        foundUrl = await scanAnchorsForItem();
-        if (!foundUrl) {
-          // 2) Tenta menu "More options"
-          foundUrl = await tryMoreOptionsThenScan();
-        }
-        if (!foundUrl) {
-          // 3) Tenta clicar o cartão "Marketplace" e capturar navegação/âncoras
-          foundUrl = await clickCardAndCaptureUrl();
-        }
-
-        // Restaura a inbox/marketplace (sempre)
-        try {
-          await main.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-        } catch {}
-
-        return foundUrl || null;
+        return (found && typeof found === 'string') ? found : null;
       } catch {
         return null;
       } finally {
         // Libera o sendLock do owner 'city'
-        try {
-          if (browser && browser._sendLock && browser._sendLock.owner === 'city') {
-            browser._sendLock.active = false;
-          }
-        } catch {}
+        try { if (browser && browser._sendLock && browser._sendLock.owner === 'city') browser._sendLock.active = false; } catch {}
       }
     }
 
