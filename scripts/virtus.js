@@ -1124,7 +1124,6 @@ function agoraEpoch() {
   return Math.floor(Date.now() / 1000);
 }
 
-const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_respondidos.json');
 
 const CHAT_STATE_FILE = (perfil) => path.join(__dirname, '../dados/perfis', perfil, 'chats_state.json');
 
@@ -1284,8 +1283,6 @@ const CHAT_STATES = Object.freeze({
 
 const SENT_COOLDOWN_MS = 60 * 1000; // mínimo de 60s
 
-const PROBE_RECHECK_MIN_MS = parseInt(process.env.VIRTUS_PROBE_RECHECK_MIN_MS || '60000', 10);  // mínimo entre enfileiramentos (anti-flood), default 60s
-const PROBE_FORCE_OPEN_MS  = parseInt(process.env.VIRTUS_PROBE_FORCE_OPEN_MS  || '300000', 10); // forçar abertura do chat após X ms, default 5min
 
 
 const NOTIFICADOR_URL = process.env.NOTIFICADOR_URL || 'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io';
@@ -1303,12 +1300,9 @@ const VIRTUS_FINAL_MSG_MAX_TRIES = parseInt(process.env.VIRTUS_FINAL_MSG_MAX_TRI
 const VIRTUS_FINAL_MSG_RETRY_MIN_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MIN_MS || '600', 10); // 600ms
 const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MAX_MS || '900', 10); // 900ms
 
-const REPLY_FIRST_DELAY_MS = parseInt(process.env.VIRTUS_REPLY_FIRST_DELAY_MS || '45000', 10);
-const REPLY_WIN_MIN_MS = parseInt(process.env.VIRTUS_REPLY_DELAY_MIN_MS || '20000', 10);
-const REPLY_WIN_MAX_MS = parseInt(process.env.VIRTUS_REPLY_DELAY_MAX_MS || '60000', 10);
-const INTER_CHAT_DELAY_MIN_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MIN_MS || '5000', 10);
-const INTER_CHAT_DELAY_MAX_MS = parseInt(process.env.VIRTUS_INTER_CHAT_DELAY_MAX_MS || '20000', 10);
 const MAX_CHAT_AGE_MS = parseInt(process.env.VIRTUS_CHAT_MAX_AGE_MS || '28800000', 10); // 8h
+const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 5s
+const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
 
 const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
 const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
@@ -1352,11 +1346,9 @@ function getPendingSet(perfil) {
 }
 
 // Throttle global entre envios por perfil (anti-spam 5–20s entre chats)
-const GLOBAL_SEND_THROTTLE = new Map(); // nomePerfil -> { nextAllowedSendAt: number }
 
 
 
-const PENDING_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_pending.json');
 
 async function readJson(file, fb={}) {
   const lockAcquired = await acquireFileLock(file, 5000);
@@ -1388,21 +1380,6 @@ async function writeJsonAtomicFsync(file, obj){
   } finally {
     await releaseFileLock(file);
   }
-}
-async function pendingAdd(perfil, chatId, attemptId) {
-  const file = PENDING_JSON_NAME(perfil);
-  const cur = await readJson(file, {});
-  cur[chatId] = { attemptId, startedAt: Date.now() };
-  await writeJsonAtomicFsync(file, cur);
-}
-async function pendingDel(perfil, chatId) {
-  const file = PENDING_JSON_NAME(perfil);
-  const cur = await readJson(file, {});
-  if (cur[chatId]) { delete cur[chatId]; await writeJsonAtomicFsync(file, cur); }
-}
-async function pendingList(perfil) {
-  const file = PENDING_JSON_NAME(perfil);
-  return await readJson(file, {});
 }
 async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
   try {
@@ -1935,11 +1912,6 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
         });
       } catch {}
 
-      // Define throttle global entre chats: 5–20s aleatório
-      try {
-        const jitter = randomBetween(INTER_CHAT_DELAY_MIN_MS, INTER_CHAT_DELAY_MAX_MS);
-        GLOBAL_SEND_THROTTLE.set(nome, { nextAllowedSendAt: Date.now() + jitter });
-      } catch {}
     }
 
   } finally {
@@ -1980,198 +1952,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   let running = true;
   let page = null;
-  let fila = [];
-  let historico = {};
-  let chatAtivo = null;
-
-  // Debounce de 20s por chat/cliente
-  const DEBOUNCE_MS = parseInt(process.env.VIRTUS_DEBOUNCE_MS || '3000', 10);
-  const debounceTimers = new Map(); // chatId -> { timerId, startedAt, dueAt }
-
-  function clearDebounce(chatId) {
-    const t = debounceTimers.get(chatId);
-    if (t && t.timerId) { try { clearTimeout(t.timerId); } catch {} }
-    debounceTimers.delete(chatId);
-  }
-
-  async function scheduleDebounce(chatId) {
-    try {
-      const now = Date.now();
-      const dueAt = now + DEBOUNCE_MS;
-
-      // NOVO: se já há um debounce ativo, não reseta!
-      const existing = debounceTimers.get(chatId);
-      if (existing && existing.dueAt && existing.dueAt > now) {
-        // já existe timer ativo; só loga, marca probe no disco e sai
-        try {
-          await setChatState(nome, chatId, {
-            lastProbeAt: now,
-          });
-        } catch {}
-        if (process.env.VIRTUS_DEBUG === '1') {
-        }
-        return;
-      }
-
-      // Se existir um timer "velho", limpa (defensivo)
-      if (existing && existing.timerId) {
-        try { clearTimeout(existing.timerId); } catch {}
-      }
-
-      // Janela de resposta: define replyDueAt somente se não houver ou se já passou
-      try {
-        const stPrev = await getChatState(nome, chatId).catch(() => null);
-        const existingDue = Number(stPrev && stPrev.replyDueAt || 0);
-        const nowMs2 = Date.now();
-        if (!existingDue || nowMs2 >= existingDue) {
-          const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
-          await setChatState(nome, chatId, { replyDueAt: nowMs2 + delay });
-        }
-      } catch {}
-
-      const tid = setTimeout(async () => {
-        try {
-          debounceTimers.delete(chatId);
-          if (!fila.includes(chatId)) {
-            fila.push(chatId);
-            scheduleNextIfIdle();
-          }
-        } catch (e) {
-          logger.warn('[DBNC] fire erro', { nome, chatId, error: e && e.message || e });
-        }
-      }, DEBOUNCE_MS);
-
-      debounceTimers.set(chatId, { timerId: tid, startedAt: now, dueAt });
-
-      try {
-        await setChatState(nome, chatId, {
-          debounceUntil: dueAt,
-          lastProbeAt: now,
-          state: CHAT_STATES.PENDENTE
-        });
-      } catch {}
-
-      try {
-        const stPrev = await getChatState(nome, chatId).catch(() => null);
-        const rDuePrev = stPrev && stPrev.replyDueAt;
-        if (!rDuePrev) {
-          const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
-          await setChatState(nome, chatId, { replyDueAt: Date.now() + delay });
-        }
-      } catch {}
-
-
-    } catch (e) {
-      logger.warn('[DBNC] schedule erro', { nome, chatId, error: e && e.message || e });
-    }
-  }
-
-  const HIST_FILE = HIST_JSON_NAME(nome);
-  const NO_REPEAT_WINDOW_SEC = 48 * 3600; // 48h
-  const POLL_INTERVAL_MS = parseInt(process.env.VIRTUS_POLL_MS || '1000', 10);
-  const MIN_REPLY_DELAY_MS = 0;
-  const MAX_REPLY_DELAY_MS = 0;
-
-  const RESP_CACHE_MAX = 5000;
-  function setResponded(id, ts) {
-    if (!respondedCache.has(id) && respondedCache.size >= RESP_CACHE_MAX) {
-      const first = respondedCache.keys().next().value;
-      if (first !== undefined) respondedCache.delete(first);
-    }
-    respondedCache.set(id, ts);
-  }
-  const respondedCache = new Map();
-
-  const lastProbeMap = new Map(); // chatId -> Date.now() da última prova/checagem
-  const lastClientTsMap = new Map(); // chatId -> ms do último cliente visto (memória local, opcional)
-
-  function tsNum(x) {
-    if (!x) return 0;
-    const n = typeof x === 'number' ? x : Date.parse(x);
-    return Number.isFinite(n) ? n : 0;
-  }
-
-  let filaInterval = null;
-  let filaChatTimer = null;
-  let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
-
-  let lastScrollToTop = 0;
-
-  let saveChain = Promise.resolve();
-  let filaLoopBusy = false;
-  let recoverBackoffMs = 0;
-  const failCounts = new Map();
-  function setFailCount(chatId, n) {
-    if (!failCounts.has(chatId) && failCounts.size >= 1000) {
-      const first = failCounts.keys().next().value;
-      if (first !== undefined) failCounts.delete(first);
-    }
-    failCounts.set(chatId, n);
-  }
-
-  async function salvaHistorico() {
-    saveChain = saveChain.then(async () => {
-      try {
-        await fs.mkdir(path.dirname(HIST_FILE), { recursive: true });
-        const tmp = HIST_FILE + '.tmp';
-        const fd = await fs.open(tmp, 'w');
-        try {
-          await fd.writeFile(JSON.stringify(historico, null, 2), 'utf8');
-          await fd.sync();
-        } finally { await fd.close(); }
-        try { await fs.unlink(HIST_FILE); } catch {}
-        try { await fs.rename(tmp, HIST_FILE); }
-        catch { await fs.copyFile(tmp, HIST_FILE); try { await fs.unlink(tmp); } catch {} }
-      } catch (e) {
-        logger.error('Erro ao salvar histórico Virtus', { nome }, e);
-      }
-    }).catch(err => logger.error('Erro em cadeia de salvamento Virtus', { nome }, err));
-    return saveChain;
-  }
-
-  async function carregaHistorico() {
-    try {
-      const tmp = HIST_FILE + '.tmp';
-      try { await fs.access(HIST_FILE); }
-      catch {
-        if (await fs.access(tmp).then(()=>true).catch(()=>false)) {
-          try { await fs.rename(tmp, HIST_FILE); }
-          catch { await fs.copyFile(tmp, HIST_FILE); try { await fs.unlink(tmp);} catch{} }
-        }
-      }
-      const txt = await fs.readFile(HIST_FILE, 'utf-8');
-      historico = JSON.parse(txt);
-    } catch {
-      historico = {};
-    }
-    respondedCache.clear();
-    const agora = agoraEpoch();
-    for (const id of Object.keys(historico)) {
-      const ts = Number(historico[id]) || 0;
-      if (ts && (agora - ts) < NO_REPEAT_WINDOW_SEC) {
-        setResponded(id, ts);
-      }
-    }
-  }
-
-  function limpaHistoricoVelho() {
-    let mudanca = false;
-    const agora = agoraEpoch();
-    Object.keys(historico).forEach(id => {
-      const ts = Number(historico[id]) || 0;
-      if (!ts || (agora - ts) >= NO_REPEAT_WINDOW_SEC) {
-        delete historico[id];
-        respondedCache.delete(id);
-        mudanca = true;
-      }
-    });
-    while (respondedCache.size > RESP_CACHE_MAX) {
-      const first = respondedCache.keys().next().value;
-      if (first !== undefined) respondedCache.delete(first);
-      mudanca = true;
-    }
-    return mudanca;
-  }
 
   let ensurePagePromise = null;
   let lastDeadLogAt = 0;
@@ -2426,922 +2206,102 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  async function reconcilePendingsIfAny() {
-    if (!running || !epochOk()) return;
+  const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 5s
+  const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
+
+  async function scanAndProcessChats(nome) {
     try {
-      const pend = await pendingList(nome);
-      const keys = Object.keys(pend||{});
-      if (!keys.length) return;
-      const p = await ensurePage();
+      const p = await ensurePage().catch(()=>null);
       if (!p) return;
-      for (const chatId of keys) {
-        const rec = pend[chatId] || {};
-        const age = Date.now() - (rec.startedAt || 0);
-        if (age < 8*60*1000) continue; // deixa “aquecendo” 8min antes de reconciliar
+
+      try { await maybeGuaranteeMarketplaceFast(p, nome); } catch {}
+
+      const lista = await coletaChatsMarketplaceTodos(p); // [{id, tempo, href}]
+      if (!Array.isArray(lista) || !lista.length) return;
+
+      for (const it of lista) {
+        const chatId = String(it.id || '').trim();
+        if (!chatId) continue;
+
         try {
-          if (!running || !epochOk()) return;
+          const stPrev = await getChatState(nome, chatId).catch(()=>null);
+          if (!stPrev || !stPrev.discoveredAt) {
+            await setChatState(nome, chatId, { discoveredAt: Date.now() });
+          }
+        } catch {}
+
+        try {
+          const url = `https://www.messenger.com/marketplace/t/${chatId}/`;
           const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
-            continue; // Skip se não está no chat correto (sem navegação)
+            await p.goto(url, { waitUntil: 'domcontentloaded', timeout: SCAN_NAV_TIMEOUT_MS }).catch(()=>{});
+            await sleep(500);
           }
-          const looksSent = await wasRecentlySentByMe(p, 10*60*1000);
-          if (looksSent) {
-            const tsNow = agoraEpoch();
-            historico[chatId] = tsNow;
-            setResponded(chatId, tsNow);
-            await salvaHistorico();
-            await pendingDel(nome, chatId);
-          } else {
-            await pendingDel(nome, chatId);
-          }
-        } catch {  }
-      }
-    } catch {}
-  }
 
-  async function initHistoricoSePreciso() {
-    if (!running || !epochOk()) return;
-    
-    const FIRST_BOOT_SNAPSHOT = (process.env.VIRTUS_FIRST_BOOT_SNAPSHOT ?? '0') === '1';
-    
-    try {
-      await fs.access(HIST_FILE);
-      await carregaHistorico();
-      await reconcilePendingsIfAny();
-      logger.info('[SNAPSHOT] Histórico existente carregado. Retomando pendentes <24h.', { nome });
-      return;
-    } catch {}
+          const historicoConversa = await extrairHistoricoConversa(p);
+          await appendChatHistoryLog(nome, chatId, historicoConversa);
 
-    if (!FIRST_BOOT_SNAPSHOT) {
-      logger.info('[SNAPSHOT] Modo seguro: não marcando recents como respondidos no primeiro boot. (Defina VIRTUS_FIRST_BOOT_SNAPSHOT=1 para habilitar)', { nome });
-      await carregaHistorico();
-      await reconcilePendingsIfAny();
-      return;
-    }
-
-    logger.info('[SNAPSHOT] Primeiro boot sem histórico. Coletando chats >=24h para marcar como respondidos.', { nome });
-    if (!running || !epochOk()) return;
-    const p = await ensurePage();
-    if (!p) { logger.warn('[SNAPSHOT] Falha ao garantir aba zero.', { nome }); return; }
-    if (!running || !epochOk()) return;
-    await maybeGuaranteeMarketplaceFast(p, nome);
-    await maybeGuaranteeMarketplaceFast(p, nome);
-    try {
-      await Promise.race([
-        p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }),
-        p.waitForSelector('div[role="row"] span', { timeout: 8000 })
-      ]);
-    } catch {}
-    const todos = await coletaChatsMarketplaceTodos(p);
-    const agora = agoraEpoch();
-    historico = {};
-    for (const chat of todos) historico[chat.id] = agora;
-    await salvaHistorico();
-    await carregaHistorico();
-    await reconcilePendingsIfAny();
-    logger.info(`[SNAPSHOT] Concluído. ${todos.length} chats marcados como respondidos no primeiro boot.`, { nome });
-  }
-
-
-  async function atualizaFila() {
-    let mudancaFila = false;
-    const chatsNovos = await coletaChatsMarketplaceRecentes();
-
-    const aguard = getSetAguardando(nome);
-    const agoraMs = Date.now();
-    const ERROR_TTL_MS = parseInt(process.env.VIRTUS_ERROR_TTL_MS || '1800000', 10); // 30min padrão
-
-    let pLimitImport;
-    try {
-      pLimitImport = require('p-limit');
-    } catch {
-      pLimitImport = null;
-    }
-    const pLimit = pLimitImport && (pLimitImport.default || pLimitImport);
-    const limit = pLimit ? pLimit(8) : (fn) => fn();
-
-    await Promise.all(chatsNovos.map(async (c) => limit(async () => {
-      const id = c.id;
-
-      let st = null;
-      try { st = await getChatState(nome, id); } catch {}
-
-      const replyDue = Number(st && st.replyDueAt || 0);
-      const nowMs = Date.now();
-      if (replyDue && nowMs < replyDue) {
-        return; // NUNCA atender antes da janela: vale para qualquer motivo (inclusive fieldTimeout)
-      }
-
-      const jaFoiRespondido = st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO);
-      
-      if (jaFoiRespondido) {
-        // NUNCA re-enfileira chats já respondidos, exceto se houver triggerReason explícito (fieldTimeout)
-        const triggerReason = st && st.triggerReason;
-        if (triggerReason !== 'fieldTimeout') {
-          return; // Não re-enfileira sem motivo explícito
-        }
-        // Se está aguardando o notificador, respeite a janela e não rearme ainda
-        if (aguard.has(id)) {
-          const st2 = await getChatState(nome, id).catch(()=>null);
-          const lastProbe2 = st2 && st2.lastProbeAt ? st2.lastProbeAt : 0;
-          const awaitTtlMs = parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS || '15000', 10);
-          if ((Date.now() - lastProbe2) < awaitTtlMs) {
-            return;
-          }
-          // TTL expirou: libere o aguardando para permitir novo debounce
+          let lastClientTs = 0;
           try {
-            const setA2 = getSetAguardando(nome);
-            setA2.delete(id);
-            clearAguardTimer(nome, id);
+            for (let i = historicoConversa.length - 1; i >= 0; i--) {
+              const m = historicoConversa[i];
+              if (m && m.autor === 'cliente') { lastClientTs = Number(m.timestamp || 0); break; }
+            }
           } catch {}
-        }
 
-        if (fila.includes(id)) {
-          return;
-        }
-
-        // Apenas para fieldTimeout: re-enfileira
-        if (!fila.includes(id)) {
-          fila.push(id);
-          mudancaFila = true;
-        }
-        return;
-      }
-
-      if (fila.includes(id)) {
-        return;
-      }
-
-      if (st && st.state === 'erro_envio') {
-      }
-
-      if (aguard.has(id)) {
-        return;
-      }
-      if (fila.includes(id)) {
-        return;
-      }
-
-      // Gating para não re-schedule de forma agressiva
-      const lastProbe = lastProbeMap.get(id) || 0;
-      const MIN_RECHECK_MS = Math.max(PROBE_RECHECK_MIN_MS, Math.floor(DEBOUNCE_MS / 2));
-      if ((agoraMs - lastProbe) < MIN_RECHECK_MS) {
-        if (process.env.VIRTUS_DEBUG === '1') {
-        }
-        return;
-      }
-
-      try {
-        await setChatState(nome, id, {
-          state: CHAT_STATES.PENDENTE,
-          createdAt: Date.now(),
-          lastProbeAt: Date.now() // NOVO: registramos a última sondagem
-        });
-      } catch {}
-
-      try {
-        const man = await manifestStore.read(nome).catch(()=>null);
-        const cid = man && man.cidade || null;
-        if (cid) {
-          await setChatState(nome, id, { perfilCidade: String(cid) });
-        }
-      } catch {}
-
-      // Se ainda não temos cidade+estado, não agenda atendimento; dispara coleta e retorna
-      const haveCity = !!(st && st.cidade && st.estado);
-      if (!haveCity) {
-        try {
-          await setChatState(nome, id, { state: CHAT_STATES.COLETANDO, locFetchInFlight: true, lastProbeAt: Date.now() });
-        } catch {}
-        ensureLocationPrefetch(id).catch(()=>{});
-        return; // Importante: não chamar scheduleDebounce para este chat agora
-      }
-
-      await scheduleDebounce(id);
-      lastProbeMap.set(id, agoraMs);
-      mudancaFila = true;
-    })));
-
-    if (mudancaFila) {
-    }
-    return mudancaFila;
-  }
-
-  function scheduleNextIfIdle() {
-    if (!running) {
-      return;
-    }
-    if (chatAtivo) {
-      return;
-    }
-    if (filaChatTimer) {
-      return;
-    }
-    if (!fila.length) {
-      return;
-    }
-
-    // Throttle global entre envios (aguarda próximo envio permitido)
-    const thr = GLOBAL_SEND_THROTTLE.get(nome);
-    if (thr && thr.nextAllowedSendAt && Date.now() < thr.nextAllowedSendAt) {
-      const wait = Math.max(50, thr.nextAllowedSendAt - Date.now() + 50);
-      filaChatTimer = setTimeout(scheduleNextIfIdle, wait);
-      return;
-    }
-
-    const next = fila.shift(); // Remove da fila imediatamente
-    if (!next) {
-      logger.warn('[FILA] Chat removido da fila mas era null/undefined', { nome });
-      return;
-    }
-    
-    chatAtivo = next;
-
-    const delayMs = (() => {
-      const env = process.env.VIRTUS_NEXT_CHAT_DELAY_MS;
-      if (typeof scheduleNextIfIdle._firstRun === 'undefined') {
-        scheduleNextIfIdle._firstRun = false;
-        return 0; // roda o primeiro chat imediatamente
-      }
-      const parsed = parseInt(env, 10);
-      return Number.isFinite(parsed) ? parsed : 0;
-    })();
-    filaChatTimer = setTimeout(async () => {
-      try {
-        filaChatTimer = null; // Limpa timer imediatamente
-        
-        if (!running || !epochOk()) {
-          chatAtivo = null; // Libera chatAtivo
-          fila.unshift(next); // Re-enfileira
-          logger.warn('[FILA] Sistema não está rodando ou epoch inválido, re-enfileirando', { nome, chatId: next });
-          return;
-        }
-        
-        if (chatAtivo !== next) {
-          logger.warn('[FILA] Chat ativo mudou, re-enfileirando', { nome, chatId: next, chatAtivo });
-          fila.unshift(next); // Re-enfileira no início
-          return scheduleNextIfIdle();
-        }
-        
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next });
-      await responderChat(next);
-        
-        chatAtivo = null;
-        
-        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
-      } catch (e) {
-        filaChatTimer = null;
-        chatAtivo = null; // Libera chatAtivo em caso de erro
-        logger.error('[FILA] Erro no timer de atendimento', { nome, chatId: next, error: e && e.message || e, stack: e && e.stack });
-        fila.unshift(next);
-        setTimeout(scheduleNextIfIdle, Math.max(200, delayMs));
-      }
-    }, delayMs);
-  }
-
-  async function responderChat(chatId) {
-    
-    let _chatLockAcquired = false;
-    try {
-      if (!running || !epochOk()) {
-        logger.warn('[RESPONDER] Sistema não está rodando ou epoch inválido', { nome, chatId, running, epochOk: epochOk() });
-        return;
-      }
-      const responderStartedAt = Date.now();
-    let manifestFrozenUntil = 0;
-    try {
-      const manifest = await manifestStore.read(nome);
-      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
-    } catch {}
-    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
-      return;
-    }
-
-    // GATE DE JANELA DE RESPOSTA POR CHAT (20–60s)
-    try {
-      const stTime = await getChatState(nome, chatId).catch(() => null);
-      let dueAt = Number(stTime && stTime.replyDueAt || 0);
-      const nowMs = Date.now();
-
-      // Se não há janela ainda, define e aguarda; se há e ainda não venceu, aguarda.
-      if (!dueAt || nowMs < dueAt) {
-        if (!dueAt) {
-          const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
-          dueAt = nowMs + delay;
-          await setChatState(nome, chatId, { replyDueAt: dueAt });
-        }
-        // Reagendamento natural: tira da fila agora; atualiza marcadores; deixa o loop recolocar quando vencer.
-        try { await pendingDel(nome, chatId); } catch {}
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
-      }
-    } catch {}
-
-      if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
-      if (!browser || browser.isConnected?.() === false) {
-        logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
-        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
-        running = false;
-        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-        return;
-      }
-      let p = await ensurePage();
-      if (!p || (p.isClosed && p.isClosed())) {
-        logger.error(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`, { nome });
-        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
-        running = false;
-        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
-        return;
-      }
-      if (!chatId) {
-        logger.warn('[RESPONDER] chatId inválido', { nome, chatId });
-        chatAtivo = null; // Libera chatAtivo antes de retornar
-        return;
-      }
-
-      if (chatAtivo && chatAtivo !== chatId) {
-        logger.warn('[RESPONDER] Outro chat já está sendo processado (chatAtivo)', { nome, chatId, chatAtivo });
-        return;
-      }
-      
-      chatAtivo = chatId;
-
-      
-      if (!chatLock.acquire(nome, chatId)) {
-        logger.warn('[RESPONDER] Falha ao adquirir lock - tentando forçar liberação', { nome, chatId });
-        try {
-          chatLock.release(nome, chatId);
-          await new Promise(r => setTimeout(r, 100));
-          if (chatLock.acquire(nome, chatId)) {
-            _chatLockAcquired = true;
-          } else {
-            logger.warn('[RESPONDER] Falha ao adquirir lock mesmo após forçar liberação', { nome, chatId });
-        stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
-            stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
-            try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId} mesmo após forçar liberação`); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            return;
+          const MAX_CHAT_AGE_MS = 8 * 60 * 60 * 1000; // 8 horas
+          if (!lastClientTs || (Date.now() - lastClientTs) > MAX_CHAT_AGE_MS) {
+            await setChatState(nome, chatId, { lastScanAt: Date.now(), lastCLIts: lastClientTs || 0 });
+            continue;
           }
+
+          try {
+            const stLoc = await getChatState(nome, chatId).catch(()=>null);
+            if (!(stLoc && stLoc.cidade && stLoc.estado)) {
+              await ensureLocationPrefetch(chatId);
+            }
+          } catch {}
+
+          let cidadeCtx = null;
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            cidadeCtx = (man && man.cidade) ? man.cidade : null;
+          } catch {}
+          if (!cidadeCtx) {
+            const stLoc2 = await getChatState(nome, chatId).catch(()=>null);
+            if (stLoc2 && stLoc2.cidade) cidadeCtx = stLoc2.cidade;
+          }
+
+          await pedidos.ingestFromVirtus(nome, chatId, {
+            historico: historicoConversa,
+            contexto: { cidade: cidadeCtx || null },
+            novasMsgs: historicoConversa.filter(m => m && m.autor === 'cliente')
+          });
+
+          await setChatState(nome, chatId, {
+            state: CHAT_STATES.AGUARDANDO,
+            lastScanAt: Date.now(),
+            lastCLIts: lastClientTs
+          });
         } catch (e) {
-          logger.error('[RESPONDER] Erro ao tentar forçar liberação de lock', { nome, chatId, error: e && e.message || e });
-          stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked', chatId, attempt: attId });
-        stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_busy', chatId, attempt: attId });
-        try { await logIssue(nome, 'chat_lock_busy', `Falha ao adquirir lock para chat ${chatId}`); } catch {}
-        fila = fila.filter(id => id !== chatId);
-        return;
+          logger.warn('[SCAN] Falha ao processar chat', { nome, chatId, error: (e && e.message) || String(e) });
+        }
       }
-      } else {
-      _chatLockAcquired = true;
-      }
-
-      
-      try {
-        await setChatState(nome, chatId, { lastProbeAt: Date.now() });
-      } catch {}
-      lastProbeMap.set(chatId, Date.now());
-      
-      stepLog.appendJSONL(nome, 'virtus', { step: 'chat_lock_ok', chatId, attempt: attId });
-
-      try {
-        await setChatState(nome, chatId, { state: CHAT_STATES.PENDENTE });
-      } catch {}
-
-      const attemptId2 = stepLog.attemptId();
-      try { await pendingAdd(nome, chatId, attemptId2); } catch {}
-
-      chatAtivo = chatId;
-
-      // GATE 1: Exclusão mútua com coleta de cidade e Robe ativo
-      try {
-        const ctrlNow = (global && global.controllers) ? global.controllers.get(nome) : null;
-        const robeActive = !!(ctrlNow && ctrlNow.browser && ctrlNow.browser._robeActiveFor === nome);
-        const busyCity = !!(ctrlNow && ctrlNow.busyReason === 'city');
-        if (robeActive || busyCity) {
-          try { await logIssue(nome, 'mil_action', `virtus_skip_busy chat=${chatId} robe=${robeActive?1:0} busy=${busyCity?'city':''}`); } catch {}
-          setTimeout(() => {
-            try { if (!fila.includes(chatId)) { fila.push(chatId); scheduleNextIfIdle(); } } catch {}
-          }, 1200);
-          return; // não atende enquanto coleta cidade ou robe ativo
-        }
-      } catch {}
-
-      // GATE 2: Nunca atender sem cidade/UF — dispara coleta e sai
-      try {
-        const stGateLoc = await getChatState(nome, chatId).catch(()=>null);
-        const haveCityGate = !!(stGateLoc && stGateLoc.cidade && stGateLoc.estado);
-        if (!haveCityGate) {
-          await setChatState(nome, chatId, { state: CHAT_STATES.COLETANDO, locFetchInFlight: true, lastProbeAt: Date.now() });
-          ensureLocationPrefetch(chatId).catch(()=>{});
-          return; // coleta primeiro; o callback re-enfileira
-        }
-      } catch {}
-
-      try {
-        p = await ensurePage();
-        if (!p) {
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-        if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-        await maybeGuaranteeMarketplaceFast(p, nome);
-
-        let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-        if (!chatUrlMatches(urlNow, chatId)) {
-        let anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-        await scrollChatsToTop(p, nome).catch(()=>{});
-        await sleep(300);
-        let found = await p.$(anchorSel);
-
-          if (found) {
-            try {
-        await p.evaluate((sel) => {
-          const el = document.querySelector(sel);
-                if (el) el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
-        }, anchorSel);
-              await Promise.race([
-                p.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
-                (async () => { await p.$eval(anchorSel, el => el.click()); })()
-              ]);
-              await sleep(1000); // Aguarda navegação
-            } catch (e) {
-              logger.warn('[NAVEGACAO] Falha ao clicar no anchor, tentando goto direto', { nome, chatId, error: e && e.message || e });
-            }
-          }
-          
-          urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-          if (!chatUrlMatches(urlNow, chatId)) {
-            try {
-              await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-              await sleep(1000);
-              urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-            } catch (e) {
-              logger.warn('[NAVEGACAO] Falha ao navegar para o chat', { nome, chatId, error: e && e.message || e });
-            }
-          }
-          
-          if (!chatUrlMatches(urlNow, chatId) || !(await assertOnChat(p, chatId, { timeoutMs: 2000 }))) {
-            logger.warn('[VIRTUS] Não foi possível abrir o chat. Abortando atendimento.', { nome, chatId, urlNow });
-            const prev = await getChatState(nome, chatId).catch(()=>null);
-            const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              sendAttempts: attempts,
-              cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-              lastProbeAt: Date.now()
-            });
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-          }
-        } else {
-          if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
-            logger.warn('[VIRTUS] Contexto do chat não corresponde. Abortando atendimento.', { nome, chatId, urlNow });
-            const prev = await getChatState(nome, chatId).catch(()=>null);
-            const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              sendAttempts: attempts,
-              cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-              lastProbeAt: Date.now()
-            });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-        }
-
-        if (await isChatBlocked(p)) {
-          logger.info('[SKIP] Chat bloqueado/indisponível', { nome, chatId });
-          logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
-          try { await pendingDel(nome, chatId); } catch {}
-          try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado/indisponível`); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          resetFail(chatId);
-          return;
-        }
-
-        if (!(await assertOnChat(p, chatId, { timeoutMs: 1200 }))) {
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          await logIssue(nome, 'mil_action', `virtus_context_abort: url divergiu antes do envio (chat ${chatId})`);
-          return;
-        }
-
-        let campo = await waitForComposer(p, 10000);
-        if (!campo) {
-          logger.info('[COMPOSER] Composer não encontrado, tentando refocus sem reload', { nome, chatId });
-          const campo2 = await refocusComposerNoReload(p, chatId, anchorSel);
-          if (campo2) {
-            campo = campo2;
-            logger.info('[COMPOSER] Refocus bem-sucedido', { nome, chatId });
-          } else {
-            logger.warn('[COMPOSER] indisponível (sem reload) — agendando cooldown', { nome, chatId });
-            const prev = await getChatState(nome, chatId).catch(()=>null);
-            const attempts = (prev && prev.sendAttempts ? prev.sendAttempts : 0) + 1;
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              sendAttempts: attempts,
-              cooldownUntil: Date.now() + Math.min(60000, 20000 * attempts),
-              ultimoProbeCLIts: Date.now(),
-              lastProbeAt: Date.now()
-            });
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-        }
-
-            resetFail(chatId);
-
-        const urlClassificado = await extrairUrlClassificado(p, chatId);
-
-        let localizacao = null;
-        try {
-          const stLoc = await getChatState(nome, chatId).catch(() => null);
-          if (stLoc && stLoc.cidade && stLoc.estado) {
-            localizacao = { cidade: stLoc.cidade, estado: stLoc.estado };
-            logger.info('[LOCALIZACAO] Localização recuperada do cache', { 
-              nome, 
-              chatId, 
-              cidade: localizacao.cidade, 
-              estado: localizacao.estado 
-            });
-          } else {
-            // Dispara PRÉ-COLETA sem bloquear o fluxo de resposta
-            try { await ensureLocationPrefetch(chatId); } catch {}
-          }
-        } catch {
-          localizacao = null;
-        }
-
-        if (localizacao && localizacao.cidade && localizacao.estado) {
-          logger.info('[LOCALIZACAO] Localização encontrada', { 
-            nome, 
-            chatId, 
-            cidade: localizacao.cidade, 
-            estado: localizacao.estado 
-          });
-        } else {
-          try {
-            const stWarn = await getChatState(nome, chatId).catch(() => null);
-            if (!stWarn || !stWarn.locWarnedNoLocation) {
-              logger.warn('[LOCALIZACAO] Localização NÃO encontrada', { nome, chatId, urlClassificado });
-              await setChatState(nome, chatId, { locWarnedNoLocation: true });
-            }
-          } catch {}
-        }
-
-        const tipoServico = await identificarTipoServico(nome);
-
-        try {
-          await setChatState(nome, chatId, { state: CHAT_STATES.GERANDO });
-        } catch {}
-
-        const historicoConversa = await extrairHistoricoConversa(p);
-        
-        await appendChatHistoryLog(nome, chatId, historicoConversa);
-        
-
-        const ultimaIA = (() => {
-          const iaMsgs = historicoConversa.filter(m => m.autor === 'ia');
-          return iaMsgs.length ? iaMsgs[iaMsgs.length - 1] : null;
-        })();
-
-        const ultimaCliente = (() => {
-          const cli = historicoConversa.filter(m => m.autor === 'cliente');
-          return cli.length ? cli[cli.length - 1] : null;
-        })();
-
-        // --- PATCH GATING ANTI-LOOP (insira exatamente aqui) ---
-        const lastClienteTs = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
-        const lastIaTs = Number((ultimaIA && ultimaIA.timestamp) || 0);
-
-        // GATE 8 HORAS — só responde se a última mensagem do cliente for <= 8h
-        try {
-          const lastCli = Number((ultimaCliente && ultimaCliente.timestamp) || 0);
-          if (!lastCli || (Date.now() - lastCli) > MAX_CHAT_AGE_MS) {
-            try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, lastProbeAt: Date.now() }); } catch {}
-            try { await pendingDel(nome, chatId); } catch {}
-            fila = fila.filter(id => id !== chatId);
-            chatAtivo = null;
-            return;
-          }
-        } catch {}
-
-        const stPrevGate = await getChatState(nome, chatId).catch(() => null);
-        const lastIATsPrev = Number((stPrevGate && stPrevGate.lastIATs) || 0);
-        const lastCLItsPrev = Number((stPrevGate && stPrevGate.lastCLIts) || 0);
-        const cutTs = Math.max(lastIATsPrev || 0, lastIaTs || 0, lastCLItsPrev || 0);
-
-        // Janela de novas mensagens do cliente desde a última IA
-        const novasMsgs = getNewClientMessagesSince(historicoConversa, cutTs);
-
-        // Detecta intenção de preço em QUALQUER mensagem nova (não só a última)
-        const priceIntentBatch = novasMsgs.some(m => hasPriceIntent(m && m.texto || ''));
-
-        // Atualize apenas marcadores de probe; NÃO atualize lastCLIts ainda!
-        await setChatState(nome, chatId, {
-          ultimoProbeCLIts: lastClienteTs,
-          lastProbeAt: Date.now()
-        });
-
-        // NOVO GATE: só responde SE o cliente falou ALGO NOVO desde a última IA/CLIts OU triggerReason === 'fieldTimeout'
-        const hasNewClient = lastClienteTs && (lastClienteTs > Math.max(lastIATsPrev, lastIaTs, lastCLItsPrev));
-        const stGate2 = await getChatState(nome, chatId).catch(() => null);
-        const triggerReason = stGate2 && stGate2.triggerReason;
-        const shouldProceed = hasNewClient || triggerReason === 'fieldTimeout';
-
-        try {
-          const stGate = await getChatState(nome, chatId).catch(() => null);
-          const rDue = (stGate && stGate.replyDueAt) || 0;
-          const nowMs = Date.now();
-          const jaRespondi = !!(stGate && stGate.ultimaRespostaEnviada);
-          const tr = stGate && stGate.triggerReason;
-
-          if (!jaRespondi && rDue && nowMs < rDue && tr !== 'fieldTimeout' && !hasNewClient) {
-            const waitMs = Math.max(50, rDue - nowMs + 10);
-            setTimeout(() => {
-              try {
-                if (!fila.includes(chatId)) fila.push(chatId);
-                scheduleNextIfIdle();
-              } catch {}
-            }, waitMs);
-            return;
-          }
-        } catch {}
-
-        if (!shouldProceed) {
-          try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO }); } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-
-        // GATE FINAL: banir duplas seguidas — se última mensagem do histórico for do bot e não for fieldTimeout, não responde
-        const ultimaMsgHistorico = historicoConversa.length > 0 ? historicoConversa[historicoConversa.length - 1] : null;
-        if (ultimaMsgHistorico && ultimaMsgHistorico.autor === 'ia' && triggerReason !== 'fieldTimeout') {
-          try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, triggerReason: null }); } catch {}
-          try { await pendingDel(nome, chatId); } catch {}
-          fila = fila.filter(id => id !== chatId);
-          chatAtivo = null;
-          return;
-        }
-
-      // === Virtus não chama IA. Encaminha histórico ao pedidos.js e aguarda replyReady ===
-      try {
-        // Contexto de cidade (manifest > classificado)
-        let cidadeCtx = null;
-        try {
-          const man = await manifestStore.read(nome).catch(()=>null);
-          cidadeCtx = (man && man.cidade) ? man.cidade : null;
-        } catch {}
-        if (!cidadeCtx && localizacao && localizacao.cidade) {
-          cidadeCtx = localizacao.cidade;
-        }
-
-        // Encaminha histórico + contexto + janela ao orquestrador (pedidos.js)
-        await pedidos.ingestFromVirtus(nome, chatId, {
-          historico: historicoConversa,
-          contexto: { cidade: cidadeCtx },
-          novasMsgs
-        });
-
-        // Virtus não envia aqui; espera o evento replyReady.
-        try { await setChatState(nome, chatId, { state: CHAT_STATES.AGUARDANDO, triggerReason: null, lastProbeAt: Date.now() }); } catch {}
-        try { await pendingDel(nome, chatId); } catch {}
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
-      } catch (e) {
-        logger.warn('[VIRTUS] Falha ao encaminhar chat ao pedidos.js', { nome, chatId, error: (e && e.message) || String(e) });
-        try { await pendingDel(nome, chatId); } catch {}
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        return;
-      }
-        fila = fila.filter(id => id !== chatId);
-        chatAtivo = null;
-        
-        try { 
-          await setChatState(nome, chatId, { lastProbeAt: Date.now() }); 
-        } catch {}
-
-      } catch (err) {
-        const msgErr = (err && err.message) ? err.message : String(err);
-        if (/Target closed|Protocol error.*Target closed|Session closed/i.test(msgErr)) {
-          try { await logIssue(nome, 'browser_disconnected', `chat ${chatId}: target/page closed during send`); } catch {}
-        } else {
-          try { await logIssue(nome, 'virtus_send_failed', `chat ${chatId}: ${msgErr}`); } catch {}
-        }
-        logger.error('Erro ao responder chat', { nome, chatId }, err);
-        try { await pendingDel(nome, chatId); } catch {}
-        try { 
-          await setChatState(nome, chatId, { lastProbeAt: Date.now() }); 
-        } catch {}
-      }
-
-      fila = fila.filter(id => id !== chatId);
-      if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
-    } finally {
-      if (chatAtivo === chatId) {
-        chatAtivo = null;
-      }
-      try { clearDebounce(chatId); } catch {}
-      
-      try { 
-        chatLock.release(nome, chatId);
-      } catch (e) {
-        // Erro ao liberar lock - não é fatal
-      }
-      
-      if (_chatLockAcquired) {
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
-      }
-      
-      try { await pendingDel(nome, chatId); } catch {}
-      resetFail(chatId); // limpa failCounts quando fim do ciclo
-      try { 
-        const p = await ensurePage().catch(()=>null);
-        if (p) releaseSendGuard(p); 
-      } catch {}
+    } catch (e) {
+      logger.warn('[SCAN] erro geral', { nome, error: (e && e.message) || String(e) });
     }
   }
 
-  async function maybeEnqueueDueChats() {
-    try {
-      const stAll = await loadChatState(nome).catch(() => ({}));
-      const now = Date.now();
-      for (const [chatId, st] of Object.entries(stAll || {})) {
-        if (!st) continue;
-        const dueAt = Number(st.replyDueAt || 0);
-        const state = st.state;
-        if (dueAt && now >= dueAt && (state === CHAT_STATES.PENDENTE || state === CHAT_STATES.AGUARDANDO)) {
-          if (!fila.includes(chatId) && chatAtivo !== chatId) {
-            fila.push(chatId);
-          }
-        }
-      }
-      scheduleNextIfIdle();
-    } catch {}
-  }
-
-  async function filaManagerLoop() {
-    if (!running || !epochOk()) return;
-    let manifestFrozenUntil = 0;
-    try {
-      const manifest = await manifestStore.read(nome);
-      manifestFrozenUntil = typeof manifest?.frozenUntil === 'number' ? manifest.frozenUntil : 0;
-    } catch {}
-    if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
-      logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
-      return;
-    }
-
-    if (!browser || browser.isConnected?.() === false) {
-      logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
-      if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
-      running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
-      return;
-    }
-
-    if (filaLoopBusy) return;
-    filaLoopBusy = true;
-    try {
-      const p = await ensurePage();
-      if (!p || (p.isClosed && p.isClosed())) {
-        logger.error(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`, { nome });
-        if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
-        running = false;
-        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-        if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-        if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
-        return;
-      }
-
-      if (!isVirtusLocked(nome)) {
-        try {
-          await p.evaluate(() => {
-            window.dispatchEvent(new Event('focus'));
-            document.dispatchEvent(new MouseEvent('mousemove', {bubbles:true}));
-            document.dispatchEvent(new Event('visibilitychange'));
-            if (window && document && document.body) {
-              const evt = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Control', code: 'ControlLeft' });
-              document.body.dispatchEvent(evt);
-            }
-          });
-        } catch {}
-      }
-
-      if (limpaHistoricoVelho()) await salvaHistorico();
-
-      const b = getBrowserFromPage(p);
-      if (b && b._sendLock && b._sendLock.active) {
-        const age = Date.now() - (b._sendLock.since || 0);
-        if (age > 45000) {
-          logger.warn('[FILA] sendLock ativo há >45s — liberando por watchdog', { nome });
-          b._sendLock.active = false;
-        } else {
-          return;
-        }
-      }
-      await maybeGuaranteeMarketplaceFast(p, nome);
-
-      await atualizaFila();
-      scheduleNextIfIdle();
-      resetRecoverBackoff();
-      await maybeEnqueueDueChats();
-
-      if (scrollInterval == null) {
-        scrollInterval = setInterval(async () => {
-          if (!running || !epochOk()) return;
-          try {
-            const ok = await scrollChatsToTop(p, nome);
-            if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
-            if (ok) {
-              lastScrollToTop = Date.now();
-            }
-          } catch {}
-          setTimeout(() => {
-            if (!running || !epochOk()) return;
-            try {
-              const b = getBrowserFromPage(p);
-              if (b && b._sendLock && b._sendLock.active) return;
-            } catch {}
-            scrollChatsToTop(p, nome);
-          }, 800);
-        }, 30000);
-      }
-      try {
-        const scrolled = await scrollChatsToTop(p, nome);
-        if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL'); }
-        if (scrolled) {
-          lastScrollToTop = Date.now();
-        }
-        setTimeout(() => {
-          if (!running || !epochOk()) return;
-          try {
-            const b = getBrowserFromPage(p);
-            if (b && b._sendLock && b._sendLock.active) return;
-          } catch {}
-          scrollChatsToTop(p, nome);
-        }, 800);
-      } catch {}
-
-      try {
-        const det = await p.evaluate(() => {
-          const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-          const texts = Array.from(document.querySelectorAll('h1,h2,span,div')).map(el => norm(el.innerText || el.textContent || ''));
-          const hasBlocked =
-            texts.some(t =>
-              t.includes('voce esta bloqueado temporariamente') ||
-              t.includes('você está bloqueado temporariamente') ||
-              t.includes('youre temporarily blocked') ||
-              t.includes('you’re temporarily blocked') ||
-              t.includes('temporarily blocked')
-            );
-          return { blocked: hasBlocked };
-        });
-        if (det && det.blocked) {
-          if (issues) try { await logIssue(nome, 'virtus_blocked', 'Messenger temporariamente bloqueado (Virtus/Marketplace)'); } catch {}
-        }
-      } catch {}
-
-      if (!chatAtivo) scheduleNextIfIdle();
-
-    } finally {
-      filaLoopBusy = false;
-      
-    }
-  }
+  // Funções antigas de fila/debounce/gating removidas - agora usa scanAndProcessChats
 
   const timersFechamento = new Map(); // chatId -> { inicio, telefone, expirado, expiraEm, timerId }
   const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, endereco_saida, endereco_destino, itens }
   const pedidosEnviados = new Set();  // chatId já enviados
+
+  // Função antiga scheduleNextIfIdle removida - substituída por scanAndProcessChats
+  // Função antiga responderChat removida - substituída por scanAndProcessChats + pedidos.ingestFromVirtus
+  // Função antiga maybeEnqueueDueChats removida - não é mais necessária
+  // Função antiga filaManagerLoop removida - substituída por scanAndProcessChats
 
   async function inferEnderecosFromText(perfil, chatId, lastText, lastIaText) {
     if (!lastText) return;
@@ -3801,12 +2761,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
           await setChatState(nome, chatId, patch);
 
-          // Janela de resposta após coletar cidade (20–60s); não enfileirar aqui
-          if (loc && loc.cidade && loc.estado) {
-            const nowMs = Date.now();
-            const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
-            await setChatState(nome, chatId, { replyDueAt: nowMs + delay });
-          }
+          // Localização coletada; pedidos.js decidirá quando responder
         } catch {}
       });
     } catch {}
@@ -3822,9 +2777,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch {}
     if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
       running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), filaInterval = null;
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
     }
@@ -3865,11 +2817,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         function onNewChatDetected({ id, tempo }) {
           const chatId = id;
           const now = Date.now();
-          if (respondedCache && respondedCache.has(chatId)) return;
-          const last = lastProbeMap.get(chatId) || 0;
-          if ((now - last) < Math.min(PROBE_RECHECK_MIN_MS, 1000)) return;
-          lastProbeMap.set(chatId, now);
-
           // Não agenda atendimento ainda. Primeiro coleta cidade obrigatoriamente.
           setChatState(nome, chatId, { state: CHAT_STATES.COLETANDO, lastProbeAt: now, locFetchInFlight: true }).catch(()=>{});
           ensureLocationPrefetch(chatId).catch(() => {});
@@ -3882,7 +2829,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     }
     if (!running || !epochOk()) return;
-    await initHistoricoSePreciso();
     
     try {
       await fazerHandshakeNotificador(nome);
@@ -3891,8 +2837,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       
       async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
-      const MAX_TRIES = 2;
-      let lastErr = null;
+        const MAX_TRIES = 2;
+        let lastErr = null;
       
       for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
         let p = await ensurePage().catch(() => null);
@@ -3928,8 +2874,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           
           let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
-            logger.warn('[MESSENGER] URL não corresponde ao chat - abortando', { nome, chatId, urlNow });
-            throw new Error('chat_not_on_correct_url');
+            try {
+              await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              await sleep(500);
+            } catch {}
           }
           
           const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
@@ -3995,42 +2943,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     
     async function marcarRespondidoLocal(chatId) {
       try {
-        const agoraTs = agoraEpoch();
-        let historicoLocal = {};
-        try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
-        historicoLocal[chatId] = agoraTs;
-        await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
-        setResponded(chatId, agoraTs);
-        await salvaHistorico();
+        await setChatState(nome, chatId, { lastIARespondedAt: Date.now() });
+        await flushChatStateNow(nome);
       } catch (e) {
         logger.error('[VIRTUS] marcarRespondido error', { nome, chatId, error: e && e.message || e });
       }
     }
     
-      if (NOTIFICADOR_OUTBOUND) {
-        iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
-      }
-      bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
-      
-      pedidos.events.on('fieldTimeout', async ({ perfil, chatId, field }) => {
-        try {
-          if (perfil !== nome) return;
-
-          const nowMs = Date.now();
-          const delay = randomBetween(REPLY_WIN_MIN_MS, REPLY_WIN_MAX_MS);
-          await setChatState(nome, chatId, {
-            state: CHAT_STATES.PENDENTE,
-            lastProbeAt: nowMs,
-            triggerReason: 'fieldTimeout',
-            replyDueAt: nowMs + delay
-          });
-          try { stepLog.appendJSONL(nome, 'virtus', { step: 'field_timeout_enqueued', chatId, field }); } catch {}
-          // Não forçar push imediato na fila; atualizaFila vai enfileirar quando replyDueAt vencer
-        } catch {}
-      });
-    } catch (e) {
-      logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
+    if (NOTIFICADOR_OUTBOUND) {
+      iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
     }
+    bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+  } catch (e) {
+    logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
+  }
     
     // Restaura dados coletados e timers do disco ao reiniciar
     try {
@@ -4039,20 +2965,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.warn('[VIRTUS] Erro ao restaurar dados/timers do disco', { nome, error: e && e.message || e });
     }
     
-    filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
-    filaManagerLoop();
-    
-    setTimeout(() => {
-      if (running && epochOk()) {
-        atualizaFila().catch(() => {});
-      }
-    }, 3000);
-    
-    setTimeout(() => {
-      if (running && epochOk()) {
-        atualizaFila().catch(() => {});
-      }
-    }, 10000);
+    // Varredura contínua e imediata (sem locks de atendimento)
+    setInterval(() => scanAndProcessChats(nome), SCAN_INTERVAL_MS);
+    scanAndProcessChats(nome);
   }
 
   runner();
@@ -4061,9 +2976,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     stop: async () => {
       stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'stop' });
       running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
-      if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
-      if (scrollInterval) clearInterval(scrollInterval), filaChatTimer = null;
       let pages = [];
       try { pages = await browser.pages(); } catch {}
       if (robeMeta && typeof nome !== "undefined") {
@@ -4071,10 +2983,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         robeMeta[nome].numPages = pages.length;
       }
       delete virtusDeadLogTimes[nome];
-      try { respondedCache.clear(); } catch {}
-      try { fila = []; } catch {}
-      try { failCounts.clear(); } catch {}
-      try { historico = {}; } catch {}
     }
   };
 }
