@@ -271,13 +271,14 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
   const instr = [];
 
   if (firstReply) {
-    instr.push('Cumprimente de forma breve e educada.');
+    instr.push('Cumprimente de forma calorosa e humana (ex.: "Olá! Que bom falar contigo 😊").');
+  }
+  // A frase do orçamento SÓ APARECE quando estiver pedindo telefone (primeira ou não)
+  if (directive && directive.askField === 'telefone') {
     instr.push('Inclua exatamente uma vez a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
-    instr.push('Peça o WhatsApp com DDD APENAS nesta primeira resposta.');
-    instr.push('Na MESMA mensagem, pergunte também o que precisa transportar (itens).');
-  } else {
+  }
+  if (!firstReply) {
     instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
-    instr.push('NÃO repita a explicação do orçamento/WhatsApp nas mensagens seguintes.');
   }
 
   const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
@@ -358,6 +359,115 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
 }
 
 /* ===================== FIM — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
+
+// [PATCH-ABERTURA] — constrói mensagens determinísticas calorosas e aplica guardrails
+
+function _isAskingPhoneDirective(directive) {
+  return directive && String(directive.askField || '') === 'telefone';
+}
+
+function _nextNonPhoneMissing(d) {
+  if (!d || !d.itens) return 'itens';
+  if (!d.endereco_saida) return 'endereco_saida';
+  if (!d.endereco_destino) return 'endereco_destino';
+  if (typeof d.ajudante !== 'boolean') return 'ajudante';
+  return null;
+}
+
+function _humanGreet() {
+  const variants = [
+    'Olá! Que bom falar contigo 😊',
+    'Oi! Que bom te atender agora',
+    'Olá! Feliz em te ajudar'
+  ];
+  return variants[Math.floor(Math.random() * variants.length)];
+}
+
+function _askPhoneLine(d) {
+  const hasFull = isValidPhoneBR(d && d.telefone);
+  const hasDDD = /^[1-9]\d$/.test(String(d && d.ddd || ''));
+  const hasParcial = /^\d{8,9}$/.test(String(d && d.telefone_parcial || ''));
+  if (hasFull) return ''; // nada
+  if (hasParcial && !hasDDD) return 'Me passa só o DDD do seu WhatsApp (2 dígitos)?';
+  if (hasDDD && !hasParcial) return 'Perfeito! E o número do WhatsApp (sem DDD), com 8 ou 9 dígitos, qual é?';
+  return 'Pode me passar seu WhatsApp com DDD?';
+}
+
+function _askFieldLine(field) {
+  switch (String(field||'')) {
+    case 'itens': return 'E já me conta: o que vamos transportar?';
+    case 'endereco_saida': return 'Qual é o ponto de saída? Pode ser bairro ou referência.';
+    case 'endereco_destino': return 'E o destino, para onde vai? Pode ser bairro ou referência.';
+    case 'ajudante': return 'Precisa de ajudante para carregar? (sim ou não)';
+    default: return '';
+  }
+}
+
+function buildAberturaImpecavel({ data = {}, nextField = 'itens' } = {}) {
+  const greet = _humanGreet();
+  const fraseValor = 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados — eu repasso pra ele e você recebe o orçamento certinho.';
+  const askPhone = _askPhoneLine(data);
+  const askNext = _askFieldLine(nextField || 'itens');
+  const partes = [
+    `${greet} Sim, faço fretes e consigo agilizar.`,
+    fraseValor,
+    askPhone,
+    askNext
+  ].filter(Boolean);
+  return partes.join(' ');
+}
+
+function stripValorFraseIfNotAllowed(texto) {
+  try {
+    let s = String(texto||'');
+    const re = /(o valor (exato )?(ser[aá]|sera|é|eh)\s+(passado|informado)\s+pelo\s+motorista.?(whats|whatsapp)[^.!?][.!?]?)/ig;
+    s = s.replace(re, '').replace(/\s+/g, ' ').trim();
+    return s;
+  } catch { return texto; }
+}
+
+function enforceAnswerGuardrails({ texto, directive, firstReply, snapshotData, askCounts }) {
+  let out = String(texto||'').trim();
+
+  // Abertura determinística: primeira resposta + pedindo telefone
+  if (firstReply && _isAskingPhoneDirective(directive)) {
+    const nextField = _nextNonPhoneMissing(snapshotData) || 'itens';
+    return buildAberturaImpecavel({ data: snapshotData || {}, nextField });
+  }
+
+  // Se a instrução é pedir telefone (mesmo não sendo a primeira), garanta frase de valor + coleta incremental
+  if (!firstReply && _isAskingPhoneDirective(directive)) {
+    const fraseValor = 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados — eu repasso pra ele e você recebe o orçamento certinho.';
+    const askPhone = _askPhoneLine(snapshotData || {});
+    const nextField = _nextNonPhoneMissing(snapshotData) || null;
+    const askNext = nextField ? _askFieldLine(nextField) : '';
+    return [fraseValor, askPhone, askNext].filter(Boolean).join(' ');
+  }
+
+  // NÃO está coletando telefone: remova qualquer menção de orçamento via motorista/WhatsApp
+  if (!_isAskingPhoneDirective(directive)) {
+    out = stripValorFraseIfNotAllowed(out);
+  }
+
+  // Evitar abertura fria "Sim, podemos ajudar com o frete!" em qualquer turno
+  const neutralRe = /^sim,\spodemos\s+ajudar.?o que voc[eê]\s+precisa\s+transportar??$/i;
+  if (neutralRe.test(out)) {
+    const variants = [
+      'Claro! Vou agilizar pra você. O que vamos transportar?',
+      'Perfeito! Me diz o que vamos levar?',
+      'Show! Qual item você precisa transportar?'
+    ];
+    out = variants[(askCounts && askCounts.itens ? askCounts.itens : 0) % variants.length];
+  }
+
+  // Se sobrou vazio por qualquer motivo, pergunta a próxima obrigatória
+  if (!out) {
+    const f = (directive && directive.askField) || _nextNonPhoneMissing(snapshotData) || 'itens';
+    out = _askFieldLine(f) || 'Pode me confirmar essa informação, por favor?';
+  }
+
+  return out.trim();
+}
 
 class PedidoOrchestrator extends EventEmitter {
   constructor() {
@@ -788,13 +898,14 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const lastWhatsAskAt = s && s.lastWhatsAskAt || 0;
   const canAskPhoneAgain = !telOk && (!hasAskedWhats || (now() - lastWhatsAskAt) >= PHONE_ASK_COOLDOWN_MS);
 
-  // Primeira resposta: WhatsApp + Itens juntos
+  // Primeira resposta: WhatsApp + próxima pergunta real do funil
   if (!telOk && firstReply) {
+    const nextAfterPhone = getNextNonPhoneField(data) || 'itens';
     return {
       askField: 'telefone',
       phase: 'first_contact',
       reason: 'first_contact',
-      nextField: 'itens',
+      nextField: nextAfterPhone,
       allowSecondQuestion: true,
       phoneMode: 'full'
     };
@@ -989,6 +1100,19 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
           module.exports.setWhatsPhase(perfil, chatId, directive.phase || 'full');
         }
       }
+    } catch {}
+
+    // [NOVO] Guardrails: reforça abertura impecável, orçamento somente junto com Whats, e evita mensagem fria/neutra
+    try {
+      const sNowForGuard = module.exports.getSnapshot(perfil, chatId);
+      const askCounts = (sNowForGuard && sNowForGuard.askCounts) || {};
+      textoSan = enforceAnswerGuardrails({
+        texto: textoSan,
+        directive,
+        firstReply,
+        snapshotData: dadosColetados || {},
+        askCounts
+      });
     } catch {}
 
     // Emite resposta consolidada
