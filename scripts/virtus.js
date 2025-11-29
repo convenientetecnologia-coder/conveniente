@@ -109,12 +109,25 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
     } catch {}
   });
 
-  // Resposta pronta pelo pedidos.js -> enviar no Messenger
+  // Resposta pronta pelo pedidos.js -> enviar no Messenger (com gate por cursor)
   pedidos.events.on('replyReady', async ({ perfil, chatId, texto }) => {
     try {
       if (perfil !== nome) return;
       const payload = String(texto || '').trim();
       if (!payload) return;
+
+      // GATE por cursor do cliente: se já respondemos a este cursor, SKIP
+      let stCur = await getChatState(nome, chatId).catch(()=>null);
+      const cCount = Number(stCur && stCur.clientCursorCount || 0);
+      const cDigest = stCur && stCur.clientCursorDigest || '';
+      const rCount = Number(stCur && stCur.repliedCursorCount || 0);
+      const rDigest = stCur && stCur.repliedCursorDigest || '';
+
+      if (cCount && cDigest && rCount === cCount && rDigest && rDigest === cDigest) {
+        try { stepLog.appendJSONL(nome, 'virtus', { step: 'reply_skip_same_cursor', chatId, cCount, cDigest }); } catch {}
+        try { issues && issues.append && issues.append(nome, 'reply_skip_same_cursor', `chat=${chatId} count=${cCount}`); } catch {}
+        return;
+      }
 
       if (typeof enviarRespostaMessengerSeguraFn === 'function') {
         const ok = await enviarRespostaMessengerSeguraFn(chatId, payload);
@@ -122,13 +135,20 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
           await marcarRespondidoFn(chatId);
         }
         try {
+          const payloadNorm = normalizeContent(payload);
+          stCur = await getChatState(nome, chatId).catch(()=>null);
+          const cCount2 = Number(stCur && stCur.clientCursorCount || 0);
+          const cDigest2 = stCur && stCur.clientCursorDigest || '';
+
           await setChatState(nome, chatId, {
             state: CHAT_STATES.AGUARDANDO,
             lastIATs: Date.now(),
             ultimaRespostaEnviada: payload,
-            ultimaRespostaEnviadaNorm: normalizeContent(payload),
-            triggerReason: null,
-            replyDueAt: null
+            ultimaRespostaEnviadaNorm: payloadNorm,
+            lastReplyHash: sha1(payloadNorm),
+            repliedCursorCount: cCount2,
+            repliedCursorDigest: cDigest2,
+            triggerReason: null
           });
           await flushChatStateNow(nome);
         } catch {}
@@ -858,12 +878,13 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         return; // NÃO enviar para o Messenger
       }
       
-      // GATE ANTI-DUPLICIDADE: só permite enviar se o cliente falou algo novo
-      const lastCLIts = Number(st && st.lastCLIts || 0);
-      const lastIATs  = Number(st && st.lastIATs  || 0);
-
-      if (lastCLIts && lastIATs && lastIATs >= lastCLIts) {
-        // Já respondido após a última fala do cliente — só ACK e dropa
+      // GATE por cursor do cliente (idêntico ao replyReady)
+      const cCount = Number(st && st.clientCursorCount || 0);
+      const cDigest = st && st.clientCursorDigest || '';
+      const rCount = Number(st && st.repliedCursorCount || 0);
+      const rDigest = st && st.repliedCursorDigest || '';
+      if (cCount && cDigest && rCount === cCount && rDigest && rDigest === cDigest) {
+        // Já respondido a este cursor — ACK e dropa
         try {
           await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
             method: 'POST',
@@ -874,15 +895,12 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
               chat_id: proximo.chatId
             })
           });
-          logger.info('[NOTIFICADOR] ACK enviado (skip por gating)', { nomePerfil, chatId: proximo.chatId });
+          logger.info('[NOTIFICADOR] ACK enviado (skip por cursor)', { nomePerfil, chatId: proximo.chatId });
         } catch (e) {
-          logger.warn('[NOTIFICADOR] Falha ao ACK (skip por gating)', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
+          logger.warn('[NOTIFICADOR] Falha ao ACK (skip por cursor)', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
         }
-        // Libera dedup local da resposta
-        try {
-          if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
-        } catch {}
-        return; // SKIP O ENVIO PARA ESTE ITEM
+        try { if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key); } catch {}
+        return;
       }
       
       if (enviarRespostaMessengerSeguraFn) {
@@ -896,14 +914,23 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
 
-      // Atualiza lastIATs e ultimaRespostaEnviada para acionar o gating e impedir reenvio futuro da mesma resposta
+      // Atualiza lastIATs, ultimaRespostaEnviada e cursor respondido
       try {
-        await setChatState(nomePerfil, proximo.chatId, { lastIATs: Date.now(), ultimaRespostaEnviada: respostaFinal });
+        const st2 = await getChatState(nomePerfil, proximo.chatId).catch(() => null);
+        const cCount2 = Number(st2 && st2.clientCursorCount || 0);
+        const cDigest2 = st2 && st2.clientCursorDigest || '';
+        await setChatState(nomePerfil, proximo.chatId, {
+          lastIATs: Date.now(),
+          ultimaRespostaEnviada: respostaFinal,
+          ultimaRespostaEnviadaNorm: normalizeContent(respostaFinal),
+          repliedCursorCount: cCount2,
+          repliedCursorDigest: cDigest2
+        });
         if (typeof flushChatStateNow === 'function') {
           await flushChatStateNow(nomePerfil);
         }
       } catch (e) {
-        try { logger.warn('[NOTIFICADOR][GATING] Falha ao atualizar lastIATs: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId }); } catch {}
+        logger.warn('[NOTIFICADOR][CURSOR] Falha ao atualizar repliedCursor*: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId });
       }
       
       try {
@@ -950,12 +977,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
 
 async function marcarRespondido(nomePerfil, chatId) {
   try {
-    const agoraTs = agoraEpoch();
-    const HIST_FILE = HIST_JSON_NAME(nomePerfil);
-    let historicoLocal = {};
-    try { historicoLocal = await readJson(HIST_FILE, {}); } catch {}
-    historicoLocal[chatId] = agoraTs;
-    await writeJsonAtomicFsync(HIST_FILE, historicoLocal);
+    await setChatState(nomePerfil, chatId, { lastIARespondedAt: Date.now() });
+    await flushChatStateNow(nomePerfil);
   } catch (e) {
     logger.error('[VIRTUS] marcarRespondido error', { nomePerfil, chatId, error: e && e.message || e });
   }
@@ -1064,6 +1087,12 @@ async function extrairHistoricoConversa(page) {
 
           const textoLimpo = txt.replace(/^(você\s+enviou|you\s+sent)[:\s]*/i, '').trim();
           if (!textoLimpo) continue;
+
+          // Filtro hard de ruído: ignora headers/logos ("Conveniente")
+          try {
+            const stopNorm = (textoLimpo || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+            if (/^conveniente(?:\s+contingencia)?$/.test(stopNorm)) continue;
+          } catch {}
 
           out.push({
             texto: textoLimpo,
@@ -1303,6 +1332,10 @@ const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETR
 const MAX_CHAT_AGE_MS = parseInt(process.env.VIRTUS_CHAT_MAX_AGE_MS || '28800000', 10); // 8h
 const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 5s
 const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
+
+// Variáveis globais para controle de backoff e falhas
+let recoverBackoffMs = 0;
+const failCounts = new Map();
 
 const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
 const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
@@ -2206,9 +2239,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 5s
-  const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
-
   async function scanAndProcessChats(nome) {
     try {
       const p = await ensurePage().catch(()=>null);
@@ -2216,7 +2246,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       try { await maybeGuaranteeMarketplaceFast(p, nome); } catch {}
 
-      const lista = await coletaChatsMarketplaceTodos(p); // [{id, tempo, href}]
+      const lista = await coletaChatsMarketplaceTodos(p);
       if (!Array.isArray(lista) || !lista.length) return;
 
       for (const it of lista) {
@@ -2225,36 +2255,51 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         try {
           const stPrev = await getChatState(nome, chatId).catch(()=>null);
+          if (stPrev && stPrev.state === CHAT_STATES.FINALIZADO) {
+            await setChatState(nome, chatId, { lastScanAt: Date.now() });
+            continue;
+          }
           if (!stPrev || !stPrev.discoveredAt) {
             await setChatState(nome, chatId, { discoveredAt: Date.now() });
           }
-        } catch {}
 
-        try {
           const url = `https://www.messenger.com/marketplace/t/${chatId}/`;
           const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
             await p.goto(url, { waitUntil: 'domcontentloaded', timeout: SCAN_NAV_TIMEOUT_MS }).catch(()=>{});
-            await sleep(500);
+            await sleep(400);
           }
 
           const historicoConversa = await extrairHistoricoConversa(p);
+          if (!Array.isArray(historicoConversa) || !historicoConversa.length) {
+            await setChatState(nome, chatId, { lastScanAt: Date.now() });
+            continue;
+          }
           await appendChatHistoryLog(nome, chatId, historicoConversa);
 
-          let lastClientTs = 0;
-          try {
-            for (let i = historicoConversa.length - 1; i >= 0; i--) {
-              const m = historicoConversa[i];
-              if (m && m.autor === 'cliente') { lastClientTs = Number(m.timestamp || 0); break; }
-            }
-          } catch {}
+          // Filtra mensagens do cliente
+          let clientMsgs = historicoConversa.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
 
-          const MAX_CHAT_AGE_MS = 8 * 60 * 60 * 1000; // 8 horas
+          // Blindagem anti-eco: se a última "cliente" for igual à última IA enviada, excluir do tail
+          const lastBotNorm = stPrev && stPrev.ultimaRespostaEnviadaNorm ? String(stPrev.ultimaRespostaEnviadaNorm) : '';
+          if (clientMsgs.length && lastBotNorm) {
+            const tailNorm = normalizeContent(clientMsgs[clientMsgs.length - 1].texto || '');
+            if (tailNorm && tailNorm === normalizeContent(lastBotNorm)) {
+              clientMsgs = clientMsgs.slice(0, -1);
+            }
+          }
+
+          // Janela de 8 horas
+          const lastClientTs = clientMsgs.length ? Number(clientMsgs[clientMsgs.length - 1].timestamp || 0) : 0;
           if (!lastClientTs || (Date.now() - lastClientTs) > MAX_CHAT_AGE_MS) {
-            await setChatState(nome, chatId, { lastScanAt: Date.now(), lastCLIts: lastClientTs || 0 });
+            await setChatState(nome, chatId, {
+              lastScanAt: Date.now(),
+              lastCLIts: lastClientTs || 0
+            });
             continue;
           }
 
+          // Prefetch de localização (não bloqueia)
           try {
             const stLoc = await getChatState(nome, chatId).catch(()=>null);
             if (!(stLoc && stLoc.cidade && stLoc.estado)) {
@@ -2262,6 +2307,41 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           } catch {}
 
+          // Cursor determinístico do CLIENTE (count + digest dos últimos 10 textos normalizados)
+          const clientCount = clientMsgs.length;
+          const clientDigest = clientCount
+            ? sha1(clientMsgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|'))
+            : '';
+          const clientLastNorm = clientCount ? normalizeContent(clientMsgs[clientCount - 1].texto || '') : '';
+
+          const prevCount = Number(stPrev && stPrev.clientCursorCount || 0);
+          const prevDigest = stPrev && stPrev.clientCursorDigest || '';
+
+          const changed =
+            (clientCount > prevCount) ||
+            (clientCount > 0 && clientCount === prevCount && clientDigest && prevDigest && clientDigest !== prevDigest);
+
+          if (!changed) {
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              lastScanAt: Date.now(),
+              clientCursorCount: clientCount,
+              clientCursorDigest: clientDigest,
+              clientLastNorm: clientLastNorm,
+              lastCLIts: lastClientTs
+            });
+            continue;
+          }
+
+          // novasMsgs: apenas o delta
+          let novasMsgs = [];
+          if (clientCount > prevCount) {
+            novasMsgs = clientMsgs.slice(prevCount);
+          } else {
+            novasMsgs = [ clientMsgs[clientMsgs.length - 1] ].filter(Boolean);
+          }
+
+          // Contexto de cidade
           let cidadeCtx = null;
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
@@ -2275,14 +2355,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await pedidos.ingestFromVirtus(nome, chatId, {
             historico: historicoConversa,
             contexto: { cidade: cidadeCtx || null },
-            novasMsgs: historicoConversa.filter(m => m && m.autor === 'cliente')
+            novasMsgs
           });
 
+          // Atualiza cursor do cliente APÓS ingest
           await setChatState(nome, chatId, {
             state: CHAT_STATES.AGUARDANDO,
             lastScanAt: Date.now(),
+            clientCursorCount: clientCount,
+            clientCursorDigest: clientDigest,
+            clientLastNorm: clientLastNorm,
             lastCLIts: lastClientTs
           });
+
         } catch (e) {
           logger.warn('[SCAN] Falha ao processar chat', { nome, chatId, error: (e && e.message) || String(e) });
         }
