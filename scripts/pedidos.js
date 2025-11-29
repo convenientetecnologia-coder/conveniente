@@ -267,8 +267,11 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
   if (firstReply) {
     instr.push('Cumprimente de forma breve e educada.');
     instr.push('Informe que quem passa o valor/orçamento é o motorista pelo WhatsApp.');
+    instr.push('Peça o WhatsApp com DDD APENAS nesta primeira resposta.');
+    instr.push('Na MESMA mensagem, pergunte também o que precisa transportar (itens).');
   } else {
     instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
+    instr.push('Não peça WhatsApp novamente (já foi solicitado).');
   }
 
   const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
@@ -767,11 +770,13 @@ function getNextNonPhoneField(d = {}) {
 function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const s = orchestrator._get(perfil, chatId) || {};
   const data = (snapshot && snapshot.data) || (s && s.data) || {};
-  const counts = (s && s.askCounts) || {};
   const telOk = isValidPhoneBR(data.telefone);
   const firstReply = !(s && s.flags && (s.flags.firstIaReplied || s.flags.greetDone));
+  const hasAskedWhats = !!(s && s.flags && s.flags.hasAskedWhats);
+  const lastWhatsAskAt = s && s.lastWhatsAskAt || 0;
+  const canAskPhoneAgain = !telOk && (!hasAskedWhats || (now() - lastWhatsAskAt) >= PHONE_ASK_COOLDOWN_MS);
 
-  // PRIMEIRA MENSAGEM: askField=telefone, nextField=itens (perguntar as 2 juntas na mesma mensagem)
+  // Primeira resposta: WhatsApp + Itens juntos
   if (!telOk && firstReply) {
     return {
       askField: 'telefone',
@@ -783,88 +788,55 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     };
   }
 
-  // Ordem do funil após primeira mensagem
-  const next = getNextAskField(data);
-
-  if (next === 'telefone') {
+  // Após a saudação: NÃO repetir pedido de WhatsApp. Priorize itens/endereço/etc.
+  if (!telOk && hasAskedWhats && !firstReply) {
+    const nextNonPhone = getNextNonPhoneField(data);
+    if (nextNonPhone) {
+      return {
+        askField: nextNonPhone,
+        phase: 'none',
+        reason: 'non_phone_after_first',
+        nextField: null,
+        allowSecondQuestion: false
+      };
+    }
+    if (canAskPhoneAgain) {
+      return {
+        askField: 'telefone',
+        phase: 'reminder',
+        reason: 'cooldown_elapsed',
+        nextField: null,
+        allowSecondQuestion: false,
+        phoneMode: 'full'
+      };
+    }
     return {
-      askField: 'telefone',
-      phase: 'none',
-      reason: 'missing',
-      nextField: null,
-      allowSecondQuestion: false,
-      phoneMode: 'full'
-    };
-  }
-  if (next === 'ddd') {
-    return {
-      askField: 'ddd',
-      phase: 'none',
-      reason: 'missing',
-      nextField: null,
-      allowSecondQuestion: false,
-      phoneMode: 'full'
-    };
-  }
-  if (next === 'telefone_parcial') {
-    return {
-      askField: 'telefone_parcial',
-      phase: 'none',
-      reason: 'missing',
-      nextField: null,
-      allowSecondQuestion: false,
-      phoneMode: 'full'
-    };
-  }
-  if (next === 'itens') {
-    return {
-      askField: 'itens',
-      phase: 'none',
-      reason: 'missing',
-      nextField: null,
-      allowSecondQuestion: false,
-      phoneMode: 'full'
-    };
-  }
-  if (next === 'endereco_saida') {
-    return {
-      askField: 'endereco_saida',
-      phase: 'none',
-      reason: 'missing',
-      nextField: null,
-      allowSecondQuestion: false,
-      phoneMode: 'full'
-    };
-  }
-  if (next === 'endereco_destino') {
-    return {
-      askField: 'endereco_destino',
-      phase: 'none',
-      reason: 'missing',
-      nextField: null,
-      allowSecondQuestion: false,
-      phoneMode: 'full'
-    };
-  }
-  if (next === 'ajudante') {
-    return {
-      askField: 'ajudante',
+      askField: 'descricao',
       phase: 'none',
       reason: 'optional',
       nextField: null,
-      allowSecondQuestion: false,
-      phoneMode: 'full'
+      allowSecondQuestion: false
     };
   }
 
-  // Ao final, pergunta descrição opcional
+  // Telefone OK ou nunca pedimos (mas não é primeira): siga ordem do funil padrão
+  const next = getNextAskField(data);
+  if (next) {
+    return {
+      askField: next,
+      phase: 'none',
+      reason: 'missing',
+      nextField: null,
+      allowSecondQuestion: false
+    };
+  }
+
   return {
     askField: 'descricao',
     phase: 'none',
     reason: 'optional',
     nextField: null,
-    allowSecondQuestion: false,
-    phoneMode: 'full'
+    allowSecondQuestion: false
   };
 }
 
@@ -907,51 +879,59 @@ async function fallbackToHuman(perfil, chatId, reason) {
 
 async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {}, novasMsgs = [] } = {}) {
   try {
-    // 0) Calcula cursor determinístico do cliente
+    // Cursor determinístico do cliente
     const cursor = computeClientCursor(historico);
-    const sPrev = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
+    const sig = `${cursor.count}|${cursor.digest}`;
 
-    // 1) Extrai/consolida dados do histórico (IA extratora) e atualiza snapshot
-    const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
+    // Snapshot atual
+    let sPrev = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
 
-    // 2) Respeita janela de silêncio (finalização ativa)
+    // Janela de silêncio (finalizado)
     if (module.exports.isFinalized(perfil, chatId)) {
       return {
         mensagemParaCliente: '',
-        dadosExtraidosAtualizados: (snapAfter && snapAfter.data) || {},
+        dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
         proximaPergunta: null,
         tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
       };
     }
 
-    // 3) Snapshot atual e diretiva determinística
+    // Idempotência forte: se já respondemos a este cursor OU já existe emissão in-flight para este cursor, SKIP
+    const lastRC = (sPrev.flags && sPrev.flags.lastRepliedCursorCount) || 0;
+    const lastRD = (sPrev.flags && sPrev.flags.lastRepliedCursorDigest) || '';
+    const inFlightSig = (sPrev.flags && sPrev.flags.emitInFlightSig) || '';
+
+    if (cursor.count && cursor.digest && (
+      (lastRC === cursor.count && lastRD === cursor.digest) ||
+      inFlightSig === sig
+    )) {
+      return {
+        mensagemParaCliente: '',
+        dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
+        proximaPergunta: null,
+        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
+      };
+    }
+
+    // Marca emissão in-flight para este cursor (com persistência)
+    sPrev.flags = sPrev.flags || {};
+    sPrev.flags.emitInFlightSig = sig;
+    orchestrator._set(perfil, chatId, sPrev);
+
+    // Extrai/consolida dados via LLM extrator
+    const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
     const snap = module.exports.getSnapshot(perfil, chatId);
     const dadosColetados = (snap && snap.data) || {};
     const firstReply = module.exports.shouldGreetFirstReply(perfil, chatId);
     const directive = module.exports.getAskDirective(perfil, chatId, novasMsgs, snap);
     const proximaPergunta = directive && directive.askField ? String(directive.askField) : null;
 
-    // 4) Unifica mensagens do cliente e identifica dúvidas
+    // Cliente unificado + dúvidas + faltantes
     const clienteUnificado = unifyClientMessages(novasMsgs, historico);
     const duvidas = detectDoubtsSimple(clienteUnificado);
     const faltantes = computeMissing(dadosColetados);
 
-    // 5) GATE anti-duplicidade por cursor (não gerar/emitir para o mesmo cursor)
-    const lastRC = (sPrev && sPrev.flags && sPrev.flags.lastRepliedCursorCount) || 0;
-    const lastRD = (sPrev && sPrev.flags && sPrev.flags.lastRepliedCursorDigest) || '';
-    const sameCursor = !!(cursor.count && cursor.digest && cursor.count === lastRC && cursor.digest === lastRD);
-
-    // 6) Se for o mesmo cursor: não gerar texto de novo; somente retorna objeto informativo
-    if (sameCursor) {
-      return {
-        mensagemParaCliente: '',
-        dadosExtraidosAtualizados: dadosColetados,
-        proximaPergunta,
-        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
-      };
-    }
-
-    // 7) Monta prompts e gera resposta humana (IA geradora)
+    // Prompt orquestrado (sem números do cliente)
     const systemPrompt = promptFretes.buildSystemPrompt();
     const instrucoes = buildInstrucoesFromDirective({
       directive,
@@ -959,7 +939,6 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       firstReply,
       novasMsgs
     });
-
     const userPrompt = buildUserOrchestrationPrompt({
       clienteUnificado,
       dados: dadosColetados,
@@ -969,6 +948,7 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       instrucoes
     });
 
+    // Gera resposta
     const model = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
     const raw = await chatCompletion({
       system: systemPrompt,
@@ -979,12 +959,11 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       timeoutMs: 22000,
       retries: 2
     });
-
     const parsed = promptFretes.parseModelAnswerToDomain(raw);
     const texto = String(parsed && parsed.resposta != null ? parsed.resposta : raw).trim();
     const textoSan = removeTelefonesCompletos(texto);
 
-    // 8) Atualiza contadores e fase do funil (apenas se vamos responder agora)
+    // Marca progresso do funil (apenas se respondemos)
     try {
       module.exports.markIaReplied(perfil, chatId);
       if (directive && directive.askField) {
@@ -995,22 +974,23 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       }
     } catch {}
 
-    // 9) Emite para o Virtus enviar no Messenger
+    // Emite resposta consolidada
     orchestrator.emit('replyReady', { perfil, chatId, texto: textoSan });
 
-    // 10) Armazena cursor respondido (para evitar duplicidade futura)
+    // Marca cursor respondido e limpa in-flight
     try {
-      const cur = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
-      cur.flags = cur.flags || {};
-      cur.flags.lastRepliedCursorCount = cursor.count || 0;
-      cur.flags.lastRepliedCursorDigest = cursor.digest || '';
-      orchestrator._set(perfil, chatId, cur);
+      const sNow = orchestrator._get(perfil, chatId) || {};
+      sNow.flags = sNow.flags || {};
+      sNow.flags.lastRepliedCursorCount = cursor.count || 0;
+      sNow.flags.lastRepliedCursorDigest = cursor.digest || '';
+      sNow.flags.emitInFlightSig = ''; // libera trava
+      orchestrator._set(perfil, chatId, sNow);
     } catch {}
 
-    // 11) Verifica finalização (pedido completo/incompleto)
+    // Verifica finalização (completo/incompleto)
     try { module.exports.finalizeIfReady(perfil, chatId); } catch {}
 
-    // 12) Retorno padrão exigido
+    // Retorno padronizado
     return {
       mensagemParaCliente: textoSan,
       dadosExtraidosAtualizados: (module.exports.getSnapshot(perfil, chatId).data) || {},
@@ -1020,6 +1000,14 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
 
   } catch (e) {
     try { issues.append(perfil, 'ingest_from_virtus_fail', `chat=${chatId} err=${(e && e.message) || e}`); } catch {}
+    // Em caso de erro, tente liberar a trava in-flight
+    try {
+      const sFail = orchestrator._get(perfil, chatId) || {};
+      if (sFail.flags && sFail.flags.emitInFlightSig) {
+        sFail.flags.emitInFlightSig = '';
+        orchestrator._set(perfil, chatId, sFail);
+      }
+    } catch {}
     return {
       mensagemParaCliente: '',
       dadosExtraidosAtualizados: (module.exports.getSnapshot(perfil, chatId).data) || {},
