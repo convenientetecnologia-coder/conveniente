@@ -166,14 +166,14 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
   });
 
   // Ping único de inatividade pedindo WhatsApp
-  pedidos.events.on('inactivityPing', async ({ perfil, chatId }) => {
+  pedidos.events.on('inactivityPing', async ({ perfil, chatId, texto }) => {
     try {
       if (perfil !== nome) return;
-      const texto = 'Perfeito, já encaminhei seu contato ao motorista. Ele te chama no WhatsApp em alguns minutinhos para passar o orçamento certinho. Qualquer coisa, é só responder aqui.';
+      const payload = String(texto || 'Perfeito, já encaminhei seu contato ao motorista. Ele te chama no WhatsApp em alguns minutinhos para passar o orçamento certinho. Qualquer coisa, é só responder aqui.').trim();
       await queueMessengerSend(nome, {
         chatId,
-        resposta: texto,
-        key: `inactivity|${chatId}|${sha1(texto)}|${Date.now()}`,
+        resposta: payload,
+        key: `inactivity|${chatId}|${sha1(payload)}|${Date.now()}`,
         fromNotifier: false,
         origin: 'inactivityPing'
       });
@@ -234,7 +234,7 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
       }
 
       // Enfileira resposta — passe lastClientTsOverride!
-      await queueMessengerSend(nome, {
+      const queuedOk = await queueMessengerSend(nome, {
         chatId,
         resposta: payload,
         key: `replyReady|${chatId}|${sha1(payload)}|${Date.now()}`,
@@ -245,6 +245,10 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         cursorDigestOverride: evDigest || undefined,
         lastClientTsOverride: evLastTs
       });
+
+      if (queuedOk) {
+        try { pedidos.ackReplyQueued(nome, chatId, evSig); } catch {}
+      }
 
       logger.info('[REPLY] queued', { nome, chatId, evSig });
 
@@ -1052,6 +1056,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       } catch (e) {
         logger.warn('[NOTIFICADOR][CURSOR] Falha ao atualizar repliedCursor*: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId });
       }
+
+      try { pedidos.ackReplySent(nomePerfil, proximo.chatId, proximo.cursorSig || ''); } catch {}
       
       // ACK somente se veio do notificador
       if (proximo.fromNotifier) {

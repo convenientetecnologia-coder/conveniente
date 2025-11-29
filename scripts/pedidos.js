@@ -469,6 +469,143 @@ function enforceAnswerGuardrails({ texto, directive, firstReply, snapshotData, a
   return out.trim();
 }
 
+// [FSM] — definição dos passos do funil e controle total centralizado
+
+const FSM_STEPS = Object.freeze([
+  'boas_vindas',
+  'info_orcamento',
+  'whatsapp_pedido_1',
+  'ddd_pedido',
+  'whatsapp_parcial_pedido',
+  'itens_pedido',
+  'end_saida_pedido',
+  'end_destino_pedido',
+  'ajudante_pedido',
+  'lembrete_1',
+  'lembrete_2'
+]);
+
+function ensureFsmStruct(snap) {
+  snap.fsm = snap.fsm || { executedSteps: {}, stepHistory: [], lastStep: null, lastQueuedCursorSig: '', lastRepliedCursorSig: '' };
+  snap.fsm.executedSteps = snap.fsm.executedSteps || {};
+  snap.fsm.stepHistory = Array.isArray(snap.fsm.stepHistory) ? snap.fsm.stepHistory : [];
+  return snap;
+}
+
+function proximoPasso(chatState, dados) {
+  const s = ensureFsmStruct(chatState);
+  const ex = s.fsm.executedSteps || {};
+  const telOk = isValidPhoneBR(dados && dados.telefone);
+  const hasDDD = /^[1-9]\d$/.test(String(dados && dados.ddd || ''));
+  const hasParcial = /^\d{8,9}$/.test(String(dados && dados.telefone_parcial || ''));
+
+  if (!ex.boas_vindas) return 'boas_vindas';
+  if (!telOk && !ex.info_orcamento && !ex.whatsapp_pedido_1) return 'info_orcamento';
+  if (!telOk && !ex.whatsapp_pedido_1 && !hasDDD && !hasParcial) return 'whatsapp_pedido_1';
+  if (!telOk && hasParcial && !hasDDD && !ex.ddd_pedido) return 'ddd_pedido';
+  if (!telOk && hasDDD && !hasParcial && !ex.whatsapp_parcial_pedido) return 'whatsapp_parcial_pedido';
+  if (!dados.itens && !ex.itens_pedido) return 'itens_pedido';
+  if (!dados.endereco_saida && !ex.end_saida_pedido) return 'end_saida_pedido';
+  if (!dados.endereco_destino && !ex.end_destino_pedido) return 'end_destino_pedido';
+  if (typeof dados.ajudante !== 'boolean' && !ex.ajudante_pedido) return 'ajudante_pedido';
+  const faltam = computeMissing(dados);
+  if (faltam.length > 0) {
+    if (!ex.lembrete_1) return 'lembrete_1';
+    if (!ex.lembrete_2) return 'lembrete_2';
+  }
+  return null;
+}
+
+function registrarPassoExecutado(perfil, chatId, step, { cursorSig = '', text = '' } = {}) {
+  const s = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
+  ensureFsmStruct(s);
+  s.fsm.executedSteps[step] = true;
+  s.fsm.stepHistory.push({ step, at: now(), cursorSig, textHash: sha1(text || '') });
+  s.fsm.lastStep = step;
+  orchestrator._set(perfil, chatId, s);
+}
+
+function gerarMensagemNegocioParaStep(step, dados, chatState) {
+  const d = dados || {};
+  switch (step) {
+    case 'boas_vindas':
+      return 'Olá! Que bom falar contigo. Sim, faço fretes e consigo agilizar.';
+    case 'info_orcamento':
+      return 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados — eu repasso para ele e você recebe o orçamento certinho.';
+    case 'whatsapp_pedido_1':
+      return 'Pode me passar seu WhatsApp com DDD?';
+    case 'ddd_pedido':
+      return 'Perfeito! Me passa só o DDD do seu WhatsApp (2 dígitos)?';
+    case 'whatsapp_parcial_pedido':
+      return 'Obrigada! E o número do WhatsApp (sem DDD), com 8 ou 9 dígitos, qual é?';
+    case 'itens_pedido':
+      return 'O que vamos transportar?';
+    case 'end_saida_pedido':
+      return 'Qual é o ponto de saída? Pode ser bairro ou referência.';
+    case 'end_destino_pedido':
+      return 'E o destino, para onde vai? Pode ser bairro ou referência.';
+    case 'ajudante_pedido':
+      return 'Precisa de ajudante para carregar? (sim ou não)';
+    case 'lembrete_1': {
+      const faltam = computeMissing(d);
+      const foco = (faltam[0] || '').replace('_', ' ');
+      return `Fico por aqui te ajudando! Se puder, me envia ${foco} para agilizar.`;
+    }
+    case 'lembrete_2': {
+      const faltam = computeMissing(d);
+      const foco = (faltam[0] || '').replace('_', ' ');
+      return `Só passando para lembrar: ficou faltando ${foco}. Assim já repasso tudo ao motorista.`;
+    }
+    default:
+      return 'Me confirma essa informação, por favor?';
+  }
+}
+
+function gerarMensagemNegocio(stepAtual, dados, chatState) {
+  const parts = [];
+  const ex = ensureFsmStruct(chatState).fsm.executedSteps || {};
+
+  if (stepAtual === 'boas_vindas') {
+    parts.push(gerarMensagemNegocioParaStep('boas_vindas', dados, chatState));
+    if (!isValidPhoneBR(dados && dados.telefone) && !ex.info_orcamento) {
+      parts.push(gerarMensagemNegocioParaStep('info_orcamento', dados, chatState));
+      parts.push(gerarMensagemNegocioParaStep('whatsapp_pedido_1', dados, chatState));
+    }
+    const nextNonPhone = (!dados.itens) ? 'itens_pedido' : (!dados.endereco_saida) ? 'end_saida_pedido' : 'end_destino_pedido';
+    if (nextNonPhone) parts.push(gerarMensagemNegocioParaStep(nextNonPhone, dados, chatState));
+    return parts.join(' ');
+  }
+
+  if (stepAtual === 'info_orcamento') {
+    parts.push(gerarMensagemNegocioParaStep('info_orcamento', dados, chatState));
+    parts.push(gerarMensagemNegocioParaStep('whatsapp_pedido_1', dados, chatState));
+    const nextNonPhone = (!dados.itens) ? 'itens_pedido' : (!dados.endereco_saida) ? 'end_saida_pedido' : 'end_destino_pedido';
+    if (nextNonPhone) parts.push(gerarMensagemNegocioParaStep(nextNonPhone, dados, chatState));
+    return parts.join(' ');
+  }
+
+  return gerarMensagemNegocioParaStep(stepAtual, dados, chatState);
+}
+
+function ackReplyQueued(perfil, chatId, cursorSig) {
+  const s = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
+  ensureFsmStruct(s);
+  s.fsm.lastQueuedCursorSig = String(cursorSig || '');
+  orchestrator._set(perfil, chatId, s);
+}
+
+function ackReplySent(perfil, chatId, cursorSig) {
+  const s = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
+  ensureFsmStruct(s);
+  s.fsm.lastRepliedCursorSig = String(cursorSig || '');
+  const [cnt, dig] = String(cursorSig || '').split('|');
+  if (cnt && dig) {
+    s.repliedCursorCount = Number(cnt) || 0;
+    s.repliedCursorDigest = dig || '';
+  }
+  orchestrator._set(perfil, chatId, s);
+}
+
 class PedidoOrchestrator extends EventEmitter {
   constructor() {
     super();
@@ -1002,167 +1139,109 @@ async function fallbackToHuman(perfil, chatId, reason) {
 
 async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {}, novasMsgs = [] } = {}) {
   try {
-    // Cursor determinístico do cliente
     const cursor = computeClientCursor(historico);
     const sig = `${cursor.count}|${cursor.digest}`;
-
-    // Snapshot atual
     let sPrev = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
 
-    // Janela de silêncio (finalizado)
+    // Janela finalizada
     if (module.exports.isFinalized(perfil, chatId)) {
-      return {
-        mensagemParaCliente: '',
-        dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
-        proximaPergunta: null,
-        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
-      };
+      return { mensagemParaCliente: '', dadosExtraidosAtualizados: (sPrev && sPrev.data) || {}, proximaPergunta: null, tudoColetado: module.exports.readyToSendComplete(perfil, chatId) };
     }
 
-    // Blindagem: apenas UMA resposta por cursor do cliente
-    const alreadyRepliedSig = (sPrev && sPrev.flags && sPrev.flags.lastRepliedCursorSig) || '';
-    if (alreadyRepliedSig === sig) {
-      return {
-        mensagemParaCliente: '',
-        dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
-        proximaPergunta: null,
-        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
-      };
+    // Idempotência: se já enfileirado/resp. para esse cursor, não reemite
+    const alreadyQueuedSig = (sPrev && sPrev.fsm && sPrev.fsm.lastQueuedCursorSig) || '';
+    if (alreadyQueuedSig === sig) {
+      return { mensagemParaCliente: '', dadosExtraidosAtualizados: (sPrev && sPrev.data) || {}, proximaPergunta: null, tudoColetado: module.exports.readyToSendComplete(perfil, chatId) };
     }
 
-    // Idempotência forte: se já existe emissão in-flight para este cursor, SKIP
-    const inFlightSig = (sPrev.flags && sPrev.flags.emitInFlightSig) || '';
-    if (inFlightSig === sig) {
-      return {
-        mensagemParaCliente: '',
-        dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
-        proximaPergunta: null,
-        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
-      };
-    }
-
-    // Marca emissão in-flight para este cursor (com persistência)
-    sPrev.flags = sPrev.flags || {};
-    sPrev.flags.emitInFlightSig = sig;
-    orchestrator._set(perfil, chatId, sPrev);
-
-    // Extrai/consolida dados via LLM extrator
+    // Extrai dados via LLM extrator (só parsing)
     const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
     const snap = module.exports.getSnapshot(perfil, chatId);
-    const dadosColetados = (snap && snap.data) || {};
-    const firstReply = module.exports.shouldGreetFirstReply(perfil, chatId);
-    const directive = module.exports.getAskDirective(perfil, chatId, novasMsgs, snap);
-    const proximaPergunta = directive && directive.askField ? String(directive.askField) : null;
+    const dados = (snap && snap.data) || {};
 
-    // Cliente unificado + dúvidas + faltantes
-    const clienteUnificado = unifyClientMessages(novasMsgs, historico);
-    const duvidas = detectDoubtsSimple(clienteUnificado);
-    const faltantes = computeMissing(dadosColetados);
+    // FSM: qual próximo step
+    const step = proximoPasso(snap, dados);
+    if (!step) {
+      // Nada a fazer (pode estar aguardando timeout para enviar incompleto ou já completo)
+      module.exports.finalizeIfReady(perfil, chatId);
+      return { mensagemParaCliente: '', dadosExtraidosAtualizados: dados, proximaPergunta: null, tudoColetado: module.exports.readyToSendComplete(perfil, chatId) };
+    }
 
-    // Prompt orquestrado (sem números do cliente)
+    // Mensagem de negócio determinística para o step
+    const msgNegocio = gerarMensagemNegocio(step, dados, snap);
+
+    // Passa pelo prompt apenas para humanizar (sem decidir fluxo)
     const systemPrompt = promptFretes.buildSystemPrompt();
-    const instrucoes = buildInstrucoesFromDirective({
-      directive,
-      snapshotData: dadosColetados,
-      firstReply,
-      novasMsgs
-    });
-    const userPrompt = buildUserOrchestrationPrompt({
-      clienteUnificado,
-      dados: dadosColetados,
-      faltantes,
-      duvidas,
-      proximaPergunta,
-      instrucoes
-    });
+    const userPrompt = promptFretes.buildUserPrompt({
+      instrucoes: [
+        'Reescreva a mensagem abaixo no seu tom humano e profissional.',
+        'Não adicione perguntas além do que já estiver no texto.',
+        'Não repita explicações que não estejam no texto.',
+        'A resposta deve ser uma única mensagem.'
+      ],
+      acao: '',
+      historico: historico.slice(-8),
+      mensagemCliente: (novasMsgs && novasMsgs.length) ? (novasMsgs[novasMsgs.length - 1].texto || '') : ''
+    }) + `\n\nMENSAGEM_DE_NEGOCIO:\n"${msgNegocio}"`;
 
-    // Gera resposta
     const model = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-    const raw = await chatCompletion({
-      system: systemPrompt,
-      user: userPrompt,
-      provider: 'groq',
-      model,
-      task: 'answer',
-      timeoutMs: 22000,
-      retries: 2
-    });
-    const parsed = promptFretes.parseModelAnswerToDomain(raw);
-    const texto = String(parsed && parsed.resposta != null ? parsed.resposta : raw).trim();
-    const textoSan = removeTelefonesCompletos(texto);
-
-    // Marca progresso do funil (apenas se respondemos)
+    let raw = '';
     try {
-      module.exports.markIaReplied(perfil, chatId);
-      if (directive && directive.askField) {
-        module.exports.recordAsk(perfil, chatId, directive.askField);
-        if (directive.askField === 'telefone') {
-          module.exports.setWhatsPhase(perfil, chatId, directive.phase || 'full');
-        }
-      }
-    } catch {}
-
-    // [NOVO] Guardrails: reforça abertura impecável, orçamento somente junto com Whats, e evita mensagem fria/neutra
-    try {
-      const sNowForGuard = module.exports.getSnapshot(perfil, chatId);
-      const askCounts = (sNowForGuard && sNowForGuard.askCounts) || {};
-      textoSan = enforceAnswerGuardrails({
-        texto: textoSan,
-        directive,
-        firstReply,
-        snapshotData: dadosColetados || {},
-        askCounts
+      raw = await chatCompletion({
+        system: systemPrompt,
+        user: userPrompt,
+        provider: 'groq',
+        model,
+        task: 'answer',
+        timeoutMs: 22000,
+        retries: 2
       });
+    } catch (e) {
+      raw = msgNegocio; // fallback: envia o texto de negócio cru
+    }
+    const parsed = promptFretes.parseModelAnswerToDomain(raw);
+    let textoFinal = String(parsed && parsed.resposta ? parsed.resposta : raw).trim();
+    if (!textoFinal) textoFinal = msgNegocio;
+
+    // Registro FSM e contadores (sem marcar replied aqui)
+    try {
+      registrarPassoExecutado(perfil, chatId, step, { cursorSig: sig, text: textoFinal });
+      const stepToField = {
+        whatsapp_pedido_1: 'telefone',
+        ddd_pedido: 'ddd',
+        whatsapp_parcial_pedido: 'telefone_parcial',
+        itens_pedido: 'itens',
+        end_saida_pedido: 'endereco_saida',
+        end_destino_pedido: 'endereco_destino',
+        ajudante_pedido: 'ajudante'
+      };
+      const field = stepToField[step] || null;
+      if (field) module.exports.recordAsk(perfil, chatId, field);
     } catch {}
 
-    // Emite resposta consolidada
+    // Emite para a fila (Virtus). ACKS ajustarão flags sig.
     orchestrator.emit('replyReady', {
       perfil,
       chatId,
-      texto: textoSan,
+      texto: textoFinal,
       cursorCount: cursor.count || 0,
       cursorDigest: cursor.digest || '',
       cursorSig: sig,
       lastClientTs: cursor.lastTs || 0
     });
 
-    // Marca cursor respondido
-    try {
-      const sNow2 = orchestrator._get(perfil, chatId) || {};
-      sNow2.flags = sNow2.flags || {};
-      sNow2.flags.lastRepliedCursorSig = sig;
-      orchestrator._set(perfil, chatId, sNow2);
-    } catch {}
-
-    // Limpa in-flight
-    try {
-      const sNow = orchestrator._get(perfil, chatId) || {};
-      sNow.flags = sNow.flags || {};
-      sNow.flags.emitInFlightSig = ''; // libera trava
-      orchestrator._set(perfil, chatId, sNow);
-    } catch {}
-
-    // Verifica finalização (completo/incompleto)
+    // Decide finalização se estiver completo
     try { module.exports.finalizeIfReady(perfil, chatId); } catch {}
 
-    // Retorno padronizado
     return {
-      mensagemParaCliente: textoSan,
+      mensagemParaCliente: textoFinal,
       dadosExtraidosAtualizados: (module.exports.getSnapshot(perfil, chatId).data) || {},
-      proximaPergunta,
+      proximaPergunta: step,
       tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
     };
 
   } catch (e) {
     try { issues.append(perfil, 'ingest_from_virtus_fail', `chat=${chatId} err=${(e && e.message) || e}`); } catch {}
-    // Em caso de erro, tente liberar a trava in-flight
-    try {
-      const sFail = orchestrator._get(perfil, chatId) || {};
-      if (sFail.flags && sFail.flags.emitInFlightSig) {
-        sFail.flags.emitInFlightSig = '';
-        orchestrator._set(perfil, chatId, sFail);
-      }
-    } catch {}
     return {
       mensagemParaCliente: '',
       dadosExtraidosAtualizados: (module.exports.getSnapshot(perfil, chatId).data) || {},
@@ -1194,5 +1273,8 @@ module.exports = {
   finalizeIfReady: (perfil, chatId) => orchestrator.finalizeIfReady(perfil, chatId),
 
   // NOVO: ponto de integração Virtus -> Pedidos
-  ingestFromVirtus
+  ingestFromVirtus,
+
+  ackReplyQueued: (perfil, chatId, cursorSig) => ackReplyQueued(perfil, chatId, cursorSig),
+  ackReplySent: (perfil, chatId, cursorSig) => ackReplySent(perfil, chatId, cursorSig)
 };
