@@ -2776,6 +2776,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       } catch {}
 
+      // Se ainda não temos cidade+estado, não agenda atendimento; dispara coleta e retorna
+      const haveCity = !!(st && st.cidade && st.estado);
+      if (!haveCity) {
+        try {
+          await setChatState(nome, id, { state: CHAT_STATES.COLETANDO, locFetchInFlight: true, lastProbeAt: Date.now() });
+        } catch {}
+        ensureLocationPrefetch(id).catch(()=>{});
+        return; // Importante: não chamar scheduleDebounce para este chat agora
+      }
+
       await scheduleDebounce(id);
       lastProbeMap.set(id, agoraMs);
       mudancaFila = true;
@@ -2957,6 +2967,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try { await pendingAdd(nome, chatId, attemptId2); } catch {}
 
       chatAtivo = chatId;
+
+      // GATE 1: Exclusão mútua com coleta de cidade e Robe ativo
+      try {
+        const ctrlNow = (global && global.controllers) ? global.controllers.get(nome) : null;
+        const robeActive = !!(ctrlNow && ctrlNow.browser && ctrlNow.browser._robeActiveFor === nome);
+        const busyCity = !!(ctrlNow && ctrlNow.busyReason === 'city');
+        if (robeActive || busyCity) {
+          try { await logIssue(nome, 'mil_action', `virtus_skip_busy chat=${chatId} robe=${robeActive?1:0} busy=${busyCity?'city':''}`); } catch {}
+          setTimeout(() => {
+            try { if (!fila.includes(chatId)) { fila.push(chatId); scheduleNextIfIdle(); } } catch {}
+          }, 1200);
+          return; // não atende enquanto coleta cidade ou robe ativo
+        }
+      } catch {}
+
+      // GATE 2: Nunca atender sem cidade/UF — dispara coleta e sai
+      try {
+        const stGateLoc = await getChatState(nome, chatId).catch(()=>null);
+        const haveCityGate = !!(stGateLoc && stGateLoc.cidade && stGateLoc.estado);
+        if (!haveCityGate) {
+          await setChatState(nome, chatId, { state: CHAT_STATES.COLETANDO, locFetchInFlight: true, lastProbeAt: Date.now() });
+          ensureLocationPrefetch(chatId).catch(()=>{});
+          return; // coleta primeiro; o callback re-enfileira
+        }
+      } catch {}
 
       try {
         p = await ensurePage();
@@ -4404,9 +4439,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Evita repetições agressivas
       if (st && st.locFetchInFlight === true) return;
 
-      // Marca "in flight" para evitar duplicatas
+      // Marca "COLETANDO" + in flight para evitar duplicatas
       try {
-        await setChatState(nome, chatId, { locFetchInFlight: true });
+        await setChatState(nome, chatId, { locFetchInFlight: true, state: CHAT_STATES.COLETANDO, lastProbeAt: Date.now() });
       } catch {}
 
       const buscador = (global && global.__buscaLocalizacaoVirtus) ? global.__buscaLocalizacaoVirtus : null;
@@ -4423,17 +4458,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (loc && loc.cidade && loc.estado) {
             patch.cidade = String(loc.cidade || '');
             patch.estado = String(loc.estado || '');
+            patch.state = CHAT_STATES.PENDENTE;
           } else {
             patch.locWarnedNoLocation = true;
           }
           await setChatState(nome, chatId, patch);
 
-          // Se ainda não foi respondido, garante o chat na fila para continuidade
-          const st2 = await getChatState(nome, chatId).catch(() => null);
-          const jaResp = !!(st2 && st2.ultimaRespostaEnviada);
-          if (!jaResp && !fila.includes(chatId) && chatAtivo !== chatId) {
-            fila.push(chatId);
-            scheduleNextIfIdle();
+          // Só agenda atendimento se cidade foi encontrada
+          if (loc && loc.cidade && loc.estado) {
+            const st2 = await getChatState(nome, chatId).catch(() => null);
+            const jaResp = !!(st2 && st2.ultimaRespostaEnviada);
+            if (!jaResp && !fila.includes(chatId) && chatAtivo !== chatId) {
+              fila.push(chatId);
+              scheduleNextIfIdle();
+            }
           }
         } catch {}
       });
@@ -4498,12 +4536,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if ((now - last) < Math.min(PROBE_RECHECK_MIN_MS, 1000)) return;
           lastProbeMap.set(chatId, now);
 
-          // Agenda a resposta com debounce e janela 20–60s
-          if (!fila.includes(chatId) && !aguardandoRespostaMap.get(nome)?.has(chatId)) {
-            scheduleDebounce(chatId).catch(() => {});
-          }
-
-          // Dispara PRÉ-COLETA de localização (não bloqueante, sem depender de URL)
+          // Não agenda atendimento ainda. Primeiro coleta cidade obrigatoriamente.
+          setChatState(nome, chatId, { state: CHAT_STATES.COLETANDO, lastProbeAt: now, locFetchInFlight: true }).catch(()=>{});
           ensureLocationPrefetch(chatId).catch(() => {});
         }
         await installChatFeedObserver(p, nome, onNewChatDetected);

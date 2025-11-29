@@ -50,11 +50,56 @@ let _lastSnapAt = 0;
 const filaBuscaLocalizacao = [];
 let processandoBuscaLocalizacao = false;
 
+// Deduplicação e fan-out de callbacks por (perfil + chatId)
+const _cityActiveKeys = new Set();           // keys em processamento (nomePerfil::chatId)
+const _cityWaiters = new Map();              // key -> [callbacks]
+function _cityKey(nomePerfil, chatId) {
+  return String(nomePerfil || '') + '::' + String(chatId || '');
+}
+function _getCtrl(nomePerfil) {
+  try {
+    if (!nomePerfil) return null;
+    const ctrlGlobal = (global && global.controllers) ? global.controllers.get(nomePerfil) : null;
+    if (ctrlGlobal) return ctrlGlobal;
+    // eslint-disable-next-line no-undef
+    if (typeof controllers !== 'undefined') {
+      // eslint-disable-next-line no-undef
+      return controllers.get(nomePerfil);
+    }
+    return null;
+  } catch { return null; }
+}
+
 // Registra no global para uso pelo Virtus (sem require de worker.js)
 global.__buscaLocalizacaoVirtus = {
   adicionarBuscaLocalizacao: (chatId, urlClassificado, nomePerfil, callback) => {
     try {
-      filaBuscaLocalizacao.push({ chatId, urlClassificado, nomePerfil, callback });
+      if (!chatId || !nomePerfil) {
+        try { callback && callback(null); } catch {}
+        return;
+      }
+
+      const key = _cityKey(nomePerfil, chatId);
+
+      // Fan-out de callbacks (mesmo chat/perfil compartilha resultado)
+      const prev = _cityWaiters.get(key) || [];
+      if (typeof callback === 'function') {
+        _cityWaiters.set(key, prev.concat([callback]));
+      } else {
+        _cityWaiters.set(key, prev);
+      }
+
+      // Evita duplicar na fila se já existe item enfileirado OU ativo
+      const alreadyQueued = filaBuscaLocalizacao.some(ent => ent && ent.chatId === chatId && ent.nomePerfil === nomePerfil);
+      const isActive = _cityActiveKeys.has(key);
+
+      if (alreadyQueued || isActive) {
+        logger.info('[LOCALIZACAO] Pedido de coleta deduplicado (já enfileirado/ativo)', { nomePerfil, chatId });
+        return;
+      }
+
+      // Enfileira com metadados de controle
+      filaBuscaLocalizacao.push({ chatId, urlClassificado, nomePerfil, retries: 0, enqueuedAt: Date.now() });
       processarFilaBuscaLocalizacao();
     } catch (e) {
       logger.error('[LOCALIZACAO] Falha ao enfileirar', { chatId, error: e && e.message || e });
@@ -68,21 +113,103 @@ async function processarFilaBuscaLocalizacao() {
   if (filaBuscaLocalizacao.length === 0) return;
 
   processandoBuscaLocalizacao = true;
+
   const item = filaBuscaLocalizacao.shift();
+  // Normaliza estrutura (backward-compat)
+  item.retries = Number(item.retries || 0);
+  const key = _cityKey(item.nomePerfil, item.chatId);
 
   try {
-    const localizacao = await buscarLocalizacaoClassificado(
-      item.chatId,
-      item.urlClassificado,
-      item.nomePerfil
-    );
-    try { item.callback(localizacao || null); } catch {}
+    const ctrl = _getCtrl(item.nomePerfil);
+
+    // Se o perfil não está pronto/ativo, re-enfileira
+    if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) {
+      logger.info('[LOCALIZACAO] Adiado: perfil/navegador indisponível', { nomePerfil: item.nomePerfil, chatId: item.chatId });
+      filaBuscaLocalizacao.push(item);
+      processandoBuscaLocalizacao = false;
+      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
+      return;
+    }
+
+    // GATE 1: Robe ativo — coletar cidade só depois do Robe
+    if (ctrl && ctrl.browser && ctrl.browser._robeActiveFor === item.nomePerfil) {
+      logger.info('[LOCALIZACAO] Adiado: Robe ativo neste perfil', { nomePerfil: item.nomePerfil, chatId: item.chatId });
+      filaBuscaLocalizacao.push(item);
+      processandoBuscaLocalizacao = false;
+      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
+      return;
+    }
+
+    // GATE 2: Envio em andamento — aguardar
+    const sendLockActive = !!(ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active);
+    if (sendLockActive) {
+      logger.info('[LOCALIZACAO] Adiado: envio ativo (sendLock)', { nomePerfil: item.nomePerfil, chatId: item.chatId });
+      filaBuscaLocalizacao.push(item);
+      processandoBuscaLocalizacao = false;
+      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
+      return;
+    }
+
+    // GATE 3: Modo humano/configuração — aguardar
+    if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
+      logger.info('[LOCALIZACAO] Adiado: human/config mode', { nomePerfil: item.nomePerfil, chatId: item.chatId });
+      filaBuscaLocalizacao.push(item);
+      processandoBuscaLocalizacao = false;
+      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
+      return;
+    }
+
+    // Marca ativo e bloqueia perfil para "city"
+    _cityActiveKeys.add(key);
+    try { ctrl.busyReason = 'city'; } catch {}
+
+    logger.info('[LOCALIZACAO] Coleta iniciada', { nomePerfil: item.nomePerfil, chatId: item.chatId, tentativa: (item.retries + 1) });
+
+    let localizacao = null;
+    try {
+      localizacao = await buscarLocalizacaoClassificado(item.chatId, item.urlClassificado, item.nomePerfil);
+    } catch (e) {
+      logger.warn('[LOCALIZACAO] Exceção durante coleta', { nomePerfil: item.nomePerfil, chatId: item.chatId, error: (e && e.message) || e });
+    } finally {
+      try { if (ctrl && ctrl.busyReason === 'city') delete ctrl.busyReason; } catch {}
+      _cityActiveKeys.delete(key);
+    }
+
+    if (localizacao && localizacao.cidade && localizacao.estado) {
+      logger.info('[LOCALIZACAO] Coleta OK', {
+        nomePerfil: item.nomePerfil,
+        chatId: item.chatId,
+        cidade: localizacao.cidade,
+        estado: localizacao.estado
+      });
+
+      const cbs = _cityWaiters.get(key) || [];
+      _cityWaiters.delete(key);
+      for (const cb of cbs) { try { cb(localizacao); } catch {} }
+    } else {
+      // Falhou — retentativa até 5x
+      const nextTry = item.retries + 1;
+      if (nextTry < 5) {
+        item.retries = nextTry;
+        filaBuscaLocalizacao.push(item);
+        logger.warn('[LOCALIZACAO] Falha na coleta — re-tentando', { nomePerfil: item.nomePerfil, chatId: item.chatId, retry: nextTry });
+      } else {
+        logger.warn('[LOCALIZACAO] Falha na coleta — limite de tentativas esgotado', { nomePerfil: item.nomePerfil, chatId: item.chatId, retries: nextTry });
+        const cbs = _cityWaiters.get(key) || [];
+        _cityWaiters.delete(key);
+        for (const cb of cbs) { try { cb(null); } catch {} }
+      }
+    }
   } catch (e) {
-    logger.error('[LOCALIZACAO] Erro ao buscar localização', { chatId: item.chatId, error: e && e.message || e });
-    try { item.callback(null); } catch {}
+    logger.error('[LOCALIZACAO] Erro ao processar item da fila', { error: (e && e.message) || e });
+    try {
+      const cbs = _cityWaiters.get(key) || [];
+      _cityWaiters.delete(key);
+      for (const cb of cbs) { try { cb(null); } catch {} }
+    } catch {}
   } finally {
     processandoBuscaLocalizacao = false;
-    setTimeout(() => processarFilaBuscaLocalizacao(), 2000); // 2s entre buscas
+    setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
   }
 }
 
@@ -118,7 +245,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
       }
       try {
         const chatUrl = `https://www.messenger.com/marketplace/t/${chatId}/`;
-        await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.goto(chatUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
         await new Promise(r => setTimeout(r, 500));
         const found = await page.evaluate(() => {
           const fixAbs = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
@@ -180,7 +307,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
       }
 
       // Vai para a página do classificado
-      await novaAba.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await novaAba.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
 
       // Apenas scraping DOM - coleta candidatos de texto, SEM parsing
       const candidates = await novaAba.evaluate(() => {
