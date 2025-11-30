@@ -1,5 +1,7 @@
 'use strict';
 
+const { chatCompletion } = require('./inteligenciaArtificial.js');
+
 /**
  * =====================================
  *  buildSystemPrompt
@@ -126,8 +128,106 @@ function parseModelAnswerToDomain(raw) {
   return { resposta };
 }
 
+function buildSystemPromptVivo() {
+  return `
+Você é um atendente humano, gentil, animado e eficiente que recebe um JSON chamado CONTEXTO_ATENDIMENTO. Sua função é gerar uma mensagem única, fluida e profissional de acordo com:
+
+- O objetivo do passo (fluxo.step, fluxo.ordem.perguntar)
+
+- O estilo e nível do ciclo: acolhedor (nível 1), objetivo (nível 2), direto (nível 3+)
+
+- Flags de saudação e explicação de orçamento
+
+- Faltantes e fornecidos (dados.faltantes, dados.ja_fornecidos) - nunca recapitule, ecoe ou agradeça campos já fornecidos
+
+- Se politicas.nao_ecoar == true, nunca diga "você já me passou..."
+
+- Proibido criar perguntas não listadas em fluxo.ordem
+
+- Proibido repetir saudação ou explicação de orçamento fora de ordem
+
+- Microvarie o vocabulário/expressão entre ciclos, mantendo clareza
+
+
+
+Formato:
+
+- Sempre UMA mensagem só, fluida, clara e humana.
+
+- Pode usar emojis e tom simpático quando apropriado, mas nunca repetir a saudação nem ecoar.
+
+- Ignore campos/camadas do contexto que não estejam presentes.
+
+
+
+Se houver dúvidas (interpretacao.duvidas), responda em 1 frase breve antes de perguntar o fluxo.ordem.perguntar.
+
+`.trim();
+}
+
+function buildUserPromptFromContext(ctx) {
+  const ctxStr = JSON.stringify(ctx, null, 2);
+  return [
+    'CONTEXTO_ATENDIMENTO (JSON, uso obrigatório):',
+    ctxStr,
+    '',
+    'TAREFA:',
+    '1) Escreva UMA mensagem humana e única, seguindo fielmente o contexto fornecido.',
+    '2) Responda dúvidas do cliente detectadas (interpretacao.duvidas) em 1 frase, se estiverem presentes.',
+    '3) Proibido ecoar, recapitular, agradecer, repetir saudação/explicação. Apenas pergunte o que está em ordem/perguntar.',
+    '4) Se style for "acolhedor", seja mais caloroso. Se "objetivo", seja direto. Se "direto", seja curto/prático.',
+    '5) Nunca escreva listas/bullets. Sempre frase natural, única, sem eco, sem "vamos fazer isso?", sem loops.'
+  ].join('\n');
+}
+
+function sanitizeAnswer(out, ctx) {
+  let s = String(out || '').replace(/\s+/g, ' ').trim();
+
+  // Remove eco, agradecimentos ou resumo do que já foi passado pelo cliente
+  s = s.replace(/\b(obrigad[oa]\s+pel[oa]s?\s+inform[aã]o(?:es)?|certo,\s*voc[eê]\s+informou|entendi|vi que)\b.*$/i, '').trim();
+  // Não mostrar números (por privacidade)
+  s = s.replace(/\b\d{8,11}\b/g, '******');
+
+  // Remove saudação, se fluxo.saudacao == false
+  if (ctx && ctx.fluxo && ctx.fluxo.saudacao === false) {
+    s = s.replace(/^(oi|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite)[!,. ]+/i, '').trim();
+  }
+  // Remove explicação do orçamento se explicacao == false
+  if (!(ctx && ctx.fluxo && ctx.fluxo.explicar_fluxo)) {
+    s = s.replace(/o valor (exato )?ser[aá] (informado|passado) pelo motorista[^.]*\./i, '').replace(/\s+/g,' ').trim();
+  }
+  if (!s) s = 'Pode me passar o dado que falta?';
+  return s;
+}
+
+async function render(contexto) {
+  const system = buildSystemPromptVivo();
+  const user = buildUserPromptFromContext(contexto);
+  const model = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+  let raw = '';
+  try {
+    raw = await chatCompletion({
+      system,
+      user,
+      provider: 'groq',
+      model,
+      task: 'answer',
+      timeoutMs: 22000,
+      retries: 2
+    });
+  } catch (e) {
+    // Fallback (curto) caso IA falhe
+    raw = 'Vamos continuar! Pode enviar o dado para terminar rapidinho?';
+  }
+  const text = sanitizeAnswer(raw, contexto);
+  return text;
+}
+
 module.exports = {
   buildSystemPrompt,
   buildUserPrompt,
-  parseModelAnswerToDomain
+  parseModelAnswerToDomain,
+  render,
+  buildSystemPromptVivo
 };

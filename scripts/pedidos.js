@@ -213,6 +213,102 @@ function buildUserOrchestrationPrompt({ clienteUnificado = '', dados = {}, falta
   return lines.join('\n');
 }
 
+// [PATCH] — Adiciona construtor de contexto detalhado e controle anti-repetição para orçamento/saudação
+
+// Cria contexto amplo, determina ordem/campo/nivel e sinaliza flags para a IA
+function computeCamposFaltantesOrdenados(d) {
+  const falta = [];
+  if (!isValidPhoneBR(d.telefone)) falta.push('telefone');
+  if (!d.itens) falta.push('itens');
+  if (!d.endereco_saida) falta.push('endereco_saida');
+  if (!d.endereco_destino) falta.push('endereco_destino');
+  return falta;
+}
+
+function styleFromNivel(n) {
+  if (n <= 1) return 'acolhedor';
+  if (n === 2) return 'objetivo';
+  return 'direto';
+}
+
+function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, directive = {}, novasMsgs = [], contexto = {} }) {
+  const s = snapshot || {};
+  const d = s.data || {};
+  const askCounts = s.askCounts || {};
+  const clienteUnificado = unifyClientMessages(novasMsgs, historico);
+  const duvidas = detectDoubtsSimple(clienteUnificado);
+  const faltantes = computeCamposFaltantesOrdenados(d);
+
+  // Sinalizadores
+  const fornecidos = {
+    itens: !!d.itens,
+    endereco_saida: !!d.endereco_saida,
+    endereco_destino: !!d.endereco_destino,
+    ajudante: d.ajudante === true || d.ajudante === false,
+    telefone: isValidPhoneBR(d.telefone),
+    ddd: /^[1-9]\d$/.test(String(d.ddd || '')),
+    telefone_parcial: /^\d{8,9}$/.test(String(d.telefone_parcial || '')),
+    cidade: !!d.cidade
+  };
+
+  const saudacao = !!directive.includeGreet;
+  const explicar_fluxo = !!directive.includeOrcamento;
+  const nivel = Number(directive.nivel || 1);
+  const estilo = styleFromNivel(nivel);
+
+  // Contexto consolidado
+  const ctx = {
+    meta: {
+      perfil,
+      chatId,
+      cidade: d.cidade || contexto.cidade || null,
+      canal: 'messenger',
+      horario: new Date().toISOString()
+    },
+    fluxo: {
+      step: String(directive.step || ''),
+      ordem: {
+        perguntar: String(directive.field || ''),
+        perguntar_tambem: directive.askNextField ? String(directive.askNextField) : null
+      },
+      nivel,
+      estilo,
+      saudacao,          // só true para 1a vez
+      explicar_fluxo,    // só true 1ª de telefone
+      cooldown_whats_ms: PHONE_ASK_COOLDOWN_MS
+    },
+    dados: {
+      ja_fornecidos: fornecidos,
+      faltantes,
+      item: d.itens ? String(d.itens).slice(0, 80) : null
+    },
+    interpretacao: {
+      cliente_unificado: clienteUnificado,
+      duvidas,              // ["Pergunta sobre valor/orçamento", ...]
+      disponibilidade: /(disponivel|disponível|tem agora)/i.test(clienteUnificado)
+    },
+    historico: {
+      ultimas_do_cliente: historico.filter(m => m && m.autor === 'cliente').slice(-6),
+      ultimas_da_ia: historico.filter(m => m && m.autor === 'ia').slice(-4)
+    },
+    politicas: {
+      nao_recapitular: true,
+      nao_ecoar: true,
+      nao_repetir_saudacao: !saudacao,
+      nao_repetir_explicacao_orcamento: !explicar_fluxo,
+      uma_unica_mensagem: true,
+      aceitar_endereco_informal: true,
+      nao_pedir_campos_ja_fornecidos: true
+    }
+  };
+
+  return ctx;
+}
+
+function _hasExplainedOrcamento(snap) {
+  return !!(snap && snap.flags && snap.flags.explainedOrcamentoOnce);
+}
+
 /* ===================== INÍCIO — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
 
 /**
@@ -602,7 +698,7 @@ function decidirProximoPasso(snap, dados) {
 
     const nivel = getFieldAskLevelFromSnap(s, field);
     const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
-    const includeOrcamento = getStepCountFromSnap(s, 'info_orcamento') === 0;
+    const includeOrcamento = !_hasExplainedOrcamento(s);
     const nextAfterPhone = pickNextNonPhoneFieldSkippingExhausted(s, d) || null;
 
     return {
@@ -925,6 +1021,9 @@ class PedidoOrchestrator extends EventEmitter {
     // Marca grupo telefone
     if (field === 'telefone' || field === 'ddd' || field === 'telefone_parcial') {
       s.flags = s.flags || {};
+      if (!s.flags.explainedOrcamentoOnce && field === 'telefone') {
+        s.flags.explainedOrcamentoOnce = true;
+      }
       s.flags.whatsAskedPhase = s.flags.whatsAskedPhase || 'full';
       s.flags.hasAskedWhats = true;
       s.lastWhatsAskAt = now();
@@ -1374,41 +1473,44 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       return { mensagemParaCliente: '', dadosExtraidosAtualizados: dados, proximaPergunta: null, tudoColetado: module.exports.readyToSendComplete(perfil, chatId) };
     }
 
-    // Mensagem de negócio determinística baseada em directive/nível
-    const msgNegocio = gerarMensagemPorDirective(directive, dados, snap, perfil);
+    // Gera contexto detalhado para a IA (context-first)
+    const ctx = buildAnswerContext({
+      perfil, chatId, historico, snapshot: snap, directive, novasMsgs, contexto
+    });
 
-    // Passa pelo prompt apenas para humanizar (sem decidir fluxo)
-    const systemPrompt = promptFretes.buildSystemPrompt();
-    const userPrompt = promptFretes.buildUserPrompt({
-      instrucoes: [
-        'Reescreva a mensagem abaixo no seu tom humano e profissional.',
-        'Não adicione perguntas além do que já estiver no texto.',
-        'Não repita explicações que não estejam no texto.',
-        'A resposta deve ser uma única mensagem.'
-      ],
-      acao: '',
-      historico: historico.slice(-8),
-      mensagemCliente: (novasMsgs && novasMsgs.length) ? (novasMsgs[novasMsgs.length - 1].texto || '') : ''
-    }) + `\n\nMENSAGEM_DE_NEGOCIO:\n"${msgNegocio}"`;
-
-    const model = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-    let raw = '';
+    let textoFinal = '';
     try {
-      raw = await chatCompletion({
-        system: systemPrompt,
-        user: userPrompt,
-        provider: 'groq',
-        model,
-        task: 'answer',
-        timeoutMs: 22000,
-        retries: 2
-      });
+      // Tenta usar render do promptFretes (context-first)
+      if (typeof promptFretes.render === 'function') {
+        textoFinal = await promptFretes.render(ctx);
+      } else {
+        // Fallback se render não existir ainda
+        throw new Error('promptFretes.render não disponível');
+      }
     } catch (e) {
-      raw = msgNegocio; // fallback: envia o texto de negócio cru
+      // Fallback: usa template determinístico apenas em caso de erro
+      const msgNegocio = gerarMensagemPorDirective(directive, dados, snap, perfil);
+      textoFinal = msgNegocio || 'Vamos seguir: pode me dizer o próximo dado, por favor?';
+      
+      // Log do erro para transparência
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'pedidos_render_fallback', { chatId, error: (e && e.message) || String(e), ctxSize: JSON.stringify(ctx).length });
+      } catch {}
     }
-    const parsed = promptFretes.parseModelAnswerToDomain(raw);
-    let textoFinal = String(parsed && parsed.resposta ? parsed.resposta : raw).trim();
-    if (!textoFinal) textoFinal = msgNegocio;
+
+    // Log de transparência (contexto e resposta)
+    try {
+      const stepLog = require('./stepLog.js');
+      stepLog.appendJSONL(perfil, 'pedidos_context_sent', {
+        chatId,
+        ctxSize: JSON.stringify(ctx).length,
+        respostaSize: textoFinal.length,
+        step: directive.step,
+        field: directive.field,
+        nivel: directive.nivel
+      });
+    } catch {}
 
     // Registro FSM e contadores (sem marcar replied aqui)
     try {
