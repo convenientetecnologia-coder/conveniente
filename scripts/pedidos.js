@@ -475,7 +475,9 @@ const FSM_STEPS = Object.freeze([
   'boas_vindas',
   'info_orcamento',
   'whatsapp_pedido_1',
+  'telefone_pedido',
   'ddd_pedido',
+  'telefone_parcial_pedido',
   'whatsapp_parcial_pedido',
   'itens_pedido',
   'end_saida_pedido',
@@ -486,105 +488,233 @@ const FSM_STEPS = Object.freeze([
 ]);
 
 function ensureFsmStruct(snap) {
-  snap.fsm = snap.fsm || { executedSteps: {}, stepHistory: [], lastStep: null, lastQueuedCursorSig: '', lastRepliedCursorSig: '' };
-  snap.fsm.executedSteps = snap.fsm.executedSteps || {};
+  snap.fsm = snap.fsm || { stepCounters: {}, stepHistory: [], lastStep: null, lastQueuedCursorSig: '', lastRepliedCursorSig: '' };
+
+  // Migração: se existir executedSteps (booleano), converte para contador (=1) e remove
+  if (snap.fsm.executedSteps) {
+    snap.fsm.stepCounters = snap.fsm.stepCounters || {};
+    for (const [k, v] of Object.entries(snap.fsm.executedSteps || {})) {
+      if (v && !snap.fsm.stepCounters[k]) snap.fsm.stepCounters[k] = 1;
+    }
+    try { delete snap.fsm.executedSteps; } catch {}
+  }
+
+  snap.fsm.stepCounters = snap.fsm.stepCounters || {};
   snap.fsm.stepHistory = Array.isArray(snap.fsm.stepHistory) ? snap.fsm.stepHistory : [];
   return snap;
 }
 
-function proximoPasso(chatState, dados) {
-  const s = ensureFsmStruct(chatState);
-  const ex = s.fsm.executedSteps || {};
-  const telOk = isValidPhoneBR(dados && dados.telefone);
-  const hasDDD = /^[1-9]\d$/.test(String(dados && dados.ddd || ''));
-  const hasParcial = /^\d{8,9}$/.test(String(dados && dados.telefone_parcial || ''));
+function getStepCountFromSnap(snap, step) {
+  ensureFsmStruct(snap);
+  return Number((snap.fsm.stepCounters && snap.fsm.stepCounters[step]) || 0);
+}
 
-  if (!ex.boas_vindas) return 'boas_vindas';
-  if (!telOk && !ex.info_orcamento && !ex.whatsapp_pedido_1) return 'info_orcamento';
-  if (!telOk && !ex.whatsapp_pedido_1 && !hasDDD && !hasParcial) return 'whatsapp_pedido_1';
-  if (!telOk && hasParcial && !hasDDD && !ex.ddd_pedido) return 'ddd_pedido';
-  if (!telOk && hasDDD && !hasParcial && !ex.whatsapp_parcial_pedido) return 'whatsapp_parcial_pedido';
-  if (!dados.itens && !ex.itens_pedido) return 'itens_pedido';
-  if (!dados.endereco_saida && !ex.end_saida_pedido) return 'end_saida_pedido';
-  if (!dados.endereco_destino && !ex.end_destino_pedido) return 'end_destino_pedido';
-  if (typeof dados.ajudante !== 'boolean' && !ex.ajudante_pedido) return 'ajudante_pedido';
-  const faltam = computeMissing(dados);
-  if (faltam.length > 0) {
-    if (!ex.lembrete_1) return 'lembrete_1';
-    if (!ex.lembrete_2) return 'lembrete_2';
+function incStepCounterOnSnap(snap, step) {
+  ensureFsmStruct(snap);
+  const c = snap.fsm.stepCounters || {};
+  c[step] = (c[step] || 0) + 1;
+  snap.fsm.stepCounters = c;
+  return c[step];
+}
+
+function getPhoneAskGroupCountFromSnap(snap) {
+  const a = (snap && snap.askCounts) || {};
+  return (a.telefone || 0) + (a.ddd || 0) + (a.telefone_parcial || 0);
+}
+
+function getFieldAskLevelFromSnap(snap, field) {
+  if (!field) return 1;
+  if (field === 'telefone' || field === 'ddd' || field === 'telefone_parcial') {
+    return 1 + getPhoneAskGroupCountFromSnap(snap);
   }
+  const a = (snap && snap.askCounts) || {};
+  return 1 + (a[field] || 0);
+}
+
+function _nextNonPhoneField(d = {}) {
+  if (!d.itens) return 'itens';
+  if (!d.endereco_saida) return 'endereco_saida';
+  if (!d.endereco_destino) return 'endereco_destino';
+  if (typeof d.ajudante !== 'boolean') return 'ajudante';
   return null;
 }
 
-function registrarPassoExecutado(perfil, chatId, step, { cursorSig = '', text = '' } = {}) {
+function _stepIdForField(field) {
+  switch (String(field)) {
+    case 'telefone': return 'telefone_pedido';
+    case 'ddd': return 'ddd_pedido';
+    case 'telefone_parcial': return 'telefone_parcial_pedido';
+    case 'itens': return 'itens_pedido';
+    case 'endereco_saida': return 'end_saida_pedido';
+    case 'endereco_destino': return 'end_destino_pedido';
+    case 'ajudante': return 'ajudante_pedido';
+    default: return null;
+  }
+}
+
+function decidirProximoPasso(snap, dados) {
+  const s = snap || {};
+  const d = dados || {};
+  const telOk = isValidPhoneBR(d.telefone);
+  const hasParcial = /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
+  const hasDDD = /^[1-9]\d$/.test(String(d.ddd || ''));
+
+  // Sempre priorize WhatsApp até ficar válido
+  if (!telOk) {
+    let field = 'telefone';
+    let step = 'telefone_pedido';
+    if (hasParcial && !hasDDD) { field = 'ddd'; step = 'ddd_pedido'; }
+    else if (hasDDD && !hasParcial) { field = 'telefone_parcial'; step = 'telefone_parcial_pedido'; }
+
+    const nivel = getFieldAskLevelFromSnap(s, field);
+    const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
+    const includeOrcamento = getStepCountFromSnap(s, 'info_orcamento') === 0;
+    const nextAfterPhone = _nextNonPhoneField(d);
+
+    return {
+      step,
+      field,
+      nivel,
+      includeGreet,
+      includeOrcamento,
+      askNextField: nextAfterPhone
+    };
+  }
+
+  // Com telefone ok, siga ordem do funil
+  const nextField = _nextNonPhoneField(d);
+  if (nextField) {
+    const step = _stepIdForField(nextField);
+    const nivel = getFieldAskLevelFromSnap(s, nextField);
+    const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
+    return { step, field: nextField, nivel, includeGreet, includeOrcamento: false, askNextField: _nextNonPhoneField(Object.assign({}, d, { [nextField]: 'dummy' })) || null };
+  }
+
+  // Nada faltando => sem próxima pergunta
+  return null;
+}
+
+function registrarPassoExecutado(perfil, chatId, step, { cursorSig = '', text = '', nivel = null } = {}) {
   const s = orchestrator._get(perfil, chatId) || orchestrator._set(perfil, chatId, {});
   ensureFsmStruct(s);
-  s.fsm.executedSteps[step] = true;
-  s.fsm.stepHistory.push({ step, at: now(), cursorSig, textHash: sha1(text || '') });
+  const newCount = incStepCounterOnSnap(s, step);
+  s.fsm.stepHistory.push({
+    step,
+    at: now(),
+    cursorSig,
+    nivel: (nivel == null ? newCount : Number(nivel)),
+    textHash: sha1(text || '')
+  });
   s.fsm.lastStep = step;
   orchestrator._set(perfil, chatId, s);
 }
 
-function gerarMensagemNegocioParaStep(step, dados, chatState) {
-  const d = dados || {};
-  switch (step) {
-    case 'boas_vindas':
-      return 'Olá! Que bom falar contigo. Sim, faço fretes e consigo agilizar.';
-    case 'info_orcamento':
-      return 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados — eu repasso para ele e você recebe o orçamento certinho.';
-    case 'whatsapp_pedido_1':
-      return 'Pode me passar seu WhatsApp com DDD?';
-    case 'ddd_pedido':
-      return 'Perfeito! Me passa só o DDD do seu WhatsApp (2 dígitos)?';
-    case 'whatsapp_parcial_pedido':
-      return 'Obrigada! E o número do WhatsApp (sem DDD), com 8 ou 9 dígitos, qual é?';
-    case 'itens_pedido':
-      return 'O que vamos transportar?';
-    case 'end_saida_pedido':
-      return 'Qual é o ponto de saída? Pode ser bairro ou referência.';
-    case 'end_destino_pedido':
-      return 'E o destino, para onde vai? Pode ser bairro ou referência.';
-    case 'ajudante_pedido':
-      return 'Precisa de ajudante para carregar? (sim ou não)';
-    case 'lembrete_1': {
-      const faltam = computeMissing(d);
-      const foco = (faltam[0] || '').replace('_', ' ');
-      return `Fico por aqui te ajudando! Se puder, me envia ${foco} para agilizar.`;
-    }
-    case 'lembrete_2': {
-      const faltam = computeMissing(d);
-      const foco = (faltam[0] || '').replace('_', ' ');
-      return `Só passando para lembrar: ficou faltando ${foco}. Assim já repasso tudo ao motorista.`;
-    }
-    default:
-      return 'Me confirma essa informação, por favor?';
-  }
+function _styleForLevel(nivel) {
+  if (nivel <= 1) return 'full';
+  if (nivel === 2) return 'brief';
+  return 'direct';
 }
 
-function gerarMensagemNegocio(stepAtual, dados, chatState) {
-  const parts = [];
-  const ex = ensureFsmStruct(chatState).fsm.executedSteps || {};
+const FRASE_VALOR = 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados — eu repasso para ele e você recebe o orçamento certinho.';
 
-  if (stepAtual === 'boas_vindas') {
-    parts.push(gerarMensagemNegocioParaStep('boas_vindas', dados, chatState));
-    if (!isValidPhoneBR(dados && dados.telefone) && !ex.info_orcamento) {
-      parts.push(gerarMensagemNegocioParaStep('info_orcamento', dados, chatState));
-      parts.push(gerarMensagemNegocioParaStep('whatsapp_pedido_1', dados, chatState));
+const TPL = {
+  telefone: {
+    full: [
+      'Pode me passar seu WhatsApp com DDD?',
+      'Me envie seu WhatsApp com DDD, por favor.'
+    ],
+    brief: [
+      'Me passa seu WhatsApp com DDD?',
+      'Seu WhatsApp com DDD, por favor.'
+    ],
+    direct: [
+      'Seu WhatsApp com DDD.'
+    ]
+  },
+  ddd: {
+    full: ['Me passa só o DDD do seu WhatsApp (2 dígitos)?'],
+    brief: ['Só o DDD (2 dígitos), por favor.'],
+    direct: ['DDD (2 dígitos).']
+  },
+  telefone_parcial: {
+    full: ['E o número do WhatsApp (sem DDD), com 8 ou 9 dígitos, qual é?'],
+    brief: ['O número do WhatsApp (sem DDD), por favor.'],
+    direct: ['Número do WhatsApp (sem DDD).']
+  },
+  itens: {
+    full: ['E já me conta: o que vamos transportar?'],
+    brief: ['O que vamos transportar?'],
+    direct: ['Só os itens.']
+  },
+  endereco_saida: {
+    full: ['Qual é o ponto de saída? Pode ser bairro ou referência.'],
+    brief: ['Endereço/ponto de saída?'],
+    direct: ['Só o ponto de saída.']
+  },
+  endereco_destino: {
+    full: ['E o destino, para onde vai? Pode ser bairro ou referência.'],
+    brief: ['Endereço de destino?'],
+    direct: ['Só o destino.']
+  },
+  ajudante: {
+    full: ['Precisa de ajudante para carregar? (sim ou não)'],
+    brief: ['Vai precisar de ajudante? (sim/não)'],
+    direct: ['Ajudante? (sim/não)']
+  }
+};
+
+function _pick(arr, seed = 0) {
+  if (!Array.isArray(arr) || arr.length === 0) return '';
+  const idx = seed % arr.length;
+  return String(arr[idx] || '').trim();
+}
+
+function _lineForField(field, nivel, seed = 0) {
+  const style = _styleForLevel(nivel);
+  const f = String(field || '');
+  const box = TPL[f] || TPL.itens;
+  return _pick(box[style] || [], seed);
+}
+
+function _lineForPhone(data, field, nivel, seed = 0) {
+  return _lineForField(field, nivel, seed);
+}
+
+function gerarMensagemPorDirective(directive, dados, snap) {
+  const dir = directive || {};
+  const d = dados || {};
+  const s = snap || {};
+  const seed = (s && s.askCounts && s.askCounts[dir.field || 'itens']) || 0;
+
+  const partes = [];
+
+  if (dir.includeGreet) {
+    partes.push(_humanGreet() + ' Sim, faço fretes e consigo agilizar.');
+  }
+
+  if (dir.includeOrcamento) {
+    partes.push(FRASE_VALOR);
+  }
+
+  if (dir.field === 'telefone' || dir.field === 'ddd' || dir.field === 'telefone_parcial') {
+    partes.push(_lineForPhone(d, dir.field, dir.nivel, seed));
+  } else {
+    partes.push(_lineForField(dir.field, dir.nivel, seed));
+  }
+
+  if (dir.askNextField) {
+    // Nunca peça 2x telefone no mesmo turno
+    if (!(dir.field === 'telefone' || dir.field === 'ddd' || dir.field === 'telefone_parcial')) {
+      if (!(dir.askNextField === 'telefone')) {
+        partes.push(_lineForField(dir.askNextField, 1, 0));
+      }
     }
-    const nextNonPhone = (!dados.itens) ? 'itens_pedido' : (!dados.endereco_saida) ? 'end_saida_pedido' : 'end_destino_pedido';
-    if (nextNonPhone) parts.push(gerarMensagemNegocioParaStep(nextNonPhone, dados, chatState));
-    return parts.join(' ');
+    if ((dir.field === 'telefone' || dir.field === 'ddd' || dir.field === 'telefone_parcial') && dir.askNextField) {
+      partes.push(_lineForField(dir.askNextField, 1, 0));
+    }
   }
 
-  if (stepAtual === 'info_orcamento') {
-    parts.push(gerarMensagemNegocioParaStep('info_orcamento', dados, chatState));
-    parts.push(gerarMensagemNegocioParaStep('whatsapp_pedido_1', dados, chatState));
-    const nextNonPhone = (!dados.itens) ? 'itens_pedido' : (!dados.endereco_saida) ? 'end_saida_pedido' : 'end_destino_pedido';
-    if (nextNonPhone) parts.push(gerarMensagemNegocioParaStep(nextNonPhone, dados, chatState));
-    return parts.join(' ');
-  }
-
-  return gerarMensagemNegocioParaStep(stepAtual, dados, chatState);
+  return partes.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 }
 
 function ackReplyQueued(perfil, chatId, cursorSig) {
@@ -695,11 +825,11 @@ class PedidoOrchestrator extends EventEmitter {
     this._set(perfil, chatId, s);
   }
 
+  // [PATCH] recordAsk - incrementa por ciclo; ajusta campo para grupo telefone
   recordAsk(perfil, chatId, field) {
     const s = this._get(perfil, chatId) || this._set(perfil, chatId, {});
     const dataNow = (s && s.data) || {};
 
-    // Remapeia pedido "telefone" para sub-etapas corretas quando já houve progresso parcial
     if (field === 'telefone' && !isValidPhoneBR(dataNow.telefone)) {
       const hasParcial = /^\d{8,9}$/.test(String(dataNow.telefone_parcial || ''));
       const hasDDD = /^[1-9]\d$/.test(String(dataNow.ddd || ''));
@@ -721,10 +851,16 @@ class PedidoOrchestrator extends EventEmitter {
         attempts: s.askCounts[field] || 0
       };
     }
-
+    // Marca grupo telefone
+    if (field === 'telefone' || field === 'ddd' || field === 'telefone_parcial') {
+      s.flags = s.flags || {};
+      s.flags.whatsAskedPhase = s.flags.whatsAskedPhase || 'full';
+      s.flags.hasAskedWhats = true;
+      s.lastWhatsAskAt = now();
+    }
     this._set(perfil, chatId, s);
 
-    // Anti-loop: se exceder MAX_ASK_RETRIES e ainda faltar o campo → apenas logar (sem fallback humano)
+    // Anti-loop log
     const stillMissing = Array.isArray(s.missing) && s.missing.includes(field);
     if (field && stillMissing && s.askCounts[field] >= MAX_ASK_RETRIES) {
       try {
@@ -1159,16 +1295,16 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
     const snap = module.exports.getSnapshot(perfil, chatId);
     const dados = (snap && snap.data) || {};
 
-    // FSM: qual próximo step
-    const step = proximoPasso(snap, dados);
-    if (!step) {
+    // FSM: decide próximo passo com nível/contador
+    const directive = decidirProximoPasso(snap, dados);
+    if (!directive) {
       // Nada a fazer (pode estar aguardando timeout para enviar incompleto ou já completo)
       module.exports.finalizeIfReady(perfil, chatId);
       return { mensagemParaCliente: '', dadosExtraidosAtualizados: dados, proximaPergunta: null, tudoColetado: module.exports.readyToSendComplete(perfil, chatId) };
     }
 
-    // Mensagem de negócio determinística para o step
-    const msgNegocio = gerarMensagemNegocio(step, dados, snap);
+    // Mensagem de negócio determinística baseada em directive/nível
+    const msgNegocio = gerarMensagemPorDirective(directive, dados, snap);
 
     // Passa pelo prompt apenas para humanizar (sem decidir fluxo)
     const systemPrompt = promptFretes.buildSystemPrompt();
@@ -1205,18 +1341,8 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
 
     // Registro FSM e contadores (sem marcar replied aqui)
     try {
-      registrarPassoExecutado(perfil, chatId, step, { cursorSig: sig, text: textoFinal });
-      const stepToField = {
-        whatsapp_pedido_1: 'telefone',
-        ddd_pedido: 'ddd',
-        whatsapp_parcial_pedido: 'telefone_parcial',
-        itens_pedido: 'itens',
-        end_saida_pedido: 'endereco_saida',
-        end_destino_pedido: 'endereco_destino',
-        ajudante_pedido: 'ajudante'
-      };
-      const field = stepToField[step] || null;
-      if (field) module.exports.recordAsk(perfil, chatId, field);
+      registrarPassoExecutado(perfil, chatId, directive.step, { cursorSig: sig, text: textoFinal, nivel: directive.nivel });
+      if (directive.field) module.exports.recordAsk(perfil, chatId, directive.field);
     } catch {}
 
     // Emite para a fila (Virtus). ACKS ajustarão flags sig.
@@ -1236,7 +1362,7 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
     return {
       mensagemParaCliente: textoFinal,
       dadosExtraidosAtualizados: (module.exports.getSnapshot(perfil, chatId).data) || {},
-      proximaPergunta: step,
+      proximaPergunta: directive.step,
       tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
     };
 
@@ -1276,5 +1402,23 @@ module.exports = {
   ingestFromVirtus,
 
   ackReplyQueued: (perfil, chatId, cursorSig) => ackReplyQueued(perfil, chatId, cursorSig),
-  ackReplySent: (perfil, chatId, cursorSig) => ackReplySent(perfil, chatId, cursorSig)
+  ackReplySent: (perfil, chatId, cursorSig) => ackReplySent(perfil, chatId, cursorSig),
+
+  getStepCounters: (perfil, chatId) => {
+    const s = orchestrator._get(perfil, chatId) || {};
+    ensureFsmStruct(s);
+    return Object.assign({}, s.fsm.stepCounters || {});
+  },
+  getFieldAskLevel: (perfil, chatId, field) => {
+    const s = orchestrator._get(perfil, chatId) || {};
+    return getFieldAskLevelFromSnap(s, field);
+  },
+  getPhoneAskGroupCount: (perfil, chatId) => {
+    const s = orchestrator._get(perfil, chatId) || {};
+    return getPhoneAskGroupCountFromSnap(s);
+  },
+  decidirProximoPasso: (perfil, chatId) => {
+    const s = orchestrator._get(perfil, chatId) || {};
+    return decidirProximoPasso(s, (s && s.data) || {});
+  }
 };
