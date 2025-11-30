@@ -11,15 +11,8 @@ const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 const fileStore = require('./fileStore.js');
 const { chatCompletion } = require('./inteligenciaArtificial.js');
 
-// Imports dos prompts modulares
-const { buildSystemPromptVivo, buildUserPromptFromContext, buildSystemPromptFromInstrucoes, sanitizeAnswer, render: renderPersona } = require('./promptFretesPersonalidade.js');
-const promptSaudacao = require('./promptFretesSaudacao.js');
-const promptItem = require('./promptFretesItem.js');
-const promptColeta = require('./promptFretesColeta.js');
-const promptDestino = require('./promptFretesDestino.js');
-const promptTelefone = (() => { try { return require('./promptFretesTelefone.js'); } catch { return []; } })();
-const promptDDD = (() => { try { return require('./promptFretesDDD.js'); } catch { return []; } })();
-const promptAjudante = (() => { try { return require('./promptFretesAjudante.js'); } catch { return []; } })();
+// Import do Prompt Único de Atendimento
+const { buildSystemPromptUnico, buildUserPromptUnico, sanitizeAnswerUnico, renderUnico } = require('./promptFretes.js');
 
 function sha1(str) {
   return crypto.createHash('sha1').update(String(str || ''), 'utf8').digest('hex');
@@ -1313,41 +1306,9 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       perfil, chatId, historico, snapshot: snap, directive, novasMsgs, contexto
     });
 
-    // Monta system prompt dinamicamente baseado no ciclo
-    let systemParts = [buildSystemPromptVivo()];
-    
-    // Adiciona prompt de saudação se for primeira resposta
-    if (ctx.fluxo && ctx.fluxo.saudacao === true) {
-      systemParts.push(...promptSaudacao);
-    }
-    
-    // Etapa principal/campo faltante:
-    const campo = directive && directive.field;
-    if (campo === 'itens') systemParts.push(...promptItem);
-    else if (campo === 'endereco_saida') systemParts.push(...promptColeta);
-    else if (campo === 'endereco_destino') systemParts.push(...promptDestino);
-    else if (campo === 'telefone') systemParts.push(...promptTelefone);
-    else if (campo === 'ddd') systemParts.push(...promptDDD);
-    else if (campo === 'ajudante') systemParts.push(...promptAjudante);
-    
-    // Se askNextField, adicione também o prompt correspondente (NUNCA mais de 2).
-    if (directive && directive.askNextField) {
-      const nf = directive.askNextField;
-      if (nf === 'itens') systemParts.push(...promptItem);
-      else if (nf === 'endereco_saida') systemParts.push(...promptColeta);
-      else if (nf === 'endereco_destino') systemParts.push(...promptDestino);
-      else if (nf === 'telefone') systemParts.push(...promptTelefone);
-      else if (nf === 'ddd') systemParts.push(...promptDDD);
-      else if (nf === 'ajudante') systemParts.push(...promptAjudante);
-    }
-    
-    // Instruções dinâmicas fora do user
-    const instrBlock = buildSystemPromptFromInstrucoes(ctx.instrucoes);
-    if (instrBlock) systemParts.push(instrBlock);
-    
-    // System prompt final
-    const system = systemParts.filter(Boolean).join('\n\n');
-    const user = buildUserPromptFromContext(ctx);
+    // Prompt Único (system + user)
+    const system = buildSystemPromptUnico();
+    const user = buildUserPromptUnico(ctx);
     
     let textoFinal = '';
     try {
@@ -1361,11 +1322,11 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
         timeoutMs: 22000,
         retries: 2
       });
-      textoFinal = sanitizeAnswer(raw, ctx);
+      textoFinal = sanitizeAnswerUnico(raw, ctx);
     } catch (e) {
-      // Fallback: tenta novamente com renderPersona
+      // Fallback: tenta novamente com renderUnico
       try {
-        textoFinal = await renderPersona(ctx);
+        textoFinal = await renderUnico(ctx);
       } catch (e2) {
         textoFinal = ''; // Não gera frase manual em NENHUMA hipótese
         try {

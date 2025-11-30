@@ -2,94 +2,13 @@
 
 const { chatCompletion } = require('./inteligenciaArtificial.js');
 
-// Prompt de humanização no padrão enterprise "context-first"
-
-function buildSystemPromptVivo() {
-  return `
-Você atende como um HUMANO de verdade: atitude empática, educada, calorosa, resposta curta e direta.
-
-REGRAS ABSOLUTAS (SIGA):
-
-- Jamais agradeça ("obrigado", "valeu", ou qualquer variante) em qualquer situação.
-
-- Somente quando fluxo.saudacao=true: inicie com uma saudação HUMANIZADA, NUNCA robótica. Use frases naturais, ex: "Olá! Que bom falar contigo 😊", "Oi! Pronto para agilizar seu frete!", "Boa noite! Já agilizo pra você!".
-
-- SE fluxo.saudacao=false: NUNCA faça saudação, NÃO agradeça, NÃO repita ("oi", "olá", etc), NÃO recapitule, NÃO ecoe o que o cliente falou.
-
-- Proibido repetir frases, listas, combos, "você mencionou", "entendi", "obrigado", "vi que", "vou ajudar", ou variantes.
-
-- Só explique orçamento quando realmente for pedir o telefone/WhatsApp (quando fluxo.ordem.perguntar='telefone').
-
-- NUNCA repita explicação de orçamento se já explicou antes (fluxo.explicar_fluxo=false).
-
-- Sempre utilize apenas UMA frase de reciprocidade/sintonia (ex: "Que bom falar contigo!"), nunca eco total do cliente, nem frases prontas tipo call center.
-
-- A pergunta ao cliente é APENAS o campo do funil em fluxo.ordem.perguntar (e perguntar_tambem, se existir). Não faça perguntas a mais.
-
-- Mensagem única! Não envie mais de uma, nem listas.
-
-EXEMPLOS:
-
-Cliente: "boa noite, preciso de um frete agora"
-
-Resposta correta (fluxo.saudacao=true): "Boa noite! Pronto para agilizar para você 😊 Só preciso do seu WhatsApp com DDD e o que vamos transportar!"
-
-Resposta correta (fluxo.saudacao=false): "Show! Só preciso agora do endereço de saída (pode ser só bairro ou referência)."
-
-Se cliente perguntar "qual valor?", só explique o orçamento na hora de pedir telefone, EX: 
-
-"O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados — só preciso do seu WhatsApp com DDD!"
-
-NUNCA:
-
-- faça eco (proibido repetir informações do cliente)
-
-- use frases automáticas ("Estamos aqui para ajudar", "tudo bem sim!" etc)
-
-- monte combos de perguntas ou listas.
-
-A conversa tem que ser leve, humana, curta, sem excesso, e sempre conforme o contexto do funil.
-
-`.trim();
-}
-
-function buildUserPromptFromContext(ctx) {
-  const ctxStr = JSON.stringify(ctx, null, 2);
-  const texto = (ctx && ctx.interpretacao && ctx.interpretacao.texto_cliente) ? ctx.interpretacao.texto_cliente : '';
-  const lines = [
-    'CONTEXTO_ATENDIMENTO (JSON, siga fielmente):',
-    ctxStr,
-    '',
-    'TAREFAS:',
-    '1) Inicie sempre respondendo de VOLTA, com simpatia e reciprocidade, ao campo interpretacao.texto_cliente (sem ecoar/repetir exatamente), mostrando que você "ouviu o cliente".',
-    `  - Exemplo: Se texto_cliente for "oi, tudo bem?", inicie com "Oi! Tudo ótimo!".`,
-    '2) Depois, pergunte UNICAMENTE o campo em fluxo.ordem.perguntar (e perguntar_tambem, se houver). Não escreva mais de uma pergunta nem agradeça, nem explique o funil de novo.',
-    '3) Proibido eco, recapitulação, agradecimento, listas, ou perguntas extras. Só faça o que está explicitamente pedido.',
-    '4) Se houver dúvida (interpretacao.duvidas), já responda no início da mensagem.',
-    '5) Adapte vocabulário ao estilo/contexto_regional do JSON; varie microexpressão entre ciclos.'
-  ];
-  
-  lines.push('');
-  lines.push('INSTRUCOES_ESPECIFICAS:');
-  if (Array.isArray(ctx.instrucoes) && ctx.instrucoes.length) {
-    for (const i of ctx.instrucoes)
-      lines.push('- ' + i);
-  } else {
-    lines.push('- (nenhuma instrução extra)');
-  }
-  lines.push('');
-  lines.push('NÃO use listas/bullets; mensagem única, uma ou duas perguntas no máximo conforme instruções do funil; NÃO explique preço/orçamento a menos que fluxo.ordem.perguntar="telefone".');
-  
-  return lines.join('\n');
-}
-
 function maskSensitive(s) {
   try {
     let x = String(s||'');
-    x = x.replace(/\b(?:\+?55\s*)?(?:\(?[1-9]{2}\)?[\s.\-()]?)?(?:9?\d{4}[\s.\-()]?\d{4})\b/g, '*');
-    x = x.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]');
-    x = x.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]');
-    x = x.replace(/\b(?:\d[\s.\-()]?){8,11}\b/g, '**');
+    x = x.replace(/\b(?:\+?55\s*)?(?:\(?[1-9]{2}\)?[\s.\-()]?)?(?:9?\d{4}[\s.\-()]?\d{4})\b/g, '*'); // telefones
+    x = x.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]'); // CPF
+    x = x.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]'); // CNPJ
+    x = x.replace(/\b(?:\d[\s.\-()]?){8,11}\b/g, '**'); // genérico
     return x;
   } catch { return String(s||''); }
 }
@@ -97,10 +16,8 @@ function maskSensitive(s) {
 function applyRegionalTone(text, region) {
   let s = String(text||'');
   if (!region) return s;
-  // ajustes leves por região
   if (region === 'nordeste') {
     s = s.replace(/\bem alguns minutinhos\b/gi, 'já já');
-    s = s.replace(/\bpor favor\b/gi, 'faz esse favor');
   } else if (region === 'sul') {
     s = s.replace(/\bem alguns minutinhos\b/gi, 'em instantes');
   } else if (region === 'sudeste_mg') {
@@ -110,68 +27,171 @@ function applyRegionalTone(text, region) {
 }
 
 function shortenIfPriority(text, prioridade) {
-  let s = String(text||'').replace(/\s+/g,' ').trim();
+  let s = String(text||'').replace(/\s+/g, ' ').trim();
   if (prioridade !== 'alta') return s;
-  // Remover floreios e manter mensagem direta
-  s = s.replace(/\s*(?:—|-)\s*[^.?!]*$/, '').replace(/\s*\([^)]*\)\s*/g, ' ');
-  if (s.length > 160) s = s.slice(0, 160).replace(/[,;:\s]+[^,;:\s]*$/, '');
+  if (s.length > 220) s = s.slice(0, 220).replace(/[,;:\s]+[^,;:\s]*$/, '');
   return s.trim();
 }
 
-function sanitizeAnswer(out, ctx) {
+function buildSystemPromptUnico() {
+  return `
+Você é o Atendente Conveniente. Seu texto soa humano, simpático e direto, nunca robótico.
+
+Objetivo do ciclo:
+
+    Produzir UMA ÚNICA mensagem ao cliente.
+    Opcional: saudação somente se "fluxo.saudacao" = true.
+    Responder dúvidas/protestos em 1–2 frases no máximo, sem inventar.
+    Fazer APENAS a(s) pergunta(s) definida(s) no ORK (ask_field e, se houver, ask_next_field), na ordem. Finalize com a pergunta do funil.
+    Jamais envie duas mensagens no mesmo ciclo.
+
+Campos do funil (controle virá no ORK):
+
+    telefone (WhatsApp BR) — pode ser completo ou vir em partes: ddd (2 dígitos) e telefone_parcial (8–9 dígitos).
+    itens (o que transportar).
+    endereco_saida (aceita informal; bairro/referência).
+    endereco_destino (aceita informal; bairro/referência).
+    ajudante (sim/não — opcional).
+    descricao (observação breve — opcional).
+
+Regras duras:
+
+    Nunca agradeça ("obrigado", "valeu" etc.).
+    Nunca ecoe ou recapitule o que o cliente disse.
+    Nunca use listas/bullets ou promova segunda mensagem ("vou te chamar", "aguarde"…).
+    Nunca diga "entendi", "vi que", "estou aqui para ajudar", "podemos ajudar".
+    Nunca invente contexto ("parece correria" etc.).
+    Endereço: aceite informal; NÃO peça "rua/número/bairro".
+    Não normalize tipo de imóvel/elevador.
+    Não repita números do cliente no texto. Peça só o que estiver faltando (DDD ou número).
+    Orçamento: só explique "o valor exato é passado pelo motorista no WhatsApp…" quando o ORK (fluxo.explicar_orcamento/excluir_fluxo=false) mandar neste ciclo. Fora isso, não fale de orçamento.
+    Não repita saudação; não repita explicação de orçamento em ciclos seguintes.
+
+Telefone (BR):
+
+    ask_field = "telefone":
+        Se "dados.telefone_parcial = presente" e "dados.ddd = ausente": peça APENAS o DDD (2 dígitos).
+        Se "dados.ddd = presente" e "dados.telefone_parcial = ausente": peça APENAS o número (8–9 dígitos, sem DDD).
+        Se ambos ausentes: peça WhatsApp com DDD numa frase curta.
+    Não recite/reforme o número informado pelo cliente.
+
+Dúvidas:
+
+    Preço/valor/orçamento: responda apenas conforme o ORK autorizar neste ciclo; evite repetição futura.
+    Quando o motorista chama: "em alguns minutinhos".
+    Disponibilidade/como funciona: uma frase, objetiva.
+
+Estilo:
+
+    Frases curtas e claras; micro-variação leve; no máx. 0–1 emoji.
+    Ajuste de tom conforme "fluxo.nivel": acolhedor | objetivo | direto.
+    Prioridade "alta" encurta a mensagem.
+
+Precedência:
+
+    Se houver conflito, siga o ORK (INSTRUCOES DO CICLO) enviado no USER.
+    Pergunte unicamente ask_field e, se houver, ask_next_field. Não crie nada além disso.
+
+Padrões de pergunta (ajuste leve conforme tom):
+
+    telefone: "Me passa seu WhatsApp com DDD?"
+    ddd: "Me diz o DDD?"
+    telefone_parcial: "Me envia o número (sem DDD)?"
+    itens: "O que você precisa transportar?"
+    endereco_saida: "Qual é o endereço de saída? Pode ser bairro ou referência."
+    endereco_destino: "E o destino? Pode ser bairro ou referência."
+    ajudante: "Precisa de ajudante (sim ou não)?"
+    descricao: "Tem alguma observação rápida?"
+
+Saída final:
+
+    Apenas o texto único para o cliente, sem bullets e sem segunda mensagem. `.trim();
+}
+
+function buildUserPromptUnico(ctx) {
+  const clienteUni = (ctx && ctx.interpretacao && ctx.interpretacao.cliente_unificado) || '';
+  const masked = maskSensitive(clienteUni);
+
+  const ork = {
+    meta: {
+      perfil: (ctx && ctx.meta && ctx.meta.perfil) || null,
+      chatId: (ctx && ctx.meta && ctx.meta.chatId) || null,
+      cidade: (ctx && ctx.meta && ctx.meta.cidade) || null,
+      regiao: (ctx && ctx.meta && ctx.meta.regiao) || null
+    },
+    fluxo: {
+      saudacao: !!(ctx && ctx.fluxo && ctx.fluxo.saudacao),
+      // Aceita ambas as chaves por compatibilidade (explicar_fluxo ou explicar_orcamento)
+      explicar_orcamento: !!(ctx && ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento)),
+      ask_field: (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || (ctx && ctx.directive && ctx.directive.field) || null,
+      ask_next_field: (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null,
+      nivel: (ctx && ctx.fluxo && ctx.fluxo.estilo) || 'objetivo',
+      prioridade: (ctx && ctx.fluxo && ctx.fluxo.prioridade) || 'normal'
+    },
+    dados: {
+      telefone: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.telefone) ? 'presente' : 'ausente',
+      ddd: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.ddd) ? 'presente' : 'ausente',
+      telefone_parcial: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.telefone_parcial) ? 'presente' : 'ausente',
+      itens: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.itens) ? 'presente' : 'ausente',
+      endereco_saida: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.endereco_saida) ? 'presente' : 'ausente',
+      endereco_destino: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.endereco_destino) ? 'presente' : 'ausente',
+      ajudante: ((ctx && ctx.dados && ctx.dados.ja_fornecidos && typeof ctx.dados.ja_fornecidos.ajudante === 'boolean') ? String(ctx.dados.ja_fornecidos.ajudante) : 'indefinido')
+    },
+    duvidas_detectadas: (ctx && ctx.interpretacao && Array.isArray(ctx.interpretacao.duvidas)) ? ctx.interpretacao.duvidas : [],
+    cliente: {
+      texto_unificado: masked || '',
+      ultimas: Array.isArray(ctx && ctx.historico && ctx.historico.ultimas_do_cliente) ? ctx.historico.ultimas_do_cliente.map(m => String(m.texto||'')).slice(-4) : []
+    }
+  };
+
+  return [
+    'CLIENTE:',
+    masked || '(vazio)',
+    '',
+    'ORK_JSON:',
+    JSON.stringify(ork, null, 2)
+  ].join('\n');
+}
+
+function sanitizeAnswerUnico(out, ctx) {
   let s = String(out || '').replace(/\s+/g, ' ').trim();
 
-  // Garantia de reciprocidade: se existir texto_cliente com saudação e a resposta não iniciar com saudação, prepend
-  if (ctx && ctx.interpretacao && ctx.interpretacao.texto_cliente) {
-    const tc = ctx.interpretacao.texto_cliente.toLowerCase();
-    if (
-      /(oi|ol[aá]|bom\s*dia|boa\s*tarde|boa\s*noite|tudo\s*bem|blz|beleza|opa)/.test(tc) &&
-      !/^(oi|ol[aá]|bom\s*dia|boa\s*tarde|boa\s*noite|tudo\s*bem|blz|beleza|opa)/i.test(s)
-    ) {
-      // Prepend saudação se não houver na resposta
-      s = "Oi! " + s.charAt(0).toLowerCase() + s.slice(1);
-    }
-  }
-
-  // Remove eco/agradecimentos/recapitulacao
-  s = s.replace(/(você (mencionou|informou|já me passou|citou|disse|solicitou)|seu pedido foi|obrigado pel[oa]|\bentendi\b|\bvi que\b|notei que|entendi sua necessidade)[^.!?]*[.!?]?/gi, '').trim();
+  // Remove eco/agradecimentos/recapitulações comuns
+  s = s.replace(/(obrigad[oa]|valeu|entendi|vi que|você mencionou|você informou|já me passou|notei que|seu pedido foi)[^.!?]*[.!?]?/gi, '').trim();
 
   // Privacidade
-  s = s.replace(/\b\d{8,11}\b/g, '******');
+  s = s.replace(/\b(?:\+?55\s*)?(?:\(?[1-9]{2}\)?[\s.\-()]?)?(?:9?\d{4}[\s.\-()]?\d{4})\b/g, '*');
+  s = s.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]');
+  s = s.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]');
+  s = s.replace(/\b(?:\d[\s.\-()]?){8,11}\b/g, '**');
 
-  // Remove saudação se não flag
+  // Remove saudação quando não permitido
   if (ctx && ctx.fluxo && ctx.fluxo.saudacao === false) {
     s = s.replace(/^\s*(?:oi|ol[aá]|e[ai]|opa|salve|fala|bom\sdia|boa\starde|boa\s*noite)[!,. ]+/i, '').trim();
   }
 
-  // Remove explicação de orçamento se não flag
-  if (!(ctx && ctx.fluxo && ctx.fluxo.explicar_fluxo)) {
-    s = s.replace(/o valor (exato )?(ser[aá]|é|eh)\s+(informado|passado)\s+pelo\s+motorista[^.]*\./i, '').trim();
+  // Remove explicação de orçamento fora de hora (aceita ambas flags)
+  const podeExplicar = !!(ctx && ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento));
+  if (!podeExplicar) {
+    s = s.replace(/o valor (exato )?(ser[aá]|é|eh)\s+(informado|passado)\s+pelo\s+motorista[^.]./i, '').trim();
+    s = s.replace(/\b(or[cç]amento|pre[cç]o|valor)\b[^.!?]{0,180}\b(motorista|whats|whatsapp)\b[^.!?][.!?]/gi, '').trim();
   }
 
-  // Amplie remoção de orçamento fora de hora
-  if (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar !== "telefone") {
-    s = s.replace(/\b(or[cç]amento|pre[cç]o|valor)\b[^.!?]{0,180}\b(motorista|whats|whatsapp)\b[^.!?]*[.!?]/gi, '').trim();
-  }
-
-  // Remova bullets/listas
+  // Remove listas/bullets
   s = s.replace(/(^|\s)[-•*]\s+/g, ' ').replace(/\b\d+\)\s+/g, ' ').trim();
 
-  // Aplique mascaramento reforçado
-  s = maskSensitive(s);
-
-  // Regional e prioridade
-  const region = ctx && ctx.meta && ctx.meta.regiao || (ctx && ctx.analitico && ctx.analitico.contexto_regional);
+  // Tom regional e prioridade
+  const region = (ctx && ctx.meta && ctx.meta.regiao) || null;
   s = applyRegionalTone(s, region);
-  s = shortenIfPriority(s, ctx && ctx.fluxo && ctx.fluxo.prioridade);
+  const prio = ctx && ctx.fluxo && ctx.fluxo.prioridade;
+  s = shortenIfPriority(s, prio);
 
-  if (!s) s = 'Pode me passar o dado que falta?';
-  return s;
+  return s || '';
 }
 
-async function render(contexto) {
-  const system = buildSystemPromptVivo();
-  const user = buildUserPromptFromContext(contexto);
+async function renderUnico(ctx) {
+  const system = buildSystemPromptUnico();
+  const user = buildUserPromptUnico(ctx);
   const model = process.env.GROQ_MODEL_ANSWER || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
   let raw = '';
@@ -188,13 +208,7 @@ async function render(contexto) {
   } catch (e) {
     raw = 'Vamos seguir rápido: me envie o dado que falta e eu agilizo já já.';
   }
-  let text = sanitizeAnswer(raw, contexto);
-  return text;
+  return sanitizeAnswerUnico(raw, ctx);
 }
 
-module.exports = {
-  buildSystemPromptVivo,
-  buildUserPromptFromContext,
-  sanitizeAnswer,
-  render
-};
+module.exports = { buildSystemPromptUnico, buildUserPromptUnico, sanitizeAnswerUnico, renderUnico };
