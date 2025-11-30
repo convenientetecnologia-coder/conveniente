@@ -1169,7 +1169,26 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
   const lastWhatsAskAt = s && s.lastWhatsAskAt || 0;
   const canAskPhoneAgain = !telOk && (!hasAskedWhats || (now() - lastWhatsAskAt) >= PHONE_ASK_COOLDOWN_MS);
 
-  // Primeira resposta: WhatsApp + próxima pergunta real do funil
+  const lastStep = s && s.fsm && s.fsm.lastStep || '';
+  const allNonPhoneCollected =
+    !!data.itens &&
+    !!data.endereco_saida &&
+    !!data.endereco_destino;
+
+  // 0) Regra pós-destino: se WhatsApp ainda faltar e já coletamos os 3 (itens, saída, destino),
+  //    ou se o último passo foi 'end_destino_pedido', PRIORIZE pedir WhatsApp agora, sem cooldown.
+  if (!telOk && hasAskedWhats && !firstReply && (allNonPhoneCollected || lastStep === 'end_destino_pedido')) {
+    // Se cliente já mandou parcial ou DDD, peça só o que faltar
+    if (/^[1-9]\d$/.test(String(data.ddd || '')) && !/^\d{8,9}$/.test(String(data.telefone_parcial || ''))) {
+      return { askField: 'telefone_parcial', phase: 'reminder', reason: 'post_destino_whatsapp', nextField: null, allowSecondQuestion: false, phoneMode: 'full' };
+    }
+    if (/^\d{8,9}$/.test(String(data.telefone_parcial || '')) && !/^[1-9]\d$/.test(String(data.ddd || ''))) {
+      return { askField: 'ddd', phase: 'reminder', reason: 'post_destino_whatsapp', nextField: null, allowSecondQuestion: false, phoneMode: 'full' };
+    }
+    return { askField: 'telefone', phase: 'reminder', reason: 'post_destino_whatsapp', nextField: null, allowSecondQuestion: false, phoneMode: 'full' };
+  }
+
+  // 1) Primeira resposta: WhatsApp + próxima pergunta real do funil
   if (!telOk && firstReply) {
     const nextAfterPhone = getNextNonPhoneField(data) || 'itens';
     return {
@@ -1182,7 +1201,7 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     };
   }
 
-  // Após a saudação: NÃO repetir pedido de WhatsApp. Priorize itens/endereço/etc.
+  // 2) Após a saudação: NÃO repetir pedido de WhatsApp à toa. Priorize itens/endereço/etc.
   if (!telOk && hasAskedWhats && !firstReply) {
     const nextNonPhone = getNextNonPhoneField(data);
     if (nextNonPhone) {
@@ -1213,7 +1232,7 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     };
   }
 
-  // Telefone OK ou nunca pedimos (mas não é primeira): siga ordem do funil padrão
+  // 3) Telefone OK ou nunca pedimos (mas não é primeira): siga ordem do funil padrão
   const next = getNextAskField(data);
   if (next) {
     return {
@@ -1225,6 +1244,7 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     };
   }
 
+  // 4) Nada faltando crítico -> descricao (opcional) para não travar
   return {
     askField: 'descricao',
     phase: 'none',

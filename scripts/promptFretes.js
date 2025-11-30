@@ -37,17 +37,24 @@ function buildSystemPromptUnico() {
   return `
 Você é o Atendente Conveniente. Seu texto soa humano, simpático e direto, nunca robótico.
 
-Objetivo do ciclo:
+TEMPLATE OBRIGATÓRIO DE SAÍDA (quando aplicável no ciclo):
 
-    Produzir UMA ÚNICA mensagem ao cliente.
-    Opcional: saudação somente se "fluxo.saudacao" = true.
-    Responder dúvidas/protestos em 1–2 frases no máximo, sem inventar.
-    Fazer APENAS a(s) pergunta(s) definida(s) no ORK (ask_field e, se houver, ask_next_field), na ordem. Finalize com a pergunta do funil.
-    Jamais envie duas mensagens no mesmo ciclo.
+    Saudação curta (somente se "fluxo.saudacao" = true).
+    Informação objetiva (apenas se pertinente ao texto do cliente):
+        Se perguntarem disponibilidade (ex.: "está disponível?"): "Sim, está disponível!"
+        Se mencionarem urgência "agora/hoje/para já": "Consigo te atender agora."
+    Orçamento/fluxo: Só quando "fluxo.explicar_orcamento" = true, inclua exatamente: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."
+    Pedido de WhatsApp conforme ask_field:
+        telefone: peça "o WhatsApp com DDD" (ou somente DDD/número, conforme status dos dados).
+        ddd: peça APENAS o DDD (2 dígitos).
+        telefone_parcial: peça APENAS o número (8–9 dígitos, sem DDD).
+    Próxima pergunta do funil (ask_next_field, se existir).
+
+SEM EXCEÇÕES: uma única mensagem integrando os 5 itens necessários daquele ciclo (alguns itens podem não aparecer se a flag do fluxo não exigir).
 
 Campos do funil (controle virá no ORK):
 
-    telefone (WhatsApp BR) — pode ser completo ou vir em partes: ddd (2 dígitos) e telefone_parcial (8–9 dígitos).
+    telefone (WhatsApp BR): completo OU partes (ddd 2 dígitos, telefone_parcial 8–9 dígitos).
     itens (o que transportar).
     endereco_saida (aceita informal; bairro/referência).
     endereco_destino (aceita informal; bairro/referência).
@@ -60,12 +67,12 @@ Regras duras:
     Nunca ecoe ou recapitule o que o cliente disse.
     Nunca use listas/bullets ou promova segunda mensagem ("vou te chamar", "aguarde"…).
     Nunca diga "entendi", "vi que", "estou aqui para ajudar", "podemos ajudar".
-    Nunca invente contexto ("parece correria" etc.).
+    Nunca invente contexto ("parece correria"…).
     Endereço: aceite informal; NÃO peça "rua/número/bairro".
     Não normalize tipo de imóvel/elevador.
     Não repita números do cliente no texto. Peça só o que estiver faltando (DDD ou número).
-    Orçamento: só explique "o valor exato é passado pelo motorista no WhatsApp…" quando o ORK (fluxo.explicar_orcamento/excluir_fluxo=false) mandar neste ciclo. Fora isso, não fale de orçamento.
-    Não repita saudação; não repita explicação de orçamento em ciclos seguintes.
+    Orçamento: siga estritamente "fluxo.explicar_orcamento" (true/false). Fora isso, não fale de orçamento.
+    Não repita saudação; não repita explicação do orçamento em ciclos seguintes.
 
 Telefone (BR):
 
@@ -77,9 +84,10 @@ Telefone (BR):
 
 Dúvidas:
 
-    Preço/valor/orçamento: responda apenas conforme o ORK autorizar neste ciclo; evite repetição futura.
+    Preço/valor/orçamento: responda apenas quando "fluxo.explicar_orcamento" = true.
     Quando o motorista chama: "em alguns minutinhos".
-    Disponibilidade/como funciona: uma frase, objetiva.
+    Disponibilidade: responda "Sim, está disponível!" (se a mensagem do cliente indicar essa pergunta padrão do Marketplace).
+    "Faz frete?": responda "Sim, fazemos fretes." (uma frase curta antes do pedido de WhatsApp).
 
 Estilo:
 
@@ -89,19 +97,8 @@ Estilo:
 
 Precedência:
 
-    Se houver conflito, siga o ORK (INSTRUCOES DO CICLO) enviado no USER.
-    Pergunte unicamente ask_field e, se houver, ask_next_field. Não crie nada além disso.
-
-Padrões de pergunta (ajuste leve conforme tom):
-
-    telefone: "Me passa seu WhatsApp com DDD?"
-    ddd: "Me diz o DDD?"
-    telefone_parcial: "Me envia o número (sem DDD)?"
-    itens: "O que você precisa transportar?"
-    endereco_saida: "Qual é o endereço de saída? Pode ser bairro ou referência."
-    endereco_destino: "E o destino? Pode ser bairro ou referência."
-    ajudante: "Precisa de ajudante (sim ou não)?"
-    descricao: "Tem alguma observação rápida?"
+    Se houver conflito, siga o ORK (ask_field e ask_next_field).
+    Nunca pergunte além do que o ORK determinou.
 
 Saída final:
 
@@ -112,6 +109,26 @@ function buildUserPromptUnico(ctx) {
   const clienteUni = (ctx && ctx.interpretacao && ctx.interpretacao.cliente_unificado) || '';
   const masked = maskSensitive(clienteUni);
 
+  // Sinalização explícita de coleta (COLETADO / URGENTE / PENDENTE)
+  const jf = (ctx && ctx.dados && ctx.dados.ja_fornecidos) || {};
+  const ask = (ctx && ctx.fluxo && ctx.fluxo.ordem) || {};
+  const coleta_status = {
+    telefone: jf.telefone ? 'COLETADO' : (ask.perguntar === 'telefone' || ask.perguntar === 'ddd' || ask.perguntar === 'telefone_parcial' ? 'URGENTE' : 'PENDENTE'),
+    ddd: jf.ddd ? 'COLETADO' : (ask.perguntar === 'ddd' ? 'URGENTE' : 'PENDENTE'),
+    telefone_parcial: jf.telefone_parcial ? 'COLETADO' : (ask.perguntar === 'telefone_parcial' ? 'URGENTE' : 'PENDENTE'),
+    itens: jf.itens ? 'COLETADO' : (ask.perguntar === 'itens' ? 'URGENTE' : 'PENDENTE'),
+    endereco_saida: jf.endereco_saida ? 'COLETADO' : (ask.perguntar === 'endereco_saida' ? 'URGENTE' : 'PENDENTE'),
+    endereco_destino: jf.endereco_destino ? 'COLETADO' : (ask.perguntar === 'endereco_destino' ? 'URGENTE' : 'PENDENTE'),
+    ajudante: (typeof jf.ajudante === 'boolean') ? 'COLETADO' : (ask.perguntar === 'ajudante' ? 'URGENTE' : 'PENDENTE')
+  };
+
+  // Políticas de atendimento para o ciclo
+  const politicas = {
+    pedir_whats_na_saudacao: !!(ctx && ctx.fluxo && ctx.fluxo.saudacao && (ask.perguntar === 'telefone' || ask.perguntar === 'ddd' || ask.perguntar === 'telefone_parcial')),
+    pedir_whats_apos_destino_se_faltando: true,
+    saltar_pergunta_itens_se_jafornecido: !!jf.itens
+  };
+
   const ork = {
     meta: {
       perfil: (ctx && ctx.meta && ctx.meta.perfil) || null,
@@ -121,22 +138,23 @@ function buildUserPromptUnico(ctx) {
     },
     fluxo: {
       saudacao: !!(ctx && ctx.fluxo && ctx.fluxo.saudacao),
-      // Aceita ambas as chaves por compatibilidade (explicar_fluxo ou explicar_orcamento)
       explicar_orcamento: !!(ctx && ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento)),
       ask_field: (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || (ctx && ctx.directive && ctx.directive.field) || null,
       ask_next_field: (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null,
       nivel: (ctx && ctx.fluxo && ctx.fluxo.estilo) || 'objetivo',
-      prioridade: (ctx && ctx.fluxo && ctx.fluxo.prioridade) || 'normal'
+      prioridade: (ctx && ctx.fluxo && ctx.fluxo.prioridade) || 'normal',
+      politicas
     },
     dados: {
-      telefone: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.telefone) ? 'presente' : 'ausente',
-      ddd: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.ddd) ? 'presente' : 'ausente',
-      telefone_parcial: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.telefone_parcial) ? 'presente' : 'ausente',
-      itens: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.itens) ? 'presente' : 'ausente',
-      endereco_saida: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.endereco_saida) ? 'presente' : 'ausente',
-      endereco_destino: (ctx && ctx.dados && ctx.dados.ja_fornecidos && ctx.dados.ja_fornecidos.endereco_destino) ? 'presente' : 'ausente',
-      ajudante: ((ctx && ctx.dados && ctx.dados.ja_fornecidos && typeof ctx.dados.ja_fornecidos.ajudante === 'boolean') ? String(ctx.dados.ja_fornecidos.ajudante) : 'indefinido')
+      telefone: jf.telefone ? 'presente' : 'ausente',
+      ddd: jf.ddd ? 'presente' : 'ausente',
+      telefone_parcial: jf.telefone_parcial ? 'presente' : 'ausente',
+      itens: jf.itens ? 'presente' : 'ausente',
+      endereco_saida: jf.endereco_saida ? 'presente' : 'ausente',
+      endereco_destino: jf.endereco_destino ? 'presente' : 'ausente',
+      ajudante: ((typeof jf.ajudante === 'boolean') ? String(jf.ajudante) : 'indefinido')
     },
+    coleta_status,
     duvidas_detectadas: (ctx && ctx.interpretacao && Array.isArray(ctx.interpretacao.duvidas)) ? ctx.interpretacao.duvidas : [],
     cliente: {
       texto_unificado: masked || '',
