@@ -128,39 +128,27 @@ function parseModelAnswerToDomain(raw) {
   return { resposta };
 }
 
+// [PATCH] — Prompt de humanização "context-first" anti-eco enterprise
+
 function buildSystemPromptVivo() {
   return `
-Você é um atendente humano, gentil, animado e eficiente que recebe um JSON chamado CONTEXTO_ATENDIMENTO. Sua função é gerar uma mensagem única, fluida e profissional de acordo com:
+Você atua como um atendente humano profissional, gentil e animado. Recebe um JSON chamado CONTEXTO_ATENDIMENTO.
 
-- O objetivo do passo (fluxo.step, fluxo.ordem.perguntar)
+- Sua missão é gerar UMA mensagem única, natural e eficiente, cumprindo APENAS as ordens explícitas do contexto.
 
-- O estilo e nível do ciclo: acolhedor (nível 1), objetivo (nível 2), direto (nível 3+)
+- NUNCA ecoe, recapitule ou agradeça por dados já passados ("você mencionou", "já me passou", "seu pedido foi", "obrigado pelo..."), nem escreva "vi que você...".
 
-- Flags de saudação e explicação de orçamento
+- Faça APENAS a pergunta do campo pedido em fluxo.ordem.perguntar (e, se houver, perguntar_tambem).
 
-- Faltantes e fornecidos (dados.faltantes, dados.ja_fornecidos) - nunca recapitule, ecoe ou agradeça campos já fornecidos
+- Nunca repita saudação, nunca explique orçamento fora do contexto (apenas se fluxo.saudacao=true ou fluxo.explicar_fluxo=true).
 
-- Se politicas.nao_ecoar == true, nunca diga "você já me passou..."
+- Microvarie vocabulário expressivo conforme fluxo.estilo: "acolhedor" (nível 1), "objetivo" (nível 2), "direto" (nível 3+)
 
-- Proibido criar perguntas não listadas em fluxo.ordem
+- Nunca faça agradecimentos, listas, segundo texto, "vamos fazer isso?" ou "segue", etc.
 
-- Proibido repetir saudação ou explicação de orçamento fora de ordem
+- Aceite qualquer formato de endereço e apenas incentive detalhamento, nunca exija.
 
-- Microvarie o vocabulário/expressão entre ciclos, mantendo clareza
-
-
-
-Formato:
-
-- Sempre UMA mensagem só, fluida, clara e humana.
-
-- Pode usar emojis e tom simpático quando apropriado, mas nunca repetir a saudação nem ecoar.
-
-- Ignore campos/camadas do contexto que não estejam presentes.
-
-
-
-Se houver dúvidas (interpretacao.duvidas), responda em 1 frase breve antes de perguntar o fluxo.ordem.perguntar.
+- Responda dúvidas (interpretacao.duvidas) primeiro, com UMA frase curta.
 
 `.trim();
 }
@@ -168,33 +156,42 @@ Se houver dúvidas (interpretacao.duvidas), responda em 1 frase breve antes de p
 function buildUserPromptFromContext(ctx) {
   const ctxStr = JSON.stringify(ctx, null, 2);
   return [
-    'CONTEXTO_ATENDIMENTO (JSON, uso obrigatório):',
+    'CONTEXTO_ATENDIMENTO (JSON, siga fielmente):',
     ctxStr,
     '',
     'TAREFA:',
-    '1) Escreva UMA mensagem humana e única, seguindo fielmente o contexto fornecido.',
-    '2) Responda dúvidas do cliente detectadas (interpretacao.duvidas) em 1 frase, se estiverem presentes.',
-    '3) Proibido ecoar, recapitular, agradecer, repetir saudação/explicação. Apenas pergunte o que está em ordem/perguntar.',
-    '4) Se style for "acolhedor", seja mais caloroso. Se "objetivo", seja direto. Se "direto", seja curto/prático.',
-    '5) Nunca escreva listas/bullets. Sempre frase natural, única, sem eco, sem "vamos fazer isso?", sem loops.'
+    '1) Escreva UMA mensagem única em linguagem humana e profissional, cumprindo fielmente o contexto fornecido.',
+    '2) Pergunte APENAS o campo solicitado em fluxo.ordem.perguntar (e perguntar_tambem, se vier). Não escreva nenhuma outra pergunta.',
+    '3) Nunca recapitule, ecoe, agradeça, repita saudação ou explicação de orçamento salvo pedido.',
+    '4) Se houver dúvida (interpretacao.duvidas), responda em 1 frase breve antes de perguntar.',
+    '5) Jamais escreva "olá", "oi", "entendi", "você mencionou", "seu pedido foi", ou similares se não explicitamente ordenado em contexto.',
+    '6) Varia pequenas expressões a cada ciclo, mas seja sempre claro e objetivo no campo pedido.'
   ].join('\n');
 }
 
 function sanitizeAnswer(out, ctx) {
   let s = String(out || '').replace(/\s+/g, ' ').trim();
 
-  // Remove eco, agradecimentos ou resumo do que já foi passado pelo cliente
-  s = s.replace(/\b(obrigad[oa]\s+pel[oa]s?\s+inform[aã]o(?:es)?|certo,\s*voc[eê]\s+informou|entendi|vi que)\b.*$/i, '').trim();
+  // Remove eco, recapitulação, agradecimentos
+  s = s.replace(/(você (mencionou|informou|já me passou|citou|disse|solicitou)|seu pedido foi|obrigado pel[oa]|\bentendi\b|\bvi que\b|notei que|entendi sua necessidade)[^.!?]*[.!?]?/gi, '').trim();
+
   // Não mostrar números (por privacidade)
   s = s.replace(/\b\d{8,11}\b/g, '******');
-
-  // Remove saudação, se fluxo.saudacao == false
+  // Remove saudação, se necessário
   if (ctx && ctx.fluxo && ctx.fluxo.saudacao === false) {
     s = s.replace(/^(oi|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite)[!,. ]+/i, '').trim();
   }
-  // Remove explicação do orçamento se explicacao == false
+  // Remove explicação do orçamento se não é para explicar
   if (!(ctx && ctx.fluxo && ctx.fluxo.explicar_fluxo)) {
     s = s.replace(/o valor (exato )?ser[aá] (informado|passado) pelo motorista[^.]*\./i, '').replace(/\s+/g,' ').trim();
+  }
+  // Se o campo pedir não está explícito, substitui por fallback
+  if (ctx?.fluxo?.ordem) {
+    const ord = ctx.fluxo.ordem;
+    if (ord.perguntar && !s.toLowerCase().includes(ord.perguntar.replace('_',' '))) {
+      s = ctx.meta && ctx.meta.perfil === 'Conveniente' && ord.perguntar === 'itens'
+        ? 'O que vamos transportar?' : 'Pode me passar o dado que falta?';
+    }
   }
   if (!s) s = 'Pode me passar o dado que falta?';
   return s;
@@ -217,7 +214,6 @@ async function render(contexto) {
       retries: 2
     });
   } catch (e) {
-    // Fallback (curto) caso IA falhe
     raw = 'Vamos continuar! Pode enviar o dado para terminar rapidinho?';
   }
   const text = sanitizeAnswer(raw, contexto);
@@ -225,9 +221,8 @@ async function render(contexto) {
 }
 
 module.exports = {
-  buildSystemPrompt,
-  buildUserPrompt,
-  parseModelAnswerToDomain,
-  render,
-  buildSystemPromptVivo
+  buildSystemPromptVivo,
+  buildUserPromptFromContext,
+  sanitizeAnswer,
+  render
 };
