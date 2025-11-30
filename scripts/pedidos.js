@@ -268,7 +268,7 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
     estiloBase = 'direto';
   }
 
-  const saudacao = !!directive.includeGreet;
+  const saudacao = !(s.flags && (s.flags.firstIaReplied || s.flags.greetDone));
   const explicar_fluxo = !!directive.includeOrcamento;
 
   const ctx = {
@@ -319,6 +319,9 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
       nao_pedir_campos_ja_fornecidos: true
     }
   };
+
+  const instr = buildInstrucoesFromDirective({ directive, snapshotData: d, firstReply: saudacao, novasMsgs });
+  ctx.instrucoes = instr;
 
   return ctx;
 }
@@ -379,6 +382,17 @@ function shouldAskWhatsappFirst({ historicoNovo = [], dataAtual = {} } = {}) {
 
 function removeTelefonesCompletos(texto) {
   try { return String(texto||'').replace(/\b\d{8,11}\b/g, '******'); } catch { return String(texto||''); }
+}
+
+function removeTelefonesCompletosLoose(s) {
+  try {
+    let x = String(s||'');
+    x = x.replace(/\b(?:\+?55\s*)?(?:\(?[1-9]{2}\)?[\s.\-()]?)?(?:9?\d{4}[\s.\-()]?\d{4})\b/g, '*');
+    x = x.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]'); // CPF
+    x = x.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]'); // CNPJ
+    x = x.replace(/\b(?:\d[\s.\-()]?){8,11}\b/g, '**');
+    return x;
+  } catch { return String(s||''); }
 }
 
 function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply = false, novasMsgs = [] }) {
@@ -561,6 +575,37 @@ function enforceAnswerGuardrails({ texto, directive, firstReply, snapshotData, a
   // NÃO está coletando telefone: remova qualquer menção de orçamento via motorista/WhatsApp
   if (!_isAskingPhoneDirective(directive)) {
     out = stripValorFraseIfNotAllowed(out);
+    
+    // Se o texto NÃO contém a pergunta esperada do campo do funil, APPEND determinístico
+    const field = directive && directive.field;
+    if (field) {
+      const fieldLine = _askFieldLine(field);
+      const hasFieldQuestion = fieldLine && out.toLowerCase().includes(fieldLine.toLowerCase().slice(0, 10));
+      if (!hasFieldQuestion && fieldLine) {
+        out = (out ? out + ' ' : '') + fieldLine;
+      }
+      // Se houver askNextField, adicionar também (máximo 2 perguntas)
+      if (directive.askNextField) {
+        const nextFieldLine = _askFieldLine(directive.askNextField);
+        if (nextFieldLine && !out.toLowerCase().includes(nextFieldLine.toLowerCase().slice(0, 10))) {
+          out = out + ' ' + nextFieldLine;
+        }
+      }
+    }
+  }
+
+  // Remova saudação no início se não for abertura
+  if (!firstReply) {
+    out = out.replace(/^\s*(?:oi|ol[aá]|e[ai]|opa|salve|fala|bom\sdia|boa\starde|boa\s*noite)[!,. ]+/i, '').trim();
+  }
+
+  // Remova agradecimentos e ecos
+  out = out.replace(/\b(obrigad[oa]s?|valeu|agrade[cç]o|thanks?)\b[^.!?][.!?]?/gi, '').trim();
+  out = out.replace(/\b(entendi|vi que|você mencionou|ja me passou|já me passou)\b[^.!?]*[.!?]?/gi, '').trim();
+
+  // [DUPLA GARANTIA] Remova orçamento fora da hora
+  if (!_isAskingPhoneDirective(directive)) {
+    out = out.replace(/\b(or[cç]amento|pre[cç]o|valor)\b[^.!?]{0,180}\b(motorista|whats|whatsapp)\b[^.!?]*[.!?]/gi, '').trim();
   }
 
   // Evitar abertura fria "Sim, podemos ajudar com o frete!" em qualquer turno
@@ -574,10 +619,13 @@ function enforceAnswerGuardrails({ texto, directive, firstReply, snapshotData, a
     out = variants[(askCounts && askCounts.itens ? askCounts.itens : 0) % variants.length];
   }
 
+  // Aplique mascaramento reforçado de contatos e documentos
+  out = removeTelefonesCompletosLoose(out);
+
   // Se sobrou vazio por qualquer motivo, pergunta a próxima obrigatória
   if (!out) {
-    const f = (directive && directive.askField) || _nextNonPhoneMissing(snapshotData) || 'itens';
-    out = _askFieldLine(f) || 'Pode me confirmar essa informação, por favor?';
+    const f = (directive && directive.field) || _nextNonPhoneMissing(snapshotData) || 'itens';
+    out = _askFieldLine(f);
   }
 
   return out.trim();
@@ -1541,6 +1589,15 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       } catch {}
     }
 
+    // Aplica enforceAnswerGuardrails imediatamente após o render
+    textoFinal = enforceAnswerGuardrails({
+      texto: textoFinal,
+      directive,
+      firstReply: !!(ctx && ctx.fluxo && ctx.fluxo.saudacao),
+      snapshotData: dados,
+      askCounts: (snap && snap.askCounts) || {}
+    });
+
     // Log de transparência (contexto e resposta)
     try {
       const stepLog = require('./stepLog.js');
@@ -1559,6 +1616,13 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       registrarPassoExecutado(perfil, chatId, directive.step, { cursorSig: sig, text: textoFinal, nivel: directive.nivel });
       if (directive.field) module.exports.recordAsk(perfil, chatId, directive.field);
     } catch {}
+
+    // Marca primeira resposta enviada (reset das flags de saudação)
+    if (ctx.fluxo && ctx.fluxo.saudacao === true) {
+      try {
+        orchestrator.markIaReplied(perfil, chatId);
+      } catch {}
+    }
 
     // Emite para a fila (Virtus). ACKS ajustarão flags sig.
     orchestrator.emit('replyReady', {

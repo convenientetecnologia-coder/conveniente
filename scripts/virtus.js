@@ -529,6 +529,17 @@ function removeTelefonesCompletos(texto) {
   try { return String(texto||'').replace(/\b\d{8,11}\b/g, '******'); } catch { return String(texto||''); }
 }
 
+function removeTelefonesCompletosLoose(s) {
+  try {
+    let x = String(s||'');
+    x = x.replace(/\b(?:\+?55\s*)?(?:\(?[1-9]{2}\)?[\s.\-()]?)?(?:9?\d{4}[\s.\-()]?\d{4})\b/g, '*');
+    x = x.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]'); // CPF
+    x = x.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]'); // CNPJ
+    x = x.replace(/\b(?:\d[\s.\-()]?){8,11}\b/g, '**'); // generic
+    return x;
+  } catch { return String(s||''); }
+}
+
 function isValidBRPhoneWithDDD(d) {
   try {
     const s = String(d || '').replace(/\D/g, '');
@@ -2121,7 +2132,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     ).catch(()=>{});
 
     const toSend = String(msg || '').replace(/\r?\n+/g, ' ');
-    const safeMsg = sanitizeOutgoing(removeTelefonesCompletos(toSend));
+    const safeMsg = sanitizeOutgoing(removeTelefonesCompletosLoose(toSend));
     const jitter = () => 8 + Math.floor(Math.random() * 7); // 8–14ms por caractere
     try {
       await campo.type(safeMsg, { delay: jitter() });
@@ -3090,7 +3101,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await waitForSendLockRelease(p, 12000);
         await acquireSendGuard(p, chatId);
         try {
-          await sendMessageSafe(p, campo, removeTelefonesCompletos(mensagem), nome, chatId);
+          await sendMessageSafe(p, campo, removeTelefonesCompletosLoose(mensagem), nome, chatId);
           // Marca flag de mensagem final enviada (idempotência)
           try {
             await setChatState(nome, chatId, { finalMsgSentAt: Date.now() });
