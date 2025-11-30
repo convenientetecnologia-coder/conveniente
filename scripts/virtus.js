@@ -29,7 +29,7 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
-const pedidos = require('./pedidos.js');
+const pedidos = require('./pedidosFretes.js');
 const fileStore = require('./fileStore.js');
 
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
