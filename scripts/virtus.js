@@ -191,7 +191,7 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         fromNotifier: false,
         origin: 'handoffToHuman'
       });
-    } catch {}
+          } catch {}
   });
 
   // Resposta pronta pelo pedidos.js -> enviar no Messenger (com gate por cursor)
@@ -414,7 +414,9 @@ async function markPedidoSent(perfil, chatId, payload, source) {
   const file = pedidoSentFile(perfil, chatId);
   const rec = { sentAt: Date.now(), source, payloadHash: sha1(JSON.stringify(payload)), payload };
   await writeJsonAtomicFsyncStrict(file, rec);
-  await appendPedidoAudit(perfil, chatId, 'sent_ok', { source, cidade: payload && payload.cidade, telefone: payload && payload.telefone });
+  const auditData = { source, cidade: payload && payload.cidade };
+  if (payload && payload.telefone) auditData.telefone = maskPhoneLog(payload.telefone);
+  await appendPedidoAudit(perfil, chatId, 'sent_ok', auditData);
 }
 
 async function appendPedidoAudit(perfil, chatId, event, data) {
@@ -436,7 +438,12 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
     if (!novos.length) return;
     await fs.mkdir(path.dirname(file), { recursive: true });
     for (const m of novos) {
-      fsRaw.appendFileSync(file, JSON.stringify(m)+'\n', 'utf8');
+      // Sanitiza mensagens antes de salvar (remove telefones completos)
+      const mSanitizado = Object.assign({}, m);
+      if (mSanitizado.texto) {
+        mSanitizado.texto = removeTelefonesCompletosLoose(String(mSanitizado.texto || ''));
+      }
+      fsRaw.appendFileSync(file, JSON.stringify(mSanitizado)+'\n', 'utf8');
     }
     const maxTs = Math.max(...novos.map(m=>Number(m.timestamp||0)));
     await setChatState(perfil, chatId, { chatLogLastTs: maxTs || Date.now() });
@@ -444,7 +451,8 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
 }
 
 async function appendIaLine(perfil, chatId, texto) {
-  const obj = { autor:'ia', texto:String(texto||''), timestamp: Date.now() };
+  const textoSanitizado = sanitizeOutgoing(removeTelefonesCompletosLoose(String(texto||'')));
+  const obj = { autor:'ia', texto: textoSanitizado, timestamp: Date.now() };
   const file = chatLogPath(perfil, chatId);
   try { fsRaw.mkdirSync(path.dirname(file), { recursive: true }); fsRaw.appendFileSync(file, JSON.stringify(obj)+'\n', 'utf8'); } catch {}
   try { await setChatState(perfil, chatId, { chatLogLastTs: obj.timestamp }); } catch {}
@@ -799,12 +807,21 @@ async function enviarLoteNotificador(nomePerfil) {
 
   await Promise.all(lote.map(async (dadosChat) => {
     try {
+      // Sanitiza histórico antes de enviar (remove telefones completos)
+      const historicoSanitizado = (dadosChat.historico || []).map(m => {
+        const mSanitizado = Object.assign({}, m);
+        if (mSanitizado.texto) {
+          mSanitizado.texto = removeTelefonesCompletosLoose(String(mSanitizado.texto || ''));
+        }
+        return mSanitizado;
+      });
+      
       const payload = {
         servidor: NOTIFICADOR_SERVIDOR,
         chat_id: dadosChat.chatId,
         perfil: nomePerfil,
         tipo_servico: dadosChat.tipoServico,
-        historico: dadosChat.historico || [], // TODO o histórico da conversa
+        historico: historicoSanitizado,
         localizacao: dadosChat.localizacao, // Formato: "Cidade (UF)" - ex: "Florianopolis (SC)"
         url_classificado: dadosChat.urlClassificado,
         timestamp: new Date().toISOString()
@@ -919,8 +936,8 @@ function iniciarPollingRespostas(nomePerfil) {
           filaRespostas.get(nomePerfil).push(resp);
           
           await queueMessengerSend(nomePerfil, {
-            chatId: resp.chat_id,
-            resposta: respostaSan,
+            chatId: resp.chat_id, 
+            resposta: respostaSan, 
             key,
             fromNotifier: true,
             origin: 'notifier_polling'
@@ -987,17 +1004,17 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       const lastIA = (st && st.ultimaRespostaEnviada) ? st.ultimaRespostaEnviada : '';
       if (lastIA && normalizeContent(lastIA) === normalizeContent(respostaFinal)) {
         if (proximo.fromNotifier) {
-          try {
-            await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                servidor: NOTIFICADOR_SERVIDOR,
-                perfil: nomePerfil,
-                chat_id: proximo.chatId
-              })
-            });
-          } catch {}
+        try {
+          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              servidor: NOTIFICADOR_SERVIDOR,
+              perfil: nomePerfil,
+              chat_id: proximo.chatId
+            })
+          });
+        } catch {}
         }
         try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'notifier_dedupe_skip', chatId: proximo.chatId }); } catch {}
         try { if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key); } catch {}
@@ -1011,18 +1028,18 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       const rDigest = st && st.repliedCursorDigest || '';
       if (cCount && cDigest && rCount === cCount && rDigest && rDigest === cDigest) {
         if (proximo.fromNotifier) {
-          try {
-            await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                servidor: NOTIFICADOR_SERVIDOR,
-                perfil: nomePerfil,
-                chat_id: proximo.chatId
-              })
-            });
+        try {
+          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              servidor: NOTIFICADOR_SERVIDOR,
+              perfil: nomePerfil,
+              chat_id: proximo.chatId
+            })
+          });
             logger.info('[NOTIFICADOR] ACK enviado (skip por cursor)', { nomePerfil, chatId: proximo.chatId });
-          } catch (e) {
+        } catch (e) {
             logger.warn('[NOTIFICADOR] Falha ao ACK (skip por cursor)', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
           }
         }
@@ -1067,26 +1084,26 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       } catch (e) {
         logger.warn('[NOTIFICADOR][CURSOR] Falha ao atualizar repliedCursor*: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId });
       }
-
+      
       try { pedidos.ackReplySent(nomePerfil, proximo.chatId, proximo.cursorSig || ''); } catch {}
       
       // ACK somente se veio do notificador
       if (proximo.fromNotifier) {
-        try {
-          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              servidor: NOTIFICADOR_SERVIDOR,
-              perfil: nomePerfil,
-              chat_id: proximo.chatId
-            })
-          });
-          logger.info('[NOTIFICADOR] ACK enviado', { nomePerfil, chatId: proximo.chatId });
-        } catch (e) {
-          logger.warn('[NOTIFICADOR] Falha ao enviar ACK (será reofertado após TTL do lock)', {
-            nomePerfil, chatId: proximo.chatId, error: e && e.message || e
-          });
+      try {
+        await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            servidor: NOTIFICADOR_SERVIDOR,
+            perfil: nomePerfil,
+            chat_id: proximo.chatId
+          })
+        });
+        logger.info('[NOTIFICADOR] ACK enviado', { nomePerfil, chatId: proximo.chatId });
+      } catch (e) {
+        logger.warn('[NOTIFICADOR] Falha ao enviar ACK (será reofertado após TTL do lock)', {
+          nomePerfil, chatId: proximo.chatId, error: e && e.message || e
+        });
         }
       }
       
@@ -1198,24 +1215,24 @@ async function extrairHistoricoConversa(page) {
 
           if (!t) return 0;
           if (/\bagora\b|just now|now/i.test(raw)) return now;
-
+          
           let m = t.match(/\b(\d+)\s*(s|seg|second|seconds?)\b/);
           if (m) return now - (parseInt(m[1], 10) * 1000);
-
+          
           m = t.match(/\b(\d+)\s*(min|mins?|minute|minuto)\b/);
           if (m) return now - (parseInt(m[1], 10) * 60000);
-
+          
           m = t.match(/\b(\d+)\s*(h|hora|horas|hour|hours?)\b/);
           if (m) return now - (parseInt(m[1], 10) * 3600000);
-
+          
           m = t.match(/\b(\d+)\s*(d|dia|dias|day|days)\b/);
           if (m) return now - (parseInt(m[1], 10) * 86400000);
-
+          
           if (/\bontem\b|yesterday\b/.test(t)) return now - 86400000;
-
+          
           const dp = Date.parse(raw);
           if (Number.isFinite(dp)) return dp;
-
+          
           return 0;
         } catch {
           return 0;
@@ -1288,7 +1305,7 @@ async function extrairHistoricoConversa(page) {
       }
 
       out.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-
+      
       // Monotonicidade de timestamps
       for (let i = 1; i < out.length; i++) {
         const prev = Number(out[i - 1].timestamp || 0);
@@ -1297,7 +1314,7 @@ async function extrairHistoricoConversa(page) {
           out[i].timestamp = prev + 1;
         }
       }
-
+      
       return out;
     });
 
@@ -2642,7 +2659,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (!(stLoc && stLoc.cidade && stLoc.estado)) {
               await ensureLocationPrefetch(chatId, classificadoUrl || null);
             }
-          } catch {}
+    } catch {}
 
           // Cursor determinístico do cliente: count + digest (últimas 10 mensagens normalizadas)
           const clientCount = clientMsgs.length;
@@ -2661,8 +2678,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try {
             logger.info('[SCAN] cursor_eval', { nome, chatId, prevCount, prevDigest, clientCount, clientDigest, changed });
             stepLog.appendJSONL(nome, 'virtus_scan', { phase: 'cursor_eval', chatId, prevCount, prevDigest, clientCount, clientDigest, changed, ts: Date.now() });
-          } catch {}
-
+      } catch {}
+      
           if (!changed) {
             await setChatState(nome, chatId, {
               state: CHAT_STATES.AGUARDANDO,
@@ -2698,7 +2715,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try {
             logger.info('[SCAN] ingest_call', { nome, chatId, cCount: clientCount, cDigest: clientDigest });
             stepLog.appendJSONL(nome, 'virtus_scan', { phase: 'ingest_call', chatId, cCount: clientCount, cDigest: clientDigest, ts: Date.now() });
-          } catch {}
+            } catch {}
 
           await pedidos.ingestFromVirtus(nome, chatId, {
             historico: historicoSan,
@@ -2708,8 +2725,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           });
 
           // Atualiza cursor do cliente APÓS ingest
-          await setChatState(nome, chatId, {
-            state: CHAT_STATES.AGUARDANDO,
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
             lastScanAt: Date.now(),
             clientCursorCount: clientCount,
             clientCursorDigest: clientDigest,
@@ -2721,7 +2738,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.warn('[SCAN] Falha ao processar chat', { nome, chatId, error: (e && e.message) || String(e) });
         }
       }
-    } catch (e) {
+            } catch (e) {
       logger.warn('[SCAN] erro geral', { nome, error: (e && e.message) || String(e) });
     }
   }
@@ -2968,7 +2985,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   async function enviarPedidoParaNotificador(chatId, dados) {
     const tel = dados && dados.telefone;
     const cidade = dados && dados.cidade;
-    await appendPedidoAudit(nome, chatId, 'send_attempt', { cidade, telefone: tel });
+    const auditData = { cidade };
+    if (tel) auditData.telefone = maskPhoneLog(tel);
+    await appendPedidoAudit(nome, chatId, 'send_attempt', auditData);
 
     if (!tel || !isValidBRPhoneWithDDD(tel)) {
       await appendPedidoAudit(nome, chatId, 'blocked_no_whatsapp', {});
@@ -3240,8 +3259,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       
       async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
-        const MAX_TRIES = 2;
-        let lastErr = null;
+      const MAX_TRIES = 2;
+      let lastErr = null;
       
       for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
         let p = await ensurePage().catch(() => null);
@@ -3350,11 +3369,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     }
     
-    iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
-    bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
-  } catch (e) {
-    logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
-  }
+        iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+    } catch (e) {
+      logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
+    }
     
     // Restaura dados coletados e timers do disco ao reiniciar
     try {
