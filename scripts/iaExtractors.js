@@ -49,6 +49,32 @@ const RE_REG_NE = /\b(oxe|visse|arretad[oa]|cabrunco|vixe|mizeravi)\b/i;
 
 const RE_REG_MG = /\b(uai|trem|s[ôo])\b/i;
 
+// Junta as últimas mensagens do cliente num texto único, limpo, para uso em conversação/acolhimento/contexto
+function unifyClientMessages(novasMsgs = [], historico = []) {
+  let blocos = [];
+
+  if (Array.isArray(novasMsgs) && novasMsgs.length) {
+    blocos = novasMsgs.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim()).map(m => String(m.texto || '').trim());
+  }
+
+  if (!blocos.length) {
+    const base = (Array.isArray(historico) ? historico : []).filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
+    blocos = base.slice(-5).map(m => String(m.texto || '').trim());
+  }
+
+  // Dedup simples dentro do bloco
+  const seen = new Set();
+  const uniq = [];
+  for (const t of blocos) {
+    const n = _norm(t);
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    uniq.push(t);
+  }
+
+  return uniq.join(' ');
+}
+
 function analyzeInteraction(mensagens = [], contexto = {}) {
   const msgs = Array.isArray(mensagens) ? mensagens.slice(-30) : [];
 
@@ -239,7 +265,7 @@ function analyzeInteraction(mensagens = [], contexto = {}) {
 
 }
 
-function sanitizeExtracted(obj) {
+function sanitizeExtracted(obj, mensagensFull = []) {
   const out = {
     itens: null,
     endereco_saida: null,
@@ -252,7 +278,8 @@ function sanitizeExtracted(obj) {
     descricao: null, // NOVO campo, livre
     missing: [],
     protesto: false,
-    sugestaoPrompt: null // NOVO!
+    sugestaoPrompt: null,
+    texto_cliente_unificado: null // NOVO!
   };
 
   try {
@@ -301,6 +328,8 @@ function sanitizeExtracted(obj) {
   } catch {
     out.missing = computeMissing(out);
   }
+
+  out.texto_cliente_unificado = unifyClientMessages([], mensagensFull);
 
   return out;
 }
@@ -403,7 +432,7 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
   let parsed = {};
   try { parsed = JSON.parse(firstJson); } catch { parsed = {}; }
 
-  const sanitized = sanitizeExtracted(parsed);
+  const sanitized = sanitizeExtracted(parsed, mensagens);
 
   // [PATCH] — análise de contexto
   const sugestao = analyzeInteraction(Array.isArray(mensagens) ? mensagens : [], contexto || {});

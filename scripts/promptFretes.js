@@ -9,10 +9,12 @@ function buildSystemPromptVivo() {
 Você atua como um atendente humano profissional, gentil e animado. Recebe um JSON chamado CONTEXTO_ATENDIMENTO.
 
 REGRAS ABSOLUTAS:
+- Primeiro, responda com simpatia e reciprocidade ao texto_cliente (em interpretacao.texto_cliente), SEM ecoar. Depois, pergunte apenas o campo do funil.
 - Gere UMA única mensagem, seguindo APENAS o que estiver em fluxo.ordem.perguntar (e perguntar_tambem, se existir).
 - NUNCA ecoe, recapitule ou agradeça (proibido: "você mencionou", "entendi", "obrigado", "vi que").
 - Nunca repita saudação nem explique orçamento fora de fluxo.saudacao=true ou fluxo.explicar_fluxo=true.
 - Aceite qualquer formato de endereço; incentive, nunca exija.
+- Se o cliente disse "oi, tudo bem?", responda com reciprocidade (ex.: "Oi! Tudo sim, obrigada!") antes de perguntar o campo.
 
 ADAPTAÇÃO context-first:
 - Use fluxo.estilo e analitico.tom_emocional para o tom: "acolhedor", "objetivo", "direto".
@@ -32,16 +34,18 @@ FORMATAÇÃO:
 
 function buildUserPromptFromContext(ctx) {
   const ctxStr = JSON.stringify(ctx, null, 2);
+  const texto = (ctx && ctx.interpretacao && ctx.interpretacao.texto_cliente) ? ctx.interpretacao.texto_cliente : '';
   return [
     'CONTEXTO_ATENDIMENTO (JSON, siga fielmente):',
     ctxStr,
     '',
-    'TAREFA:',
-    '1) Escreva UMA mensagem única em linguagem humana e profissional, só pedindo o campo em fluxo.ordem.perguntar (e perguntar_tambem quando vier).',
-    '2) Se houver dúvida (interpretacao.duvidas), responda brevemente no início.',
-    '3) Nunca ecoe, recapitule, agradeça, repita saudação ou explicação a não ser se as flags permitirem.',
-    '4) Se estilo for "acolhedor", seja caloroso. "objetivo": direto. "direto": curto. Adapte vocabulário a contexto_regional.',
-    '5) Nunca escreva listas, "vamos fazer isso?", nem nenhuma frase que não seja a pergunta da ordem.'
+    'TAREFAS:',
+    '1) Inicie sempre respondendo de VOLTA, com simpatia e reciprocidade, ao campo interpretacao.texto_cliente (sem ecoar/repetir exatamente), mostrando que você "ouviu o cliente".',
+    `  - Exemplo: Se texto_cliente for "oi, tudo bem?", inicie com "Oi! Tudo ótimo, obrigado por perguntar!".`,
+    '2) Depois, pergunte UNICAMENTE o campo em fluxo.ordem.perguntar (e perguntar_tambem, se houver). Não escreva mais de uma pergunta nem agradeça, nem explique o funil de novo.',
+    '3) Proibido eco, recapitulação, agradecimento, listas, ou perguntas extras. Só faça o que está explicitamente pedido.',
+    '4) Se houver dúvida (interpretacao.duvidas), já responda no início da mensagem.',
+    '5) Adapte vocabulário ao estilo/contexto_regional do JSON; varie microexpressão entre ciclos.'
   ].join('\n');
 }
 
@@ -71,6 +75,18 @@ function shortenIfPriority(text, prioridade) {
 
 function sanitizeAnswer(out, ctx) {
   let s = String(out || '').replace(/\s+/g, ' ').trim();
+
+  // Garantia de reciprocidade: se existir texto_cliente com saudação e a resposta não iniciar com saudação, prepend
+  if (ctx && ctx.interpretacao && ctx.interpretacao.texto_cliente) {
+    const tc = ctx.interpretacao.texto_cliente.toLowerCase();
+    if (
+      /(oi|ol[aá]|bom\s*dia|boa\s*tarde|boa\s*noite|tudo\s*bem|blz|beleza|opa)/.test(tc) &&
+      !/^(oi|ol[aá]|bom\s*dia|boa\s*tarde|boa\s*noite|tudo\s*bem|blz|beleza|opa)/i.test(s)
+    ) {
+      // Prepend saudação se não houver na resposta
+      s = "Oi! " + s.charAt(0).toLowerCase() + s.slice(1);
+    }
+  }
 
   // Remove eco/agradecimentos/recapitulacao
   s = s.replace(/(você (mencionou|informou|já me passou|citou|disse|solicitou)|seu pedido foi|obrigado pel[oa]|\bentendi\b|\bvi que\b|notei que|entendi sua necessidade)[^.!?]*[.!?]?/gi, '').trim();

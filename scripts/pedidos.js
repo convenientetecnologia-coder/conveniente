@@ -235,6 +235,9 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
   const s = snapshot || {};
   const d = s.data || {};
   const askCounts = s.askCounts || {};
+  // [NOVO] Pega texto_cliente_unificado salvo ou recalcula se não houver
+  const textoCliente = (s && s.texto_cliente_unificado) ||
+    (typeof unifyClientMessages === 'function' ? unifyClientMessages(novasMsgs, historico) : '');
   const clienteUnificado = unifyClientMessages(novasMsgs, historico);
   const duvidas = detectDoubtsSimple(clienteUnificado);
   const faltantes = computeCamposFaltantesOrdenados(d);
@@ -296,6 +299,7 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
       item: d.itens ? String(d.itens).slice(0, 80) : null
     },
     interpretacao: {
+      texto_cliente: textoCliente || '',
       cliente_unificado: clienteUnificado,
       duvidas,
       disponibilidade: /(disponivel|disponível|tem agora)/i.test(clienteUnificado)
@@ -1176,11 +1180,22 @@ class PedidoOrchestrator extends EventEmitter {
     const allMsgs = Array.isArray(mensagensDoCliente) ? mensagensDoCliente : [];
     const campos = await extractOrderFieldsLLM({ perfil, chatId, mensagens: allMsgs, contexto: contexto || {} });
 
+    // [NOVO]: salva texto_cliente_unificado junto com snapshot (para reciprocidade)
+    const clienteUnificadoTexto = campos && campos.texto_cliente_unificado ? campos.texto_cliente_unificado : '';
+
     // [NOVO]: análise do extractor
     const analise = campos && campos.sugestaoPrompt ? campos.sugestaoPrompt : null;
 
     // Upsert apenas dos campos do pedido
     const snap = this.upsertFromIA(perfil, chatId, campos);
+
+    if (clienteUnificadoTexto) {
+      const sNow = this._get(perfil, chatId) || {};
+      this._set(perfil, chatId, Object.assign({}, sNow, {
+        texto_cliente_unificado: clienteUnificadoTexto,
+        texto_cliente_updatedAt: Date.now()
+      }));
+    }
 
     if (analise) {
       const sNow = this._get(perfil, chatId) || {};
