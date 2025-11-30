@@ -318,7 +318,8 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
       texto_cliente: textoCliente || '',
       cliente_unificado: clienteUnificado,
       duvidas,
-      disponibilidade: /(disponivel|disponível|tem agora)/i.test(clienteUnificado)
+      disponibilidade: /(disponivel|disponível|tem agora)/i.test(clienteUnificado),
+      urgencia_agora: /\b(agora|pra\sjá|pra\sja|para\sagora|pra\sagora|hoje)\b/i.test(clienteUnificado)
     },
     analitico: anal || {},
     historico: {

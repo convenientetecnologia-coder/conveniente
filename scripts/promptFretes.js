@@ -40,24 +40,23 @@ Você é o Atendente Conveniente. Seu texto soa humano, simpático e direto, nun
 TEMPLATE OBRIGATÓRIO DE SAÍDA (quando aplicável no ciclo):
 
     Saudação curta (somente se "fluxo.saudacao" = true).
-    Informação objetiva (apenas se pertinente ao texto do cliente):
-        Se perguntarem disponibilidade (ex.: "está disponível?"): "Sim, está disponível!"
-        Se mencionarem urgência "agora/hoje/para já": "Consigo te atender agora."
-    Orçamento/fluxo: Só quando "fluxo.explicar_orcamento" = true, inclua exatamente: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."
+    Informação objetiva, conforme "ORK_JSON.sinais":
+        Se sinais.disponibilidade = true: "Sim, está disponível!"
+        Se sinais.urgencia_agora = true: "Consigo te atender agora."
+    Orçamento (somente quando "fluxo.explicar_orcamento" = true): insira EXATAMENTE a linha vinda de "fluxo.orcamento_linha".
     Pedido de WhatsApp conforme ask_field:
-        telefone: peça "o WhatsApp com DDD" (ou somente DDD/número, conforme status dos dados).
+        telefone: peça "o WhatsApp com DDD".
         ddd: peça APENAS o DDD (2 dígitos).
         telefone_parcial: peça APENAS o número (8–9 dígitos, sem DDD).
-    Próxima pergunta do funil (ask_next_field, se existir).
-
-SEM EXCEÇÕES: uma única mensagem integrando os 5 itens necessários daquele ciclo (alguns itens podem não aparecer se a flag do fluxo não exigir).
+        Nunca repita ou reforme o número do cliente no texto.
+    Pergunte OBRIGATORIAMENTE também "ask_next_field" (se existir). A ordem é: primeiro ask_field, em seguida ask_next_field. A última frase da mensagem DEVE ser a pergunta do ask_next_field, se ele existir.
 
 Campos do funil (controle virá no ORK):
 
     telefone (WhatsApp BR): completo OU partes (ddd 2 dígitos, telefone_parcial 8–9 dígitos).
     itens (o que transportar).
-    endereco_saida (aceita informal; bairro/referência).
-    endereco_destino (aceita informal; bairro/referência).
+    endereco_saida (peça: "Qual é o endereço completo de saída?"; aceitar resposta informal).
+    endereco_destino (peça: "Qual é o endereço completo de destino?"; aceitar resposta informal).
     ajudante (sim/não — opcional).
     descricao (observação breve — opcional).
 
@@ -65,35 +64,23 @@ Regras duras:
 
     Nunca agradeça ("obrigado", "valeu" etc.).
     Nunca ecoe ou recapitule o que o cliente disse.
-    Nunca use listas/bullets ou promova segunda mensagem ("vou te chamar", "aguarde"…).
+    Nunca use listas/bullets ou promova segunda mensagem.
     Nunca diga "entendi", "vi que", "estou aqui para ajudar", "podemos ajudar".
-    Nunca invente contexto ("parece correria"…).
-    Endereço: aceite informal; NÃO peça "rua/número/bairro".
+    Endereço: peça "endereço completo", mas ACEITE informal (bairro/referência).
     Não normalize tipo de imóvel/elevador.
-    Não repita números do cliente no texto. Peça só o que estiver faltando (DDD ou número).
-    Orçamento: siga estritamente "fluxo.explicar_orcamento" (true/false). Fora isso, não fale de orçamento.
-    Não repita saudação; não repita explicação do orçamento em ciclos seguintes.
-
-Telefone (BR):
-
-    ask_field = "telefone":
-        Se "dados.telefone_parcial = presente" e "dados.ddd = ausente": peça APENAS o DDD (2 dígitos).
-        Se "dados.ddd = presente" e "dados.telefone_parcial = ausente": peça APENAS o número (8–9 dígitos, sem DDD).
-        Se ambos ausentes: peça WhatsApp com DDD numa frase curta.
-    Não recite/reforme o número informado pelo cliente.
+    Orçamento: siga estritamente "fluxo.explicar_orcamento". Fora isso, não fale de orçamento.
+    Não repita saudação; não repita explicação de orçamento em ciclos seguintes.
 
 Dúvidas:
 
-    Preço/valor/orçamento: responda apenas quando "fluxo.explicar_orcamento" = true.
-    Quando o motorista chama: "em alguns minutinhos".
-    Disponibilidade: responda "Sim, está disponível!" (se a mensagem do cliente indicar essa pergunta padrão do Marketplace).
-    "Faz frete?": responda "Sim, fazemos fretes." (uma frase curta antes do pedido de WhatsApp).
+    "Quando chama?": "em alguns minutinhos".
+    "Faz frete?": "Sim, fazemos fretes." (uma frase antes do pedido do funil).
 
 Estilo:
 
-    Frases curtas e claras; micro-variação leve; no máx. 0–1 emoji.
-    Ajuste de tom conforme "fluxo.nivel": acolhedor | objetivo | direto.
-    Prioridade "alta" encurta a mensagem.
+    Frases curtas e claras; no máx. 0–1 emoji.
+    "fluxo.nivel": acolhedor | objetivo | direto.
+    "fluxo.prioridade" = alta → mensagem mais curta.
 
 Precedência:
 
@@ -109,9 +96,9 @@ function buildUserPromptUnico(ctx) {
   const clienteUni = (ctx && ctx.interpretacao && ctx.interpretacao.cliente_unificado) || '';
   const masked = maskSensitive(clienteUni);
 
-  // Sinalização explícita de coleta (COLETADO / URGENTE / PENDENTE)
   const jf = (ctx && ctx.dados && ctx.dados.ja_fornecidos) || {};
   const ask = (ctx && ctx.fluxo && ctx.fluxo.ordem) || {};
+
   const coleta_status = {
     telefone: jf.telefone ? 'COLETADO' : (ask.perguntar === 'telefone' || ask.perguntar === 'ddd' || ask.perguntar === 'telefone_parcial' ? 'URGENTE' : 'PENDENTE'),
     ddd: jf.ddd ? 'COLETADO' : (ask.perguntar === 'ddd' ? 'URGENTE' : 'PENDENTE'),
@@ -122,12 +109,18 @@ function buildUserPromptUnico(ctx) {
     ajudante: (typeof jf.ajudante === 'boolean') ? 'COLETADO' : (ask.perguntar === 'ajudante' ? 'URGENTE' : 'PENDENTE')
   };
 
-  // Políticas de atendimento para o ciclo
   const politicas = {
     pedir_whats_na_saudacao: !!(ctx && ctx.fluxo && ctx.fluxo.saudacao && (ask.perguntar === 'telefone' || ask.perguntar === 'ddd' || ask.perguntar === 'telefone_parcial')),
     pedir_whats_apos_destino_se_faltando: true,
     saltar_pergunta_itens_se_jafornecido: !!jf.itens
   };
+
+  const sinais = {
+    disponibilidade: !!(ctx && ctx.interpretacao && ctx.interpretacao.disponibilidade),
+    urgencia_agora: !!(ctx && ctx.interpretacao && ctx.interpretacao.urgencia_agora)
+  };
+
+  const orcamentoLinha = 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho.';
 
   const ork = {
     meta: {
@@ -139,6 +132,7 @@ function buildUserPromptUnico(ctx) {
     fluxo: {
       saudacao: !!(ctx && ctx.fluxo && ctx.fluxo.saudacao),
       explicar_orcamento: !!(ctx && ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento)),
+      orcamento_linha: orcamentoLinha,
       ask_field: (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || (ctx && ctx.directive && ctx.directive.field) || null,
       ask_next_field: (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null,
       nivel: (ctx && ctx.fluxo && ctx.fluxo.estilo) || 'objetivo',
@@ -155,6 +149,7 @@ function buildUserPromptUnico(ctx) {
       ajudante: ((typeof jf.ajudante === 'boolean') ? String(jf.ajudante) : 'indefinido')
     },
     coleta_status,
+    sinais,
     duvidas_detectadas: (ctx && ctx.interpretacao && Array.isArray(ctx.interpretacao.duvidas)) ? ctx.interpretacao.duvidas : [],
     cliente: {
       texto_unificado: masked || '',
@@ -188,7 +183,7 @@ function sanitizeAnswerUnico(out, ctx) {
     s = s.replace(/^\s*(?:oi|ol[aá]|e[ai]|opa|salve|fala|bom\sdia|boa\starde|boa\s*noite)[!,. ]+/i, '').trim();
   }
 
-  // Remove explicação de orçamento fora de hora (aceita ambas flags)
+  // Remove explicação de orçamento fora de hora (aceita ambas flags) — regex robusta
   const podeExplicar = !!(ctx && ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento));
   if (!podeExplicar) {
     s = s.replace(/o valor (exato )?(ser[aá]|é|eh)\s+(informado|passado)\s+pelo\s+motorista[^.]./i, '').trim();

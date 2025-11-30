@@ -1,5 +1,3 @@
-// iaExtractors.js
-
 'use strict';
 
 const { chatCompletion } = require('./inteligenciaArtificial.js');
@@ -11,6 +9,17 @@ function removeTelefonesCompletosLoose(s) {
     x = x.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]'); // CPF
     x = x.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]'); // CNPJ
     x = x.replace(/\b(?:\d[\s.\-()]?){8,11}\b/g, '**'); // genérico
+    return x;
+  } catch { return String(s||''); }
+}
+
+// NOVO: máscara para o EXTRATOR — mantém telefones visíveis, mascara apenas CPF/CNPJ
+function maskForExtractorPhonesAllowed(s) {
+  try {
+    let x = String(s||'');
+    // NÃO mascarar telefones aqui — o extrator precisa enxergar dígitos
+    x = x.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]'); // CPF
+    x = x.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]'); // CNPJ
     return x;
   } catch { return String(s||''); }
 }
@@ -101,6 +110,7 @@ function sanitizeExtracted(obj, mensagensFull = []) {
 
     out.protesto = !!obj.protesto;
     out.missing = computeMissing(out);
+
   } catch {
     out.missing = computeMissing(out);
   }
@@ -114,54 +124,64 @@ Você é um extrator determinístico. Saída: APENAS UM JSON, sem texto extra.
 
 Objetivo: a partir do histórico, consolidar:
 
-- telefone: "10–11 dígitos (BR) com DDD" ou null
+    telefone: "10–11 dígitos (BR) com DDD" ou null
 
-- ddd: "2 dígitos" ou null (se cliente mandou separado)
+    ddd: "2 dígitos" ou null (se cliente mandou separado)
 
-- telefone_parcial: "8–9 dígitos" ou null (sem DDD)
+    telefone_parcial: "8–9 dígitos" ou null (sem DDD)
 
-- itens: string | null (o que precisa transportar)
+    itens: string | null (o que precisa transportar)
 
-- endereco_saida: string | null (aceita informal: bairro, ponto de referência, termos curtos; nunca rejeite formas como "parque", "centro", "aldeião", "ali pro kobrasol", "mercado")
+    endereco_saida: string | null (aceita informal: bairro, ponto de referência, termos curtos; nunca rejeite formas como "parque", "centro", "aldeião", "ali pro kobrasol", "mercado")
 
-- endereco_destino: string | null (aceita informal: termos curtos, como acima)
+    endereco_destino: string | null (aceita informal: termos curtos, como acima)
 
-- ajudante: true|false|null (opcional, não trava o pedido)
+    ajudante: true|false|null (opcional, não trava o pedido)
 
-- descricao: string | null (resumo/concat do que o cliente informou — livre)
+    descricao: string | null (resumo/concat do que o cliente informou — livre)
 
-- cidade: string | null (se houver)
+    cidade: string | null (se houver)
 
-- missing: ["telefone", "itens", "endereco_saida", "endereco_destino"] — apenas esses
+    missing: ["telefone", "itens", "endereco_saida", "endereco_destino"] — apenas esses
 
-- protesto: true|false (se houver reclamações tipo "já falei", "pare de perguntar"...)
+    protesto: true|false (se houver reclamações tipo "já falei", "pare de perguntar"...)
 
 Regras:
 
-- Endereços informais e curtos são válidos: aceite exemplos como "parque", "centro", "aldeião", "ali pro kobrasol", "mercado".
+    Endereços informais e curtos são válidos: aceite exemplos como "parque", "centro", "aldeião", "ali pro kobrasol", "mercado".
 
-- NUNCA normalize para "casa/apartamento/elevador". NUNCA pedir ou sugerir formato "rua/número/bairro".
+    NUNCA normalize para "casa/apartamento/elevador". NUNCA pedir ou sugerir formato "rua/número/bairro".
 
-- NÃO extraia/normalize tipo de imóvel ou elevador.
+    NÃO extraia/normalize tipo de imóvel ou elevador.
 
-- Se veio ddd separadamente e telefone parcial, monte telefone com DDD quando válido.
+    Se veio ddd separadamente e telefone parcial, monte telefone com DDD quando válido.
 
-- Retorne APENAS o JSON final (sem frases).
+    Mapear verbos comuns:
+        Se o cliente falar em "buscar", "retirar", "pegar" + local, considere ENDERECO_SAIDA.
+        Se o cliente falar em "levar", "entregar", "pra/para" + local, considere ENDERECO_DESTINO.
+        Aceite expressões como "ali no centro", "aqui no parque", "ali no kobrasol".
+
+    Telefones:
+        Extraia telefone completo (10–11 dígitos com DDD) quando houver.
+        Se vier somente número de 8–9 dígitos, coloque em telefone_parcial; se vier apenas DDD, coloque em ddd.
+        Monte o telefone final com DDD + telefone_parcial quando possível.
+
+    Retorne APENAS o JSON final (sem frases).
 
 Formato OBRIGATÓRIO:
 
 {
- "telefone": "string|null",
- "ddd": "string|null",
- "telefone_parcial": "string|null",
- "itens": "string|null",
- "endereco_saida": "string|null",
- "endereco_destino": "string|null",
- "ajudante": true|false|null,
- "descricao": "string|null",
- "cidade": "string|null",
- "missing": ["..."],
- "protesto": true|false
+"telefone": "string|null",
+"ddd": "string|null",
+"telefone_parcial": "string|null",
+"itens": "string|null",
+"endereco_saida": "string|null",
+"endereco_destino": "string|null",
+"ajudante": true|false|null,
+"descricao": "string|null",
+"cidade": "string|null",
+"missing": ["..."],
+"protesto": true|false
 }
 `.trim();
 }
@@ -172,9 +192,11 @@ function buildUserPrompt({ mensagens, contexto }) {
   const hist = pick.map(m => {
     const autor = (m.autor === 'ia' ? 'Atendente' : 'Cliente');
     const ts = m.timestamp ? new Date(m.timestamp).toISOString() : '';
-    return `[${autor}]${ts? ` ${ts}`:''}: ${m.texto || ''}`;
+    return `[${autor}]${ts ? ' ' + ts : ''}: ${m.texto || ''}`;
   }).join('\n');
-  const histMasked = removeTelefonesCompletosLoose(hist);
+
+  // NOVO: para o EXTRATOR, não mascarar telefones; mascarar apenas CPF/CNPJ
+  const histMasked = maskForExtractorPhonesAllowed(hist);
 
   const cidadeCtx = contexto && contexto.cidade ? `cidade_contexto: ${contexto.cidade}` : 'cidade_contexto: null';
 
@@ -219,7 +241,7 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
       }
     }
   }
-  
+
   // Preenche descricao se estiver vazia, concatenando mensagens do cliente
   try {
     const textoHistorico = (Array.isArray(mensagens) ? mensagens : []).filter(m => m && m.autor === 'cliente').map(m => m.texto).join(' | ').slice(0, 600);
@@ -227,19 +249,19 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
       sanitized.descricao = textoHistorico;
     }
   } catch {}
-  
+
   try {
     const stepLog = require('./stepLog.js');
     stepLog.appendJSONL(perfil, 'ia_extract', {
       chatId, raw, firstJson, parsedPreview: Object.keys(parsed||{}), ts: Date.now()
     });
   } catch {}
-  
+
   // Fallback e log se JSON inválido ou parse falhou
   const hasValidJson = firstJson && firstJson !== '{}' && parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0;
   if (!hasValidJson) {
     try { require('./issues.js').append(perfil, 'ia_extract_raw_invalid', `extractor_raw_invalid chat=${chatId}`); } catch {}
-    
+
     // Fallback: usa texto da última mensagem do cliente como itens se não houver
     if (!sanitized.itens) {
       const lastClient = Array.isArray(mensagens) ? mensagens.slice().reverse().find(m => m && m.autor === 'cliente') : null;
@@ -247,12 +269,12 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
         sanitized.itens = String(lastClient.texto).slice(0, 60);
       }
     }
+
   }
-  
+
   if (!sanitized.cidade && contexto && contexto.cidade) sanitized.cidade = String(contexto.cidade);
   sanitized.missing = computeMissing(sanitized);
   return sanitized;
 }
 
 module.exports = { extractOrderFieldsLLM };
-
