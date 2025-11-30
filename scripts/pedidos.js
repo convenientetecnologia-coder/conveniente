@@ -239,7 +239,7 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
   const duvidas = detectDoubtsSimple(clienteUnificado);
   const faltantes = computeCamposFaltantesOrdenados(d);
 
-  // Sinalizadores
+  // Fornecidos
   const fornecidos = {
     itens: !!d.itens,
     endereco_saida: !!d.endereco_saida,
@@ -251,19 +251,31 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
     cidade: !!d.cidade
   };
 
+  // [NOVO]: análise contextual incorporada
+  const anal = s.analysis || {};
+  // Ajuste de estilo por prioridade/tom
+  let nivel = Number(directive.nivel || 1);
+  let estiloBase = styleFromNivel(nivel);
+  if (anal && anal.tom_emocional) {
+    if (anal.tom_emocional === 'acolhedor') estiloBase = 'acolhedor';
+    if (anal.tom_emocional === 'objetivo') estiloBase = 'objetivo';
+    if (anal.tom_emocional === 'direto') estiloBase = 'direto';
+  }
+  if (anal && anal.prioridade === 'alta') {
+    estiloBase = 'direto';
+  }
+
   const saudacao = !!directive.includeGreet;
   const explicar_fluxo = !!directive.includeOrcamento;
-  const nivel = Number(directive.nivel || 1);
-  const estilo = styleFromNivel(nivel);
 
-  // Contexto consolidado
   const ctx = {
     meta: {
       perfil,
       chatId,
       cidade: d.cidade || contexto.cidade || null,
       canal: 'messenger',
-      horario: new Date().toISOString()
+      horario: new Date().toISOString(),
+      regiao: anal && anal.contexto_regional || null
     },
     fluxo: {
       step: String(directive.step || ''),
@@ -272,9 +284,10 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
         perguntar_tambem: directive.askNextField ? String(directive.askNextField) : null
       },
       nivel,
-      estilo,
-      saudacao,          // só true para 1a vez
-      explicar_fluxo,    // só true 1ª de telefone
+      estilo: estiloBase,
+      prioridade: (anal && anal.prioridade) || 'normal',
+      saudacao,
+      explicar_fluxo,
       cooldown_whats_ms: PHONE_ASK_COOLDOWN_MS
     },
     dados: {
@@ -284,9 +297,10 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
     },
     interpretacao: {
       cliente_unificado: clienteUnificado,
-      duvidas,              // ["Pergunta sobre valor/orçamento", ...]
+      duvidas,
       disponibilidade: /(disponivel|disponível|tem agora)/i.test(clienteUnificado)
     },
+    analitico: anal || {},
     historico: {
       ultimas_do_cliente: historico.filter(m => m && m.autor === 'cliente').slice(-6),
       ultimas_da_ia: historico.filter(m => m && m.autor === 'ia').slice(-4)
@@ -1159,29 +1173,44 @@ class PedidoOrchestrator extends EventEmitter {
   }
 
   async upsertFromHistoryLLM(perfil, chatId, mensagensDoCliente, { contexto } = {}) {
-    // mensagensDoCliente: histórico completo ou último lote; o extrator usa as últimas 15–30 internamente
     const allMsgs = Array.isArray(mensagensDoCliente) ? mensagensDoCliente : [];
     const campos = await extractOrderFieldsLLM({ perfil, chatId, mensagens: allMsgs, contexto: contexto || {} });
+
+    // [NOVO]: análise do extractor
+    const analise = campos && campos.sugestaoPrompt ? campos.sugestaoPrompt : null;
+
+    // Upsert apenas dos campos do pedido
     const snap = this.upsertFromIA(perfil, chatId, campos);
 
-    // Preenche descricao se estiver vazia, concatenando mensagens do cliente
+    if (analise) {
+      const sNow = this._get(perfil, chatId) || {};
+      this._set(perfil, chatId, Object.assign({}, sNow, {
+        analysis: analise,
+        analysisUpdatedAt: Date.now()
+      }));
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'pedidos_analysis_attached', { chatId, analise_preview: analise && analise.flags, ts: Date.now() });
+      } catch {}
+    }
+
+    // Descricao fallback
     try {
-      const textoHistorico = (Array.isArray(mensagensDoCliente) ? mensagensDoCliente : []).filter(m => m && m.autor === 'cliente').map(m => m.texto).join(' | ').slice(0, 600);
+      const textoHistorico = (Array.isArray(mensagensDoCliente) ? mensagensDoCliente : [])
+        .filter(m => m && m.autor === 'cliente').map(m => m.texto).join(' | ').slice(0, 600);
       if (!snap.data.descricao && textoHistorico) {
         snap.data.descricao = textoHistorico;
         this._set(perfil, chatId, { data: snap.data });
       }
     } catch {}
 
-    // Anti-loop: verifica se algum campo faltante excedeu MAX_ASK_RETRIES (apenas logar, sem fallback humano)
-    const sNow = this._get(perfil, chatId);
-    if (sNow && sNow.askCounts) {
-      for (const miss of (sNow.missing||[])) {
-        const tries = sNow.askCounts[miss] || 0;
+    // Log anti-loop
+    const sNow2 = this._get(perfil, chatId);
+    if (sNow2 && sNow2.askCounts) {
+      for (const miss of (sNow2.missing||[])) {
+        const tries = sNow2.askCounts[miss] || 0;
         if (tries >= MAX_ASK_RETRIES) {
-          try {
-            issues.append(perfil, 'pedidos_max_ask_retries', `campo=${miss} chat=${chatId} tentativas=${tries}`);
-          } catch {}
+          try { issues.append(perfil, 'pedidos_max_ask_retries', `campo=${miss} chat=${chatId} tentativas=${tries}`); } catch {}
           try {
             const stepLog = require('./stepLog.js');
             stepLog.appendJSONL(perfil, 'pedidos_max_ask_retries', { chatId, field: miss, attempts: tries });
@@ -1191,9 +1220,7 @@ class PedidoOrchestrator extends EventEmitter {
       }
     }
 
-    // Decisão centralizada de finalização
     this.finalizeIfReady(perfil, chatId);
-
     return this._get(perfil, chatId);
   }
 

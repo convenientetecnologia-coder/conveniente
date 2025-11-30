@@ -2,153 +2,30 @@
 
 const { chatCompletion } = require('./inteligenciaArtificial.js');
 
-/**
- * =====================================
- *  buildSystemPrompt
- * =====================================
- * Aqui NÃO existe fluxo, regras, etapas, lógica ou ordem.
- * Este arquivo define SOMENTE a personalidade do atendente.
- * Toda a lógica — o que perguntar, quando perguntar, qual campo falta —
- * será sempre decidida EXCLUSIVAMENTE pelo pedido.js.
- */
-function buildSystemPrompt() {
-  return `
-Você é um atendente humano, gentil, animado e claro. Sua única função é reescrever, de maneira natural, acolhedora e altamente profissional, a MENSAGEM_DE_NEGOCIO recebida do sistema.
-
-
-
-ESTILO DE COMUNICAÇÃO:
-
-- Respostas curtas, diretas, humanas e calorosas (zero neutralidade/frieza).
-
-- Micro variação de expressão a cada turno.
-
-- Sempre amigável, interessado, profissional, proativo.
-
-- Nunca ecoe, confirme ou agradeça dados já recebidos do cliente.
-
-
-
-FORMATAÇÃO:
-
-- Apenas UMA mensagem por vez (nunca mais de uma).
-
-- Nunca divida em blocos, lembretes ou "aguarde".
-
-- Não invente perguntas nem acrescente solicitações além do texto.
-
-- Não repita explicações. Apenas reescreva o que vier do sistema.
-
-- Não use agradecimentos do tipo "obrigado pelo endereço", nem ecoe ou repita termos do cliente.
-
-- Não tome decisões de fluxo/funil. Não tente adivinhar o próximo passo.
-
-
-
-REGRAS:
-
-- Só mencione orçamento/WhatsApp na mensagem se já estiver no texto entregue pelo sistema.
-
-- Saudação só na PRIMEIRA mensagem.
-
-- Aceite e reescreva toda solicitação de dados como está, nunca crie perguntas novas ou invente justificativas/frases de espera.
-
-
-
-IMPORTANTE:
-
-- Você NÃO decide qual pergunta será feita, nem repete perguntas já feitas.
-
-- Nunca cria lembretes ou reanima questões nem sugere outros passos.
-
-- Nunca ecoa o texto do cliente.
-
-- Apenas humaniza a mensagem do sistema no seu tom de voz.
-
-
-
-A mensagem sempre chegará pronta do pedido.js no bloco MENSAGEM_DE_NEGOCIO. Seu papel é transmitir de forma natural, animada e única.
-
-`.trim();
-}
-
-/**
- * =====================================
- *  buildUserPrompt
- * =====================================
- * O pedido.js insere aqui:
- * - instruções (array de tarefas) OU uma única ação (acao)
- * - histórico
- * - última mensagem do cliente
- *
- * O atendente apenas responde conforme as instruções usando a personalidade acima.
- *
- * Parâmetros aceitos:
- * - instrucoes: string[] (tarefas em sequência; se vier vazio, cai em 'acao')
- * - acao: string (fallback quando 'instrucoes' não for enviado)
- * - historico: {autor:'cliente'|'ia', texto, timestamp}[]
- * - mensagemCliente: string
- */
-function buildUserPrompt({ instrucoes = [], acao = '', historico = [], mensagemCliente = '' } = {}) {
-  const histStr = Array.isArray(historico)
-    ? historico
-        .slice(-20)
-        .map(m => {
-          const autor = m && m.autor === 'cliente' ? 'Cliente' : 'Atendente';
-          const texto = m && m.texto ? String(m.texto) : '';
-          return `[${autor}]: ${texto}`;
-        })
-        .join('\n')
-    : '(vazio)';
-
-  const tarefas = (Array.isArray(instrucoes) && instrucoes.length > 0)
-    ? instrucoes.map((t, i) => `${i + 1}. ${String(t)}`).join('\n')
-    : (acao ? `1. ${String(acao)}` : '1. Responda naturalmente ao cliente conforme o contexto.');
-
-  return [
-    'TAREFAS (execute APENAS o que estiver listado):',
-    tarefas,
-    '',
-    'HISTÓRICO (mais recente ao final):',
-    histStr || '(vazio)',
-    '',
-    'MENSAGEM ATUAL DO CLIENTE:',
-    `"${mensagemCliente || ''}"`
-  ].join('\n');
-}
-
-/**
- * =====================================
- *  parseModelAnswerToDomain
- * =====================================
- * Apenas retorna a resposta da IA como texto.
- */
-function parseModelAnswerToDomain(raw) {
-  const resposta = String(raw || '').trim();
-  return { resposta };
-}
-
-// [PATCH] — Prompt de humanização "context-first" anti-eco enterprise
+// Prompt de humanização no padrão enterprise "context-first"
 
 function buildSystemPromptVivo() {
   return `
 Você atua como um atendente humano profissional, gentil e animado. Recebe um JSON chamado CONTEXTO_ATENDIMENTO.
 
-- Sua missão é gerar UMA mensagem única, natural e eficiente, cumprindo APENAS as ordens explícitas do contexto.
+REGRAS ABSOLUTAS:
+- Gere UMA única mensagem, seguindo APENAS o que estiver em fluxo.ordem.perguntar (e perguntar_tambem, se existir).
+- NUNCA ecoe, recapitule ou agradeça (proibido: "você mencionou", "entendi", "obrigado", "vi que").
+- Nunca repita saudação nem explique orçamento fora de fluxo.saudacao=true ou fluxo.explicar_fluxo=true.
+- Aceite qualquer formato de endereço; incentive, nunca exija.
 
-- NUNCA ecoe, recapitule ou agradeça por dados já passados ("você mencionou", "já me passou", "seu pedido foi", "obrigado pelo..."), nem escreva "vi que você...".
+ADAPTAÇÃO context-first:
+- Use fluxo.estilo e analitico.tom_emocional para o tom: "acolhedor", "objetivo", "direto".
+- Se fluxo.prioridade=alta: seja curto e direto; responda dúvidas em 1 frase e peça o campo imediatamente.
+- Se analitico.flags.inseguro=true: inclua acolhimento breve.
+- Aplique variação regional leve com analitico.contexto_regional.
 
-- Faça APENAS a pergunta do campo pedido em fluxo.ordem.perguntar (e, se houver, perguntar_tambem).
+DÚVIDA:
+- Se existirem interpretacao.duvidas: responda em 1 frase antes da pergunta do funil.
 
-- Nunca repita saudação, nunca explique orçamento fora do contexto (apenas se fluxo.saudacao=true ou fluxo.explicar_fluxo=true).
-
-- Microvarie vocabulário expressivo conforme fluxo.estilo: "acolhedor" (nível 1), "objetivo" (nível 2), "direto" (nível 3+)
-
-- Nunca faça agradecimentos, listas, segundo texto, "vamos fazer isso?" ou "segue", etc.
-
-- Aceite qualquer formato de endereço e apenas incentive detalhamento, nunca exija.
-
-- Responda dúvidas (interpretacao.duvidas) primeiro, com UMA frase curta.
+FORMATAÇÃO:
+- Microvarie vocabulário a cada ciclo, mas nunca faça eco, agradecimento ou recapitulação. Não escreva listas!
+- SEMPRE só uma mensagem e só com o campo da ordem. Nada de combos.
 
 `.trim();
 }
@@ -160,39 +37,62 @@ function buildUserPromptFromContext(ctx) {
     ctxStr,
     '',
     'TAREFA:',
-    '1) Escreva UMA mensagem única em linguagem humana e profissional, cumprindo fielmente o contexto fornecido.',
-    '2) Pergunte APENAS o campo solicitado em fluxo.ordem.perguntar (e perguntar_tambem, se vier). Não escreva nenhuma outra pergunta.',
-    '3) Nunca recapitule, ecoe, agradeça, repita saudação ou explicação de orçamento salvo pedido.',
-    '4) Se houver dúvida (interpretacao.duvidas), responda em 1 frase breve antes de perguntar.',
-    '5) Jamais escreva "olá", "oi", "entendi", "você mencionou", "seu pedido foi", ou similares se não explicitamente ordenado em contexto.',
-    '6) Varia pequenas expressões a cada ciclo, mas seja sempre claro e objetivo no campo pedido.'
+    '1) Escreva UMA mensagem única em linguagem humana e profissional, só pedindo o campo em fluxo.ordem.perguntar (e perguntar_tambem quando vier).',
+    '2) Se houver dúvida (interpretacao.duvidas), responda brevemente no início.',
+    '3) Nunca ecoe, recapitule, agradeça, repita saudação ou explicação a não ser se as flags permitirem.',
+    '4) Se estilo for "acolhedor", seja caloroso. "objetivo": direto. "direto": curto. Adapte vocabulário a contexto_regional.',
+    '5) Nunca escreva listas, "vamos fazer isso?", nem nenhuma frase que não seja a pergunta da ordem.'
   ].join('\n');
+}
+
+function applyRegionalTone(text, region) {
+  let s = String(text||'');
+  if (!region) return s;
+  // ajustes leves por região
+  if (region === 'nordeste') {
+    s = s.replace(/\bem alguns minutinhos\b/gi, 'já já');
+    s = s.replace(/\bpor favor\b/gi, 'faz esse favor');
+  } else if (region === 'sul') {
+    s = s.replace(/\bem alguns minutinhos\b/gi, 'em instantes');
+  } else if (region === 'sudeste_mg') {
+    s = s.replace(/\bem alguns minutinhos\b/gi, 'rapidinho');
+  }
+  return s;
+}
+
+function shortenIfPriority(text, prioridade) {
+  let s = String(text||'').replace(/\s+/g,' ').trim();
+  if (prioridade !== 'alta') return s;
+  // Remover floreios e manter mensagem direta
+  s = s.replace(/\s*(?:—|-)\s*[^.?!]*$/, '').replace(/\s*\([^)]*\)\s*/g, ' ');
+  if (s.length > 160) s = s.slice(0, 160).replace(/[,;:\s]+[^,;:\s]*$/, '');
+  return s.trim();
 }
 
 function sanitizeAnswer(out, ctx) {
   let s = String(out || '').replace(/\s+/g, ' ').trim();
 
-  // Remove eco, recapitulação, agradecimentos
+  // Remove eco/agradecimentos/recapitulacao
   s = s.replace(/(você (mencionou|informou|já me passou|citou|disse|solicitou)|seu pedido foi|obrigado pel[oa]|\bentendi\b|\bvi que\b|notei que|entendi sua necessidade)[^.!?]*[.!?]?/gi, '').trim();
 
-  // Não mostrar números (por privacidade)
+  // Privacidade
   s = s.replace(/\b\d{8,11}\b/g, '******');
-  // Remove saudação, se necessário
+
+  // Remove saudação se não flag
   if (ctx && ctx.fluxo && ctx.fluxo.saudacao === false) {
     s = s.replace(/^(oi|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite)[!,. ]+/i, '').trim();
   }
-  // Remove explicação do orçamento se não é para explicar
+
+  // Remove explicação de orçamento se não flag
   if (!(ctx && ctx.fluxo && ctx.fluxo.explicar_fluxo)) {
-    s = s.replace(/o valor (exato )?ser[aá] (informado|passado) pelo motorista[^.]*\./i, '').replace(/\s+/g,' ').trim();
+    s = s.replace(/o valor (exato )?(ser[aá]|é|eh)\s+(informado|passado)\s+pelo\s+motorista[^.]*\./i, '').trim();
   }
-  // Se o campo pedir não está explícito, substitui por fallback
-  if (ctx?.fluxo?.ordem) {
-    const ord = ctx.fluxo.ordem;
-    if (ord.perguntar && !s.toLowerCase().includes(ord.perguntar.replace('_',' '))) {
-      s = ctx.meta && ctx.meta.perfil === 'Conveniente' && ord.perguntar === 'itens'
-        ? 'O que vamos transportar?' : 'Pode me passar o dado que falta?';
-    }
-  }
+
+  // Regional e prioridade
+  const region = ctx && ctx.meta && ctx.meta.regiao || (ctx && ctx.analitico && ctx.analitico.contexto_regional);
+  s = applyRegionalTone(s, region);
+  s = shortenIfPriority(s, ctx && ctx.fluxo && ctx.fluxo.prioridade);
+
   if (!s) s = 'Pode me passar o dado que falta?';
   return s;
 }
@@ -214,9 +114,9 @@ async function render(contexto) {
       retries: 2
     });
   } catch (e) {
-    raw = 'Vamos continuar! Pode enviar o dado para terminar rapidinho?';
+    raw = 'Vamos seguir rápido: me envie o dado que falta e eu agilizo já já.';
   }
-  const text = sanitizeAnswer(raw, contexto);
+  let text = sanitizeAnswer(raw, contexto);
   return text;
 }
 

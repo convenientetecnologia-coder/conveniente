@@ -29,6 +29,216 @@ function computeMissing(data) {
   return missing;
 }
 
+// [PATCH] — Heurísticas de análise contextual (urgência, intenção, emoção, regionalismo, ciclo, etc.)
+
+function _norm(s){ try{ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); } catch { return String(s||'').toLowerCase().trim(); } }
+
+function _isQuestion(s){ return /\?/.test(String(s||'')); }
+
+const RE_VALOR = /(pre[cç]o|valor|quanto\s+(custa|fica|sai)|or[cç]amento|cobra)/i;
+
+const RE_URGENCIA = /\b(agora|pra\s*hoje|hoje|urgente|agorinha|imediat[oa]|para\s+agora|daqui\s+agora)\b/i;
+
+const RE_INSEGURANCA = /(nao\s+entendi|não\s+entendi|como\s+funciona|explica|pode\s+explicar|n[ãa]o\s+sei|nao\s+sei)/i;
+
+const RE_PROTESTO = /(ja\s+falei|já\s+falei|ja\s+passei|já\s+passei|leia\s+acima|olha\s+acima|pare\s+de\s+perguntar|para\s+de\s+perguntar|n[aã]o\s+insista|de\s+novo)/i;
+
+const RE_REG_SUL = /\b(bah|tri|guri|guria|capaz|tch[eê])\b/i;
+
+const RE_REG_NE = /\b(oxe|visse|arretad[oa]|cabrunco|vixe|mizeravi)\b/i;
+
+const RE_REG_MG = /\b(uai|trem|s[ôo])\b/i;
+
+function analyzeInteraction(mensagens = [], contexto = {}) {
+  const msgs = Array.isArray(mensagens) ? mensagens.slice(-30) : [];
+
+  const clientes = msgs.filter(m => m && m.autor === 'cliente' && String(m.texto||'').trim());
+
+  const ias = msgs.filter(m => m && m.autor === 'ia' && String(m.texto||'').trim());
+
+  let valorCount = 0, telefoneCount = 0, enderecoCount = 0, duvidaFluxo = 0;
+
+  let urgente = false, inseguro = false, impaciente = false, insistente = false, detalhista = false, protesto = false;
+
+  let regiao = null;
+
+  const seenClientTexts = clientes.map(m => String(m.texto||''));
+
+  const lastClientText = seenClientTexts[seenClientTexts.length - 1] || '';
+
+  for (const tRaw of seenClientTexts) {
+    const t = String(tRaw||'');
+
+    const n = _norm(t);
+    if (RE_VALOR.test(t)) valorCount++;
+
+    if (/\b(whats|whatsapp|ddd|telefone|celular|zap)\b/i.test(t)) telefoneCount++;
+
+    if (/\b(endere[cç]o|endereço|saida|sa[ií]da|destino|entrega|bairro|refer[êe]ncia)\b/i.test(t)) enderecoCount++;
+
+    if (RE_URGENCIA.test(t)) urgente = true;
+
+    if (RE_INSEGURANCA.test(t)) inseguro = true;
+
+    if (RE_PROTESTO.test(t)) protesto = true;
+
+    if (RE_REG_NE.test(t)) regiao = 'nordeste';
+
+    if (RE_REG_SUL.test(t)) regiao = regiao || 'sul';
+
+    if (RE_REG_MG.test(t)) regiao = regiao || 'sudeste_mg';
+
+    if (/como\s+funciona|nao\s+entendi|não\s+entendi/i.test(t)) duvidaFluxo++;
+
+    if ((t.match(/[,:;-]\s*\w+/g) || []).length >= 3 || t.length > 180) detalhista = true;
+
+  }
+
+  // Impaciência: muitos "?" em mensagens curtas ou repetição de pedidos (valor, disponibilidade)
+
+  const questCount = seenClientTexts.reduce((acc, s) => acc + (_isQuestion(s) ? 1 : 0), 0);
+
+  impaciente = questCount >= 2 || valorCount >= 2;
+
+  // Insistência: intenção repetida (valor ou telefone) 2+ vezes
+
+  insistente = valorCount >= 2 || telefoneCount >= 2;
+
+  // Intenção principal
+
+  let intencao = null;
+
+  if (valorCount > 0) intencao = 'valor';
+
+  else if (/\b(dispon[ií]vel|disponivel|tem\s+agora|ainda\s+tem)\b/i.test(lastClientText)) intencao = 'disponibilidade';
+
+  else if (enderecoCount > 0) intencao = 'endereco';
+
+  else if (telefoneCount > 0) intencao = 'telefone';
+
+  else if (duvidaFluxo > 0) intencao = 'funcionamento';
+
+  else intencao = 'outro';
+
+  // Prioridade e tom
+
+  const prioridade = urgente ? 'alta' : 'normal';
+
+  let tom_emocional = 'objetivo';
+
+  if (inseguro) tom_emocional = 'acolhedor';
+
+  if (insistente || impaciente || urgente) tom_emocional = 'direto';
+
+  // Repetições
+
+  const repeticoes = {
+
+    valor: valorCount,
+
+    telefone: telefoneCount,
+
+    endereco: enderecoCount,
+
+    duvida_fluxo: duvidaFluxo
+
+  };
+
+  // Ja respondeu X?
+
+  const ja_respondeu = {
+
+    endereco_saida: false,
+
+    endereco_destino: false,
+
+    telefone: false,
+
+    itens: false
+
+  };
+  // heurística simples (se o cliente citou termos-chave)
+
+  for (const t of seenClientTexts) {
+
+    const n = _norm(t);
+
+    if (/sa[ií]da|retirada|origem/.test(n)) ja_respondeu.endereco_saida = true;
+
+    if (/destino|entrega|para\s+onde/.test(n)) ja_respondeu.endereco_destino = true;
+
+    if (/whats|whatsapp|ddd|celular|zap|telefone/.test(n)) ja_respondeu.telefone = true;
+
+    if (/levar|transportar|itens?/.test(n)) ja_respondeu.itens = true;
+
+  }
+
+  const meta = {
+
+    ciclo: Math.max(1, ias.length + clientes.length ? Math.ceil((ias.length + clientes.length) / 2) : 1),
+
+    mensagens_cliente: clientes.length,
+
+    mensagens_ia: ias.length,
+
+    last_cliente_ts: (clientes[clientes.length - 1] && Number(clientes[clientes.length - 1].timestamp || 0)) || null
+
+  };
+
+  const flags = {
+
+    urgente,
+
+    inseguro,
+
+    impaciente,
+
+    insistente,
+
+    detalhista,
+
+    regionalismo_detectado: !!regiao,
+
+    protesto
+
+  };
+
+  const meta_instrucoes = [];
+
+  if (urgente) meta_instrucoes.push('Seja direto e curto; responda em 1 frase o que der e peça o campo obrigatório imediatamente.');
+
+  if (inseguro) meta_instrucoes.push('Use um tom acolhedor, passe segurança e clareza sem jargão.');
+
+  if (insistente) meta_instrucoes.push('Evite explicações repetidas; foque na pergunta do funil com frase curta.');
+
+  if (flags.regionalismo_detectado) meta_instrucoes.push('Aplique micro variação de linguagem regional leve (ex.: "já já", "rapidinho").');
+
+  const sugestaoPrompt = {
+
+    prioridade,
+
+    tom_emocional,
+
+    contexto_regional: regiao || null,
+
+    intencao_principal: intencao,
+
+    repeticoes,
+
+    flags,
+
+    ja_respondeu,
+
+    meta,
+
+    instrucoes: meta_instrucoes
+
+  };
+
+  return sugestaoPrompt;
+
+}
+
 function sanitizeExtracted(obj) {
   const out = {
     itens: null,
@@ -41,7 +251,8 @@ function sanitizeExtracted(obj) {
     cidade: null,
     descricao: null, // NOVO campo, livre
     missing: [],
-    protesto: false
+    protesto: false,
+    sugestaoPrompt: null // NOVO!
   };
 
   try {
@@ -193,6 +404,24 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
   try { parsed = JSON.parse(firstJson); } catch { parsed = {}; }
 
   const sanitized = sanitizeExtracted(parsed);
+
+  // [PATCH] — análise de contexto
+  const sugestao = analyzeInteraction(Array.isArray(mensagens) ? mensagens : [], contexto || {});
+  sanitized.sugestaoPrompt = sugestao || null;
+
+  // Harmoniza protesto
+  if (!sanitized.protesto && sugestao && sugestao.flags && sugestao.flags.protesto) {
+    sanitized.protesto = true;
+  }
+
+  try {
+    const stepLog = require('./stepLog.js');
+    stepLog.appendJSONL(perfil, 'ia_extract_analysis', {
+      chatId,
+      analise: sanitized.sugestaoPrompt,
+      ts: Date.now()
+    });
+  } catch {}
   
   // Preenche descricao se estiver vazia, concatenando mensagens do cliente
   try {
