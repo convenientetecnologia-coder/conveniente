@@ -170,63 +170,61 @@ function detectDoubtsSimple(text) {
 }
 
 function describeAskField(field) {
-  switch (String(field || '')) {
-    case 'telefone': return 'seu WhatsApp com DDD';
-    case 'ddd': return 'apenas o DDD (2 dígitos) do seu WhatsApp';
-    case 'telefone_parcial': return 'o número do WhatsApp (sem DDD), com 8 ou 9 dígitos';
-    case 'itens': return 'o que você precisa transportar';
-    case 'endereco_saida': return 'o endereço de saída (pode ser bairro/ponto de referência)';
-    case 'endereco_destino': return 'o endereço de destino (pode ser bairro/ponto de referência)';
-    case 'ajudante': return 'se precisa de ajudante (sim ou não)';
-    case 'descricao': return 'alguma observação breve (opcional)';
-    default: return '';
-  }
+switch (String(field || '')) {
+case 'telefone': return 'seu WhatsApp com DDD';
+case 'ddd': return 'apenas o DDD (2 dígitos) do seu WhatsApp';
+case 'telefone_parcial': return 'o número do WhatsApp (sem DDD), com 8 ou 9 dígitos';
+case 'itens': return 'o que você precisa transportar';
+case 'endereco_saida': return 'o endereço completo de saída (pode ser bairro/ponto de referência)';
+case 'endereco_destino': return 'o endereço completo de destino (pode ser bairro/ponto de referência)';
+case 'descricao': return 'alguma observação breve (opcional)';
+default: return '';
+}
 }
 
 function buildUserOrchestrationPrompt({ clienteUnificado = '', dados = {}, faltantes = [], duvidas = [], proximaPergunta = '', instrucoes = [] } = {}) {
-  const dataView = {
-    itens: !!(dados && dados.itens),
-    endereco_saida: !!(dados && dados.endereco_saida),
-    endereco_destino: !!(dados && dados.endereco_destino),
-    ajudante: (typeof (dados && dados.ajudante) === 'boolean') ? String(dados.ajudante) : 'indefinido',
-    telefone: isValidPhoneBR(dados && dados.telefone) ? 'presente' : 'ausente',
-    ddd: (dados && /^[1-9]\d$/.test(String(dados.ddd || ''))) ? 'presente' : 'ausente',
-    telefone_parcial: (dados && /^\d{8,9}$/.test(String(dados.telefone_parcial || ''))) ? 'presente' : 'ausente',
-    cidade: (dados && dados.cidade) ? 'presente' : 'ausente'
-  };
+const dataView = {
+itens: !!(dados && dados.itens),
+endereco_saida: !!(dados && dados.endereco_saida),
+endereco_destino: !!(dados && dados.endereco_destino),
+telefone: isValidPhoneBR(dados && dados.telefone) ? 'presente' : 'ausente',
+ddd: (dados && /^[1-9]\d$/.test(String(dados.ddd || ''))) ? 'presente' : 'ausente',
+telefone_parcial: (dados && /^\d{8,9}$/.test(String(dados.telefone_parcial || ''))) ? 'presente' : 'ausente',
+cidade: (dados && dados.cidade) ? 'presente' : 'ausente'
+};
 
-  const faltas = (faltantes || []).slice(0);
-  const proxLabel = describeAskField(proximaPergunta);
+const faltas = (faltantes || []).slice(0);
+const proxLabel = describeAskField(proximaPergunta);
 
-  const lines = [];
-  lines.push('Mensagens do cliente (unificadas):');
-  lines.push(clienteUnificado ? `"""${clienteUnificado}"""` : '"""(sem conteúdo adicional)"""');
-  lines.push('');
-  lines.push('Dados já coletados (apenas sinalizar se presentes/ausentes):');
-  lines.push(JSON.stringify(dataView));
-  lines.push('');
-  lines.push('Falta coletar (ordem do funil):');
-  lines.push(faltas.length ? faltas.join(', ') : 'nada');
-  lines.push('');
-  lines.push('Dúvidas detectadas:');
-  lines.push(duvidas.length ? ('- ' + duvidas.join('\n- ')) : 'nenhuma');
-  lines.push('');
-  lines.push('Próxima pergunta obrigatória:');
-  lines.push(proxLabel || 'nenhuma');
-  lines.push('');
-  lines.push('Instruções:');
-  lines.push('- Responda às dúvidas de forma breve e objetiva (sem inventar).');
-  lines.push('- Sempre finalize com a próxima pergunta do funil (não envie mensagem apenas tirando dúvidas).');
-  lines.push('- Seja humano, simpático e direto; varie micro expressões e evite repetir frases.');
-  lines.push('Produza UMA ÚNICA mensagem. Nada de segunda mensagem, lembrete, "aguarde", "vou te chamar" ou "já volto".');
-  lines.push('Na mesma mensagem, componha: 1) responda dúvidas/protestos em 1–2 frases; 2) faça APENAS a pergunta indicada nas instruções do funil (não peça WhatsApp nem repita a frase do motorista/WhatsApp a menos que as instruções digam explicitamente); 3) finalize.');
-  lines.push('Jamais ecoe ou confirme o que o cliente disse; não use "entendi", "vi que", "obrigado pelos dados", "certo, você informou...".');
-  lines.push('Proibido repetir a explicação do orçamento/via motorista/WhatsApp depois da primeira resposta.');
-  lines.push('Se já recebemos número sem DDD, peça APENAS o que faltar (DDD ou número sem DDD), conforme instruções.');
-  lines.push('Não quebre em mensagens separadas — conteúdo todo em uma única mensagem.');
-  for (const i of (instrucoes || [])) lines.push('- ' + i);
+const lines = [];
+lines.push('Mensagens do cliente (unificadas):');
+lines.push(clienteUnificado ? `"""${clienteUnificado}"""` : '"""(sem conteúdo adicional)"""');
+lines.push('');
+lines.push('Dados já coletados (apenas sinalizar se presentes/ausentes):');
+lines.push(JSON.stringify(dataView));
+lines.push('');
+lines.push('Falta coletar (ordem do funil):');
+lines.push(faltas.length ? faltas.join(', ') : 'nada');
+lines.push('');
+lines.push('Dúvidas detectadas:');
+lines.push(duvidas.length ? ('- ' + duvidas.join('\n- ')) : 'nenhuma');
+lines.push('');
+lines.push('Próxima pergunta obrigatória:');
+lines.push(proxLabel || 'nenhuma');
+lines.push('');
+lines.push('Instruções:');
+lines.push('- Responda às dúvidas de forma breve e objetiva (sem inventar).');
+lines.push('- Sempre finalize com a próxima pergunta do funil (não envie mensagem apenas tirando dúvidas).');
+lines.push('- Seja humano, simpático e direto; varie micro expressões e evite repetir frases.');
+lines.push('Produza UMA ÚNICA mensagem. Nada de segunda mensagem, lembrete, "aguarde", "vou te chamar" ou "já volto".');
+lines.push('Na mesma mensagem, componha: 1) responda dúvidas/protestos em 1–2 frases; 2) faça APENAS a pergunta indicada nas instruções do funil (não peça WhatsApp nem repita a frase do motorista/WhatsApp a menos que as instruções digam explicitamente); 3) finalize.');
+lines.push('Jamais ecoe ou confirme o que o cliente disse; não use "entendi", "vi que", "obrigado pelos dados", "certo, você informou...".');
+lines.push('Proibido repetir a explicação do orçamento/via motorista/WhatsApp depois da primeira resposta.');
+lines.push('Se já recebemos número sem DDD, peça APENAS o que faltar (DDD ou número sem DDD), conforme instruções.');
+lines.push('Não quebre em mensagens separadas — conteúdo todo em uma única mensagem.');
+for (const i of (instrucoes || [])) lines.push('- ' + i);
 
-  return lines.join('\n');
+return lines.join('\n');
 }
 
 // [PATCH] — Adiciona construtor de contexto detalhado e controle anti-repetição para orçamento/saudação
@@ -364,32 +362,30 @@ function hasPriceIntent(text) {
 }
 
 const ALLOWED_ASK_FIELDS = Object.freeze([
-  'itens',
-  'endereco_saida',
-  'endereco_destino',
-  'ajudante',
-  'ddd',
-  'telefone_parcial',
-  'telefone',
-  'descricao'
+'itens',
+'endereco_saida',
+'endereco_destino',
+'ddd',
+'telefone_parcial',
+'telefone',
+'descricao'
 ]);
 
 function getNextAskField(d = {}) {
-  const telValido = isValidPhoneBR(d && d.telefone);
-  const hasParcial = /^\d{8,9}$/.test(String((d && d.telefone_parcial) || ''));
-  const hasDDD = /^[1-9]\d$/.test(String((d && d.ddd) || ''));
+const telValido = isValidPhoneBR(d && d.telefone);
+const hasParcial = /^\d{8,9}$/.test(String((d && d.telefone_parcial) || ''));
+const hasDDD = /^[1-9]\d$/.test(String((d && d.ddd) || ''));
 
-  if (!telValido) {
-    if (hasParcial && !hasDDD) return 'ddd';
-    if (hasDDD && !hasParcial) return 'telefone_parcial';
-    return 'telefone';
-  }
+if (!telValido) {
+if (hasParcial && !hasDDD) return 'ddd';
+if (hasDDD && !hasParcial) return 'telefone_parcial';
+return 'telefone';
+}
 
-  if (!d.itens) return 'itens';
-  if (!d.endereco_saida) return 'endereco_saida';
-  if (!d.endereco_destino) return 'endereco_destino';
-  if (typeof d.ajudante !== 'boolean') return 'ajudante';
-  return null;
+if (!d.itens) return 'itens';
+if (!d.endereco_saida) return 'endereco_saida';
+if (!d.endereco_destino) return 'endereco_destino';
+return null;
 }
 
 function shouldAskWhatsappFirst({ historicoNovo = [], dataAtual = {} } = {}) {
@@ -413,94 +409,91 @@ function removeTelefonesCompletosLoose(s) {
 }
 
 function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply = false, novasMsgs = [] }) {
-  const instr = [];
+const instr = [];
 
-  if (firstReply) {
-    instr.push('Cumprimente de forma calorosa e humana (ex.: "Olá! Que bom falar contigo 😊").');
+if (firstReply) {
+instr.push('Cumprimente de forma calorosa e humana (ex.: "Olá! Que bom falar contigo 😊").');
+}
+if (directive && directive.askField === 'telefone') {
+instr.push('Inclua exatamente uma vez a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
+}
+if (!firstReply) {
+instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
+}
+
+const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
+.map(m => (m && m.texto ? String(m.texto) : ''))
+.filter(t => /\?/.test(t))
+.slice(0, 3);
+if (perguntas.length > 0) {
+instr.push('Responda de forma objetiva às perguntas do cliente (não invente informações).');
+} else {
+instr.push('Se houver algo a esclarecer na mensagem do cliente, responda de forma breve.');
+}
+
+const textoJanela = (Array.isArray(novasMsgs) ? novasMsgs : [])
+.map(m => (m && m.texto ? String(m.texto) : ''))
+.join(' ')
+.toLowerCase();
+const perguntouTempo = /quanto\s+tempo|quando|que\s+horas|vai\s+me\s+chamar|em\s+quanto/.test(textoJanela);
+if (perguntouTempo) {
+instr.push('Se perguntarem quando o motorista vai chamar, responda apenas: "em alguns minutinhos".');
+}
+
+if (directive && directive.askField) {
+if (directive.askField === 'telefone') {
+const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
+const temDDD = !!(snapshotData && snapshotData.ddd);
+if (temParcial && !temDDD) {
+instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita nem reformule o número do cliente.');
+} else if (temDDD && !temParcial) {
+instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos.');
+} else {
+instr.push('Peça o WhatsApp com DDD em uma única frase curta.');
+}
+instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
+}
+if (directive.askField === 'ddd') {
+instr.push('Peça APENAS o DDD (2 dígitos).');
+instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
+}
+if (directive.askField === 'telefone_parcial') {
+instr.push('Peça APENAS o número (sem DDD), com 8 ou 9 dígitos.');
+instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
+}
+if (directive.askField === 'itens') {
+instr.push('Pergunte o que precisa transportar (itens).');
+}
+if (directive.askField === 'endereco_saida') {
+instr.push('Pergunte o endereço completo de saída (aceite informal).');
+}
+if (directive.askField === 'endereco_destino') {
+instr.push('Pergunte o endereço completo de destino (aceite informal).');
+}
+if (directive.askField === 'descricao') {
+instr.push('Pergunte se há alguma observação breve.');
+}
+
+if (directive.allowSecondQuestion && directive.nextField) {
+  if (directive.nextField === 'itens') {
+    instr.push('Na sequência, pergunte também o que precisa transportar (itens).');
   }
-  // A frase do orçamento SÓ APARECE quando estiver pedindo telefone (primeira ou não)
-  if (directive && directive.askField === 'telefone') {
-    instr.push('Inclua exatamente uma vez a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
+  if (directive.nextField === 'endereco_saida') {
+    instr.push('Na sequência, pergunte também o endereço completo de saída (aceite informal).');
   }
-  if (!firstReply) {
-    instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
+  if (directive.nextField === 'endereco_destino') {
+    instr.push('Na sequência, pergunte também o endereço completo de destino (aceite informal).');
   }
+}
 
-  const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
-    .map(m => (m && m.texto ? String(m.texto) : ''))
-    .filter(t => /\?/.test(t))
-    .slice(0, 3);
-  if (perguntas.length > 0) {
-    instr.push('Responda de forma objetiva às perguntas do cliente (não invente informações).');
-  } else {
-    instr.push('Se houver algo a esclarecer na mensagem do cliente, responda de forma breve.');
-  }
+}
 
-  const textoJanela = (Array.isArray(novasMsgs) ? novasMsgs : [])
-    .map(m => (m && m.texto ? String(m.texto) : ''))
-    .join(' ')
-    .toLowerCase();
-  const perguntouTempo = /quanto\s+tempo|quando|que\s+horas|vai\s+me\s+chamar|em\s+quanto/.test(textoJanela);
-  if (perguntouTempo) {
-    instr.push('Se perguntarem quando o motorista vai chamar, responda apenas: "em alguns minutinhos".');
-  }
+instr.push('Jamais ecoe ou confirme o que o cliente disse; não use "entendi", "vi que", "obrigado pelos dados".');
+instr.push('Não repita números do cliente no texto.');
+instr.push('Não crie perguntas além das listadas.');
+instr.push('Seja breve, humano e profissional.');
 
-  if (directive && directive.askField) {
-    if (directive.askField === 'telefone') {
-      const temParcial = !!(snapshotData && snapshotData.telefone_parcial);
-      const temDDD = !!(snapshotData && snapshotData.ddd);
-      if (temParcial && !temDDD) {
-        instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita nem reformule o número do cliente.');
-      } else if (temDDD && !temParcial) {
-        instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos.');
-      } else {
-        instr.push('Peça o WhatsApp com DDD em uma única frase curta. Sem explicação do fluxo do motorista.');
-      }
-      instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
-    }
-    if (directive.askField === 'ddd') {
-      instr.push('Peça APENAS o DDD (2 dígitos) para completar o WhatsApp. Não repita o número do cliente.');
-      instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
-    }
-    if (directive.askField === 'telefone_parcial') {
-      instr.push('Peça APENAS o número do WhatsApp (sem DDD), com 8 ou 9 dígitos. Não repita o número do cliente.');
-      instr.push('Tudo em UMA mensagem única junto com a próxima pergunta obrigatória.');
-    }
-    if (directive.askField === 'itens') {
-      instr.push('Pergunte o que precisa transportar (itens).');
-    }
-    if (directive.askField === 'endereco_saida') {
-      instr.push('Pergunte o endereço de saída (pode ser informal: bairro, ponto de referência).');
-    }
-    if (directive.askField === 'endereco_destino') {
-      instr.push('Pergunte o endereço de destino (pode ser informal).');
-    }
-    if (directive.askField === 'ajudante') {
-      instr.push('Pergunte se precisa de ajudante (resposta sim ou não).');
-    }
-    if (directive.askField === 'descricao') {
-      instr.push('Pergunte se há alguma observação breve sobre a coleta/entrega.');
-    }
-
-    if (directive.allowSecondQuestion && directive.nextField) {
-      if (directive.nextField === 'itens') {
-        instr.push('Na sequência, pergunte também o que precisa transportar (itens).');
-      }
-      if (directive.nextField === 'endereco_saida') {
-        instr.push('Na sequência, pergunte também o endereço de saída (pode ser informal).');
-      }
-      if (directive.nextField === 'endereco_destino') {
-        instr.push('Na sequência, pergunte também o endereço de destino (pode ser informal).');
-      }
-    }
-  }
-
-  instr.push('Jamais ecoe ou confirme o que o cliente disse; não use "entendi", "vi que", "obrigado pelos dados".');
-  instr.push('Não repita números de telefone do cliente no texto.');
-  instr.push('Não crie perguntas além das listadas.');
-  instr.push('Seja breve, humano e profissional.');
-
-  return instr;
+return instr;
 }
 
 /* ===================== FIM — ADIÇÕES DETERMINÍSTICAS DE FLUXO ===================== */
@@ -509,20 +502,19 @@ function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply
 // [FSM] — definição dos passos do funil e controle total centralizado
 
 const FSM_STEPS = Object.freeze([
-  'boas_vindas',
-  'info_orcamento',
-  'whatsapp_pedido_1',
-  'telefone_pedido',
-  'ddd_pedido',
-  'telefone_parcial_pedido',
-  'whatsapp_parcial_pedido',
-  'itens_pedido',
-  'end_saida_pedido',
-  'end_destino_pedido',
-  'ajudante_pedido',
-  'descricao_pedido',
-  'lembrete_1',
-  'lembrete_2'
+'boas_vindas',
+'info_orcamento',
+'whatsapp_pedido_1',
+'telefone_pedido',
+'ddd_pedido',
+'telefone_parcial_pedido',
+'whatsapp_parcial_pedido',
+'itens_pedido',
+'end_saida_pedido',
+'end_destino_pedido',
+'descricao_pedido',
+'lembrete_1',
+'lembrete_2'
 ]);
 
 function ensureFsmStruct(snap) {
@@ -570,58 +562,54 @@ function getFieldAskLevelFromSnap(snap, field) {
 }
 
 function _nextNonPhoneField(d = {}) {
-  if (!d.itens) return 'itens';
-  if (!d.endereco_saida) return 'endereco_saida';
-  if (!d.endereco_destino) return 'endereco_destino';
-  if (typeof d.ajudante !== 'boolean') return 'ajudante';
-  return null;
+if (!d.itens) return 'itens';
+if (!d.endereco_saida) return 'endereco_saida';
+if (!d.endereco_destino) return 'endereco_destino';
+return null;
 }
 
 function _stepIdForField(field) {
-  switch (String(field)) {
-    case 'telefone': return 'telefone_pedido';
-    case 'ddd': return 'ddd_pedido';
-    case 'telefone_parcial': return 'telefone_parcial_pedido';
-    case 'itens': return 'itens_pedido';
-    case 'endereco_saida': return 'end_saida_pedido';
-    case 'endereco_destino': return 'end_destino_pedido';
-    case 'ajudante': return 'ajudante_pedido';
-    case 'descricao': return 'descricao_pedido';
-    default: return null;
-  }
+switch (String(field)) {
+case 'telefone': return 'telefone_pedido';
+case 'ddd': return 'ddd_pedido';
+case 'telefone_parcial': return 'telefone_parcial_pedido';
+case 'itens': return 'itens_pedido';
+case 'endereco_saida': return 'end_saida_pedido';
+case 'endereco_destino': return 'end_destino_pedido';
+case 'descricao': return 'descricao_pedido';
+default: return null;
+}
 }
 
 function _hasFieldValue(d, field) {
-  if (!field) return false;
-  switch (String(field)) {
-    case 'itens': return !!(d.itens && String(d.itens).trim());
-    case 'endereco_saida': return !!(d.endereco_saida && String(d.endereco_saida).trim());
-    case 'endereco_destino': return !!(d.endereco_destino && String(d.endereco_destino).trim());
-    case 'ajudante': return (d.ajudante === true || d.ajudante === false);
-    case 'ddd': return /^[1-9]\d$/.test(String(d.ddd || ''));
-    case 'telefone_parcial': return /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
-    case 'telefone': {
-      const hasFull = isValidPhoneBR(d.telefone);
-      const hasParcial = /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
-      const hasDDD = /^[1-9]\d$/.test(String(d.ddd || ''));
-      return !!(hasFull || hasParcial || hasDDD);
-    }
-    case 'descricao': return !!(d.descricao && String(d.descricao).trim());
-    default: return false;
-  }
+if (!field) return false;
+switch (String(field)) {
+case 'itens': return !!(d.itens && String(d.itens).trim());
+case 'endereco_saida': return !!(d.endereco_saida && String(d.endereco_saida).trim());
+case 'endereco_destino': return !!(d.endereco_destino && String(d.endereco_destino).trim());
+case 'ddd': return /^[1-9]\d$/.test(String(d.ddd || ''));
+case 'telefone_parcial': return /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
+case 'telefone': {
+const hasFull = isValidPhoneBR(d.telefone);
+const hasParcial = /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
+const hasDDD = /^[1-9]\d$/.test(String(d.ddd || ''));
+return !!(hasFull || hasParcial || hasDDD);
+}
+case 'descricao': return !!(d.descricao && String(d.descricao).trim());
+default: return false;
+}
 }
 
 function pickNextNonPhoneFieldSkippingExhausted(snap, d) {
-  const s = snap || {};
-  const a = (s && s.askCounts) || {};
-  const order = ['itens','endereco_saida','endereco_destino','ajudante'];
-  for (const f of order) {
-    if (_hasFieldValue(d, f)) continue;
-    const tries = Number(a[f] || 0);
-    if (tries < MAX_ASK_RETRIES) return f;
-  }
-  // Todos os faltantes esgotaram tentativas: não trave; caia em descricao (opcional) pra manter a conversa viva
-  return null;
+const s = snap || {};
+const a = (s && s.askCounts) || {};
+const order = ['itens','endereco_saida','endereco_destino'];
+for (const f of order) {
+if (_hasFieldValue(d, f)) continue;
+const tries = Number(a[f] || 0);
+if (tries < MAX_ASK_RETRIES) return f;
+}
+return null;
 }
 
 function decidirProximoPasso(snap, dados) {
@@ -739,7 +727,7 @@ class PedidoOrchestrator extends EventEmitter {
       data: { itens:null,endereco_saida:null,endereco_destino:null,ajudante:null,telefone:null,ddd:null,telefone_parcial:null,cidade:null,descricao:null },
       flags: { firstIaReplied:false, greetDone:false, finalizedAt:null, finalizationFreezeUntil:null, sentToNotifierAt:null, hasAskedWhats:false, singleInactivityPingSent:false, sentType:null, pendingField: null },
       timers: { startedAt: now(), incompleteWithWhatsDeadline: null, withoutWhatsDeadline: null },
-      askCounts: { telefone:0, ddd:0, telefone_parcial:0, itens:0, endereco_saida:0, endereco_destino:0, ajudante:0, descricao:0 },
+      askCounts: { telefone:0, ddd:0, telefone_parcial:0, itens:0, endereco_saida:0, endereco_destino:0, descricao:0 },
       lastWhatsAskAt: null,
       missing: []
     };
@@ -1153,12 +1141,11 @@ class PedidoOrchestrator extends EventEmitter {
 const orchestrator = new PedidoOrchestrator();
 
 function getNextNonPhoneField(d = {}) {
-  // Ordem fixa sem campos de telefone
-  if (!d.itens) return 'itens';
-  if (!d.endereco_saida) return 'endereco_saida';
-  if (!d.endereco_destino) return 'endereco_destino';
-  if (typeof d.ajudante !== 'boolean') return 'ajudante';
-  return null;
+// Ordem fixa sem campos de telefone
+if (!d.itens) return 'itens';
+if (!d.endereco_saida) return 'endereco_saida';
+if (!d.endereco_destino) return 'endereco_destino';
+return null;
 }
 
 function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
