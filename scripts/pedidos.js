@@ -483,6 +483,7 @@ const FSM_STEPS = Object.freeze([
   'end_saida_pedido',
   'end_destino_pedido',
   'ajudante_pedido',
+  'descricao_pedido',
   'lembrete_1',
   'lembrete_2'
 ]);
@@ -548,8 +549,42 @@ function _stepIdForField(field) {
     case 'endereco_saida': return 'end_saida_pedido';
     case 'endereco_destino': return 'end_destino_pedido';
     case 'ajudante': return 'ajudante_pedido';
+    case 'descricao': return 'descricao_pedido';
     default: return null;
   }
+}
+
+function _hasFieldValue(d, field) {
+  if (!field) return false;
+  switch (String(field)) {
+    case 'itens': return !!(d.itens && String(d.itens).trim());
+    case 'endereco_saida': return !!(d.endereco_saida && String(d.endereco_saida).trim());
+    case 'endereco_destino': return !!(d.endereco_destino && String(d.endereco_destino).trim());
+    case 'ajudante': return (d.ajudante === true || d.ajudante === false);
+    case 'ddd': return /^[1-9]\d$/.test(String(d.ddd || ''));
+    case 'telefone_parcial': return /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
+    case 'telefone': {
+      const hasFull = isValidPhoneBR(d.telefone);
+      const hasParcial = /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
+      const hasDDD = /^[1-9]\d$/.test(String(d.ddd || ''));
+      return !!(hasFull || hasParcial || hasDDD);
+    }
+    case 'descricao': return !!(d.descricao && String(d.descricao).trim());
+    default: return false;
+  }
+}
+
+function pickNextNonPhoneFieldSkippingExhausted(snap, d) {
+  const s = snap || {};
+  const a = (s && s.askCounts) || {};
+  const order = ['itens','endereco_saida','endereco_destino','ajudante'];
+  for (const f of order) {
+    if (_hasFieldValue(d, f)) continue;
+    const tries = Number(a[f] || 0);
+    if (tries < MAX_ASK_RETRIES) return f;
+  }
+  // Todos os faltantes esgotaram tentativas: não trave; caia em descricao (opcional) pra manter a conversa viva
+  return null;
 }
 
 function decidirProximoPasso(snap, dados) {
@@ -559,7 +594,6 @@ function decidirProximoPasso(snap, dados) {
   const hasParcial = /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
   const hasDDD = /^[1-9]\d$/.test(String(d.ddd || ''));
 
-  // Sempre priorize WhatsApp até ficar válido
   if (!telOk) {
     let field = 'telefone';
     let step = 'telefone_pedido';
@@ -569,7 +603,7 @@ function decidirProximoPasso(snap, dados) {
     const nivel = getFieldAskLevelFromSnap(s, field);
     const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
     const includeOrcamento = getStepCountFromSnap(s, 'info_orcamento') === 0;
-    const nextAfterPhone = _nextNonPhoneField(d);
+    const nextAfterPhone = pickNextNonPhoneFieldSkippingExhausted(s, d) || null;
 
     return {
       step,
@@ -581,17 +615,21 @@ function decidirProximoPasso(snap, dados) {
     };
   }
 
-  // Com telefone ok, siga ordem do funil
-  const nextField = _nextNonPhoneField(d);
+  // Com telefone ok, siga ordem do funil pulando campos esgotados
+  const nextField = pickNextNonPhoneFieldSkippingExhausted(s, d);
   if (nextField) {
     const step = _stepIdForField(nextField);
     const nivel = getFieldAskLevelFromSnap(s, nextField);
     const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
-    return { step, field: nextField, nivel, includeGreet, includeOrcamento: false, askNextField: _nextNonPhoneField(Object.assign({}, d, { [nextField]: 'dummy' })) || null };
+    // Próximo encadeado (se houver outro após esse)
+    const d2 = Object.assign({}, d, { [nextField]: 'dummy' });
+    const encadeado = pickNextNonPhoneFieldSkippingExhausted(s, d2) || null;
+    return { step, field: nextField, nivel, includeGreet, includeOrcamento: false, askNextField: encadeado };
   }
 
-  // Nada faltando => sem próxima pergunta
-  return null;
+  // Se nada faltar (ou tudo esgotado), faça pergunta opcional descricao para não travar
+  const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
+  return { step: 'descricao_pedido', field: 'descricao', nivel: getFieldAskLevelFromSnap(s, 'descricao'), includeGreet, includeOrcamento: false, askNextField: null };
 }
 
 function registrarPassoExecutado(perfil, chatId, step, { cursorSig = '', text = '', nivel = null } = {}) {
@@ -609,12 +647,7 @@ function registrarPassoExecutado(perfil, chatId, step, { cursorSig = '', text = 
   orchestrator._set(perfil, chatId, s);
 }
 
-function _styleForLevel(nivel) {
-  if (nivel <= 1) return 'full';
-  if (nivel === 2) return 'brief';
-  return 'direct';
-}
-
+// [PATCH-1] — TPL base + picker determinístico (endereços completos incentivados; referência aceita)
 const FRASE_VALOR = 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados — eu repasso para ele e você recebe o orçamento certinho.';
 
 const TPL = {
@@ -647,21 +680,50 @@ const TPL = {
     direct: ['Só os itens.']
   },
   endereco_saida: {
-    full: ['Qual é o ponto de saída? Pode ser bairro ou referência.'],
-    brief: ['Endereço/ponto de saída?'],
-    direct: ['Só o ponto de saída.']
+    full: [
+      'Para agilizar, pode me passar o endereço completo de saída? Se preferir, pode ser só o bairro ou um ponto de referência.',
+      'Endereço de saída completo ajuda muito. Se não tiver tudo agora, pode mandar só o bairro ou alguma referência.'
+    ],
+    brief: [
+      'Endereço de saída completo ou uma referência.',
+      'Saída: endereço completo; se não tiver, referência já ajuda.'
+    ],
+    direct: [
+      'Endereço de saída ou referência.',
+      'Saída (pode ser só referência).'
+    ]
   },
   endereco_destino: {
-    full: ['E o destino, para onde vai? Pode ser bairro ou referência.'],
-    brief: ['Endereço de destino?'],
-    direct: ['Só o destino.']
+    full: [
+      'Agora, o endereço completo de destino para onde vamos levar, com ponto de referência (se quiser).',
+      'Destino: me envie o endereço completo. Se preferir, pode ser só referência/bairro.'
+    ],
+    brief: [
+      'Endereço de destino completo ou uma referência.',
+      'Destino: completo se tiver; referência também serve.'
+    ],
+    direct: [
+      'Endereço de destino ou referência.',
+      'Destino (pode ser só referência).'
+    ]
   },
   ajudante: {
     full: ['Precisa de ajudante para carregar? (sim ou não)'],
     brief: ['Vai precisar de ajudante? (sim/não)'],
     direct: ['Ajudante? (sim/não)']
+  },
+  descricao: {
+    full: ['Alguma observação ou detalhe que queira acrescentar? (opcional)'],
+    brief: ['Alguma observação? (opcional)'],
+    direct: ['Observação? (opcional)']
   }
 };
+
+function _styleForLevel(nivel) {
+  if (nivel <= 1) return 'full';
+  if (nivel === 2) return 'brief';
+  return 'direct';
+}
 
 function _pick(arr, seed = 0) {
   if (!Array.isArray(arr) || arr.length === 0) return '';
@@ -669,23 +731,34 @@ function _pick(arr, seed = 0) {
   return String(arr[idx] || '').trim();
 }
 
-function _lineForField(field, nivel, seed = 0) {
+const TPL_OVERRIDES = new Map(); // perfil -> { field -> { style -> [variants] } }
+
+function setTemplatesOverrides(perfil, overrides) {
+  if (!perfil || !overrides || typeof overrides !== 'object') return;
+  TPL_OVERRIDES.set(perfil, overrides);
+}
+
+function _lineForField(field, nivel, seed = 0, perfil = null) {
   const style = _styleForLevel(nivel);
   const f = String(field || '');
-  const box = TPL[f] || TPL.itens;
+  let box = TPL[f] || TPL.itens;
+  
+  // Aplica override se existir para este perfil
+  if (perfil && TPL_OVERRIDES.has(perfil)) {
+    const overrides = TPL_OVERRIDES.get(perfil);
+    if (overrides && overrides[f] && overrides[f][style]) {
+      box = Object.assign({}, box, { [style]: overrides[f][style] });
+    }
+  }
+  
   return _pick(box[style] || [], seed);
 }
 
-function _lineForPhone(data, field, nivel, seed = 0) {
-  return _lineForField(field, nivel, seed);
-}
-
-function gerarMensagemPorDirective(directive, dados, snap) {
+function gerarMensagemPorDirective(directive, dados, snap, perfil = null) {
   const dir = directive || {};
   const d = dados || {};
   const s = snap || {};
   const seed = (s && s.askCounts && s.askCounts[dir.field || 'itens']) || 0;
-
   const partes = [];
 
   if (dir.includeGreet) {
@@ -697,20 +770,18 @@ function gerarMensagemPorDirective(directive, dados, snap) {
   }
 
   if (dir.field === 'telefone' || dir.field === 'ddd' || dir.field === 'telefone_parcial') {
-    partes.push(_lineForPhone(d, dir.field, dir.nivel, seed));
+    partes.push(_lineForField(dir.field, dir.nivel, seed, perfil));
   } else {
-    partes.push(_lineForField(dir.field, dir.nivel, seed));
+    partes.push(_lineForField(dir.field, dir.nivel, seed, perfil));
   }
 
   if (dir.askNextField) {
-    // Nunca peça 2x telefone no mesmo turno
     if (!(dir.field === 'telefone' || dir.field === 'ddd' || dir.field === 'telefone_parcial')) {
       if (!(dir.askNextField === 'telefone')) {
-        partes.push(_lineForField(dir.askNextField, 1, 0));
+        partes.push(_lineForField(dir.askNextField, 1, 0, perfil));
       }
-    }
-    if ((dir.field === 'telefone' || dir.field === 'ddd' || dir.field === 'telefone_parcial') && dir.askNextField) {
-      partes.push(_lineForField(dir.askNextField, 1, 0));
+    } else {
+      partes.push(_lineForField(dir.askNextField, 1, 0, perfil));
     }
   }
 
@@ -1304,7 +1375,7 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
     }
 
     // Mensagem de negócio determinística baseada em directive/nível
-    const msgNegocio = gerarMensagemPorDirective(directive, dados, snap);
+    const msgNegocio = gerarMensagemPorDirective(directive, dados, snap, perfil);
 
     // Passa pelo prompt apenas para humanizar (sem decidir fluxo)
     const systemPrompt = promptFretes.buildSystemPrompt();
@@ -1420,5 +1491,7 @@ module.exports = {
   decidirProximoPasso: (perfil, chatId) => {
     const s = orchestrator._get(perfil, chatId) || {};
     return decidirProximoPasso(s, (s && s.data) || {});
-  }
+  },
+
+  setTemplatesOverrides: (perfil, overrides) => setTemplatesOverrides(perfil, overrides)
 };
