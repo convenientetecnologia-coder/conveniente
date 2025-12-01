@@ -197,6 +197,25 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
   pedidos.events.on('inactivityPing', async ({ perfil, chatId, texto }) => {
     try {
       if (perfil !== nome) return;
+      
+      // BLOQUEIO: Verifica freeze antes de enviar
+      const stateAtual = await getChatState(nome, chatId).catch(()=>null);
+      if (stateAtual && stateAtual.finalizationFreezeUntil && Date.now() < stateAtual.finalizationFreezeUntil) {
+        logger.info('[VIRTUS] Atendimento congelado por pendência crítica. Nada será enviado (inactivityPing). chatId=', chatId);
+        try {
+          await stepLog.appendJSONL(nome, 'virtus_freeze_send_blocked', {
+            chatId,
+            ts: Date.now(),
+            reason: 'finalizationFreezeUntil',
+            origin: 'inactivityPing'
+          });
+        } catch {}
+        try {
+          await issues.append(nome, 'virtus_freeze_send_blocked', `chat=${chatId} motivo=finalizationFreezeUntil origin=inactivityPing`);
+        } catch {}
+        return; // aborta envio
+      }
+      
       const payload = String(texto || 'Perfeito, já encaminhei seu contato ao motorista. Ele te chama no WhatsApp em alguns minutinhos para passar o orçamento certinho. Qualquer coisa, é só responder aqui.').trim();
       await queueMessengerSend(nome, {
         chatId,
@@ -234,8 +253,30 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
       const evSig = String(cursorSig || (evCount && evDigest ? `${evCount}|${evDigest}` : ''));
       const evLastTs = Number(lastClientTs || 0) || undefined;
 
-      // Throttle por cursorSig (já existente — não modifique)
+      // BLOQUEIO: Verifica freeze antes de enviar
       let stCur = await getChatState(nome, chatId).catch(()=>null);
+      if (stCur && stCur.finalizationFreezeUntil && Date.now() < stCur.finalizationFreezeUntil) {
+        logger.info('[VIRTUS] Atendimento congelado por pendência crítica. Nada será enviado (replyReady). chatId=', chatId);
+        try {
+          await stepLog.appendJSONL(nome, 'virtus_freeze_send_blocked', {
+            chatId,
+            ts: Date.now(),
+            reason: 'finalizationFreezeUntil',
+            origin: 'replyReady',
+            cursorSig: evSig
+          });
+        } catch {}
+        try {
+          await issues.append(nome, 'virtus_freeze_send_blocked', `chat=${chatId} motivo=finalizationFreezeUntil origin=replyReady cursorSig=${evSig}`);
+        } catch {}
+        return; // aborta envio
+      }
+
+      // Detecta se é mensagem final de pendência WhatsApp
+      const isPendenteWhatsapp = evSig === 'MAXRETRIES' || evSig === 'MAXRETRIES_TTL' || 
+                                 /para seguir.*preciso.*whatsapp|assim que enviar.*whatsapp|pedido.*pendente.*whatsapp/i.test(payload);
+
+      // Throttle por cursorSig (já existente — não modifique)
       const lastEvMap = (stCur && stCur.lastReplyEvMap) || {};
       const nowMs = Date.now();
       if (evSig && lastEvMap[evSig] && (nowMs - lastEvMap[evSig]) < 2000) {
@@ -271,10 +312,25 @@ function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRe
         cursorSig: evSig,
         cursorCountOverride: evCount || undefined,
         cursorDigestOverride: evDigest || undefined,
-        lastClientTsOverride: evLastTs
+        lastClientTsOverride: evLastTs,
+        pendente_whats_finalizacao: isPendenteWhatsapp // sinaliza tipo especial
       });
 
       if (queuedOk) {
+        // Log específico para mensagem final pendente
+        if (isPendenteWhatsapp) {
+          try {
+            await stepLog.appendJSONL(nome, 'virtus_reply_pendente_whatsapp', {
+              chatId,
+              cursorSig: evSig,
+              texto_preview: payload.slice(0, 100),
+              ts: Date.now()
+            });
+          } catch {}
+          try {
+            await issues.append(nome, 'virtus_reply_pendente_whatsapp', `chat=${chatId} cursorSig=${evSig}`);
+          } catch {}
+        }
         try { pedidos.ackReplyQueued(nome, chatId, evSig); } catch {}
       }
 
@@ -584,6 +640,37 @@ function isValidBRPhoneWithDDD(d) {
     return false;
   } catch {
     return false;
+  }
+}
+
+// Liberação automática após envio de WhatsApp correto
+async function clearFreezeIfTelefoneOk(nomePerfil, chatId, novoPayload) {
+  try {
+    if (!novoPayload || !novoPayload.telefone) return;
+    if (!isValidBRPhoneWithDDD(novoPayload.telefone)) return;
+    
+    const state = await getChatState(nomePerfil, chatId).catch(()=>null);
+    if (!state || !state.finalizationFreezeUntil) return;
+    if (Date.now() > state.finalizationFreezeUntil) return; // já expirou
+    
+    // Limpa freeze
+    state.finalizationFreezeUntil = null;
+    state.finalizationReason = null;
+    await setChatState(nomePerfil, chatId, { finalizationFreezeUntil: null, finalizationReason: null });
+    
+    logger.info('[VIRTUS] Freeze liberado por novo telefone válido', { nomePerfil, chatId });
+    try {
+      await stepLog.appendJSONL(nomePerfil, 'virtus_freeze_cleared_whatsapp', {
+        chatId,
+        telefone_mask: maskPhoneLog(novoPayload.telefone),
+        ts: Date.now()
+      });
+    } catch {}
+    try {
+      await issues.append(nomePerfil, 'virtus_freeze_cleared_whatsapp', `chat=${chatId} telefone_recebido`);
+    } catch {}
+  } catch (e) {
+    logger.warn('[VIRTUS] Erro ao limpar freeze', { nomePerfil, chatId, error: e && e.message || e });
   }
 }
 
@@ -1027,8 +1114,27 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     try {
       const respostaFinal = String(proximo.resposta || '').trim();
       
-      // DEDUPE textual: se a última resposta enviada é igual, ACK (se for do notificador) e skip
+      // BLOQUEIO: Verifica freeze antes de enviar qualquer mensagem
       const st = await getChatState(nomePerfil, proximo.chatId).catch(() => null);
+      if (st && st.finalizationFreezeUntil && Date.now() < st.finalizationFreezeUntil) {
+        logger.info('[VIRTUS] Atendimento congelado por pendência crítica. Nada será enviado (queue loop). chatId=', proximo.chatId);
+        try {
+          await stepLog.appendJSONL(nomePerfil, 'virtus_freeze_send_blocked', {
+            chatId: proximo.chatId,
+            ts: Date.now(),
+            reason: 'finalizationFreezeUntil',
+            origin: proximo.origin || 'unknown'
+          });
+        } catch {}
+        try {
+          await issues.append(nomePerfil, 'virtus_freeze_send_blocked', `chat=${proximo.chatId} motivo=finalizationFreezeUntil origin=${proximo.origin || 'unknown'}`);
+        } catch {}
+        // Remove da fila e retorna
+        if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
+        return; // aborta envio
+      }
+      
+      // DEDUPE textual: se a última resposta enviada é igual, ACK (se for do notificador) e skip
       const lastIA = (st && st.ultimaRespostaEnviada) ? st.ultimaRespostaEnviada : '';
       if (lastIA && normalizeContent(lastIA) === normalizeContent(respostaFinal)) {
         if (proximo.fromNotifier) {
@@ -2781,6 +2887,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             cursor: { count: clientCount, digest: clientDigest }
           });
 
+          // Verifica se recebeu telefone válido após ingest e libera freeze se necessário
+          try {
+            const snapAfter = pedidos.getSnapshot(nome, chatId);
+            const dadosAfter = (snapAfter && snapAfter.data) || {};
+            if (dadosAfter.telefone && isValidBRPhoneWithDDD(dadosAfter.telefone)) {
+              await clearFreezeIfTelefoneOk(nome, chatId, dadosAfter);
+            }
+          } catch {}
+
           // Atualiza cursor do cliente APÓS ingest
             await setChatState(nome, chatId, {
               state: CHAT_STATES.AGUARDANDO,
@@ -2834,6 +2949,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (Object.keys(patch).length) {
         await atualizarDadosColetados(chatId, { dados: patch });
         await pedidos.upsertFromIA(perfil, chatId, patch);
+        // Libera freeze se recebeu telefone válido
+        if (patch.telefone) {
+          await clearFreezeIfTelefoneOk(perfil, chatId, patch);
+        }
         try { await issues.append(perfil, 'mil_action', `infer_enderecos (informal) saida="${patch.endereco_saida||''}" destino="${patch.endereco_destino||''}"`); } catch {}
       }
     }
@@ -2903,6 +3022,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // Centraliza finalização no orquestrador
     try {
       await pedidos.upsertFromIA(nome, chatId, cur);
+      // Libera freeze se recebeu telefone válido
+      if (cur.telefone) {
+        await clearFreezeIfTelefoneOk(nome, chatId, cur);
+      }
       await pedidos.finalizeIfReady(nome, chatId);
     } catch {}
   }
@@ -2968,6 +3091,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch {}
 
     await appendPedidoAudit(nome, chatId, 'timer_expired', { telOk: !!(tel && isValidBRPhoneWithDDD(tel)), cidadeOk: !!(cidade && String(cidade).trim()) });
+
+    // BLOQUEIO: Não envia mensagem final se houver freeze ativo
+    const stateAtual = await getChatState(nome, chatId).catch(()=>null);
+    if (stateAtual && stateAtual.finalizationFreezeUntil && Date.now() < stateAtual.finalizationFreezeUntil) {
+      logger.info('[VIRTUS] Timer expirado mas atendimento congelado por pendência crítica. Não enviará mensagem final. chatId=', chatId);
+      try {
+        await stepLog.appendJSONL(nome, 'virtus_freeze_timer_blocked', {
+          chatId,
+          ts: Date.now(),
+          reason: 'finalizationFreezeUntil',
+          timer_expired: true
+        });
+      } catch {}
+      try {
+        await issues.append(nome, 'virtus_freeze_timer_blocked', `chat=${chatId} motivo=finalizationFreezeUntil timer_expired=true`);
+      } catch {}
+      timersFechamento.delete(chatId);
+      return; // aborta envio de mensagem final
+    }
 
     if (!tel || !isValidBRPhoneWithDDD(tel)) { timersFechamento.delete(chatId); return; }
     if (!cidade || !String(cidade).trim()) { timersFechamento.delete(chatId); return; }

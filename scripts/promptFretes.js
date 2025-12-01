@@ -18,11 +18,19 @@ const POOLS = {
       'Olá, tudo bem?'
     ],
     animado: [
-      'Oi! Tudo bem? 😊',
+      'Oi! Tudo bem?',
       'Olá! Que bom falar contigo!',
       'Oi, oi! Pronto pra agilizar!',
       'Bom dia! Vamos lá!',
       'Boa tarde! Bora resolver isso!',
+      'Boa noite! Vamos agilizar!'
+    ],
+    empolgado: [
+      'Oi! Que bom!',
+      'Olá! Vamos resolver isso!',
+      'Opa! Bora agilizar!',
+      'Bom dia! Vamos lá!',
+      'Boa tarde! Vamos resolver!',
       'Boa noite! Vamos agilizar!'
     ],
     casual: [
@@ -94,6 +102,12 @@ const POOLS = {
     'Qual o endereço de entrega? Aceito bairro ou ponto conhecido.',
     'Onde vamos levar os itens? Pode ser só a região ou referência.',
     'Me passa o endereço de destino? Pode ser informal, só bairro ou referência.'
+  ],
+
+  pendenteWhatsapp: [
+    'Para seguir, preciso do seu WhatsApp com DDD – sem ele não consigo repassar o pedido para o motorista.',
+    'Assim que enviar o WhatsApp completo, seguimos rapidinho! Ficarei aguardando.',
+    'Seu pedido ficará pendente enquanto não recebemos o WhatsApp certo. Assim que enviar o número completo, finalizamos para você!'
   ]
 };
 
@@ -106,12 +120,42 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+// Memória de picks para evitar repetição absoluta na mesma sessão
+function pickVar(ctx, key, arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  
+  // Inicializa memória se não existir
+  if (!ctx.memory) ctx.memory = {};
+  if (!ctx.memory.used) ctx.memory.used = {};
+  if (!ctx.memory.used[key]) ctx.memory.used[key] = [];
+  
+  // Filtra opções já usadas
+  const available = arr.filter(item => !ctx.memory.used[key].includes(item));
+  
+  // Se todas foram usadas, reseta e começa de novo
+  const pool = available.length > 0 ? available : arr;
+  
+  // Escolhe aleatoriamente
+  const picked = pickRandom(pool);
+  
+  // Registra na memória
+  if (picked) {
+    ctx.memory.used[key].push(picked);
+  }
+  
+  return picked;
+}
+
 function analyzeClientTone(firstMsg) {
   try {
     const msg = String(firstMsg || '').toLowerCase();
     if (!msg) return 'casual';
 
-    // Análise de energia/animado
+    // Análise de empolgado (repetições de vogais, textos longos, vários pontos de exclamação, emojis de alegria)
+    const empolgado = /(a{3,}|e{3,}|i{3,}|o{3,}|u{3,}|!{3,}|😊|😁|kkk|hahaha|rsrsrs)/i.test(msg);
+    if (empolgado) return 'empolgado';
+
+    // Análise de energia/animado (moderado)
     const animado = /(!!+|!{2,}|😊|😁|kk|haha|rsrs|hehe|bom\s+dia{3,}|boa\s+tarde{3,})/i.test(msg);
     if (animado) return 'animado';
 
@@ -143,16 +187,16 @@ function getSaudacaoFromCliente(msgCliente, horario) {
     }
   }
   
-  // Garantir emoji para tom animado/casual, remover para formal
-  if (tone === 'animado' || tone === 'casual') {
+  // EMOJI: SOMENTE para tom "animado" ou "empolgado"
+  if (tone === 'animado' || tone === 'empolgado') {
     // Se não tem emoji, adiciona um
     if (!/[😊😁👍]/.test(saud)) {
       const emojis = ['😊', '😁'];
       const emoji = pickRandom(emojis);
       saud = saud.replace(/([!?.])?$/, ` ${emoji}$1`).trim();
     }
-  } else if (tone === 'formal') {
-    // Remove emojis se for formal
+  } else {
+    // Remove emojis se for "casual" ou "formal"
     saud = saud.replace(/[😊😁👍]/g, '').trim();
   }
   
@@ -248,7 +292,7 @@ Dúvidas:
     Estilo:
 
     Frases curtas, claras, com calor humano.
-    EMOJI: Use EXATAMENTE 1 emoji (😊 ou 😁) APENAS se tom_cliente for "animado" ou "casual". Se for "formal", NUNCA use emoji.
+    EMOJI: Use EXATAMENTE 1 emoji (😊 ou 😁) APENAS se tom_cliente for "animado" ou "empolgado". Jamais use emoji para "formal" ou "casual".
     "fluxo.nivel": acolhedor | objetivo | direto.
     "fluxo.prioridade" = alta → mensagem mais curta.
     Varie sempre: diferentes formas de saudar, pedir dados, explicar.
@@ -361,7 +405,7 @@ INSTRUÇÕES CRÍTICAS:
 - NUNCA agradeça ("obrigado", "valeu").
 - NUNCA repita exatamente a mesma resposta de ciclos anteriores - SEMPRE varie.
 - Use o tom detectado (${tomCliente}) para adequar sua resposta.
-- Se tom for animado/casual, pode usar 1 emoji (😊 ou 😁). Se formal, NUNCA use emoji.
+- EMOJI: Use EXATAMENTE 1 emoji (😊 ou 😁) APENAS se tom_cliente for "animado" ou "empolgado". Jamais use emoji para "formal" ou "casual".
 - Sempre use variações diferentes das frases acima - não copie literalmente.
 `;
 
@@ -420,6 +464,60 @@ function sanitizeAnswerUnico(out, ctx) {
     .replace(/\b\d+[.)]\s+/g, ' ')
     .trim();
 
+  // FAILSAFE DO EMOJI: baseado no tom do cliente
+  const tomCliente = (ctx && ctx.interpretacao && ctx.interpretacao.tom_cliente) || 
+                     (ctx && ctx.meta && ctx.meta.tom_cliente) || 
+                     'casual';
+  
+  // Remove todos os emojis se tom não for "animado" ou "empolgado"
+  if (tomCliente !== 'animado' && tomCliente !== 'empolgado') {
+    const beforeEmoji = s;
+    s = s.replace(/[😊😁👍😀😃😄😅😆😉😋😎😍😘😗😙😚😜😝😛😟😠😡😢😣😤😥😦😧😨😩😪😫😬😭😮😯😰😱😲😳😴😵😶😷😸😹😺😻😼😽😾😿🙀🙁🙂🙃🙄🙅🙆🙇🙈🙉🙊🙋🙌🙍🙎🙏]/g, '').trim();
+    
+    // Log quando remove emoji
+    if (beforeEmoji !== s && process.env.LOG_EMOJI_SANITIZE === 'true') {
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL('default', 'emoji_removed_sanitize', {
+          tom_cliente: tomCliente,
+          before: beforeEmoji.slice(0, 50),
+          after: s.slice(0, 50)
+        });
+      } catch {}
+    }
+  } else {
+    // Garante máximo 1 emoji (😊 ou 😁) para tom animado/empolgado
+    const emojiMatches = s.match(/[😊😁]/g);
+    if (emojiMatches && emojiMatches.length > 1) {
+      // Mantém apenas o primeiro emoji válido
+      let firstEmojiIndex = -1;
+      for (let i = 0; i < s.length; i++) {
+        if (s[i] === '😊' || s[i] === '😁') {
+          firstEmojiIndex = i;
+          break;
+        }
+      }
+      if (firstEmojiIndex >= 0) {
+        const firstEmoji = s[firstEmojiIndex];
+        s = s.replace(/[😊😁]/g, '');
+        // Reinsere o primeiro emoji no final
+        s = s.trim() + ' ' + firstEmoji;
+      }
+    }
+    
+    // Log quando ajusta emoji
+    if (emojiMatches && emojiMatches.length > 1 && process.env.LOG_EMOJI_SANITIZE === 'true') {
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL('default', 'emoji_normalized_sanitize', {
+          tom_cliente: tomCliente,
+          count_before: emojiMatches.length,
+          after: s.slice(0, 50)
+        });
+      } catch {}
+    }
+  }
+
   // Tom regional e prioridade
   const region = (ctx && ctx.meta && ctx.meta.regiao) || null;
   s = applyRegionalTone(s, region);
@@ -477,6 +575,9 @@ function timePartFromISO(iso) {
 // ============================================================================
 
 function composeDeterministic(ctx) {
+  // Inicializa memória se não existir
+  if (!ctx.memory) ctx.memory = { used: {} };
+  
   // Campos e sinais
   const ask = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || null;
   const askNext = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null;
@@ -490,20 +591,29 @@ function composeDeterministic(ctx) {
     ? ctx.historico.ultimas_do_cliente[0]?.texto || ''
     : '';
 
+  // Verifica se é mensagem final de pendente WhatsApp
+  const isPendenteWhatsapp = (ctx && ctx.fluxo && ctx.fluxo.finalizacao_pendente_whatsapp) || false;
+  
+  if (isPendenteWhatsapp) {
+    // Usa pool de mensagem final e retorna imediatamente
+    const mensagemFinal = pickVar(ctx, 'pendenteWhatsapp', POOLS.pendenteWhatsapp) || POOLS.pendenteWhatsapp[0];
+    return mensagemFinal;
+  }
+
   function perguntaDoCampo(f) {
     switch (String(f || '')) {
       case 'telefone':
-        return pickRandom(POOLS.pedirWhatsapp.completo) || 'Pode me passar o seu WhatsApp com DDD?';
+        return pickVar(ctx, 'pedirWhatsapp_completo', POOLS.pedirWhatsapp.completo) || 'Pode me passar o seu WhatsApp com DDD?';
       case 'ddd':
-        return pickRandom(POOLS.pedirWhatsapp.ddd) || 'Me passa só o DDD (2 dígitos) para completar o WhatsApp?';
+        return pickVar(ctx, 'pedirWhatsapp_ddd', POOLS.pedirWhatsapp.ddd) || 'Me passa só o DDD (2 dígitos) para completar o WhatsApp?';
       case 'telefone_parcial':
-        return pickRandom(POOLS.pedirWhatsapp.parcial) || 'Me envia o número do WhatsApp (sem DDD), com 8 ou 9 dígitos?';
+        return pickVar(ctx, 'pedirWhatsapp_parcial', POOLS.pedirWhatsapp.parcial) || 'Me envia o número do WhatsApp (sem DDD), com 8 ou 9 dígitos?';
       case 'itens':
-        return pickRandom(POOLS.perguntaItens) || 'O que você precisa transportar?';
+        return pickVar(ctx, 'perguntaItens', POOLS.perguntaItens) || 'O que você precisa transportar?';
       case 'endereco_saida':
-        return pickRandom(POOLS.perguntaEnderecoSaida) || 'Qual é o endereço completo de saída? Pode ser bairro ou ponto de referência.';
+        return pickVar(ctx, 'perguntaEnderecoSaida', POOLS.perguntaEnderecoSaida) || 'Qual é o endereço completo de saída? Pode ser bairro ou ponto de referência.';
       case 'endereco_destino':
-        return pickRandom(POOLS.perguntaEnderecoDestino) || 'Qual é o endereço completo de destino? Pode ser bairro ou ponto de referência.';
+        return pickVar(ctx, 'perguntaEnderecoDestino', POOLS.perguntaEnderecoDestino) || 'Qual é o endereço completo de destino? Pode ser bairro ou ponto de referência.';
       default:
         return '';
     }
@@ -521,9 +631,9 @@ function composeDeterministic(ctx) {
     partes.push(saud);
   }
 
-  // Papel do atendente (apenas na primeira resposta)
+  // Papel do atendente (apenas na primeira resposta) - usa pickVar para evitar repetição
   if (saudacaoFlag && precisaOrcamento) {
-    const papel = pickRandom(POOLS.papelAtendente);
+    const papel = pickVar(ctx, 'papelAtendente', POOLS.papelAtendente);
     if (papel) partes.push(papel);
   }
 
@@ -531,15 +641,15 @@ function composeDeterministic(ctx) {
   if (disp) partes.push('Sim, está disponível!');
   if (urgente) partes.push('Consigo te atender agora.');
 
-  // Orçamento (variações - SEMPRE usa pools diferentes)
+  // Orçamento (variações - usa pickVar para evitar repetição)
   if (precisaOrcamento) {
     // Pega duas frases diferentes do pool para variar
-    const orc1 = pickRandom(POOLS.orcamentoMotorista) || 'Quem passa o orçamento é o motorista no WhatsApp; eu apenas anoto o pedido e repasso pra ele.';
-    let orc2 = pickRandom(POOLS.orcamentoMotorista) || 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho.';
+    const orc1 = pickVar(ctx, 'orcamentoMotorista_1', POOLS.orcamentoMotorista) || 'Quem passa o orçamento é o motorista no WhatsApp; eu apenas anoto o pedido e repasso pra ele.';
+    let orc2 = pickVar(ctx, 'orcamentoMotorista_2', POOLS.orcamentoMotorista) || 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho.';
     // Garante que são diferentes
     if (orc1 === orc2 && POOLS.orcamentoMotorista.length > 1) {
       const filtered = POOLS.orcamentoMotorista.filter(f => f !== orc1);
-      orc2 = pickRandom(filtered) || orc2;
+      orc2 = pickVar(ctx, 'orcamentoMotorista_2_alt', filtered) || orc2;
     }
     partes.push(orc1);
     partes.push(orc2);
@@ -552,16 +662,22 @@ function composeDeterministic(ctx) {
   // Monta uma única mensagem (máximo 250 caracteres)
   let out = partes.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
   
-  // Limita a 250 caracteres se exceder, cortando de forma inteligente
+  // Limita a 250 caracteres se exceder, cortando de forma inteligente em ponto natural
   if (out.length > 250) {
-    out = out.slice(0, 250);
-    // Tenta cortar em um ponto natural (ponto, vírgula, espaço)
-    const lastSpace = out.lastIndexOf(' ');
-    const lastComma = out.lastIndexOf(',');
-    const lastDot = out.lastIndexOf('.');
-    const cutPoint = Math.max(lastSpace, lastComma, lastDot);
+    // Tenta cortar em um ponto natural (ponto, vírgula, espaço) antes de 250
+    const candidate = out.slice(0, 250);
+    const lastSpace = candidate.lastIndexOf(' ');
+    const lastComma = candidate.lastIndexOf(',');
+    const lastDot = candidate.lastIndexOf('.');
+    const lastExcl = candidate.lastIndexOf('!');
+    const lastInter = candidate.lastIndexOf('?');
+    const cutPoint = Math.max(lastSpace, lastComma, lastDot, lastExcl, lastInter);
+    
     if (cutPoint > 200) {
-      out = out.slice(0, cutPoint + 1).trim();
+      out = candidate.slice(0, cutPoint + 1).trim();
+    } else {
+      // Se não encontrou ponto natural, corta no último espaço antes de 250
+      out = candidate.slice(0, lastSpace > 0 ? lastSpace : 250).trim();
     }
   }
   
@@ -574,7 +690,8 @@ function composeDeterministic(ctx) {
         ask: ask,
         askNext: askNext,
         length: out.length,
-        preview: out.slice(0, 100)
+        preview: out.slice(0, 100),
+        memory_keys: Object.keys(ctx.memory.used || {})
       });
     } catch {}
   }

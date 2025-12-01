@@ -715,24 +715,30 @@ function decidirProximoPasso(snap, dados) {
   const allNonPhoneCollected = !!d.itens && !!d.endereco_saida && !!d.endereco_destino;
 
   if (!telOk) {
+    // Verifica se algum campo de telefone atingiu MAX_ASK_RETRIES
+    const askCounts = s.askCounts || {};
+    const telefoneExhausted = (askCounts.telefone || 0) >= MAX_ASK_RETRIES;
+    const dddExhausted = (askCounts.ddd || 0) >= MAX_ASK_RETRIES;
+    const parcialExhausted = (askCounts.telefone_parcial || 0) >= MAX_ASK_RETRIES;
+    const phoneGroupExhausted = telefoneExhausted || dddExhausted || parcialExhausted;
+
+    // BLOQUEIO: Se grupo telefone esgotou, NÃO cai para descricao_pedido - retorna null para parar funil
+    if (phoneGroupExhausted) {
+      // Retorna null para indicar que o funil deve parar (já foi enviada mensagem final)
+      return null;
+    }
+
     // 1) Limite de tentativas do grupo telefone: se atingiu, não pedir mais telefone agora
     if (phoneGroupTries >= MAX_PHONE_GROUP_RETRIES) {
-      const nextNonPhone = pickNextNonPhoneFieldSkippingExhausted(s, d);
-      if (nextNonPhone) {
-        const step = _stepIdForField(nextNonPhone);
-        const nivel = getFieldAskLevelFromSnap(s, nextNonPhone);
-        const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
-        return { step, field: nextNonPhone, nivel, includeGreet, includeOrcamento: false, askNextField: null };
-      }
-      const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
-      return { step: 'descricao_pedido', field: 'descricao', nivel: getFieldAskLevelFromSnap(s, 'descricao'), includeGreet, includeOrcamento: false, askNextField: null };
+      // NÃO cai para descricao_pedido quando falta telefone - retorna null
+      return null;
     }
 
     // 2) Pós-destino: se já coletamos itens+saída+destino (ou último passo foi destino) e já pedimos WhatsApp,
     //    respeitar cooldown antes de pedir novamente
     if ((allNonPhoneCollected || lastStep === 'end_destino_pedido') && hasAskedWhats && !canAskPhoneAgain) {
-      const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
-      return { step: 'descricao_pedido', field: 'descricao', nivel: getFieldAskLevelFromSnap(s, 'descricao'), includeGreet, includeOrcamento: false, askNextField: null };
+      // NÃO cai para descricao_pedido quando falta telefone - aguarda cooldown ou retorna null
+      return null;
     }
 
     // 3) Fluxo padrão: pedir telefone (ou apenas a parte faltante)
@@ -959,6 +965,56 @@ class PedidoOrchestrator extends EventEmitter {
         stepLog.appendJSONL(perfil, 'pedidos_max_ask_retries', { chatId, field, attempts: s.askCounts[field] });
       } catch {}
     }
+
+    // FINALIZAÇÃO FORÇADA: Se atingiu MAX_ASK_RETRIES para campos críticos de telefone, envia mensagem final e congela
+    if (field === 'telefone' || field === 'ddd' || field === 'telefone_parcial') {
+      if (s.askCounts[field] >= MAX_ASK_RETRIES) {
+        const telOk = isValidPhoneBR(dataNow.telefone);
+        // Só finaliza se ainda não tem telefone válido
+        if (!telOk) {
+          // Mensagem final de ciclo (pool rotativo)
+          const mensagemFinal = [
+            "Para seguir, preciso do seu WhatsApp com DDD – sem ele não consigo repassar o pedido para o motorista.",
+            "Assim que enviar o WhatsApp completo, seguimos rapidinho! Ficarei aguardando.",
+            "Seu pedido ficará pendente enquanto não recebemos o WhatsApp certo. Assim que enviar o número completo, finalizamos para você!"
+          ];
+          const idx = Math.floor(Math.random() * mensagemFinal.length);
+          const textoFinal = mensagemFinal[idx];
+
+          try {
+            const stepLog = require('./stepLog.js');
+            stepLog.appendJSONL(perfil, 'pedidos_finalizacao_pendente_whatsapp', {
+              chatId,
+              reason: 'max_retries_telefone',
+              textoEnv: textoFinal,
+              field,
+              askCount: s.askCounts[field],
+              ts: Date.now()
+            });
+          } catch {}
+
+          try {
+            issues.append(perfil, 'pedidos_finalizacao_pendente_whatsapp', `chat=${chatId} field=${field} tentativas=${s.askCounts[field]}`);
+          } catch {}
+
+          orchestrator.emit('replyReady', {
+            perfil,
+            chatId,
+            texto: textoFinal,
+            cursorCount: 0,
+            cursorDigest: '',
+            cursorSig: 'MAXRETRIES',
+            lastClientTs: Date.now()
+          });
+
+          // Marca janela congelada (finaliza por padrão por 12h ou ajustável)
+          s.flags = s.flags || {};
+          s.flags.finalizationFreezeUntil = now() + 12 * 60 * 60 * 1000; // 12 horas
+          s.flags.finalizationReason = 'max_retries_telefone';
+          this._set(perfil, chatId, s);
+        }
+      }
+    }
   }
 
   markSentAndFreeze(perfil, chatId, tipo='completo') {
@@ -1071,6 +1127,26 @@ class PedidoOrchestrator extends EventEmitter {
     if (askedField && _hasFieldValue(merged, askedField)) {
       const newFlags = Object.assign({}, flagsCur, { pendingField: null });
       patch.flags = newFlags;
+    }
+
+    // RETOMA FUNIL: Se recebeu WhatsApp válido após freeze, limpa o freeze automaticamente
+    const telOk = isValidPhoneBR(merged.telefone);
+    const wasFrozen = flagsCur.finalizationFreezeUntil && flagsCur.finalizationFreezeUntil > now();
+    if (telOk && wasFrozen && flagsCur.finalizationReason === 'max_retries_telefone') {
+      // Limpa freeze e reinicia ciclo normalmente
+      patch.flags = patch.flags || flagsCur;
+      patch.flags.finalizationFreezeUntil = null;
+      patch.flags.finalizationReason = null;
+      
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'pedidos_funil_retomado_whatsapp', {
+          chatId,
+          reason: 'whatsapp_recebido_apos_freeze',
+          telefone_mask: maskPhoneLog(merged.telefone),
+          ts: Date.now()
+        });
+      } catch {}
     }
 
     return this._set(perfil, chatId, patch);
@@ -1237,6 +1313,59 @@ class PedidoOrchestrator extends EventEmitter {
 
             s.askCounts = s.askCounts || {};
             if (field) s.askCounts[field] = (s.askCounts[field] || 0) + 1;
+
+            // FINALIZAÇÃO FORÇADA NO _TICK: Se atingiu MAX_ASK_RETRIES para campos críticos de telefone após timeout
+            if (field === 'telefone' || field === 'ddd' || field === 'telefone_parcial') {
+              if (s.askCounts[field] >= MAX_ASK_RETRIES) {
+                const telOk = isValidPhoneBR(dataBefore.telefone);
+                // Só finaliza se ainda não tem telefone válido
+                if (!telOk) {
+                  // Mensagem final de ciclo (pool rotativo)
+                  const mensagemFinal = [
+                    "Para seguir, preciso do seu WhatsApp com DDD – sem ele não consigo repassar o pedido para o motorista.",
+                    "Assim que enviar o WhatsApp completo, seguimos rapidinho! Ficarei aguardando.",
+                    "Seu pedido ficará pendente enquanto não recebemos o WhatsApp certo. Assim que enviar o número completo, finalizamos para você!"
+                  ];
+                  const idx = Math.floor(Math.random() * mensagemFinal.length);
+                  const textoFinal = mensagemFinal[idx];
+
+                  try {
+                    const stepLog = require('./stepLog.js');
+                    stepLog.appendJSONL(perfil, 'pedidos_finalizacao_pendente_whatsapp', {
+                      chatId,
+                      reason: 'max_retries_telefone_ttl',
+                      textoEnv: textoFinal,
+                      field,
+                      askCount: s.askCounts[field],
+                      ts: Date.now()
+                    });
+                  } catch {}
+
+                  try {
+                    issues.append(perfil, 'pedidos_finalizacao_pendente_whatsapp', `chat=${chatId} field=${field} tentativas=${s.askCounts[field]} via_ttl`);
+                  } catch {}
+
+                  orchestrator.emit('replyReady', {
+                    perfil,
+                    chatId,
+                    texto: textoFinal,
+                    cursorCount: 0,
+                    cursorDigest: '',
+                    cursorSig: 'MAXRETRIES_TTL',
+                    lastClientTs: Date.now()
+                  });
+
+                  // Marca janela congelada (finaliza por padrão por 12h)
+                  s.flags = s.flags || {};
+                  s.flags.finalizationFreezeUntil = now() + 12 * 60 * 60 * 1000; // 12 horas
+                  s.flags.finalizationReason = 'max_retries_telefone';
+                  s.flags.pendingField = null;
+                  this._set(perfil, chatId, { data: dataBefore, flags: s.flags, askCounts: s.askCounts });
+                  
+                  continue; // NÃO continue o ciclo, break/finalize imediatamente
+                }
+              }
+            }
 
             s.flags.pendingField = null;
             this._set(perfil, chatId, { data: dataBefore, flags: s.flags, askCounts: s.askCounts });
@@ -1490,6 +1619,52 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       return { mensagemParaCliente: '', dadosExtraidosAtualizados: (sPrev && sPrev.data) || {}, proximaPergunta: null, tudoColetado: module.exports.readyToSendComplete(perfil, chatId) };
     }
 
+    // BLOQUEIO: Se está congelado por falta de WhatsApp, só processa se recebeu WhatsApp válido
+    const isFrozen = orchestrator.isFrozen(perfil, chatId);
+    let snapAfter = null;
+    let dados = (sPrev && sPrev.data) || {};
+    
+    if (isFrozen) {
+      const flagsCur = (sPrev && sPrev.flags) || {};
+      const freezeReason = flagsCur.finalizationReason;
+      
+      // Se está congelado por max_retries_telefone, verifica se recebeu WhatsApp agora
+      if (freezeReason === 'max_retries_telefone') {
+        // Extrai dados primeiro para verificar se tem WhatsApp válido agora
+        snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
+        const snap = module.exports.getSnapshot(perfil, chatId);
+        dados = (snap && snap.data) || {};
+        const telOk = isValidPhoneBR(dados.telefone);
+        
+        // Se recebeu WhatsApp válido, limpa freeze e continua normalmente
+        if (telOk) {
+          const sNow = orchestrator._get(perfil, chatId) || {};
+          sNow.flags = sNow.flags || {};
+          sNow.flags.finalizationFreezeUntil = null;
+          sNow.flags.finalizationReason = null;
+          orchestrator._set(perfil, chatId, sNow);
+          
+          try {
+            const stepLog = require('./stepLog.js');
+            stepLog.appendJSONL(perfil, 'pedidos_funil_retomado_whatsapp', {
+              chatId,
+              reason: 'whatsapp_recebido_apos_freeze',
+              telefone_mask: maskPhoneLog(dados.telefone),
+              ts: Date.now()
+            });
+          } catch {}
+          
+          // Continua o processamento normalmente abaixo (reutiliza snapAfter se já foi extraído)
+        } else {
+          // Ainda não tem WhatsApp válido, mantém congelado e não processa
+          return { mensagemParaCliente: '', dadosExtraidosAtualizados: dados, proximaPergunta: null, tudoColetado: false };
+        }
+      } else {
+        // Outro tipo de freeze, não processa
+        return { mensagemParaCliente: '', dadosExtraidosAtualizados: dados, proximaPergunta: null, tudoColetado: false };
+      }
+    }
+
     // Idempotência: se já enfileirado/resp. para esse cursor, não reemite
     const alreadyQueuedSig = (sPrev && sPrev.fsm && sPrev.fsm.lastQueuedCursorSig) || '';
     if (alreadyQueuedSig === sig) {
@@ -1508,10 +1683,12 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       };
     }
 
-  // Extrai dados via LLM extrator (só parsing)
-  const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
+  // Extrai dados via LLM extrator (só parsing) - reutiliza se já foi extraído no freeze check
+  if (!snapAfter) {
+    snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
+  }
   const snap = module.exports.getSnapshot(perfil, chatId);
-  const dados = (snap && snap.data) || {};
+  dados = (snap && snap.data) || {};
   
   // Log de extração para auditoria
   try {
