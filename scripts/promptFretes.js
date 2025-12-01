@@ -217,6 +217,124 @@ function sanitizeAnswerUnico(out, ctx) {
   return s || '';
 }
 
+function hasAskFor(text, field) {
+  const s = String(text || '');
+  switch (String(field || '')) {
+    case 'telefone':
+      return /whats\sapp|whatsapp|wpp/i.test(s) && /\bddd\b/i.test(s);
+    case 'ddd':
+      return /\bddd\b/i.test(s);
+    case 'telefone_parcial':
+      return /\bsem\sddd\b/i.test(s) || /\b8\sou\s9\sd[ií]gitos\b/i.test(s);
+    case 'itens':
+      return /o que (você|voce)?\sprecisa\stransportar?/i.test(s) || /o que\sprecisa\s*transportar?/i.test(s);
+    case 'endereco_saida':
+      return /endere[cç]o\s+completo\s+de\s+sa[ií]da/i.test(s) || /onde\s+(buscar|retirar)/i.test(s) || /endere[cç]o\s+de\s+sa[ií]da/i.test(s);
+    case 'endereco_destino':
+      return /endere[cç]o\s+completo\s+de\s+destino/i.test(s) || /\bpara\s+onde\b/i.test(s) || /local\s+de\s+entrega/i.test(s);
+    default:
+      return false;
+  }
+}
+
+function shouldExplainBudget(ctx) {
+  const fluxoOk = !!(ctx && ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento));
+  const priceIntent = !!(ctx && ctx.interpretacao && Array.isArray(ctx.interpretacao.duvidas) &&
+    ctx.interpretacao.duvidas.some(d => /valor|or[cç]amento/i.test(String(d||''))));
+  return fluxoOk || priceIntent;
+}
+
+function hasBudgetLines(text) {
+  const s = String(text || '');
+  const l1 = /quem\s+passa\s+o\s+or[cç]amento\s+é\s+o\s+motorista\s+no\s+whats\sapp/i;
+  const l2 = /o\s+valor\s+exato\s+é\s+passado\s+pelo\s+motorista\s+no\s+whats\sapp/i;
+  return l1.test(s) && l2.test(s);
+}
+
+function timePartFromISO(iso) {
+  try {
+    const h = new Date(String(iso || '')).getHours();
+    if (h >= 0 && h < 12) return 'bom dia';
+    if (h >= 12 && h < 18) return 'boa tarde';
+    return 'boa noite';
+  } catch { return 'olá'; }
+}
+
+function composeDeterministic(ctx) {
+  // Campos e sinais
+  const ask = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || null;
+  const askNext = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null;
+  const saudacaoFlag = !!(ctx && ctx.fluxo && ctx.fluxo.saudacao);
+  const disp = !!(ctx && ctx.interpretacao && ctx.interpretacao.disponibilidade);
+  const urgente = !!(ctx && ctx.interpretacao && ctx.interpretacao.urgencia_agora);
+  const precisaOrcamento = shouldExplainBudget(ctx);
+
+  const orc1 = 'Quem passa o orçamento é o motorista no WhatsApp; eu apenas anoto o pedido e repasso pra ele.';
+  const orc2 = 'O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho.';
+
+  function perguntaDoCampo(f) {
+    switch (String(f || '')) {
+      case 'telefone':
+        return 'Pode me passar o seu WhatsApp com DDD?';
+      case 'ddd':
+        return 'Me passa só o DDD (2 dígitos) para completar o WhatsApp?';
+      case 'telefone_parcial':
+        return 'Me envia o número do WhatsApp (sem DDD), com 8 ou 9 dígitos?';
+      case 'itens':
+        return 'O que você precisa transportar?';
+      case 'endereco_saida':
+        return 'Qual é o endereço completo de saída? Pode ser bairro ou ponto de referência.';
+      case 'endereco_destino':
+        return 'Qual é o endereço completo de destino? Pode ser bairro ou ponto de referência.';
+      default:
+        return '';
+    }
+  }
+
+  const partes = [];
+
+  if (saudacaoFlag) {
+    const saud = timePartFromISO(ctx && ctx.meta && ctx.meta.horario);
+    partes.push(`Oi, ${saud}!`);
+  }
+
+  if (disp) partes.push('Sim, está disponível!');
+  if (urgente) partes.push('Consigo te atender agora.');
+
+  if (precisaOrcamento) {
+    partes.push(orc1);
+    partes.push(orc2);
+  }
+
+  // Ordem: ask_field depois ask_next_field (se houver), sendo a última frase
+  if (ask) partes.push(perguntaDoCampo(ask));
+  if (askNext) partes.push(perguntaDoCampo(askNext));
+
+  // Monta uma única mensagem
+  const out = partes.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  return out;
+}
+
+function enforceAnswer(ctx, s) {
+  const ask = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || null;
+  const askNext = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null;
+
+  const precisaOrcamento = shouldExplainBudget(ctx);
+  const temBudget = hasBudgetLines(s);
+
+  let precisaEnforce = false;
+
+  if (ask && !hasAskFor(s, ask)) precisaEnforce = true;
+  if (askNext && !hasAskFor(s, askNext)) precisaEnforce = true;
+
+  if (precisaOrcamento && !temBudget) precisaEnforce = true;
+
+  if (precisaEnforce) {
+    return composeDeterministic(ctx); // substitui integralmente; NÃO re-sanitiza para não remover orçamento válido
+  }
+  return s; // mantém saída da IA já sanitizada
+}
+
 async function renderUnico(ctx) {
   const system = buildSystemPromptUnico();
   const user = buildUserPromptUnico(ctx);
@@ -236,7 +354,14 @@ async function renderUnico(ctx) {
   } catch (e) {
     raw = 'Vamos seguir rápido: me envie o dado que falta e eu agilizo já já.';
   }
-  return sanitizeAnswerUnico(raw, ctx);
+
+  // 1) Sanitiza saída do modelo
+  let s = sanitizeAnswerUnico(raw, ctx);
+
+  // 2) Enforcer determinístico: garante ask_field/ask_next_field e orçamento quando devido
+  s = enforceAnswer(ctx, s);
+
+  return s;
 }
 
 module.exports = { buildSystemPromptUnico, buildUserPromptUnico, sanitizeAnswerUnico, renderUnico };

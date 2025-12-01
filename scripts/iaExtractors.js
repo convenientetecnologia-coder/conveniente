@@ -313,6 +313,9 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
       .slice(-10);
     const joined = textosCliente.join(' | ');
 
+    const beforeSaida = sanitized.endereco_saida;
+    const beforeDestino = sanitized.endereco_destino;
+
     if (!sanitized.endereco_saida) {
       const mSaida = joined.match(/\b(?:buscar|retirar|pegar|coletar)\s+(?:em|no|na|aqui|ali)?\s*([^|,.\n]{3,60})/i);
       if (mSaida && mSaida[1]) {
@@ -325,6 +328,18 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
       if (mDest && mDest[1]) {
         sanitized.endereco_destino = mDest[1].trim();
       }
+    }
+
+    const addrSet = (!!sanitized.endereco_saida && !beforeSaida) || (!!sanitized.endereco_destino && !beforeDestino);
+    if (addrSet) {
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'ia_extract_addr_heuristic', {
+          chatId,
+          set_saida: (!!sanitized.endereco_saida && !beforeSaida) || false,
+          set_destino: (!!sanitized.endereco_destino && !beforeDestino) || false
+        });
+      } catch {}
     }
   } catch {}
 

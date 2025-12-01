@@ -2728,8 +2728,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             novasMsgs = [ clientMsgs[clientMsgs.length - 1] ].filter(Boolean);
           }
 
-          // Gate semântico: só segue se houver novidade relevante
-          const novasFiltradas = (novasMsgs || []).filter(semanticallyRelevant);
+          // Gate reforçado: semântica + diferença real do último texto do cliente
+          const lastClientNormPrev = (stPrev && stPrev.clientLastNorm) || '';
+          const preFiltradas = (novasMsgs || []).filter(semanticallyRelevant);
+          const novasFiltradas = preFiltradas.filter(m => {
+            const t = normalizeContent(String(m && m.texto || ''));
+            if (!t) return false;
+            // Se é praticamente igual ao último texto conhecido do cliente, ignore
+            if (lastClientNormPrev && (nearEqual(t, lastClientNormPrev) || t.includes(lastClientNormPrev) || lastClientNormPrev.includes(t))) {
+              try { stepLog.appendJSONL(nome, 'virtus', { step: 'semantic_gate_skip', chatId, reason: 'near_equal_last', lastClientNormPrev }); } catch {}
+              return false;
+            }
+            return true;
+          });
+
           if (!novasFiltradas.length) {
             try {
               stepLog.appendJSONL(nome, 'virtus', { step: 'semantic_gate_skip', chatId, reason: 'no_semantic_delta', cCount: clientCount, cDigest: clientDigest });

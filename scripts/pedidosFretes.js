@@ -320,7 +320,8 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
   }
 
   const saudacao = !(s.flags && (s.flags.firstIaReplied || s.flags.greetDone));
-  const explicar_fluxo = !!directive.includeOrcamento;
+  const priceIntentNow = Array.isArray(duvidas) && duvidas.some(d => /valor|or[cç]amento/i.test(String(d || '')));
+  const explicar_fluxo = (!!(directive && directive.includeOrcamento)) || priceIntentNow;
 
   const ctx = {
     meta: {
@@ -1229,9 +1230,18 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     !!data.endereco_saida &&
     !!data.endereco_destino;
 
-  // 0) Regra pós-destino: se WhatsApp ainda faltar e já coletamos os 3 (itens, saída, destino),
-  //    ou se o último passo foi 'end_destino_pedido', PRIORIZE pedir WhatsApp agora, sem cooldown.
+  // 0) Pós-destino: se WhatsApp faltar e já coletamos itens+saída+destino (ou último passo foi destino),
+  //    respeitar cooldown antes de pedir novamente (evita loop)
   if (!telOk && hasAskedWhats && !firstReply && (allNonPhoneCollected || lastStep === 'end_destino_pedido')) {
+    if (!canAskPhoneAgain) {
+      return {
+        askField: 'descricao',
+        phase: 'none',
+        reason: 'post_destino_cooldown',
+        nextField: null,
+        allowSecondQuestion: false
+      };
+    }
     // Se cliente já mandou parcial ou DDD, peça só o que faltar
     if (/^[1-9]\d$/.test(String(data.ddd || '')) && !/^\d{8,9}$/.test(String(data.telefone_parcial || ''))) {
       return { askField: 'telefone_parcial', phase: 'reminder', reason: 'post_destino_whatsapp', nextField: null, allowSecondQuestion: false, phoneMode: 'full' };
