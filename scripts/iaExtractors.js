@@ -2,6 +2,8 @@
 
 const { chatCompletion } = require('./inteligenciaArtificial.js');
 
+const RE_PHONE_BR = /\b(?:\+?55\s*)?(?:\(?([1-9]\d)\)?[\s.\-()]*)?([2-9]\d{3,4}[\s.\-()]?\d{4})\b/g;
+
 function removeTelefonesCompletosLoose(s) {
   try {
     let x = String(s||'');
@@ -22,6 +24,38 @@ function maskForExtractorPhonesAllowed(s) {
     x = x.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[dados omitidos]'); // CNPJ
     return x;
   } catch { return String(s||''); }
+}
+
+function fallbackPhoneFromMessages(mensagens = []) {
+  try {
+    const arr = (Array.isArray(mensagens) ? mensagens : [])
+      .filter(m => m && m.autor === 'cliente')
+      .slice(-30) // últimas 30 do cliente
+      .reverse(); // mais recentes primeiro
+
+    for (const m of arr) {
+      const text = String(m.texto || '');
+      let match;
+      RE_PHONE_BR.lastIndex = 0;
+      while ((match = RE_PHONE_BR.exec(text)) !== null) {
+        const ddd = String(match[1] || '').replace(/\D/g, '');
+        const corpo = String(match[2] || '').replace(/\D/g, '');
+        // corpo: 8 ou 9 dígitos
+        if (corpo.length < 8 || corpo.length > 9) continue;
+        if (ddd && ddd.length === 2) {
+          const full = ddd + corpo;
+          if (isValidBRPhoneWithDDD(full)) {
+            return { telefone: full }; // telefone completo válido
+          }
+        } else {
+          // sem DDD: retorna parcial
+          return { telefone_parcial: corpo };
+        }
+      }
+    }
+
+  } catch {}
+  return null;
 }
 
 function onlyDigits(s){ return String(s||'').replace(/\D/g,''); }
@@ -230,6 +264,72 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
   try { parsed = JSON.parse(firstJson); } catch { parsed = {}; }
 
   const sanitized = sanitizeExtracted(parsed, mensagens);
+
+  // FALLBACK DETERMINÍSTICO DE TELEFONE (regex) — só se a LLM não trouxe telefone completo
+  try {
+    let phoneFallbackUsed = false;
+
+    if (!sanitized.telefone) {
+      const fb = fallbackPhoneFromMessages(mensagens);
+      if (fb && fb.telefone && isValidBRPhoneWithDDD(fb.telefone)) {
+        sanitized.telefone = fb.telefone;
+        sanitized.ddd = null;
+        sanitized.telefone_parcial = null;
+        phoneFallbackUsed = true;
+      } else if (fb && fb.telefone_parcial && !sanitized.telefone_parcial && !sanitized.telefone) {
+        sanitized.telefone_parcial = fb.telefone_parcial;
+        phoneFallbackUsed = true;
+      }
+    }
+
+    // Montagem automática de telefone caso tenha DDD + parcial (após fallback)
+    if (!sanitized.telefone && sanitized.ddd && sanitized.telefone_parcial) {
+      const comb = String(sanitized.ddd).replace(/\D/g,'') + String(sanitized.telefone_parcial).replace(/\D/g,'');
+      if (isValidBRPhoneWithDDD(comb)) {
+        sanitized.telefone = comb;
+        sanitized.ddd = null;
+        sanitized.telefone_parcial = null;
+      }
+    }
+
+    if (phoneFallbackUsed) {
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'ia_extract_phone_fallback', {
+          chatId,
+          used: true,
+          hasFull: !!sanitized.telefone,
+          hasPartial: !!sanitized.telefone_parcial
+        });
+      } catch {}
+    }
+  } catch {}
+
+  // HEURÍSTICA LEVE PARA ENDEREÇOS INFORMAIS (apenas se ainda estiverem ausentes)
+  try {
+    const textosCliente = (Array.isArray(mensagens) ? mensagens : [])
+      .filter(m => m && m.autor === 'cliente')
+      .map(m => String(m.texto || ''))
+      .slice(-10);
+    const joined = textosCliente.join(' | ');
+
+    if (!sanitized.endereco_saida) {
+      const mSaida = joined.match(/\b(?:buscar|retirar|pegar|coletar)\s+(?:em|no|na|aqui|ali)?\s*([^|,.\n]{3,60})/i);
+      if (mSaida && mSaida[1]) {
+        sanitized.endereco_saida = mSaida[1].trim();
+      }
+    }
+
+    if (!sanitized.endereco_destino) {
+      const mDest = joined.match(/\b(?:levar|entregar|para|pra|pro)\s+(?:o|a|no|na|ali|lá|la)?\s*([^|,.\n]{3,60})/i);
+      if (mDest && mDest[1]) {
+        sanitized.endereco_destino = mDest[1].trim();
+      }
+    }
+  } catch {}
+
+  // Recalcula missing após os reforços
+  sanitized.missing = computeMissing(sanitized);
 
   // Detecção simples de protesto (apenas se não veio do JSON)
   if (!sanitized.protesto && Array.isArray(mensagens)) {

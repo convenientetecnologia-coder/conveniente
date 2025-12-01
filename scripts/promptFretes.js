@@ -178,6 +178,12 @@ function sanitizeAnswerUnico(out, ctx) {
   // Corrigir frase estranha
   s = s.replace(/\bqual\s+é\s+o\s+que\s+você\s+precisa\s+transportar\??/gi, 'O que você precisa transportar?');
 
+  // Cortar pedidos de reconfirmação ou repetição
+  s = s.replace(/\b(me\s+confirma\s+novamente|pode\s+me\s+confirmar\s+novamente|me\s+passa\s+novamente|me\s+envia\s+de\s+novo|manda\s+de\s+novo|reenvia|reenvie|repete\s+por\s+favor)\b[^.!?]*[.!?]/gi, '').trim();
+
+  // Cortar frases de meta-conversa proibidas
+  s = s.replace(/\b(aguarde|vou te chamar|vou\s+te\s+chamar|já\s+volto|volto\s+já|vou\s+chamar|te\s+chamo)\b[^.!?]*[.!?]/gi, '').trim();
+
   // Privacidade
   s = s.replace(/\b(?:\+?55\s*)?(?:\(?[1-9]{2}\)?[\s.\-()]?)?(?:9?\d{4}[\s.\-()]?\d{4})\b/g, '*');
   s = s.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[dados omitidos]');
@@ -194,10 +200,13 @@ function sanitizeAnswerUnico(out, ctx) {
   if (!podeExplicar) {
     s = s.replace(/o valor (exato )?(ser[aá]|é|eh)\s+(informado|passado)\s+pelo\s+motorista[^.]./i, '').trim();
     s = s.replace(/\b(or[cç]amento|pre[cç]o|valor)\b[^.!?]{0,180}\b(motorista|whats|whatsapp)\b[^.!?][.!?]/gi, '').trim();
+    s = s.replace(/\b(motorista)\b[^.!?]{0,80}\b(or[cç]amento|pre[cç]o|valor|passa|informa)\b[^.!?]*[.!?]/gi, '').trim();
   }
 
-  // Remove bullets/listas
-  s = s.replace(/(^|\s)[-•*]\s+/g, ' ').replace(/\b\d+\)\s+/g, ' ').trim();
+  // Remove bullets/listas (inclui "1." e "1)")
+  s = s.replace(/(^|\s)[-•*]\s+/g, ' ')
+    .replace(/\b\d+[.)]\s+/g, ' ')
+    .trim();
 
   // Tom regional e prioridade
   const region = (ctx && ctx.meta && ctx.meta.regiao) || null;

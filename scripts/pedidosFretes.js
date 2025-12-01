@@ -20,6 +20,7 @@ function sha1(str) {
 const MAX_ASK_RETRIES = parseInt(process.env.MAX_ASK_RETRIES || '3', 10);
 const PHONE_ASK_COOLDOWN_MS = parseInt(process.env.PHONE_ASK_COOLDOWN_MS || '120000', 10); // 2 min de cooldown para pedir telefone/DDD novamente
 const FIELD_TTL_MS = parseInt(process.env.FIELD_TTL_MS || '60000', 10); // 60s para expirar um campo perguntado
+const MAX_PHONE_GROUP_RETRIES = parseInt(process.env.MAX_PHONE_GROUP_RETRIES || '3', 10);
 
 const ROOT = path.join(__dirname, '..', 'dados', 'perfis');
 function stateFile(perfil){ return path.join(ROOT, perfil, 'pedidos_state.json'); }
@@ -167,6 +168,42 @@ function detectDoubtsSimple(text) {
   if (/(como\s+funciona|nao\s+entendi|explica|pode\s+explicar)/.test(t)) duvidas.push('Dúvida de funcionamento');
 
   return duvidas;
+}
+
+function isSemanticallyNew(novasMsgs = [], lastClientNorm = '') {
+  try {
+    const joined = (Array.isArray(novasMsgs) ? novasMsgs : [])
+      .filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim())
+      .map(m => String(m.texto || ''))
+      .join(' ');
+    const norm = normalizeContent(joined);
+    const lastNorm = String(lastClientNorm || '').trim();
+
+    if (!norm) return false;
+
+    // Sinais fortes de novidade
+    if (/\b\d{8,11}\b/.test(norm)) return true; // telefone/parcial (8–11 dígitos)
+    if (/[?？]/.test(joined)) return true;      // pergunta nova
+
+    // Palavras-chave de endereço
+    if (/\b(rua|avenida|av\.|rodovia|estrada|bairro|kobrasol|centro|mercado|shopping|posto|parque)\b/.test(norm)) return true;
+
+    // Itens comuns de mudança/frete
+    if (/\b(cama|sofa|sof[aá]|guarda\-roupa|geladeira|fog[aã]o|moveis|móveis|colch[aã]o|mesa|cadeira|máquina|lavar|secadora)\b/.test(norm)) return true;
+
+    // Repetição explícita de "disponível" sem mais conteúdo não é novidade
+    if (/disponivel|disponível/.test(norm) && norm.length < 40) return false;
+
+    // Anti-eco: se é praticamente igual ao último texto do cliente, não é novidade
+    if (lastNorm && (norm === lastNorm || norm.includes(lastNorm) || lastNorm.includes(norm))) {
+      return false;
+    }
+
+    return true;
+
+  } catch {
+    return true; // fallback otimista: se der erro, considera como novo para não bloquear indevidamente
+  }
 }
 
 function describeAskField(field) {
@@ -619,7 +656,35 @@ function decidirProximoPasso(snap, dados) {
   const hasParcial = /^\d{8,9}$/.test(String(d.telefone_parcial || ''));
   const hasDDD = /^[1-9]\d$/.test(String(d.ddd || ''));
 
+  const phoneGroupTries = getPhoneAskGroupCountFromSnap(s);
+  const hasAskedWhats = !!(s.flags && s.flags.hasAskedWhats);
+  const lastWhatsAskAt = s && s.lastWhatsAskAt || 0;
+  const canAskPhoneAgain = !telOk && (!hasAskedWhats || (now() - lastWhatsAskAt) >= PHONE_ASK_COOLDOWN_MS);
+  const lastStep = (s && s.fsm && s.fsm.lastStep) || '';
+  const allNonPhoneCollected = !!d.itens && !!d.endereco_saida && !!d.endereco_destino;
+
   if (!telOk) {
+    // 1) Limite de tentativas do grupo telefone: se atingiu, não pedir mais telefone agora
+    if (phoneGroupTries >= MAX_PHONE_GROUP_RETRIES) {
+      const nextNonPhone = pickNextNonPhoneFieldSkippingExhausted(s, d);
+      if (nextNonPhone) {
+        const step = _stepIdForField(nextNonPhone);
+        const nivel = getFieldAskLevelFromSnap(s, nextNonPhone);
+        const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
+        return { step, field: nextNonPhone, nivel, includeGreet, includeOrcamento: false, askNextField: null };
+      }
+      const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
+      return { step: 'descricao_pedido', field: 'descricao', nivel: getFieldAskLevelFromSnap(s, 'descricao'), includeGreet, includeOrcamento: false, askNextField: null };
+    }
+
+    // 2) Pós-destino: se já coletamos itens+saída+destino (ou último passo foi destino) e já pedimos WhatsApp,
+    //    respeitar cooldown antes de pedir novamente
+    if ((allNonPhoneCollected || lastStep === 'end_destino_pedido') && hasAskedWhats && !canAskPhoneAgain) {
+      const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
+      return { step: 'descricao_pedido', field: 'descricao', nivel: getFieldAskLevelFromSnap(s, 'descricao'), includeGreet, includeOrcamento: false, askNextField: null };
+    }
+
+    // 3) Fluxo padrão: pedir telefone (ou apenas a parte faltante)
     let field = 'telefone';
     let step = 'telefone_pedido';
     if (hasParcial && !hasDDD) { field = 'ddd'; step = 'ddd_pedido'; }
@@ -638,6 +703,7 @@ function decidirProximoPasso(snap, dados) {
       includeOrcamento,
       askNextField: nextAfterPhone
     };
+
   }
 
   // Com telefone ok, siga ordem do funil pulando campos esgotados
@@ -1294,6 +1360,18 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
     const alreadyQueuedSig = (sPrev && sPrev.fsm && sPrev.fsm.lastQueuedCursorSig) || '';
     if (alreadyQueuedSig === sig) {
       return { mensagemParaCliente: '', dadosExtraidosAtualizados: (sPrev && sPrev.data) || {}, proximaPergunta: null, tudoColetado: module.exports.readyToSendComplete(perfil, chatId) };
+    }
+
+    // Gate: só responde se houver novidade semântica (evita eco/resposta a repetições)
+    const lastClientNormPrev = (sPrev && sPrev.clientLastNorm) || '';
+    if (!isSemanticallyNew(novasMsgs, lastClientNormPrev)) {
+      module.exports.finalizeIfReady(perfil, chatId);
+      return {
+        mensagemParaCliente: '',
+        dadosExtraidosAtualizados: (sPrev && sPrev.data) || {},
+        proximaPergunta: null,
+        tudoColetado: module.exports.readyToSendComplete(perfil, chatId)
+      };
     }
 
     // Extrai dados via LLM extrator (só parsing)

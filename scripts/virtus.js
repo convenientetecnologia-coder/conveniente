@@ -80,6 +80,34 @@ function isNoiseNorm(n) {
   return false;
 }
 
+function semanticallyRelevant(m) {
+  try {
+    if (!m || !m.texto) return false;
+    const t = normalizeContent(String(m.texto || ''));
+    if (!t) return false;
+
+    // Telefone/partials (8–11 dígitos) é sempre novidade
+    if (/\b\d{8,11}\b/.test(t)) return true;
+
+    // Pergunta nova
+    if (/[?？]/.test(m.texto)) return true;
+
+    // Palavras-chave de endereço (aceita informal)
+    if (/\b(rua|avenida|av\.|rodovia|estrada|bairro|kobrasol|centro|mercado|shopping|posto|parque)\b/.test(t)) return true;
+
+    // Itens comuns de frete/mudança
+    if (/\b(cama|sofa|sof[aá]|guarda\-roupa|geladeira|fog[aã]o|moveis|móveis|colch[aã]o|mesa|cadeira|máquina|lavar|secadora)\b/.test(t)) return true;
+
+    // "Disponível?" isolado ou variações curtas sem mais conteúdo NÃO são novidade
+    if ((/disponivel|disponível/.test(t)) && t.length < 40) return false;
+
+    return true;
+
+  } catch {
+    return false;
+  }
+}
+
 function explodeAndFilterLines(entry, ultimaIaNorm) {
   const out = [];
   const ts = Number(entry && entry.timestamp || Date.now());
@@ -2700,6 +2728,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             novasMsgs = [ clientMsgs[clientMsgs.length - 1] ].filter(Boolean);
           }
 
+          // Gate semântico: só segue se houver novidade relevante
+          const novasFiltradas = (novasMsgs || []).filter(semanticallyRelevant);
+          if (!novasFiltradas.length) {
+            try {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'semantic_gate_skip', chatId, reason: 'no_semantic_delta', cCount: clientCount, cDigest: clientDigest });
+            } catch {}
+            await setChatState(nome, chatId, {
+              state: CHAT_STATES.AGUARDANDO,
+              lastScanAt: Date.now(),
+              clientCursorCount: clientCount,
+              clientCursorDigest: clientDigest,
+              clientLastNorm: clientLastNorm,
+              lastCLIts: lastClientTs
+            });
+            continue;
+          }
+
           // Contexto de cidade
           let cidadeCtx = null;
           try {
@@ -2720,7 +2765,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await pedidos.ingestFromVirtus(nome, chatId, {
             historico: historicoSan,
             contexto: { cidade: cidadeCtx || null },
-            novasMsgs,
+            novasMsgs: novasFiltradas,
             cursor: { count: clientCount, digest: clientDigest }
           });
 
