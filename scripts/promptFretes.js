@@ -451,13 +451,26 @@ function sanitizeAnswerUnico(out, ctx) {
     s = s.replace(/^\s*(?:oi|ol[aá]|e[ai]|opa|salve|fala|bom\sdia|boa\starde|boa\s*noite)[!,. ]+/i, '').trim();
   }
 
-  // Remove orçamento fora de hora
+  // Remove orçamento fora de hora (APENAS se não for obrigatório)
   const podeExplicar = !!(ctx && ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento));
   if (!podeExplicar) {
+    const beforeBudget = s;
     s = s.replace(/o valor (exato )?(ser[aá]|é|eh)\s+(informado|passado)\s+pelo\s+motorista[^.]./i, '').trim();
     s = s.replace(/\b(or[cç]amento|pre[cç]o|valor)\b[^.!?]{0,180}\b(motorista|whats|whatsapp)\b[^.!?][.!?]/gi, '').trim();
     s = s.replace(/\b(motorista)\b[^.!?]{0,80}\b(or[cç]amento|pre[cç]o|valor|passa|informa)\b[^.!?]*[.!?]/gi, '').trim();
+    
+    // Log quando remove orçamento (auditoria)
+    if (beforeBudget !== s) {
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL('default', 'sanitize_removed_budget', {
+          before: beforeBudget.slice(0, 100),
+          after: s.slice(0, 100)
+        });
+      } catch {}
+    }
   }
+  // NÃO remove orçamento se ctx.fluxo.explicar_orcamento=true (é obrigatório)
 
   // Remove bullets/listas (inclui "1." e "1)")
   s = s.replace(/(^|\s)[-•*]\s+/g, ' ')
@@ -523,6 +536,52 @@ function sanitizeAnswerUnico(out, ctx) {
   s = applyRegionalTone(s, region);
   const prio = ctx && ctx.fluxo && ctx.fluxo.prioridade;
   s = shortenIfPriority(s, prio);
+
+  // POLICIAMENTO: Verifica se contém pergunta obrigatória (ask_field e ask_next_field se existir)
+  const askField = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || null;
+  const askNextField = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null;
+  
+  // Verifica se ask_field está presente
+  if (askField && !hasAskFor(s, askField)) {
+    // Log erro antes de lançar
+    try {
+      const stepLog = require('./stepLog.js');
+      stepLog.appendJSONL('default', 'sanitize_invalidated_ask', {
+        askField: askField,
+        askNextField: askNextField || null,
+        texto_preview: s.slice(0, 100),
+        missing_ask_field: true
+      });
+    } catch {}
+    
+    // Lança erro para o FSM tratar
+    throw Object.assign(new Error('sanitize_invalidated_ask'), { 
+      code: 'sanitize_invalidated_ask',
+      askField: askField,
+      askNextField: askNextField
+    });
+  }
+  
+  // Verifica se ask_next_field está presente (se existir)
+  if (askNextField && !hasAskFor(s, askNextField)) {
+    // Log erro antes de lançar
+    try {
+      const stepLog = require('./stepLog.js');
+      stepLog.appendJSONL('default', 'sanitize_invalidated_ask', {
+        askField: askField || null,
+        askNextField: askNextField,
+        texto_preview: s.slice(0, 100),
+        missing_ask_next_field: true
+      });
+    } catch {}
+    
+    // Lança erro para o FSM tratar
+    throw Object.assign(new Error('sanitize_invalidated_ask'), { 
+      code: 'sanitize_invalidated_ask',
+      askField: askField,
+      askNextField: askNextField
+    });
+  }
 
   return s || '';
 }
@@ -699,32 +758,8 @@ function composeDeterministic(ctx) {
   return out;
 }
 
-function enforceAnswer(ctx, s) {
-  const ask = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar) || null;
-  const askNext = (ctx && ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar_tambem) || null;
-  const saudacaoFlag = !!(ctx && ctx.fluxo && ctx.fluxo.saudacao);
-
-  const precisaOrcamento = shouldExplainBudget(ctx);
-  const temBudget = hasBudgetLines(s);
-  const temSaudacao = saudacaoFlag && /^(oi|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite|opa|salve)/i.test(s);
-
-  let precisaEnforce = false;
-
-  // Verifica se faltou saudação na primeira resposta
-  if (saudacaoFlag && !temSaudacao) precisaEnforce = true;
-  
-  // Verifica se faltou perguntas obrigatórias
-  if (ask && !hasAskFor(s, ask)) precisaEnforce = true;
-  if (askNext && !hasAskFor(s, askNext)) precisaEnforce = true;
-
-  // Verifica se faltou orçamento quando necessário
-  if (precisaOrcamento && !temBudget) precisaEnforce = true;
-
-  if (precisaEnforce) {
-    return composeDeterministic(ctx); // substitui integralmente; NÃO re-sanitiza para não remover orçamento válido
-  }
-  return s; // mantém saída da IA já sanitizada
-}
+// REMOVIDO: enforceAnswer() - NUNCA pode decidir/pular step, perguntar novo campo, corrigir step, inventar pergunta
+// Toda decisão de ciclo agora pertence ao FSM
 
 // ============================================================================
 // RENDER PRINCIPAL
@@ -750,11 +785,11 @@ async function renderUnico(ctx) {
     raw = 'Vamos seguir rápido: me envie o dado que falta e eu agilizo já já.';
   }
 
-  // 1) Sanitiza saída do modelo
+  // 1) Sanitiza saída do modelo (pode lançar erro 'sanitize_invalidated_ask' se faltar pergunta obrigatória)
   let s = sanitizeAnswerUnico(raw, ctx);
 
-  // 2) Enforcer determinístico: garante ask_field/ask_next_field e orçamento quando devido
-  s = enforceAnswer(ctx, s);
+  // 2) REMOVIDO: enforceAnswer() - não pode mais decidir/corrigir ciclo
+  // Se sanitizeAnswerUnico lançar erro, o FSM deve tratar
 
   return s;
 }

@@ -71,6 +71,7 @@ function _getCtrl(nomePerfil) {
 }
 
 // Registra no global para uso pelo Virtus (sem require de worker.js)
+// Coleta de localização: clique/navegação/seleção na aba zero Messenger só é executada pelo Virtus.js (UI driver), nunca pelo worker — esta função apenas gerencia fila de pedidos e locks.
 global.__buscaLocalizacaoVirtus = {
   adicionarBuscaLocalizacao: (chatId, urlClassificado, nomePerfil, callback) => {
     try {
@@ -105,7 +106,10 @@ global.__buscaLocalizacaoVirtus = {
       logger.error('[LOCALIZACAO] Falha ao enfileirar', { chatId, error: e && e.message || e });
       try { callback && callback(null); } catch {}
     }
-  }
+  },
+  // Handler que Virtus deve implementar para abrir chat e extrair URL do item
+  // Virtus.js deve registrar esta função quando iniciar, fazendo o clique/navegação na aba zero quando seguro
+  solicitarAberturaChat: null // Será preenchido pelo Virtus.js
 };
 
 async function processarFilaBuscaLocalizacao() {
@@ -334,144 +338,40 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
     }
     // ====== FIM: EXTRATOR ROBUSTO DE CIDADE/UF NO ANÚNCIO ======
 
-    // Helper: abrir chat por clique (sem navegar), extrair URL do item do DOM do chat e liberar sendLock.
+    // Coleta de localização: clique/navegação/seleção na aba zero Messenger só é executada pelo Virtus.js (UI driver), nunca pelo worker — esta função apenas gerencia fila de pedidos e locks.
+    // Worker solicita abertura do chat via handler global que Virtus consome quando seguro.
     async function _descobrirUrlClassificadoSeNecessario() {
       if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
         return urlClassificado;
       }
 
-      // Aba zero (Messenger) controlada pelo Virtus
-      let main = controller.mainPage;
-      try {
-        if (!main) {
-          const pages = await browser.pages().catch(() => []);
-          main = (Array.isArray(pages) && pages[0]) ? pages[0] : null;
-          if (main) controller.mainPage = main;
-        }
-      } catch {}
-      if (!main) return null;
+      // Handler global que Virtus consome para abrir chat e extrair URL do item
+      const handler = (global && global.__buscaLocalizacaoVirtus && global.__buscaLocalizacaoVirtus.solicitarAberturaChat) 
+        ? global.__buscaLocalizacaoVirtus.solicitarAberturaChat 
+        : null;
 
-      // Exclusão mútua: trava Virtus enquanto clicamos/extraímos
-      try {
-        browser._sendLock = browser._sendLock || {};
-        browser._sendLock.active = true;
-        browser._sendLock.owner = 'city';
-        browser._sendLock.chatId = chatId;
-        browser._sendLock.since = Date.now();
-      } catch {}
-
-      const CLICK_TIMEOUT = 6500;
-      const WAIT_ITEM_TIMEOUT = 6000;
-
-      try {
-        // 1) Já está no chat desse chatId?
-        let onChat = false;
-        try {
-          onChat = await main.evaluate((cid) => {
-            try { return location && location.pathname && location.pathname.includes('/marketplace/t/' + cid); }
-            catch { return false; }
-          }, chatId).catch(() => false);
-        } catch {}
-
-        // 2) Se não está, clicar no anchor do chat (sem goto)
-        if (!onChat) {
-          const clicked = await main.evaluate(async (cid) => {
-            function isVisible(el) {
-              try {
-                const st = window.getComputedStyle(el);
-                if (!st) return false;
-                if (st.visibility === 'hidden' || st.display === 'none') return false;
-                const r = el.getBoundingClientRect();
-                return !!(r && r.width > 0 && r.height > 0);
-              } catch { return false; }
-            }
-            function gridRoot() {
-              let g = document.querySelector('div[role="grid"]');
-              if (!g) {
-                const pagelet = document.querySelector('div[data-pagelet="MWThreadList"]');
-                if (pagelet) g = pagelet.querySelector('div[role="grid"]');
-              }
-              return g || document.body;
-            }
-
-            const root = gridRoot();
-            try { root.scrollTop = 0; } catch {}
-            const sel = 'a[href^="/marketplace/t/"]';
-            const findAnchor = () => Array.from(document.querySelectorAll(sel)).find(a => {
-              const href = a.getAttribute('href') || a.href || '';
-              return href.includes('/marketplace/t/' + cid);
-            });
-
-            let anchor = findAnchor();
-            if (!anchor) {
-              // pequena varredura para cima, sem navegar
-              for (let i = 0; i < 6 && !anchor; i++) {
-                try { root.scrollTop = Math.max(0, root.scrollTop - 400); } catch {}
-                anchor = findAnchor();
-              }
-            }
-            if (anchor && isVisible(anchor)) {
-              try { anchor.focus && anchor.focus(); } catch {}
-              try { anchor.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-              try { anchor.click(); } catch {}
-              return true;
-            }
-            return false;
-          }, chatId);
-
-          if (clicked) {
-            // Aguarda a rota mudar para o chat, sem usar goto/reload
-            await Promise.race([
-              main.waitForFunction(
-                (cid) => (location && location.pathname && location.pathname.includes('/marketplace/t/' + cid)),
-                { timeout: CLICK_TIMEOUT },
-                chatId
-              ).catch(() => null),
-              new Promise(r => setTimeout(r, CLICK_TIMEOUT))
-            ]).catch(() => {});
-          }
-        }
-
-        // 3) Confirma se estamos no chat
-        try {
-          onChat = await main.evaluate((cid) => {
-            try { return location && location.pathname && location.pathname.includes('/marketplace/t/' + cid); }
-            catch { return false; }
-          }, chatId).catch(() => false);
-        } catch {}
-        if (!onChat) return null;
-
-        // 4) Espera breve e extrai âncora de item do DOM do chat
-        await Promise.race([
-          main.waitForFunction(() => !!document.querySelector('a[href*="/marketplace/item/"]'), { timeout: WAIT_ITEM_TIMEOUT }).catch(() => null),
-          new Promise(r => setTimeout(r, WAIT_ITEM_TIMEOUT))
-        ]).catch(() => {});
-
-        const found = await main.evaluate(() => {
-          const fixAbs = (h) => (!h ? null : (h.startsWith('http') ? h : ('https://www.facebook.com' + h)));
-          const list = Array.from(document.querySelectorAll('a[href]'));
-          // Item anchor
-          const a1 = list.find(el => {
-            const href = el.getAttribute('href') || el.href || '';
-            return href.includes('/marketplace/item/') && !href.includes('/marketplace/t/');
-          });
-          if (a1) return fixAbs(a1.getAttribute('href') || a1.href || '');
-          // Alternativo /commerce/listing/
-          const a2 = list.find(el => {
-            const href = el.getAttribute('href') || el.href || '';
-            return (/\/commerce\/listing\//i.test(href) || /\/marketplace\/.*listing/i.test(href)) && !href.includes('/marketplace/t/');
-          });
-          if (a2) return fixAbs(a2.getAttribute('href') || a2.href || '');
-          return null;
-        });
-
-        return (found && typeof found === 'string') ? found : null;
-      } catch {
+      if (!handler || typeof handler !== 'function') {
+        logger.warn('[LOCALIZACAO] Handler de abertura de chat não disponível (Virtus não registrou)', { nomePerfil, chatId });
         return null;
-      } finally {
-        // Libera o sendLock do owner 'city'
-        try { if (browser && browser._sendLock && browser._sendLock.owner === 'city') browser._sendLock.active = false; } catch {}
       }
+
+      // Solicita ao Virtus que abra o chat e extraia a URL (Virtus faz o clique/navegação quando seguro)
+      return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          resolve(null);
+        }, 15000); // Timeout de 15s
+
+        try {
+          handler(nomePerfil, chatId, (url) => {
+            clearTimeout(timeout);
+            resolve(url || null);
+          });
+        } catch (e) {
+          clearTimeout(timeout);
+          logger.warn('[LOCALIZACAO] Erro ao solicitar abertura de chat', { nomePerfil, chatId, error: e && e.message || e });
+          resolve(null);
+        }
+      });
     }
 
     // Flag global ANTES de newPage
@@ -507,7 +407,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
         novaAba._buscaLocalizacaoChatId = chatId;
       } catch {}
 
-      // Descobre URL do classificado abrindo o chat na mainPage (com sendLock)
+      // Descobre URL do classificado solicitando ao Virtus que abra o chat (Virtus faz clique/navegação quando seguro)
       let targetUrl = await _descobrirUrlClassificadoSeNecessario();
       if (!targetUrl || typeof targetUrl !== 'string') {
         try {

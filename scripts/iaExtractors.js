@@ -1,6 +1,7 @@
 'use strict';
 
 const { chatCompletion } = require('./inteligenciaArtificial.js');
+const { computeMissing } = require('./missing.js');
 
 const RE_PHONE_BR = /\b(?:\+?55\s*)?(?:\(?([1-9]\d)\)?[\s.\-()]*)?([2-9]\d{3,4}[\s.\-()]?\d{4})\b/g;
 
@@ -70,18 +71,7 @@ function isValidBRPhoneWithDDD(d) {
   return false;
 }
 
-function computeMissing(data) {
-  const d = data || {};
-  const missing = [];
-  // WhatsApp completo (com DDD) é obrigatório
-  if (!isValidBRPhoneWithDDD(d.telefone)) missing.push('telefone');
-  // Coleta mínima obrigatória do pedido
-  if (!d.itens) missing.push('itens');
-  if (!d.endereco_saida) missing.push('endereco_saida');
-  if (!d.endereco_destino) missing.push('endereco_destino');
-  // "ajudante", "cidade", "descricao" NÃO bloqueiam o pedido!
-  return missing;
-}
+// REMOVIDO: computeMissing local - agora importado de ./missing.js
 
 // Detecção simples de protesto (apenas para extração pura)
 const RE_PROTESTO = /(ja\s+falei|já\s+falei|ja\s+passei|já\s+passei|leia\s+acima|olha\s+acima|pare\s+de\s+perguntar|para\s+de\s+perguntar|n[aã]o\s+insista|de\s+novo)/i;

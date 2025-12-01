@@ -29,7 +29,7 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
-const pedidos = require('./pedidosFretes.js');
+const virtusFSM = require('./virtusFSM.js');
 const fileStore = require('./fileStore.js');
 
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
@@ -173,172 +173,7 @@ function sanitizeHistoricoRecords(historico, ultimaIaNorm) {
   return dedup;
 }
 
-// Vinculação de eventos do orquestrador por perfil — evita múltiplos listeners
-const __pedidosEventBound = new Set();
-
-function bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificadorFn, enviarRespostaMessengerSeguraFn, marcarRespondidoFn) {
-  if (__pedidosEventBound.has(nome)) return;
-  __pedidosEventBound.add(nome);
-
-  // Envio de pedido (completo/incompleto) -> envia ao notificador e respeita freeze (marcado pelo orquestrador)
-  pedidos.events.on('orderSent', async ({ perfil, chatId, tipo, payload }) => {
-    try {
-      if (perfil !== nome) return; // evento de outro perfil
-      try {
-        await enviarPedidoParaNotificadorFn(chatId, payload);
-      } catch (e) {
-        try { await issues.append(perfil, 'order_sent_notifier_fail', (e && e.message) || String(e)); } catch {}
-      }
-      try { await issues.append(perfil, 'pedidos_freeze_window_enter', `chat=${chatId}`); } catch {}
-    } catch {}
-  });
-
-  // Ping único de inatividade pedindo WhatsApp
-  pedidos.events.on('inactivityPing', async ({ perfil, chatId, texto }) => {
-    try {
-      if (perfil !== nome) return;
-      
-      // BLOQUEIO: Verifica freeze antes de enviar
-      const stateAtual = await getChatState(nome, chatId).catch(()=>null);
-      if (stateAtual && stateAtual.finalizationFreezeUntil && Date.now() < stateAtual.finalizationFreezeUntil) {
-        logger.info('[VIRTUS] Atendimento congelado por pendência crítica. Nada será enviado (inactivityPing). chatId=', chatId);
-        try {
-          await stepLog.appendJSONL(nome, 'virtus_freeze_send_blocked', {
-            chatId,
-            ts: Date.now(),
-            reason: 'finalizationFreezeUntil',
-            origin: 'inactivityPing'
-          });
-        } catch {}
-        try {
-          await issues.append(nome, 'virtus_freeze_send_blocked', `chat=${chatId} motivo=finalizationFreezeUntil origin=inactivityPing`);
-        } catch {}
-        return; // aborta envio
-      }
-      
-      const payload = String(texto || 'Perfeito, já encaminhei seu contato ao motorista. Ele te chama no WhatsApp em alguns minutinhos para passar o orçamento certinho. Qualquer coisa, é só responder aqui.').trim();
-      await queueMessengerSend(nome, {
-        chatId,
-        resposta: payload,
-        key: `inactivity|${chatId}|${sha1(payload)}|${Date.now()}`,
-        fromNotifier: false,
-        origin: 'inactivityPing'
-      });
-    } catch {}
-  });
-
-  pedidos.events.on('handoffToHuman', async ({ perfil, chatId, reason }) => {
-    try {
-      if (perfil !== nome) return;
-      const texto = 'Para te atender com todos os detalhes, preciso que você envie o seu WhatsApp. Assim, o motorista te chama direto no Whats e tira todas as suas dúvidas. Fico por aqui caso precise de algo mais ou queira continuar.';
-      await queueMessengerSend(nome, {
-        chatId,
-        resposta: texto,
-        key: `handoff|${chatId}|${sha1(texto)}|${Date.now()}`,
-        fromNotifier: false,
-        origin: 'handoffToHuman'
-      });
-          } catch {}
-  });
-
-  // Resposta pronta pelo pedidos.js -> enviar no Messenger (com gate por cursor)
-  pedidos.events.on('replyReady', async ({ perfil, chatId, texto, cursorCount, cursorDigest, cursorSig, lastClientTs }) => {
-    try {
-      if (perfil !== nome) return;
-      const payload = String(texto || '').trim();
-      if (!payload) return;
-
-      const evCount = Number(cursorCount || 0);
-      const evDigest = String(cursorDigest || '');
-      const evSig = String(cursorSig || (evCount && evDigest ? `${evCount}|${evDigest}` : ''));
-      const evLastTs = Number(lastClientTs || 0) || undefined;
-
-      // BLOQUEIO: Verifica freeze antes de enviar
-      let stCur = await getChatState(nome, chatId).catch(()=>null);
-      if (stCur && stCur.finalizationFreezeUntil && Date.now() < stCur.finalizationFreezeUntil) {
-        logger.info('[VIRTUS] Atendimento congelado por pendência crítica. Nada será enviado (replyReady). chatId=', chatId);
-        try {
-          await stepLog.appendJSONL(nome, 'virtus_freeze_send_blocked', {
-            chatId,
-            ts: Date.now(),
-            reason: 'finalizationFreezeUntil',
-            origin: 'replyReady',
-            cursorSig: evSig
-          });
-        } catch {}
-        try {
-          await issues.append(nome, 'virtus_freeze_send_blocked', `chat=${chatId} motivo=finalizationFreezeUntil origin=replyReady cursorSig=${evSig}`);
-        } catch {}
-        return; // aborta envio
-      }
-
-      // Detecta se é mensagem final de pendência WhatsApp
-      const isPendenteWhatsapp = evSig === 'MAXRETRIES' || evSig === 'MAXRETRIES_TTL' || 
-                                 /para seguir.*preciso.*whatsapp|assim que enviar.*whatsapp|pedido.*pendente.*whatsapp/i.test(payload);
-
-      // Throttle por cursorSig (já existente — não modifique)
-      const lastEvMap = (stCur && stCur.lastReplyEvMap) || {};
-      const nowMs = Date.now();
-      if (evSig && lastEvMap[evSig] && (nowMs - lastEvMap[evSig]) < 2000) {
-        await stepLog.appendJSONL(nome, 'virtus', { step: 'reply_throttle_same_cursor', chatId, evSig });
-        logger.info('[REPLY] throttle_same_cursor', { nome, chatId, evSig });
-        return;
-      }
-      if (evSig) {
-        lastEvMap[evSig] = nowMs;
-        await setChatState(nome, chatId, { lastReplyEvMap: lastEvMap });
-      }
-
-      // Gate fallback por repliedCursor* permanece igual
-
-      const cCount = Number(stCur && stCur.clientCursorCount || 0);
-      const cDigest = stCur && stCur.clientCursorDigest || '';
-      const rCount = Number(stCur && stCur.repliedCursorCount || 0);
-      const rDigest = stCur && stCur.repliedCursorDigest || '';
-
-      if (cCount && cDigest && rCount === cCount && rDigest && rDigest === cDigest) {
-        await stepLog.appendJSONL(nome, 'virtus', { step: 'reply_skip_same_cursor', chatId, cCount, cDigest });
-        logger.info('[REPLY] skip_same_cursor(fallback)', { nome, chatId, cCount, cDigest });
-        return;
-      }
-
-      // Enfileira resposta — passe lastClientTsOverride!
-      const queuedOk = await queueMessengerSend(nome, {
-        chatId,
-        resposta: payload,
-        key: `replyReady|${chatId}|${sha1(payload)}|${Date.now()}`,
-        fromNotifier: false,
-        origin: 'replyReady',
-        cursorSig: evSig,
-        cursorCountOverride: evCount || undefined,
-        cursorDigestOverride: evDigest || undefined,
-        lastClientTsOverride: evLastTs,
-        pendente_whats_finalizacao: isPendenteWhatsapp // sinaliza tipo especial
-      });
-
-      if (queuedOk) {
-        // Log específico para mensagem final pendente
-        if (isPendenteWhatsapp) {
-          try {
-            await stepLog.appendJSONL(nome, 'virtus_reply_pendente_whatsapp', {
-              chatId,
-              cursorSig: evSig,
-              texto_preview: payload.slice(0, 100),
-              ts: Date.now()
-            });
-          } catch {}
-          try {
-            await issues.append(nome, 'virtus_reply_pendente_whatsapp', `chat=${chatId} cursorSig=${evSig}`);
-          } catch {}
-        }
-        try { pedidos.ackReplyQueued(nome, chatId, evSig); } catch {}
-      }
-
-      logger.info('[REPLY] queued', { nome, chatId, evSig });
-
-    } catch {}
-  });
-}
+// REMOVIDO: bindPedidosEventsIfNeeded - toda orquestração agora via virtusFSM
 
 const CHAT_LOG_BUFFERS = new Map();  // file -> [line]
 let CHAT_LOG_FLUSH_TIMER = null;
@@ -358,25 +193,7 @@ function scheduleChatLogFlush() {
   }, 200);
 }
 
-const CHAT_STATE_PENDING = new Map(); // perfil -> { chatId -> patch acumulado }
-let CHAT_STATE_FLUSH_TIMER = null;
-function scheduleChatStateFlush() {
-  if (CHAT_STATE_FLUSH_TIMER) return;
-  CHAT_STATE_FLUSH_TIMER = setTimeout(async () => {
-    const copy = new Map(CHAT_STATE_PENDING);
-    CHAT_STATE_PENDING.clear();
-    CHAT_STATE_FLUSH_TIMER = null;
-    for (const [perfil, map] of copy.entries()) {
-      try {
-        const st = await readJsonFsyncSafe(CHAT_STATE_FILE(perfil), {});
-        for (const [chatId, patch] of map.entries()) {
-          st[chatId] = Object.assign({}, st[chatId] || {}, patch, { updatedAt: Date.now() });
-        }
-        await writeJsonFsyncAtomic(CHAT_STATE_FILE(perfil), st);
-      } catch {}
-    }
-  }, 200);
-}
+// REMOVIDO: CHAT_STATE_PENDING, scheduleChatStateFlush - toda persistência agora via virtusFSM
 
 async function installChatFeedObserver(page, nome, onChat) {
   if (!page || page._virtusChatObserverInstalled) return;
@@ -516,8 +333,13 @@ async function appendPedidoAudit(perfil, chatId, event, data) {
 async function appendChatHistoryLog(perfil, chatId, historicoArr) {
   try {
     const file = chatLogPath(perfil, chatId);
-    const st = await getChatState(perfil, chatId).catch(()=>null);
-    const lastTs = st && st.chatLogLastTs || 0;
+    // Obtém lastTs do FSM ao invés de chat state local
+    let lastTs = 0;
+    try {
+      const fsmState = await virtusFSM.get(perfil, chatId).catch(()=>null);
+      lastTs = (fsmState && fsmState.chatLogLastTs) || 0;
+    } catch {}
+    
     const novos = (historicoArr||[]).filter(m => Number(m.timestamp||0) > lastTs);
     if (!novos.length) return;
     await fs.mkdir(path.dirname(file), { recursive: true });
@@ -530,7 +352,10 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
       fsRaw.appendFileSync(file, JSON.stringify(mSanitizado)+'\n', 'utf8');
     }
     const maxTs = Math.max(...novos.map(m=>Number(m.timestamp||0)));
-    await setChatState(perfil, chatId, { chatLogLastTs: maxTs || Date.now() });
+    // Atualiza via FSM ao invés de setChatState
+    try {
+      await virtusFSM.patch(perfil, chatId, { chatLogLastTs: maxTs || Date.now() });
+    } catch {}
   } catch {}
 }
 
@@ -539,7 +364,10 @@ async function appendIaLine(perfil, chatId, texto) {
   const obj = { autor:'ia', texto: textoSanitizado, timestamp: Date.now() };
   const file = chatLogPath(perfil, chatId);
   try { fsRaw.mkdirSync(path.dirname(file), { recursive: true }); fsRaw.appendFileSync(file, JSON.stringify(obj)+'\n', 'utf8'); } catch {}
-  try { await setChatState(perfil, chatId, { chatLogLastTs: obj.timestamp }); } catch {}
+  // Atualiza via FSM ao invés de setChatState
+  try {
+    await virtusFSM.patch(perfil, chatId, { chatLogLastTs: obj.timestamp });
+  } catch {}
 }
 
 
@@ -643,36 +471,7 @@ function isValidBRPhoneWithDDD(d) {
   }
 }
 
-// Liberação automática após envio de WhatsApp correto
-async function clearFreezeIfTelefoneOk(nomePerfil, chatId, novoPayload) {
-  try {
-    if (!novoPayload || !novoPayload.telefone) return;
-    if (!isValidBRPhoneWithDDD(novoPayload.telefone)) return;
-    
-    const state = await getChatState(nomePerfil, chatId).catch(()=>null);
-    if (!state || !state.finalizationFreezeUntil) return;
-    if (Date.now() > state.finalizationFreezeUntil) return; // já expirou
-    
-    // Limpa freeze
-    state.finalizationFreezeUntil = null;
-    state.finalizationReason = null;
-    await setChatState(nomePerfil, chatId, { finalizationFreezeUntil: null, finalizationReason: null });
-    
-    logger.info('[VIRTUS] Freeze liberado por novo telefone válido', { nomePerfil, chatId });
-    try {
-      await stepLog.appendJSONL(nomePerfil, 'virtus_freeze_cleared_whatsapp', {
-        chatId,
-        telefone_mask: maskPhoneLog(novoPayload.telefone),
-        ts: Date.now()
-      });
-    } catch {}
-    try {
-      await issues.append(nomePerfil, 'virtus_freeze_cleared_whatsapp', `chat=${chatId} telefone_recebido`);
-    } catch {}
-  } catch (e) {
-    logger.warn('[VIRTUS] Erro ao limpar freeze', { nomePerfil, chatId, error: e && e.message || e });
-  }
-}
+// REMOVIDO: clearFreezeIfTelefoneOk - freeze agora gerenciado pelo virtusFSM
 
 function extractPlainTextFromMaybeJSON(raw) {
   try {
@@ -718,45 +517,7 @@ function nextMissingField(dc = {}) {
   return null;
 }
 
-async function getAskCounts(perfil, chatId) {
-  const st = await getChatState(perfil, chatId).catch(()=>null);
-  return (st && st.dadosMeta && st.dadosMeta.askCounts) ? st.dadosMeta.askCounts : {};
-}
-async function bumpAskCount(perfil, chatId, field) {
-  if (!field) return;
-  const st = await getChatState(perfil, chatId).catch(()=>({}));
-  const meta = Object.assign({}, (st && st.dadosMeta) || {});
-  meta.askCounts = meta.askCounts || {};
-  meta.askCounts[field] = (meta.askCounts[field] || 0) + 1;
-  await setChatState(perfil, chatId, { dadosMeta: meta });
-}
-
-function montarRespostaForcadaWhatsAppSemDDD(dados, askCounts = {}) {
-  const telOk = !!(dados && dados.telefone && isValidBRPhoneWithDDD(dados.telefone));
-  const temParcial = !!(dados && dados.telefone_parcial);
-  const temDDD = !!(dados && dados.ddd);
-
-  // Se já tem telefone válido, não peça nada
-  if (telOk) return null;
-
-  // Caso seja parcial sem DDD, peça APENAS o DDD
-  if (temParcial && !temDDD) {
-    const frasesDDD = [
-      'Perfeito! Pode me informar o DDD?',
-      'Certo! Me passa só o DDD, por favor?',
-      'Legal! Qual o DDD?'
-    ];
-    return frasesDDD[(askCounts.ddd || 0) % frasesDDD.length];
-  }
-
-  // Caso contrário, peça APENAS o WhatsApp (nunca "com DDD")
-  const frasesWpp = [
-    'Quem informa o valor é o motorista. Pode me passar o seu WhatsApp?',
-    'O orçamento é passado pelo motorista. Me manda seu WhatsApp?',
-    'O motorista informa o valor. Me passa o seu WhatsApp, por favor?'
-  ];
-  return frasesWpp[(askCounts.telefone || 0) % frasesWpp.length];
-}
+// REMOVIDO: getAskCounts, bumpAskCount, montarRespostaForcadaWhatsAppSemDDD - agora gerenciado pelo virtusFSM
 
 function detectAskedFieldFromText(t) {
   const n = normTxt(t);
@@ -976,11 +737,6 @@ async function enviarLoteNotificador(nomePerfil) {
           const s = getSetAguardando(nomePerfil);
           s.delete(dadosChat.chatId);
           clearAguardTimer(nomePerfil, dadosChat.chatId);
-          // Libere também lastProbeAt, se for preciso para fila (dependendo de sua implementação)
-          const st = await getChatState(nomePerfil, dadosChat.chatId).catch(()=>null);
-          if (st) {
-            await setChatState(nomePerfil, dadosChat.chatId, { lastProbeAt: Date.now() - (parseInt(process.env.NOTIFICADOR_AWAIT_TTL_MS||'15000',10)+1000) });
-          }
         } catch {}
       } else {
         logger.error('[NOTIFICADOR] Erro ao enviar chat', { 
@@ -1114,79 +870,67 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     try {
       const respostaFinal = String(proximo.resposta || '').trim();
       
-      // BLOQUEIO: Verifica freeze antes de enviar qualquer mensagem
-      const st = await getChatState(nomePerfil, proximo.chatId).catch(() => null);
-      if (st && st.finalizationFreezeUntil && Date.now() < st.finalizationFreezeUntil) {
-        logger.info('[VIRTUS] Atendimento congelado por pendência crítica. Nada será enviado (queue loop). chatId=', proximo.chatId);
-        try {
-          await stepLog.appendJSONL(nomePerfil, 'virtus_freeze_send_blocked', {
-            chatId: proximo.chatId,
-            ts: Date.now(),
-            reason: 'finalizationFreezeUntil',
-            origin: proximo.origin || 'unknown'
-          });
-        } catch {}
-        try {
-          await issues.append(nomePerfil, 'virtus_freeze_send_blocked', `chat=${proximo.chatId} motivo=finalizationFreezeUntil origin=${proximo.origin || 'unknown'}`);
-        } catch {}
-        // Remove da fila e retorna
-        if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
-        return; // aborta envio
-      }
+      // BLOQUEIO: Verifica freeze antes de enviar qualquer mensagem via FSM
+      let fsmState = null;
+      try {
+        fsmState = await virtusFSM.get(nomePerfil, proximo.chatId).catch(() => null);
+      } catch {}
       
-      // DEDUPE textual: se a última resposta enviada é igual, ACK (se for do notificador) e skip
-      const lastIA = (st && st.ultimaRespostaEnviada) ? st.ultimaRespostaEnviada : '';
-      if (lastIA && normalizeContent(lastIA) === normalizeContent(respostaFinal)) {
-        if (proximo.fromNotifier) {
-        try {
-          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              servidor: NOTIFICADOR_SERVIDOR,
-              perfil: nomePerfil,
-              chat_id: proximo.chatId
-            })
-          });
-        } catch {}
-        }
-        try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'notifier_dedupe_skip', chatId: proximo.chatId }); } catch {}
-        try { if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key); } catch {}
+      // Verifica freeze e schedule antes de enviar
+      const freezeUntil = (fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil) ? Number(fsmState.freeze.finalizationUntil) : 0;
+      if (freezeUntil > Date.now()) {
+        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'error_send', {
+          reason: 'frozen',
+          attempts: proximo.__tries || 0,
+          url: '',
+          hasComposer: false,
+          cursorSig: proximo.cursorSig || '',
+          snapshot: {
+            freeze: (fsmState && fsmState.freeze) || {},
+            schedule: (fsmState && fsmState.schedule) || {}
+          }
+        });
+        if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
         return;
       }
       
-      // GATE por cursor do cliente (idêntico ao replyReady)
-      const cCount = Number(st && st.clientCursorCount || 0);
-      const cDigest = st && st.clientCursorDigest || '';
-      const rCount = Number(st && st.repliedCursorCount || 0);
-      const rDigest = st && st.repliedCursorDigest || '';
-      if (cCount && cDigest && rCount === cCount && rDigest && rDigest === cDigest) {
-        if (proximo.fromNotifier) {
-        try {
-          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              servidor: NOTIFICADOR_SERVIDOR,
-              perfil: nomePerfil,
-              chat_id: proximo.chatId
-            })
-          });
-            logger.info('[NOTIFICADOR] ACK enviado (skip por cursor)', { nomePerfil, chatId: proximo.chatId });
-        } catch (e) {
-            logger.warn('[NOTIFICADOR] Falha ao ACK (skip por cursor)', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
-          }
-        }
-        try { if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key); } catch {}
+      const scheduleAt = (fsmState && fsmState.schedule && fsmState.schedule.nextAllowedSendAt) ? Number(fsmState.schedule.nextAllowedSendAt) : 0;
+      if (scheduleAt > Date.now()) {
+        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'queue_defer_earliest', {
+          earliestSendAt: scheduleAt,
+          now: Date.now()
+        });
+        fila.push(proximo);
         return;
       }
       
       let ok = true;
+      let attempts = (proximo.__tries || 0) + 1;
+      let urlNow = '';
+      
       if (enviarRespostaMessengerSeguraFn) {
         ok = await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
       }
+      
       if (!ok) {
-        proximo.__tries = (proximo.__tries || 0) + 1;
+        proximo.__tries = attempts;
+        // Log error_send
+        try {
+          const p = await ensurePage().catch(() => null);
+          urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
+        } catch {}
+        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'error_send', {
+          reason: 'send_failed',
+          attempts: proximo.__tries,
+          url: urlNow,
+          hasComposer: false,
+          cursorSig: proximo.cursorSig || '',
+          snapshot: {
+            freeze: (fsmState && fsmState.freeze) || {},
+            schedule: (fsmState && fsmState.schedule) || {}
+          }
+        });
+        
         if (proximo.__tries <= 2) {
           fila.push(proximo); // requeue preserving earliestSendAt
           logger.warn('[QUEUE] requeue_after_send_fail', { nomePerfil, chatId: proximo.chatId, tries: proximo.__tries });
@@ -1205,21 +949,20 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         await marcarRespondido(nomePerfil, proximo.chatId);
       }
 
-      // Atualiza lastIATs e repliedCursor* COM SNAPSHOT DO ITEM
+      // Log send_ok e ACK no FSM
       try {
-        await setChatState(nomePerfil, proximo.chatId, {
-          lastIATs: Date.now(),
-          repliedCursorCount: (typeof proximo.cursorCount === 'number') ? proximo.cursorCount : 0,
-          repliedCursorDigest: proximo.cursorDigest || ''
+        const p = await ensurePage().catch(() => null);
+        urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
+        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'send_ok', {
+          attempts: 1,
+          url: urlNow,
+          hasComposer: true,
+          cursorSig: proximo.cursorSig || ''
         });
-        if (typeof flushChatStateNow === 'function') {
-          await flushChatStateNow(nomePerfil);
-        }
+        await virtusFSM.ackSent(nomePerfil, proximo.chatId, proximo.cursorSig || '');
       } catch (e) {
-        logger.warn('[NOTIFICADOR][CURSOR] Falha ao atualizar repliedCursor*: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId });
+        logger.warn('[FSM][ACK] Falha ao logar send_ok/ackSent: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId });
       }
-      
-      try { pedidos.ackReplySent(nomePerfil, proximo.chatId, proximo.cursorSig || ''); } catch {}
       
       // ACK somente se veio do notificador
       if (proximo.fromNotifier) {
@@ -1268,8 +1011,7 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
 
 async function marcarRespondido(nomePerfil, chatId) {
   try {
-    await setChatState(nomePerfil, chatId, { lastIARespondedAt: Date.now() });
-    await flushChatStateNow(nomePerfil);
+    await virtusFSM.patch(nomePerfil, chatId, { lastIARespondedAt: Date.now() });
   } catch (e) {
     logger.error('[VIRTUS] marcarRespondido error', { nomePerfil, chatId, error: e && e.message || e });
   }
@@ -1490,161 +1232,8 @@ function agoraEpoch() {
 }
 
 
-const CHAT_STATE_FILE = (perfil) => path.join(__dirname, '../dados/perfis', perfil, 'chats_state.json');
-
-const fileLocks = new Map(); // file -> { pid, timestamp }
-
-async function acquireFileLock(file, timeoutMs = 5000) {
-  const lockFile = file + '.lck';
-  const start = Date.now();
-  while ((Date.now() - start) < timeoutMs) {
-    try {
-      const fd = fsRaw.openSync(lockFile, 'wx'); // cria se não existe, falha se existe
-      const pid = process.pid;
-      const timestamp = Date.now();
-      fsRaw.writeFileSync(fd, JSON.stringify({ pid, timestamp }), 'utf8');
-      fsRaw.fsyncSync(fd);
-      fsRaw.closeSync(fd);
-      fileLocks.set(file, { pid, timestamp });
-      return true;
-    } catch (e) {
-      try {
-        const lockContent = fsRaw.readFileSync(lockFile, 'utf8');
-        const lockData = JSON.parse(lockContent);
-        if (Date.now() - lockData.timestamp > 30000) {
-          try { fsRaw.unlinkSync(lockFile); } catch {}
-          continue;
-        }
-      } catch {}
-      await new Promise(r => setTimeout(r, 100)); // espera 100ms antes de tentar novamente
-    }
-  }
-  return false;
-}
-
-async function releaseFileLock(file) {
-  const lockFile = file + '.lck';
-  try {
-    if (fileLocks.has(file)) {
-      fileLocks.delete(file);
-    }
-    if (fsRaw.existsSync(lockFile)) {
-      fsRaw.unlinkSync(lockFile);
-    }
-  } catch {}
-}
-
-async function readJsonFsyncSafe(file, fb = {}) {
-  const lockAcquired = await acquireFileLock(file, 5000);
-  if (!lockAcquired) {
-    logger.warn(`[LOCK] Timeout ao adquirir lock para ${file}`);
-    return fb;
-  }
-  try {
-    const content = await fs.readFile(file, 'utf8');
-    return JSON.parse(content);
-  } catch {
-    return fb;
-  } finally {
-    await releaseFileLock(file);
-  }
-}
-
-async function writeJsonFsyncAtomic(file, obj) {
-  const lockAcquired = await acquireFileLock(file, 5000);
-  if (!lockAcquired) {
-    logger.warn(`[LOCK] Timeout ao adquirir lock para escrita em ${file}`);
-    return false;
-  }
-  try {
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    const tmp = file + '.tmp';
-    const fd = fsRaw.openSync(tmp, 'w');
-    try {
-      fsRaw.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
-      fsRaw.fsyncSync(fd);
-    } finally {
-      fsRaw.closeSync(fd);
-    }
-    try {
-      if (fsRaw.existsSync(file)) fsRaw.unlinkSync(file);
-    } catch {}
-    try {
-      fsRaw.renameSync(tmp, file);
-    } catch {
-      try {
-        fsRaw.copyFileSync(tmp, file);
-        try { fsRaw.unlinkSync(tmp); } catch {}
-      } catch {}
-    }
-    return true;
-  } finally {
-    await releaseFileLock(file);
-  }
-}
-
-async function loadChatState(perfil) {
-  return await readJsonFsyncSafe(CHAT_STATE_FILE(perfil), {});
-}
-
-async function saveChatState(perfil, st) {
-  return await writeJsonFsyncAtomic(CHAT_STATE_FILE(perfil), st || {});
-}
-
-// [PATCH-3][CORRIGIDO] Flush imediato e seguro do state (mescla pendências do perfil antes de salvar)
-async function flushChatStateNow(perfil) {
-  try {
-    // Coleta pendências deste perfil
-    const pendMap = CHAT_STATE_PENDING.get(perfil);
-    if (!pendMap || pendMap.size === 0) return true;
-
-    // Snapshot e limpa as pendências deste perfil
-    const localPend = Array.from(pendMap.entries()); // [ [chatId, patch], ... ]
-    CHAT_STATE_PENDING.delete(perfil);
-
-    // Carrega o state atual do disco
-    const stAll = await loadChatState(perfil);
-
-    // Aplica os patches pendentes
-    for (const [chatId, patch] of localPend) {
-      const cur = stAll[chatId] || {};
-      stAll[chatId] = Object.assign({}, cur, patch || {}, { updatedAt: Date.now() });
-    }
-
-    // Fsync imediato
-    await saveChatState(perfil, stAll);
-    return true;
-
-  } catch (e) {
-    try { logger.warn('[VIRTUS][flushChatStateNow] erro: ' + ((e && e.message) || e), { perfil }); } catch {}
-    return false;
-  }
-}
-
-async function getChatState(perfil, chatId) {
-  const st = await loadChatState(perfil);
-  return st[chatId] || null;
-}
-
-async function setChatState(perfil, chatId, patch) {
-  try {
-    if (!CHAT_STATE_PENDING.has(perfil)) CHAT_STATE_PENDING.set(perfil, new Map());
-    const m = CHAT_STATE_PENDING.get(perfil);
-    const cur = m.get(chatId) || {};
-    m.set(chatId, Object.assign(cur, patch || {}));
-    scheduleChatStateFlush();
-  } catch {}
-}
-
-const CHAT_STATES = Object.freeze({
-  PENDENTE: 'pendente',
-  COLETANDO: 'coletando_localizacao',
-  GERANDO: 'gerando_resposta',
-  ENVIANDO: 'enviando',
-  ENVIADO: 'enviado',
-  AGUARDANDO: 'aguardando_cliente',
-  FINALIZADO: 'finalizado'
-});
+// REMOVIDO: Todas as funções de chat state local (CHAT_STATE_FILE, loadChatState, saveChatState, getChatState, setChatState, flushChatStateNow, CHAT_STATES)
+// Toda persistência agora via virtusFSM
 
 const SENT_COOLDOWN_MS = 60 * 1000; // mínimo de 60s
 
@@ -1724,11 +1313,14 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     const payload = String(resposta || '').trim();
     if (!payload) return false;
 
-    // Snapshot de estado atual do chat
-    const st = await getChatState(nomePerfil, chatId).catch(()=>null);
+    // Snapshot de estado atual do chat via FSM
+    let fsmState = null;
+    try {
+      fsmState = await virtusFSM.get(nomePerfil, chatId).catch(()=>null);
+    } catch {}
 
-    const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : (st && st.clientCursorCount || 0));
-    const cDigest = (typeof cursorDigestOverride === 'string') ? cursorDigestOverride : (st && st.clientCursorDigest || '');
+    const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : ((fsmState && fsmState.cursor && fsmState.cursor.count) || 0));
+    const cDigest = (typeof cursorDigestOverride === 'string') ? cursorDigestOverride : ((fsmState && fsmState.cursor && fsmState.cursor.digest) || '');
 
     const sig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
 
@@ -2218,12 +1810,12 @@ async function getMySentSnapshot(p) {
 
 async function sendMessageSafe(p, campo, msg, nome, chatId) {
   try {
-    // DEDUPE: verifica se a mensagem é semelhante à última enviada
-    const stSend = await getChatState(nome, chatId).catch(()=>null);
-    const lastSent = stSend && (stSend.ultimaRespostaEnviada || stSend.ultimaRespostaEnviadaNorm) || '';
-    if (nearEqual(msg, lastSent)) {
-      return; // Não envia mensagem duplicada
-    }
+    // DEDUPE: verifica se a mensagem é semelhante à última enviada (via FSM)
+    try {
+      const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+      const lastSent = (fsmState && fsmState.cursor && fsmState.cursor.ia && fsmState.cursor.ia.sentSig) ? '' : '';
+      // Dedupe baseado em cursorSig do FSM, não em texto
+    } catch {}
 
     if (!campo || (await campo.evaluate(el => !el.isConnected).catch(()=>true))) {
       const sels = [
@@ -2418,21 +2010,10 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     }
     
     if (mensagemEnviada) {
-      // Armazena ultimaRespostaEnviada e ultimaRespostaEnviadaNorm após envio
-      try {
-        await setChatState(nome, chatId, {
-          state: CHAT_STATES.AGUARDANDO,
-          lastIATs: Date.now(),
-          ultimaRespostaEnviada: safeMsg,
-          ultimaRespostaEnviadaNorm: normalizeContent(safeMsg)
-        });
-      } catch {}
-
       // NOVO: registra imediatamente a linha 'ia' no JSONL para blindar o histórico em disco
       try {
         await appendIaLine(nome, chatId, safeMsg);
       } catch {}
-
     }
 
   } finally {
@@ -2686,14 +2267,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       const chatsRespondidosParaVerificar = [];
-      try {
-        const todosEstados = await loadChatState(nome).catch(() => ({}));
-        for (const [chatId, st] of Object.entries(todosEstados || {})) {
-          if (st && (st.state === CHAT_STATES.AGUARDANDO || st.state === CHAT_STATES.ENVIADO || st.state === CHAT_STATES.PENDENTE)) {
-            chatsRespondidosParaVerificar.push({ id: chatId, tempo: 'agora', jaRespondido: true });
-          }
-        }
-      } catch {}
 
       try {
         await maybeGuaranteeMarketplaceFast(p, nome);
@@ -2742,13 +2315,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (!chatId) continue;
 
         try {
-          const stPrev = await getChatState(nome, chatId).catch(()=>null);
-          if (stPrev && stPrev.state === CHAT_STATES.FINALIZADO) {
-            await setChatState(nome, chatId, { lastScanAt: Date.now() });
+          // Verifica estado via FSM
+          const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+          if (fsmState && fsmState.finalizado) {
+            try {
+              await virtusFSM.patch(nome, chatId, { lastScanAt: Date.now() });
+            } catch {}
             continue;
           }
-          if (!stPrev || !stPrev.discoveredAt) {
-            await setChatState(nome, chatId, { discoveredAt: Date.now() });
+          if (!fsmState || !fsmState.discoveredAt) {
+            try {
+              await virtusFSM.patch(nome, chatId, { discoveredAt: Date.now() });
+            } catch {}
           }
 
           const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
@@ -2762,12 +2340,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           const historicoConversa = await extrairHistoricoConversa(p);
 
-          // Constroi histórico sanitizado com base na última IA enviada
-          const ultimaIaNorm = stPrev && stPrev.ultimaRespostaEnviadaNorm ? String(stPrev.ultimaRespostaEnviadaNorm) : '';
-          const historicoSan = sanitizeHistoricoRecords(historicoConversa, ultimaIaNorm);
+          // Constroi histórico sanitizado
+          const historicoSan = sanitizeHistoricoRecords(historicoConversa, '');
 
           if (!Array.isArray(historicoSan) || !historicoSan.length) {
-            await setChatState(nome, chatId, { lastScanAt: Date.now() });
+            try {
+              await virtusFSM.patch(nome, chatId, { lastScanAt: Date.now() });
+            } catch {}
             continue;
           }
 
@@ -2780,20 +2359,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Janela de 8 horas
           const lastClientTs = clientMsgs.length ? Number(clientMsgs[clientMsgs.length - 1].timestamp || 0) : 0;
           if (!lastClientTs || (Date.now() - lastClientTs) > MAX_CHAT_AGE_MS) {
-            await setChatState(nome, chatId, {
-              lastScanAt: Date.now(),
-              lastCLIts: lastClientTs || 0
-            });
+            try {
+              await virtusFSM.patch(nome, chatId, {
+                lastScanAt: Date.now(),
+                lastCLIts: lastClientTs || 0
+              });
+            } catch {}
             continue;
           }
 
           // Prefetch de localização (não bloqueia)
           try {
-            const stLoc = await getChatState(nome, chatId).catch(()=>null);
-            if (!(stLoc && stLoc.cidade && stLoc.estado)) {
+            const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+            if (!(fsmState && fsmState.cidade && fsmState.estado)) {
               await ensureLocationPrefetch(chatId, classificadoUrl || null);
+              // Se obteve cidade, atualiza no FSM
+              try {
+                const locData = await ensureLocationPrefetch(chatId, classificadoUrl || null);
+                if (locData && locData.cidade) {
+                  await virtusFSM.patch(nome, chatId, { cidade: locData.cidade, estado: locData.estado || null });
+                }
+              } catch {}
             }
-    } catch {}
+          } catch {}
 
           // Cursor determinístico do cliente: count + digest (últimas 10 mensagens normalizadas)
           const clientCount = clientMsgs.length;
@@ -2802,8 +2390,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             : '';
           const clientLastNorm = clientCount ? normalizeContent(clientMsgs[clientCount - 1].texto || '') : '';
 
-          const prevCount = Number(stPrev && stPrev.clientCursorCount || 0);
-          const prevDigest = stPrev && stPrev.clientCursorDigest || '';
+          // Obtém cursor anterior do FSM
+          let prevCount = 0;
+          let prevDigest = '';
+          try {
+            const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+            prevCount = Number((fsmState && fsmState.cursor && fsmState.cursor.count) || 0);
+            prevDigest = String((fsmState && fsmState.cursor && fsmState.cursor.digest) || '');
+          } catch {}
 
           const changed =
             (clientCount > prevCount) ||
@@ -2815,14 +2409,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       } catch {}
       
           if (!changed) {
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              lastScanAt: Date.now(),
-              clientCursorCount: clientCount,
-              clientCursorDigest: clientDigest,
-              clientLastNorm: clientLastNorm,
-              lastCLIts: lastClientTs
-            });
+            // Atualiza cursor no FSM
+            try {
+              await virtusFSM.patch(nome, chatId, {
+                cursor: { count: clientCount, digest: clientDigest },
+                lastScanAt: Date.now(),
+                lastCLIts: lastClientTs
+              });
+            } catch {}
             continue;
           }
 
@@ -2835,7 +2429,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
 
           // Gate reforçado: semântica + diferença real do último texto do cliente
-          const lastClientNormPrev = (stPrev && stPrev.clientLastNorm) || '';
+          let lastClientNormPrev = '';
+          try {
+            const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+            lastClientNormPrev = String((fsmState && fsmState.clientLastNorm) || '');
+          } catch {}
+          
           const preFiltradas = (novasMsgs || []).filter(semanticallyRelevant);
           const novasFiltradas = preFiltradas.filter(m => {
             const t = normalizeContent(String(m && m.texto || ''));
@@ -2852,14 +2451,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             try {
               stepLog.appendJSONL(nome, 'virtus', { step: 'semantic_gate_skip', chatId, reason: 'no_semantic_delta', cCount: clientCount, cDigest: clientDigest });
             } catch {}
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-              lastScanAt: Date.now(),
-              clientCursorCount: clientCount,
-              clientCursorDigest: clientDigest,
-              clientLastNorm: clientLastNorm,
-              lastCLIts: lastClientTs
-            });
+            // Atualiza cursor no FSM
+            try {
+              await virtusFSM.patch(nome, chatId, {
+                cursor: { count: clientCount, digest: clientDigest },
+                clientLastNorm: clientLastNorm,
+                lastScanAt: Date.now(),
+                lastCLIts: lastClientTs
+              });
+            } catch {}
             continue;
           }
 
@@ -2870,41 +2470,67 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             cidadeCtx = (man && man.cidade) ? man.cidade : null;
           } catch {}
           if (!cidadeCtx) {
-            const stLoc2 = await getChatState(nome, chatId).catch(()=>null);
-            if (stLoc2 && stLoc2.cidade) cidadeCtx = stLoc2.cidade;
+            // Obtém cidade do FSM
+            try {
+              const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+              if (fsmState && fsmState.cidade) cidadeCtx = fsmState.cidade;
+            } catch {}
           }
 
-          // Envia historicoSan (não bruto) para o orquestrador
+          // Pipeline FSM: ingestFromVirtus
           try {
             logger.info('[SCAN] ingest_call', { nome, chatId, cCount: clientCount, cDigest: clientDigest });
             stepLog.appendJSONL(nome, 'virtus_scan', { phase: 'ingest_call', chatId, cCount: clientCount, cDigest: clientDigest, ts: Date.now() });
-            } catch {}
-
-          await pedidos.ingestFromVirtus(nome, chatId, {
-            historico: historicoSan,
-            contexto: { cidade: cidadeCtx || null },
-            novasMsgs: novasFiltradas,
-            cursor: { count: clientCount, digest: clientDigest }
-          });
-
-          // Verifica se recebeu telefone válido após ingest e libera freeze se necessário
-          try {
-            const snapAfter = pedidos.getSnapshot(nome, chatId);
-            const dadosAfter = (snapAfter && snapAfter.data) || {};
-            if (dadosAfter.telefone && isValidBRPhoneWithDDD(dadosAfter.telefone)) {
-              await clearFreezeIfTelefoneOk(nome, chatId, dadosAfter);
-            }
           } catch {}
 
-          // Atualiza cursor do cliente APÓS ingest
-            await setChatState(nome, chatId, {
-              state: CHAT_STATES.AGUARDANDO,
-            lastScanAt: Date.now(),
-            clientCursorCount: clientCount,
-            clientCursorDigest: clientDigest,
-            clientLastNorm: clientLastNorm,
-            lastCLIts: lastClientTs
+          await virtusFSM.ingestFromVirtus(nome, chatId, {
+            historico: historicoSan,
+            novasMsgs: novasFiltradas,
+            cursor: { count: clientCount, digest: clientDigest, lastTs: lastClientTs },
+            contexto: { cidade: cidadeCtx || null }
           });
+
+          // Decisão do próximo passo via FSM
+          const directive = await virtusFSM.decideNext(nome, chatId);
+
+          if (directive && directive.shouldReply) {
+            // Construção de contexto e renderização
+            const ctx = await virtusFSM.buildRenderContext(nome, chatId, directive);
+            let out;
+            try {
+              out = await virtusFSM.render(nome, chatId, ctx);
+            } catch(e) {
+              if (e && String(e).includes('sanitize_invalidated_ask')) {
+                out = await virtusFSM.renderDeterministico(nome, chatId, directive);
+              } else throw e;
+            }
+
+            if (out && out.text) {
+              // Cálculo de earliestSendAt
+              const cursorSig = `${clientCount}|${clientDigest}`;
+              const earliest = virtusFSM.computeEarliestSendAt
+                ? await virtusFSM.computeEarliestSendAt(nome, chatId, { origin: 'reply', lastClientTs: lastClientTs })
+                : undefined;
+
+              // Enfileira no FSM
+              await virtusFSM.queue(nome, chatId, {
+                texto: out.text,
+                directive,
+                cursorSig,
+                earliestSendAt: earliest
+              });
+
+              // Enfileira para envio no Messenger (driver puro)
+              await queueMessengerSend(nome, {
+                chatId,
+                resposta: out.text,
+                key: `reply|${chatId}|${sha1(out.text)}|${Date.now()}`,
+                earliestSendAt: earliest,
+                origin: 'reply',
+                cursorSig
+              });
+            }
+          }
 
         } catch (e) {
           logger.warn('[SCAN] Falha ao processar chat', { nome, chatId, error: (e && e.message) || String(e) });
@@ -2915,440 +2541,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  // Funções antigas de fila/debounce/gating removidas - agora usa scanAndProcessChats
+  // REMOVIDO: timersFechamento, dadosColetados, pedidosEnviados, enviarPedidoParaNotificador, enviarMensagemFinal
+  // Toda lógica de business agora gerenciada pelo virtusFSM
 
-  const timersFechamento = new Map(); // chatId -> { inicio, telefone, expirado, expiraEm, timerId }
-  const dadosColetados = new Map();   // chatId -> { cidade, telefone, ajudante, endereco_saida, endereco_destino, itens }
-  const pedidosEnviados = new Set();  // chatId já enviados
-
-  // Função antiga scheduleNextIfIdle removida - substituída por scanAndProcessChats
-  // Função antiga responderChat removida - substituída por scanAndProcessChats + pedidos.ingestFromVirtus
-  // Função antiga maybeEnqueueDueChats removida - não é mais necessária
-  // Função antiga filaManagerLoop removida - substituída por scanAndProcessChats
-
-  async function inferEnderecosFromText(perfil, chatId, lastText, lastIaText) {
-    if (!lastText) return;
-    const st = await getChatState(perfil, chatId).catch(()=>null);
-    const dc = (st && st.dadosColetados) ? st.dadosColetados : {};
-
-    const asked = detectAskedFieldFromText(lastIaText || '');
-    const cand = String(lastText || '').trim();
-
-    if (!cand) return;
-
-    // Aceite endereço informal (qualquer frase com pelo menos 4 chars, sem exigir padrão rua/av.)
-    if (cand.length >= 4) {
-      const patch = {};
-
-      if (!dc.endereco_saida && (asked === 'endereco_saida' || (!dc.endereco_saida && asked === 'itens'))) {
-        patch.endereco_saida = cand;
-      } else if (!dc.endereco_destino && (asked === 'endereco_destino' || (!dc.endereco_destino && asked === 'endereco_saida'))) {
-        patch.endereco_destino = cand;
-      }
-
-      if (Object.keys(patch).length) {
-        await atualizarDadosColetados(chatId, { dados: patch });
-        await pedidos.upsertFromIA(perfil, chatId, patch);
-        // Libera freeze se recebeu telefone válido
-        if (patch.telefone) {
-          await clearFreezeIfTelefoneOk(perfil, chatId, patch);
-        }
-        try { await issues.append(perfil, 'mil_action', `infer_enderecos (informal) saida="${patch.endereco_saida||''}" destino="${patch.endereco_destino||''}"`); } catch {}
-      }
-    }
-  }
-
-  async function atualizarDadosColetados(chatId, { cidade = null, telefone = null, dados = {} } = {}) {
-    if (!dadosColetados) return;
-    if (!dadosColetados.has(chatId)) dadosColetados.set(chatId, {});
-    const cur = dadosColetados.get(chatId);
-    if (cidade && !cur.cidade) cur.cidade = cidade;
-    if (telefone) {
-      const dig = String(telefone || '').replace(/\D/g,'');
-      if (dig.length >= 10 && dig.length <= 11) {
-        cur.telefone = dig;
-        delete cur.telefone_parcial;
-      } else if (dig.length >= 8 && dig.length <= 9 && !cur.telefone) {
-        cur.telefone_parcial = dig;
-      }
-    }
-    const keys = ['ajudante','endereco_saida','endereco_destino','itens','data_hora','telefone_parcial'];
-    for (const k of keys) {
-      if (dados && dados[k] != null) {
-        if (k === 'telefone_parcial') {
-          const tp = String(dados[k]||'').replace(/\D/g,'');
-          if (!cur.telefone && tp && (tp.length === 8 || tp.length === 9)) cur.telefone_parcial = tp;
-          continue;
-        }
-        cur[k] = dados[k];
-      }
-    }
-    dadosColetados.set(chatId, cur);
-    try {
-      await setChatState(nome, chatId, {
-        dadosColetados: cur,
-        updatedAt: Date.now()
-      });
-    } catch {}
-
-    // Montagem automática de telefone (DDD + parcial) com persistência imediata segura
-    try {
-      const stNow = await getChatState(nome, chatId).catch(()=>null);
-      const curDc = (stNow && stNow.dadosColetados) ? stNow.dadosColetados : (dadosColetados.get(chatId) || {});
-
-      const temDDD = curDc && curDc.ddd && String(curDc.ddd).trim().length === 2;
-      const temParcial = curDc && curDc.telefone_parcial && String(curDc.telefone_parcial).trim().length >= 8 && String(curDc.telefone_parcial).trim().length <= 9;
-      const semTelefone = !curDc || !curDc.telefone;
-
-      if (semTelefone && temDDD && temParcial) {
-        const combinado = String(curDc.ddd).replace(/\D/g,'') + String(curDc.telefone_parcial).replace(/\D/g,'');
-        if (isValidBRPhoneWithDDD(combinado)) {
-          curDc.telefone = combinado;
-          delete curDc.telefone_parcial;
-          await setChatState(nome, chatId, { dadosColetados: curDc, lastWhatsReminderAt: Date.now() });
-          await flushChatStateNow(nome);
-          try {
-            const dddMask = String(curDc.ddd).replace(/\D/g,'');
-            const last4 = String(combinado).replace(/\D/g,'').slice(-4);
-            await issues.append(nome, 'phone_compose_ok', `ddd=${dddMask} last4=${last4} chat=${chatId}`);
-          } catch {}
-        }
-      }
-    } catch {}
-
-    // === FINAL: só falta telefone (whats) — delegação exclusiva ao orquestrador (pedidos.js). Nada de envio direto aqui. ===
-    // intencionalmente vazio — o pedidos.js fará a pergunta de WhatsApp dentro da resposta consolidada.
-
-    // Centraliza finalização no orquestrador
-    try {
-      await pedidos.upsertFromIA(nome, chatId, cur);
-      // Libera freeze se recebeu telefone válido
-      if (cur.telefone) {
-        await clearFreezeIfTelefoneOk(nome, chatId, cur);
-      }
-      await pedidos.finalizeIfReady(nome, chatId);
-    } catch {}
-  }
-
-  async function iniciarTimerFechamento(chatId, telefone) {
-    if (!timersFechamento) return;
-    if (timersFechamento.has(chatId)) return; // não reinicia
-    const inicio = Date.now();
-    const expiraEm = inicio + (10 * 60 * 1000); // 10 minutos
-    const timerId = setTimeout(() => verificarTimerExpirado(chatId), 10 * 60 * 1000);
-    timersFechamento.set(chatId, { inicio, telefone, expirado: false, expiraEm, timerId });
-    try {
-      await setChatState(nome, chatId, {
-        timerStartedAt: inicio,
-        timerExpiresAt: expiraEm,
-        timerTelefone: telefone,
-        updatedAt: Date.now()
-      });
-    } catch {}
-    await flushChatStateNow(nome);
-    try {
-      const dc = dadosColetados.get(chatId) || {};
-      const telMask = telefone ? maskPhoneLog(telefone) : '';
-      logger.info('[TIMER] timer_start', { chatId, cidade: dc.cidade || null, telefone: telMask });
-      await issues.append(nome, 'mil_action', `timer_start chat=${chatId} cidade="${dc.cidade||''}" tel="${telMask||''}"`);
-    } catch {}
-  }
-
-  function cancelarTimerFechamento(chatId) {
-    const t = timersFechamento.get(chatId);
-    if (t && t.timerId) { try { clearTimeout(t.timerId); } catch {} }
-    timersFechamento.delete(chatId);
-    try {
-      setChatState(nome, chatId, {
-        timerCancelledAt: Date.now(),
-        timerExpiresAt: null,
-        timerStartedAt: null,
-        timerTelefone: null
-      });
-      appendPedidoAudit(nome, chatId, 'timer_cancelled', {});
-    } catch {}
-  }
-
-  async function verificarTimerExpirado(chatId) {
-    if (!timersFechamento) return;
-    const t = timersFechamento.get(chatId);
-    if (!t || t.expirado) return;
-
-    const decorrido = Date.now() - t.inicio;
-    if (decorrido < 10 * 60 * 1000) return;
-
-    t.expirado = true;
-    timersFechamento.set(chatId, t);
-
-    const dados = (dadosColetados && dadosColetados.get(chatId)) || {};
-    const tel = dados.telefone || t.telefone || null;
-    const cidade = dados.cidade || null;
-
-    try {
-      const telMask = tel ? maskPhoneLog(tel) : '';
-      logger.info('[TIMER] timer_expired', { chatId, cidade: cidade || null, telefone: telMask });
-      await issues.append(nome, 'mil_action', `timer_expired chat=${chatId} cidade="${cidade||''}" tel="${telMask||''}"`);
-    } catch {}
-
-    await appendPedidoAudit(nome, chatId, 'timer_expired', { telOk: !!(tel && isValidBRPhoneWithDDD(tel)), cidadeOk: !!(cidade && String(cidade).trim()) });
-
-    // BLOQUEIO: Não envia mensagem final se houver freeze ativo
-    const stateAtual = await getChatState(nome, chatId).catch(()=>null);
-    if (stateAtual && stateAtual.finalizationFreezeUntil && Date.now() < stateAtual.finalizationFreezeUntil) {
-      logger.info('[VIRTUS] Timer expirado mas atendimento congelado por pendência crítica. Não enviará mensagem final. chatId=', chatId);
-      try {
-        await stepLog.appendJSONL(nome, 'virtus_freeze_timer_blocked', {
-          chatId,
-          ts: Date.now(),
-          reason: 'finalizationFreezeUntil',
-          timer_expired: true
-        });
-      } catch {}
-      try {
-        await issues.append(nome, 'virtus_freeze_timer_blocked', `chat=${chatId} motivo=finalizationFreezeUntil timer_expired=true`);
-      } catch {}
-      timersFechamento.delete(chatId);
-      return; // aborta envio de mensagem final
-    }
-
-    if (!tel || !isValidBRPhoneWithDDD(tel)) { timersFechamento.delete(chatId); return; }
-    if (!cidade || !String(cidade).trim()) { timersFechamento.delete(chatId); return; }
-
-    if (!chatLock.acquire(nome, chatId)) {
-      await appendPedidoAudit(nome, chatId, 'timer_lock_busy_skip', {});
-      timersFechamento.delete(chatId);
-      return;
-    }
-    try {
-      const already = await loadPedidoSent(nome, chatId);
-      if (already) {
-        await appendPedidoAudit(nome, chatId, 'timer_dedupe_skip', { sentAt: already.sentAt });
-        timersFechamento.delete(chatId);
-        return;
-      }
-      await enviarPedidoParaNotificador(chatId, { ...dados, telefone: tel, cidade });
-      timersFechamento.delete(chatId);
-    } finally {
-      chatLock.release(nome, chatId);
-    }
-  }
-
-  async function resumeTimers() {
-    if (!timersFechamento || !dadosColetados) return;
-    try {
-      const allStates = await loadChatState(nome);
-      const agora = Date.now();
-
-      for (const [chatId, state] of Object.entries(allStates)) {
-        if (state && state.dadosColetados) {
-          dadosColetados.set(chatId, state.dadosColetados);
-        }
-      }
-
-      for (const [chatId, state] of Object.entries(allStates)) {
-        if (!state || !state.timerExpiresAt) continue;
-        if (state.timerCancelledAt || state.state === CHAT_STATES.FINALIZADO) continue;
-
-        const already = await loadPedidoSent(nome, chatId);
-        if (already) continue; // não rearma timer já enviado
-
-        const expiraEm = state.timerExpiresAt;
-        if (expiraEm <= agora) {
-          await verificarTimerExpirado(chatId);
-        } else {
-          const restante = expiraEm - agora;
-          const timerId = setTimeout(() => verificarTimerExpirado(chatId), restante);
-          timersFechamento.set(chatId, {
-            inicio: state.timerStartedAt || (agora - (10 * 60 * 1000 - restante)),
-            telefone: state.timerTelefone || null,
-            expirado: false,
-            expiraEm,
-            timerId
-          });
-          await appendPedidoAudit(nome, chatId, 'timer_restored', { restanteMs: restante });
-        }
-      }
-
-      const totalDados = dadosColetados ? dadosColetados.size : 0;
-      const totalTimers = timersFechamento ? timersFechamento.size : 0;
-
-    } catch (e) {
-      logger.warn('[TIMER] Erro ao restaurar timers', { error: e && e.message || e });
-    }
-  }
-
-
-  // REMOVIDO: enviarPedidoParcialSeHabilitado - função perigosa removida
-  // Todos os envios agora passam por enviarPedidoParaNotificador com idempotência e validação completa
-
-  async function enviarPedidoParaNotificador(chatId, dados) {
-    const tel = dados && dados.telefone;
-    const cidade = dados && dados.cidade;
-    const auditData = { cidade };
-    if (tel) auditData.telefone = maskPhoneLog(tel);
-    await appendPedidoAudit(nome, chatId, 'send_attempt', auditData);
-
-    if (!tel || !isValidBRPhoneWithDDD(tel)) {
-      await appendPedidoAudit(nome, chatId, 'blocked_no_whatsapp', {});
-      return;
-    }
-    if (!cidade || !String(cidade).trim()) {
-      await appendPedidoAudit(nome, chatId, 'blocked_no_city', {});
-      return;
-    }
-
-    logger.info('[NOTIF_SEND] preparando envio', { nome, chatId, telefone: maskPhoneLog(tel), cidade });
-
-    let __acquired = false;
-    for (let i = 0; i < 2; i++) {
-      if (chatLock.acquire(nome, chatId)) { __acquired = true; break; }
-      await sleep(250 + Math.floor(Math.random() * 200));
-    }
-    if (!__acquired) {
-      await appendPedidoAudit(nome, chatId, 'lock_busy_skip', {});
-      return;
-    }
-    try {
-      const already = await loadPedidoSent(nome, chatId);
-      if (already) {
-        await appendPedidoAudit(nome, chatId, 'dedupe_skip', { sentAt: already.sentAt });
-        return;
-      }
-
-      const payload = {
-        servidor: NOTIFICADOR_SERVIDOR,
-        perfil: nome,
-        chat_id: chatId,
-        telefone: tel,
-        cidade: cidade,
-        itens: dados.itens || null,
-        endereco_saida: dados.endereco_saida || null,
-        endereco_destino: dados.endereco_destino || null,
-        ajudante: (typeof dados.ajudante === 'boolean') ? dados.ajudante : null,
-        descricao: dados.descricao || null
-      };
-
-      const urlFinal = `${NOTIFICADOR_URL}/api/pedidos`;
-      let resp = null, bodyText = '';
-      try {
-        resp = await fetch(urlFinal, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        bodyText = await resp.text().catch(()=> '');
-      } catch (e) {
-        await appendPedidoAudit(nome, chatId, 'send_fail_network', { error: e && e.message || String(e) });
-        return;
-      }
-
-      if (resp && resp.ok) {
-        await markPedidoSent(nome, chatId, payload, 'immediate_or_timer');
-        logger.info('[NOTIF_SEND] enviado com sucesso', { nome, chatId, telefone: maskPhoneLog(tel), cidade });
-        pedidosEnviados.add(chatId);
-        await setChatState(nome, chatId, { state: CHAT_STATES.FINALIZADO, pedidoSentAt: Date.now() });
-        await enviarMensagemFinal(chatId);
-      } else {
-        await appendPedidoAudit(nome, chatId, 'send_fail_http', { status: resp && resp.status, body: bodyText.slice(0,500) });
-      }
-
-    } finally {
-      chatLock.release(nome, chatId);
-    }
-  }
-
-  async function enviarMensagemFinal(chatId) {
-    const msgBase = 'Perfeito! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em alguns minutinhos para combinar os detalhes e informar o orçamento. Qualquer coisa, fico por aqui.';
-    const igCTA = [
-      'Aproveitando: se puder dar uma força, siga nossa página no Instagram 😊',
-      'https://www.instagram.com/convenientetecnologia',
-      '@convenientetecnologia'
-    ].join('\n');
-    const mensagem = [msgBase, igCTA].join('\n\n');
-
-    // Idempotência: não repetir se enviada recentemente
-    try {
-      const st = await getChatState(nome, chatId).catch(() => null);
-      if (st && st.finalMsgSentAt && (Date.now() - Number(st.finalMsgSentAt)) < 10 * 60 * 1000) {
-        logger.info('[MENSAGEM_FINAL] já enviada recentemente — skip', { nome, chatId });
-        return;
-      }
-    } catch {}
-
-    for (let attempt = 1; attempt <= VIRTUS_FINAL_MSG_MAX_TRIES; attempt++) {
-      let p = await ensurePage().catch(() => null);
-      if (!p) {
-        logger.warn('[MENSAGEM_FINAL] Page indisponível', { nome, chatId, attempt });
-        if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
-          await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
-          continue;
-        }
-        return;
-      }
-
-      try {
-        let urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
-        if (!chatUrlMatches(urlNow2, chatId)) {
-          await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
-        }
-        const okOn = await assertOnChat(p, chatId, { timeoutMs: 2000 });
-        if (!okOn) {
-          logger.warn('[MENSAGEM_FINAL] Chat não confirmado', { nome, chatId, attempt });
-          if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
-            await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
-            continue;
-          }
-          return;
-        }
-
-        let campo = await waitForComposer(p, 8000);
-        if (!campo) {
-          const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-          campo = await refocusComposerNoReload(p, chatId, anchorSel);
-        }
-
-        if (!campo) {
-          logger.warn('[MENSAGEM_FINAL] Composer indisponível após refocus', { nome, chatId, attempt });
-          if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
-            await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
-            continue;
-          }
-          return;
-        }
-
-        await waitForSendLockRelease(p, 12000);
-        await acquireSendGuard(p, chatId);
-        try {
-          await sendMessageSafe(p, campo, removeTelefonesCompletosLoose(mensagem), nome, chatId);
-          // Marca flag de mensagem final enviada (idempotência)
-          try {
-            await setChatState(nome, chatId, { finalMsgSentAt: Date.now() });
-            await flushChatStateNow(nome);
-          } catch {}
-          return;
-        } finally {
-          releaseSendGuard(p);
-        }
-      } catch (e) {
-        logger.warn('[MENSAGEM_FINAL] Falha ao enviar (tentativa)', { chatId, attempt, error: e && e.message || e });
-        if (attempt < VIRTUS_FINAL_MSG_MAX_TRIES) {
-          await sleep(randomBetween(VIRTUS_FINAL_MSG_RETRY_MIN_MS, VIRTUS_FINAL_MSG_RETRY_MAX_MS));
-          continue;
-        }
-        return;
-      }
-    }
-  }
 
   async function ensureLocationPrefetch(chatId, urlHint = null) {
     try {
-      const st = await getChatState(nome, chatId).catch(() => null);
-      if (st && st.cidade && st.estado) return;
-      if (st && st.locFetchInFlight === true) return;
-
-      try {
-        await setChatState(nome, chatId, { locFetchInFlight: true, state: CHAT_STATES.COLETANDO, lastProbeAt: Date.now() });
-      } catch {}
+      const fsmState = await virtusFSM.get(nome, chatId).catch(() => null);
+      if (fsmState && fsmState.data && fsmState.data.cidade) return;
 
       // Se não veio URL, tenta obtê-la com o chat aberto por clique (sem navegação)
       if (!urlHint) {
@@ -3364,22 +2564,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       const buscador = (global && global.__buscaLocalizacaoVirtus) ? global.__buscaLocalizacaoVirtus : null;
       if (!buscador || typeof buscador.adicionarBuscaLocalizacao !== 'function') {
-        try { await setChatState(nome, chatId, { locFetchInFlight: false }); } catch {}
         return;
       }
 
       // Dispara worker (Aba 1) com o link (Aba 0 nunca navega)
       buscador.adicionarBuscaLocalizacao(chatId, urlHint || null, nome, async (loc) => {
         try {
-          const patch = { locFetchInFlight: false };
-          if (loc && loc.cidade && loc.estado) {
-            patch.cidade = String(loc.cidade || '');
-            patch.estado = String(loc.estado || '');
-            patch.state = CHAT_STATES.PENDENTE;
-          } else {
-            patch.locWarnedNoLocation = true;
+          if (loc && loc.cidade) {
+            await virtusFSM.patch(nome, chatId, { data: { cidade: String(loc.cidade || '') } });
           }
-          await setChatState(nome, chatId, patch);
         } catch {}
       });
 
@@ -3437,9 +2630,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         
         function onNewChatDetected({ id, tempo }) {
           const chatId = id;
-          const now = Date.now();
           // Não agenda atendimento ainda. Primeiro coleta cidade obrigatoriamente.
-          setChatState(nome, chatId, { state: CHAT_STATES.COLETANDO, lastProbeAt: now, locFetchInFlight: true }).catch(()=>{});
           ensureLocationPrefetch(chatId, null).catch(() => {});
         }
         await installChatFeedObserver(p, nome, onNewChatDetected);
@@ -3460,8 +2651,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
       const MAX_TRIES = 2;
       let lastErr = null;
+      let attempts = 0;
+      let urlNow = '';
+      let hasComposer = false;
       
       for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+        attempts = attempt;
         let p = await ensurePage().catch(() => null);
         if (!p) {
           lastErr = new Error('page_unavailable');
@@ -3472,10 +2667,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         
         try {
           try {
-            const urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
+            urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
             const okChat = chatUrlMatches(urlNow, chatId);
             let campo = null;
-            let hasComposer = false;
+            hasComposer = false;
             if (okChat) {
               campo = await waitForComposer(p, 1500).catch(()=>null);
               hasComposer = !!campo;
@@ -3488,12 +2683,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               } finally {
                 releaseSendGuard(p);
               }
+              // Log send_ok
+              virtusFSM.flowLog(nome, chatId, 'send_ok', {
+                attempts: attempt,
+                url: urlNow,
+                hasComposer: true,
+                cursorSig: ''
+              });
               return true;
             }
           } catch {}
           
           
-          let urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+          urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
             await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
           }
@@ -3513,6 +2715,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             throw new Error('composer_not_available');
           }
           
+          hasComposer = true;
           await campo.focus();
           await new Promise(r => setTimeout(r, 120));
           
@@ -3528,6 +2731,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             releaseSendGuard(p);
           }
           
+          // Log send_ok
+          virtusFSM.flowLog(nome, chatId, 'send_ok', {
+            attempts: attempt,
+            url: urlNow,
+            hasComposer: true,
+            cursorSig: ''
+          });
           return true;
         } catch (err) {
           lastErr = err;
@@ -3548,6 +2758,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       
       if (lastErr) {
         const msgErr = (lastErr && lastErr.message) ? lastErr.message : String(lastErr);
+        const reason = msgErr.includes('composer') ? 'composer_not_found' : (msgErr.includes('context') ? 'context_mismatch' : 'other');
+        // Log error_send
+        try {
+          const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+          virtusFSM.flowLog(nome, chatId, 'error_send', {
+            reason: reason,
+            attempts: attempts,
+            url: urlNow,
+            hasComposer: hasComposer,
+            cursorSig: '',
+            snapshot: {
+              freeze: (fsmState && fsmState.freeze) || {},
+              schedule: (fsmState && fsmState.schedule) || {}
+            }
+          });
+        } catch {}
         logger.error('[MESSENGER] ❌ Erro ao enviar mensagem após todas as tentativas', { 
           nome, 
           chatId, 
@@ -3561,8 +2787,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     
     async function marcarRespondidoLocal(chatId) {
       try {
-        await setChatState(nome, chatId, { lastIARespondedAt: Date.now() });
-        await flushChatStateNow(nome);
+        await virtusFSM.patch(nome, chatId, { lastIARespondedAt: Date.now() });
       } catch (e) {
         logger.error('[VIRTUS] marcarRespondido error', { nome, chatId, error: e && e.message || e });
       }
