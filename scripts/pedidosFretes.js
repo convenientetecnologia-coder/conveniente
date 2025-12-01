@@ -293,6 +293,24 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
   const duvidas = detectDoubtsSimple(clienteUnificado);
   const faltantes = computeCamposFaltantesOrdenados(d);
 
+  // Primeira mensagem do cliente para análise de tom
+  const primeiraMsgCliente = Array.isArray(historico) 
+    ? historico.find(m => m && m.autor === 'cliente')?.texto || ''
+    : '';
+  const ultimasDoCliente = historico.filter(m => m && m.autor === 'cliente').slice(-6);
+
+  // Análise de tom do cliente (formal, casual, animado)
+  function analyzeClientTone(msg) {
+    try {
+      const txt = String(msg || '').toLowerCase();
+      if (!txt) return 'casual';
+      if (/(!!+|!{2,}|😊|😁|kk|haha|rsrs|hehe|bom\s+dia{3,}|boa\s+tarde{3,})/i.test(txt)) return 'animado';
+      if (/^(bom\s+dia|boa\s+tarde|boa\s+noite|olá|senhor|senhora)/i.test(txt)) return 'formal';
+      return 'casual';
+    } catch { return 'casual'; }
+  }
+  const tomCliente = analyzeClientTone(primeiraMsgCliente);
+
   // Fornecidos
   const fornecidos = {
     itens: !!d.itens,
@@ -322,6 +340,9 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
   const saudacao = !(s.flags && (s.flags.firstIaReplied || s.flags.greetDone));
   const priceIntentNow = Array.isArray(duvidas) && duvidas.some(d => /valor|or[cç]amento/i.test(String(d || '')));
   const explicar_fluxo = (!!(directive && directive.includeOrcamento)) || priceIntentNow;
+  
+  // Informação sobre saudação já dada (para prevenir eco/repetição)
+  const saudacaoJaDada = !!(s.flags && (s.flags.firstIaReplied || s.flags.greetDone));
 
   const ctx = {
     meta: {
@@ -330,7 +351,9 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
       cidade: d.cidade || contexto.cidade || null,
       canal: 'messenger',
       horario: new Date().toISOString(),
-      regiao: anal && anal.contexto_regional || null
+      regiao: anal && anal.contexto_regional || null,
+      tom_cliente: tomCliente,
+      primeira_mensagem_cliente: primeiraMsgCliente
     },
     fluxo: {
       step: String(directive.step || ''),
@@ -343,7 +366,8 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
       prioridade: (anal && anal.prioridade) || 'normal',
       saudacao,
       explicar_fluxo,
-      cooldown_whats_ms: PHONE_ASK_COOLDOWN_MS
+      cooldown_whats_ms: PHONE_ASK_COOLDOWN_MS,
+      saudacao_ja_dada: saudacaoJaDada
     },
     dados: {
       ja_fornecidos: fornecidos,
@@ -355,11 +379,12 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
       cliente_unificado: clienteUnificado,
       duvidas,
       disponibilidade: /(disponivel|disponível|tem agora)/i.test(clienteUnificado),
-      urgencia_agora: /\b(agora|pra\sjá|pra\sja|para\sagora|pra\sagora|hoje)\b/i.test(clienteUnificado)
+      urgencia_agora: /\b(agora|pra\sjá|pra\sja|para\sagora|pra\sagora|hoje)\b/i.test(clienteUnificado),
+      tom_cliente: tomCliente
     },
     analitico: anal || {},
     historico: {
-      ultimas_do_cliente: historico.filter(m => m && m.autor === 'cliente').slice(-6),
+      ultimas_do_cliente: ultimasDoCliente,
       ultimas_da_ia: historico.filter(m => m && m.autor === 'ia').slice(-4)
     },
     politicas: {
@@ -370,10 +395,17 @@ function buildAnswerContext({ perfil, chatId, historico = [], snapshot = {}, dir
       uma_unica_mensagem: true,
       aceitar_endereco_informal: true,
       nao_pedir_campos_ja_fornecidos: true
-    }
+    },
+    directive: directive // Inclui directive completo para referência
   };
 
-  const instr = buildInstrucoesFromDirective({ directive, snapshotData: d, firstReply: saudacao, novasMsgs });
+  const instr = buildInstrucoesFromDirective({ 
+    directive, 
+    snapshotData: d, 
+    firstReply: saudacao, 
+    novasMsgs,
+    duvidasDetectadas: duvidas // Passa dúvidas detectadas para as instruções
+  });
   ctx.instrucoes = instr;
 
   return ctx;
@@ -410,20 +442,23 @@ const ALLOWED_ASK_FIELDS = Object.freeze([
 ]);
 
 function getNextAskField(d = {}) {
-const telValido = isValidPhoneBR(d && d.telefone);
-const hasParcial = /^\d{8,9}$/.test(String((d && d.telefone_parcial) || ''));
-const hasDDD = /^[1-9]\d$/.test(String((d && d.ddd) || ''));
-
-if (!telValido) {
-if (hasParcial && !hasDDD) return 'ddd';
-if (hasDDD && !hasParcial) return 'telefone_parcial';
-return 'telefone';
-}
-
-if (!d.itens) return 'itens';
-if (!d.endereco_saida) return 'endereco_saida';
-if (!d.endereco_destino) return 'endereco_destino';
-return null;
+  // ORDEM FIXA DO FUNIL: itens > saída > destino > telefone
+  // Primeiro verifica campos não-telefone na ordem correta
+  if (!d.itens) return 'itens';
+  if (!d.endereco_saida) return 'endereco_saida';
+  if (!d.endereco_destino) return 'endereco_destino';
+  
+  // Depois verifica telefone (completo ou partes)
+  const telValido = isValidPhoneBR(d && d.telefone);
+  if (!telValido) {
+    const hasParcial = /^\d{8,9}$/.test(String((d && d.telefone_parcial) || ''));
+    const hasDDD = /^[1-9]\d$/.test(String((d && d.ddd) || ''));
+    if (hasParcial && !hasDDD) return 'ddd';
+    if (hasDDD && !hasParcial) return 'telefone_parcial';
+    return 'telefone';
+  }
+  
+  return null;
 }
 
 function shouldAskWhatsappFirst({ historicoNovo = [], dataAtual = {} } = {}) {
@@ -446,17 +481,30 @@ function removeTelefonesCompletosLoose(s) {
   } catch { return String(s||''); }
 }
 
-function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply = false, novasMsgs = [] }) {
+function buildInstrucoesFromDirective({ directive, snapshotData = {}, firstReply = false, novasMsgs = [], duvidasDetectadas = [] }) {
 const instr = [];
 
 if (firstReply) {
-instr.push('Cumprimente de forma calorosa e humana (ex.: "Olá! Que bom falar contigo 😊").');
+  instr.push('Cumprimente de forma calorosa e humana, variando conforme o tom do cliente (formal, casual ou animado).');
+  instr.push('Inclua uma frase explicando seu papel: "Faço o primeiro atendimento e anoto seus dados; depois repasso pro motorista" (ou variação similar).');
+  instr.push('Inclua a explicação sobre orçamento: "Quem passa o orçamento é o motorista no WhatsApp; eu apenas anoto o pedido e repasso pra ele. O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados."');
+  instr.push('SEMPRE peça o WhatsApp com DDD e a próxima pergunta do funil (itens, saída ou destino) na mesma mensagem.');
+} else {
+  // Nas demais etapas: não repetir saudação, orçamento ou papel do atendente
+  instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
+  instr.push('Não repita explicação de orçamento ou papel do atendente.');
 }
-if (directive && directive.askField === 'telefone') {
-instr.push('Inclua exatamente uma vez a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
+
+// Se houver dúvidas detectadas, instruir para responder brevemente e continuar o funil
+const duvidasDetectadasParam = (directive && directive.duvidasDetectadas) || 
+                                (snapshotData && snapshotData.duvidas) || 
+                                duvidasDetectadas || [];
+if (Array.isArray(duvidasDetectadasParam) && duvidasDetectadasParam.length > 0) {
+  instr.push('O cliente fez uma pergunta. Responda brevemente (1-2 frases) e continue com a pergunta do funil.');
 }
-if (!firstReply) {
-instr.push('Não use saudação (oi/olá/bom dia/boa tarde/boa noite). Vá direto ao ponto.');
+
+if (directive && directive.includeOrcamento && !firstReply) {
+  instr.push('Inclua exatamente uma vez a frase: "O valor exato é passado pelo motorista no WhatsApp assim que coletarmos seus dados. Repasso para ele, e você recebe o orçamento certinho."');
 }
 
 const perguntas = (Array.isArray(novasMsgs) ? novasMsgs : [])
@@ -639,6 +687,8 @@ default: return false;
 }
 
 function pickNextNonPhoneFieldSkippingExhausted(snap, d) {
+  // ORDEM FIXA DO FUNIL: itens > saída > destino
+  // Verifica na ordem correta, pulando campos esgotados
 const s = snap || {};
 const a = (s && s.askCounts) || {};
 const order = ['itens','endereco_saida','endereco_destino'];
@@ -707,15 +757,27 @@ function decidirProximoPasso(snap, dados) {
 
   }
 
-  // Com telefone ok, siga ordem do funil pulando campos esgotados
-  const nextField = pickNextNonPhoneFieldSkippingExhausted(s, d);
+  // Com telefone ok, siga ordem do funil (itens > saída > destino) pulando campos esgotados
+  // Ordem fixa garantida
+  let nextField = null;
+  if (!d.itens) {
+    nextField = 'itens';
+  } else if (!d.endereco_saida) {
+    nextField = 'endereco_saida';
+  } else if (!d.endereco_destino) {
+    nextField = 'endereco_destino';
+  }
+  
   if (nextField) {
     const step = _stepIdForField(nextField);
     const nivel = getFieldAskLevelFromSnap(s, nextField);
     const includeGreet = getStepCountFromSnap(s, 'boas_vindas') === 0;
     // Próximo encadeado (se houver outro após esse)
     const d2 = Object.assign({}, d, { [nextField]: 'dummy' });
-    const encadeado = pickNextNonPhoneFieldSkippingExhausted(s, d2) || null;
+    let encadeado = null;
+    if (!d2.itens) encadeado = 'itens';
+    else if (!d2.endereco_saida) encadeado = 'endereco_saida';
+    else if (!d2.endereco_destino) encadeado = 'endereco_destino';
     return { step, field: nextField, nivel, includeGreet, includeOrcamento: false, askNextField: encadeado };
   }
 
@@ -1107,6 +1169,20 @@ class PedidoOrchestrator extends EventEmitter {
       } catch {}
       this.markSentAndFreeze(perfil, chatId, 'completo');
       this._audit('pedidos_order_sent', perfil, chatId, { tipo: 'completo', telefone_mask: maskPhoneLog(payload.telefone), campos_faltantes_count: 0 });
+      
+      // Log de fechamento completo para auditoria
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'pedidos_finalizado_completo', {
+          chatId,
+          telefone: maskPhoneLog(payload.telefone),
+          hasItens: !!payload.itens,
+          hasSaida: !!payload.endereco_saida,
+          hasDestino: !!payload.endereco_destino,
+          timestamp: Date.now()
+        });
+      } catch {}
+      
       return 'completo';
     }
 
@@ -1165,6 +1241,18 @@ class PedidoOrchestrator extends EventEmitter {
             s.flags.pendingField = null;
             this._set(perfil, chatId, { data: dataBefore, flags: s.flags, askCounts: s.askCounts });
 
+            // Log de avanço por timeout (não informado) - garante que o funil nunca trava
+            try {
+              const stepLog = require('./stepLog.js');
+              stepLog.appendJSONL(perfil, 'pedidos_field_timeout_advance', {
+                chatId,
+                field: field,
+                askCount: s.askCounts[field] || 0,
+                reason: 'ttl_expired',
+                timestamp: Date.now()
+              });
+            } catch {}
+            
             try { issues.append(perfil, 'mil_action', `field_timeout chat=${chatId} field=${field}`); } catch {}
             this.emit('fieldTimeout', { perfil, chatId, field });
           }
@@ -1252,22 +1340,42 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     return { askField: 'telefone', phase: 'reminder', reason: 'post_destino_whatsapp', nextField: null, allowSecondQuestion: false, phoneMode: 'full' };
   }
 
-  // 1) Primeira resposta: WhatsApp + próxima pergunta real do funil
+  // 1) Primeira resposta: WhatsApp + próxima pergunta real do funil (ORDEM: itens > saída > destino)
   if (!telOk && firstReply) {
-    const nextAfterPhone = getNextNonPhoneField(data) || 'itens';
+    // Garante ordem correta: itens > saída > destino
+    let nextAfterPhone = null;
+    if (!data.itens) {
+      nextAfterPhone = 'itens';
+    } else if (!data.endereco_saida) {
+      nextAfterPhone = 'endereco_saida';
+    } else if (!data.endereco_destino) {
+      nextAfterPhone = 'endereco_destino';
+    }
+    
+    // Se já tem tudo, não precisa de próxima pergunta
     return {
       askField: 'telefone',
       phase: 'first_contact',
       reason: 'first_contact',
       nextField: nextAfterPhone,
-      allowSecondQuestion: true,
-      phoneMode: 'full'
+      allowSecondQuestion: !!nextAfterPhone,
+      phoneMode: 'full',
+      includeOrcamento: true // Sempre inclui orçamento na primeira resposta
     };
   }
 
-  // 2) Após a saudação: NÃO repetir pedido de WhatsApp à toa. Priorize itens/endereço/etc.
+  // 2) Após a saudação: NÃO repetir pedido de WhatsApp à toa. Priorize ordem do funil (itens > saída > destino)
   if (!telOk && hasAskedWhats && !firstReply) {
-    const nextNonPhone = getNextNonPhoneField(data);
+    // Ordem fixa: itens > saída > destino
+    let nextNonPhone = null;
+    if (!data.itens) {
+      nextNonPhone = 'itens';
+    } else if (!data.endereco_saida) {
+      nextNonPhone = 'endereco_saida';
+    } else if (!data.endereco_destino) {
+      nextNonPhone = 'endereco_destino';
+    }
+    
     if (nextNonPhone) {
       return {
         askField: nextNonPhone,
@@ -1296,8 +1404,24 @@ function getAskDirective(perfil, chatId, novasMsgs = [], snapshot = {}) {
     };
   }
 
-  // 3) Telefone OK ou nunca pedimos (mas não é primeira): siga ordem do funil padrão
-  const next = getNextAskField(data);
+  // 3) Telefone OK ou nunca pedimos (mas não é primeira): siga ordem do funil padrão (itens > saída > destino)
+  // Ordem fixa garantida
+  let next = null;
+  if (!data.itens) {
+    next = 'itens';
+  } else if (!data.endereco_saida) {
+    next = 'endereco_saida';
+  } else if (!data.endereco_destino) {
+    next = 'endereco_destino';
+  } else if (!telOk) {
+    // Se telefone não está OK, verifica partes
+    const hasParcial = /^\d{8,9}$/.test(String(data.telefone_parcial || ''));
+    const hasDDD = /^[1-9]\d$/.test(String(data.ddd || ''));
+    if (hasParcial && !hasDDD) next = 'ddd';
+    else if (hasDDD && !hasParcial) next = 'telefone_parcial';
+    else next = 'telefone';
+  }
+  
   if (next) {
     return {
       askField: next,
@@ -1384,10 +1508,26 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       };
     }
 
-    // Extrai dados via LLM extrator (só parsing)
-    const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
-    const snap = module.exports.getSnapshot(perfil, chatId);
-    const dados = (snap && snap.data) || {};
+  // Extrai dados via LLM extrator (só parsing)
+  const snapAfter = await module.exports.upsertFromHistoryLLM(perfil, chatId, historico, { contexto });
+  const snap = module.exports.getSnapshot(perfil, chatId);
+  const dados = (snap && snap.data) || {};
+  
+  // Log de extração para auditoria
+  try {
+    const stepLog = require('./stepLog.js');
+    stepLog.appendJSONL(perfil, 'pedidos_extract_after', {
+      chatId,
+      hasItens: !!dados.itens,
+      hasSaida: !!dados.endereco_saida,
+      hasDestino: !!dados.endereco_destino,
+      hasTelefone: isValidPhoneBR(dados.telefone),
+      hasDDD: /^[1-9]\d$/.test(String(dados.ddd || '')),
+      hasParcial: /^\d{8,9}$/.test(String(dados.telefone_parcial || '')),
+      tomCliente: dados.tom_cliente || null,
+      saudacaoCliente: dados.saudacao_cliente ? dados.saudacao_cliente.slice(0, 50) : null
+    });
+  } catch {}
 
     // FSM: decide próximo passo com nível/contador
     const directive = decidirProximoPasso(snap, dados);
@@ -1401,6 +1541,11 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
     const ctx = buildAnswerContext({
       perfil, chatId, historico, snapshot: snap, directive, novasMsgs, contexto
     });
+    
+    // Extrai tom_cliente do contexto para uso no enforcer
+    const tomCliente = (ctx && ctx.meta && ctx.meta.tom_cliente) || 
+                       (ctx && ctx.interpretacao && ctx.interpretacao.tom_cliente) || 
+                       'casual';
 
     // Prompt Único (system + user)
     const system = buildSystemPromptUnico();
@@ -1432,16 +1577,133 @@ async function ingestFromVirtus(perfil, chatId, { historico = [], contexto = {},
       }
     }
 
-    // Log de transparência (contexto e resposta)
+    // ENFORCER: Validação pós-IA para garantir que resposta contém elementos obrigatórios
+    let enforceNeeded = false;
+    let enforceReason = '';
+    
+    // Verifica se é primeira resposta e se tem saudação
+    if (ctx.fluxo && ctx.fluxo.saudacao && !/^(oi|ol[aá]|bom\s+dia|boa\s+tarde|boa\s+noite|opa|salve)/i.test(textoFinal)) {
+      enforceNeeded = true;
+      enforceReason = 'missing_saudacao';
+    }
+    
+    // Verifica se tem pergunta do campo obrigatório
+    const askField = ctx.fluxo && ctx.fluxo.ordem && ctx.fluxo.ordem.perguntar;
+    if (askField) {
+      const hasAsk = (() => {
+        const s = String(textoFinal || '').toLowerCase();
+        switch (askField) {
+          case 'telefone':
+            return /whats\sapp|whatsapp|wpp/i.test(s) && /\bddd\b/i.test(s);
+          case 'ddd':
+            return /\bddd\b/i.test(s);
+          case 'telefone_parcial':
+            return /\bsem\sddd\b/i.test(s) || /\b8\sou\s9\sd[ií]gitos\b/i.test(s);
+          case 'itens':
+            return /o que.*transportar|qual.*item|quais.*itens/i.test(s);
+          case 'endereco_saida':
+            return /endere[cç]o.*sa[ií]da|onde.*buscar|onde.*retirar|de\s+onde/i.test(s);
+          case 'endereco_destino':
+            return /endere[cç]o.*destino|para\s+onde|local.*entrega|destino/i.test(s);
+          default:
+            return false;
+        }
+      })();
+      
+      if (!hasAsk) {
+        enforceNeeded = true;
+        enforceReason = `missing_ask_${askField}`;
+      }
+    }
+    
+    // Verifica se tem orçamento quando necessário (primeira resposta OU intenção de preço)
+    const precisaOrcamento = !!(ctx.fluxo && (ctx.fluxo.explicar_fluxo || ctx.fluxo.explicar_orcamento));
+    if (precisaOrcamento) {
+      const hasBudget = /quem\s+passa.*or[cç]amento.*motorista/i.test(textoFinal) && 
+                       /valor\s+exato.*motorista/i.test(textoFinal);
+      if (!hasBudget) {
+        enforceNeeded = true;
+        enforceReason = 'missing_orcamento';
+      }
+    }
+    
+    // Verifica se pediu WhatsApp quando ainda não tem (primeira resposta ou quando necessário)
+    const telOk = isValidPhoneBR((snap && snap.data && snap.data.telefone) || '');
+    // askField já foi declarado acima
+    if (!telOk && (askField === 'telefone' || askField === 'ddd' || askField === 'telefone_parcial')) {
+      const hasWhatsAsk = /whats\sapp|whatsapp|wpp/i.test(textoFinal.toLowerCase());
+      if (!hasWhatsAsk) {
+        enforceNeeded = true;
+        enforceReason = enforceReason || 'missing_whatsapp_ask';
+      }
+    }
+    
+    // Aplica enforcer se necessário
+    if (enforceNeeded) {
+      try {
+        const stepLog = require('./stepLog.js');
+        stepLog.appendJSONL(perfil, 'pedidos_enforce_triggered', {
+          chatId,
+          reason: enforceReason,
+          originalLength: textoFinal.length,
+          askField: askField || null,
+          saudacaoExpected: !!(ctx.fluxo && ctx.fluxo.saudacao),
+          orcamentoExpected: precisaOrcamento,
+          telOk: telOk,
+          tomCliente: (ctx && ctx.meta && ctx.meta.tom_cliente) || null
+        });
+      } catch {}
+      
+      // Usa renderUnico como fallback determinístico (que usa composeDeterministic internamente)
+      try {
+        const enforced = await renderUnico(ctx);
+        if (enforced && enforced.trim()) {
+          textoFinal = enforced;
+          try {
+            const stepLog = require('./stepLog.js');
+            stepLog.appendJSONL(perfil, 'pedidos_enforce_applied', {
+              chatId,
+              reason: enforceReason,
+              enforcedLength: textoFinal.length
+            });
+          } catch {}
+        }
+      } catch (e3) {
+        // Se renderUnico falhar, mantém textoFinal original (já sanitizado)
+        try {
+          const stepLog = require('./stepLog.js');
+          stepLog.appendJSONL(perfil, 'pedidos_enforce_failed', {
+            chatId,
+            error: (e3 && e3.message) || String(e3)
+          });
+        } catch {}
+      }
+    }
+
+    // Log de transparência (contexto e resposta) - sempre logar para auditoria
     try {
       const stepLog = require('./stepLog.js');
+      const duvidasDetectadas = Array.isArray(ctx && ctx.interpretacao && ctx.interpretacao.duvidas) 
+        ? ctx.interpretacao.duvidas 
+        : [];
       stepLog.appendJSONL(perfil, 'pedidos_context_sent', {
         chatId,
         ctxSize: JSON.stringify(ctx).length,
         respostaSize: textoFinal.length,
         step: directive.step,
         field: directive.field,
-        nivel: directive.nivel
+        askNextField: directive.askNextField || null,
+        nivel: directive.nivel,
+        tomCliente: (ctx && ctx.meta && ctx.meta.tom_cliente) || null,
+        saudacao: !!(ctx && ctx.fluxo && ctx.fluxo.saudacao),
+        orcamento: precisaOrcamento,
+        enforceApplied: enforceNeeded,
+        enforceReason: enforceNeeded ? enforceReason : null,
+        duvidasDetectadas: duvidasDetectadas.length > 0 ? duvidasDetectadas : null,
+        hasItens: !!dados.itens,
+        hasSaida: !!dados.endereco_saida,
+        hasDestino: !!dados.endereco_destino,
+        hasTelefone: telOk
       });
     } catch {}
 
