@@ -436,9 +436,23 @@ if (typeof computeMissing === 'function') {
 
 }
 
+// Limpa pending se o campo foi preenchido e atualiza step
+const st3 = get(perfil, chatId);
+const pendingField = st3 && st3.funil && st3.funil.pending && st3.funil.pending.field;
+const missingAfter = Array.isArray(st3 && st3.data && st3.data.missing) ? st3.data.missing : [];
 
+// Se o pending field foi preenchido (não está mais em missing), limpa pending e atualiza step
+if (pendingField && !missingAfter.includes(pendingField)) {
+  const nextField = _orderMandatory(st3 && st3.data);
+  patch(perfil, chatId, {
+    funil: {
+      pending: null,
+      step: nextField || null
+    }
+  });
+}
 
-flowLog(perfil, chatId, 'extract_ok', { fields: Object.keys(put), missing: (st2 && st2.data && st2.data.missing) ? st2.data.missing.slice(0) : [] });
+flowLog(perfil, chatId, 'extract_ok', { fields: Object.keys(put), missing: (st3 && st3.data && st3.data.missing) ? st3.data.missing.slice(0) : [] });
 
 
 
@@ -640,9 +654,13 @@ if (!field) {
 
   // Nada a perguntar (completo). Sem directive.
 
-  flowLog(perfil, chatId, 'decide_ok', { ask_field: null, done: true });
+  const directive = { ask_field: null, ask_next_field: null, include_orcamento: false, saudacao: false, done: true };
 
-  return { ask_field: null, ask_next_field: null, include_orcamento: false, saudacao: false, done: true };
+  directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
+
+  flowLog(perfil, chatId, 'decide_ok', directive);
+
+  return directive;
 
 }
 
@@ -782,7 +800,27 @@ historico: {
 
 ultimas_do_cliente: Array.isArray(c.meta && c.meta.lastClientTexts) ? c.meta.lastClientTexts : []
 
-}
+},
+
+flags: c.flags || {},
+
+audit: c.audit || {},
+
+funil: {
+
+step: ask_field
+
+},
+
+render: {
+
+nextField: ask_field,
+
+questionBudget: (c.flags && c.flags.greetDone) ? 1 : 2
+
+},
+
+missingOrdered: Array.isArray(c.data && c.data.missing) ? c.data.missing.slice(0) : []
 
 };
 
@@ -805,6 +843,23 @@ const raw = await renderUnico(ctx);
 const text = await sanitizeAnswerUnico(raw, ctx);
 
 const sanitized = String(text || '') !== String(raw || '');
+
+// Persistência imediata de flags e audit após render/sanitize
+const flagsPatch = {};
+if (ctx.flags && ctx.flags.greetDone) flagsPatch.greetDone = true;
+if (ctx.flags && ctx.flags.explainedOrcamentoOnce) flagsPatch.explainedOrcamentoOnce = true;
+
+const auditPatch = {};
+if (ctx.audit && Array.isArray(ctx.audit.lastIAFingerprints)) {
+  auditPatch.lastIAFingerprints = ctx.audit.lastIAFingerprints.slice(0, 2);
+}
+
+if (Object.keys(flagsPatch).length > 0 || Object.keys(auditPatch).length > 0) {
+  const patchObj = {};
+  if (Object.keys(flagsPatch).length > 0) patchObj.flags = flagsPatch;
+  if (Object.keys(auditPatch).length > 0) patchObj.audit = auditPatch;
+  patch(perfil, chatId, patchObj);
+}
 
 flowLog(perfil, chatId, 'render_ok', { provider: 'groq', length: String(text || '').length, sanitized });
 

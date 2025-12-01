@@ -71,6 +71,14 @@ function isValidBRPhoneWithDDD(d) {
   return false;
 }
 
+// Validação específica para WhatsApp (só aceita 11 dígitos começando com 9 após DDD)
+function isValidWhatsAppTelefone(d) {
+  const s = String(d || '').replace(/\D/g, '');
+  if (s.length !== 11) return false;
+  // DDD (2 dígitos) + 9 (celular) + 8 dígitos
+  return /^[1-9]{2}9\d{8}$/.test(s);
+}
+
 // REMOVIDO: computeMissing local - agora importado de ./missing.js
 
 // Detecção simples de protesto (apenas para extração pura)
@@ -80,6 +88,26 @@ const RE_PROTESTO = /(ja\s+falei|já\s+falei|ja\s+passei|já\s+passei|leia\s+aci
 // AMPLIADO: inclui mais variações e termos relacionados ao serviço
 const RE_NOISE_ITEM = /\b(conveniente|atendente|motorista|fretes?|frete|pedido|orçamento|orçamento|preço|preco|valor|quanto\s+custa|whatsapp|wpp|ddd|telefone|número|numero|contato|chamar|ligar|entrar\s+em\s+contato|disponivel|disponível|tem\s+agora|faz\s+frete|como\s+funciona)\b/i;
 const RE_NOISE_ADDRESS = /\b(conveniente|atendente|motorista|fretes?|frete|pedido|orçamento|preço|preco|valor|quanto\s+custa|whatsapp|wpp|ddd|telefone|número|numero|contato|chamar|ligar|entrar\s+em\s+contato|disponivel|disponível|tem\s+agora|faz\s+frete|como\s+funciona)\b/i;
+
+// HEURÍSTICA DE ITENS - LEXICON para detectar itens (nunca extrair como endereço)
+const ITEM_LEXICON = [
+  'cama','sof[aá]','mesa','geladeira','fog[aã]o','guarda-roupa','arm[aá]rio','c[áa]ixa[s]?',
+  'colch[aã]o','cadeira[s]?','prateleira[s]?', 'm[aá]quina de lavar','micro-ondas',
+  'm[óo]vel','m[óo]veis','eletrodom[ée]stico','eletrodom[ée]sticos','tv','televis[ãa]o',
+  'computador','notebook','geladeira','freezer','lavadora','secadora'
+];
+const RX_ITEM = new RegExp(`\\b(${ITEM_LEXICON.join('|')})\\b`, 'i');
+function looksLikeItem(val) {
+  if (!val) return false;
+  return RX_ITEM.test(String(val).trim());
+}
+
+// HEURÍSTICA DE DESTINO - Marcadores de direção (para/pro/pra/até/no/na/destino/entrega)
+const RX_DESTINO_MARKER = /\b(at[eé]\s+|para\s+|pro\s+|pra\s+|no\s+|na\s+|ao\s+|a\s+|destino|entrega)\b/i;
+function isMarker(txt) {
+  if (!txt) return false;
+  return RX_DESTINO_MARKER.test(String(txt));
+}
 
 // Função auxiliar: verifica se o texto é APENAS ruído (sem conteúdo válido)
 function isOnlyNoise(text, noiseRegex) {
@@ -179,9 +207,17 @@ function sanitizeExtracted(obj, mensagensFull = []) {
 
     // Proteção contra ruídos: filtra palavras que não devem ser extraídas
     // Só rejeita se for APENAS ruído (não bloqueia "cama do conveniente" ou "rua do motorista")
+    // PROTEÇÃO EXTRA: nunca extrai item se for apenas marcador de destino ou ruído
     let itensRaw = pickStr(obj.itens);
-    if (itensRaw && isOnlyNoise(itensRaw, RE_NOISE_ITEM)) {
-      itensRaw = null; // Não extrai "Conveniente", "atendente", etc como item se for apenas isso
+    if (itensRaw) {
+      // Rejeita se for APENAS ruído
+      if (isOnlyNoise(itensRaw, RE_NOISE_ITEM)) {
+        itensRaw = null;
+      }
+      // Rejeita se for APENAS marcador de destino (sem conteúdo válido)
+      else if (isMarker(itensRaw) && itensRaw.split(/\s+/).length <= 3) {
+        itensRaw = null;
+      }
     }
     out.itens = itensRaw;
     
@@ -229,16 +265,28 @@ function sanitizeExtracted(obj, mensagensFull = []) {
     const parcial = onlyDigits(obj.telefone_parcial);
     const isValidBR = isValidBRPhoneWithDDD;
 
-    if (isValidBR(telFull)) {
+    // VALIDAÇÃO WHATSAPP: só aceita telefone válido se for WhatsApp (11 dígitos, celular com 9)
+    if (telFull && isValidWhatsAppTelefone(telFull)) {
       out.telefone = telFull;
+      // Limpa ddd e parcial se telefone completo é válido
+      out.ddd = null;
+      out.telefone_parcial = null;
     } else {
+      // Se não é WhatsApp válido, preenche ddd e parcial mas NUNCA monta telefone
       if (ddd && ddd.length === 2) out.ddd = ddd;
       if (parcial && (parcial.length === 8 || parcial.length === 9)) out.telefone_parcial = parcial;
+      
+      // Se tem DDD + parcial, verifica se é WhatsApp válido antes de montar
       const comb = (out.ddd || '') + (out.telefone_parcial || '');
-      if (comb && isValidBR(comb)) {
+      if (comb && isValidWhatsAppTelefone(comb)) {
         out.telefone = comb;
         out.ddd = null;
         out.telefone_parcial = null;
+      } else if (comb && isValidBR(comb)) {
+        // Telefone fixo (10 dígitos) ou inválido: NUNCA monta telefone, mantém ddd e parcial
+        // O FSM vai perguntar explicitamente se é WhatsApp ou pedir número correto
+        out.telefone = null;
+        // Mantém ddd e parcial para o FSM decidir
       }
     }
 
@@ -374,30 +422,53 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
 
   const sanitized = sanitizeExtracted(parsed, mensagens);
 
-  // FALLBACK DETERMINÍSTICO DE TELEFONE (regex) — só se a LLM não trouxe telefone completo
+    // FALLBACK DETERMINÍSTICO DE TELEFONE (regex) — só se a LLM não trouxe telefone completo
   try {
     let phoneFallbackUsed = false;
+    let phoneFallbackType = null;
 
     if (!sanitized.telefone) {
       const fb = fallbackPhoneFromMessages(mensagens);
-      if (fb && fb.telefone && isValidBRPhoneWithDDD(fb.telefone)) {
-        sanitized.telefone = fb.telefone;
-        sanitized.ddd = null;
-        sanitized.telefone_parcial = null;
-        phoneFallbackUsed = true;
+      if (fb && fb.telefone) {
+        // VALIDAÇÃO WHATSAPP: só aceita se for WhatsApp válido (11 dígitos, celular com 9)
+        if (isValidWhatsAppTelefone(fb.telefone)) {
+          sanitized.telefone = fb.telefone;
+          sanitized.ddd = null;
+          sanitized.telefone_parcial = null;
+          phoneFallbackUsed = true;
+          phoneFallbackType = 'whatsapp_valid';
+        } else if (isValidBRPhoneWithDDD(fb.telefone)) {
+          // Telefone fixo (10 dígitos) ou inválido: NUNCA monta telefone, mantém ddd e parcial
+          // Extrai DDD e parcial separadamente
+          const s = String(fb.telefone).replace(/\D/g, '');
+          if (s.length === 10) {
+            sanitized.ddd = s.slice(0, 2);
+            sanitized.telefone_parcial = s.slice(2);
+            sanitized.telefone = null; // NUNCA preenche telefone se não for WhatsApp
+            phoneFallbackUsed = true;
+            phoneFallbackType = 'fixed_phone_ddd_parcial';
+          }
+        }
       } else if (fb && fb.telefone_parcial && !sanitized.telefone_parcial && !sanitized.telefone) {
         sanitized.telefone_parcial = fb.telefone_parcial;
         phoneFallbackUsed = true;
+        phoneFallbackType = 'parcial_only';
       }
     }
 
-    // Montagem automática de telefone caso tenha DDD + parcial (após fallback)
+    // Montagem automática de telefone caso tenha DDD + parcial (após fallback) - SÓ SE FOR WHATSAPP
     if (!sanitized.telefone && sanitized.ddd && sanitized.telefone_parcial) {
       const comb = String(sanitized.ddd).replace(/\D/g,'') + String(sanitized.telefone_parcial).replace(/\D/g,'');
-      if (isValidBRPhoneWithDDD(comb)) {
+      // VALIDAÇÃO WHATSAPP: só monta se for WhatsApp válido
+      if (isValidWhatsAppTelefone(comb)) {
         sanitized.telefone = comb;
         sanitized.ddd = null;
         sanitized.telefone_parcial = null;
+        phoneFallbackType = phoneFallbackType || 'whatsapp_assembled';
+      } else {
+        // Telefone fixo ou inválido: NUNCA monta telefone, mantém ddd e parcial
+        sanitized.telefone = null;
+        phoneFallbackType = phoneFallbackType || 'fixed_phone_not_assembled';
       }
     }
 
@@ -408,7 +479,10 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
           chatId,
           used: true,
           hasFull: !!sanitized.telefone,
-          hasPartial: !!sanitized.telefone_parcial
+          hasPartial: !!sanitized.telefone_parcial,
+          hasDDD: !!sanitized.ddd,
+          fallbackType: phoneFallbackType,
+          isWhatsApp: sanitized.telefone ? isValidWhatsAppTelefone(sanitized.telefone) : false
         });
       } catch {}
     }
@@ -449,24 +523,28 @@ async function extractOrderFieldsLLM({ perfil, chatId, mensagens, contexto }) {
     }
 
     if (!sanitized.endereco_destino) {
-      const mDest = joined.match(/\b(?:levar|entregar|para|pra|pro)\s+(?:o|a|no|na|ali|lá|la)?\s*([^|,.\n]{3,60})/i);
+      // HEURÍSTICA BLINDADA: só extrai destino se tiver marcador de direção E não for item
+      const mDest = joined.match(/\b(?:levar|entregar|para|pra|pro|at[eé]|no|na|ao|a)\s+(?:o|a|no|na|ali|lá|la)?\s*([^|,.\n]{3,60})/i);
       if (mDest && mDest[1]) {
         const addr = mDest[1].trim();
-        // Proteção contra ruídos: não aceita se for APENAS palavra de ruído
-        // Aceita informalidades válidas como "ali no parque", "centro", "mercado"
-        if (addr && !isOnlyNoise(addr, RE_NOISE_ADDRESS)) {
-          sanitized.endereco_destino = addr;
-          
-          // Log de endereço informal extraído via heurística
-          try {
-            const stepLog = require('./stepLog.js');
-            stepLog.appendJSONL(perfil, 'ia_extract_addr_heuristic_informal', {
-              chatId,
-              campo: 'endereco_destino',
-              valor: addr.slice(0, 50),
-              metodo: 'heuristica_verbo'
-            });
-          } catch {}
+        // PROTEÇÃO CRÍTICA: nunca extrai item como destino
+        if (addr && !looksLikeItem(addr) && !isOnlyNoise(addr, RE_NOISE_ADDRESS)) {
+          // Verifica se há marcador de direção antes do endereço (segurança extra)
+          const contextBefore = joined.slice(0, joined.indexOf(addr));
+          if (isMarker(contextBefore) || /(?:levar|entregar|para|pra|pro|at[eé])\s+/i.test(contextBefore)) {
+            sanitized.endereco_destino = addr;
+            
+            // Log de endereço informal extraído via heurística
+            try {
+              const stepLog = require('./stepLog.js');
+              stepLog.appendJSONL(perfil, 'ia_extract_addr_heuristic_informal', {
+                chatId,
+                campo: 'endereco_destino',
+                valor: addr.slice(0, 50),
+                metodo: 'heuristica_verbo_blindado'
+              });
+            } catch {}
+          }
         }
       }
     }

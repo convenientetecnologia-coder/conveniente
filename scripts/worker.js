@@ -1,6 +1,8 @@
 // scripts/worker.js
-// ATENÇÃO: CLICAR/ABRIR/FILTRAR(CHAT) NA ABA PRINCIPAL (Messenger) só pode ser executado pela Virtus.js (UI driver).
-// worker.js nunca faz evaluate/click/focus na mainPage; só coordena fila, locks, scraping em abas extras.
+// ATENÇÃO: Worker NUNCA interage nem clica/open/chat na aba principal Messenger.
+// TODO acesso UI de chat deve ser feito via callback handler que Virtus registra via global.__buscaLocalizacaoVirtus.solicitarAberturaChat.
+// O worker só pede, aguarda, e opera ABA NOVA para scraping/classificado.
+// Worker nunca faz evaluate/click/focus na mainPage; só coordena fila, locks, scraping em abas extras.
 
 const path = require('path');
 const fs = require('fs');
@@ -345,6 +347,9 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
     // Coleta de localização: clique/navegação/seleção na aba zero Messenger só é executada pelo Virtus.js (UI driver), nunca pelo worker — esta função apenas gerencia fila de pedidos e locks.
     // Worker solicita abertura do chat via handler global que Virtus consome quando seguro.
     // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
+    // ATENÇÃO: Worker NUNCA interage nem clica/open/chat na aba principal Messenger.
+    // TODO acesso UI de chat deve ser feito via callback handler que Virtus registra via global.__buscaLocalizacaoVirtus.solicitarAberturaChat.
+    // O worker só pede, aguarda, e opera ABA NOVA para scraping/classificado.
     async function _descobrirUrlClassificadoSeNecessario() {
       if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
         return urlClassificado;
@@ -362,6 +367,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
       // Solicita ao Virtus que abra o chat e extraia a URL (Virtus faz o clique/navegação quando seguro)
       // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
+      // NUNCA tenta fallback para click na mainPage sob hipótese alguma.
       return new Promise((resolve) => {
         const timeout = setTimeout(() => {
           resolve(null);
