@@ -1,4 +1,7 @@
 // scripts/worker.js
+// ATENÇÃO: CLICAR/ABRIR/FILTRAR(CHAT) NA ABA PRINCIPAL (Messenger) só pode ser executado pela Virtus.js (UI driver).
+// worker.js nunca faz evaluate/click/focus na mainPage; só coordena fila, locks, scraping em abas extras.
+
 const path = require('path');
 const fs = require('fs');
 const logger = require('./logger.js');
@@ -107,8 +110,9 @@ global.__buscaLocalizacaoVirtus = {
       try { callback && callback(null); } catch {}
     }
   },
-  // Handler que Virtus deve implementar para abrir chat e extrair URL do item
-  // Virtus.js deve registrar esta função quando iniciar, fazendo o clique/navegação na aba zero quando seguro
+  // Handler que Virtus deve registrar para executar o clique/abertura do chat na mainPage e extrair a URL do classificado
+  // Virtus deve fazer: global.__buscaLocalizacaoVirtus.solicitarAberturaChat = function(perfil, chatId, callback) { ... }
+  // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
   solicitarAberturaChat: null // Será preenchido pelo Virtus.js
 };
 
@@ -340,6 +344,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
 
     // Coleta de localização: clique/navegação/seleção na aba zero Messenger só é executada pelo Virtus.js (UI driver), nunca pelo worker — esta função apenas gerencia fila de pedidos e locks.
     // Worker solicita abertura do chat via handler global que Virtus consome quando seguro.
+    // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
     async function _descobrirUrlClassificadoSeNecessario() {
       if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
         return urlClassificado;
@@ -356,6 +361,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
       }
 
       // Solicita ao Virtus que abra o chat e extraia a URL (Virtus faz o clique/navegação quando seguro)
+      // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
       return new Promise((resolve) => {
         const timeout = setTimeout(() => {
           resolve(null);
@@ -408,6 +414,7 @@ async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil
       } catch {}
 
       // Descobre URL do classificado solicitando ao Virtus que abra o chat (Virtus faz clique/navegação quando seguro)
+      // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
       let targetUrl = await _descobrirUrlClassificadoSeNecessario();
       if (!targetUrl || typeof targetUrl !== 'string') {
         try {
