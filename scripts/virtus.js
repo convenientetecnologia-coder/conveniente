@@ -336,7 +336,10 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
     // Obtém lastTs do FSM ao invés de chat state local
     let lastTs = 0;
     try {
-      const fsmState = await virtusFSM.get(perfil, chatId).catch(()=>null);
+      let fsmState = null;
+      try {
+        fsmState = virtusFSM.get(perfil, chatId);
+      } catch {}
       lastTs = (fsmState && fsmState.chatLogLastTs) || 0;
     } catch {}
     
@@ -873,7 +876,9 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       // BLOQUEIO: Verifica freeze antes de enviar qualquer mensagem via FSM
       let fsmState = null;
       try {
-        fsmState = await virtusFSM.get(nomePerfil, proximo.chatId).catch(() => null);
+        try {
+          fsmState = virtusFSM.get(nomePerfil, proximo.chatId);
+        } catch {}
       } catch {}
       
       // Verifica freeze e schedule antes de enviar
@@ -1316,7 +1321,9 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     // Snapshot de estado atual do chat via FSM
     let fsmState = null;
     try {
-      fsmState = await virtusFSM.get(nomePerfil, chatId).catch(()=>null);
+      try {
+        fsmState = virtusFSM.get(nomePerfil, chatId);
+      } catch {}
     } catch {}
 
     const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : ((fsmState && fsmState.cursor && fsmState.cursor.count) || 0));
@@ -1812,7 +1819,10 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
   try {
     // DEDUPE: verifica se a mensagem é semelhante à última enviada (via FSM)
     try {
-      const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+      let fsmState = null;
+      try {
+        fsmState = virtusFSM.get(nome, chatId);
+      } catch {}
       const lastSent = (fsmState && fsmState.cursor && fsmState.cursor.ia && fsmState.cursor.ia.sentSig) ? '' : '';
       // Dedupe baseado em cursorSig do FSM, não em texto
     } catch {}
@@ -2316,7 +2326,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         try {
           // Verifica estado via FSM
-          const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+          let fsmState = null;
+          try {
+            fsmState = virtusFSM.get(nome, chatId);
+          } catch {}
           if (fsmState && fsmState.finalizado) {
             try {
               await virtusFSM.patch(nome, chatId, { lastScanAt: Date.now() });
@@ -2370,7 +2383,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Prefetch de localização (não bloqueia)
           try {
-            const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+            let fsmState = null;
+          try {
+            fsmState = virtusFSM.get(nome, chatId);
+          } catch {}
             if (!(fsmState && fsmState.cidade && fsmState.estado)) {
               await ensureLocationPrefetch(chatId, classificadoUrl || null);
               // Se obteve cidade, atualiza no FSM
@@ -2394,7 +2410,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           let prevCount = 0;
           let prevDigest = '';
           try {
-            const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+            let fsmState = null;
+          try {
+            fsmState = virtusFSM.get(nome, chatId);
+          } catch {}
             prevCount = Number((fsmState && fsmState.cursor && fsmState.cursor.count) || 0);
             prevDigest = String((fsmState && fsmState.cursor && fsmState.cursor.digest) || '');
           } catch {}
@@ -2431,7 +2450,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Gate reforçado: semântica + diferença real do último texto do cliente
           let lastClientNormPrev = '';
           try {
-            const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+            let fsmState = null;
+          try {
+            fsmState = virtusFSM.get(nome, chatId);
+          } catch {}
             lastClientNormPrev = String((fsmState && fsmState.clientLastNorm) || '');
           } catch {}
           
@@ -2472,7 +2494,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (!cidadeCtx) {
             // Obtém cidade do FSM
             try {
-              const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+              let fsmState = null;
+          try {
+            fsmState = virtusFSM.get(nome, chatId);
+          } catch {}
               if (fsmState && fsmState.cidade) cidadeCtx = fsmState.cidade;
             } catch {}
           }
@@ -2547,7 +2572,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function ensureLocationPrefetch(chatId, urlHint = null) {
     try {
-      const fsmState = await virtusFSM.get(nome, chatId).catch(() => null);
+      let fsmState = null;
+      try {
+        fsmState = virtusFSM.get(nome, chatId);
+      } catch {}
       if (fsmState && fsmState.data && fsmState.data.cidade) return;
 
       // Se não veio URL, tenta obtê-la com o chat aberto por clique (sem navegação)
@@ -2761,7 +2789,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const reason = msgErr.includes('composer') ? 'composer_not_found' : (msgErr.includes('context') ? 'context_mismatch' : 'other');
         // Log error_send
         try {
-          const fsmState = await virtusFSM.get(nome, chatId).catch(()=>null);
+          let fsmState = null;
+          try {
+            fsmState = virtusFSM.get(nome, chatId);
+          } catch {}
           virtusFSM.flowLog(nome, chatId, 'error_send', {
             reason: reason,
             attempts: attempts,
@@ -2794,17 +2825,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     
         iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
-      bindPedidosEventsIfNeeded(nome, enviarPedidoParaNotificador, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+      // REMOVIDO: bindPedidosEventsIfNeeded - toda orquestração agora via virtusFSM
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
     }
     
-    // Restaura dados coletados e timers do disco ao reiniciar
-    try {
-      await resumeTimers();
-    } catch (e) {
-      logger.warn('[VIRTUS] Erro ao restaurar dados/timers do disco', { nome, error: e && e.message || e });
-    }
+    // REMOVIDO: resumeTimers - timers agora gerenciados pelo virtusFSM
     
     // Varredura contínua e imediata (sem locks de atendimento)
     setInterval(() => scanAndProcessChats(nome), SCAN_INTERVAL_MS);
