@@ -54,13 +54,13 @@ function nearEqual(a, b) {
 function isNoiseNorm(n) {
   const s = String(n || '').trim();
   if (!s) return true;
-  // Normaliza
-  const t = normalizeContent(s);
+  const t0 = normalizeContent(s);
+  const t = t0.replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
   if (!t) return true;
 
   // Lixos comuns do Messenger/Marketplace
   if (t === 'inserir') return true;
-  if (t === 'mensagem nao lida' || t === 'mensagem não lida') return true;
+  if (t.startsWith('mensagem nao lida')) return true;
   if (/^\d{1,2}:\d{2}$/.test(t)) return true;              // "03:26"
   if (/^(hoje|ontem)\b/.test(t)) return true;
   if (/^\s*[·•]\s*$/.test(s)) return true;                 // bullet solto
@@ -2414,8 +2414,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try {
             fsmState = virtusFSM.get(nome, chatId);
           } catch {}
-            prevCount = Number((fsmState && fsmState.cursor && fsmState.cursor.count) || 0);
-            prevDigest = String((fsmState && fsmState.cursor && fsmState.cursor.digest) || '');
+            prevCount = Number((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.count) || 0);
+            prevDigest = String((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.digest) || '');
           } catch {}
 
           const changed =
@@ -2518,7 +2518,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Decisão do próximo passo via FSM
           const directive = await virtusFSM.decideNext(nome, chatId);
 
-          if (directive && directive.shouldReply) {
+          const mustReply = !!(directive && (directive.final_message === true || directive.ask_field));
+          if (mustReply) {
             // Construção de contexto e renderização
             const ctx = await virtusFSM.buildRenderContext(nome, chatId, directive);
             let out;
@@ -2545,14 +2546,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 earliestSendAt: earliest
               });
 
+              await virtusFSM.ackQueued(nome, chatId, cursorSig);
+
               // Enfileira para envio no Messenger (driver puro)
               await queueMessengerSend(nome, {
                 chatId,
                 resposta: out.text,
                 key: `reply|${chatId}|${sha1(out.text)}|${Date.now()}`,
                 earliestSendAt: earliest,
-                origin: 'reply',
-                cursorSig
+                origin: 'replyReady',
+                cursorSig,
+                lastClientTsOverride: lastClientTs
               });
             }
           }

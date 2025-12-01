@@ -558,6 +558,8 @@ return { expired: false };
 
 
 
+// Pipeline/decisão: qual perguntar agora (única autoridade)
+// shouldReply = true é exigido para garantir que o ciclo Virtus nunca fique travado.
 function decideNext(perfil, chatId) {
 
 try {
@@ -583,6 +585,8 @@ const ttl = _checkPendingTTL(perfil, chatId);
 if (ttl.expired) {
 
   const directive = { final_message: true, ask_field: null, ask_next_field: null, include_orcamento: false, saudacao: false };
+
+  directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
 
   flowLog(perfil, chatId, 'decide_ok', directive);
 
@@ -613,6 +617,8 @@ if (pendingField) {
     saudacao: c.flags && c.flags.greetDone === false
 
   };
+
+  directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
 
   // Marque greetDone no primeiro ciclo de decisão:
 
@@ -663,6 +669,8 @@ const directive = {
   saudacao: c2.flags && c2.flags.greetDone === false
 
 };
+
+directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
 
 if (c2.flags && c2.flags.greetDone === false) patch(perfil, chatId, { flags: { greetDone: true } });
 
@@ -1030,7 +1038,7 @@ const u = Number(until || 0);
 
 patch(perfil, chatId, { freeze: { finalizationUntil: u, reason: String(reason || '') } });
 
-flowLog(perfil, chatId, 'error_freeze', { until: u, reason: String(reason || '') });
+flowLog(perfil, chatId, 'freeze', { until: u, reason: String(reason || '') });
 
 return true;
 
