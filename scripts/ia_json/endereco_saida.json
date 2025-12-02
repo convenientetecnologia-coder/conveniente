@@ -1,0 +1,14 @@
+{
+  "id": "endereco_saida",
+  "version": 1,
+  "text": "Qual é o endereço de retirada/origem do frete? Por favor, informe o endereço completo.",
+  "variants": [
+    "Informe o endereço de onde devemos retirar os itens.",
+    "Qual o local de origem do frete? Escreva o endereço completo.",
+    "Onde devemos coletar? Envie o endereço de retirada.",
+    "Me passe o endereço de retirada, por favor."
+  ],
+  "rules": {
+    "questionBudget": 1
+  }
+}

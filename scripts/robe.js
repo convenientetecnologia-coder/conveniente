@@ -343,20 +343,26 @@ async function findComboboxByLabel(page, labelText, timeout = 8000) {
 }
 
 // Clicar em um item por texto (patch robusto da auditoria)
-async function clickItemByText(page, text, timeout = 5000) {
-  const xp = `//div[@role="button" or @role="menuitem" or @role="option" or @role="link"]//*[contains(normalize-space(.), "${text}")]` +
-             `|//button[contains(normalize-space(.), "${text}")]` +
-             `|//a[contains(normalize-space(.), "${text}")]`;
-  const t0 = Date.now();
-  while ((Date.now() - t0) < timeout) {
+async function clickItemByText(page, text, { timeout = 5000 } = {}) {
+  const started = Date.now();
+  function escXPath(s) {
+    const t = String(s || '');
+    if (!t.includes('"')) return `"${t}"`;
+    if (!t.includes("'")) return `'${t}'`;
+    return 'concat("' + t.replace(/"/g, '",\'"\',"') + '")';
+  }
+  const needle = escXPath(text);
+  const xp = `//div[@role="button" or @role="menuitem" or @role="option" or @role="link"][contains(normalize-space(.), ${needle})]`;
+  while ((Date.now() - started) < timeout) {
     try {
       const els = await page.$x(xp);
       if (els && els[0]) {
+        await els[0].evaluate(el => { try { el.scrollIntoView({behavior:'instant', block:'center'}); } catch {} });
         await els[0].click({ delay: 60 });
         return true;
       }
     } catch {}
-    await new Promise(r => setTimeout(r, 150));
+    await sleep(150);
   }
   return false;
 }
@@ -858,7 +864,7 @@ async function selecionarCategoriaMoveis(page) {
 
   await combo.click();
   await sleep(jitter(180, 300));
-  const clicked = await clickItemByText(page, 'Móveis', 2500);
+  const clicked = await clickItemByText(page, 'Móveis', { timeout: 2500 });
   if (!clicked) {
     for (let i = 0; i < 20; i++) {
       await page.keyboard.press('ArrowDown');

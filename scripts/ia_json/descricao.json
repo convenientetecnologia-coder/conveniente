@@ -1,0 +1,14 @@
+{
+  "id": "descricao",
+  "version": 1,
+  "text": "Pode descrever com algumas palavras o tipo de serviço ou o que precisa transportar? Exemplo: mudança pequena, móveis, caixas, eletrodomésticos.",
+  "variants": [
+    "Por favor, detalhe rapidamente o que você vai precisar transportar.",
+    "Me diga em algumas palavras o serviço, ex: mudança completa, só alguns itens, itens frágeis...",
+    "Coloque uma breve descrição do frete, por favor.",
+    "Conte um pouco sobre o que será transportado para melhor cotação."
+  ],
+  "rules": {
+    "questionBudget": 1
+  }
+}

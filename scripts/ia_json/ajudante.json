@@ -1,0 +1,14 @@
+{
+  "id": "ajudante",
+  "version": 1,
+  "text": "Você vai precisar de ajudante para carregar ou descarregar o frete?",
+  "variants": [
+    "Precisa de ajudante para carregar/descarregar?",
+    "Deseja um ajudante para essa mudança ou frete?",
+    "O frete precisa de ajudante ou só motorista?",
+    "Vai precisar de uma pessoa para ajudar no serviço?"
+  ],
+  "rules": {
+    "questionBudget": 1
+  }
+}

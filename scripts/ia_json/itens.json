@@ -1,0 +1,14 @@
+{
+  "id": "itens",
+  "version": 1,
+  "text": "O que você precisa transportar? Por favor, detalhe os itens.",
+  "variants": [
+    "Me diga o que será transportado.",
+    "Quais itens ou objetos precisam ser levados?",
+    "Pode listar tudo que vai no frete?",
+    "Liste os móveis, caixas ou produtos a serem transportados."
+  ],
+  "rules": {
+    "questionBudget": 1
+  }
+}

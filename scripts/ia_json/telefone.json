@@ -1,0 +1,14 @@
+{
+  "id": "telefone",
+  "version": 1,
+  "text": "Qual é o seu WhatsApp com DDD?",
+  "variants": [
+    "Me informe, por favor, seu telefone com DDD (WhatsApp).",
+    "Pode passar seu contato do WhatsApp com DDD?",
+    "Qual seu número de WhatsApp (com DDD)?",
+    "Informe seu WhatsApp, incluindo o DDD, por gentileza."
+  ],
+  "rules": {
+    "questionBudget": 1
+  }
+}

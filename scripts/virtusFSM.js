@@ -1,8 +1,16 @@
 const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 
-let computeMissing = null;
+// ==== INTEGRAÇÃO DO STEP ENGINE (FLOW MODULAR) ====
+const stepEngine = require('./ia_scripts/core');
+const stepRegistry = require('./ia_scripts/registry');
 
-try { computeMissing = require('./missing.js').computeMissing; } catch {}
+// computeMissing delegado ao Step Engine
+let computeMissing = null;
+try {
+  computeMissing = stepEngine.computeMissingByFlow;
+} catch {
+  try { computeMissing = require('./missing.js').computeMissing; } catch {}
+}
 
 const path = require('path');
 
@@ -443,7 +451,7 @@ const missingAfter = Array.isArray(st3 && st3.data && st3.data.missing) ? st3.da
 
 // Se o pending field foi preenchido (não está mais em missing), limpa pending e atualiza step
 if (pendingField && !missingAfter.includes(pendingField)) {
-  const nextField = _orderMandatory(st3 && st3.data);
+  const nextField = stepEngine.nextFieldByOrder(st3 && st3.data);
   patch(perfil, chatId, {
     funil: {
       pending: null,
@@ -646,9 +654,9 @@ if (pendingField) {
 
 
 
-// Escolha próximo mandatory/optional
+// Escolha próximo mandatory/optional (via Step Engine)
 
-const field = _orderMandatory(c && c.data);
+const field = stepEngine.nextFieldByOrder(c && c.data);
 
 if (!field) {
 
@@ -836,13 +844,22 @@ async function render(perfil, chatId, ctx) {
 
 try {
 
-if (!renderUnico || !sanitizeAnswerUnico) throw new Error('prompt engine indisponível (render/sanitize ausente)');
+// ctx.funil.step = ask_field
+const askField = ctx?.funil?.step || null;
 
-const raw = await renderUnico(ctx);
+if (!askField) {
+  // fallback para manter compatibilidade
+  return renderDeterministico(perfil, chatId, { final_message: true });
+}
 
-const text = await sanitizeAnswerUnico(raw, ctx);
+// Usa Step Engine
+const out = await stepEngine.runStep(ctx, askField, 1); // versão 1 default
+let text = out.ask;
 
-const sanitized = String(text || '') !== String(raw || '');
+// (sanitizeAnswerUnico pode continuar)
+if (sanitizeAnswerUnico) {
+  text = sanitizeAnswerUnico(text, ctx);
+}
 
 // Persistência imediata de flags e audit após render/sanitize
 const flagsPatch = {};
@@ -861,9 +878,9 @@ if (Object.keys(flagsPatch).length > 0 || Object.keys(auditPatch).length > 0) {
   patch(perfil, chatId, patchObj);
 }
 
-flowLog(perfil, chatId, 'render_ok', { provider: 'groq', length: String(text || '').length, sanitized });
+flowLog(perfil, chatId, 'render_ok', { provider: 'step_engine', ask: askField, length: String(text || '').length });
 
-return { text: String(text || ''), sanitized };
+return { text: String(text || ''), sanitized: false };
 
 } catch (e) {
 
@@ -877,7 +894,7 @@ throw e;
 
 }
 
-flowLog(perfil, chatId, 'error_render', { error: msg });
+flowLog(perfil, chatId, 'error_render_engine', { error: msg });
 
 throw e;
 
