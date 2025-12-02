@@ -1,14 +1,14 @@
 {
-  "id": "endereco_saida",
-  "version": 1,
-  "text": "Qual é o endereço de retirada/origem do frete? Por favor, informe o endereço completo.",
-  "variants": [
-    "Informe o endereço de onde devemos retirar os itens.",
-    "Qual o local de origem do frete? Escreva o endereço completo.",
-    "Onde devemos coletar? Envie o endereço de retirada.",
-    "Me passe o endereço de retirada, por favor."
-  ],
-  "rules": {
-    "questionBudget": 1
-  }
+"id": "endereco_saida",
+"version": 1,
+"text": "Qual é o endereço de saída? Pode ser bairro ou ponto de referência.",
+"variants": [
+"Informe o local de retirada. Pode ser bairro ou ponto de referência.",
+"Qual o local de origem do frete? Pode ser um bairro ou ponto de referência.",
+"Onde devemos coletar? Pode informar só o bairro, região ou ponto de referência.",
+"Me passe o endereço de retirada, pode ser informal (ex.: centro, parque, mercado, Kobrasol)."
+],
+"rules": {
+"questionBudget": 1
+}
 }

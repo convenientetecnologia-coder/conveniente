@@ -27,11 +27,13 @@ const SENTENCE_BLACKLIST = [
 
 // perguntas padrão para fallback (quando dedupe aciona)
 const ASKS = {
-  telefone: 'Qual é o seu WhatsApp com DDD?',
-  confirmWhatsapp: 'Esse número tem WhatsApp? Se for celular, envie com o 9. Se for fixo, me informe um número com WhatsApp.',
-  itens: 'O que você precisa transportar?',
-  endereco_saida: 'Qual é o endereço completo de saída?',
-  endereco_destino: 'Qual é o endereço de destino?'
+telefone: 'Qual é o seu WhatsApp com DDD?',
+ddd: 'Qual é o DDD do seu WhatsApp?',
+numero_whats: 'Qual é o número do seu WhatsApp?',
+confirmWhatsapp: 'Esse número tem WhatsApp? Se for celular, envie com o 9. Se for fixo, me informe um número com WhatsApp.',
+itens: 'O que você precisa transportar?',
+endereco_saida: 'Qual é o endereço de saída? Pode ser bairro ou ponto de referência.',
+endereco_destino: 'Qual é o endereço de destino? Pode ser bairro ou ponto de referência.'
 };
 
 function normalizeForFingerprint(text) {
@@ -92,18 +94,28 @@ function countQuestions(text) {
 }
 
 function fallbackAsk(ctx) {
-  // Escolha do fallback baseada no próximo campo (ctx.funil.step ou ctx.render.nextField)
-  const nf = (ctx && (ctx.funil?.step || ctx.render?.nextField)) || null;
-  if (nf === 'telefone') {
-    // Se já existe telefone porém não é WhatsApp ok, force confirmação
-    if (ctx?.data?.telefone && ctx?.validations && ctx.validations.telefoneWhatsAppOk === false) {
-      return ASKS.confirmWhatsapp;
-    }
-    return ASKS.telefone;
-  }
-  if (nf && ASKS[nf]) return ASKS[nf];
-  // Se não souber o próximo campo, caia para pergunta genérica de continuidade
-  return 'Pode me informar o próximo dado que falta, por favor?';
+const nf = (ctx && (ctx.funil?.step || ctx.render?.nextField)) || null;
+const data = ctx && ctx.data ? ctx.data : {};
+
+if (nf === 'telefone') {
+// Se veio número sem DDD (8–9 dígitos), peça o DDD
+if (data.telefone_parcial && !data.ddd && !data.telefone) {
+  return ASKS.ddd;
+}
+// Se veio somente DDD, peça o número
+if (data.ddd && !data.telefone && !data.telefone_parcial) {
+  return ASKS.numero_whats;
+}
+// Se o número completo existe mas não é WhatsApp válido, confirmar
+if (data.telefone && ctx?.validations && ctx.validations.telefoneWhatsAppOk === false) {
+  return ASKS.confirmWhatsapp;
+}
+// Caso padrão
+return ASKS.telefone;
+}
+
+if (nf && ASKS[nf]) return ASKS[nf];
+return 'Pode me informar o próximo dado que falta, por favor?';
 }
 
 /* ========= 1) sanitizeAnswerUnico — Blacklist, Dedup, Clamp, Flags, Validação de Ask ========= */
@@ -179,86 +191,92 @@ function sanitizeAnswerUnico(raw, ctx = {}) {
 
 /* ========= 2) renderUnico — Composição Modular, Flags, Clamp, Dedup ========= */
 function renderUnico(ctx = {}) {
-  // Orçamento de perguntas: 2 somente na abertura; depois 1
-  const questionBudget = (ctx.render && Number.isInteger(ctx.render.questionBudget))
-    ? ctx.render.questionBudget
-    : (ctx.flags && ctx.flags.greetDone ? 1 : 2);
+// Orçamento de perguntas: 2 somente na abertura; depois 1
+const questionBudget = (ctx.render && Number.isInteger(ctx.render.questionBudget))
+? ctx.render.questionBudget
+: (ctx.flags && ctx.flags.greetDone ? 1 : 2);
 
-  const out = [];
-  const flags = ctx.flags || {};
-  const data = ctx.data || {};
-  const validations = ctx.validations || {};
-  const missingOrdered = Array.isArray(ctx.missingOrdered) ? ctx.missingOrdered : null;
+const out = [];
+const flags = ctx.flags || {};
+const data = ctx.data || {};
+const validations = ctx.validations || {};
+const missingOrdered = Array.isArray(ctx.missingOrdered) ? ctx.missingOrdered : null;
 
-  // Intro + orçamento (somente se ainda não disparados)
-  if (!flags.greetDone) {
-    out.push('Olá! Sim, fazemos fretes.');
+// Intro + orçamento (somente se ainda não disparados)
+if (!flags.greetDone) {
+out.push('Olá! Sim, fazemos fretes.');
+}
+if (!flags.explainedOrcamentoOnce) {
+out.push('O motorista envia o valor no WhatsApp após eu anotar os dados.');
+}
+
+// Determina o(s) ask(s) respeitando o budget e sem decidir passo aqui
+const asks = [];
+const nextField =
+(ctx.funil && ctx.funil.step) ||
+(ctx.render && ctx.render.nextField) ||
+(missingOrdered && missingOrdered[0]) ||
+null;
+
+// Pergunta principal
+if (nextField === 'telefone') {
+if (data.telefone && validations.telefoneWhatsAppOk === false) {
+  asks.push(ASKS.confirmWhatsapp);
+} else if (data.telefone_parcial && !data.ddd && !data.telefone) {
+  // Número sem DDD -> pedir DDD
+  asks.push(ASKS.ddd);
+} else if (data.ddd && !data.telefone && !data.telefone_parcial) {
+  // DDD sem número -> pedir número
+  asks.push(ASKS.numero_whats);
+} else {
+  asks.push(ASKS.telefone);
+}
+} else if (nextField && ASKS[nextField]) {
+asks.push(ASKS[nextField]);
+} else {
+asks.push(fallbackAsk(ctx));
+}
+
+// Pergunta adicional (somente se budget >= 2 e soubermos o próximo pendente)
+if (questionBudget >= 2) {
+let second = null;
+
+if (missingOrdered && missingOrdered.length > 1) {
+  const idx = missingOrdered.indexOf(nextField);
+  const nextIdx = idx >= 0 ? idx + 1 : 1;
+  const secondField = missingOrdered[nextIdx];
+  if (secondField && ASKS[secondField]) {
+    second = ASKS[secondField];
   }
-  if (!flags.explainedOrcamentoOnce) {
-    out.push('O motorista envia o valor no WhatsApp após eu anotar os dados.');
-  }
+}
 
-  // Determina o(s) ask(s) respeitando o budget e sem decidir passo aqui
-  const asks = [];
-  const nextField =
-    (ctx.funil && ctx.funil.step) ||
-    (ctx.render && ctx.render.nextField) ||
-    (missingOrdered && missingOrdered[0]) ||
-    null;
+if (second) asks.push(second);
 
-  // Pergunta principal
-  if (nextField === 'telefone') {
-    if (data.telefone && validations.telefoneWhatsAppOk === false) {
-      asks.push(ASKS.confirmWhatsapp);
-    } else {
-      asks.push(ASKS.telefone);
-    }
-  } else if (nextField && ASKS[nextField]) {
-    asks.push(ASKS[nextField]);
-  } else {
-    asks.push(fallbackAsk(ctx));
-  }
+}
 
-  // Pergunta adicional (somente se budget >= 2 e soubermos o próximo pendente)
-  if (questionBudget >= 2) {
-    let second = null;
+// Monta a saída crua
+const raw = [...out, ...asks].filter(Boolean).join(' ').trim();
 
-    if (missingOrdered && missingOrdered.length > 1) {
-      const idx = missingOrdered.indexOf(nextField);
-      const nextIdx = idx >= 0 ? idx + 1 : 1;
-      const secondField = missingOrdered[nextIdx];
-      if (secondField && ASKS[secondField]) {
-        second = ASKS[secondField];
-      }
-    }
+// Prepara ctx.render e fallback para sanitize (anti-eco)
+ctx.render = ctx.render || {};
+ctx.render.questionBudget = questionBudget;
+ctx.render.fallbackQuestion = fallbackAsk(ctx);
 
-    if (second) asks.push(second);
+// Sanitize final (dedupe/clamp/blacklist/validação de ask)
+const text = sanitizeAnswerUnico(raw, ctx);
 
-  }
+// Persistência imediata das flags (greet/orçamento) antes de retornar
+if (!flags.greetDone) ctx.flags.greetDone = true;
+if (!flags.explainedOrcamentoOnce) ctx.flags.explainedOrcamentoOnce = true;
 
-  // Monta a saída crua
-  const raw = [...out, ...asks].filter(Boolean).join(' ').trim();
+// Persistência do fingerprint no audit (para anti-flood)
+if (ctx._nextFingerprint) {
+ctx.audit = ctx.audit || {};
+const prev = ctx.audit.lastIAFingerprints || [];
+ctx.audit.lastIAFingerprints = [ctx._nextFingerprint, ...prev].slice(0, 2);
+}
 
-  // Prepara ctx.render e fallback para sanitize (anti-eco)
-  ctx.render = ctx.render || {};
-  ctx.render.questionBudget = questionBudget;
-  ctx.render.fallbackQuestion = fallbackAsk(ctx);
-
-  // Sanitize final (dedupe/clamp/blacklist/validação de ask)
-  const text = sanitizeAnswerUnico(raw, ctx);
-
-  // Persistência imediata das flags (greet/orçamento) antes de retornar
-  if (!flags.greetDone) ctx.flags.greetDone = true;
-  if (!flags.explainedOrcamentoOnce) ctx.flags.explainedOrcamentoOnce = true;
-
-  // Persistência do fingerprint no audit (para anti-flood)
-  if (ctx._nextFingerprint) {
-    ctx.audit = ctx.audit || {};
-    const prev = ctx.audit.lastIAFingerprints || [];
-    ctx.audit.lastIAFingerprints = [ctx._nextFingerprint, ...prev].slice(0, 2);
-  }
-
-  return text;
+return text;
 }
 
 /* ========= 3) buildSystemPromptUnico ========= */

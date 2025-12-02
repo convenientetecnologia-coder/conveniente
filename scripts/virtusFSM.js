@@ -718,29 +718,37 @@ const include_orcamento = !!(directive && directive.include_orcamento);
 
 const saudacao = !!(directive && directive.saudacao);
 
+// Clona os dados atuais do chat para o contexto de render (fundamental para os steps e o renderer enxergarem o que já foi coletado)
+const dataClone = deepClone(c.data || {});
+const missingOrdered = Array.isArray(dataClone.missing) ? dataClone.missing.slice(0) : [];
 
-
+// Campos já fornecidos (booleanos de presença)
 const ja_fornecidos = {
-
-telefone: !!(c.data && c.data.telefone),
-
-ddd: !!(c.data && c.data.ddd),
-
-telefone_parcial: !!(c.data && c.data.telefone_parcial),
-
-itens: !!(c.data && c.data.itens),
-
-endereco_saida: !!(c.data && c.data.endereco_saida),
-
-endereco_destino: !!(c.data && c.data.endereco_destino),
-
-ajudante: (typeof (c.data && c.data.ajudante) === 'boolean'),
-
-descricao: !!(c.data && c.data.descricao)
-
+telefone: !!dataClone.telefone,
+ddd: !!dataClone.ddd,
+telefone_parcial: !!dataClone.telefone_parcial,
+itens: !!dataClone.itens,
+endereco_saida: !!dataClone.endereco_saida,
+endereco_destino: !!dataClone.endereco_destino,
+ajudante: (typeof dataClone.ajudante === 'boolean'),
+descricao: !!dataClone.descricao
 };
 
+// Na saudação, o "próximo campo" para o renderer deve ser o primeiro pendente real (usualmente telefone)
+let nextFieldForAsk = ask_field;
+if (ask_field === 'saudacao') {
+nextFieldForAsk = missingOrdered[0] || 'telefone';
+}
 
+// Flags sombra: para renderizar a primeira mensagem com saudação+explicação e budget=2, mesmo que greetDone tenha sido marcado em decideNext
+const flagsShadow = deepClone(c.flags || {});
+if (ask_field === 'saudacao') {
+flagsShadow.greetDone = false;              // libera saudação e 2 perguntas
+flagsShadow.explainedOrcamentoOnce = false; // libera explicação de orçamento uma única vez
+}
+
+// Budget de perguntas: 2 na saudação, senão respeita a regra padrão (1 após saudação)
+const questionBudget = (ask_field === 'saudacao') ? 2 : (flagsShadow.greetDone ? 1 : 2);
 
 const ctx = {
 
@@ -750,7 +758,7 @@ perfil: String(perfil || ''),
 
 chatId: String(chatId || ''),
 
-cidade: c.data && c.data.cidade || null,
+cidade: dataClone.cidade || null,
 
 regiao: null
 
@@ -784,7 +792,7 @@ ja_fornecidos
 
 interpretacao: {
 
-tom_cliente: c.data && c.data.tom_cliente || 'casual',
+tom_cliente: dataClone.tom_cliente || 'casual',
 
 duvidas: []
 
@@ -796,7 +804,7 @@ ultimas_do_cliente: Array.isArray(c.meta && c.meta.lastClientTexts) ? c.meta.las
 
 },
 
-flags: c.flags || {},
+flags: flagsShadow,
 
 audit: c.audit || {},
 
@@ -808,13 +816,15 @@ step: ask_field
 
 render: {
 
-nextField: ask_field,
+nextField: nextFieldForAsk,
 
-questionBudget: (c.flags && c.flags.greetDone) ? 1 : 2
+questionBudget
 
 },
 
-missingOrdered: Array.isArray(c.data && c.data.missing) ? c.data.missing.slice(0) : []
+missingOrdered,
+
+data: dataClone // Os steps e o renderer usam esses dados para pular perguntas já preenchidas e adaptar o texto
 
 };
 
@@ -830,24 +840,28 @@ async function render(perfil, chatId, ctx) {
 
 try {
 
-// ctx.funil.step = ask_field
 const askField = ctx?.funil?.step || null;
 
 if (!askField) {
-  // fallback para manter compatibilidade
-  return renderDeterministico(perfil, chatId, { final_message: true });
+// Fallback seguro — caso não haja step atual, retorna mensagem final do determinístico
+return renderDeterministico(perfil, chatId, { final_message: true });
 }
 
-// Usa Step Engine
-const out = await stepEngine.runStep(ctx, askField, 1); // versão 1 default
-let text = out.ask;
+// Usa o renderer unificado (humano/curto, com 2 perguntas na primeira resposta) como padrão;
+// se indisponível, fallback no step engine.
+let text = '';
 
-// (sanitizeAnswerUnico pode continuar)
+if (renderUnico) {
+text = renderUnico(ctx);
+} else {
+const out = await stepEngine.runStep(ctx, askField, 1); // versão 1 default
+text = out.ask || '';
 if (sanitizeAnswerUnico) {
   text = sanitizeAnswerUnico(text, ctx);
 }
+}
 
-// Persistência imediata de flags e audit após render/sanitize
+// Após renderização, persistimos no estado possíveis alterações de flags/audit feitas durante o render
 const flagsPatch = {};
 if (ctx.flags && ctx.flags.greetDone) flagsPatch.greetDone = true;
 if (ctx.flags && ctx.flags.explainedOrcamentoOnce) flagsPatch.explainedOrcamentoOnce = true;
@@ -858,13 +872,13 @@ if (ctx.audit && Array.isArray(ctx.audit.lastIAFingerprints)) {
 }
 
 if (Object.keys(flagsPatch).length > 0 || Object.keys(auditPatch).length > 0) {
-  const patchObj = {};
-  if (Object.keys(flagsPatch).length > 0) patchObj.flags = flagsPatch;
-  if (Object.keys(auditPatch).length > 0) patchObj.audit = auditPatch;
-  patch(perfil, chatId, patchObj);
+const patchObj = {};
+if (Object.keys(flagsPatch).length > 0) patchObj.flags = flagsPatch;
+if (Object.keys(auditPatch).length > 0) patchObj.audit = auditPatch;
+patch(perfil, chatId, patchObj);
 }
 
-flowLog(perfil, chatId, 'render_ok', { provider: 'step_engine', ask: askField, length: String(text || '').length });
+flowLog(perfil, chatId, 'render_ok', { provider: renderUnico ? 'render_unico' : 'step_engine', ask: askField, length: String(text || '').length });
 
 return { text: String(text || ''), sanitized: false };
 

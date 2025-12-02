@@ -1,14 +1,14 @@
 {
-  "id": "endereco_destino",
-  "version": 1,
-  "text": "Qual é o endereço de destino (entrega)? Por favor, informe o endereço completo.",
-  "variants": [
-    "Me informe o endereço de entrega completo, por favor.",
-    "Pra onde será levado o frete? Envie o destino completo.",
-    "Qual o endereço para entrega dos itens?",
-    "Onde devemos entregar? Envie o endereço de destino."
-  ],
-  "rules": {
-    "questionBudget": 1
-  }
+"id": "endereco_destino",
+"version": 1,
+"text": "Qual é o endereço de destino? Pode ser bairro ou ponto de referência.",
+"variants": [
+"Informe o local de entrega. Pode ser bairro ou ponto de referência.",
+"Pra onde devemos levar? Pode informar só o bairro, região ou ponto de referência.",
+"Qual o local de entrega? Pode ser informal (ex.: centro, parque, mercado, Kobrasol).",
+"Onde devemos entregar? Pode mandar só o bairro ou uma referência."
+],
+"rules": {
+"questionBudget": 1
+}
 }
