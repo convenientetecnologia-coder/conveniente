@@ -2,8 +2,7 @@
 //
 // Gera o arquivo "projeto atendimento.txt" na raiz, contendo apenas os arquivos
 // relacionados ao sistema de atendimento/Virtus:
-// - virtus.js, virtusFSM.js, promptFretes.js, inteligenciaArtificial.js, iaExtractors.js
-// - ia_extractor/*, ia_json/*, ia_scripts/*
+// - virtus.js, virtusFSM.js, promptFretes.js, iaExtractors.js, inteligenciaArtificial.js
 //
 // Isso é pensado para trabalhar apenas com a parte de atendimento, sem o resto do projeto.
 
@@ -15,67 +14,16 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 
-// Arquivos específicos do atendimento
+// Arquivos específicos do atendimento (7 arquivos principais)
 const ATENDIMENTO_FILES = [
   "scripts/virtus.js",
   "scripts/virtusFSM.js",
   "scripts/promptFretes.js",
-  "scripts/inteligenciaArtificial.js",
+  "scripts/promptSupervisor.js",
   "scripts/iaExtractors.js",
-  "scripts/missing.js",
-  "scripts/fsmFlow.js"
+  "scripts/inteligenciaArtificial.js",
+  "scripts/missing.js"
 ];
-
-// Diretórios específicos do atendimento
-const ATENDIMENTO_DIRS = [
-  "scripts/ia_extractor",
-  "scripts/ia_json",
-  "scripts/ia_scripts"
-];
-
-function walkFiles(baseDir, relDir = "") {
-  const result = [];
-  const dirPath = path.join(baseDir, relDir);
-  let entries = [];
-  try {
-    entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  } catch {
-    return result;
-  }
-  for (const ent of entries) {
-    const relPath = path.join(relDir, ent.name);
-    if (ent.isDirectory()) {
-      result.push(...walkFiles(baseDir, relPath));
-    } else if (ent.isFile()) {
-      result.push(relPath.replace(/\\/g, "/"));
-    }
-  }
-  return result;
-}
-
-function collectFileList() {
-  const files = [];
-  
-  // Adiciona arquivos específicos
-  for (const file of ATENDIMENTO_FILES) {
-    const full = path.join(ROOT, file);
-    if (fs.existsSync(full)) {
-      files.push(file.replace(/\\/g, "/"));
-    }
-  }
-  
-  // Adiciona arquivos dos diretórios
-  for (const dir of ATENDIMENTO_DIRS) {
-    const full = path.join(ROOT, dir);
-    if (fs.existsSync(full)) {
-      files.push(...walkFiles(full).map(f => path.join(dir, f).replace(/\\/g, "/")));
-    }
-  }
-  
-  // Ordena por caminho para ficar determinístico
-  files.sort();
-  return files;
-}
 
 /**
  * Remove comentários e linhas totalmente vazias em modo "somente export",
@@ -122,7 +70,11 @@ function stripCommentsForExport(relPath, content) {
 }
 
 function main() {
-  const files = collectFileList();
+  const files = ATENDIMENTO_FILES.filter(f => {
+    const full = path.join(ROOT, f);
+    return fs.existsSync(full);
+  });
+  
   let out = "";
 
   for (const rel of files) {
@@ -148,4 +100,6 @@ function main() {
 if (require.main === module) {
   main();
 }
+
+module.exports = { main };
 

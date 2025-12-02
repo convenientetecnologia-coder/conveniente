@@ -1,8 +1,6 @@
 // api_status
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
-const fs = require('fs');
-
 module.exports = (app, workerClient, fileStore) => {
 // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
 // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
@@ -96,21 +94,14 @@ try {
   // CRÍTICO: sempre baseline de perfis.json
   let perfisSkeleton = [];
   try {
-    let listaPerfis = [];
-    try {
-      listaPerfis = (typeof fileStore.loadPerfisJson === 'function') ? fileStore.loadPerfisJson() : [];
-    } catch {
-      try {
-        if (fileStore.perfisPath && fs.existsSync(fileStore.perfisPath)) {
-          listaPerfis = JSON.parse(fs.readFileSync(fileStore.perfisPath, 'utf8'));
-        } else {
-          listaPerfis = [];
-        }
-      } catch { listaPerfis = []; }
-    }
+    let listaPerfis = fileStore.loadPerfisJsonSync
+      ? fileStore.loadPerfisJsonSync()
+      : fileStore.perfisJson
+      ? fileStore.perfisJson
+      : require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8') && JSON.parse(require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8'));
     perfisSkeleton = (listaPerfis || []).map(perfil => ({
       nome: perfil.nome,
-      label: perfil.label || null,
+      label: perfil.label,
       cidade: perfil.cidade,
       uaPresetId: perfil.uaPresetId,
       active: false,
@@ -155,7 +146,7 @@ try {
       banned: false,
       bannedAt: null,
       bannedText: null,
-      problem: false
+      problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 2)
     }));
   } catch(e2) {
     perfisSkeleton = [];

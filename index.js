@@ -35,32 +35,24 @@ const allowedOrigins = [
   `http://localhost:${PORT}`,
   `http://127.0.0.1:${PORT}`
 ];
-
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-
-  // Normaliza IPs: trata IPv6, IPv4-mapped, hostname
-  const ip = String(req.ip || '').replace(/^::ffff:/, '');
-  const isLocalHost = (
-    req.hostname === 'localhost' ||
-    req.hostname === '127.0.0.1' ||
-    req.hostname === '::1'
-  );
-  const isLocalIp = (ip === '127.0.0.1' || ip === '::1');
-  const isLocalReq = isLocalHost || isLocalIp;
-
+  const isLocalReq = (req.ip === '127.0.0.1' || req.hostname === 'localhost');
   if (
     allowedOrigins.includes(origin) ||
     (!origin && isLocalReq)
   ) {
+    // Libera CORS somente para as origens válidas e undefined
     res.header('Access-Control-Allow-Origin', origin || '*');
     res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') {
+      // Pré-flight para CORS
       return res.sendStatus(204);
     }
     return next();
   } else {
+    // Bloqueia tudo que não é de painel local
     res.status(403).json({
       error: 'CORS Restrito: apenas painel local pode acessar este serviço.'
     });

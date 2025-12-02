@@ -11,24 +11,6 @@ const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./brow
 
 const browserHelper = require('./browser.js');
 
-// ==== REGISTRO DE HANDLERS IA SCRIPTS (Step Engine Modularizado) ====
-
-// Carrega registry do Step Engine
-const stepRegistry = require('./ia_scripts/registry');
-
-// Registra os steps/handlers (NÃO modifique o require dos paths, use exatamente esses!)
-try {
-  require('./ia_scripts/saudacao').register(stepRegistry);
-  require('./ia_scripts/telefone').register(stepRegistry);
-  require('./ia_scripts/itens').register(stepRegistry);
-  require('./ia_scripts/endereco_saida').register(stepRegistry);
-  require('./ia_scripts/endereco_destino').register(stepRegistry);
-  require('./ia_scripts/ajudante').register(stepRegistry);
-  require('./ia_scripts/descricao').register(stepRegistry);
-} catch (e) {
-  try { logger.warn('[STEP_REGISTRY] Falha ao registrar handlers IA Scripts', { error: e && e.message || e }); } catch {}
-}
-
 // ====== INÍCIO: LOCK GLOBAL DE LOCALIZAÇÃO (arquivo) ======
 const LOC_GLOBAL_LOCK_FILE = path.join(__dirname, '..', 'dados', 'loc_global.lock');
 

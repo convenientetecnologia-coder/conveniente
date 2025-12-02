@@ -58,9 +58,6 @@ function isNoiseNorm(n) {
   const t = t0.replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
   if (!t) return true;
 
-  // Filtro específico para "Conveniente" e variações (com todos os acentos)
-  if (/^conveniente(\s+conting(enc|ênc)ia)?$/i.test(s)) return true;
-
   // Lixos comuns do Messenger/Marketplace
   if (t === 'inserir') return true;
   if (t.startsWith('mensagem nao lida')) return true;
@@ -120,9 +117,6 @@ function explodeAndFilterLines(entry, ultimaIaNorm) {
   const parts = raw.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
 
   for (const line of parts) {
-    const rawLower = String(line||'').trim().toLowerCase();
-    if (rawLower === 'conveniente' || rawLower === 'conveniente contingencia' || rawLower === 'conveniente contingência') continue;
-    
     const ln = normalizeContent(line);
     if (!ln) continue;
 
@@ -2672,30 +2666,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           ensureLocationPrefetch(chatId, null).catch(() => {});
         }
         await installChatFeedObserver(p, nome, onNewChatDetected);
-
-        // Registra handler para o coletor de localização (worker)
-        try {
-          if (global && global.__buscaLocalizacaoVirtus && typeof global.__buscaLocalizacaoVirtus === 'object') {
-            global.__buscaLocalizacaoVirtus.solicitarAberturaChat = async (perfil, chatId, callback) => {
-              try {
-                if (String(perfil || '') !== String(nome || '')) { callback && callback(null); return; }
-                const pg = await ensurePage().catch(()=>null);
-                if (!pg) { callback && callback(null); return; }
-                // Garante estar no chat
-                if (!await assertOnChat(pg, chatId, { timeoutMs: 3000 })) {
-                  await openChatByClick(pg, chatId, { timeoutMs: 8000, retries: 1 });
-                }
-                if (!await assertOnChat(pg, chatId, { timeoutMs: 1500 })) {
-                  callback && callback(null); return;
-                }
-                const url = await extrairUrlClassificado(pg, chatId);
-                callback && callback(url || null);
-              } catch {
-                try { callback && callback(null); } catch {}
-              }
-            };
-          }
-        } catch {}
       } catch (err) {
         if (!running) return;
         logger.error('Falha ao garantir aba zero no startup Virtus', { nome }, err);

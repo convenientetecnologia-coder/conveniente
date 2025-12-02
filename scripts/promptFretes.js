@@ -29,11 +29,10 @@ const SENTENCE_BLACKLIST = [
 const ASKS = {
 telefone: 'Qual é o seu WhatsApp com DDD?',
 ddd: 'Qual é o DDD do seu WhatsApp?',
-numero_whats: 'Qual é o número do seu WhatsApp?',
 confirmWhatsapp: 'Esse número tem WhatsApp? Se for celular, envie com o 9. Se for fixo, me informe um número com WhatsApp.',
 itens: 'O que você precisa transportar?',
-endereco_saida: 'Qual é o endereço de saída? Pode ser bairro ou ponto de referência.',
-endereco_destino: 'Qual é o endereço de destino? Pode ser bairro ou ponto de referência.'
+endereco_saida: 'Qual é o endereço completo de saída?',
+endereco_destino: 'Qual é o endereço de destino?'
 };
 
 function normalizeForFingerprint(text) {
@@ -94,27 +93,20 @@ function countQuestions(text) {
 }
 
 function fallbackAsk(ctx) {
+// Escolha do fallback baseada no próximo campo (ctx.funil.step ou ctx.render.nextField)
 const nf = (ctx && (ctx.funil?.step || ctx.render?.nextField)) || null;
-const data = ctx && ctx.data ? ctx.data : {};
-
 if (nf === 'telefone') {
-// Se veio número sem DDD (8–9 dígitos), peça o DDD
-if (data.telefone_parcial && !data.ddd && !data.telefone) {
+  // Se já existe telefone porém não é WhatsApp ok, force confirmação
+  if (ctx?.data?.telefone && ctx?.validations && ctx.validations.telefoneWhatsAppOk === false) {
+    return ASKS.confirmWhatsapp;
+  }
+  return ASKS.telefone;
+}
+if (nf === 'ddd') {
   return ASKS.ddd;
 }
-// Se veio somente DDD, peça o número
-if (data.ddd && !data.telefone && !data.telefone_parcial) {
-  return ASKS.numero_whats;
-}
-// Se o número completo existe mas não é WhatsApp válido, confirmar
-if (data.telefone && ctx?.validations && ctx.validations.telefoneWhatsAppOk === false) {
-  return ASKS.confirmWhatsapp;
-}
-// Caso padrão
-return ASKS.telefone;
-}
-
 if (nf && ASKS[nf]) return ASKS[nf];
+// Se não souber o próximo campo, caia para pergunta genérica de continuidade
 return 'Pode me informar o próximo dado que falta, por favor?';
 }
 
@@ -202,10 +194,13 @@ const data = ctx.data || {};
 const validations = ctx.validations || {};
 const missingOrdered = Array.isArray(ctx.missingOrdered) ? ctx.missingOrdered : null;
 
-// Intro + orçamento (somente se ainda não disparados)
+// Saudação única, levemente personalizada usando a saudação do cliente (se houver)
 if (!flags.greetDone) {
-out.push('Olá! Sim, fazemos fretes.');
+const saud = (data && data.saudacao_cliente) ? String(data.saudacao_cliente).split('|')[0].trim() : null;
+if (saud) out.push(`${saud} Sim, fazemos fretes.`);
+else out.push('Oi! Sim, fazemos fretes.');
 }
+// Explicação de orçamento (somente se ainda não disparada)
 if (!flags.explainedOrcamentoOnce) {
 out.push('O motorista envia o valor no WhatsApp após eu anotar os dados.');
 }
@@ -218,19 +213,25 @@ const nextField =
 (missingOrdered && missingOrdered[0]) ||
 null;
 
+// Funções utilitárias locais para decidir confirmWhatsapp quando vier DDD + parcial inválido
+const digits = s => String(s || '').replace(/\D/g, '');
+const isWhats = s => /^[1-9]{2}9\d{8}$/.test(String(s || ''));
+
 // Pergunta principal
 if (nextField === 'telefone') {
-if (data.telefone && validations.telefoneWhatsAppOk === false) {
+// Se temos DDD e telefone_parcial mas não é WhatsApp (ex.: fixo 10 dígitos), pedir confirmação/ajuste
+const dd = digits(data.ddd);
+const part = digits(data.telefone_parcial);
+const combo = (dd || '') + (part || '');
+if (!data.telefone && dd && part && !isWhats(combo)) {
   asks.push(ASKS.confirmWhatsapp);
-} else if (data.telefone_parcial && !data.ddd && !data.telefone) {
-  // Número sem DDD -> pedir DDD
-  asks.push(ASKS.ddd);
-} else if (data.ddd && !data.telefone && !data.telefone_parcial) {
-  // DDD sem número -> pedir número
-  asks.push(ASKS.numero_whats);
+} else if (data.telefone && validations.telefoneWhatsAppOk === false) {
+  asks.push(ASKS.confirmWhatsapp);
 } else {
   asks.push(ASKS.telefone);
 }
+} else if (nextField === 'ddd') {
+asks.push(ASKS.ddd);
 } else if (nextField && ASKS[nextField]) {
 asks.push(ASKS[nextField]);
 } else {

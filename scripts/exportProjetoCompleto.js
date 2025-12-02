@@ -143,11 +143,9 @@ function stripCommentsForExport(relPath, content) {
 
 function main() {
   const files = collectFileList();
-  // Remove arquivos JSON de ia_json da lista inicial (serão adicionados no final)
-  const filesFiltered = files.filter(f => !f.startsWith("scripts/ia_json/"));
   let out = "";
 
-  for (const rel of filesFiltered) {
+  for (const rel of files) {
     const abs = path.join(ROOT, rel);
     let content = "";
     try {
@@ -163,38 +161,10 @@ function main() {
     out += "\n";
   }
 
-  // Adiciona arquivos JSON da pasta ia_json no final
-  const iaJsonDir = path.join(ROOT, "scripts", "ia_json");
-  if (fs.existsSync(iaJsonDir)) {
-    try {
-      const jsonFiles = fs.readdirSync(iaJsonDir)
-        .filter(f => f.endsWith(".json"))
-        .sort();
-      
-      for (const jsonFile of jsonFiles) {
-        const jsonPath = path.join(iaJsonDir, jsonFile);
-        const relPath = `scripts/ia_json/${jsonFile}`;
-        let content = "";
-        try {
-          content = fs.readFileSync(jsonPath, "utf8");
-        } catch (e) {
-          content = `// ERRO AO LER ${relPath}: ${e && e.message || String(e)}`;
-        }
-        out += `==== FILE: ${relPath} ====\n`;
-        out += content;
-        if (!out.endsWith("\n")) out += "\n";
-        out += "\n";
-      }
-    } catch (e) {
-      out += `// ERRO AO PROCESSAR ia_json: ${e && e.message || String(e)}\n\n`;
-    }
-  }
-
   fs.writeFileSync(OUT_FILE, out, "utf8");
   // Log simples no console para facilitar debug quando rodar manualmente
   // (não afeta o servidor, é apenas uma ferramenta auxiliar)
-  const totalFiles = filesFiltered.length + (fs.existsSync(iaJsonDir) ? fs.readdirSync(iaJsonDir).filter(f => f.endsWith(".json")).length : 0);
-  console.log(`[exportProjetoCompleto] Gerado ${OUT_FILE} com ${totalFiles} arquivos.`);
+  console.log(`[exportProjetoCompleto] Gerado ${OUT_FILE} com ${files.length} arquivos.`);
 }
 
 if (require.main === module) {

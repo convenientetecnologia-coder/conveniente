@@ -1,16 +1,8 @@
 const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 
-// ==== INTEGRAÇÃO DO STEP ENGINE (FLOW MODULAR) ====
-const stepEngine = require('./ia_scripts/core');
-const stepRegistry = require('./ia_scripts/registry');
-
-// computeMissing delegado ao Step Engine
 let computeMissing = null;
-try {
-  computeMissing = stepEngine.computeMissingByFlow;
-} catch {
-  try { computeMissing = require('./missing.js').computeMissing; } catch {}
-}
+
+try { computeMissing = require('./missing.js').computeMissing; } catch {}
 
 const path = require('path');
 
@@ -55,6 +47,10 @@ renderUnico = prompt.renderUnico || prompt.render;
 sanitizeAnswerUnico = prompt.sanitizeAnswerUnico;
 
 } catch {}
+
+let supervisor = null;
+
+try { supervisor = require('./promptSupervisor.js'); } catch {}
 
 
 
@@ -449,15 +445,26 @@ const st3 = get(perfil, chatId);
 const pendingField = st3 && st3.funil && st3.funil.pending && st3.funil.pending.field;
 const missingAfter = Array.isArray(st3 && st3.data && st3.data.missing) ? st3.data.missing : [];
 
-// Se o pending field foi preenchido (não está mais em missing), limpa pending e atualiza step
-if (pendingField && !missingAfter.includes(pendingField)) {
-  const nextField = stepEngine.nextFieldByOrder(st3 && st3.data, st3 && st3.flags || {});
-  patch(perfil, chatId, {
-    funil: {
-      pending: null,
-      step: nextField || null
-    }
-  });
+let canClearPending = false;
+if (pendingField) {
+if (pendingField === 'ddd') {
+  // 'ddd' não entra em missing; só limpa quando ddd de fato foi informado
+  const hasDDD = !!String(st3 && st3.data && st3.data.ddd || '').replace(/\D/g, '');
+  canClearPending = hasDDD;
+} else {
+  // Para os demais campos, basta não estar mais em missing
+  canClearPending = !missingAfter.includes(pendingField);
+}
+}
+
+if (pendingField && canClearPending) {
+const nextField = _orderMandatory(st3 && st3.data);
+patch(perfil, chatId, {
+  funil: {
+    pending: null,
+    step: nextField || null
+  }
+});
 }
 
 flowLog(perfil, chatId, 'extract_ok', { fields: Object.keys(put), missing: (st3 && st3.data && st3.data.missing) ? st3.data.missing.slice(0) : [] });
@@ -480,25 +487,47 @@ throw e;
 
 function _orderMandatory(data) {
 
-// Ordem estrita: telefone -> itens -> end_saida -> end_destino
+const d = data || {};
 
-// Ajudante/descricao são opcionais e só entram quando principais preenchidos.
+const miss = Array.isArray(d.missing) ? d.missing.slice(0) : [];
 
-const miss = Array.isArray(data && data.missing) ? data.missing.slice(0) : [];
+const onlyDigits = s => String(s || '').replace(/\D/g, '');
 
-const order = ['telefone', 'itens', 'endereco_saida', 'endereco_destino'];
 
-for (const f of order) {
 
-if (miss.includes(f)) return f;
+// Se telefone ainda falta:
+
+if (miss.includes('telefone')) {
+
+const hasTel = !!d.telefone;
+
+const hasDDD = !!onlyDigits(d.ddd);
+
+const parcial = onlyDigits(d.telefone_parcial || '');
+
+// Se não temos telefone final e existe telefone_parcial sem DDD, perguntar 'ddd' antes de 'telefone'
+
+if (!hasTel && parcial && !hasDDD) return 'ddd';
+
+return 'telefone';
 
 }
 
-// Se nenhum obrigatório faltando, opcional:
 
-if (data && typeof data.ajudante !== 'boolean') return 'ajudante';
 
-if (!data || !data.descricao) return 'descricao';
+if (miss.includes('itens')) return 'itens';
+
+if (miss.includes('endereco_saida')) return 'endereco_saida';
+
+if (miss.includes('endereco_destino')) return 'endereco_destino';
+
+
+
+if (typeof d.ajudante !== 'boolean') return 'ajudante';
+
+if (!d.descricao) return 'descricao';
+
+
 
 return null;
 
@@ -512,7 +541,9 @@ function _decideIncludeOrcamento(chat, ask_field) {
 
 if (!chat || !chat.flags) return false;
 
-if (!chat.flags.explainedOrcamentoOnce && (ask_field === 'telefone' || chat.flags.greetDone === false)) {
+if (!chat.flags.explainedOrcamentoOnce &&
+
+(ask_field === 'telefone' || ask_field === 'ddd' || chat.flags.greetDone === false)) {
 
 return true;
 
@@ -598,51 +629,65 @@ return { blocked: true };
 
 }
 
-// [PATCH A1] SAUDAÇÃO PRIMEIRO E ANTI-SPAM DE RE-ASK
-if (!c.flags || c.flags.greetDone !== true) {
-  _setPendingAsk(perfil, chatId, 'saudacao');
-  patch(perfil, chatId, { flags: { greetDone: true } });
-  const directive = {
-    ask_field: 'saudacao',
-    ask_next_field: null,
-    include_orcamento: true,
-    saudacao: true
-  };
-  directive.shouldReply = true;
+
+
+// TTL
+
+const ttl = _checkPendingTTL(perfil, chatId);
+
+if (ttl.expired) {
+
+  const directive = { final_message: true, ask_field: null, ask_next_field: null, include_orcamento: false, saudacao: false };
+
+  directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
+
   flowLog(perfil, chatId, 'decide_ok', directive);
+
   return directive;
+
 }
 
-// TTL pendente: se campo já foi perguntado uma vez (askCounts>=1), NÃO repetir a mesma pergunta
-const ttl = _checkPendingTTL(perfil, chatId);
-if (ttl.expired) {
-  const directive = { final_message: true, ask_field: null, ask_next_field: null, include_orcamento: false };
-  directive.shouldReply = !!(directive.final_message);
-  flowLog(perfil, chatId, 'decide_ok', directive);
-  return directive;
-}
+
+
+// Se já existe pending, mantenha (nunca duplique/regreda):
 
 const pendingField = c && c.funil && c.funil.pending && c.funil.pending.field;
+
 if (pendingField) {
-  const counts = (c && c.funil && c.funil.askCounts) ? c.funil.askCounts : {};
-  const askedTimes = counts[pendingField] || 0;
-  if (askedTimes >= 1) {
-    // Não repetir a pergunta do mesmo campo enquanto pendente
-    flowLog(perfil, chatId, 'pending_hold_no_repeat', { field: pendingField, askedTimes });
-    return { blocked: false, ask_field: null, ask_next_field: null, include_orcamento: false, saudacao: false, shouldReply: false };
-  }
+
   const include_orcamento = _decideIncludeOrcamento(c, pendingField);
-  const directive = { ask_field: pendingField, ask_next_field: null, include_orcamento, saudacao: false };
-  directive.shouldReply = true;
+
+  if (include_orcamento) patch(perfil, chatId, { flags: { explainedOrcamentoOnce: true } });
+
+  const directive = {
+
+    ask_field: pendingField,
+
+    ask_next_field: null,
+
+    include_orcamento,
+
+    saudacao: c.flags && c.flags.greetDone === false
+
+  };
+
+  directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
+
+  // Marque greetDone no primeiro ciclo de decisão:
+
+  if (c.flags && c.flags.greetDone === false) patch(perfil, chatId, { flags: { greetDone: true } });
+
   flowLog(perfil, chatId, 'decide_ok', directive);
+
   return directive;
+
 }
 
 
 
-// Escolha próximo mandatory/optional (via Step Engine)
+// Escolha próximo mandatory/optional
 
-const field = stepEngine.nextFieldByOrder(c && c.data, c && c.flags || {});
+const field = _orderMandatory(c && c.data);
 
 if (!field) {
 
@@ -718,37 +763,34 @@ const include_orcamento = !!(directive && directive.include_orcamento);
 
 const saudacao = !!(directive && directive.saudacao);
 
-// Clona os dados atuais do chat para o contexto de render (fundamental para os steps e o renderer enxergarem o que já foi coletado)
-const dataClone = deepClone(c.data || {});
-const missingOrdered = Array.isArray(dataClone.missing) ? dataClone.missing.slice(0) : [];
-
-// Campos já fornecidos (booleanos de presença)
 const ja_fornecidos = {
-telefone: !!dataClone.telefone,
-ddd: !!dataClone.ddd,
-telefone_parcial: !!dataClone.telefone_parcial,
-itens: !!dataClone.itens,
-endereco_saida: !!dataClone.endereco_saida,
-endereco_destino: !!dataClone.endereco_destino,
-ajudante: (typeof dataClone.ajudante === 'boolean'),
-descricao: !!dataClone.descricao
+
+telefone: !!(c.data && c.data.telefone),
+
+ddd: !!(c.data && c.data.ddd),
+
+telefone_parcial: !!(c.data && c.data.telefone_parcial),
+
+itens: !!(c.data && c.data.itens),
+
+endereco_saida: !!(c.data && c.data.endereco_saida),
+
+endereco_destino: !!(c.data && c.data.endereco_destino),
+
+ajudante: (typeof (c.data && c.data.ajudante) === 'boolean'),
+
+descricao: !!(c.data && c.data.descricao)
+
 };
 
-// Na saudação, o "próximo campo" para o renderer deve ser o primeiro pendente real (usualmente telefone)
-let nextFieldForAsk = ask_field;
-if (ask_field === 'saudacao') {
-nextFieldForAsk = missingOrdered[0] || 'telefone';
-}
-
-// Flags sombra: para renderizar a primeira mensagem com saudação+explicação e budget=2, mesmo que greetDone tenha sido marcado em decideNext
-const flagsShadow = deepClone(c.flags || {});
-if (ask_field === 'saudacao') {
-flagsShadow.greetDone = false;              // libera saudação e 2 perguntas
-flagsShadow.explainedOrcamentoOnce = false; // libera explicação de orçamento uma única vez
-}
-
-// Budget de perguntas: 2 na saudação, senão respeita a regra padrão (1 após saudação)
-const questionBudget = (ask_field === 'saudacao') ? 2 : (flagsShadow.greetDone ? 1 : 2);
+// Validations para telefone/WhatsApp
+const digits = s => String(s || '').replace(/\D/g, '');
+const tel = digits(c.data && c.data.telefone);
+const ddd = digits(c.data && c.data.ddd);
+const parcial = digits(c.data && c.data.telefone_parcial);
+const combo = (ddd || '') + (parcial || '');
+const isWhats = s => /^[1-9]{2}9\d{8}$/.test(String(s || ''));
+const telefoneWhatsAppOk = !!( (tel && isWhats(tel)) || (combo && isWhats(combo)) );
 
 const ctx = {
 
@@ -758,7 +800,7 @@ perfil: String(perfil || ''),
 
 chatId: String(chatId || ''),
 
-cidade: dataClone.cidade || null,
+cidade: c.data && c.data.cidade || null,
 
 regiao: null
 
@@ -790,9 +832,20 @@ ja_fornecidos
 
 },
 
+data: c.data || {}, // disponibiliza dados completos ao prompt
+validations: {
+
+telefoneWhatsAppOk,
+
+hasDDD: !!ddd,
+
+hasTelefoneParcial: !!parcial
+
+},
+
 interpretacao: {
 
-tom_cliente: dataClone.tom_cliente || 'casual',
+tom_cliente: c.data && c.data.tom_cliente || 'casual',
 
 duvidas: []
 
@@ -804,7 +857,7 @@ ultimas_do_cliente: Array.isArray(c.meta && c.meta.lastClientTexts) ? c.meta.las
 
 },
 
-flags: flagsShadow,
+flags: c.flags || {},
 
 audit: c.audit || {},
 
@@ -816,15 +869,13 @@ step: ask_field
 
 render: {
 
-nextField: nextFieldForAsk,
+nextField: ask_field,
 
-questionBudget
+questionBudget: (c.flags && c.flags.greetDone) ? 1 : 2
 
 },
 
-missingOrdered,
-
-data: dataClone // Os steps e o renderer usam esses dados para pular perguntas já preenchidas e adaptar o texto
+missingOrdered: Array.isArray(c.data && c.data.missing) ? c.data.missing.slice(0) : []
 
 };
 
@@ -840,28 +891,24 @@ async function render(perfil, chatId, ctx) {
 
 try {
 
-const askField = ctx?.funil?.step || null;
+if (!renderUnico || !sanitizeAnswerUnico) throw new Error('prompt engine indisponível (render/sanitize ausente)');
 
-if (!askField) {
-// Fallback seguro — caso não haja step atual, retorna mensagem final do determinístico
-return renderDeterministico(perfil, chatId, { final_message: true });
-}
+let raw = renderUnico(ctx);
 
-// Usa o renderer unificado (humano/curto, com 2 perguntas na primeira resposta) como padrão;
-// se indisponível, fallback no step engine.
-let text = '';
+let text = sanitizeAnswerUnico(raw, ctx);
 
-if (renderUnico) {
-text = renderUnico(ctx);
-} else {
-const out = await stepEngine.runStep(ctx, askField, 1); // versão 1 default
-text = out.ask || '';
-if (sanitizeAnswerUnico) {
-  text = sanitizeAnswerUnico(text, ctx);
+// Integração do supervisor (se disponível) após sanitize
+if (supervisor && typeof supervisor.superviseAndFix === 'function') {
+try {
+  text = await supervisor.superviseAndFix(text, ctx) || text;
+} catch (e) {
+  // Supervisor falhou silenciosamente; mantém texto original
 }
 }
 
-// Após renderização, persistimos no estado possíveis alterações de flags/audit feitas durante o render
+const sanitized = String(text || '') !== String(raw || '');
+
+// Persistência imediata de flags e audit após render/sanitize
 const flagsPatch = {};
 if (ctx.flags && ctx.flags.greetDone) flagsPatch.greetDone = true;
 if (ctx.flags && ctx.flags.explainedOrcamentoOnce) flagsPatch.explainedOrcamentoOnce = true;
@@ -872,15 +919,15 @@ if (ctx.audit && Array.isArray(ctx.audit.lastIAFingerprints)) {
 }
 
 if (Object.keys(flagsPatch).length > 0 || Object.keys(auditPatch).length > 0) {
-const patchObj = {};
-if (Object.keys(flagsPatch).length > 0) patchObj.flags = flagsPatch;
-if (Object.keys(auditPatch).length > 0) patchObj.audit = auditPatch;
-patch(perfil, chatId, patchObj);
+  const patchObj = {};
+  if (Object.keys(flagsPatch).length > 0) patchObj.flags = flagsPatch;
+  if (Object.keys(auditPatch).length > 0) patchObj.audit = auditPatch;
+  patch(perfil, chatId, patchObj);
 }
 
-flowLog(perfil, chatId, 'render_ok', { provider: renderUnico ? 'render_unico' : 'step_engine', ask: askField, length: String(text || '').length });
+flowLog(perfil, chatId, 'render_ok', { provider: 'groq', length: String(text || '').length, sanitized });
 
-return { text: String(text || ''), sanitized: false };
+return { text: String(text || ''), sanitized };
 
 } catch (e) {
 
@@ -894,7 +941,7 @@ throw e;
 
 }
 
-flowLog(perfil, chatId, 'error_render_engine', { error: msg });
+flowLog(perfil, chatId, 'error_render', { error: msg });
 
 throw e;
 
@@ -937,6 +984,8 @@ parts.push('Quem passa o orçamento é o motorista no WhatsApp assim que coletar
 const askMap = {
 
 telefone: 'Pode me passar o seu WhatsApp com DDD?',
+
+ddd: 'Qual é o DDD do seu WhatsApp?',
 
 itens: 'O que você precisa transportar?',
 
