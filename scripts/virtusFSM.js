@@ -598,58 +598,44 @@ return { blocked: true };
 
 }
 
-
-
-// TTL
-
-const ttl = _checkPendingTTL(perfil, chatId);
-
-if (ttl.expired) {
-
-  const directive = { final_message: true, ask_field: null, ask_next_field: null, include_orcamento: false, saudacao: false };
-
-  directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
-
+// [PATCH A1] SAUDAÇÃO PRIMEIRO E ANTI-SPAM DE RE-ASK
+if (!c.flags || c.flags.greetDone !== true) {
+  _setPendingAsk(perfil, chatId, 'saudacao');
+  patch(perfil, chatId, { flags: { greetDone: true } });
+  const directive = {
+    ask_field: 'saudacao',
+    ask_next_field: null,
+    include_orcamento: true,
+    saudacao: true
+  };
+  directive.shouldReply = true;
   flowLog(perfil, chatId, 'decide_ok', directive);
-
   return directive;
-
 }
 
-
-
-// Se já existe pending, mantenha (nunca duplique/regreda):
+// TTL pendente: se campo já foi perguntado uma vez (askCounts>=1), NÃO repetir a mesma pergunta
+const ttl = _checkPendingTTL(perfil, chatId);
+if (ttl.expired) {
+  const directive = { final_message: true, ask_field: null, ask_next_field: null, include_orcamento: false };
+  directive.shouldReply = !!(directive.final_message);
+  flowLog(perfil, chatId, 'decide_ok', directive);
+  return directive;
+}
 
 const pendingField = c && c.funil && c.funil.pending && c.funil.pending.field;
-
 if (pendingField) {
-
+  const counts = (c && c.funil && c.funil.askCounts) ? c.funil.askCounts : {};
+  const askedTimes = counts[pendingField] || 0;
+  if (askedTimes >= 1) {
+    // Não repetir a pergunta do mesmo campo enquanto pendente
+    flowLog(perfil, chatId, 'pending_hold_no_repeat', { field: pendingField, askedTimes });
+    return { blocked: false, ask_field: null, ask_next_field: null, include_orcamento: false, saudacao: false, shouldReply: false };
+  }
   const include_orcamento = _decideIncludeOrcamento(c, pendingField);
-
-  if (include_orcamento) patch(perfil, chatId, { flags: { explainedOrcamentoOnce: true } });
-
-  const directive = {
-
-    ask_field: pendingField,
-
-    ask_next_field: null,
-
-    include_orcamento,
-
-    saudacao: c.flags && c.flags.greetDone === false
-
-  };
-
-  directive.shouldReply = !!(directive.ask_field || directive.final_message === true);
-
-  // Marque greetDone no primeiro ciclo de decisão:
-
-  if (c.flags && c.flags.greetDone === false) patch(perfil, chatId, { flags: { greetDone: true } });
-
+  const directive = { ask_field: pendingField, ask_next_field: null, include_orcamento, saudacao: false };
+  directive.shouldReply = true;
   flowLog(perfil, chatId, 'decide_ok', directive);
-
   return directive;
-
 }
 
 

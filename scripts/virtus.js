@@ -58,6 +58,9 @@ function isNoiseNorm(n) {
   const t = t0.replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
   if (!t) return true;
 
+  // Filtro específico para "Conveniente" e variações (com todos os acentos)
+  if (/^conveniente(\s+conting(enc|ênc)ia)?$/i.test(s)) return true;
+
   // Lixos comuns do Messenger/Marketplace
   if (t === 'inserir') return true;
   if (t.startsWith('mensagem nao lida')) return true;
@@ -117,6 +120,9 @@ function explodeAndFilterLines(entry, ultimaIaNorm) {
   const parts = raw.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
 
   for (const line of parts) {
+    const rawLower = String(line||'').trim().toLowerCase();
+    if (rawLower === 'conveniente' || rawLower === 'conveniente contingencia' || rawLower === 'conveniente contingência') continue;
+    
     const ln = normalizeContent(line);
     if (!ln) continue;
 

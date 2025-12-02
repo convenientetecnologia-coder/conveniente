@@ -21,10 +21,17 @@ async function computeMissingByFlow(data) {
 /**
  * Indica próximo campo a ser perguntado, na ordem do flow, considerando respostas já no data.
  * @param {Object} data 
+ * @param {Object} flags - Flags do chat (ex.: { greetDone: true/false })
  * @returns {String|null} - Step/campo pendente, ou null se finalizado
  */
-function nextFieldByOrder(data) {
+function nextFieldByOrder(data, flags = {}) {
   const flowOrder = flowDef.order || [];
+  
+  // [Blindagem]: Prioriza saudacao como passo zero, se greetDone ainda for false
+  if (!flags || flags.greetDone !== true) {
+    if (flowOrder.includes('saudacao')) return 'saudacao';
+  }
+  
   for (const k of flowOrder) {
     // Required: obrigatório não preenchido
     if (flowDef.required.includes(k) && (!data || !data[k])) return k;
@@ -66,9 +73,23 @@ async function runStep(ctx, stepId, version = 1) {
   // 4) Decidir próximo passo (custom ou ordem default)
   let next = null;
   if (typeof step.next === 'function') next = step.next(ctx);
-  else next = { stepId: nextFieldByOrder(ctx.data) };
+  else next = { stepId: nextFieldByOrder(ctx.data, ctx.flags || {}) };
 
-  // 5) Retorno: pergunta, destino, (state para logs se quiser)
+  // 5) Logs por step (QA modular)
+  try {
+    const stepLog = require('../stepLog.js');
+    const perfil = (ctx && ctx.meta && ctx.meta.perfil) || 'default';
+    stepLog.appendJSONL(perfil, 'flow', {
+      event: 'step_render',
+      stepId,
+      version,
+      validate: val,
+      next: next.stepId || null,
+      meta: step.meta || {}
+    });
+  } catch {}
+
+  // 6) Retorno: pergunta, destino, (state para logs se quiser)
   return { ask: text, next, meta: step.meta || {}, prompt: promptObj, validate: val };
 }
 
