@@ -31,6 +31,7 @@ const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 const virtusFSM = require('./virtusFSM.js');
 const fileStore = require('./fileStore.js');
+const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
 const AI_FIRST = false;
@@ -1267,6 +1268,9 @@ const MAX_CHAT_AGE_MS = parseInt(process.env.VIRTUS_CHAT_MAX_AGE_MS || '28800000
 const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 5s
 const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
 
+const COLETA_FINAL_MS = parseInt(process.env.VIRTUS_COLETA_FINAL_MS || '600000', 10); // 10min
+const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '3600000', 10); // 1h
+
 // Variáveis globais para controle de backoff e falhas
 let recoverBackoffMs = 0;
 const failCounts = new Map();
@@ -1287,6 +1291,26 @@ const aguardandoRespostaMap = new Map();  // nomePerfil -> Set(chatId)
 
 // TTL de aguardando notificador (Virtus)
 const aguardTimers = new Map(); // nomePerfil -> Map(chatId -> timeoutId)
+
+const finalizationTimers = new Map(); // nomePerfil -> Map(chatId -> timeoutId)
+const finalizingSetByPerfil = new Map(); // nomePerfil -> Set(chatId)
+
+function getFinalizationMap(perfil) {
+  if (!finalizationTimers.has(perfil)) finalizationTimers.set(perfil, new Map());
+  return finalizationTimers.get(perfil);
+}
+
+function getFinalizingSet(perfil) {
+  if (!finalizingSetByPerfil.has(perfil)) finalizingSetByPerfil.set(perfil, new Set());
+  return finalizingSetByPerfil.get(perfil);
+}
+
+function clearFinalizationTimer(perfil, chatId) {
+  try {
+    const m = getFinalizationMap(perfil);
+    if (m.has(chatId)) { clearTimeout(m.get(chatId)); m.delete(chatId); }
+  } catch {}
+}
 
 function markAguardando(nomePerfil, chatId) {
   const set = getSetAguardando(nomePerfil);
@@ -2031,6 +2055,202 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
   }
 }
 
+async function sendPedidoToNotificador(perfil, payload) {
+  const url = `${NOTIFICADOR_URL}/api/virtus/pedido`;
+  let lastErr = null;
+  for (let attempt=1; attempt<=2; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({
+          servidor: NOTIFICADOR_SERVIDOR,
+          perfil,
+          ...payload
+        })
+      });
+      const text = await resp.text().catch(()=> '');
+      let data = null; try { data = text ? JSON.parse(text) : null; } catch {}
+      if (resp.ok && data && data.ok === true) {
+        logger.info('[NOTIFICADOR] Pedido enviado com sucesso', { perfil, chatId: payload.chat_id });
+        return true;
+      }
+      lastErr = new Error(`http_${resp.status}`);
+      logger.error('[NOTIFICADOR] Falha ao enviar pedido', {
+        perfil, chatId: payload.chat_id, status: resp.status, body: text.substring(0,500)
+      });
+    } catch (e) {
+      lastErr = e;
+      logger.error('[NOTIFICADOR] Erro de rede ao enviar pedido', {
+        perfil, chatId: payload.chat_id, error: (e && e.message) || e
+      });
+    }
+    await sleep(600 + Math.floor(Math.random()*400));
+  }
+  if (issues && typeof issues.append === 'function') {
+    await issues.append(perfil, 'pedido_send_fail', `chat=${payload.chat_id} err=${(lastErr && lastErr.message) || lastErr}`);
+  }
+  return false;
+}
+
+async function finalizePedido(perfil, chatId, contexto, classificadoUrl) {
+  const finalizing = getFinalizingSet(perfil);
+  if (finalizing.has(chatId)) return;
+  finalizing.add(chatId);
+
+  try {
+    const already = await loadPedidoSent(perfil, chatId).catch(()=> null);
+    if (already) return;
+
+    let state = null; try { state = virtusFSM.get(perfil, chatId); } catch {}
+    if (state && state.finalizado) return;
+
+    // Extrai o estado do chat mais recente
+    const historicoArray = await (async () => {
+      try {
+        const file = chatLogPath(perfil, chatId);
+        const lines = fsRaw.existsSync(file) ? fsRaw.readFileSync(file,'utf8').trim().split(/\r?\n+/).map(l => JSON.parse(l)) : [];
+        return lines;
+      } catch { return []; }
+    })();
+
+    const contextoBuild = contexto && contexto.cidade ? contexto : {
+      cidade: (state && state.cidade) || null
+    };
+
+    const extraction = await extractOrderFieldsLLM({ perfil, chatId, mensagens: historicoArray, contexto: contextoBuild });
+    const tel = String(extraction && extraction.telefone || '').trim();
+
+    if (!tel) {
+      logger.warn('[FINALIZE] Abortado — telefone ausente/ inválido', { perfil, chatId });
+      if (issues && typeof issues.append === 'function') {
+        await issues.append(perfil, 'finalize_abort_no_whatsapp', `chat=${chatId}`);
+      }
+      return;
+    }
+
+    const itens = extraction.itens || 'não informado';
+    const endSaida = extraction.endereco_saida || 'não informado';
+    const endDestino = extraction.endereco_destino || 'não informado';
+    const ajud = (extraction.ajudante === true) ? 'sim'
+               : (extraction.ajudante === false) ? 'nao'
+               : 'não informado';
+
+    const cidade = extraction.cidade || (state && state.cidade) || null;
+    const estado = (state && state.estado) || null;
+    const localizacao = formatarLocalizacaoParaPlanilha({ cidade, estado });
+
+    const payload = {
+      chat_id: chatId,
+      telefone: tel,
+      itens,
+      endereco_saida: endSaida,
+      endereco_destino: endDestino,
+      ajudante: ajud,
+      localizacao: localizacao || null,
+      url_classificado: classificadoUrl || null,
+      descricao: extraction.descricao || null,
+      cidade,
+      estado,
+      timestamp: new Date().toISOString()
+    };
+
+    const ok = await sendPedidoToNotificador(perfil, payload);
+    if (!ok) return;
+
+    await markPedidoSent(perfil, chatId, payload, 'virtus_finalizacao');
+
+    // Mensagem final ao cliente
+    try {
+      let st = null; try { st = virtusFSM.get(perfil, chatId); } catch {}
+      const alreadyQueued = st && st.finalization && st.finalization.closingMessageQueued;
+      if (!alreadyQueued) {
+        const finalMsg = 'Perfeito! Já repassei seu pedido para o motorista. Ele vai te chamar pelo WhatsApp em até 5 minutos pra combinar os detalhes. Qualquer coisa, fico disponível por aqui. Se quiser dar aquela força, segue a gente no Insta: @convenientetecnologia 😊';
+        await queueMessengerSend(perfil, {
+          chatId,
+          resposta: finalMsg,
+          key: `finalize_msg|${chatId}|${sha1(finalMsg)}|${Date.now()}`,
+          origin: 'finalize'
+        });
+        await virtusFSM.patch(perfil, chatId, {
+          finalization: Object.assign({}, st && st.finalization || {}, {
+            closingMessageQueued: true,
+            closedAt: Date.now()
+          }),
+          finalizado: true
+        });
+      }
+    } catch (e) {
+      logger.warn('[FINALIZE] Falha ao enfileirar mensagem final', { perfil, chatId, error: (e && e.message) || e });
+    }
+
+    // Bloqueia novas coletas pós-fechamento (freeze)
+    try {
+      await virtusFSM.patch(perfil, chatId, {
+        freeze: Object.assign({}, (state && state.freeze)||{}, { finalizationUntil: Date.now() + FINALIZACAO_FREEZE_MS })
+      });
+    } catch {}
+
+    clearFinalizationTimer(perfil, chatId);
+
+    logger.info('[FINALIZE] Pedido concluído e notificado', { perfil, chatId, telefone: maskPhoneLog(tel) });
+  } finally {
+    getFinalizingSet(perfil).delete(chatId);
+  }
+}
+
+async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contexto, classificadoUrl) {
+  try {
+    const already = await loadPedidoSent(perfil, chatId).catch(()=>null);
+    if (already) return;
+
+    let st = null; try { st = virtusFSM.get(perfil, chatId); } catch {}
+    if (st && st.finalizado) return;
+
+    if (st && st.finalization && st.finalization.startedAt && st.finalization.deadlineAt) {
+      const now = Date.now();
+      const delay = Math.max(0, Number(st.finalization.deadlineAt) - now);
+      const map = getFinalizationMap(perfil);
+      if (!map.has(chatId)) {
+        const tid = setTimeout(() => finalizePedido(perfil, chatId, contexto || {}, classificadoUrl || null), delay);
+        map.set(chatId, tid);
+        stepLog.appendJSONL(perfil, 'virtus', { step: 'finalization_timer_rearmed', chatId, delay, ts: now });
+      }
+      return;
+    }
+
+    const extraction = await extractOrderFieldsLLM({ perfil, chatId, mensagens: historicoSan || [], contexto: contexto || {} });
+    const tel = String(extraction && extraction.telefone || '').trim();
+    if (!tel) return;
+
+    const startedAt = Date.now();
+    const deadlineAt = startedAt + COLETA_FINAL_MS;
+    await virtusFSM.patch(perfil, chatId, {
+      finalization: Object.assign({}, st && st.finalization || {}, {
+        telefone: tel,
+        startedAt,
+        deadlineAt
+      })
+    });
+
+    const map = getFinalizationMap(perfil);
+    clearFinalizationTimer(perfil, chatId);
+    const tid = setTimeout(() => finalizePedido(perfil, chatId, contexto || {}, classificadoUrl || null), COLETA_FINAL_MS);
+    map.set(chatId, tid);
+
+    stepLog.appendJSONL(perfil, 'virtus', {
+      step: 'finalization_timer_started',
+      chatId,
+      startedAt,
+      deadlineAt,
+      telMasked: maskPhoneLog(tel),
+      ts: Date.now()
+    });
+  } catch (e) {
+    logger.warn('[FINALIZE] arm_timer erro', { perfil, chatId, error: (e && e.message) || e });
+  }
+}
+
 async function startVirtus(browser, nome, robeMeta = {}) {
   let requiredEpoch = 0;
   if (arguments.length >= 3 && arguments[2] && arguments[2].epoch != null) {
@@ -2365,6 +2585,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
           // Persistência imediata do histórico sanitizado
           await appendChatHistoryLog(nome, chatId, historicoSan);
+
+          try {
+            await armFinalizationTimerIfNeeded(nome, chatId, historicoSan, {}, classificadoUrl || null);
+          } catch {}
 
           // Filtra somente mensagens do cliente (sanitizadas)
           const clientMsgs = historicoSan.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());

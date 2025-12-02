@@ -14,15 +14,12 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 
-// Arquivos específicos do atendimento (7 arquivos principais)
+// Arquivos específicos do atendimento (4 arquivos principais)
 const ATENDIMENTO_FILES = [
   "scripts/virtus.js",
-  "scripts/virtusFSM.js",
   "scripts/promptFretes.js",
-  "scripts/promptSupervisor.js",
   "scripts/iaExtractors.js",
-  "scripts/inteligenciaArtificial.js",
-  "scripts/missing.js"
+  "scripts/inteligenciaArtificial.js"
 ];
 
 /**

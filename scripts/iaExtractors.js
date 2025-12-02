@@ -364,16 +364,20 @@ Formato OBRIGATÓRIO:
 "ddd": "string|null",
 "telefone_parcial": "string|null",
 "itens": "string|null",
-    "endereco_saida": "string|null",
-    "endereco_destino": "string|null",
-    "ajudante": true|false|null,
-    "descricao": "string|null",
-    "cidade": "string|null",
-    "missing": ["..."],
-    "protesto": true|false,
-    "tom_cliente": "animado|formal|empolgado|neutro" (SEMPRE presente, nunca null),
-    "saudacao_cliente": "string|null" (texto literal das primeiras 1-2 saudações do cliente)
+"endereco_saida": "string|null",
+"endereco_destino": "string|null",
+"ajudante": true|false|null,
+"descricao": "string|null",
+"cidade": "string|null",
+"missing": ["..."],
+"protesto": true|false,
+"tom_cliente": "animado|formal|empolgado|neutro",
+"saudacao_cliente": "string|null"
 }
+
+Observações:
+- "tom_cliente" deve SEMPRE estar presente (nunca null).
+- "saudacao_cliente" é o texto literal das primeiras 1-2 saudações do cliente.
 `.trim();
 }
 

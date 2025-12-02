@@ -4,6 +4,10 @@
 
 const fetch = global.fetch || require('node-fetch');
 
+let stepLog = null; try { stepLog = require('./stepLog.js'); } catch {}
+
+let issues = null; try { issues = require('./issues.js'); } catch {}
+
 function pickTempByTask(task) {
 const t = String(task || '').toLowerCase();
 if (t === 'extract') return 0.0;
@@ -126,10 +130,37 @@ try {
 } catch (e) {
   clearTimeout(t);
   lastErr = e;
-  // backoff suave entre tentativas
+  try {
+    const errMsg = (e && e.message) || String(e);
+    if (stepLog) {
+      stepLog.appendJSONL('default', 'llm_chat_error_try', {
+        provider,
+        model: model || null,
+        task,
+        attempt: i + 1,
+        retries,
+        timeoutMs,
+        error: errMsg,
+        ts: Date.now()
+      });
+    }
+  } catch {}
   await new Promise(r => setTimeout(r, 800));
 }
 
+}
+
+if (issues && typeof issues.append === 'function') {
+  try { await issues.append('default', 'llm_error_final', `provider=${provider} model=${model||''} task=${task} err=${(lastErr && lastErr.message) || lastErr}`); } catch {}
+}
+if (stepLog) {
+  try {
+    stepLog.appendJSONL('default', 'llm_error_final', {
+      provider, model: model || null, task,
+      error: (lastErr && lastErr.message) || String(lastErr || 'unknown'),
+      ts: Date.now()
+    });
+  } catch {}
 }
 
 throw lastErr || new Error('llm_error');
