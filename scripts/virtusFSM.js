@@ -451,7 +451,7 @@ const missingAfter = Array.isArray(st3 && st3.data && st3.data.missing) ? st3.da
 
 // Se o pending field foi preenchido (não está mais em missing), limpa pending e atualiza step
 if (pendingField && !missingAfter.includes(pendingField)) {
-  const nextField = stepEngine.nextFieldByOrder(st3 && st3.data);
+  const nextField = stepEngine.nextFieldByOrder(st3 && st3.data, st3 && st3.flags || {});
   patch(perfil, chatId, {
     funil: {
       pending: null,
@@ -642,7 +642,7 @@ if (pendingField) {
 
 // Escolha próximo mandatory/optional (via Step Engine)
 
-const field = stepEngine.nextFieldByOrder(c && c.data);
+const field = stepEngine.nextFieldByOrder(c && c.data, c && c.flags || {});
 
 if (!field) {
 

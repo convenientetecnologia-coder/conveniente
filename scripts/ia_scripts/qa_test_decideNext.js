@@ -40,6 +40,7 @@ fs.mkdirSync(baseDir, { recursive: true });
 
   // 3) Simula cliente preenchendo telefone (pendingField = null), deve perguntar próximo step
   fsm.patch(perfil, chatId, {
+    flags: { greetDone: true },
     data: { telefone: '48999998888', itens: null, endereco_saida: null, endereco_destino: null, ajudante: null, descricao: null, missing: ['itens', 'endereco_saida', 'endereco_destino'] },
     funil: { pending: { field: null, askedAt: null, expiresAt: null }, askCounts: { telefone: 1 } }
   });
