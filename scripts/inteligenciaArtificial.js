@@ -209,8 +209,6 @@ async function callOpenAI(messages, systemPrompt, respond) {
     temperature: respond ? 0.6 : 0.0,
     top_p: respond ? 0.9 : 1.0,
     max_completion_tokens: respond ? 900 : 1200,
-    presence_penalty: respond ? 0.1 : 0.0,
-    frequency_penalty: respond ? 0.1 : 0.0,
     response_format: { type: 'json_object' }
   };
 
