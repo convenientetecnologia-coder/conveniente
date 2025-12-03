@@ -1,7 +1,23 @@
 'use strict';
 
 const { chatCompletion } = require('./inteligenciaArtificial.js');
-const { computeMissing } = require('./missing.js');
+
+// [MOCK-INLINE] missing.js ausente — computeMissing local
+function computeMissing(out) {
+  const missing = [];
+  try {
+    const tel = out && out.telefone ? String(out.telefone).replace(/\D/g, '') : '';
+    const validPhone = (tel.length === 11) || (tel.length === 10);
+    if (!validPhone) missing.push('telefone');
+    if (!out || !out.itens) missing.push('itens');
+    if (!out || !out.endereco_saida) missing.push('endereco_saida');
+    if (!out || !out.endereco_destino) missing.push('endereco_destino');
+  } catch {
+    // Em qualquer falha, pede os 4 campos
+    return ['telefone', 'itens', 'endereco_saida', 'endereco_destino'];
+  }
+  return missing;
+}
 
 const RE_PHONE_BR = /\b(?:\+?55\s*)?(?:\(?([1-9]\d)\)?[\s.\-()]*)?([2-9]\d{3,4}[\s.\-()]?\d{4})\b/g;
 
@@ -78,8 +94,6 @@ function isValidWhatsAppTelefone(d) {
   // DDD (2 dígitos) + 9 (celular) + 8 dígitos
   return /^[1-9]{2}9\d{8}$/.test(s);
 }
-
-// REMOVIDO: computeMissing local - agora importado de ./missing.js
 
 // Detecção simples de protesto (apenas para extração pura)
 const RE_PROTESTO = /(ja\s+falei|já\s+falei|ja\s+passei|já\s+passei|leia\s+acima|olha\s+acima|pare\s+de\s+perguntar|para\s+de\s+perguntar|n[aã]o\s+insista|de\s+novo)/i;

@@ -29,7 +29,80 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
-const virtusFSM = require('./virtusFSM.js');
+// [MOCK-INLINE] virtusFSM.js ausente — stub local seguro
+const virtusFSM = (() => {
+  const store = new Map();
+  function key(perfil, chatId) { return `${perfil}::${chatId}`; }
+  function ensure(perfil, chatId) {
+    const k = key(perfil, chatId);
+    if (!store.has(k)) {
+      store.set(k, {
+        cursor: { client: { count: 0, digest: '' }, ia: { sentSig: '' } },
+        freeze: {},
+        schedule: {},
+        data: {},
+        finalization: {}
+      });
+    }
+    return store.get(k);
+  }
+  return {
+    get(perfil, chatId) {
+      return ensure(perfil, chatId);
+    },
+    patch(perfil, chatId, patchObj) {
+      const s = ensure(perfil, chatId);
+      Object.assign(s, patchObj || {});
+      return s;
+    },
+    ingestFromVirtus(perfil, chatId, payload) {
+      const s = ensure(perfil, chatId);
+      if (payload && payload.cursor) {
+        s.cursor = s.cursor || {};
+        s.cursor.client = s.cursor.client || {};
+        s.cursor.client.count = Number(payload.cursor.count || 0);
+        s.cursor.client.digest = String(payload.cursor.digest || '');
+        s.cursor.client.lastTs = Number(payload.cursor.lastTs || 0);
+      }
+      return true;
+    },
+    decideNext(perfil, chatId) {
+      // Simplificação: sempre pedir telefone (WhatsApp com DDD) — fluxo mínimo/seguro.
+      return { ask_field: 'telefone' };
+    },
+    buildRenderContext(perfil, chatId, directive) {
+      return { perfil, chatId, directive };
+    },
+    render(perfil, chatId, ctx) {
+      return {
+        text: 'Olá! Para seguir com o atendimento, pode me informar seu WhatsApp com DDD, por favor?'
+      };
+    },
+    renderDeterministico(perfil, chatId, directive) {
+      return this.render(perfil, chatId, directive);
+    },
+    queue(perfil, chatId, data) {
+      const s = ensure(perfil, chatId);
+      s.__queue = s.__queue || [];
+      s.__queue.push(Object.assign({ ts: Date.now() }, data || {}));
+      return true;
+    },
+    ackQueued() { return true; },
+    ackSent(perfil, chatId, cursorSig) {
+      const s = ensure(perfil, chatId);
+      s.cursor = s.cursor || {};
+      s.cursor.ia = s.cursor.ia || {};
+      s.cursor.ia.sentSig = String(cursorSig || '');
+      return true;
+    },
+    flowLog() { return true; },
+    computeEarliestSendAt(perfil, chatId, { origin, lastClientTs } = {}) {
+      const base = Number(lastClientTs || Date.now());
+      const jitter = 20000 + Math.floor(Math.random() * 20000); // 20–40s
+      return base + jitter;
+    }
+  };
+})();
 const fileStore = require('./fileStore.js');
 const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 
