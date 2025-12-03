@@ -182,6 +182,7 @@ function preventEcho(lastClientMsg, answer) {
 // ========== CONSTRUÇÃO DE PROMPTS ==========
 
 const { promptFretes } = require('./promptFretes.js');
+const { promptFretesReply } = require('./promptFretesReply.js');
 
 function buildSystemPrompt(contexto = {}) {
   const header = promptFretes.trim();
@@ -234,6 +235,17 @@ Não ecoe literalmente a última mensagem do cliente na resposta (anti-eco).
 Responda APENAS com o JSON válido, sem explicações adicionais.`;
 
   return [header, jsonSpec].join('\n\n');
+}
+
+function buildReplySystemPrompt() {
+  /**
+   * promptFretesReply será um texto de system prompt específico
+   * para geração de respostas (segunda chamada), sem JSON.
+   * Aqui apenas retornamos o conteúdo dele, já aparado.
+   */
+  const header = String(promptFretesReply || '').trim();
+
+  return header;
 }
 
 function buildMessages(historico = [], maxMessages = 30) {
@@ -309,6 +321,145 @@ async function callOpenAI(messages, systemPrompt, respond) {
   } catch (e) {
     clearTimeout(t);
     throw e;
+  }
+}
+
+async function callOpenAIReply(messages, systemPrompt) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const apiUrl = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
+  const model = process.env.OPENAI_MODEL_MASTER || 'gpt-5.1';
+
+  if (!apiKey) throw new Error('OPENAI_API_KEY ausente');
+
+  const allMessages = [
+    { role: 'system', content: systemPrompt },
+    ...messages
+  ];
+
+  const params = {
+    model,
+    messages: allMessages,
+    temperature: 0.7,
+    top_p: 0.9,
+    max_completion_tokens: 600
+    // Aqui não usamos response_format, pois queremos texto livre
+  };
+
+  const Controller = global.AbortController || require('node-abort-controller');
+  const controller = new Controller();
+  const timeoutMs = 30000;
+  const t = setTimeout(() => { try { controller.abort(); } catch {} }, timeoutMs);
+
+  try {
+    const resp = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(params),
+      signal: controller.signal
+    });
+
+    clearTimeout(t);
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`OpenAI HTTP ${resp.status}: ${text.substring(0, 200)}`);
+    }
+
+    const data = await resp.json();
+    const content = data?.choices?.[0]?.message?.content || '';
+
+    if (!content || !String(content).trim()) throw new Error('openai_empty_response');
+
+    return { content: String(content).trim(), usage: data.usage || {} };
+  } catch (e) {
+    clearTimeout(t);
+    throw e;
+  }
+}
+
+async function generateFreteReply({ perfil, chatId, historico, extraction, acao, instrucoesAcao }) {
+  const startTs = Date.now();
+
+  try {
+    const historicoArr = Array.isArray(historico) ? historico : [];
+    const lastClientMsg = historicoArr.filter(m => m && m.autor === 'cliente').slice(-1)[0]?.texto || null;
+
+    const ex = extraction || {};
+    const known = {
+      telefone: ex.telefone || null,
+      ddd: ex.ddd || null,
+      telefone_parcial: ex.telefone_parcial || null,
+      itens: ex.itens || null,
+      endereco_saida: ex.endereco_saida || null,
+      endereco_destino: ex.endereco_destino || null,
+      ajudante: (typeof ex.ajudante === 'boolean') ? ex.ajudante : null,
+      descricao: ex.descricao || null
+    };
+
+    const payload = {
+      known,
+      acao: acao || null,
+      instrucoes_acao: Array.isArray(instrucoesAcao) ? instrucoesAcao : [],
+      ultimo_trecho_cliente: lastClientMsg || null
+    };
+
+    const userContent = JSON.stringify(payload, null, 2);
+    const messages = [
+      { role: 'user', content: userContent }
+    ];
+
+    const systemPrompt = buildReplySystemPrompt();
+    const { content, usage } = await callOpenAIReply(messages, systemPrompt);
+
+    const resposta = String(content || '').trim() || null;
+
+    // Log da chamada de reply
+    appendLog(perfil, chatId, {
+      ts: Date.now(),
+      type: 'reply',
+      perfil,
+      chatId,
+      acao: acao || null,
+      payload,
+      resposta,
+      requestTokens: usage?.prompt_tokens || 0,
+      responseTokens: usage?.completion_tokens || 0,
+      totalTokens: usage?.total_tokens || 0,
+      durationMs: Date.now() - startTs
+    });
+
+    if (issues && typeof issues.append === 'function') {
+      try {
+        await issues.append(perfil, 'reply_call', `chat=${chatId} acao=${acao || ''} tokens=${usage?.total_tokens || 0}`);
+      } catch {}
+    }
+
+    return resposta;
+  } catch (e) {
+    const errorMsg = (e && e.message) || String(e);
+
+    appendLog(perfil, chatId, {
+      ts: Date.now(),
+      type: 'reply_error',
+      perfil,
+      chatId,
+      acao: acao || null,
+      error: errorMsg,
+      durationMs: Date.now() - startTs
+    });
+
+    if (issues && typeof issues.append === 'function') {
+      try {
+        await issues.append(perfil, 'reply_error', `chat=${chatId} acao=${acao || ''} err=${errorMsg}`);
+      } catch {}
+    }
+
+    try { logger.error('[REPLY] error', { perfil, chatId, acao: acao || null, error: errorMsg }); } catch {}
+
+    return null;
   }
 }
 
@@ -474,4 +625,7 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
   }
 }
 
-module.exports = { masterExtractAnswer };
+module.exports = {
+  masterExtractAnswer,
+  generateFreteReply
+};
