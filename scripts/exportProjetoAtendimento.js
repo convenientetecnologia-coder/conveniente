@@ -19,7 +19,6 @@ const ATENDIMENTO_FILES = [
   "scripts/virtus.js",
   "scripts/promptFretes.js",
   "scripts/inteligenciaArtificial.js", // agora só OpenAI/master
-  "scripts/chatStateStore.js"
 ];
 
 /**

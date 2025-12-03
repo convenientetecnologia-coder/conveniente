@@ -29,9 +29,8 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
-const { masterExtractAnswer, generateFreteReply } = require('./inteligenciaArtificial.js');
+const { masterExtractAnswer } = require('./inteligenciaArtificial.js');
 const chatStateStore = require('./chatStateStore.js');
-const { decidirProximaAcao } = require('./flowFretes.js');
 const virtusFSM = {
   get(perfil, chatId){ return chatStateStore.get(perfil, chatId); },
   patch(perfil, chatId, patchObj){ return chatStateStore.patch(perfil, chatId, patchObj); },
@@ -2725,122 +2724,45 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           });
 
           try {
-            // 1) Estado corrente via FSM (antes do LLM)
+            // Estado corrente (para log)
             const stateBefore = virtusFSM.get(nome, chatId);
+            const llm = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
 
-            // 2) EXTRAÇÃO PURA: masterExtractAnswer em modo extração (respond: false)
-            const llm = await masterExtractAnswer({
-              perfil: nome,
-              chatId,
-              mensagens: historicoSan,
-              contexto: {},
-              respond: false
-            });
-
-            const extraction = (llm && llm.extraction) ? llm.extraction : {};
-
-            // 3) Persistir extração no FSM (para finalização e consistência)
-            const mergedData = Object.assign({}, stateBefore.data || {}, { extraction });
+            // Persistência da extração (para finalização futura e consistência)
+            const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llm.extraction || {} });
             virtusFSM.patch(nome, chatId, { data: mergedData });
 
-            appendMasterJSONL(nome, chatId, {
-              kind: 'master_cycle',
-              extraction,
-              control: llm && llm.control ? llm.control : null,
-              tookMs: llm && llm.meta && llm.meta.tookMs
-            });
+            appendMasterJSONL(nome, chatId, { kind: 'master_cycle', extraction: llm.extraction, control: llm.control, tookMs: llm.meta && llm.meta.tookMs });
 
-            // 4) Decidir próxima AÇÃO de fluxo (NÃO conversa aqui)
-            const flowDecision = await decidirProximaAcao({
-              perfil: nome,
-              chatId,
-              state: stateBefore,
-              extraction,
-              historico: historicoSan,
-              novasMensagens: novasFiltradas
-            });
+            const shouldAnswer = !!(llm && llm.control && llm.control.shouldReply);
+            let reply = (llm && llm.answer) ? String(llm.answer) : null;
 
-            // flowDecision deve ser algo como:
-            // { acao: 'SAUDACAO_PEDIR_TEL_E_ITEM', instrucoesAcao: [ '...', '...' ] }
-            if (!flowDecision || !flowDecision.acao || !Array.isArray(flowDecision.instrucoesAcao) || !flowDecision.instrucoesAcao.length) {
-              // Nenhuma ação a tomar neste ciclo (sem resposta)
-              appendMasterJSONL(nome, chatId, {
-                kind: 'flow_skip',
-                reason: 'no_action',
-                cursorCount: clientCount,
-                cursorDigest: clientDigest
-              });
-              return;
-            }
-
-            // 5) Gerar resposta HUMANIZADA para a ação especificada
-            let reply = await generateFreteReply({
-              perfil: nome,
-              chatId,
-              historico: historicoSan,
-              extraction,
-              acao: flowDecision.acao,
-              instrucoesAcao: flowDecision.instrucoesAcao
-            });
-
-            if (!reply || !String(reply).trim()) {
-              appendMasterJSONL(nome, chatId, {
-                kind: 'flow_skip',
-                reason: 'empty_reply',
-                acao: flowDecision.acao
-              });
-              return;
-            }
-
-            reply = String(reply).trim();
-
-            // Anti-eco reforçado com base na última mensagem do cliente (novasFiltradas)
+            // Anti-eco reforçado
             const lastClient = (novasFiltradas && novasFiltradas.length) ? novasFiltradas[novasFiltradas.length - 1] : null;
             if (reply && lastClient && lastClient.texto) {
               reply = antiEchoReply(reply, lastClient.texto);
             }
 
-            if (!reply) {
-              appendMasterJSONL(nome, chatId, {
-                kind: 'flow_skip',
-                reason: 'anti_echo_filtered',
-                acao: flowDecision.acao
+            if (shouldAnswer && reply) {
+              const cursorSig = `${clientCount}|${clientDigest}`;
+              const earliest = virtusFSM.computeEarliestSendAt ? virtusFSM.computeEarliestSendAt(nome, chatId, { origin: 'reply', lastClientTs }) : undefined;
+
+              await virtusFSM.ackQueued(nome, chatId, cursorSig);
+              await queueMessengerSend(nome, {
+                chatId,
+                resposta: reply,
+                key: `master|${chatId}|${sha1(reply)}|${Date.now()}`,
+                earliestSendAt: earliest,
+                origin: 'replyReady',
+                cursorSig,
+                lastClientTsOverride: lastClientTs
               });
-              return;
+              // NUNCA ackSent aqui.
+              appendMasterJSONL(nome, chatId, { kind: 'master_enqueued', replySize: reply.length, earliestSendAt: earliest || null, cursorSig });
             }
-
-            // 6) Enfileirar resposta via queueMessengerSend (origem: replyReady)
-            const cursorSig = `${clientCount}|${clientDigest}`;
-            const earliest = virtusFSM.computeEarliestSendAt
-              ? virtusFSM.computeEarliestSendAt(nome, chatId, { origin: 'reply', lastClientTs })
-              : undefined;
-
-            await virtusFSM.ackQueued(nome, chatId, cursorSig);
-
-            await queueMessengerSend(nome, {
-              chatId,
-              resposta: reply,
-              key: `flow|${chatId}|${sha1(reply)}|${Date.now()}`,
-              earliestSendAt: earliest,
-              origin: 'replyReady',
-              cursorSig,
-              lastClientTsOverride: lastClientTs
-            });
-
-            appendMasterJSONL(nome, chatId, {
-              kind: 'flow_enqueued',
-              replySize: reply.length,
-              earliestSendAt: earliest || null,
-              cursorSig,
-              acao: flowDecision.acao
-            });
-
           } catch (e) {
-            logger.error('[MASTER][FLOW] cycle error', { nome, chatId, error: (e && e.message) || e });
-            appendMasterJSONL(nome, chatId, {
-              kind: 'master_error',
-              error: (e && e.message) || String(e)
-            });
+            logger.error('[MASTER] cycle error', { nome, chatId, error: (e&&e.message)||e });
+            appendMasterJSONL(nome, chatId, { kind: 'master_error', error: (e&&e.message)||String(e) });
           }
 
         } catch (e) {
