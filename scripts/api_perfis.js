@@ -874,14 +874,17 @@ module.exports = (app, workerClient, fileStore) => {
       }
 
       // 1) Atualiza manifest primeiro (fonte de verdade para flows)
+      const uf = utils.getUF && utils.getUF(novaCidade) || null;
       await manifestStore.update(nome, (m) => {
         m = m || {};
         m.cidade = String(novaCidade);
+        if (uf) m.estado = String(uf);
         return m;
       });
 
       // 2) Atualiza perfis.json (baseline do status e UI)
       perfisArr[idx].cidade = String(novaCidade);
+      if (uf) perfisArr[idx].estado = String(uf);
       fileStore.savePerfisJson(perfisArr);
 
       await issues.append(nome, 'mil_action', `admin_update_city from="${oldCidade||''}" to="${novaCidade}" by=${op}`);

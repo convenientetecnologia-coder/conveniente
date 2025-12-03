@@ -1,8 +1,5 @@
 // scripts/worker.js
-// ATENÇÃO: Worker NUNCA interage nem clica/open/chat na aba principal Messenger.
-// TODO acesso UI de chat deve ser feito via callback handler que Virtus registra via global.__buscaLocalizacaoVirtus.solicitarAberturaChat.
-// O worker só pede, aguarda, e opera ABA NOVA para scraping/classificado.
-// Worker nunca faz evaluate/click/focus na mainPage; só coordena fila, locks, scraping em abas extras.
+// [REMOVIDO] Fila/locks/busca de localizacao extintos por nova regra. Localizacao vem apenas do manifest do perfil.
 
 const path = require('path');
 const fs = require('fs');
@@ -11,558 +8,12 @@ const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./brow
 
 const browserHelper = require('./browser.js');
 
-// ====== INÍCIO: LOCK GLOBAL DE LOCALIZAÇÃO (arquivo) ======
-const LOC_GLOBAL_LOCK_FILE = path.join(__dirname, '..', 'dados', 'loc_global.lock');
-
-async function acquireGlobalLocLock(timeoutMs = 60000) {
-  const start = Date.now();
-  while ((Date.now() - start) < timeoutMs) {
-    try {
-      const fd = fs.openSync(LOC_GLOBAL_LOCK_FILE, 'wx');
-      try {
-        fs.writeFileSync(fd, String(Date.now()), 'utf8');
-        fs.fsyncSync(fd);
-      } finally {
-        try { fs.closeSync(fd); } catch {}
-      }
-      try { logger.info('[LOCALIZACAO][LOCK] ACQUIRED', { file: LOC_GLOBAL_LOCK_FILE }); } catch {}
-      return true;
-    } catch {
-      try {
-        const st = fs.statSync(LOC_GLOBAL_LOCK_FILE);
-        const age = Date.now() - st.mtimeMs;
-        if (age > 45 * 1000) {
-          try { fs.unlinkSync(LOC_GLOBAL_LOCK_FILE); } catch {}
-        }
-      } catch {}
-      await new Promise(r => setTimeout(r, 25));
-    }
-  }
-  try { logger.warn('[LOCALIZACAO][LOCK] TIMEOUT', { file: LOC_GLOBAL_LOCK_FILE, timeoutMs }); } catch {}
-  return false;
-}
-
-function releaseGlobalLocLock() {
-  try { fs.unlinkSync(LOC_GLOBAL_LOCK_FILE); } catch {}
-  try { logger.info('[LOCALIZACAO][LOCK] RELEASED', { file: LOC_GLOBAL_LOCK_FILE }); } catch {}
-}
-// ====== FIM: LOCK GLOBAL DE LOCALIZAÇÃO (arquivo) ======
+// [REMOVIDO] Fila/locks/busca de localizacao extintos por nova regra.
 
 // Snapshot status throttle (evita overkill em ambientes multi-perfil)
 let _lastSnapAt = 0;
 
-// ====== INÍCIO: FILA GLOBAL DE BUSCA DE LOCALIZAÇÃO (sem ciclo) ======
-const filaBuscaLocalizacao = [];
-let processandoBuscaLocalizacao = false;
-
-// Deduplicação e fan-out de callbacks por (perfil + chatId)
-const _cityActiveKeys = new Set();           // keys em processamento (nomePerfil::chatId)
-const _cityWaiters = new Map();              // key -> [callbacks]
-function _cityKey(nomePerfil, chatId) {
-  return String(nomePerfil || '') + '::' + String(chatId || '');
-}
-function _getCtrl(nomePerfil) {
-  try {
-    if (!nomePerfil) return null;
-    const ctrlGlobal = (global && global.controllers) ? global.controllers.get(nomePerfil) : null;
-    if (ctrlGlobal) return ctrlGlobal;
-    // eslint-disable-next-line no-undef
-    if (typeof controllers !== 'undefined') {
-      // eslint-disable-next-line no-undef
-      return controllers.get(nomePerfil);
-    }
-    return null;
-  } catch { return null; }
-}
-
-// Registra no global para uso pelo Virtus (sem require de worker.js)
-// Coleta de localização: clique/navegação/seleção na aba zero Messenger só é executada pelo Virtus.js (UI driver), nunca pelo worker — esta função apenas gerencia fila de pedidos e locks.
-global.__buscaLocalizacaoVirtus = {
-  adicionarBuscaLocalizacao: (chatId, urlClassificado, nomePerfil, callback) => {
-    try {
-      if (!chatId || !nomePerfil) {
-        try { callback && callback(null); } catch {}
-        return;
-      }
-
-      const key = _cityKey(nomePerfil, chatId);
-
-      // Fan-out de callbacks (mesmo chat/perfil compartilha resultado)
-      const prev = _cityWaiters.get(key) || [];
-      if (typeof callback === 'function') {
-        _cityWaiters.set(key, prev.concat([callback]));
-      } else {
-        _cityWaiters.set(key, prev);
-      }
-
-      // Evita duplicar na fila se já existe item enfileirado OU ativo
-      const alreadyQueued = filaBuscaLocalizacao.some(ent => ent && ent.chatId === chatId && ent.nomePerfil === nomePerfil);
-      const isActive = _cityActiveKeys.has(key);
-
-      if (alreadyQueued || isActive) {
-        logger.info('[LOCALIZACAO] Pedido de coleta deduplicado (já enfileirado/ativo)', { nomePerfil, chatId });
-        return;
-      }
-
-      // Enfileira com metadados de controle
-      filaBuscaLocalizacao.push({ chatId, urlClassificado, nomePerfil, retries: 0, enqueuedAt: Date.now() });
-      processarFilaBuscaLocalizacao();
-    } catch (e) {
-      logger.error('[LOCALIZACAO] Falha ao enfileirar', { chatId, error: e && e.message || e });
-      try { callback && callback(null); } catch {}
-    }
-  },
-  // Handler que Virtus deve registrar para executar o clique/abertura do chat na mainPage e extrair a URL do classificado
-  // Virtus deve fazer: global.__buscaLocalizacaoVirtus.solicitarAberturaChat = function(perfil, chatId, callback) { ... }
-  // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
-  solicitarAberturaChat: null // Será preenchido pelo Virtus.js
-};
-
-async function processarFilaBuscaLocalizacao() {
-  if (processandoBuscaLocalizacao) return;
-  if (filaBuscaLocalizacao.length === 0) return;
-
-  processandoBuscaLocalizacao = true;
-
-  const item = filaBuscaLocalizacao.shift();
-  // Normaliza estrutura (backward-compat)
-  item.retries = Number(item.retries || 0);
-  const key = _cityKey(item.nomePerfil, item.chatId);
-
-  try {
-    const ctrl = _getCtrl(item.nomePerfil);
-
-    // Se o perfil não está pronto/ativo, re-enfileira
-    if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) {
-      logger.info('[LOCALIZACAO] Adiado: perfil/navegador indisponível', { nomePerfil: item.nomePerfil, chatId: item.chatId });
-      filaBuscaLocalizacao.push(item);
-      processandoBuscaLocalizacao = false;
-      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
-      return;
-    }
-
-    // GATE 1: Robe ativo — coletar cidade só depois do Robe
-    if (ctrl && ctrl.browser && ctrl.browser._robeActiveFor === item.nomePerfil) {
-      logger.info('[LOCALIZACAO] Adiado: Robe ativo neste perfil', { nomePerfil: item.nomePerfil, chatId: item.chatId });
-      filaBuscaLocalizacao.push(item);
-      processandoBuscaLocalizacao = false;
-      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
-      return;
-    }
-
-    // GATE 2: Envio em andamento — aguardar
-    const sendLockActive = !!(ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active);
-    if (sendLockActive) {
-      logger.info('[LOCALIZACAO] Adiado: envio ativo (sendLock)', { nomePerfil: item.nomePerfil, chatId: item.chatId });
-      filaBuscaLocalizacao.push(item);
-      processandoBuscaLocalizacao = false;
-      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
-      return;
-    }
-
-    // GATE 3: Modo humano/configuração — aguardar
-    if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) {
-      logger.info('[LOCALIZACAO] Adiado: human/config mode', { nomePerfil: item.nomePerfil, chatId: item.chatId });
-      filaBuscaLocalizacao.push(item);
-      processandoBuscaLocalizacao = false;
-      setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
-      return;
-    }
-
-    // Marca ativo e bloqueia perfil para "city"
-    _cityActiveKeys.add(key);
-    try { ctrl.busyReason = 'city'; } catch {}
-
-    logger.info('[LOCALIZACAO] Coleta iniciada', { nomePerfil: item.nomePerfil, chatId: item.chatId, tentativa: (item.retries + 1) });
-
-    let localizacao = null;
-    try {
-      localizacao = await buscarLocalizacaoClassificado(item.chatId, item.urlClassificado, item.nomePerfil);
-    } catch (e) {
-      logger.warn('[LOCALIZACAO] Exceção durante coleta', { nomePerfil: item.nomePerfil, chatId: item.chatId, error: (e && e.message) || e });
-    } finally {
-      try { if (ctrl && ctrl.busyReason === 'city') delete ctrl.busyReason; } catch {}
-      _cityActiveKeys.delete(key);
-    }
-
-    if (localizacao && localizacao.cidade && localizacao.estado) {
-      logger.info('[LOCALIZACAO] Coleta OK', {
-        nomePerfil: item.nomePerfil,
-        chatId: item.chatId,
-        cidade: localizacao.cidade,
-        estado: localizacao.estado
-      });
-
-      const cbs = _cityWaiters.get(key) || [];
-      _cityWaiters.delete(key);
-      for (const cb of cbs) { try { cb(localizacao); } catch {} }
-    } else {
-      // Falhou — retentativa até 5x
-      const nextTry = item.retries + 1;
-      if (nextTry < 5) {
-        item.retries = nextTry;
-        filaBuscaLocalizacao.push(item);
-        logger.warn('[LOCALIZACAO] Falha na coleta — re-tentando', { nomePerfil: item.nomePerfil, chatId: item.chatId, retry: nextTry });
-      } else {
-        logger.warn('[LOCALIZACAO] Falha na coleta — limite de tentativas esgotado', { nomePerfil: item.nomePerfil, chatId: item.chatId, retries: nextTry });
-        const cbs = _cityWaiters.get(key) || [];
-        _cityWaiters.delete(key);
-        for (const cb of cbs) { try { cb(null); } catch {} }
-      }
-    }
-  } catch (e) {
-    logger.error('[LOCALIZACAO] Erro ao processar item da fila', { error: (e && e.message) || e });
-    try {
-      const cbs = _cityWaiters.get(key) || [];
-      _cityWaiters.delete(key);
-      for (const cb of cbs) { try { cb(null); } catch {} }
-    } catch {}
-  } finally {
-    processandoBuscaLocalizacao = false;
-    setTimeout(() => processarFilaBuscaLocalizacao(), 2000);
-  }
-}
-
-async function buscarLocalizacaoClassificado(chatId, urlClassificado, nomePerfil) {
-  // NOTA: 'controllers' será declarado mais adiante no arquivo. A função só será executada
-  // depois que 'controllers' existir (quando Virtus chamar a fila). Isso é seguro.
-
-  // Resolve controller pelo global ou escopo local
-  const ctrlGlobal = (global && global.controllers) ? global.controllers.get(nomePerfil) : null;
-  let ctrl = ctrlGlobal;
-  try {
-    if (!ctrl) {
-      // eslint-disable-next-line no-undef
-      if (typeof controllers !== 'undefined') {
-        // eslint-disable-next-line no-undef
-        ctrl = controllers.get(nomePerfil);
-      }
-    }
-  } catch {}
-
-  if (!ctrl || !ctrl.browser) return null;
-
-  return await _execBusca(ctrl);
-
-  async function _execBusca(controller) {
-    const browser = controller.browser;
-
-    // ====== INÍCIO: EXTRATOR ROBUSTO DE CIDADE/UF NO ANÚNCIO ======
-    async function _extractCityUF(page, candidates = []) {
-      const UF_SET = new Set(['AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG','PA','PB','PR','PE','PI','RJ','RN','RS','RO','RR','SC','SP','SE','TO']);
-
-      function _parseLineCityUf(s) {
-        if (!s) return null;
-        const str = String(s).trim();
-        const m = /([A-Za-zÀ-ÿ0-9 .\-']+),\s*([A-Za-z]{2})\b/.exec(str);
-        if (!m) return null;
-        const cidade = (m[1] || '').trim();
-        const uf = (m[2] || '').toUpperCase();
-        if (!cidade || !UF_SET.has(uf)) return null;
-        return { cidade, estado: uf };
-      }
-
-      function _parseFromCandidates(list) {
-        for (const s of (list || [])) {
-          const out = _parseLineCityUf(s);
-          if (out) return out;
-        }
-        return null;
-      }
-
-      // 1) Tentativa direta por seletores — spans e anchors visíveis no anúncio
-      const direct = await page.evaluate(() => {
-        function isVisible(el) {
-          try {
-            const st = window.getComputedStyle(el);
-            if (!st) return false;
-            if (st.visibility === 'hidden' || st.display === 'none') return false;
-            const r = el.getBoundingClientRect();
-            return !!(r && r.width > 0 && r.height > 0);
-          } catch { return false; }
-        }
-        function pickText(el) {
-          return (el && (el.innerText || el.textContent) || '').trim();
-        }
-        const out = [];
-
-        // a) Spans visíveis com padrão "Cidade, UF"
-        const spans = Array.from(document.querySelectorAll('span'));
-        for (const s of spans) {
-          if (!isVisible(s)) continue;
-          const t = pickText(s);
-          if (t) out.push(t);
-        }
-
-        // b) Anchors do Marketplace (ex.: "Anunciado em <a ...>Florianópolis, SC</a>")
-        const anchors = Array.from(document.querySelectorAll('a[href^="/marketplace/"], a[href*="/marketplace/"]'));
-        for (const a of anchors) {
-          if (!isVisible(a)) continue;
-          const t = pickText(a);
-          if (t) out.push(t);
-        }
-
-        // c) Regiões principais (header, main, pagelet Marketplace)
-        const regs = [
-          document.querySelector('header'),
-          document.querySelector('[role="main"]'),
-          document.querySelector('[data-pagelet*="Marketplace"]')
-        ].filter(Boolean);
-        for (const r of regs) {
-          const txt = pickText(r);
-          if (txt) {
-            const lines = txt.split(/\n+/).map(s => s.trim()).filter(Boolean);
-            out.push(...lines);
-          }
-        }
-
-        return out;
-      });
-
-      let best = _parseFromCandidates(direct);
-      if (best) return best;
-
-      // 2) Fallback: usa candidatos já coletados
-      best = _parseFromCandidates(candidates);
-      if (best) return best;
-
-      // 3) Fallback final: meta/title/og:description
-      const metaText = await page.evaluate(() => {
-        try {
-          const arr = [];
-          const title = (document.title || '').trim();
-          if (title) arr.push(title);
-          const md = document.querySelector('meta[name="description"]');
-          if (md && md.content) arr.push(md.content.trim());
-          const ogd = document.querySelector('meta[property="og:description"]');
-          if (ogd && ogd.content) arr.push(ogd.content.trim());
-          return arr.join('\n');
-        } catch { return ''; }
-      });
-      best = _parseFromCandidates([metaText].concat(candidates || []));
-      return best || null;
-    }
-    // ====== FIM: EXTRATOR ROBUSTO DE CIDADE/UF NO ANÚNCIO ======
-
-    // Coleta de localização: clique/navegação/seleção na aba zero Messenger só é executada pelo Virtus.js (UI driver), nunca pelo worker — esta função apenas gerencia fila de pedidos e locks.
-    // Worker solicita abertura do chat via handler global que Virtus consome quando seguro.
-    // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
-    // ATENÇÃO: Worker NUNCA interage nem clica/open/chat na aba principal Messenger.
-    // TODO acesso UI de chat deve ser feito via callback handler que Virtus registra via global.__buscaLocalizacaoVirtus.solicitarAberturaChat.
-    // O worker só pede, aguarda, e opera ABA NOVA para scraping/classificado.
-    async function _descobrirUrlClassificadoSeNecessario() {
-      if (urlClassificado && typeof urlClassificado === 'string' && urlClassificado.trim()) {
-        return urlClassificado;
-      }
-
-      // Handler global que Virtus consome para abrir chat e extrair URL do item
-      const handler = (global && global.__buscaLocalizacaoVirtus && global.__buscaLocalizacaoVirtus.solicitarAberturaChat) 
-        ? global.__buscaLocalizacaoVirtus.solicitarAberturaChat 
-        : null;
-
-      if (!handler || typeof handler !== 'function') {
-        logger.warn('[LOCALIZACAO] Handler de abertura de chat não disponível (Virtus não registrou)', { nomePerfil, chatId });
-        return null;
-      }
-
-      // Solicita ao Virtus que abra o chat e extraia a URL (Virtus faz o clique/navegação quando seguro)
-      // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
-      // NUNCA tenta fallback para click na mainPage sob hipótese alguma.
-      return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          resolve(null);
-        }, 15000); // Timeout de 15s
-
-        try {
-          handler(nomePerfil, chatId, (url) => {
-            clearTimeout(timeout);
-            resolve(url || null);
-          });
-        } catch (e) {
-          clearTimeout(timeout);
-          logger.warn('[LOCALIZACAO] Erro ao solicitar abertura de chat', { nomePerfil, chatId, error: e && e.message || e });
-          resolve(null);
-        }
-      });
-    }
-
-    // Flag global ANTES de newPage
-    let buscaId = '';
-    let lockAcquired = false;
-    let novaAba = null;
-
-    try {
-      // Garante estrutura para flags de busca
-      if (!browser._buscasLocalizacaoAtivas) {
-        browser._buscasLocalizacaoAtivas = new Set();
-      }
-      buscaId = `busca_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      browser._buscasLocalizacaoAtivas.add(buscaId);
-      try {
-        logger.info('[LOCALIZACAO] Flag adicionada', { nomePerfil, buscaId, flagSize: browser._buscasLocalizacaoAtivas.size });
-      } catch {}
-
-      // Adquiri lock global (1 coleta por vez no servidor inteiro)
-      lockAcquired = await acquireGlobalLocLock(60000);
-      if (!lockAcquired) {
-        try {
-          logger.warn('[LOCALIZACAO] Lock global não adquirido (timeout)', { nomePerfil, chatId });
-        } catch {}
-        return null;
-      }
-
-      // Abre nova aba PROTEGIDA (pruner respeita esta marca)
-      novaAba = await browser.newPage();
-      try {
-        novaAba._buscaLocalizacao = true;
-        novaAba._buscaLocalizacaoSince = Date.now();
-        novaAba._buscaLocalizacaoChatId = chatId;
-      } catch {}
-
-      // Descobre URL do classificado solicitando ao Virtus que abra o chat (Virtus faz clique/navegação quando seguro)
-      // ONLY Virtus (UI driver) can execute the chat opening/click on Messenger. Worker just requests via handler.
-      let targetUrl = await _descobrirUrlClassificadoSeNecessario();
-      if (!targetUrl || typeof targetUrl !== 'string') {
-        try {
-          logger.warn('[LOCALIZACAO] Localização NÃO encontrada (sem url do item)', { nomePerfil, chatId, urlClassificado });
-        } catch {}
-        return null;
-      }
-
-      // Vai para a página do classificado
-      await novaAba.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-
-      // Aguarda elementos do anúncio surgirem (sem travar o fluxo)
-      await Promise.race([
-        novaAba.waitForSelector('a[href^="/marketplace/"]', { timeout: 8000 }).catch(() => null),
-        novaAba.waitForSelector('span', { timeout: 8000 }).catch(() => null),
-        new Promise(r => setTimeout(r, 1500))
-      ]).catch(() => {});
-
-      // Apenas scraping DOM - coleta candidatos de texto, SEM parsing
-      const candidates = await novaAba.evaluate(() => {
-        try {
-          function isVisible(el) {
-            try {
-              const st = window.getComputedStyle(el);
-              if (!st) return false;
-              if (st.visibility === 'hidden' || st.display === 'none') return false;
-              const r = el.getBoundingClientRect();
-              return !!(r && r.width > 0 && r.height > 0);
-            } catch { return false; }
-          }
-          const candidates = [];
-
-          // Estratégia 1 — Anchor de localização do Marketplace
-          {
-            const anchors = Array.from(document.querySelectorAll('a[role="link"][href^="/marketplace/"], a[href^="/marketplace/"]'))
-              .filter(a => {
-                const href = (a.getAttribute('href') || '').trim();
-                return href && !/\/t\//i.test(href) && !/\/item\//i.test(href);
-              });
-            for (const a of anchors) {
-              if (!isVisible(a)) continue;
-              const texts = [
-                (a.innerText || a.textContent || '').trim(),
-                ...Array.from(a.querySelectorAll('span')).map(s => (s.innerText || s.textContent || '').trim())
-              ].filter(Boolean);
-              candidates.push(...texts);
-            }
-          }
-
-          // Estratégia 2 — Spans e Divs visíveis
-          {
-            const nodes = Array.from(document.querySelectorAll('span,div'));
-            for (const el of nodes) {
-              if (!isVisible(el)) continue;
-              const txt = (el.innerText || el.textContent || '').trim();
-              if (txt) candidates.push(txt);
-            }
-          }
-
-          // Estratégia 3 — Cabeçalhos/regiões principais
-          {
-            const regs = [
-              document.querySelector('header'),
-              document.querySelector('[role="main"]'),
-              document.querySelector('[data-pagelet*="Marketplace"]')
-            ].filter(Boolean);
-            for (const r of regs) {
-              const lines = ((r.innerText || r.textContent || '') || '').split(/\n+/).map(s => s.trim()).filter(Boolean);
-              candidates.push(...lines);
-            }
-          }
-
-          // Estratégia 4 — Último recurso: fullText
-          {
-            const full = (document.body && (document.body.innerText || document.body.textContent) || '');
-            if (full) {
-              const parts = full.split(/\n+/).map(x => x.trim()).filter(Boolean);
-              candidates.push(...parts);
-            }
-          }
-
-          return candidates;
-        } catch {
-          return [];
-        }
-      });
-
-      // Parsing robusto local (sem dependência externa)
-      const finalLocal = await _extractCityUF(novaAba, candidates);
-
-      if (finalLocal && finalLocal.cidade && finalLocal.estado) {
-        try {
-          logger.info('[LOCALIZACAO] Localização encontrada no classificado', {
-            nomePerfil,
-            chatId,
-            cidade: finalLocal.cidade,
-            estado: finalLocal.estado,
-            urlClassificado: targetUrl
-          });
-        } catch {}
-      } else {
-        try {
-          logger.warn('[LOCALIZACAO] Localização NÃO encontrada no classificado', {
-            nomePerfil,
-            chatId,
-            urlClassificado: targetUrl
-          });
-        } catch {}
-      }
-
-      return finalLocal || null;
-    } catch (e) {
-      try {
-        logger.error('[LOCALIZACAO] Erro ao buscar localização', { nomePerfil, chatId, error: (e && e.message) || e });
-      } catch {}
-      return null;
-    } finally {
-      // Fechamento e limpeza garantidos
-      try { if (novaAba) await novaAba.close({ runBeforeUnload: false }); } catch {}
-      try { if (browser._buscasLocalizacaoAtivas) browser._buscasLocalizacaoAtivas.delete(buscaId); } catch {}
-      try { if (novaAba) { delete novaAba._buscaLocalizacao; delete novaAba._buscaLocalizacaoSince; delete novaAba._buscaLocalizacaoChatId; } } catch {}
-      try {
-        logger.info('[LOCALIZACAO] Flag removida/aba fechada', {
-          nomePerfil, buscaId, flagSize: (browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size) || 0
-        });
-      } catch {}
-      if (lockAcquired) {
-        try { releaseGlobalLocLock(); } catch {}
-      }
-    }
-  }
-}
-
-// expõe no module.exports para ambientes que realmente façam require deste arquivo
-module.exports = module.exports || {};
-module.exports.adicionarBuscaLocalizacao = global.__buscaLocalizacaoVirtus.adicionarBuscaLocalizacao;
-module.exports.processarFilaBuscaLocalizacao = processarFilaBuscaLocalizacao;
-module.exports.buscarLocalizacaoClassificado = buscarLocalizacaoClassificado;
-
-// também deixa controllers acessível via global para a função acima
-// (será atualizado quando controllers for definido mais abaixo no arquivo)
-// ====== FIM: FILA GLOBAL DE BUSCA DE LOCALIZAÇÃO ======
+// [REMOVIDO] Fila/locks/busca de localizacao extintos por nova regra.
 
 const virtusHelper = require('./virtus.js');
 const robeHelper   = require('./robe.js');
@@ -1649,15 +1100,6 @@ function getWorkingProfileNames() {
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
-    const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000; // 60s de proteção
-    const now = Date.now();
-
-    // BLOQUEIO CRÍTICO: Flag global ativa => nunca fechar
-    try {
-      if (browser && browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
-        return;
-      }
-    } catch {}
 
     const pages = await browser.pages();
     let closed = 0;
@@ -1668,25 +1110,11 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman  = ctrl && ctrl.humanControl === true;
 
-    function isProtectedBusca(p) {
-      try {
-        if (p._buscaLocalizacao === true) {
-          const age = now - (p._buscaLocalizacaoSince || 0);
-          if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) return true;
-          try { delete p._buscaLocalizacao; } catch {}
-          try { delete p._buscaLocalizacaoSince; } catch {}
-          try { delete p._buscaLocalizacaoChatId; } catch {}
-        }
-      } catch {}
-      return false;
-    }
-
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       for (const p of pages) {
         try {
           if (mainPage && p === mainPage) continue;
           if (!mainPage && pages[0] && p === pages[0]) continue;
-          if (isProtectedBusca(p)) continue;
           let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
             await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1702,13 +1130,6 @@ async function closeExtraPages(browser, mainPage, nome) {
         try {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && again[0] && p === again[0]) continue;
-          // PROTEÇÃO DUPLA: flag global + marcação
-          try {
-            if (browser && browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
-              continue;
-            }
-          } catch {}
-          if (isProtectedBusca(p)) continue;
         let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1734,16 +1155,6 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
   if (_pruners.has(nome)) return;
   const interval = setInterval(async () => {
     try {
-      const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
-      const now = Date.now();
-      try {
-        const pages = await browser.pages();
-        const hasBusca = Array.isArray(pages) && pages.some(p => p._buscaLocalizacao === true && (now - (p._buscaLocalizacaoSince || 0)) < MAX_BUSCA_LOCALIZACAO_AGE_MS);
-        if (hasBusca) {
-          // Se há busca em andamento recentíssima, não fecha nada nessa passada.
-          return;
-        }
-      } catch {}
       await closeExtraPages(browser, mainPage, nome);
     } catch (e) {
       if (process.env.PRUNE_DEBUG === '1') {
@@ -4393,18 +3804,11 @@ setTimeout(() => { healthTick().catch(()=>{}); }, 2500);
 async function periodicAboutBlankCleanup() {
   try {
     const issues = require('./issues.js');
-    const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
-    const now = Date.now();
     let totalClosed = 0;
 
     for (const [nome, ctrl] of controllers.entries()) {
       try {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
-
-        // BLOQUEIO: flag global ativa
-        try {
-          if (ctrl.browser._buscasLocalizacaoAtivas && ctrl.browser._buscasLocalizacaoAtivas.size > 0) continue;
-        } catch {}
 
         const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
@@ -4415,19 +3819,6 @@ async function periodicAboutBlankCleanup() {
 
         const pages = await ctrl.browser.pages().catch(() => []);
         if (!Array.isArray(pages) || pages.length <= 1) continue;
-
-        // Se há qualquer aba marcada nesta janela, também aborta
-        const hasMarked = pages.some(p => {
-          try {
-            if (p._buscaLocalizacao === true) {
-              const age = now - (p._buscaLocalizacaoSince || 0);
-              return age < MAX_BUSCA_LOCALIZACAO_AGE_MS;
-            }
-          } catch {}
-          return false;
-        });
-
-        if (hasMarked) continue;
 
         const mainPage = ctrl.mainPage || pages[0];
 

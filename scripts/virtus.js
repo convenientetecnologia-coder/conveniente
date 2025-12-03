@@ -749,14 +749,19 @@ async function enviarLoteNotificador(nomePerfil) {
         return mSanitizado;
       });
       
+      // Localização sempre do manifest
+      const man = await manifestStore.read(nomePerfil).catch(()=>null);
+      const cidade = man && man.cidade || null;
+      const uf = man && man.estado || null;
+      const localizacao = cidade && uf ? `${cidade} (${uf})` : (cidade || null);
+      
       const payload = {
         servidor: NOTIFICADOR_SERVIDOR,
         chat_id: dadosChat.chatId,
         perfil: nomePerfil,
         tipo_servico: dadosChat.tipoServico,
         historico: historicoSanitizado,
-        localizacao: dadosChat.localizacao, // Formato: "Cidade (UF)" - ex: "Florianopolis (SC)"
-        url_classificado: dadosChat.urlClassificado,
+        localizacao: localizacao || null,
         timestamp: new Date().toISOString()
       };
       
@@ -1076,60 +1081,7 @@ async function marcarRespondido(nomePerfil, chatId) {
   }
 }
 
-async function extrairUrlClassificado(page, chatId) {
-  try {
-    const url = await page.evaluate(() => {
-      const fixAbsolute = (h) => (h && h.startsWith('http')) ? h : (h ? ('https://www.facebook.com' + h) : null);
-      const as = Array.from(document.querySelectorAll('a[href]'));
-
-      // 1) Preferir a página do item do Marketplace (mais informativa)
-      for (const a of as) {
-        const href = a.getAttribute('href') || a.href || '';
-        if (!href) continue;
-        if (href.includes('/marketplace/item/') && !href.includes('/marketplace/t/')) {
-          return fixAbsolute(href);
-        }
-      }
-
-      // 2) Se não houver item, usar o perfil do comprador ("View buyer"/"Ver comprador")
-      //    Ex.: https://www.facebook.com/marketplace/profile/...
-      //    Procura primeiro por aria-label, depois por qualquer /marketplace/profile/
-      const headerProfileAnchor =
-        document.querySelector('a[aria-label*="View buyer" i]') ||
-        document.querySelector('a[aria-label*="Ver comprador" i]') ||
-        null;
-
-      if (headerProfileAnchor) {
-        const h = headerProfileAnchor.getAttribute('href') || headerProfileAnchor.href || '';
-        if (h && h.includes('/marketplace/profile/') && !h.includes('/marketplace/t/')) {
-          return fixAbsolute(h);
-        }
-      }
-
-      for (const a of as) {
-        const href = a.getAttribute('href') || a.href || '';
-        if (!href) continue;
-        if (href.includes('/marketplace/profile/') && !href.includes('/marketplace/t/')) {
-          return fixAbsolute(href);
-        }
-      }
-
-      // 3) Fallback: qualquer outro /marketplace/ que não seja do chat (/t/)
-      for (const a of as) {
-        const href = a.getAttribute('href') || a.href || '';
-        if (!href) continue;
-        if (href.includes('/marketplace/') && !href.includes('/marketplace/t/')) {
-          return fixAbsolute(href);
-        }
-      }
-
-      return null;
-    });
-    return url || null;
-  } catch {
-    return null;
-  }
-}
+// [REMOVIDO: extrairUrlClassificado — scraping de URL não necessário, localização vem do manifest]
 
 async function extrairHistoricoConversa(page) {
   try {
@@ -1336,7 +1288,7 @@ function setFailCount(chatId, n) {
 }
 let NAV_CLICK_ONLY = false; // Após boot, bloqueia qualquer navegação/reload na Aba 0 (Messenger)
 
-const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao, urlClassificado } ]
+const filaEnviarNotificador = new Map();  // nomePerfil -> [ { chatId, tipoServico, mensagem, localizacao } ]
 const filaRespostas = new Map();          // nomePerfil -> [ { chat_id, resposta } ]
 const filaEnvioMessenger = new Map();     // nomePerfil -> [ { chatId, resposta, key } ]
 const ultimaRespostaMessenger = new Map();// nomePerfil -> timestamp
@@ -2146,7 +2098,7 @@ async function sendPedidoToNotificador(perfil, payload) {
   return false;
 }
 
-async function finalizePedido(perfil, chatId, contexto, classificadoUrl) {
+async function finalizePedido(perfil, chatId, contexto) {
   const finalizing = getFinalizingSet(perfil);
   if (finalizing.has(chatId)) return;
   finalizing.add(chatId);
@@ -2167,9 +2119,12 @@ async function finalizePedido(perfil, chatId, contexto, classificadoUrl) {
       } catch { return []; }
     })();
 
-    const contextoBuild = contexto && contexto.cidade ? contexto : {
-      cidade: (state && state.cidade) || null
-    };
+    // Localização sempre do manifest
+    const man = await manifestStore.read(perfil).catch(()=>null);
+    const cidade = man && man.cidade || null;
+    const uf = man && man.estado || null;
+    const localizacao = cidade && uf ? `${cidade} (${uf})` : (cidade || null);
+    const contextoBuild = contexto && contexto.cidade ? contexto : { cidade };
 
     const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoArray, contexto: contextoBuild, respond: false });
     const extraction = llm && llm.extraction ? llm.extraction : {};
@@ -2190,10 +2145,6 @@ async function finalizePedido(perfil, chatId, contexto, classificadoUrl) {
                : (extraction.ajudante === false) ? 'nao'
                : 'não informado';
 
-    const cidade = extraction.cidade || (state && state.cidade) || null;
-    const estado = (state && state.estado) || null;
-    const localizacao = formatarLocalizacaoParaPlanilha({ cidade, estado });
-
     const payload = {
       chat_id: chatId,
       telefone: tel,
@@ -2202,10 +2153,9 @@ async function finalizePedido(perfil, chatId, contexto, classificadoUrl) {
       endereco_destino: endDestino,
       ajudante: ajud,
       localizacao: localizacao || null,
-      url_classificado: classificadoUrl || null,
       descricao: extraction.descricao || null,
       cidade,
-      estado,
+      estado: uf,
       timestamp: new Date().toISOString()
     };
 
@@ -2253,7 +2203,7 @@ async function finalizePedido(perfil, chatId, contexto, classificadoUrl) {
   }
 }
 
-async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contexto, classificadoUrl) {
+async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contexto) {
   try {
     const already = await loadPedidoSent(perfil, chatId).catch(()=>null);
     if (already) return;
@@ -2266,7 +2216,7 @@ async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contex
       const delay = Math.max(0, Number(st.finalization.deadlineAt) - now);
       const map = getFinalizationMap(perfil);
       if (!map.has(chatId)) {
-        const tid = setTimeout(() => finalizePedido(perfil, chatId, contexto || {}, classificadoUrl || null), delay);
+        const tid = setTimeout(() => finalizePedido(perfil, chatId, contexto || {}), delay);
         map.set(chatId, tid);
         stepLog.appendJSONL(perfil, 'virtus', { step: 'finalization_timer_rearmed', chatId, delay, ts: now });
       }
@@ -2290,7 +2240,7 @@ async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contex
 
     const map = getFinalizationMap(perfil);
     clearFinalizationTimer(perfil, chatId);
-    const tid = setTimeout(() => finalizePedido(perfil, chatId, contexto || {}, classificadoUrl || null), COLETA_FINAL_MS);
+    const tid = setTimeout(() => finalizePedido(perfil, chatId, contexto || {}), COLETA_FINAL_MS);
     map.set(chatId, tid);
 
     stepLog.appendJSONL(perfil, 'virtus', {
@@ -2368,35 +2318,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
         try {
-          if (browser._buscasLocalizacaoAtivas && browser._buscasLocalizacaoAtivas.size > 0) {
-            return page;
-          }
-        } catch {}
-
-        try {
           if (browser && browser._robeActiveFor === nome) {
           } else {
             const allPages = await browser.pages();
             if (Array.isArray(allPages) && allPages.length > 1) {
-              const MAX_BUSCA_LOCALIZACAO_AGE_MS = 60000;
-              const now = Date.now();
               for (let i = allPages.length - 1; i >= 1; i--) {
                 const p = allPages[i];
                 try {
-                  if (p._buscaLocalizacao === true) {
-                    const age = now - (p._buscaLocalizacaoSince || 0);
-                    if (age < MAX_BUSCA_LOCALIZACAO_AGE_MS) {
-                      continue; // protegido
-                    }
-                    try { delete p._buscaLocalizacao; } catch {}
-                    try { delete p._buscaLocalizacaoSince; } catch {}
-                    try { delete p._buscaLocalizacaoChatId; } catch {}
-                  }
+                  let u = '';
+                  try { u = await p.url(); } catch {}
+                  if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // NUNCA fechar create item
+                  try { await p.close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
                 } catch {}
-                let u = '';
-                try { u = await p.url(); } catch {}
-                if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // NUNCA fechar create item
-                try { await p.close({ runBeforeUnload:false }).catch(()=>{}); } catch {}
               }
             }
           }
@@ -2622,10 +2555,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
           }
 
-          // Coleta a URL do classificado com o chat aberto (sem navegar)
-          let classificadoUrl = null;
-          try { classificadoUrl = await extrairUrlClassificado(p, chatId); } catch {}
-
           const historicoConversa = await extrairHistoricoConversa(p);
 
           // Constroi histórico sanitizado
@@ -2642,7 +2571,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await appendChatHistoryLog(nome, chatId, historicoSan);
 
           try {
-            await armFinalizationTimerIfNeeded(nome, chatId, historicoSan, {}, classificadoUrl || null);
+            await armFinalizationTimerIfNeeded(nome, chatId, historicoSan, {});
           } catch {}
 
           // Filtra somente mensagens do cliente (sanitizadas)
@@ -2667,14 +2596,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             fsmState = virtusFSM.get(nome, chatId);
           } catch {}
             if (!(fsmState && fsmState.cidade && fsmState.estado)) {
-              await ensureLocationPrefetch(chatId, classificadoUrl || null);
-              // Se obteve cidade, atualiza no FSM
-              try {
-                const locData = await ensureLocationPrefetch(chatId, classificadoUrl || null);
-                if (locData && locData.cidade) {
-                  await virtusFSM.patch(nome, chatId, { cidade: locData.cidade, estado: locData.estado || null });
-                }
-              } catch {}
+              await ensureLocationPrefetch(chatId);
             }
           } catch {}
 
@@ -2850,40 +2772,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // Toda lógica de business agora gerenciada pelo virtusFSM
 
 
-  async function ensureLocationPrefetch(chatId, urlHint = null) {
+  async function ensureLocationPrefetch(chatId) {
     try {
-      let fsmState = null;
-      try {
-        fsmState = virtusFSM.get(nome, chatId);
-      } catch {}
-      if (fsmState && fsmState.data && fsmState.data.cidade) return;
-
-      // Se não veio URL, tenta obtê-la com o chat aberto por clique (sem navegação)
-      if (!urlHint) {
-        const p0 = await ensurePage().catch(() => null);
-        if (p0) {
-          const nowUrl = (typeof p0.url === 'function') ? (p0.url() || '') : '';
-          if (!chatUrlMatches(nowUrl, chatId)) {
-            await openChatByClick(p0, chatId, { timeoutMs: 6000, retries: 1 });
-          }
-          try { urlHint = await extrairUrlClassificado(p0, chatId); } catch {}
-        }
+      const man = await manifestStore.read(nome).catch(()=>null);
+      const cidade = man && man.cidade || null;
+      const estado = man && man.estado || null;
+      if (cidade) {
+        await virtusFSM.patch(nome, chatId, { cidade, estado });
       }
-
-      const buscador = (global && global.__buscaLocalizacaoVirtus) ? global.__buscaLocalizacaoVirtus : null;
-      if (!buscador || typeof buscador.adicionarBuscaLocalizacao !== 'function') {
-        return;
-      }
-
-      // Dispara worker (Aba 1) com o link (Aba 0 nunca navega)
-      buscador.adicionarBuscaLocalizacao(chatId, urlHint || null, nome, async (loc) => {
-        try {
-          if (loc && loc.cidade) {
-            await virtusFSM.patch(nome, chatId, { data: { cidade: String(loc.cidade || '') } });
-          }
-        } catch {}
-      });
-
     } catch {}
   }
 
@@ -2938,32 +2834,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         
         function onNewChatDetected({ id, tempo }) {
           const chatId = id;
-          // Não agenda atendimento ainda. Primeiro coleta cidade obrigatoriamente.
-          ensureLocationPrefetch(chatId, null).catch(() => {});
+          // Prefetch de localização do manifest
+          ensureLocationPrefetch(chatId).catch(() => {});
         }
         await installChatFeedObserver(p, nome, onNewChatDetected);
 
-        // Patch P0-3: Handler solicitarAberturaChat para integração de localização (cidade/UF). Auditoria GPT-5.
-        // Habilita o handler de descoberta de URL de classificado para o Worker (corrige localização/cidade/UF)
-        try {
-          if (global.__buscaLocalizacaoVirtus && typeof global.__buscaLocalizacaoVirtus === 'object') {
-            global.__buscaLocalizacaoVirtus.solicitarAberturaChat = async (nomePerfil, chatId, cb) => {
-              try {
-                if (String(nomePerfil) !== String(nome)) return cb(null);
-                const pReq = await ensurePage();
-                if (!pReq) return cb(null);
-                // Garante o chat aberto antes de extrair
-                if (!await assertOnChat(pReq, chatId, { timeoutMs: 0 })) {
-                  await openChatByClick(pReq, chatId, { timeoutMs: 6000, retries: 1 });
-                }
-                const url = await extrairUrlClassificado(pReq, chatId).catch(() => null);
-                cb(url || null);
-              } catch {
-                cb(null);
-              }
-            };
-          }
-        } catch {}
+        // [REMOVIDO: Handler de localização — localização vem do manifest]
       } catch (err) {
         if (!running) return;
         logger.error('Falha ao garantir aba zero no startup Virtus', { nome }, err);

@@ -259,6 +259,28 @@ function getCoords(cidade) {
   } catch { return null; }
 }
 
+function getUF(cidade) {
+  try {
+    if (!cidade) return null;
+    const cidadesPath = path.join(__dirname, '..', 'dados', 'cidades_coords.json');
+    const arr = readJsonSafe(cidadesPath, []);
+    const norm = (s) => slugify(String(s||''));
+    const cidadeNorm = norm(cidade);
+    for (const ent of arr) {
+      const ok = ent && (
+        norm(ent.nome) === cidadeNorm ||
+        norm(ent.label) === cidadeNorm ||
+        norm(ent.id) === cidadeNorm
+      );
+      if (ok) {
+        const uf = ent.uf || ent.estado || ent.UF || null;
+        return uf ? String(uf).toUpperCase() : null;
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
 /**
  * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos.
  *
@@ -298,5 +320,6 @@ module.exports = {
   writeJsonSafe,
   normalizeCookies,
   getCoords,
+  getUF,
   getAvailableMB
 };
