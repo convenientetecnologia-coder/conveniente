@@ -65,19 +65,78 @@ function appendLog(perfil, chatId, entry) {
   }
 }
 
+// ========== VALIDAÇÃO E NORMALIZAÇÃO DE TELEFONE ==========
+
+function isValidBRPhoneWithDDD(num) {
+  try {
+    const s = String(num || '').replace(/\D/g, '');
+    if (s.length === 11) return /^[1-9]{2}9\d{8}$/.test(s);
+    if (s.length === 10) return /^[1-9]{2}[2-9]\d{7}$/.test(s);
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePhoneExtraction(raw) {
+  const out = {
+    telefone: null,
+    ddd: null,
+    telefone_parcial: null,
+    itens: raw.itens || null,
+    endereco_saida: raw.endereco_saida || null,
+    endereco_destino: raw.endereco_destino || null,
+    ajudante: typeof raw.ajudante === 'boolean' ? raw.ajudante : null,
+    descricao: raw.descricao || null,
+    missing: Array.isArray(raw.missing) ? raw.missing : []
+  };
+
+  let tel = (raw.telefone || '').toString().replace(/\D/g, '');
+  let ddd = (raw.ddd || '').toString().replace(/\D/g, '');
+  let parcial = (raw.telefone_parcial || '').toString().replace(/\D/g, '');
+
+  if (tel) {
+    if (isValidBRPhoneWithDDD(tel)) {
+      // Telefone completo OK
+    } else {
+      if (tel.length === 8 || tel.length === 9) {
+        parcial = tel;
+      }
+      tel = '';
+    }
+  }
+
+  if (!tel && ddd && parcial) {
+    const combined = ddd + parcial;
+    if (isValidBRPhoneWithDDD(combined)) {
+      tel = combined;
+    }
+  }
+
+  if (!isValidBRPhoneWithDDD(tel)) {
+    tel = '';
+  }
+
+  if (tel) {
+    out.telefone = tel;
+    out.ddd = ddd || tel.slice(0, 2);
+    out.telefone_parcial = tel.slice(2);
+  } else {
+    out.telefone = null;
+    out.ddd = ddd || null;
+    out.telefone_parcial = parcial || null;
+  }
+
+  return out;
+}
+
 // ========== SANITIZAÇÃO DE SEGREDOS ==========
 
 function sanitizeSecrets(text) {
   try {
     let s = String(text || '');
-    // Telefones (BR): DDD + 8-9 dígitos
-    s = s.replace(/\b(?:\+?55\s*)?(?:\(?[1-9]{2}\)?[\s.\-()]?)?(?:9?\d{4}[\s.\-()]?\d{4})\b/g, '[TELEFONE]');
-    // CPF: 11 dígitos com ou sem formatação
     s = s.replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[CPF]');
-    // CNPJ: 14 dígitos
     s = s.replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[CNPJ]');
-    // Números genéricos suspeitos (8-11 dígitos)
-    s = s.replace(/\b(?:\d[\s.\-()]?){8,11}\b/g, '[NUMERO]');
     return s;
   } catch {
     return String(text || '');
@@ -156,15 +215,21 @@ REGRAS CRÍTICAS:
 
 Primeira resposta ao cliente DEVE afirmar explicitamente: "eu apenas anoto o pedido e quem informa valores é o motorista pelo WhatsApp".
 
-Se receber WhatsApp completo (11 dígitos com DDD), inicie uma janela de 10 minutos para coletar o que faltar (itens, saída, destino); avance campo a campo, um por vez.
+NUNCA cite cidade, UF, nome do perfil, nome da loja ou local do atendimento nas respostas, mesmo que o cliente mencione ou o contexto venha do sistema.
 
-Se receber apenas DDD ou telefone parcial, preencha "ddd" e "telefone_parcial"; mantenha "telefone" = null.
+DDD é obrigatório: nunca preencha "telefone" se não for DDD+corpo validado (10 ou 11 dígitos). Se receber apenas telefone parcial (8 ou 9 dígitos), preencha "telefone_parcial" e mantenha "telefone" = null. Só peça DDD se tiver parcial.
 
-Quando faltar somente WhatsApp, peça APENAS o WhatsApp (não reabra campos já coletados).
+Se receber WhatsApp completo (10 ou 11 dígitos com DDD validado), inicie uma janela de 10 minutos para coletar o que faltar (itens, saída, destino); avance campo a campo, um por vez.
 
-Se o WhatsApp foi coletado e o tempo (10min) expirou sem todos os campos, finalize marcando faltantes como "não informado" (control.finalMessage=true).
+Se receber apenas DDD ou telefone parcial, preencha "ddd" e "telefone_parcial"; mantenha "telefone" = null até ter ambos validados.
 
-Não ecoe literalmente a última mensagem do cliente na resposta (anti-eco).${contexto.cidade ? ` CONTEXTO: Cidade ${contexto.cidade}` : ''}
+Quando faltar somente WhatsApp (com DDD), peça APENAS o WhatsApp (não reabra campos já coletados).
+
+Se o WhatsApp foi coletado (com DDD validado) e o tempo (10min) expirou sem todos os campos, finalize marcando faltantes como "não informado" (control.finalMessage=true).
+
+A mensagem final de fechamento é enviada AUTOMATICAMENTE pelo sistema backend, não por você. NUNCA envie mensagem de fechamento, agradecimento final ou convite para seguir no Instagram.
+
+Não ecoe literalmente a última mensagem do cliente na resposta (anti-eco).
 
 Responda APENAS com o JSON válido, sem explicações adicionais.`;
 
@@ -263,7 +328,7 @@ function parseResponse(rawContent, lastClientMsg) {
       }
     }
 
-    const extraction = parsed.extraction || {};
+    const rawExtraction = parsed.extraction || {};
     let answer = parsed.answer || null;
     const control = parsed.control || {};
     const meta = parsed.meta || {};
@@ -275,18 +340,10 @@ function parseResponse(rawContent, lastClientMsg) {
     if (answer && typeof answer !== 'string') answer = null;
     if (answer) answer = answer.trim() || null;
 
+    const normalized = normalizePhoneExtraction(rawExtraction);
+
     return {
-      extraction: {
-        telefone: extraction.telefone || null,
-        ddd: extraction.ddd || null,
-        telefone_parcial: extraction.telefone_parcial || null,
-        itens: extraction.itens || null,
-        endereco_saida: extraction.endereco_saida || null,
-        endereco_destino: extraction.endereco_destino || null,
-        ajudante: typeof extraction.ajudante === 'boolean' ? extraction.ajudante : null,
-        descricao: extraction.descricao || null,
-        missing: Array.isArray(extraction.missing) ? extraction.missing : []
-      },
+      extraction: normalized,
       answer,
       control: {
         shouldReply: !!(answer || (control.finalMessage === true)),

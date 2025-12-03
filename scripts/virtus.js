@@ -925,6 +925,7 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       // Verifica freeze e schedule antes de enviar
       const freezeUntil = (fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil) ? Number(fsmState.freeze.finalizationUntil) : 0;
       if (freezeUntil > Date.now() && proximo.origin !== 'finalize') {
+        logger.info('[QUEUE] Ignorado devido a bloqueio de 72h', { nomePerfil: nomePerfil, chatId: proximo.chatId, freezeUntil });
         virtusFSM.flowLog(nomePerfil, proximo.chatId, 'queue_defer_frozen', {
           earliestSendAt: proximo.earliestSendAt || null,
           now: Date.now(),
@@ -1251,7 +1252,7 @@ const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 
 const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
 
 const COLETA_FINAL_MS = parseInt(process.env.VIRTUS_COLETA_FINAL_MS || '600000', 10); // 10min
-const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '3600000', 10); // 1h
+const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '259200000', 10); // 72h
 
 // Variáveis globais para controle de backoff e falhas
 let recoverBackoffMs = 0;
@@ -2121,14 +2122,18 @@ async function finalizePedido(perfil, chatId, contexto) {
     const cidade = man && man.cidade || null;
     const uf = man && man.estado || null;
     const localizacao = cidade && uf ? `${cidade} (${uf})` : (cidade || null);
-    const contextoBuild = contexto && contexto.cidade ? contexto : { cidade };
 
-    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoArray, contexto: contextoBuild, respond: false });
+    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoArray, contexto: {}, respond: false });
     const extraction = llm && llm.extraction ? llm.extraction : {};
     const tel = String(extraction && extraction.telefone || '').trim();
 
-    if (!tel) {
-      logger.warn('[FINALIZE] Abortado — telefone ausente/ inválido', { perfil, chatId });
+    if (!isValidBRPhoneWithDDD(tel)) {
+      logger.warn('[FINALIZE] Abortado — telefone ausente/ inválido (sem DDD)', { perfil, chatId, rawTelefone: tel || null });
+      stepLog.appendJSONL(perfil, 'virtus', {
+        step: 'finalization_skip_no_valid_phone',
+        chatId,
+        rawTelefone: tel || null
+      });
       if (issues && typeof issues.append === 'function') {
         await issues.append(perfil, 'finalize_abort_no_whatsapp', `chat=${chatId}`);
       }
@@ -2173,24 +2178,23 @@ async function finalizePedido(perfil, chatId, contexto) {
           key: `finalize_msg|${chatId}|${sha1(finalMsg)}|${Date.now()}`,
           origin: 'finalize'
         });
+        const now = Date.now();
+        const lockUntil = now + FINALIZACAO_FREEZE_MS;
         await virtusFSM.patch(perfil, chatId, {
           finalization: Object.assign({}, st && st.finalization || {}, {
             closingMessageQueued: true,
-            closedAt: Date.now()
+            closedAt: now,
+            lockUntil
           }),
-          finalizado: true
+          finalizado: true,
+          freeze: Object.assign({}, st && st.freeze || {}, {
+            finalizationUntil: lockUntil
+          })
         });
       }
     } catch (e) {
       logger.warn('[FINALIZE] Falha ao enfileirar mensagem final', { perfil, chatId, error: (e && e.message) || e });
     }
-
-    // Bloqueia novas coletas pós-fechamento (freeze)
-    try {
-      await virtusFSM.patch(perfil, chatId, {
-        freeze: Object.assign({}, (state && state.freeze)||{}, { finalizationUntil: Date.now() + FINALIZACAO_FREEZE_MS })
-      });
-    } catch {}
 
     clearFinalizationTimer(perfil, chatId);
 
@@ -2220,10 +2224,17 @@ async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contex
       return;
     }
 
-    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoSan || [], contexto: contexto || {}, respond: false });
+    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoSan || [], contexto: {}, respond: false });
     const extraction = llm && llm.extraction ? llm.extraction : {};
     const tel = String(extraction && extraction.telefone || '').trim();
-    if (!tel) return;
+    if (!isValidBRPhoneWithDDD(tel)) {
+      stepLog.appendJSONL(perfil, 'virtus', {
+        step: 'finalization_timer_skip_no_valid_phone',
+        chatId,
+        rawTelefone: tel || null
+      });
+      return;
+    }
 
     const startedAt = Date.now();
     const deadlineAt = startedAt + COLETA_FINAL_MS;
@@ -2529,43 +2540,59 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const chatId = String(it.id || '').trim();
         if (!chatId) continue;
 
-        try {
-          // Verifica estado via FSM
-          let fsmState = null;
+        let fsmState = null;
+        try { fsmState = virtusFSM.get(nome, chatId); } catch {}
+        const now = Date.now();
+        let finalLockUntil = fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil ? Number(fsmState.freeze.finalizationUntil) : 0;
+        let finalLocked = finalLockUntil > now;
+
+        // SEM early-continue! Primeiro extrai/loga histórico SEMPRE:
+        const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+        if (!chatUrlMatches(urlNow, chatId)) {
+          await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
+        }
+
+        const historicoConversa = await extrairHistoricoConversa(p);
+        const historicoSan = sanitizeHistoricoRecords(historicoConversa, "");
+        if (!Array.isArray(historicoSan) || !historicoSan.length) {
+          await virtusFSM.patch(nome, chatId, { lastScanAt: now });
+          continue;
+        }
+
+        await appendChatHistoryLog(nome, chatId, historicoSan);
+        const clientMsgs = historicoSan.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
+        const lastClientTs = clientMsgs.length ? Number(clientMsgs[clientMsgs.length - 1].timestamp || 0) : 0;
+
+        // Se FECHADO e freeze válido, ignora e LOGA:
+        if (finalLocked) {
+          logger.info("Ignorado devido a bloqueio de 72h, chatId=" + chatId, { nomePerfil: nome, chatId, finalLockUntil });
           try {
-            fsmState = virtusFSM.get(nome, chatId);
+            stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked_72h', chatId, finalLockUntil, ts: now });
+            await virtusFSM.patch(nome, chatId, { lastScanAt: now, lastCLIts: lastClientTs || 0 });
           } catch {}
-          if (fsmState && fsmState.finalizado) {
-            try {
-              await virtusFSM.patch(nome, chatId, { lastScanAt: Date.now() });
-            } catch {}
-            continue;
-          }
+          continue;
+        }
+
+        // Auto-unlock depois do freeze:
+        if (fsmState && fsmState.finalizado && !finalLocked) {
+          try {
+            await virtusFSM.patch(nome, chatId, {
+              finalizado: false,
+              finalization: Object.assign({}, fsmState.finalization || {}, { unlockedAt: now }),
+              freeze: Object.assign({}, fsmState.freeze || {}, { finalizationUntil: 0 })
+            });
+            logger.info('[SCAN] auto_unlock_72h', { nome, chatId, ts: now });
+            stepLog.appendJSONL(nome, 'virtus', { step: 'auto_unlock_72h', chatId, ts: now });
+          } catch {}
+          fsmState = virtusFSM.get(nome, chatId);
+        }
+
+        try {
           if (!fsmState || !fsmState.discoveredAt) {
             try {
               await virtusFSM.patch(nome, chatId, { discoveredAt: Date.now() });
             } catch {}
           }
-
-          const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-          if (!chatUrlMatches(urlNow, chatId)) {
-            await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
-          }
-
-          const historicoConversa = await extrairHistoricoConversa(p);
-
-          // Constroi histórico sanitizado
-          const historicoSan = sanitizeHistoricoRecords(historicoConversa, '');
-
-          if (!Array.isArray(historicoSan) || !historicoSan.length) {
-            try {
-              await virtusFSM.patch(nome, chatId, { lastScanAt: Date.now() });
-            } catch {}
-            continue;
-          }
-
-          // Persistência imediata do histórico sanitizado
-          await appendChatHistoryLog(nome, chatId, historicoSan);
 
           try {
             await armFinalizationTimerIfNeeded(nome, chatId, historicoSan, {});
@@ -2683,23 +2710,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             continue;
           }
 
-          // Contexto de cidade
-          let cidadeCtx = null;
-          try {
-            const man = await manifestStore.read(nome).catch(()=>null);
-            cidadeCtx = (man && man.cidade) ? man.cidade : null;
-          } catch {}
-          if (!cidadeCtx) {
-            // Obtém cidade do FSM
-            try {
-              let fsmState = null;
-          try {
-            fsmState = virtusFSM.get(nome, chatId);
-          } catch {}
-              if (fsmState && fsmState.cidade) cidadeCtx = fsmState.cidade;
-            } catch {}
-          }
-
           // Pipeline FSM: ingestFromVirtus
           try {
             logger.info('[SCAN] ingest_call', { nome, chatId, cCount: clientCount, cDigest: clientDigest });
@@ -2710,14 +2720,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             historico: historicoSan,
             novasMsgs: novasFiltradas,
             cursor: { count: clientCount, digest: clientDigest, lastTs: lastClientTs },
-            contexto: { cidade: cidadeCtx || null }
+            contexto: {}
           });
 
           try {
             // Estado corrente (para log)
             const stateBefore = virtusFSM.get(nome, chatId);
-            const cidadeCtxFinal = stateBefore && stateBefore.cidade ? { cidade: stateBefore.cidade } : (cidadeCtx ? { cidade: cidadeCtx } : {});
-            const llm = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: cidadeCtxFinal, respond: true });
+            const llm = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
 
             // Persistência da extração (para finalização futura e consistência)
             const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llm.extraction || {} });
