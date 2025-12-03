@@ -1503,14 +1503,6 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
     let removed = 0;
     for (const p of targets) {
       try {
-        if (!fs.existsExists) {} // placeholder
-      } catch {}
-    }
-
-    // Ajuste: checagem correta de existência e remoção
-    removed = 0;
-    for (const p of targets) {
-      try {
         if (!fs.existsSync(p)) continue;
         // Proteção adicional contra alvos críticos
         const pNorm = path.normalize(p);

@@ -29,82 +29,38 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
-// [MOCK-INLINE] virtusFSM.js ausente — stub local seguro
-const virtusFSM = (() => {
-  const store = new Map();
-  function key(perfil, chatId) { return `${perfil}::${chatId}`; }
-  function ensure(perfil, chatId) {
-    const k = key(perfil, chatId);
-    if (!store.has(k)) {
-      store.set(k, {
-        cursor: { client: { count: 0, digest: '' }, ia: { sentSig: '' } },
-        freeze: {},
-        schedule: {},
-        data: {},
-        finalization: {}
-      });
-    }
-    return store.get(k);
-  }
-  return {
-    get(perfil, chatId) {
-      return ensure(perfil, chatId);
-    },
-    patch(perfil, chatId, patchObj) {
-      const s = ensure(perfil, chatId);
-      Object.assign(s, patchObj || {});
-      return s;
-    },
-    ingestFromVirtus(perfil, chatId, payload) {
-      const s = ensure(perfil, chatId);
-      if (payload && payload.cursor) {
-        s.cursor = s.cursor || {};
-        s.cursor.client = s.cursor.client || {};
-        s.cursor.client.count = Number(payload.cursor.count || 0);
-        s.cursor.client.digest = String(payload.cursor.digest || '');
-        s.cursor.client.lastTs = Number(payload.cursor.lastTs || 0);
-      }
-      return true;
-    },
-    decideNext(perfil, chatId) {
-      // Simplificação: sempre pedir telefone (WhatsApp com DDD) — fluxo mínimo/seguro.
-      return { ask_field: 'telefone' };
-    },
-    buildRenderContext(perfil, chatId, directive) {
-      return { perfil, chatId, directive };
-    },
-    render(perfil, chatId, ctx) {
-      return {
-        text: 'Olá! Para seguir com o atendimento, pode me informar seu WhatsApp com DDD, por favor?'
-      };
-    },
-    renderDeterministico(perfil, chatId, directive) {
-      return this.render(perfil, chatId, directive);
-    },
-    queue(perfil, chatId, data) {
-      const s = ensure(perfil, chatId);
-      s.__queue = s.__queue || [];
-      s.__queue.push(Object.assign({ ts: Date.now() }, data || {}));
-      return true;
-    },
-    ackQueued() { return true; },
-    ackSent(perfil, chatId, cursorSig) {
-      const s = ensure(perfil, chatId);
+const { masterExtractAnswer } = require('./inteligenciaArtificial.js');
+const chatStateStore = require('./chatStateStore.js');
+const virtusFSM = {
+  get(perfil, chatId){ return chatStateStore.get(perfil, chatId); },
+  patch(perfil, chatId, patchObj){ return chatStateStore.patch(perfil, chatId, patchObj); },
+  ingestFromVirtus(perfil, chatId, payload) {
+    const s = chatStateStore.get(perfil, chatId);
+    if (payload && payload.cursor) {
       s.cursor = s.cursor || {};
-      s.cursor.ia = s.cursor.ia || {};
-      s.cursor.ia.sentSig = String(cursorSig || '');
-      return true;
-    },
-    flowLog() { return true; },
-    computeEarliestSendAt(perfil, chatId, { origin, lastClientTs } = {}) {
-      const base = Number(lastClientTs || Date.now());
-      const jitter = 20000 + Math.floor(Math.random() * 20000); // 20–40s
-      return base + jitter;
+      s.cursor.client = s.cursor.client || {};
+      s.cursor.client.count = Number(payload.cursor.count || 0);
+      s.cursor.client.digest = String(payload.cursor.digest || '');
+      s.cursor.client.lastTs = Number(payload.cursor.lastTs || 0);
     }
-  };
-})();
+    return chatStateStore.patch(perfil, chatId, s);
+  },
+  ackQueued(){ return true; },
+  ackSent(perfil, chatId, cursorSig) {
+    const s = chatStateStore.get(perfil, chatId);
+    s.cursor = s.cursor || {};
+    s.cursor.ia = s.cursor.ia || {};
+    s.cursor.ia.sentSig = String(cursorSig || '');
+    return chatStateStore.patch(perfil, chatId, s);
+  },
+  flowLog(){ return true; },
+  computeEarliestSendAt(perfil, chatId, { origin, lastClientTs } = {}) {
+    const base = Number(lastClientTs || Date.now());
+    const jitter = 20000 + Math.floor(Math.random() * 20000); // 20–40s
+    return base + jitter;
+  }
+};
 const fileStore = require('./fileStore.js');
-const { extractOrderFieldsLLM } = require('./iaExtractors.js');
 
 // === IA-FIRST MODE: chama LLM em toda mensagem nova do cliente ===
 const AI_FIRST = false;
@@ -366,6 +322,30 @@ function pedidoAuditLog(perfil) {
 
 function sha1(str) {
   return crypto.createHash('sha1').update(String(str), 'utf8').digest('hex');
+}
+
+function masterJsonlPath(perfil, chatId) {
+  const p = path.join(__dirname, '..', 'dados', 'perfis', String(perfil||'default'), 'chats');
+  try { fsRaw.mkdirSync(p, { recursive: true }); } catch {}
+  return path.join(p, `${chatId}.master.jsonl`);
+}
+
+function appendMasterJSONL(perfil, chatId, obj) {
+  try {
+    fsRaw.appendFileSync(masterJsonlPath(perfil, chatId), JSON.stringify({ ts: Date.now(), ...obj }) + '\n', 'utf8');
+  } catch {}
+}
+
+function antiEchoReply(reply, lastClientText) {
+  try {
+    const a = (reply||'').toLowerCase().replace(/\s+/g,' ').trim();
+    const b = (lastClientText||'').toLowerCase().replace(/\s+/g,' ').trim();
+    if (!a || !b) return reply;
+    if (a.includes(b) || b.includes(a)) {
+      return reply.length > 200 ? reply.slice(0, 200) : reply; // corta eco massivo
+    }
+  } catch {}
+  return reply;
 }
 
 async function loadPedidoSent(perfil, chatId) {
@@ -2191,7 +2171,8 @@ async function finalizePedido(perfil, chatId, contexto, classificadoUrl) {
       cidade: (state && state.cidade) || null
     };
 
-    const extraction = await extractOrderFieldsLLM({ perfil, chatId, mensagens: historicoArray, contexto: contextoBuild });
+    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoArray, contexto: contextoBuild, respond: false });
+    const extraction = llm && llm.extraction ? llm.extraction : {};
     const tel = String(extraction && extraction.telefone || '').trim();
 
     if (!tel) {
@@ -2292,7 +2273,8 @@ async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contex
       return;
     }
 
-    const extraction = await extractOrderFieldsLLM({ perfil, chatId, mensagens: historicoSan || [], contexto: contexto || {} });
+    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoSan || [], contexto: contexto || {}, respond: false });
+    const extraction = llm && llm.extraction ? llm.extraction : {};
     const tel = String(extraction && extraction.telefone || '').trim();
     if (!tel) return;
 
@@ -2812,50 +2794,47 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             contexto: { cidade: cidadeCtx || null }
           });
 
-          // Decisão do próximo passo via FSM
-          const directive = await virtusFSM.decideNext(nome, chatId);
+          try {
+            // Estado corrente (para log)
+            const stateBefore = virtusFSM.get(nome, chatId);
+            const cidadeCtxFinal = stateBefore && stateBefore.cidade ? { cidade: stateBefore.cidade } : (cidadeCtx ? { cidade: cidadeCtx } : {});
+            const llm = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: cidadeCtxFinal, respond: true });
 
-          const mustReply = !!(directive && (directive.final_message === true || directive.ask_field));
-          if (mustReply) {
-            // Construção de contexto e renderização
-            const ctx = await virtusFSM.buildRenderContext(nome, chatId, directive);
-            let out;
-            try {
-              out = await virtusFSM.render(nome, chatId, ctx);
-            } catch(e) {
-              if (e && String(e).includes('sanitize_invalidated_ask')) {
-                out = await virtusFSM.renderDeterministico(nome, chatId, directive);
-              } else throw e;
+            // Persistência da extração (para finalização futura e consistência)
+            const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llm.extraction || {} });
+            virtusFSM.patch(nome, chatId, { data: mergedData });
+
+            appendMasterJSONL(nome, chatId, { kind: 'master_cycle', extraction: llm.extraction, control: llm.control, tookMs: llm.meta && llm.meta.tookMs });
+
+            const shouldAnswer = !!(llm && llm.control && llm.control.shouldReply);
+            let reply = (llm && llm.answer) ? String(llm.answer) : null;
+
+            // Anti-eco reforçado
+            const lastClient = (novasFiltradas && novasFiltradas.length) ? novasFiltradas[novasFiltradas.length - 1] : null;
+            if (reply && lastClient && lastClient.texto) {
+              reply = antiEchoReply(reply, lastClient.texto);
             }
 
-            if (out && out.text) {
-              // Cálculo de earliestSendAt
+            if (shouldAnswer && reply) {
               const cursorSig = `${clientCount}|${clientDigest}`;
-              const earliest = virtusFSM.computeEarliestSendAt
-                ? await virtusFSM.computeEarliestSendAt(nome, chatId, { origin: 'reply', lastClientTs: lastClientTs })
-                : undefined;
-
-              // Enfileira no FSM
-              await virtusFSM.queue(nome, chatId, {
-                texto: out.text,
-                directive,
-                cursorSig,
-                earliestSendAt: earliest
-              });
+              const earliest = virtusFSM.computeEarliestSendAt ? virtusFSM.computeEarliestSendAt(nome, chatId, { origin: 'reply', lastClientTs }) : undefined;
 
               await virtusFSM.ackQueued(nome, chatId, cursorSig);
-
-              // Enfileira para envio no Messenger (driver puro)
               await queueMessengerSend(nome, {
                 chatId,
-                resposta: out.text,
-                key: `reply|${chatId}|${sha1(out.text)}|${Date.now()}`,
+                resposta: reply,
+                key: `master|${chatId}|${sha1(reply)}|${Date.now()}`,
                 earliestSendAt: earliest,
                 origin: 'replyReady',
                 cursorSig,
                 lastClientTsOverride: lastClientTs
               });
+              await virtusFSM.ackSent(nome, chatId, cursorSig);
+              appendMasterJSONL(nome, chatId, { kind: 'master_enqueued', replySize: reply.length, earliestSendAt: earliest || null, cursorSig });
             }
+          } catch (e) {
+            logger.error('[MASTER] cycle error', { nome, chatId, error: (e&&e.message)||e });
+            appendMasterJSONL(nome, chatId, { kind: 'master_error', error: (e&&e.message)||String(e) });
           }
 
         } catch (e) {
@@ -2963,6 +2942,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           ensureLocationPrefetch(chatId, null).catch(() => {});
         }
         await installChatFeedObserver(p, nome, onNewChatDetected);
+
+        // Patch P0-3: Handler solicitarAberturaChat para integração de localização (cidade/UF). Auditoria GPT-5.
+        // Habilita o handler de descoberta de URL de classificado para o Worker (corrige localização/cidade/UF)
+        try {
+          if (global.__buscaLocalizacaoVirtus && typeof global.__buscaLocalizacaoVirtus === 'object') {
+            global.__buscaLocalizacaoVirtus.solicitarAberturaChat = async (nomePerfil, chatId, cb) => {
+              try {
+                if (String(nomePerfil) !== String(nome)) return cb(null);
+                const pReq = await ensurePage();
+                if (!pReq) return cb(null);
+                // Garante o chat aberto antes de extrair
+                if (!await assertOnChat(pReq, chatId, { timeoutMs: 0 })) {
+                  await openChatByClick(pReq, chatId, { timeoutMs: 6000, retries: 1 });
+                }
+                const url = await extrairUrlClassificado(pReq, chatId).catch(() => null);
+                cb(url || null);
+              } catch {
+                cb(null);
+              }
+            };
+          }
+        } catch {}
       } catch (err) {
         if (!running) return;
         logger.error('Falha ao garantir aba zero no startup Virtus', { nome }, err);

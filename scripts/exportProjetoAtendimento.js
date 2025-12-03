@@ -2,8 +2,8 @@
 //
 // Gera o arquivo "projeto atendimento.txt" na raiz, contendo apenas os arquivos
 // relacionados ao sistema de atendimento/Virtus:
-// - virtus.js, virtusFSM.js, promptFretes.js, iaExtractors.js, inteligenciaArtificial.js
-//
+// - virtus.js, promptFretes.js, iaExtractors.js, inteligenciaArtificial.js
+// 
 // Isso é pensado para trabalhar apenas com a parte de atendimento, sem o resto do projeto.
 
 "use strict";
@@ -18,8 +18,7 @@ const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 const ATENDIMENTO_FILES = [
   "scripts/virtus.js",
   "scripts/promptFretes.js",
-  "scripts/iaExtractors.js",
-  "scripts/inteligenciaArtificial.js"
+  "scripts/inteligenciaArtificial.js", // agora só OpenAI/master
 ];
 
 /**
