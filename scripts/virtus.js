@@ -1323,7 +1323,7 @@ const handshakesFeitos = new Set();       // Set(nomePerfil)
 async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotifier = false, origin = '', cursorSig = '', cursorCountOverride, cursorDigestOverride, lastClientTsOverride }) {
   try {
     const payload = String(resposta || '').trim();
-    if (!payload) return false;
+    if (!payload) return { ok: false, status: 'dropped' };
 
     // Snapshot de estado atual do chat via FSM
     let fsmState = null;
@@ -1333,8 +1333,18 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       } catch {}
     } catch {}
 
-    const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : ((fsmState && fsmState.cursor && fsmState.cursor.count) || 0));
-    const cDigest = (typeof cursorDigestOverride === 'string') ? cursorDigestOverride : ((fsmState && fsmState.cursor && fsmState.cursor.digest) || '');
+    // Bloqueio de finalize duplicado
+    if (origin === 'finalize') {
+      if (fsmState && fsmState.finalization && fsmState.finalization.closingMessageQueued) {
+        try {
+          stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_finalize_duplicate', chatId });
+        } catch {}
+        return { ok: false, status: 'dropped' };
+      }
+    }
+
+    const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : ((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.count) || 0));
+    const cDigest = (typeof cursorDigestOverride === 'string') ? cursorDigestOverride : ((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.digest) || '');
 
     const sig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
 
@@ -1366,7 +1376,7 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
           });
           logger.info('[QUEUE] merge_update', { nomePerfil, chatId, sig, cCount, cDigest, earliestSendAt: mergedEarliest });
         } catch {}
-        return true;
+        return { ok: true, status: 'merged' };
       }
     }
 
@@ -1385,7 +1395,7 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
         stepLog.appendJSONL(nomePerfil, 'virtus', { step, chatId, sig, cCount, cDigest, origin });
       } catch {}
       try { logger.info('[QUEUE] skip_same_cursor', { nomePerfil, chatId, sig, cCount, cDigest, origin }); } catch {}
-      return false;
+      return { ok: false, status: 'dropped' };
     }
 
     // earliestSendAt para replyReady, ancorado NO lastClientTsOverride
@@ -1425,12 +1435,21 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       lastClientTs: lastClientTsOverride || 0
     });
 
+    // Marca closingMessageQueued se for finalize
+    if (origin === 'finalize') {
+      try {
+        await virtusFSM.patch(nomePerfil, chatId, {
+          finalization: { ...(fsmState && fsmState.finalization || {}), closingMessageQueued: true }
+        });
+      } catch {}
+    }
+
     try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, sig, cCount, cDigest, origin, earliestSendAt, ts: Date.now() }); } catch {}
     try { logger.info('[QUEUE] add', { nomePerfil, chatId, sig, cCount, cDigest, origin, earliestSendAt }); } catch {}
-    return true;
+    return { ok: true, status: 'enqueued' };
 
   } catch {
-    return false;
+    return { ok: false, status: 'dropped' };
   }
 }
 
@@ -2546,6 +2565,36 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         let finalLockUntil = fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil ? Number(fsmState.freeze.finalizationUntil) : 0;
         let finalLocked = finalLockUntil > now;
 
+        // Early return pós-finalização (anti-loop pós-fechamento)
+        if (fsmState && (fsmState.finalizado === true || (fsmState.finalization && fsmState.finalization.closingMessageQueued))) {
+          stepLog.appendJSONL(nome, 'virtus', { step: 'skip_after_finalization', chatId });
+          const historicoConversaEarly = await extrairHistoricoConversa(p).catch(() => []);
+          const historicoSanEarly = sanitizeHistoricoRecords(historicoConversaEarly, "");
+          const clientMsgsEarly = historicoSanEarly.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
+          const lastClientTsEarly = clientMsgsEarly.length ? Number(clientMsgsEarly[clientMsgsEarly.length - 1].timestamp || 0) : 0;
+          const clientCountEarly = clientMsgsEarly.length;
+          const clientDigestEarly = clientCountEarly
+            ? sha1(clientMsgsEarly.slice(-10).map(m => normalizeContent(m.texto || '')).join('|'))
+            : '';
+          function uniqSeqNormEarly(list) {
+            const out = []; let prev = '';
+            for (const m of (list || [])) {
+              const t = normalizeContent(String(m && m.texto || ''));
+              if (!t) continue;
+              if (t !== prev) out.push(t);
+              prev = t;
+            }
+            return out;
+          }
+          const semDigestArrEarly = uniqSeqNormEarly(clientMsgsEarly).slice(-10);
+          const clientContentSigEarly = sha1(semDigestArrEarly.join('|'));
+          await virtusFSM.patch(nome, chatId, {
+            cursor: { client: { count: clientCountEarly, digest: clientDigestEarly, contentSig: clientContentSigEarly, lastTs: lastClientTsEarly } },
+            lastScanAt: Date.now(), lastCLIts: lastClientTsEarly
+          });
+          continue;
+        }
+
         // SEM early-continue! Primeiro extrai/loga histórico SEMPRE:
         const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
         if (!chatUrlMatches(urlNow, chatId)) {
@@ -2555,7 +2604,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const historicoConversa = await extrairHistoricoConversa(p);
         const historicoSan = sanitizeHistoricoRecords(historicoConversa, "");
         if (!Array.isArray(historicoSan) || !historicoSan.length) {
-          await virtusFSM.patch(nome, chatId, { lastScanAt: now });
+          const clientMsgsEmpty = [];
+          const lastClientTsEmpty = 0;
+          const clientCountEmpty = 0;
+          const clientDigestEmpty = '';
+          const clientContentSigEmpty = '';
+          const lastClientNormEmpty = '';
+          await virtusFSM.patch(nome, chatId, {
+            cursor: { client: { count: clientCountEmpty, digest: clientDigestEmpty, contentSig: clientContentSigEmpty, lastTs: lastClientTsEmpty } },
+            data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormEmpty, lastClientTs: lastClientTsEmpty || Date.now() },
+            lastScanAt: now
+          });
           continue;
         }
 
@@ -2568,7 +2627,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           logger.info("Ignorado devido a bloqueio de 72h, chatId=" + chatId, { nomePerfil: nome, chatId, finalLockUntil });
           try {
             stepLog.appendJSONL(nome, 'virtus', { step: 'skip_locked_72h', chatId, finalLockUntil, ts: now });
-            await virtusFSM.patch(nome, chatId, { lastScanAt: now, lastCLIts: lastClientTs || 0 });
+            const clientCountLock = clientMsgs.length;
+            const clientDigestLock = clientCountLock
+              ? sha1(clientMsgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|'))
+              : '';
+            function uniqSeqNormLock(list) {
+              const out = []; let prev = '';
+              for (const m of (list || [])) {
+                const t = normalizeContent(String(m && m.texto || ''));
+                if (!t) continue;
+                if (t !== prev) out.push(t);
+                prev = t;
+              }
+              return out;
+            }
+            const semDigestArrLock = uniqSeqNormLock(clientMsgs).slice(-10);
+            const clientContentSigLock = sha1(semDigestArrLock.join('|'));
+            const lastClientNormLock = clientCountLock ? normalizeContent(clientMsgs[clientCountLock - 1].texto || '') : '';
+            await virtusFSM.patch(nome, chatId, {
+              cursor: { client: { count: clientCountLock, digest: clientDigestLock, contentSig: clientContentSigLock, lastTs: lastClientTs || 0 } },
+              data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormLock, lastClientTs: lastClientTs || Date.now() },
+              lastScanAt: now, lastCLIts: lastClientTs || 0
+            });
           } catch {}
           continue;
         }
@@ -2605,7 +2685,26 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const lastClientTs = clientMsgs.length ? Number(clientMsgs[clientMsgs.length - 1].timestamp || 0) : 0;
           if (!lastClientTs || (Date.now() - lastClientTs) > MAX_CHAT_AGE_MS) {
             try {
+              const clientCountAge = clientMsgs.length;
+              const clientDigestAge = clientCountAge
+                ? sha1(clientMsgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|'))
+                : '';
+              function uniqSeqNormAge(list) {
+                const out = []; let prev = '';
+                for (const m of (list || [])) {
+                  const t = normalizeContent(String(m && m.texto || ''));
+                  if (!t) continue;
+                  if (t !== prev) out.push(t);
+                  prev = t;
+                }
+                return out;
+              }
+              const semDigestArrAge = uniqSeqNormAge(clientMsgs).slice(-10);
+              const clientContentSigAge = sha1(semDigestArrAge.join('|'));
+              const lastClientNormAge = clientCountAge ? normalizeContent(clientMsgs[clientCountAge - 1].texto || '') : '';
               await virtusFSM.patch(nome, chatId, {
+                cursor: { client: { count: clientCountAge, digest: clientDigestAge, contentSig: clientContentSigAge, lastTs: lastClientTs || 0 } },
+                data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormAge, lastClientTs: lastClientTs || Date.now() },
                 lastScanAt: Date.now(),
                 lastCLIts: lastClientTs || 0
               });
@@ -2631,9 +2730,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             : '';
           const clientLastNorm = clientCount ? normalizeContent(clientMsgs[clientCount - 1].texto || '') : '';
 
+          // Controle de mudança real do cliente (contentSig) - anti-loop por spam
+          function uniqSeqNorm(list) {
+            const out = []; let prev = '';
+            for (const m of (list || [])) {
+              const t = normalizeContent(String(m && m.texto || ''));
+              if (!t) continue;
+              if (t !== prev) out.push(t);
+              prev = t;
+            }
+            return out;
+          }
+          const semDigestArr = uniqSeqNorm(clientMsgs).slice(-10);
+          const clientContentSig = sha1(semDigestArr.join('|'));
+
           // Obtém cursor anterior do FSM
           let prevCount = 0;
           let prevDigest = '';
+          let prevContentSig = '';
           try {
             let fsmState = null;
           try {
@@ -2641,11 +2755,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           } catch {}
             prevCount = Number((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.count) || 0);
             prevDigest = String((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.digest) || '');
+            prevContentSig = String((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.contentSig) || '');
           } catch {}
 
-          const changed =
-            (clientCount > prevCount) ||
-            (clientCount > 0 && clientCount === prevCount && clientDigest && prevDigest && clientDigest !== prevDigest);
+          const changed = !!clientContentSig && clientContentSig !== prevContentSig;
 
           try {
             logger.info('[SCAN] cursor_eval', { nome, chatId, prevCount, prevDigest, clientCount, clientDigest, changed });
@@ -2656,7 +2769,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // Atualiza cursor no FSM
             try {
               await virtusFSM.patch(nome, chatId, {
-                cursor: { count: clientCount, digest: clientDigest },
+                cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                data: { ...(fsmState && fsmState.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
                 lastScanAt: Date.now(),
                 lastCLIts: lastClientTs
               });
@@ -2701,8 +2815,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // Atualiza cursor no FSM
             try {
               await virtusFSM.patch(nome, chatId, {
-                cursor: { count: clientCount, digest: clientDigest },
-                clientLastNorm: clientLastNorm,
+                cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                data: { ...(fsmState && fsmState.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
                 lastScanAt: Date.now(),
                 lastCLIts: lastClientTs
               });
@@ -2744,11 +2858,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
 
             if (shouldAnswer && reply) {
+              // Debounce por askField - anti-pergunta repetida
+              const DEBOUNCE_MS = parseInt(process.env.VIRTUS_ASK_DEBOUNCE_MS || '45000', 10);
+              const askField = (llm && llm.control && llm.control.askField) || null;
+              const stateBeforeDebounce = virtusFSM.get(nome, chatId);
+              const lastAskedField = (stateBeforeDebounce && stateBeforeDebounce.schedule && stateBeforeDebounce.schedule.lastAskedField) || null;
+              const lastAskedAt = (stateBeforeDebounce && stateBeforeDebounce.schedule && stateBeforeDebounce.schedule.lastAskedAt) || 0;
+              if (askField && lastAskedField === askField && (Date.now() - lastAskedAt) < DEBOUNCE_MS) {
+                stepLog.appendJSONL(nome, 'virtus', { step: 'ask_debounce_skip', chatId, askField, sinceMs: Date.now() - lastAskedAt });
+                await virtusFSM.patch(nome, chatId, {
+                  cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } }
+                });
+                continue;
+              }
+
               const cursorSig = `${clientCount}|${clientDigest}`;
               const earliest = virtusFSM.computeEarliestSendAt ? virtusFSM.computeEarliestSendAt(nome, chatId, { origin: 'reply', lastClientTs }) : undefined;
 
               await virtusFSM.ackQueued(nome, chatId, cursorSig);
-              await queueMessengerSend(nome, {
+              const queueResult = await queueMessengerSend(nome, {
                 chatId,
                 resposta: reply,
                 key: `master|${chatId}|${sha1(reply)}|${Date.now()}`,
@@ -2758,7 +2886,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastClientTsOverride: lastClientTs
               });
               // NUNCA ackSent aqui.
-              appendMasterJSONL(nome, chatId, { kind: 'master_enqueued', replySize: reply.length, earliestSendAt: earliest || null, cursorSig });
+              if (queueResult && queueResult.status === 'enqueued') {
+                appendMasterJSONL(nome, chatId, { kind: 'master_enqueued', replySize: reply.length, earliestSendAt: earliest || null, cursorSig });
+              }
+              // Atualiza lastAskedField e lastAskedAt no FSM
+              if (askField) {
+                await virtusFSM.patch(nome, chatId, {
+                  schedule: { ...(stateBeforeDebounce && stateBeforeDebounce.schedule || {}), lastAskedField: askField, lastAskedAt: Date.now() }
+                });
+              }
             }
           } catch (e) {
             logger.error('[MASTER] cycle error', { nome, chatId, error: (e&&e.message)||e });
@@ -3027,6 +3163,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     stop: async () => {
       stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'stop' });
       running = false;
+      
+      // Limpeza de timers/intervalos órfãos
+      const tPoll = pollingIntervals.get(nome);
+      if (tPoll) { clearInterval(tPoll); pollingIntervals.delete(nome); }
+      const tFila = filaEnvioTimers.get(nome);
+      if (tFila) { clearInterval(tFila); filaEnvioTimers.delete(nome); }
+      
       let pages = [];
       try { pages = await browser.pages(); } catch {}
       if (robeMeta && typeof nome !== "undefined") {

@@ -388,17 +388,20 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
         control: { shouldReply: false, askField: null, finalMessage: false },
         meta: { confidence: 0.0, tokensUsed: 0, error: 'no_messages' }
       };
-      appendLog(perfil, chatId, {
-        ts: Date.now(),
-        type: 'request',
-        perfil,
-        chatId,
-        respond,
-        messagesCount: 0,
-        stateBefore,
-        result,
-        durationMs: Date.now() - startTs
-      });
+      const DEBUG_MASTER = process.env.AI_DEBUG_MASTER === '1';
+      if (respond || DEBUG_MASTER) {
+        appendLog(perfil, chatId, {
+          ts: Date.now(),
+          type: 'request',
+          perfil,
+          chatId,
+          respond,
+          messagesCount: 0,
+          stateBefore,
+          result,
+          durationMs: Date.now() - startTs
+        });
+      }
       return result;
     }
 
@@ -414,23 +417,26 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
 
     await saveState(perfil, chatId, stateAfter);
 
-    appendLog(perfil, chatId, {
-      ts: Date.now(),
-      type: 'request',
-      perfil,
-      chatId,
-      respond,
-      messagesCount: messages.length,
-      systemPromptLength: systemPrompt.length,
-      requestTokens: usage.prompt_tokens || 0,
-      responseTokens: usage.completion_tokens || 0,
-      totalTokens: usage.total_tokens || 0,
-      stateBefore,
-      stateAfter,
-      rawResponse: content,
-      result,
-      durationMs: Date.now() - startTs
-    });
+    const DEBUG_MASTER = process.env.AI_DEBUG_MASTER === '1';
+    if (respond || DEBUG_MASTER) {
+      appendLog(perfil, chatId, {
+        ts: Date.now(),
+        type: 'request',
+        perfil,
+        chatId,
+        respond,
+        messagesCount: messages.length,
+        systemPromptLength: systemPrompt.length,
+        requestTokens: usage.prompt_tokens || 0,
+        responseTokens: usage.completion_tokens || 0,
+        totalTokens: usage.total_tokens || 0,
+        stateBefore,
+        stateAfter,
+        rawResponse: content,
+        result,
+        durationMs: Date.now() - startTs
+      });
+    }
 
     if (issues && typeof issues.append === 'function') {
       try {

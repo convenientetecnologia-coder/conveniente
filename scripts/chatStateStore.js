@@ -38,10 +38,22 @@ function get(perfil, chatId){
   return init;
 }
 
+function deepMerge(a, b) {
+  if (!b || typeof b !== 'object') return a;
+  for (const k of Object.keys(b)) {
+    if (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k])) {
+      a[k] = deepMerge(a[k] || {}, b[k]);
+    } else {
+      a[k] = b[k];
+    }
+  }
+  return a;
+}
+
 function patch(perfil, chatId, patchObj){
   const file = stateFile(perfil, chatId);
   const cur = get(perfil, chatId);
-  const next = Object.assign({}, cur, patchObj || {});
+  const next = deepMerge({ ...cur }, patchObj || {});
   writeAtomic(file, next);
   return next;
 }
