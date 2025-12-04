@@ -3078,7 +3078,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           try {
             fsmState = virtusFSM.get(nome, chatId);
           } catch {}
-            lastClientNormPrev = String((fsmState && fsmState.clientLastNorm) || '');
+            lastClientNormPrev = String(((fsmState && fsmState.data && fsmState.data.lastClientNorm) || ''));
           } catch {}
           
           const preFiltradas = (novasMsgs || []).filter(semanticallyRelevant);
@@ -3276,6 +3276,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               continue;
             }
 
+            let llmRes = null;
+            const llmStartAt = Date.now();
+            
             try {
               // Atualiza inflightSig antes de chamar IA
               await virtusFSM.patch(nome, chatId, {
@@ -3296,7 +3299,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 ts: Date.now()
               });
               
-              const llm = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
+              llmRes = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
             
               // Após IA rodar, zera a janela e registra lastConsumedSig
               await virtusFSM.patch(nome, chatId, {
@@ -3316,9 +3319,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 step: 'llm_call_end',
                 chatId,
                 consumedSig: clientContentSig,
-                tookMs: llm.meta && llm.meta.tookMs || null,
+                tookMs: llmRes.meta && llmRes.meta.tookMs || null,
                 ts: Date.now()
               });
+            } catch (e) {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_error', chatId, error: (e && e.message) || String(e), ts: Date.now() });
+              throw e;
             } finally {
               // Sempre libera o lock
               try {
@@ -3326,30 +3332,36 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               } catch {}
             }
 
+            // A PARTIR DAQUI, use SEMPRE llmRes, nunca "llm"
+            if (!llmRes) {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'llm_result_missing', chatId, ts: Date.now() });
+              continue;
+            }
+
             // Persistência da extração (para finalização futura e consistência)
-            const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llm.extraction || {} });
+            const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llmRes.extraction || {} });
             virtusFSM.patch(nome, chatId, { data: mergedData });
             
             // Logs ultra detalhados de ciclo
             appendMasterJSONL(nome, chatId, {
               kind: 'master_request',
-              systemPromptLength: llm.meta && llm.meta.systemPromptLength || null,
-              tokens: llm.meta && llm.meta.tokens || null,
-              tookMs: llm.meta && llm.meta.tookMs || null
+              systemPromptLength: llmRes.meta && llmRes.meta.systemPromptLength || null,
+              tokens: llmRes.meta && llmRes.meta.tokens || null,
+              tookMs: llmRes.meta && llmRes.meta.tookMs || null
             });
 
             // Log apenas com campos permitidos: localizacao, whatsapp, item, endereco_saida, endereco_destino
             const extractionLog = {};
-            if (llm.extraction) {
-              if (llm.extraction.telefone) extractionLog.telefone = llm.extraction.telefone;
-              if (llm.extraction.item) extractionLog.item = llm.extraction.item;
-              if (llm.extraction.endereco_saida) extractionLog.endereco_saida = llm.extraction.endereco_saida;
-              if (llm.extraction.endereco_destino) extractionLog.endereco_destino = llm.extraction.endereco_destino;
+            if (llmRes.extraction) {
+              if (llmRes.extraction.telefone) extractionLog.telefone = llmRes.extraction.telefone;
+              if (llmRes.extraction.item) extractionLog.item = llmRes.extraction.item;
+              if (llmRes.extraction.endereco_saida) extractionLog.endereco_saida = llmRes.extraction.endereco_saida;
+              if (llmRes.extraction.endereco_destino) extractionLog.endereco_destino = llmRes.extraction.endereco_destino;
             }
-            appendMasterJSONL(nome, chatId, { kind: 'master_cycle', extraction: extractionLog, control: llm.control, tookMs: llm.meta && llm.meta.tookMs });
+            appendMasterJSONL(nome, chatId, { kind: 'master_cycle', extraction: extractionLog, control: llmRes.control, tookMs: llmRes.meta && llmRes.meta.tookMs });
 
             // Detectar se os 4 campos obrigatórios estão completos: whatsapp, item, endereco_saida, endereco_destino
-            const extraction = llm.extraction || {};
+            const extraction = llmRes.extraction || {};
             const tel = String(extraction.telefone || '').trim();
             const hasWhatsApp = isValidBRPhoneWithDDD(tel);
             const hasItem = !!(extraction.item && String(extraction.item).trim());
@@ -3363,8 +3375,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               continue;
             }
 
-            const shouldAnswer = !!(llm && llm.control && llm.control.shouldReply);
-            let reply = (llm && llm.answer) ? String(llm.answer) : null;
+            const shouldAnswer = !!(llmRes && llmRes.control && llmRes.control.shouldReply);
+            let reply = (llmRes && llmRes.answer) ? String(llmRes.answer) : null;
 
             // Anti-eco reforçado
             const lastClient = (novasFiltradas && novasFiltradas.length) ? novasFiltradas[novasFiltradas.length - 1] : null;
@@ -3375,7 +3387,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (shouldAnswer && reply) {
               // Debounce por askField - anti-pergunta repetida
               const DEBOUNCE_MS = parseInt(process.env.VIRTUS_ASK_DEBOUNCE_MS || '45000', 10);
-              const askField = (llm && llm.control && llm.control.askField) || null;
+              const askField = (llmRes && llmRes.control && llmRes.control.askField) || null;
               const stateBeforeDebounce = virtusFSM.get(nome, chatId);
               const lastAskedField = (stateBeforeDebounce && stateBeforeDebounce.schedule && stateBeforeDebounce.schedule.lastAskedField) || null;
               const lastAskedAt = (stateBeforeDebounce && stateBeforeDebounce.schedule && stateBeforeDebounce.schedule.lastAskedAt) || 0;
@@ -3392,16 +3404,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
               await virtusFSM.ackQueued(nome, chatId, cursorSig);
               
-              // Logs ultra detalhados: queue_add
-              stepLog.appendJSONL(nome, 'virtus', {
-                step: 'queue_add',
-                chatId,
-                origin: 'replyReady',
-                cursorSig,
-                earliestSendAt: earliest || null,
-                ts: Date.now()
-              });
-              
               const queueResult = await queueMessengerSend(nome, {
                 chatId,
                 resposta: reply,
@@ -3411,6 +3413,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 cursorSig,
                 lastClientTsOverride: lastClientTs
               });
+              
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'reply_enqueued',
+                chatId,
+                status: queueResult && queueResult.status || 'unknown',
+                earliestSendAt: earliest || null,
+                cursorSig,
+                ts: Date.now()
+              });
+              
               // NUNCA ackSent aqui.
               if (queueResult && queueResult.status === 'enqueued') {
                 appendMasterJSONL(nome, chatId, { kind: 'master_enqueued', replySize: reply.length, earliestSendAt: earliest || null, cursorSig });
