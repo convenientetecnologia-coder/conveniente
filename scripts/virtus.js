@@ -3033,7 +3033,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           // Se há mudança (mensagem nova)
           if (changed) {
             if (openAt > 0 && now < openAt) {
-              // Se ainda está na primeira janela de espera, só aguarda!
+              // Se ainda está dentro da primeira janela (já armada no chat_detected/msg_new_detected), só aguarda e NÃO rearma schedule.collect.openAt.
               stepLog.appendJSONL(nome, 'virtus', {
                 step: 'msg_new_detected_defer_until_timer',
                 chatId, openAt, now, clientContentSig, ts: now
@@ -3045,8 +3045,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               });
               continue;
             }
-            // Se openAt == 0, timer já disparou: NUNCA rearme schedule.collect.openAt aqui.
-            // Siga para bloco schedule.llm!
+            // BLINDAGEM CRÍTICA: Se openAt === 0 (ou não existe), o timer já disparou (timer_fire).
+            // NUNCA rearme schedule.collect.openAt aqui! Siga para schedule.llm (janela IA).
+            // O pipeline deve fluir para IA → fila Messenger → resposta, SEM abrir nova espera de 45s.
           }
       
           if (!changed) {
@@ -3152,7 +3153,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const now = Date.now();
             const COLLECT_WAIT_MS = 45000; // 45s
             
-            // Verifica se já passou pelo timer_fire (openAt === 0 significa que timer já disparou)
+            // BLINDAGEM CRÍTICA: Verifica se já passou pelo timer_fire (openAt === 0 significa que timer já disparou)
+            // Se alreadyWaited === true, NÃO reinicia nova espera de 45s, permite que IA rode imediatamente
             const alreadyWaited = !!(collectSchedule && collectSchedule.startedAt && Number(collectSchedule.openAt || 0) === 0);
             
             stepLog.appendJSONL(nome, 'virtus', {
@@ -3187,6 +3189,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
             
             // Inicia ou estende janela de coleta se necessário
+            // BLINDAGEM: Se alreadyWaited === true, newCollectUntil = now (sem nova espera de 45s)
             if (!llmSchedule.pendingSig || llmSchedule.pendingSig !== clientContentSig) {
               const newCollectUntil = alreadyWaited ? now : Math.max(collectUntil, lastClientTs + COLLECT_WAIT_MS);
               await virtusFSM.patch(nome, chatId, {
