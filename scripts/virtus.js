@@ -3716,8 +3716,21 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal, getUrlNowFn);
         
         // Inicializa o worker da fila persistente do notificador para o perfil
-        // Callback de sucesso: marca no audit log quando pedido for enviado com sucesso
-        notifierQueue.startWorker(nome, markPedidoSent);
+        notifierQueue.ensureWorker(nome, {
+          url: NOTIFICADOR_URL,
+          servidor: NOTIFICADOR_SERVIDOR,
+          logger,
+          stepLog,
+          onJobOk: async (perfilCb, job) => {
+            if (job && job.kind === 'pedido') {
+              try { 
+                await markPedidoSent(perfilCb, job.payload.chat_id, job.payload, 'virtus_finalizacao');
+              } catch (e) {
+                logger.warn('[NOTIFIER_QUEUE] markPedidoSent fail', { perfil: perfilCb, chatId: job && job.payload && job.payload.chat_id, error: e && e.message || e });
+              }
+            }
+          }
+        });
       // REMOVIDO: bindPedidosEventsIfNeeded - toda orquestração agora via virtusFSM
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });

@@ -174,4 +174,16 @@ function enqueueChat(perfil, payload) {
   return enqueue(perfil, 'chat', payload);
 }
 
-module.exports = { ensureWorker, enqueuePedido, enqueueChat };
+function stopWorker(perfil) {
+  // Nota: ensureWorker usa setInterval que não pode ser facilmente parado
+  // Em produção, workers devem continuar rodando mesmo após stop do virtus
+  // para garantir processamento da outbox. Esta função é um placeholder.
+  const worker = workers.get(perfil);
+  if (worker) {
+    // Marca como não rodando (mas não para o interval)
+    worker.running = false;
+    workers.delete(perfil);
+  }
+}
+
+module.exports = { ensureWorker, enqueuePedido, enqueueChat, stopWorker };
