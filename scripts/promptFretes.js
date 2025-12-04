@@ -382,7 +382,7 @@ Objetivo prático:
 
 - BOLO (obrigatório): WhatsApp (e localização automática se disponível)
 
-- CEREJAS (opcionais): item, endereco_saida, endereco_destino, ajudante, tipo local (casa/apto), elevador.
+- CEREJAS (opcionais): item, endereco_saida, endereco_destino.
 
 Fluxo operacional:
 
@@ -394,7 +394,7 @@ Fluxo operacional:
 
 3) Quando WhatsApp for coletado: sistema inicia TIMER de 10 minutos para essa sessão com IA.
 
-   - Durante 10 minutos, IA coleta as "cerejas" (item, saida, destino, ajudante, apt/elevador).
+   - Durante 10 minutos, IA coleta as "cerejas" (item, saida, destino).
 
    - Se todas as cerejas (item + saida + destino) forem coletadas antes do timer, encerra imediatamente.
 
@@ -501,10 +501,6 @@ Antes de encerrar, sempre grave / entregar para o backend um RESUMO CURTO com:
 - SAÍDA
 
 - DESTINO
-
-- AJUDANTE (informado/não informado)
-
-- OBSERVAÇÕES (se houver)
 
 Sem explicações. Sem raciocínio exposto. Sem JSON visível ao cliente.
 

@@ -83,12 +83,9 @@ function normalizePhoneExtraction(raw) {
     telefone: null,
     ddd: null,
     telefone_parcial: null,
-    itens: raw.itens || null,
+    item: (raw.item || raw.itens || null),
     endereco_saida: raw.endereco_saida || null,
-    endereco_destino: raw.endereco_destino || null,
-    ajudante: typeof raw.ajudante === 'boolean' ? raw.ajudante : null,
-    descricao: raw.descricao || null,
-    missing: Array.isArray(raw.missing) ? raw.missing : []
+    endereco_destino: raw.endereco_destino || null
   };
 
   let tel = (raw.telefone || '').toString().replace(/\D/g, '');
@@ -192,17 +189,14 @@ FORMATO DE RESPOSTA OBRIGATÓRIO (JSON):
     "telefone": "string|null",
     "ddd": "string|null",
     "telefone_parcial": "string|null",
-    "itens": "string|null",
+    "item": "string|null",
     "endereco_saida": "string|null",
-    "endereco_destino": "string|null",
-    "ajudante": true|false|null,
-    "descricao": "string|null",
-    "missing": ["telefone", "itens", ...]
+    "endereco_destino": "string|null"
   },
   "answer": "string|null",
   "control": {
     "shouldReply": true|false,
-    "askField": "telefone|itens|endereco_saida|endereco_destino|null",
+    "askField": "telefone|item|endereco_saida|endereco_destino|null",
     "finalMessage": true|false
   },
   "meta": {
@@ -219,7 +213,7 @@ NUNCA cite cidade, UF, nome do perfil, nome da loja ou local do atendimento nas 
 
 DDD é obrigatório: nunca preencha "telefone" se não for DDD+corpo validado (10 ou 11 dígitos). Se receber apenas telefone parcial (8 ou 9 dígitos), preencha "telefone_parcial" e mantenha "telefone" = null. Só peça DDD se tiver parcial.
 
-Se receber WhatsApp completo (10 ou 11 dígitos com DDD validado), inicie uma janela de 10 minutos para coletar o que faltar (itens, saída, destino); avance campo a campo, um por vez.
+Se receber WhatsApp completo (10 ou 11 dígitos com DDD validado), inicie uma janela de 10 minutos para coletar o que faltar (item, saída, destino); avance campo a campo, um por vez.
 
 Se receber apenas DDD ou telefone parcial, preencha "ddd" e "telefone_parcial"; mantenha "telefone" = null até ter ambos validados.
 
@@ -346,8 +340,8 @@ function parseResponse(rawContent, lastClientMsg) {
       extraction: normalized,
       answer,
       control: {
-        shouldReply: !!(answer || (control.finalMessage === true)),
-        askField: control.askField || null,
+        shouldReply: !!answer,
+        askField: (control.askField === 'itens') ? 'item' : (control.askField || null),
         finalMessage: control.finalMessage === true
       },
       meta: {

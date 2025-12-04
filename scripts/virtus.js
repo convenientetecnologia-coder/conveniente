@@ -42,6 +42,9 @@ const virtusFSM = {
       s.cursor.client.count = Number(payload.cursor.count || 0);
       s.cursor.client.digest = String(payload.cursor.digest || '');
       s.cursor.client.lastTs = Number(payload.cursor.lastTs || 0);
+      if (payload.cursor.contentSig !== undefined) {
+        s.cursor.client.contentSig = String(payload.cursor.contentSig || '');
+      }
     }
     return chatStateStore.patch(perfil, chatId, s);
   },
@@ -324,6 +327,21 @@ function sha1(str) {
   return crypto.createHash('sha1').update(String(str), 'utf8').digest('hex');
 }
 
+function pickFinalMessageFromFile() {
+  try {
+    const file = path.join(__dirname, '..', 'dados', 'mensagemFinal.json');
+    if (fsRaw.existsSync(file)) {
+      const content = fsRaw.readFileSync(file, 'utf8');
+      const data = JSON.parse(content);
+      if (data.mensagem) return data.mensagem;
+      if (Array.isArray(data) && data.length) {
+        return data[Math.floor(Math.random() * data.length)];
+      }
+    }
+  } catch {}
+  return 'Perfeito! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em alguns minutinhos para combinar os detalhes e informar o orçamento. Qualquer coisa, fico por aqui. Aproveitando: se puder dar uma força, siga nossa página no Instagram 😊 @convenientetecnologia';
+}
+
 function masterJsonlPath(perfil, chatId) {
   const p = path.join(__dirname, '..', 'dados', 'perfis', String(perfil||'default'), 'chats');
   try { fsRaw.mkdirSync(p, { recursive: true }); } catch {}
@@ -566,26 +584,28 @@ function extractPlainTextFromMaybeJSON(raw) {
   }
 }
 
-function nextMissingField(dc = {}) {
-  if (!dc.itens) return 'itens';
-  if (!dc.endereco_saida) return 'endereco_saida';
-  if (!dc.endereco_destino) return 'endereco_destino';
-  if (typeof dc.ajudante !== 'boolean') return 'ajudante';
-  return null;
-}
+// REMOVIDO: nextMissingField - campos ajudante, missing, descrição removidos
+// function nextMissingField(dc = {}) {
+//   if (!dc.itens) return 'itens';
+//   if (!dc.endereco_saida) return 'endereco_saida';
+//   if (!dc.endereco_destino) return 'endereco_destino';
+//   if (typeof dc.ajudante !== 'boolean') return 'ajudante';
+//   return null;
+// }
 
 // REMOVIDO: getAskCounts, bumpAskCount, montarRespostaForcadaWhatsAppSemDDD - agora gerenciado pelo virtusFSM
 
-function detectAskedFieldFromText(t) {
-  const n = normTxt(t);
-  // Endereço de saída
-  if (/(endereco|endereço).*(sa[ií]da|retirada)|onde\s+(buscar|retirar)|local\s+de\s+retirada/.test(n)) return 'endereco_saida';
-  // Endereço de destino
-  if (/(endereco|endereço).*(destino|entrega)|para\s+onde|local\s+de\s+entrega/.test(n)) return 'endereco_destino';
-  if (/ajudante/.test(n)) return 'ajudante';
-  if (/itens?|o que\s+(levar|transportar)/.test(n)) return 'itens';
-  return null;
-}
+// REMOVIDO: detectAskedFieldFromText - campos ajudante removidos
+// function detectAskedFieldFromText(t) {
+//   const n = normTxt(t);
+//   // Endereço de saída
+//   if (/(endereco|endereço).*(sa[ií]da|retirada)|onde\s+(buscar|retirar)|local\s+de\s+retirada/.test(n)) return 'endereco_saida';
+//   // Endereço de destino
+//   if (/(endereco|endereço).*(destino|entrega)|para\s+onde|local\s+de\s+entrega/.test(n)) return 'endereco_destino';
+//   if (/ajudante/.test(n)) return 'ajudante';
+//   if (/itens?|o que\s+(levar|transportar)/.test(n)) return 'itens';
+//   return null;
+// }
 
 
 function normTxt(s) {
@@ -598,14 +618,15 @@ function extractBairro(text, pattern) {
   return String(m[1] || '').trim().replace(/[\s,.;:!?]+$/,'');
 }
 
-function interpretYesNo(raw) {
-  const t = normTxt(raw || '');
-  if (/^(sim|isso|claro|afirmativo)\b/.test(t)) return true;
-  if (/\b(vou precisar|com ajudante)\b/.test(t)) return true;
-  if (/^(nao|não|n)\b/.test(t)) return false;
-  if (/\b(sem ajudante|nao vou precisar|não vou precisar|dispenso)\b/.test(t)) return false;
-  return null;
-}
+// REMOVIDO: interpretYesNo - campo ajudante removido
+// function interpretYesNo(raw) {
+//   const t = normTxt(raw || '');
+//   if (/^(sim|isso|claro|afirmativo)\b/.test(t)) return true;
+//   if (/\b(vou precisar|com ajudante)\b/.test(t)) return true;
+//   if (/^(nao|não|n)\b/.test(t)) return false;
+//   if (/\b(sem ajudante|nao vou precisar|não vou precisar|dispenso)\b/.test(t)) return false;
+//   return null;
+// }
 
 
 
@@ -2142,8 +2163,12 @@ async function finalizePedido(perfil, chatId, contexto) {
     const uf = man && man.estado || null;
     const localizacao = cidade && uf ? `${cidade} (${uf})` : (cidade || null);
 
-    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoArray, contexto: {}, respond: false });
-    const extraction = llm && llm.extraction ? llm.extraction : {};
+    // NUNCA chamar IA no timer/finalização - usar apenas dados já salvos
+    let extraction = {};
+    try {
+      const state = virtusFSM.get(perfil, chatId);
+      extraction = (state && state.data && state.data.extraction) || {};
+    } catch {}
     const tel = String(extraction && extraction.telefone || '').trim();
 
     if (!isValidBRPhoneWithDDD(tel)) {
@@ -2159,22 +2184,17 @@ async function finalizePedido(perfil, chatId, contexto) {
       return;
     }
 
-    const itens = extraction.itens || 'não informado';
+    const item = extraction.item || 'não informado';
     const endSaida = extraction.endereco_saida || 'não informado';
     const endDestino = extraction.endereco_destino || 'não informado';
-    const ajud = (extraction.ajudante === true) ? 'sim'
-               : (extraction.ajudante === false) ? 'nao'
-               : 'não informado';
 
     const payload = {
       chat_id: chatId,
       telefone: tel,
-      itens,
+      item,
       endereco_saida: endSaida,
       endereco_destino: endDestino,
-      ajudante: ajud,
       localizacao: localizacao || null,
-      descricao: extraction.descricao || null,
       cidade,
       estado: uf,
       timestamp: new Date().toISOString()
@@ -2185,12 +2205,12 @@ async function finalizePedido(perfil, chatId, contexto) {
 
     await markPedidoSent(perfil, chatId, payload, 'virtus_finalizacao');
 
-    // Mensagem final ao cliente
+    // Mensagem final ao cliente (DO SISTEMA, não da IA)
     try {
       let st = null; try { st = virtusFSM.get(perfil, chatId); } catch {}
       const alreadyQueued = st && st.finalization && st.finalization.closingMessageQueued;
       if (!alreadyQueued) {
-        const finalMsg = 'Perfeito! Já repassei seu pedido para o motorista. Ele vai te chamar pelo WhatsApp em até 5 minutos pra combinar os detalhes. Qualquer coisa, fico disponível por aqui. Se quiser dar aquela força, segue a gente no Insta: @convenientetecnologia 😊';
+        const finalMsg = pickFinalMessageFromFile();
         await queueMessengerSend(perfil, {
           chatId,
           resposta: finalMsg,
@@ -2198,7 +2218,8 @@ async function finalizePedido(perfil, chatId, contexto) {
           origin: 'finalize'
         });
         const now = Date.now();
-        const lockUntil = now + FINALIZACAO_FREEZE_MS;
+        // Bloqueio indefinido (10 anos) para não monitorar/reentrar
+        const lockUntil = now + (10 * 365 * 24 * 60 * 60 * 1000);
         await virtusFSM.patch(perfil, chatId, {
           finalization: Object.assign({}, st && st.finalization || {}, {
             closingMessageQueued: true,
@@ -2243,8 +2264,12 @@ async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contex
       return;
     }
 
-    const llm = await masterExtractAnswer({ perfil, chatId, mensagens: historicoSan || [], contexto: {}, respond: false });
-    const extraction = llm && llm.extraction ? llm.extraction : {};
+    // NUNCA chamar IA no timer/finalização - usar apenas dados já salvos
+    let extraction = {};
+    try {
+      const st = virtusFSM.get(perfil, chatId);
+      extraction = (st && st.data && st.data.extraction) || {};
+    } catch {}
     const tel = String(extraction && extraction.telefone || '').trim();
     if (!isValidBRPhoneWithDDD(tel)) {
       stepLog.appendJSONL(perfil, 'virtus', {
@@ -2833,7 +2858,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await virtusFSM.ingestFromVirtus(nome, chatId, {
             historico: historicoSan,
             novasMsgs: novasFiltradas,
-            cursor: { count: clientCount, digest: clientDigest, lastTs: lastClientTs },
+            cursor: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs },
             contexto: {}
           });
 
@@ -2846,7 +2871,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llm.extraction || {} });
             virtusFSM.patch(nome, chatId, { data: mergedData });
 
-            appendMasterJSONL(nome, chatId, { kind: 'master_cycle', extraction: llm.extraction, control: llm.control, tookMs: llm.meta && llm.meta.tookMs });
+            // Log apenas com campos permitidos: localizacao, whatsapp, item, endereco_saida, endereco_destino
+            const extractionLog = {};
+            if (llm.extraction) {
+              if (llm.extraction.telefone) extractionLog.telefone = llm.extraction.telefone;
+              if (llm.extraction.item) extractionLog.item = llm.extraction.item;
+              if (llm.extraction.endereco_saida) extractionLog.endereco_saida = llm.extraction.endereco_saida;
+              if (llm.extraction.endereco_destino) extractionLog.endereco_destino = llm.extraction.endereco_destino;
+            }
+            appendMasterJSONL(nome, chatId, { kind: 'master_cycle', extraction: extractionLog, control: llm.control, tookMs: llm.meta && llm.meta.tookMs });
+
+            // Detectar se os 4 campos obrigatórios estão completos: whatsapp, item, endereco_saida, endereco_destino
+            const extraction = llm.extraction || {};
+            const tel = String(extraction.telefone || '').trim();
+            const hasWhatsApp = isValidBRPhoneWithDDD(tel);
+            const hasItem = !!(extraction.item && String(extraction.item).trim());
+            const hasSaida = !!(extraction.endereco_saida && String(extraction.endereco_saida).trim());
+            const hasDestino = !!(extraction.endereco_destino && String(extraction.endereco_destino).trim());
+
+            if (hasWhatsApp && hasItem && hasSaida && hasDestino) {
+              // Campos completos - finalizar imediatamente, NÃO enfileirar resposta da IA
+              stepLog.appendJSONL(nome, 'virtus', { step: 'auto_finalize_all_fields_complete', chatId });
+              await finalizePedido(nome, chatId, {});
+              continue;
+            }
 
             const shouldAnswer = !!(llm && llm.control && llm.control.shouldReply);
             let reply = (llm && llm.answer) ? String(llm.answer) : null;

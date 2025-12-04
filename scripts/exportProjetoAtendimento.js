@@ -14,12 +14,15 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 
-// Arquivos específicos do atendimento (4 arquivos principais)
+// Arquivos específicos do atendimento
 const ATENDIMENTO_FILES = [
   "scripts/virtus.js",
   "scripts/promptFretes.js",
   "scripts/inteligenciaArtificial.js", // agora só OpenAI/master
   "scripts/chatStateStore.js",
+  "scripts/stepLog.js", // logging de passos do atendimento
+  "scripts/chatLock.js", // sistema de locks de chat
+  "scripts/manifestStore.js", // dados do perfil (cidade, estado) usados no contexto
 ];
 
 /**
