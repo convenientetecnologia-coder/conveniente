@@ -60,7 +60,7 @@ const virtusFSM = {
   flowLog(){ return true; },
   computeEarliestSendAt(perfil, chatId, { origin, lastClientTs } = {}) {
     const base = Number(lastClientTs || Date.now());
-    const jitter = 45000 + Math.floor(Math.random() * 75000); // 45-120s
+    const jitter = 30000 + Math.floor(Math.random() * 60000); // 30-90s
     return base + jitter;
   }
 };
@@ -982,7 +982,18 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     const ultima = ultimaRespostaMessenger.get(nomePerfil) || 0;
     const intervaloAleatorio = MESSENGER_INTERVALO_MIN_MS + Math.floor(Math.random() * (MESSENGER_INTERVALO_MAX_MS - MESSENGER_INTERVALO_MIN_MS));
     const tempoDesdeUltima = agora - ultima;
-    if (tempoDesdeUltima < intervaloAleatorio) return;
+    if (tempoDesdeUltima < intervaloAleatorio) {
+      const proximo = fila[0];
+      if (proximo) {
+        stepLog.appendJSONL(nomePerfil, 'virtus', {
+          step: 'messenger_send_defer_random',
+          chatId: proximo.chatId,
+          remainingMs: intervaloAleatorio - tempoDesdeUltima,
+          ts: agora
+        });
+      }
+      return;
+    }
 
     // Fila FIFO estrita: primeiro da fila, nunca saltar
     // Só envia o primeiro se já passou o earliestSendAt
@@ -1362,12 +1373,12 @@ const NOTIFICADOR_HISTORICO = String(process.env.NOTIFICADOR_HISTORICO || '0') =
 
 const NOTIFICADOR_ENVIO_LOTE_MS = parseInt(process.env.NOTIFICADOR_ENVIO_LOTE_MS || '10000', 10); // 10s
 const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '1100', 10);
-const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '45000', 10); // 45s
-const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '120000', 10); // 120s
+const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '30000', 10); // 30s
+const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '90000', 10); // 90s
 
 // Janela de espera por conversa (antes de responder o cliente)
-const WAIT_BEFORE_REPLY_MIN_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MIN_MS || '45000', 10); // 45s
-const WAIT_BEFORE_REPLY_MAX_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MAX_MS || '120000', 10); // 120s
+const WAIT_BEFORE_REPLY_MIN_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MIN_MS || '30000', 10); // 30s
+const WAIT_BEFORE_REPLY_MAX_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MAX_MS || '90000', 10); // 90s
 
 const VIRTUS_FINAL_MSG_MAX_TRIES = parseInt(process.env.VIRTUS_FINAL_MSG_MAX_TRIES || '2', 10); // tentativas no envio da mensagem final
 const VIRTUS_FINAL_MSG_RETRY_MIN_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MIN_MS || '600', 10); // 600ms
@@ -3019,60 +3030,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             stepLog.appendJSONL(nome, 'virtus_scan', { phase: 'cursor_eval', chatId, prevCount, prevDigest, clientCount, clientDigest, changed, ts: Date.now() });
       } catch {}
       
-          // Se há mudança (mensagem nova), mas openAt não venceu, arma timer
-          if (changed && (openAt === 0 || now < openAt)) {
-            stepLog.appendJSONL(nome, 'virtus', { step: 'msg_new_detected', chatId, prevContentSig, clientContentSig, ts: now });
-            if (openAt === 0) {
-              // Arma timer de 45s
-              const timerOpenAt = now + 45000;
-              await virtusFSM.patch(nome, chatId, {
-                schedule: {
-                  ...schedule,
-                  collect: {
-                    ...collectSchedule,
-                    openAt: timerOpenAt
-                  }
-                }
+          // Se há mudança (mensagem nova)
+          if (changed) {
+            if (openAt > 0 && now < openAt) {
+              // Se ainda está na primeira janela de espera, só aguarda!
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'msg_new_detected_defer_until_timer',
+                chatId, openAt, now, clientContentSig, ts: now
               });
-              stepLog.appendJSONL(nome, 'virtus', { step: 'timer_start', chatId, openAt: timerOpenAt, ts: now });
-              
-              clearCollectTimer(nome, chatId);
-              const timerId = setTimeout(() => {
-                stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() });
-                
-                // Arma SLA watchdog
-                clearSlaWatchdog(nome, chatId);
-                const slaTimeout = 6 * 60 * 1000;
-                const slaTimerId = setTimeout(() => {
-                  try {
-                    const state = virtusFSM.get(nome, chatId);
-                    const hasResponse = state && state.lastIARespondedAt && (Date.now() - state.lastIARespondedAt) < slaTimeout;
-                    if (!hasResponse) {
-                      stepLog.appendJSONL(nome, 'virtus', {
-                        step: 'pending_sla_breach',
-                        chatId,
-                        timerFiredAt: timerOpenAt,
-                        now: Date.now(),
-                        elapsedMs: Date.now() - timerOpenAt,
-                        hasResponse: false
-                      });
-                    }
-                  } catch {}
-                }, slaTimeout);
-                getSlaWatchdogMap(nome).set(chatId, slaTimerId);
-              }, 45000);
-              getCollectTimerMap(nome).set(chatId, timerId);
-            }
-            // Atualiza cursor mas não processa ainda
-            try {
               await virtusFSM.patch(nome, chatId, {
                 cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
                 data: { ...(fsmState && fsmState.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
-                lastScanAt: Date.now(),
-                lastCLIts: lastClientTs
+                lastScanAt: now, lastCLIts: lastClientTs
               });
-            } catch {}
-            continue; // Aguarda timer vencer
+              continue;
+            }
+            // Se openAt == 0, timer já disparou: NUNCA rearme schedule.collect.openAt aqui.
+            // Siga para bloco schedule.llm!
           }
       
           if (!changed) {
@@ -3173,9 +3147,21 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // ===================================================
             const stateBefore = virtusFSM.get(nome, chatId);
             const schedule = stateBefore && stateBefore.schedule || {};
+            const collectSchedule = schedule.collect || {};
             const llmSchedule = schedule.llm || {};
             const now = Date.now();
             const COLLECT_WAIT_MS = 45000; // 45s
+            
+            // Verifica se já passou pelo timer_fire (openAt === 0 significa que timer já disparou)
+            const alreadyWaited = !!(collectSchedule && collectSchedule.startedAt && Number(collectSchedule.openAt || 0) === 0);
+            
+            stepLog.appendJSONL(nome, 'virtus', {
+              step: 'ingest_call_gate',
+              chatId,
+              alreadyWaited,
+              openAt: Number(collectSchedule.openAt || 0),
+              ts: now
+            });
             
             // Verifica se está dentro da janela de coleta
             const collectUntil = Number(llmSchedule.collectUntil || 0);
@@ -3202,7 +3188,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             // Inicia ou estende janela de coleta se necessário
             if (!llmSchedule.pendingSig || llmSchedule.pendingSig !== clientContentSig) {
-              const newCollectUntil = Math.max(collectUntil, lastClientTs + COLLECT_WAIT_MS);
+              const newCollectUntil = alreadyWaited ? now : Math.max(collectUntil, lastClientTs + COLLECT_WAIT_MS);
               await virtusFSM.patch(nome, chatId, {
                 schedule: {
                   ...schedule,
@@ -3236,8 +3222,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             
             // Verifica se a signature mudou desde o início da janela
             if (llmSchedule.pendingSig && llmSchedule.pendingSig !== clientContentSig) {
-              // Signature mudou, reinicia janela
-              const newCollectUntil = lastClientTs + COLLECT_WAIT_MS;
+              // Signature mudou, reinicia janela (mas não se já passou pelo timer_fire)
+              const newCollectUntil = alreadyWaited ? now : (lastClientTs + COLLECT_WAIT_MS);
               await virtusFSM.patch(nome, chatId, {
                 schedule: {
                   ...schedule,
