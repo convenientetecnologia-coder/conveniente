@@ -31,6 +31,7 @@ const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 const { masterExtractAnswer } = require('./inteligenciaArtificial.js');
 const chatStateStore = require('./chatStateStore.js');
+const notifierQueue = require('./notifierQueue.js');
 const virtusFSM = {
   get(perfil, chatId){ return chatStateStore.get(perfil, chatId); },
   patch(perfil, chatId, patchObj){ return chatStateStore.patch(perfil, chatId, patchObj); },
@@ -59,7 +60,7 @@ const virtusFSM = {
   flowLog(){ return true; },
   computeEarliestSendAt(perfil, chatId, { origin, lastClientTs } = {}) {
     const base = Number(lastClientTs || Date.now());
-    const jitter = 20000 + Math.floor(Math.random() * 20000); // 20–40s
+    const jitter = 45000 + Math.floor(Math.random() * 75000); // 45-120s
     return base + jitter;
   }
 };
@@ -909,8 +910,18 @@ function iniciarPollingRespostas(nomePerfil) {
   pollingIntervals.set(nomePerfil, id);
 }
 
-function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, marcarRespondidoFn) {
+function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, marcarRespondidoFn, getUrlNowFn) {
   if (filaEnvioTimers.has(nomePerfil)) return;
+
+  // Callback de URL para logging diários, nunca depende de ensurePage diretamente
+  const getUrlNow = getUrlNowFn || (async () => {
+    try {
+      const p = await ensurePage().catch(() => null);
+      return (p && typeof p.url === 'function') ? (p.url() || '') : '';
+    } catch {
+      return '';
+    }
+  });
 
   const id = setInterval(async () => {
     const fila = filaEnvioMessenger.get(nomePerfil) || [];
@@ -922,15 +933,18 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     const tempoDesdeUltima = agora - ultima;
     if (tempoDesdeUltima < intervaloAleatorio) return;
 
-    // Pega item elegível (earliestSendAt <= agora)
-    let idxElegivel = fila.findIndex(it => (typeof it.earliestSendAt !== 'number') || (agora >= it.earliestSendAt));
-    if (idxElegivel < 0) {
-      fila.sort((a, b) => (Number(a.earliestSendAt || Infinity) - Number(b.earliestSendAt || Infinity)));
-      logger.info('[QUEUE] no_eligible_sorted', { nomePerfil, size: fila.length, minEarliest: fila[0] && fila[0].earliestSendAt });
-      return;
-    }
-    const proximo = fila.splice(idxElegivel, 1)[0];
+    // Fila FIFO estrita: primeiro da fila, nunca saltar
+    // Só envia o primeiro se já passou o earliestSendAt
+    const proximo = fila[0];
     if (!proximo) return;
+    
+    // Verifica se earliestSendAt já passou
+    if (typeof proximo.earliestSendAt === 'number' && proximo.earliestSendAt > agora) {
+      return; // Ainda não é hora de enviar
+    }
+    
+    // Remove da fila (FIFO)
+    fila.shift();
 
     try {
       const respostaFinal = String(proximo.resposta || '').trim();
@@ -967,6 +981,15 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         return;
       }
       
+      // Logs ultra detalhados: messenger_send_attempt
+      stepLog.appendJSONL(nomePerfil, 'virtus', {
+        step: 'messenger_send_attempt',
+        chatId: proximo.chatId,
+        origin: proximo.origin || '',
+        cursorSig: proximo.cursorSig || '',
+        ts: agora
+      });
+      
       let ok = true;
       let attempts = (proximo.__tries || 0) + 1;
       let urlNow = '';
@@ -977,11 +1000,17 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       
       if (!ok) {
         proximo.__tries = attempts;
-        // Log error_send
-        try {
-          const p = await ensurePage().catch(() => null);
-          urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
-        } catch {}
+        urlNow = await getUrlNow();
+        
+        // Logs ultra detalhados: messenger_send_fail
+        stepLog.appendJSONL(nomePerfil, 'virtus', {
+          step: 'messenger_send_fail',
+          chatId: proximo.chatId,
+          attempts: proximo.__tries,
+          url: urlNow,
+          ts: Date.now()
+        });
+        
         virtusFSM.flowLog(nomePerfil, proximo.chatId, 'error_send', {
           reason: 'send_failed',
           attempts: proximo.__tries,
@@ -994,15 +1023,34 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
           }
         });
         
-        if (proximo.__tries <= 2) {
-          fila.push(proximo); // requeue preserving earliestSendAt
-          logger.warn('[QUEUE] requeue_after_send_fail', { nomePerfil, chatId: proximo.chatId, tries: proximo.__tries });
+        // Em caso de erro, refile esse no topo da fila, com earliestSendAt para 5s no futuro (não trava, não trava a ordem)
+        const MAX_RETRIES = parseInt(process.env.MESSENGER_MAX_RETRIES || '2', 10);
+        if (proximo.__tries < MAX_RETRIES) {
+          proximo.earliestSendAt = agora + 5000; // 5s no futuro
+          fila.unshift(proximo); // Refile no topo (FIFO preservado)
+          logger.warn('[QUEUE] requeue_after_send_fail', { nomePerfil, chatId: proximo.chatId, tries: proximo.__tries, newEarliest: proximo.earliestSendAt });
         } else {
-          logger.error('[QUEUE] drop_after_max_retries', { nomePerfil, chatId: proximo.chatId });
+          // Limite de tentativas, após o qual loga e dropa o item
+          logger.error('[QUEUE] drop_after_max_retries', { nomePerfil, chatId: proximo.chatId, maxRetries: MAX_RETRIES });
+          stepLog.appendJSONL(nomePerfil, 'virtus', {
+            step: 'messenger_send_dropped',
+            chatId: proximo.chatId,
+            attempts: proximo.__tries,
+            ts: Date.now()
+          });
         }
         if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
         return;
       }
+      
+      // Logs ultra detalhados: messenger_send_ok
+      urlNow = await getUrlNow();
+      stepLog.appendJSONL(nomePerfil, 'virtus', {
+        step: 'messenger_send_ok',
+        chatId: proximo.chatId,
+        url: urlNow,
+        ts: Date.now()
+      });
 
       ultimaRespostaMessenger.set(nomePerfil, Date.now());
 
@@ -1014,8 +1062,6 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
 
       // Log send_ok e ACK no FSM
       try {
-        const p = await ensurePage().catch(() => null);
-        urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
         virtusFSM.flowLog(nomePerfil, proximo.chatId, 'send_ok', {
           attempts: 1,
           url: urlNow,
@@ -1023,6 +1069,14 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
           cursorSig: proximo.cursorSig || ''
         });
         await virtusFSM.ackSent(nomePerfil, proximo.chatId, proximo.cursorSig || '');
+        
+        // Logs ultra detalhados: ACK
+        stepLog.appendJSONL(nomePerfil, 'virtus', {
+          step: 'messenger_ack',
+          chatId: proximo.chatId,
+          cursorSig: proximo.cursorSig || '',
+          ts: Date.now()
+        });
       } catch (e) {
         logger.warn('[FSM][ACK] Falha ao logar send_ok/ackSent: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId });
       }
@@ -1257,12 +1311,12 @@ const NOTIFICADOR_HISTORICO = String(process.env.NOTIFICADOR_HISTORICO || '0') =
 
 const NOTIFICADOR_ENVIO_LOTE_MS = parseInt(process.env.NOTIFICADOR_ENVIO_LOTE_MS || '10000', 10); // 10s
 const NOTIFICADOR_POLLING_MS = parseInt(process.env.NOTIFICADOR_POLLING_MS || '1100', 10);
-const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '20000', 10); // 20s
-const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '60000', 10); // 60s
+const MESSENGER_INTERVALO_MIN_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '45000', 10); // 45s
+const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '120000', 10); // 120s
 
 // Janela de espera por conversa (antes de responder o cliente)
-const WAIT_BEFORE_REPLY_MIN_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MIN_MS || '20000', 10); // 20s
-const WAIT_BEFORE_REPLY_MAX_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MAX_MS || '60000', 10); // 60s
+const WAIT_BEFORE_REPLY_MIN_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MIN_MS || '45000', 10); // 45s
+const WAIT_BEFORE_REPLY_MAX_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MAX_MS || '120000', 10); // 120s
 
 const VIRTUS_FINAL_MSG_MAX_TRIES = parseInt(process.env.VIRTUS_FINAL_MSG_MAX_TRIES || '2', 10); // tentativas no envio da mensagem final
 const VIRTUS_FINAL_MSG_RETRY_MIN_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MIN_MS || '600', 10); // 600ms
@@ -2099,41 +2153,12 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 }
 
 async function sendPedidoToNotificador(perfil, payload) {
-  const url = `${NOTIFICADOR_URL}/api/virtus/pedido`;
-  let lastErr = null;
-  for (let attempt=1; attempt<=2; attempt++) {
-    try {
-      const resp = await fetch(url, {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({
-          servidor: NOTIFICADOR_SERVIDOR,
-          perfil,
-          ...payload
-        })
-      });
-      const text = await resp.text().catch(()=> '');
-      let data = null; try { data = text ? JSON.parse(text) : null; } catch {}
-      if (resp.ok && data && data.ok === true) {
-        logger.info('[NOTIFICADOR] Pedido enviado com sucesso', { perfil, chatId: payload.chat_id });
-        return true;
-      }
-      lastErr = new Error(`http_${resp.status}`);
-      logger.error('[NOTIFICADOR] Falha ao enviar pedido', {
-        perfil, chatId: payload.chat_id, status: resp.status, body: text.substring(0,500)
-      });
-    } catch (e) {
-      lastErr = e;
-      logger.error('[NOTIFICADOR] Erro de rede ao enviar pedido', {
-        perfil, chatId: payload.chat_id, error: (e && e.message) || e
-      });
-    }
-    await sleep(600 + Math.floor(Math.random()*400));
+  // 100% via notifierQueue - nunca envia diretamente à API, nunca joga fora em memória
+  const ok = await notifierQueue.enqueuePedido(perfil, payload);
+  if (ok) {
+    stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_queue_add', chatId: payload.chat_id, ts: Date.now() });
   }
-  if (issues && typeof issues.append === 'function') {
-    await issues.append(perfil, 'pedido_send_fail', `chat=${payload.chat_id} err=${(lastErr && lastErr.message) || lastErr}`);
-  }
-  return false;
+  return ok;
 }
 
 async function finalizePedido(perfil, chatId, contexto) {
@@ -2190,7 +2215,7 @@ async function finalizePedido(perfil, chatId, contexto) {
 
     const payload = {
       chat_id: chatId,
-      telefone: tel,
+      whatsapp: tel, // Campo whatsapp (não telefone/nome antigo)
       item,
       endereco_saida: endSaida,
       endereco_destino: endDestino,
@@ -2200,10 +2225,15 @@ async function finalizePedido(perfil, chatId, contexto) {
       timestamp: new Date().toISOString()
     };
 
+    // Nunca espera resposta síncrona do notificador! Apenas joga na fila persistente/outbox e retorna
     const ok = await sendPedidoToNotificador(perfil, payload);
-    if (!ok) return;
-
-    await markPedidoSent(perfil, chatId, payload, 'virtus_finalizacao');
+    if (!ok) {
+      logger.warn('[FINALIZE] Falha ao enfileirar pedido no notifierQueue', { perfil, chatId });
+      return;
+    }
+    
+    // Não remove, não apaga, não considera concluído antes do callback de ACK
+    // markPedidoSent será chamado pelo callback de ACK do notificador
 
     // Mensagem final ao cliente (DO SISTEMA, não da IA)
     try {
@@ -2863,13 +2893,168 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           });
 
           try {
-            // Estado corrente (para log)
+            // ===== BARREIRA DE COLETA 45s: CICLO DE VIDA =====
+            // Objetivo: Anti-spam, espera de mensagem real do cliente antes de chamar IA
+            // 
+            // Ciclo de vida:
+            // 1. Após detectar changed === true para o chat, cria/atualiza em schedule.llm:
+            //    - pendingSig: clientContentSig (signature do conteúdo atual)
+            //    - collectUntil: lastClientTs + 45000ms (ou maior se já rodando janela)
+            //    - anchorTs: lastClientTs (timestamp de referência)
+            // 2. Se ainda está dentro da janela de coleta (Date.now() < collectUntil), não chama IA
+            //    e apenas atualiza cursor/estado, logando "collect_wait_extend"
+            // 3. Só roda IA se:
+            //    - Date.now() >= schedule.llm.collectUntil
+            //    - O signature (clientContentSig) não mudou desde o início da janela (pendingSig)
+            // 4. Após IA rodar, zera a janela e registra:
+            //    - lastConsumedSig = clientContentSig
+            //    - inflightSig = null
+            //    - pendingSig = null
+            // 
+            // Logs: stepLog deve registrar "collect_wait_start", "collect_wait_extend", "llm_call_start", "llm_call_end"
+            // Motivo: Garantir que não chamamos IA para cada mensagem isolada, mas aguardamos 45s para coletar
+            // todas as mensagens do cliente antes de processar. Isso reduz spam de chamadas IA e melhora
+            // a qualidade da extração ao ter contexto completo.
+            // ===================================================
             const stateBefore = virtusFSM.get(nome, chatId);
+            const schedule = stateBefore && stateBefore.schedule || {};
+            const llmSchedule = schedule.llm || {};
+            const now = Date.now();
+            const COLLECT_WAIT_MS = 45000; // 45s
+            
+            // Verifica se está dentro da janela de coleta
+            const collectUntil = Number(llmSchedule.collectUntil || 0);
+            const pendingSig = String(llmSchedule.pendingSig || '');
+            const anchorTs = Number(llmSchedule.anchorTs || 0);
+            
+            if (collectUntil > now && pendingSig === clientContentSig) {
+              // Ainda dentro da janela de coleta, apenas atualiza cursor/estado
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'collect_wait_extend',
+                chatId,
+                collectUntil,
+                pendingSig,
+                remainingMs: collectUntil - now
+              });
+              await virtusFSM.patch(nome, chatId, {
+                cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
+                lastScanAt: now,
+                lastCLIts: lastClientTs
+              });
+              continue;
+            }
+            
+            // Inicia ou estende janela de coleta se necessário
+            if (!llmSchedule.pendingSig || llmSchedule.pendingSig !== clientContentSig) {
+              const newCollectUntil = Math.max(collectUntil, lastClientTs + COLLECT_WAIT_MS);
+              await virtusFSM.patch(nome, chatId, {
+                schedule: {
+                  ...schedule,
+                  llm: {
+                    pendingSig: clientContentSig,
+                    collectUntil: newCollectUntil,
+                    anchorTs: lastClientTs
+                  }
+                }
+              });
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'collect_wait_start',
+                chatId,
+                pendingSig: clientContentSig,
+                collectUntil: newCollectUntil,
+                anchorTs: lastClientTs,
+                remainingMs: newCollectUntil - now
+              });
+              
+              // Se ainda não passou a janela, apenas atualiza cursor e continua
+              if (newCollectUntil > now) {
+                await virtusFSM.patch(nome, chatId, {
+                  cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                  data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
+                  lastScanAt: now,
+                  lastCLIts: lastClientTs
+                });
+                continue;
+              }
+            }
+            
+            // Verifica se a signature mudou desde o início da janela
+            if (llmSchedule.pendingSig && llmSchedule.pendingSig !== clientContentSig) {
+              // Signature mudou, reinicia janela
+              const newCollectUntil = lastClientTs + COLLECT_WAIT_MS;
+              await virtusFSM.patch(nome, chatId, {
+                schedule: {
+                  ...schedule,
+                  llm: {
+                    pendingSig: clientContentSig,
+                    collectUntil: newCollectUntil,
+                    anchorTs: lastClientTs
+                  }
+                }
+              });
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'collect_wait_restart',
+                chatId,
+                oldSig: llmSchedule.pendingSig,
+                newSig: clientContentSig,
+                collectUntil: newCollectUntil
+              });
+              
+              if (newCollectUntil > now) {
+                await virtusFSM.patch(nome, chatId, {
+                  cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                  data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
+                  lastScanAt: now,
+                  lastCLIts: lastClientTs
+                });
+                continue;
+              }
+            }
+            
+            // Passou a barreira de coleta, pode chamar IA
+            stepLog.appendJSONL(nome, 'virtus', {
+              step: 'llm_call_start',
+              chatId,
+              pendingSig: clientContentSig,
+              ts: now
+            });
+            
             const llm = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
+            
+            // Após IA rodar, zera a janela e registra lastConsumedSig
+            await virtusFSM.patch(nome, chatId, {
+              schedule: {
+                ...schedule,
+                llm: {
+                  lastConsumedSig: clientContentSig,
+                  inflightSig: null,
+                  pendingSig: null,
+                  collectUntil: 0,
+                  anchorTs: 0
+                }
+              }
+            });
+            
+            stepLog.appendJSONL(nome, 'virtus', {
+              step: 'llm_call_end',
+              chatId,
+              consumedSig: clientContentSig,
+              tookMs: llm.meta && llm.meta.tookMs || null,
+              ts: Date.now()
+            });
 
             // Persistência da extração (para finalização futura e consistência)
             const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llm.extraction || {} });
             virtusFSM.patch(nome, chatId, { data: mergedData });
+            
+            // Logs ultra detalhados de ciclo
+            appendMasterJSONL(nome, chatId, {
+              kind: 'master_request',
+              systemPromptLength: llm.meta && llm.meta.systemPromptLength || null,
+              tokens: llm.meta && llm.meta.tokens || null,
+              tookMs: llm.meta && llm.meta.tookMs || null
+            });
 
             // Log apenas com campos permitidos: localizacao, whatsapp, item, endereco_saida, endereco_destino
             const extractionLog = {};
@@ -2924,6 +3109,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               const earliest = virtusFSM.computeEarliestSendAt ? virtusFSM.computeEarliestSendAt(nome, chatId, { origin: 'reply', lastClientTs }) : undefined;
 
               await virtusFSM.ackQueued(nome, chatId, cursorSig);
+              
+              // Logs ultra detalhados: queue_add
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'queue_add',
+                chatId,
+                origin: 'replyReady',
+                cursorSig,
+                earliestSendAt: earliest || null,
+                ts: Date.now()
+              });
+              
               const queueResult = await queueMessengerSend(nome, {
                 chatId,
                 resposta: reply,
@@ -3192,7 +3388,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     }
     
-        iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal);
+        // Callback de URL para logging diários, nunca depende de ensurePage diretamente
+        const getUrlNowFn = async () => {
+          try {
+            const p = await ensurePage().catch(() => null);
+            return (p && typeof p.url === 'function') ? (p.url() || '') : '';
+          } catch {
+            return '';
+          }
+        };
+        iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal, getUrlNowFn);
+        
+        // Inicializa o worker da fila persistente do notificador para o perfil
+        // Callback de sucesso: marca no audit log quando pedido for enviado com sucesso
+        notifierQueue.startWorker(nome, markPedidoSent);
       // REMOVIDO: bindPedidosEventsIfNeeded - toda orquestração agora via virtusFSM
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
@@ -3218,6 +3427,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const tFila = filaEnvioTimers.get(nome);
       if (tFila) { clearInterval(tFila); filaEnvioTimers.delete(nome); }
       
+      // Para o worker da fila persistente do notificador
+      notifierQueue.stopWorker(nome);
+      
       let pages = [];
       try { pages = await browser.pages(); } catch {}
       if (robeMeta && typeof nome !== "undefined") {
@@ -3230,5 +3442,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 }
 
 module.exports = {
-  startVirtus
+  startVirtus,
+  markPedidoSent
 };

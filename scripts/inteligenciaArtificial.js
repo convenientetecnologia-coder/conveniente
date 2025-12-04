@@ -79,11 +79,14 @@ function isValidBRPhoneWithDDD(num) {
 }
 
 function normalizePhoneExtraction(raw) {
+  // Somente campos permitidos: telefone, ddd, telefone_parcial, item, endereco_saida, endereco_destino
+  // NUNCA inclua ajudante, missing, descricao, obs, itens (apenas singular "item")
+  // Caso raw.itens venha, use apenas se raw.item não vier
   const out = {
     telefone: null,
     ddd: null,
     telefone_parcial: null,
-    item: (raw.item || raw.itens || null),
+    item: (raw.item || (raw.itens && !raw.item ? raw.itens : null) || null),
     endereco_saida: raw.endereco_saida || null,
     endereco_destino: raw.endereco_destino || null
   };
@@ -336,12 +339,23 @@ function parseResponse(rawContent, lastClientMsg) {
 
     const normalized = normalizePhoneExtraction(rawExtraction);
 
+    // Retorno padronizado: ajuste askField para nunca ser "itens", sempre "item"
+    let askField = control.askField || null;
+    if (askField === 'itens') {
+      askField = 'item';
+    }
+    // Garantir que askField seja apenas um dos campos permitidos
+    const allowedFields = ['telefone', 'item', 'endereco_saida', 'endereco_destino', null];
+    if (askField && !allowedFields.includes(askField)) {
+      askField = null;
+    }
+
     return {
       extraction: normalized,
       answer,
       control: {
         shouldReply: !!answer,
-        askField: (control.askField === 'itens') ? 'item' : (control.askField || null),
+        askField: askField,
         finalMessage: control.finalMessage === true
       },
       meta: {
@@ -399,8 +413,38 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
       return result;
     }
 
+    // Rastreabilidade/Logs por request de IA: antes da chamada GPT/LLM
+    const DEBUG_MASTER = process.env.AI_DEBUG_MASTER === '1';
+    if (respond || DEBUG_MASTER) {
+      appendLog(perfil, chatId, {
+        type: 'llm_call_start',
+        perfil,
+        chatId,
+        respond,
+        ts: Date.now(),
+        messagesCount: messages.length
+      });
+    }
+
+    const callStartTs = Date.now();
     const { content, usage } = await callOpenAI(messages, systemPrompt, respond);
+    const callDurationMs = Date.now() - callStartTs;
     const result = parseResponse(content, lastClientMsg);
+
+    // Rastreabilidade/Logs por request de IA: após o retorno do GPT/LLM
+    if (respond || DEBUG_MASTER) {
+      appendLog(perfil, chatId, {
+        type: 'llm_call_end',
+        perfil,
+        chatId,
+        respond,
+        requestTokens: usage.prompt_tokens || 0,
+        responseTokens: usage.completion_tokens || 0,
+        totalTokens: usage.total_tokens || 0,
+        durationMs: callDurationMs,
+        ts: Date.now()
+      });
+    }
 
     stateAfter = Object.assign({}, stateBefore, {
       lastCallAt: Date.now(),
@@ -411,7 +455,7 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
 
     await saveState(perfil, chatId, stateAfter);
 
-    const DEBUG_MASTER = process.env.AI_DEBUG_MASTER === '1';
+    // Control de logs: todos os logs detalhados só são salvos se respond===true ou AI_DEBUG_MASTER==='1'
     if (respond || DEBUG_MASTER) {
       appendLog(perfil, chatId, {
         ts: Date.now(),
