@@ -272,7 +272,7 @@ async function installChatFeedObserver(page, nome, onChat) {
             if (!id) continue;
             const row = a.closest('div[role="row"]') || a.parentElement || document.body;
             const tempo = labelOf(row);
-            const key = id + '|' + tempo;
+            const key = id; // Usar só id para evitar spam de eventos por tempo que muda
             if (seen.has(key)) continue;
             seen.add(key);
             (window.__virtusOnNewChat && window.__virtusOnNewChat({ id, tempo })) || null;
@@ -2717,56 +2717,63 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         let finalLockUntil = fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil ? Number(fsmState.freeze.finalizationUntil) : 0;
         let finalLocked = finalLockUntil > now;
 
-        // Verifica se é chat novo ou mensagem nova
-        const isNewChat = !fsmState || !fsmState.discoveredAt;
+        // Obtém schedule e openAt
         const schedule = fsmState && fsmState.schedule || {};
         const collectSchedule = schedule.collect || {};
         const openAt = Number(collectSchedule.openAt || 0);
 
-        // Se é chat novo, logue e arme timer
+        // BLINDAGEM: se openAt já existe (herdado/estado antigo) mas discoveredAt não existe, corrige para manter pipeline íntegro.
+        if ((!fsmState || !fsmState.discoveredAt) && openAt > 0) {
+          await virtusFSM.patch(nome, chatId, { discoveredAt: Date.now() });
+          // Atualiza fsmState para refletir a mudança
+          try { fsmState = virtusFSM.get(nome, chatId); } catch {}
+          // Prossiga, não marque isNewChat true para não rearma/limpar timer.
+        }
+
+        // BLINDAGEM PARA NOVO CHAT: marca discoveredAt na detecção real e só uma vez,
+        // NUNCA rearma o timer se já estiver marcado. Corrige bug de rearme eterno.
+        const isNewChat = (!fsmState || !fsmState.discoveredAt) && !(openAt > 0);
+        
         if (isNewChat) {
           stepLog.appendJSONL(nome, 'virtus', { step: 'chat_detected', chatId, ts: now });
-          const timerOpenAt = now + 45000; // 45s
+          const timerOpenAt = now + 45000;
           await virtusFSM.patch(nome, chatId, {
+            discoveredAt: now,
             schedule: {
-              ...schedule,
-              collect: {
-                ...collectSchedule,
-                openAt: timerOpenAt
-              }
+              ...(schedule || {}),
+              collect: { ...(collectSchedule || {}), openAt: timerOpenAt, startedAt: now }
             }
           });
           stepLog.appendJSONL(nome, 'virtus', { step: 'timer_start', chatId, openAt: timerOpenAt, ts: now });
           
-          // Arma timer para coleta
-          clearCollectTimer(nome, chatId);
-          const timerId = setTimeout(() => {
-            // Timer disparado - será processado no próximo scan
-            stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() });
-            
-            // Arma SLA watchdog (6 minutos após timer_fire)
-            clearSlaWatchdog(nome, chatId);
-            const slaTimeout = 6 * 60 * 1000; // 6 minutos
-            const slaTimerId = setTimeout(() => {
-              try {
-                const state = virtusFSM.get(nome, chatId);
-                const hasResponse = state && state.lastIARespondedAt && (Date.now() - state.lastIARespondedAt) < slaTimeout;
-                if (!hasResponse) {
-                  stepLog.appendJSONL(nome, 'virtus', {
-                    step: 'pending_sla_breach',
-                    chatId,
-                    timerFiredAt: timerOpenAt,
-                    now: Date.now(),
-                    elapsedMs: Date.now() - timerOpenAt,
-                    hasResponse: false
-                  });
-                }
-              } catch {}
-            }, slaTimeout);
-            getSlaWatchdogMap(nome).set(chatId, slaTimerId);
-          }, 45000);
-          getCollectTimerMap(nome).set(chatId, timerId);
-          continue; // Não processa ainda, aguarda 45s
+          // Armamento idempotente, nunca rearma se já existe timer
+          if (!getCollectTimerMap(nome).has(chatId)) {
+            const delay = Math.max(0, timerOpenAt - Date.now());
+            const timerId = setTimeout(() => {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() });
+              clearSlaWatchdog(nome, chatId);
+              const slaTimeout = 6 * 60 * 1000;
+              const slaTimerId = setTimeout(() => {
+                try {
+                  const state = virtusFSM.get(nome, chatId);
+                  const hasResponse = state && state.lastIARespondedAt && (Date.now() - state.lastIARespondedAt) < slaTimeout;
+                  if (!hasResponse) {
+                    stepLog.appendJSONL(nome, 'virtus', {
+                      step: 'pending_sla_breach',
+                      chatId,
+                      timerFiredAt: timerOpenAt,
+                      now: Date.now(),
+                      elapsedMs: Date.now() - timerOpenAt,
+                      hasResponse: false
+                    });
+                  }
+                } catch {}
+              }, slaTimeout);
+              getSlaWatchdogMap(nome).set(chatId, slaTimerId);
+            }, delay);
+            getCollectTimerMap(nome).set(chatId, timerId);
+          }
+          continue;
         }
 
         // Verifica se há mensagem nova (detectada via mudança de cursor)
