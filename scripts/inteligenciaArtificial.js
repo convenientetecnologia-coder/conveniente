@@ -78,6 +78,84 @@ function isValidBRPhoneWithDDD(num) {
   }
 }
 
+// === INÍCIO: Funções de extração de telefone via regex/heurística (fallback militar) ===
+
+function normalizeBrazilDigits(d) {
+  try {
+    let s = String(d || '').replace(/\D/g, '');
+    if (!s) return '';
+    if (s.startsWith('55') && s.length > 11) s = s.slice(2);
+    if (s.length > 13) s = s.slice(-11);
+    return s;
+  } catch { return ''; }
+}
+
+function classifyPhoneDigits(d) {
+  const s = normalizeBrazilDigits(d);
+  if (!s) return null;
+  if (/^[1-9]{2}$/.test(s)) return { kind: 'ddd', value: s };
+  if (/^\d{8,9}$/.test(s)) return { kind: 'partial', value: s };
+  if (isValidBRPhoneWithDDD(s)) return { kind: 'full', value: s };
+  return null;
+}
+
+function extractPhoneCandidatesFromText(text) {
+  try {
+    const s = String(text || '');
+    const hits = s.match(/(\+?\d[\d\s().-]{7,})/g) || [];
+    const candidates = new Set();
+    for (const seg of hits) {
+      const digits = seg.replace(/\D/g, '');
+      if (digits && digits.length >= 8 && digits.length <= 14) {
+        candidates.add(digits);
+      }
+    }
+    // Se a mensagem for só dígitos sem espaços e tiver tamanho plausível, captura também
+    const onlyDigits = s.replace(/\D/g, '');
+    if (onlyDigits && onlyDigits.length >= 8 && onlyDigits.length <= 14) {
+      candidates.add(onlyDigits);
+    }
+    return Array.from(candidates);
+  } catch {
+    return [];
+  }
+}
+
+function findLatestFullPhoneFromMessages(historico) {
+  try {
+    const arr = Array.isArray(historico) ? historico.slice().reverse() : [];
+    for (const m of arr) {
+      if (!m || m.autor !== 'cliente' || !m.texto) continue;
+      const candidates = extractPhoneCandidatesFromText(m.texto);
+      for (const c of candidates) {
+        const cls = classifyPhoneDigits(c);
+        if (cls && cls.kind === 'full') return cls.value;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function findLatestPartialAndDDDFromMessages(historico) {
+  const res = { ddd: null, parcial: null };
+  try {
+    const arr = Array.isArray(historico) ? historico.slice().reverse() : [];
+    for (const m of arr) {
+      if (!m || m.autor !== 'cliente' || !m.texto) continue;
+      const candidates = extractPhoneCandidatesFromText(m.texto);
+      for (const c of candidates) {
+        const cls = classifyPhoneDigits(c);
+        if (!cls) continue;
+        if (cls.kind === 'ddd' && !res.ddd) res.ddd = cls.value;
+        if (cls.kind === 'partial' && !res.parcial) res.parcial = cls.value;
+        if (res.ddd && res.parcial) return res;
+      }
+    }
+  } catch {}
+  return res;
+}
+// === FIM: Funções de extração de telefone via regex/heurística ===
+
 function combinePhoneParts(ddd, parcial) {
   try {
     const d = String(ddd || '').replace(/\D/g, '');
@@ -105,20 +183,67 @@ function findLatestDDDFromMessages(historico) {
 function mergeWithPrevExtraction(prev, cur, historico) {
   const out = Object.assign({}, cur || {});
   const prevSafe = Object.assign({}, prev || {});
+
+  // Herdar DDD/Parcial anteriores
   if (!out.ddd) {
     const heur = findLatestDDDFromMessages(historico);
     if (heur) out.ddd = heur;
   }
   if (!out.ddd && prevSafe.ddd) out.ddd = prevSafe.ddd;
   if (!out.telefone_parcial && prevSafe.telefone_parcial) out.telefone_parcial = prevSafe.telefone_parcial;
+
+  // 1) Se já temos telefone válido, só complete ddd/parcial se faltar
+  if (out.telefone && isValidBRPhoneWithDDD(out.telefone)) {
+    out.ddd = out.ddd || out.telefone.slice(0,2);
+    out.telefone_parcial = out.telefone_parcial || out.telefone.slice(2);
+    return out;
+  }
+
+  // 2) Tentar combinar DDD + parcial do estado atual/anterior
   if (!out.telefone) {
-    const combined = combinePhoneParts(out.ddd, out.telefone_parcial);
-    if (combined) {
-      out.telefone = combined;
-      if (!out.ddd) out.ddd = combined.slice(0,2);
-      if (!out.telefone_parcial) out.telefone_parcial = combined.slice(2);
+    const d1 = out.ddd || prevSafe.ddd || null;
+    const p1 = out.telefone_parcial || prevSafe.telefone_parcial || null;
+    if (d1 && p1) {
+      const full = String(d1).replace(/\D/g, '') + String(p1).replace(/\D/g, '');
+      if (isValidBRPhoneWithDDD(full)) {
+        out.telefone = full;
+        out.ddd = full.slice(0,2);
+        out.telefone_parcial = full.slice(2);
+        return out;
+      }
     }
   }
+
+  // 3) Fallback militar: procurar telefone COMPLETO no histórico (últimas mensagens do cliente)
+  if (!out.telefone) {
+    const fromHistFull = findLatestFullPhoneFromMessages(historico);
+    if (fromHistFull && isValidBRPhoneWithDDD(fromHistFull)) {
+      out.telefone = fromHistFull;
+      out.ddd = out.ddd || fromHistFull.slice(0,2);
+      out.telefone_parcial = out.telefone_parcial || fromHistFull.slice(2);
+      return out;
+    }
+  }
+
+  // 4) Fallback secundário: capturar parcial e/ou DDD dispersos no histórico e tentar combinar
+  if (!out.telefone) {
+    const partialPack = findLatestPartialAndDDDFromMessages(historico);
+    const d = out.ddd || partialPack.ddd || prevSafe.ddd || null;
+    const p = out.telefone_parcial || partialPack.parcial || prevSafe.telefone_parcial || null;
+
+    if (d && p) {
+      const full = String(d).replace(/\D/g, '') + String(p).replace(/\D/g, '');
+      if (isValidBRPhoneWithDDD(full)) {
+        out.telefone = full;
+        out.ddd = full.slice(0,2);
+        out.telefone_parcial = full.slice(2);
+        return out;
+      }
+    }
+    if (!out.ddd && partialPack.ddd) out.ddd = partialPack.ddd;
+    if (!out.telefone_parcial && partialPack.parcial) out.telefone_parcial = partialPack.parcial;
+  }
+
   return out;
 }
 
@@ -166,7 +291,9 @@ function normalizePhoneExtraction(raw) {
     endereco_destino: raw.endereco_destino || null
   };
 
-  let tel = (raw.telefone || '').toString().replace(/\D/g, '');
+  // Aliases comuns
+  const aliasTel = raw.whatsapp || raw.celular || raw.telefone || null;
+  let tel = String(aliasTel || '').toString().replace(/\D/g, '');
   let ddd = (raw.ddd || '').toString().replace(/\D/g, '');
   let parcial = (raw.telefone_parcial || '').toString().replace(/\D/g, '');
 

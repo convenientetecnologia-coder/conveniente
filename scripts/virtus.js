@@ -2114,7 +2114,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     ).catch(()=>{});
 
     const toSend = String(msg || '').replace(/\r?\n+/g, ' ');
-    const safeMsg = sanitizeOutgoing(removeTelefonesCompletosLoose(toSend));
+    const safeMsg = sanitizeOutgoing(toSend);
     const jitter = () => 8 + Math.floor(Math.random() * 7); // 8–14ms por caractere
     try {
       await campo.type(safeMsg, { delay: jitter() });
