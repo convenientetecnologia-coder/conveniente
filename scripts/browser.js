@@ -6,45 +6,9 @@ const path = require('path');
 const os = require('os');
 const utils = require('./utils.js');
 const logger = require('./logger.js');
-
-puppeteer.use(StealthPlugin());
-
-/**
- * Impede qualquer navegação ativa (goto, reload, setContent) na page. 
- * Ao tentar, loga 'nav_guard_block' e lança exceção.
- * Deve ser chamado para TODA page do Messenger via patchPage ou ensurePage!
- */
 const stepLog = require('./stepLog.js');
 
-function enforceClickOnlyNavigation(page, perfil = 'default') {
-  if (page._virtusNavGuardInstalled) return;
-  page._virtusNavGuardInstalled = true;
-
-  const kill = (methodName) => {
-    if (typeof page[methodName] !== 'function') return;
-    const orig = page[methodName].bind(page);
-    page[methodName] = async (...args) => {
-      try {
-        const target = (args && args[0]) ? String(args[0]).slice(0, 200) : '';
-        stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_block', method: methodName, target, ts: Date.now() });
-      } catch {}
-      throw new Error('nav_forbidden: ' + methodName);
-    };
-    page[methodName]._virtusNavGuard = true;
-  };
-
-  kill('goto');
-  kill('reload');
-  kill('setContent');
-
-  // Visualização: loga toda navegação profunda (hash, etc)
-  page.on('framenavigated', (frame) => {
-    try {
-      const url = String(frame.url() || '');
-      stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_framenavigated', url, ts: Date.now() });
-    } catch {}
-  });
-}
+puppeteer.use(StealthPlugin());
 
 // [REMOVIDO: busca de localização — proteção não necessária]
 
@@ -118,6 +82,54 @@ async function injectCookies(page, cookies) {
     if (process.env.BROWSER_DEBUG === '1') {
       logger.warn('[browser.js] Erro ao injetar cookies: ' + (e && e.message));
     }
+  }
+}
+
+function installThreadNavGuard(page, perfil = 'default') {
+  try {
+    if (!page || page._virtusThreadNavGuardInstalled) return;
+    page._virtusThreadNavGuardInstalled = true;
+
+    const isThreadUrl = (u) => {
+      try {
+        const s = String(u || '');
+        if (!s) return false;
+        // Absoluto ou relativo
+        if (/^https?:\/\/(www\.)?messenger\.com\/marketplace\/t\/\d+(?:[/?#]|$)/i.test(s)) return true;
+        if (/^\/marketplace\/t\/\d+(?:[/?#]|$)/i.test(s)) return true;
+        return false;
+      } catch { return false; }
+    };
+
+    // Monkey-patch goto
+    const origGoto = typeof page.goto === 'function' ? page.goto.bind(page) : null;
+    if (origGoto) {
+      page.goto = async (...args) => {
+        const target = (args && args[0]) ? String(args[0]) : '';
+        if (isThreadUrl(target)) {
+          try { stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_block_goto_thread', target, ts: Date.now() }); } catch {}
+          throw new Error('nav_forbidden_thread_goto');
+        }
+        return origGoto(...args);
+      };
+    }
+
+    // Monkey-patch reload
+    const origReload = typeof page.reload === 'function' ? page.reload.bind(page) : null;
+    if (origReload) {
+      page.reload = async (...args) => {
+        let cur = '';
+        try { cur = String(page.url() || ''); } catch {}
+        if (isThreadUrl(cur)) {
+          try { stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_block_reload_thread', current: cur, ts: Date.now() }); } catch {}
+          throw new Error('nav_forbidden_thread_reload');
+        }
+        return origReload(...args);
+      };
+    }
+
+  } catch {
+    // Nada — guard nunca deve quebrar a page
   }
 }
 
@@ -285,6 +297,7 @@ async function patchPage(nome, page, coords) {
         page._virtusIntercepted = true;
         interceptionConfigured = true;
       }
+      try { installThreadNavGuard(page, nome); } catch {}
     } catch (err) {
       // log silencioso
     }
@@ -296,11 +309,6 @@ async function patchPage(nome, page, coords) {
     await page.evaluateOnNewDocument(() => {
       window.addEventListener('beforeunload', (e) => { try { e.stopImmediatePropagation(); } catch {} }, true);
     });
-  } catch {}
-
-  // Proteção NAV_GUARD — impede uso de page.goto, reload ou setContent
-  try {
-    enforceClickOnlyNavigation(page, nome);
   } catch {}
 }
 
@@ -2145,5 +2153,5 @@ module.exports = {
   // ==== NOVOS:
   detectLoginRequired,
   detectAccountSuspended,
-  enforceClickOnlyNavigation
+  installThreadNavGuard
 };

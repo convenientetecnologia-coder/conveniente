@@ -1145,8 +1145,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
 
     sendInProgressByPerfil.set(nomePerfil, true);
     setScanBlocked(nomePerfil, true, { reason: 'messenger_send', chatId: proximo.chatId, origin: proximo.origin || '' });
-    await withNavLock(nomePerfil, async () => {
-      try {
+    try {
+      await withNavLock(nomePerfil, async () => {
         const respostaFinal = String(proximo.resposta || '').trim();
       
       // BLOQUEIO: Verifica freeze antes de enviar qualquer mensagem via FSM
@@ -1307,27 +1307,26 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       try { const setA = getSetAguardando(nomePerfil); setA.delete(proximo.chatId); } catch {}
       try { clearAguardTimer(nomePerfil, proximo.chatId); } catch {}
 
-      try {
-        if (proximo.key) {
-          const setPend = getPendingSet(nomePerfil);
-          setPend.delete(proximo.key);
-        }
-      } catch {}
-
-      } catch (e) {
-        logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
-        
         try {
           if (proximo.key) {
             const setPend = getPendingSet(nomePerfil);
             setPend.delete(proximo.key);
           }
         } catch {}
-      } finally {
-        sendInProgressByPerfil.set(nomePerfil, false);
-        setScanBlocked(nomePerfil, false);
-      }
-    });
+      });
+    } catch (e) {
+      logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
+      
+      try {
+        if (proximo.key) {
+          const setPend = getPendingSet(nomePerfil);
+          setPend.delete(proximo.key);
+        }
+      } catch {}
+    } finally {
+      sendInProgressByPerfil.set(nomePerfil, false);
+      setScanBlocked(nomePerfil, false);
+    }
   }, 2000);
 
   filaEnvioTimers.set(nomePerfil, id);
@@ -1910,32 +1909,35 @@ async function coletaChatsMarketplaceTodos(page) {
           return id && /^\d+$/.test(id) ? id : null;
         } catch { return null; }
       }
-      function _extraiTempo(row) {
+      function _rowOf(a) {
+        return a.closest && a.closest('div[role="row"]') || a.parentElement || null;
+      }
+      function _tempoOf(row) {
         if (!row) return '';
-        const pickAbbr = () => {
         try {
-          const abbr = row.querySelector('abbr[aria-label]');
-          if (abbr) {
-            const t1 = (abbr.innerText || '').trim();
-            if (t1) return t1;
-            const t2 = (abbr.getAttribute('aria-label') || '').trim();
-            if (t2) return t2;
+          const ab = row.querySelector('abbr[aria-label]');
+          if (ab) {
+            const t1 = (ab.innerText || '').trim(); if (t1) return t1;
+            const t2 = (ab.getAttribute('aria-label') || '').trim(); if (t2) return t2;
           }
-          } catch {}
-          return '';
-        };
-        const ab = pickAbbr();
-        if (ab) return ab;
+        } catch {}
         try {
           const spans = Array.from(row.querySelectorAll('span'));
           for (const s of spans) {
             const txt = (s.innerText || s.textContent || '').trim();
             if (!txt) continue;
-            if (/agora|now|just\snow/i.test(txt)) return txt;
+            if (/agora|now|just\s*now/i.test(txt)) return txt;
             if (/\d+\s(s|seg|sec|secs?|seconds?|min|m|mins?|minutes?|hora|horas?|h|hours?|dia|dias?|d|seman|sem|weeks?|w)/i.test(txt)) return txt;
           }
         } catch {}
         return '';
+      }
+      function _previewOf(row) {
+        if (!row) return '';
+        try {
+          const txt = (row.innerText || row.textContent || '').replace(/\s+/g, ' ').trim();
+          return (txt || '').slice(0, 400);
+        } catch { return ''; }
       }
       const anchors = els.filter(a => {
         const href = a.getAttribute('href') || a.href || '';
@@ -1944,25 +1946,17 @@ async function coletaChatsMarketplaceTodos(page) {
       const arr = anchors.map(a => {
         const href = a.getAttribute('href') || a.href || '';
         const id = _extraiId(href);
-        const row = a.closest('div[role="row"]') || a.parentElement;
-        const tempo = _extraiTempo(row);
-        return { id, tempo, href };
+        const row = _rowOf(a);
+        const tempo = _tempoOf(row);
+        const preview = _previewOf(row);
+        return { id, tempo, href, preview };
       }).filter(o => o.id);
       const map = new Map();
       for (const it of arr) if (!map.has(it.id)) map.set(it.id, it);
       return Array.from(map.values());
     });
-    
-    if (process.env.VIRTUS_FEED_DEBUG === '1') {
-      try {
-        const sample = items.slice(0, 8).map(i => ({ id: i.id, tempo: i.tempo, href: i.href }));
-        console.log(`[VIRTUS][FEED_SAMPLE]`, sample);
-      } catch {}
-    }
-    
     return items;
-  } catch (err) {
-    if (VIRTUS_DETAILED_DEBUG) { logger.debug('[VIRTUS] Erro em coletaChatsMarketplaceTodos', { err: String(err) }); }
+  } catch {
     return [];
   }
 }
@@ -2004,11 +1998,34 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
   
   async function gotoInboxRobust(route) {
     try {
-      try {
-        stepLog.appendJSONL(nome || 'global', 'virtus', { step: 'nav_guard_block', route, ts: Date.now() });
-      } catch {}
-      // Navegação bloqueada - apenas loga
-      return false;
+      await page.goto(`https://www.messenger.com${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+      
+  try {
+    const browserJs = require('./browser.js');
+    if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
+      await browserJs.resolveNonceIfPresent(page).catch(()=>{});
+    }
+    if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
+      await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
+    }
+  } catch {}
+      
+  const ok = await Promise.race([
+    page.waitForFunction(() => {
+      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
+      const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
+          return hasAnchor || hasRow;
+        }, { timeout: 8000 }),
+        page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).catch(() => null),
+        page.waitForSelector('div[role="row"]', { timeout: 8000 }).catch(() => null)
+      ]);
+      
+      if (ok) {
+        return true;
+      } else {
+        logger.warn(`[VIRTUS][garantirMarketplace] Rota ${route} não encontrou anchors/rows`, nome ? { nome } : {});
+        return false;
+      }
     } catch (e) {
       logger.warn(`[VIRTUS][garantirMarketplace] Erro ao tentar rota ${route}: ${e && e.message || e}`, nome ? { nome } : {});
       return false;
@@ -2087,12 +2104,11 @@ async function scrollChatsToTop(page, nome) {
   }
 }
 
-// PATCH: bloqueia navegação por URL completamente
 async function openChatByUrl(p, chatId, { timeoutMs = 8000 } = {}) {
   try {
-    stepLog.appendJSONL('global', 'virtus', { step: 'nav_forbidden_openChatByUrl_call', chatId, ts: Date.now() });
+    stepLog.appendJSONL('global', 'virtus', { step: 'openChatByUrl_forbidden_call', chatId, ts: Date.now() });
   } catch {}
-  return false;
+  return false; // Proibido usar URL para abrir chat
 }
 
 async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}) {
@@ -2129,6 +2145,12 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}
       await sleep(250 + Math.floor(Math.random() * 200));
       try { await scrollChatsToTop(p, null); } catch {}
     }
+    
+    // Proibido fallback por URL ao abrir chat
+    try {
+      stepLog.appendJSONL('global', 'virtus', { step: 'forbidden_url_fallback_skipped', chatId, ts: Date.now() });
+    } catch {}
+    return false;
   } catch {}
   return false;
 }
@@ -2670,12 +2692,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (!running || !epochOk()) return null;
             await patchPage(nome, newP, coords);
             if (!running || !epochOk()) return null;
-            try {
-              const browserJs = require('./browser.js');
-              if (browserJs && typeof browserJs.enforceClickOnlyNavigation === 'function') {
-                await browserJs.enforceClickOnlyNavigation(newP, nome);
-              }
-            } catch {}
             await ensureMinimizedWindowForPage(newP);
           } catch (e) {
             logger.warn('ensurePage: falha patchPage/minimize na nova aba', { nome }, e);
@@ -2916,10 +2932,71 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         let finalLockUntil = fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil ? Number(fsmState.freeze.finalizationUntil) : 0;
         let finalLocked = finalLockUntil > now;
 
-        // Obtém schedule e openAt
+        // FEED DIGEST: assina preview e agenda 45s SEM abrir chat
+        function normFeed(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim(); } catch { return String(s||'').toLowerCase().trim(); } }
+        const feedPreview = normFeed((it.preview || it.tempo || '').slice(0,400));
+        const feedSig = sha1(feedPreview || '');
+        const prevFeedSig = String((fsmState && fsmState.cursor && fsmState.cursor.feed && fsmState.cursor.feed.sig) || '');
         const schedule = fsmState && fsmState.schedule || {};
         const collectSchedule = schedule.collect || {};
         const openAt = Number(collectSchedule.openAt || 0);
+
+        // Atualiza assinatura do feed
+        if (!fsmState || !fsmState.discoveredAt) {
+          if (!finalLocked) {
+            const timerOpenAt = now + 45000;
+            await virtusFSM.patch(nome, chatId, {
+              discoveredAt: now,
+              cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now } },
+              schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: timerOpenAt, startedAt: now } }
+            });
+            stepLog.appendJSONL(nome, 'virtus', { step: 'feed_detect_set_timer', chatId, openAt: timerOpenAt, feedSig, ts: now });
+            if (!getCollectTimerMap(nome).has(chatId)) {
+              const delay = Math.max(0, timerOpenAt - Date.now());
+              const timerId = setTimeout(() => {
+                stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() });
+              }, delay);
+              getCollectTimerMap(nome).set(chatId, timerId);
+            }
+            continue; // só agenda; não abre chat
+          } else {
+            await virtusFSM.patch(nome, chatId, {
+              discoveredAt: now,
+              cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now } }
+            });
+            continue;
+          }
+        } else {
+          // Já descoberto: se a assinatura do feed mudou, reprograma 45s
+          if (feedSig && feedSig !== prevFeedSig) {
+            await virtusFSM.patch(nome, chatId, {
+              cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now } }
+            });
+            if (!finalLocked) {
+              const newOpenAt = now + 45000;
+              await virtusFSM.patch(nome, chatId, {
+                schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: newOpenAt, startedAt: collectSchedule.startedAt || now } }
+              });
+              clearCollectTimer(nome, chatId);
+              const delay = Math.max(0, newOpenAt - Date.now());
+              const tid = setTimeout(() => {
+                stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() });
+              }, delay);
+              getCollectTimerMap(nome).set(chatId, tid);
+              stepLog.appendJSONL(nome, 'virtus', { step: 'feed_change_set_timer', chatId, openAt: newOpenAt, feedSig, ts: now });
+              continue; // reprogramado; não abre agora
+            } else {
+              continue; // congelado: não abre
+            }
+          } else {
+            // Sem mudança: só atualiza seenAt do feed (facultativo)
+            if (fsmState && fsmState.cursor && fsmState.cursor.feed) {
+              await virtusFSM.patch(nome, chatId, {
+                cursor: { ...(fsmState.cursor || {}), feed: { ...(fsmState.cursor.feed || {}), seenAt: now } }
+              });
+            }
+          }
+        }
 
         // BLINDAGEM: se openAt já existe (herdado/estado antigo) mas discoveredAt não existe, corrige para manter pipeline íntegro.
         if ((!fsmState || !fsmState.discoveredAt) && openAt > 0) {
@@ -3751,18 +3828,31 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const p = await ensurePage();
         if (!running || !epochOk()) return;
         if (!p) { await sleep(2500); continue; }
-        // Espera UI Messenger ficar visível, sem navegar
-        try {
-          await Promise.race([
-            p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 30000 }),
-            p.waitForSelector('div[role="row"]', { timeout: 30000 })
-          ]);
-        } catch {
-          stepLog.appendJSONL(nome, 'virtus', { step: 'messenger_ui_wait_timeout', ts: Date.now() });
-          await sleep(2500);
+        if (p.url() === 'about:blank' || !/messenger\.com\/marketplace/i.test(p.url())) {
+          try {
+            if (!running || !epochOk()) return;
+            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          } catch {
+            bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue;
+          }
         }
+        if (!running || !epochOk()) return;
+        await maybeGuaranteeMarketplaceFast(p, nome);
+        try {
+          const ok = await scrollChatsToTop(p, nome);
+          setTimeout(() => {
+            if (!running || !epochOk()) return;
+            try {
+              const b = getBrowserFromPage(p);
+              if (b && b._sendLock && b._sendLock.active) return;
+            } catch {}
+            scrollChatsToTop(p, nome);
+          }, 800);
+        } catch {}
+        ready = true;
+        logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
         NAV_CLICK_ONLY = true;
-        stepLog.appendJSONL(nome, 'virtus', { step: 'nav_click_only_lock_enabled' });
+        try { stepLog.appendJSONL(nome, 'virtus', { step: 'nav_click_only_lock_enabled' }); } catch {}
         
         function onNewChatDetected({ id, tempo }) {
           const chatId = id;
