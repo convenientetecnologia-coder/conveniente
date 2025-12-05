@@ -139,18 +139,18 @@ function chooseNextMissingField(extraction, prev = {}) {
 
 function buildAskTextFor(field) {
   if (field === 'telefone') {
-    return 'Desculpa, não consegui entender o número completo. Envie tudo junto, por favor: DDD + número do WhatsApp.';
+    return 'Pode enviar o WhatsApp completo com DDD (apenas números)?';
   }
   if (field === 'item') {
-    return 'Perfeito. O que você deseja transportar?';
+    return 'O que você deseja transportar?';
   }
   if (field === 'endereco_saida') {
-    return 'Certo! Qual é o endereço completo de onde o item será retirado? (pode ser rua, bairro ou ponto de referência)';
+    return 'Qual é o endereço completo de onde o item será retirado?';
   }
   if (field === 'endereco_destino') {
-    return 'Ótimo! E qual é o endereço completo de destino?';
+    return 'E qual é o endereço completo de destino?';
   }
-  return 'Beleza! Se puder, me traga mais detalhes, por favor.';
+  return 'Pode detalhar um pouco mais, por favor?';
 }
 
 function normalizePhoneExtraction(raw) {
@@ -462,7 +462,7 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
     const lastClientMsg = historico.filter(m => m.autor === 'cliente').slice(-1)[0]?.texto || null;
 
     let basePrompt = buildSystemPrompt(contexto || {});
-    const forcedInjection = '\n\nATENÇÃO: Você precisa responder SEMPRE, mesmo que ache que não entendeu a mensagem do cliente. NUNCA retorne resposta vazia. Se o cliente mandar telefone picado (DDD em uma mensagem e número em outra), junte os dois, confirme internamente e avance para o PRÓXIMO campo faltante. NUNCA peça dados já informados, e pergunte apenas o campo ausente.';
+    const forcedInjection = '\n\nATENÇÃO: Proibido repetir ou recapitular o que já foi entendido. Apenas pergunte o próximo campo faltante, sem mencionar os campos já informados. Se o cliente enviar DDD e parcial separados, junte internamente e avance para o próximo campo. Nunca peça dados já informados; pergunte somente o que falta. Você nunca deve dizer frases como "já anotei", "já registrei", "perfeito, já anotei", "já confirmei", "já foi", etc. Seja sempre objetivo e direto. Não use muletas tipo "perfeito", "certo", "ótimo" no início da resposta. Não ecoe, não recapitule. Dê sempre apenas a próxima pergunta.';
 
     const messages = buildMessages(historico, 30);
 
@@ -552,6 +552,27 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
         finalResult.control.shouldReply = false;
       }
     }
+
+    // Anti-redundância: se o modelo insistir em "já anotei / já registrei", trocamos pela próxima pergunta faltante
+    try {
+      const prevExtraction = (stateBefore && stateBefore.lastExtraction) || (stateBefore && stateBefore.data && stateBefore.data.extraction) || {};
+      if (
+        finalResult.answer &&
+        /j[áa]\s+(anotei|registrei|notei|peguei|adicionei)/i.test(finalResult.answer)
+      ) {
+        const askField = chooseNextMissingField(finalResult.extraction, prevExtraction);
+        if (askField) {
+          finalResult.answer = buildAskTextFor(askField);
+          finalResult.control = finalResult.control || {};
+          finalResult.control.shouldReply = true;
+          finalResult.control.askField = askField;
+        }
+      }
+      // Também remove prefixos de muleta ("Perfeito", "Certo", "Ótimo") se existirem
+      if (finalResult.answer) {
+        finalResult.answer = String(finalResult.answer).replace(/^(perfeito|certo|ótimo|otimo)[,!.\s]+/i, '').trim();
+      }
+    } catch {}
 
     return finalResult;
   } catch (e) {

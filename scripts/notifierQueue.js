@@ -17,6 +17,21 @@ function outboxDirFor(perfil) {
 
 function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
 
+function moveToDeadletter(perfil, file) {
+  try {
+    const dir = path.join(outboxDirFor(perfil), 'dead');
+    ensureDir(dir);
+    const base = path.basename(file);
+    const dest = path.join(dir, base);
+    fs.renameSync(file, dest);
+    return dest;
+  } catch { return null; }
+}
+
+function isDeterministicConfigError(respText) {
+  return /VIRTUS_SHEET_RANGE/i.test(String(respText || '')) || /Unable to parse range/i.test(String(respText || ''));
+}
+
 function jobIdFor(kind, payload) {
   // idempotência forte por chat e payload
   const base = `${kind}-${payload.chat_id || payload.chatId || 'na'}`;
@@ -121,6 +136,24 @@ async function processOne(perfil, opts, file) {
     const backoff = DEFAULT_BACKOFFS[Math.min(attempts, DEFAULT_BACKOFFS.length - 1)];
     const nextAttemptAt = Date.now() + backoff;
     const upd = Object.assign({}, job, { attempts: attempts + 1, nextAttemptAt, lastStatus: status, lastResp: (data && JSON.stringify(data).slice(0,300)) || String(text||'').slice(0,300) });
+    const MAX_ATTEMPTS = 5;
+    if (isDeterministicConfigError(text) || (attempts + 1) >= MAX_ATTEMPTS) {
+      // move to dead-letter e abre issue
+      const deadPath = moveToDeadletter(perfil, file);
+      if (opts.logger && opts.logger.error) {
+        opts.logger.error('[NOTIFIER_QUEUE] dead_letter', { perfil, kind: job.kind, id: job.id, attempts: attempts+1, deadPath });
+      }
+      if (opts.stepLog) {
+        try { opts.stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_dead_letter', kind: job.kind, id: job.id, attempts: attempts+1, deadPath, ts: Date.now() }); } catch {}
+      }
+      try {
+        const issues = require('./issues.js');
+        if (issues && typeof issues.append === 'function') {
+          await issues.append(perfil, 'notifier_config_error', `Outbox movida para dead-letter. Provável range inválido: ${text && text.slice(0,200)}`);
+        }
+      } catch {}
+      return;
+    }
     writeAtomicFsync(file, upd);
     if (opts.logger && opts.logger.error) {
       opts.logger.error('[NOTIFIER_QUEUE] http_fail', { perfil, kind: job.kind, id: job.id, status, attempts: upd.attempts });
@@ -134,6 +167,24 @@ async function processOne(perfil, opts, file) {
     const backoff = DEFAULT_BACKOFFS[Math.min(attempts, DEFAULT_BACKOFFS.length - 1)];
     const nextAttemptAt = Date.now() + backoff;
     const upd = Object.assign({}, job, { attempts: attempts + 1, nextAttemptAt, lastError: (e && e.message) || String(e) });
+    // Mesmo escalonamento para dead-letter se passar do máximo de tentativas
+    const MAX_ATTEMPTS = 5;
+    if ((attempts + 1) >= MAX_ATTEMPTS) {
+      const deadPath = moveToDeadletter(perfil, file);
+      if (opts.logger && opts.logger.error) {
+        opts.logger.error('[NOTIFIER_QUEUE] dead_letter', { perfil, kind: job.kind, id: job.id, attempts: attempts+1, deadPath });
+      }
+      if (opts.stepLog) {
+        try { opts.stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_dead_letter', kind: job.kind, id: job.id, attempts: attempts+1, deadPath, ts: Date.now() }); } catch {}
+      }
+      try {
+        const issues = require('./issues.js');
+        if (issues && typeof issues.append === 'function') {
+          await issues.append(perfil, 'notifier_config_error', `Outbox movida para dead-letter após erro persistente (${attempts+1} tentativas). Último erro: ${(e && e.message) || String(e)}`);
+        }
+      } catch {}
+      return;
+    }
     writeAtomicFsync(file, upd);
     if (opts.logger && opts.logger.error) {
       opts.logger.error('[NOTIFIER_QUEUE] net_fail', { perfil, kind: job.kind, id: job.id, attempts: upd.attempts, error: (e && e.message) || e });

@@ -1462,9 +1462,27 @@ const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
 
+function stripRedundantRecap(s) {
+  try {
+    let x = String(s || '');
+    // Remove frases tipo "Perfeito, já anotei [...]" preservando só a pergunta.
+    x = x.replace(/^(?:perfeito|certo|ótimo|otimo)[,!.\s]*(?:j[áa]\s+)?(?:anotei|registrei|notei|peguei|adicionei)[^?!.]*[.!\s]+/i, '').trim();
+    // Remove qualquer "já anotei..." isolado
+    x = x.replace(/^(?:j[áa]\s+)?(?:anotei|registrei|notei|peguei|adicionei)[^?!.]*[.!\s]+/i, '').trim();
+    // Remove qualquer muleta "Perfeito" "Certo" "Ótimo" sozinha
+    x = x.replace(/^(perfeito|certo|ótimo|otimo)[,!.\s]+/i, '').trim();
+    return x;
+  } catch { return s; }
+}
+
 async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotifier = false, origin = '', cursorSig = '', cursorCountOverride, cursorDigestOverride, lastClientTsOverride }) {
   try {
-    const payload = String(resposta || '').trim();
+    let payload = String(resposta || '').trim();
+    const sanitized = stripRedundantRecap(payload);
+    if (sanitized) {
+      resposta = sanitized;
+      payload = String(resposta || '').trim();
+    }
     if (!payload) return { ok: false, status: 'dropped' };
 
     // Snapshot de estado atual do chat via FSM
