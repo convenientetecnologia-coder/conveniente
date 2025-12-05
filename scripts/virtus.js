@@ -179,6 +179,24 @@ function normalizeContent(s) {
      .trim().toLowerCase();
 }
 
+function sanitizeFeedPreview(s) {
+  try {
+    let t = String(s || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g,'')
+      .toLowerCase();
+
+    // Remove indicações de tempo/voláteis
+    t = t.replace(/\b(agora|just\s*now|now|hoje|ontem)\b/g, ' ');
+    t = t.replace(/\b\d{1,2}:\d{2}\b/g, ' ');
+    t = t.replace(/\b\d+\s*(s|seg|sec|secs?|seconds?|min|mins?|minute|minuto|minutos|h|hora|horas|d|dia|dias|sem|semana|semanas|week|weeks)\b/g, ' ');
+    t = t.replace(/\s+/g, ' ').trim();
+    return t;
+  } catch {
+    return String(s || '').trim();
+  }
+}
+
 function nearEqual(a, b) {
   const na = normalizeContent(a), nb = normalizeContent(b);
   if (!na || !nb) return false;
@@ -1538,6 +1556,8 @@ const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
 
 const COLETA_FINAL_MS = parseInt(process.env.VIRTUS_COLETA_FINAL_MS || '600000', 10); // 10min
 const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '259200000', 10); // 72h
+const VIRTUS_COLLECT_IDLE_MS = parseInt(process.env.VIRTUS_COLLECT_IDLE_MS || '120000', 10); // 2min de repouso por chat pós-coleta
+const VIRTUS_PROFILE_COLLECT_THROTTLE_MS = parseInt(process.env.VIRTUS_PROFILE_COLLECT_THROTTLE_MS || '90000', 10); // 90s de repouso global do perfil pós-coleta
 
 // Variáveis globais para controle de backoff e falhas
 let recoverBackoffMs = 0;
@@ -1578,6 +1598,7 @@ function setScanBlocked(perfil, blocked, meta = {}) {
   }
 }
 const sendInProgressByPerfil = new Map();
+const PROFILE_NEXT_COLLECT_AT = new Map(); // nomePerfil -> epoch (ms) mínimo para próxima coleta
 
 // Timers de coleta (45s após evento)
 const collectTimers = new Map(); // nomePerfil -> Map(chatId -> timeoutId)
@@ -2932,25 +2953,48 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         let finalLockUntil = fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil ? Number(fsmState.freeze.finalizationUntil) : 0;
         let finalLocked = finalLockUntil > now;
 
-        // FEED DIGEST: assina preview e agenda 45s SEM abrir chat
-        function normFeed(s){ try { return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim(); } catch { return String(s||'').toLowerCase().trim(); } }
-        const feedPreview = normFeed((it.preview || it.tempo || '').slice(0,400));
-        const feedSig = sha1(feedPreview || '');
-        const prevFeedSig = String((fsmState && fsmState.cursor && fsmState.cursor.feed && fsmState.cursor.feed.sig) || '');
+        // FEED DIGEST: agenda coleta somente por evento estável do feed (sem tempo)
         const schedule = fsmState && fsmState.schedule || {};
         const collectSchedule = schedule.collect || {};
         const openAt = Number(collectSchedule.openAt || 0);
+        const idleUntil = Number(collectSchedule.idleUntil || 0);
+        const nextProfileCollectAt = Number(PROFILE_NEXT_COLLECT_AT.get(nome) || 0);
 
-        // Atualiza assinatura do feed
+        const feedCursor = (fsmState && fsmState.cursor && fsmState.cursor.feed) || {};
+        const lastConsumedFeedSig = String(feedCursor.lastConsumedSig || '');
+        const pendingFeedSig = String(feedCursor.pendingSig || '');
+        const prevFeedSig = String(feedCursor.sig || '');
+
+        const feedPreviewRaw = String((it.preview || '')).slice(0, 400);
+        const feedSig = sha1(sanitizeFeedPreview(feedPreviewRaw));
+
+        // 4.1) Se ainda em cooldown global do perfil, só atualiza seenAt e segue
+        if (nextProfileCollectAt > now) {
+          await virtusFSM.patch(nome, chatId, {
+            cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
+          });
+          continue;
+        }
+
+        // 4.2) Se ainda em cooldown por chat, não agenda, só atualiza feed cursor
+        if (idleUntil > now) {
+          await virtusFSM.patch(nome, chatId, {
+            cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
+          });
+          continue;
+        }
+
+        // 4.3) Primeira detecção: agenda 45s com token ligado ao feedSig, se houver sig estável
         if (!fsmState || !fsmState.discoveredAt) {
-          if (!finalLocked) {
+          if (!finalLocked && feedSig) {
             const timerOpenAt = now + 45000;
             await virtusFSM.patch(nome, chatId, {
               discoveredAt: now,
-              cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now } },
-              schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: timerOpenAt, startedAt: now } }
+              cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now, pendingSig: feedSig } },
+              schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: timerOpenAt, startedAt: now, tokenSig: feedSig } }
             });
             stepLog.appendJSONL(nome, 'virtus', { step: 'feed_detect_set_timer', chatId, openAt: timerOpenAt, feedSig, ts: now });
+            // Arma timer apenas 1x por chatId
             if (!getCollectTimerMap(nome).has(chatId)) {
               const delay = Math.max(0, timerOpenAt - Date.now());
               const timerId = setTimeout(() => {
@@ -2958,45 +3002,41 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               }, delay);
               getCollectTimerMap(nome).set(chatId, timerId);
             }
-            continue; // só agenda; não abre chat
           } else {
+            // Congelado ou sem sig: só atualiza cursor
             await virtusFSM.patch(nome, chatId, {
               discoveredAt: now,
               cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now } }
             });
-            continue;
           }
-        } else {
-          // Já descoberto: se a assinatura do feed mudou, reprograma 45s
-          if (feedSig && feedSig !== prevFeedSig) {
-            await virtusFSM.patch(nome, chatId, {
-              cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now } }
-            });
-            if (!finalLocked) {
-              const newOpenAt = now + 45000;
-              await virtusFSM.patch(nome, chatId, {
-                schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: newOpenAt, startedAt: collectSchedule.startedAt || now } }
-              });
-              clearCollectTimer(nome, chatId);
-              const delay = Math.max(0, newOpenAt - Date.now());
-              const tid = setTimeout(() => {
-                stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() });
-              }, delay);
-              getCollectTimerMap(nome).set(chatId, tid);
-              stepLog.appendJSONL(nome, 'virtus', { step: 'feed_change_set_timer', chatId, openAt: newOpenAt, feedSig, ts: now });
-              continue; // reprogramado; não abre agora
-            } else {
-              continue; // congelado: não abre
-            }
-          } else {
-            // Sem mudança: só atualiza seenAt do feed (facultativo)
-            if (fsmState && fsmState.cursor && fsmState.cursor.feed) {
-              await virtusFSM.patch(nome, chatId, {
-                cursor: { ...(fsmState.cursor || {}), feed: { ...(fsmState.cursor.feed || {}), seenAt: now } }
-              });
-            }
-          }
+          continue;
         }
+
+        // 4.4) Mudança real do feed (sig estável) e não consumida: reprograma 45s com novo token
+        if (feedSig && feedSig !== prevFeedSig && feedSig !== lastConsumedFeedSig) {
+          await virtusFSM.patch(nome, chatId, {
+            cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now, pendingSig: feedSig } }
+          });
+          if (!finalLocked) {
+            const newOpenAt = now + 45000;
+            await virtusFSM.patch(nome, chatId, {
+              schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: newOpenAt, startedAt: collectSchedule.startedAt || now, tokenSig: feedSig } }
+            });
+            clearCollectTimer(nome, chatId);
+            const delay = Math.max(0, newOpenAt - Date.now());
+            const tid = setTimeout(() => {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() });
+            }, delay);
+            getCollectTimerMap(nome).set(chatId, tid);
+            stepLog.appendJSONL(nome, 'virtus', { step: 'feed_change_set_timer', chatId, openAt: newOpenAt, feedSig, ts: now });
+          }
+          continue;
+        }
+
+        // 4.5) Sem mudança relevante do feed: manter seenAt atualizado
+        await virtusFSM.patch(nome, chatId, {
+          cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
+        });
 
         // BLINDAGEM: se openAt já existe (herdado/estado antigo) mas discoveredAt não existe, corrige para manter pipeline íntegro.
         if ((!fsmState || !fsmState.discoveredAt) && openAt > 0) {
@@ -3077,8 +3117,40 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         // Timer venceu ou não existe - processa coleta real
         if (openAt > 0) {
+          // 5.1) Se throttle global do perfil ainda em vigor, reprograma abertura deste chat
+          if (nextProfileCollectAt > now) {
+            const deferAt = nextProfileCollectAt + 3000 + Math.floor(Math.random() * 4000); // 3–7s após fim do throttle
+            await virtusFSM.patch(nome, chatId, {
+              schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: deferAt } }
+            });
+            clearCollectTimer(nome, chatId);
+            const delay = Math.max(0, deferAt - Date.now());
+            const tid = setTimeout(() => { stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() }); }, delay);
+            getCollectTimerMap(nome).set(chatId, tid);
+            stepLog.appendJSONL(nome, 'virtus', { step: 'timer_deferred_profile_throttle', chatId, deferAt, ts: now });
+            continue;
+          }
+
+          // 5.2) Validação do token: só coletar se o token casar com o feed atual/pending
+          const tokenSig = String((collectSchedule && collectSchedule.tokenSig) || '');
+          const curFeedSig = sha1(sanitizeFeedPreview(String((it.preview || '')).slice(0, 400)));
+          const curPending = String(((fsmState && fsmState.cursor && fsmState.cursor.feed && fsmState.cursor.feed.pendingSig) || ''));
+
+          if (!tokenSig || (curFeedSig && tokenSig !== curFeedSig && tokenSig !== curPending)) {
+            // Token desatualizado: reprograma para 45s
+            const rearmAt = now + 45000;
+            await virtusFSM.patch(nome, chatId, {
+              schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: rearmAt, tokenSig: curFeedSig || tokenSig || '' } }
+            });
+            clearCollectTimer(nome, chatId);
+            const delay = Math.max(0, rearmAt - Date.now());
+            const tid = setTimeout(() => { stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() }); }, delay);
+            getCollectTimerMap(nome).set(chatId, tid);
+            stepLog.appendJSONL(nome, 'virtus', { step: 'timer_rearm_token_mismatch', chatId, tokenSig, curFeedSig, curPending, ts: now });
+            continue;
+          }
+
           stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, openAt, now, ts: now });
-          // Limpa timer quando consumir
           clearCollectTimer(nome, chatId);
           await virtusFSM.patch(nome, chatId, {
             schedule: {
@@ -3095,8 +3167,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         // Enfileira processamento serial do chat (com NavLock)
         await enqueueProcess(nome, async () => {
+          setScanBlocked(nome, true, { reason: 'collect', chatId });
           const p = await ensurePage().catch(()=>null);
-          if (!p) return;
+          if (!p) {
+            setScanBlocked(nome, false);
+            return;
+          }
 
           // Abre chat e coleta histórico (coleta real)
           const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
@@ -3780,6 +3856,39 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch (e) {
           logger.warn('[SCAN] Falha ao processar chat', { nome, chatId, error: (e && e.message) || String(e) });
         }
+
+        try {
+          // Atualiza lastConsumedFeedSig com o token consumido e zera pending/token
+          let stAfter = null;
+          try { stAfter = virtusFSM.get(nome, chatId); } catch {}
+          const cs = (stAfter && stAfter.schedule && stAfter.schedule.collect) || {};
+          const tokenSigFinal = String(cs.tokenSig || '');
+
+          await virtusFSM.patch(nome, chatId, {
+            cursor: {
+              ...(stAfter && stAfter.cursor || {}),
+              feed: {
+                ...((stAfter && stAfter.cursor && stAfter.cursor.feed) || {}),
+                lastConsumedSig: tokenSigFinal || (stAfter && stAfter.cursor && stAfter.cursor.feed && stAfter.cursor.feed.pendingSig) || '',
+                pendingSig: ''
+              }
+            },
+            schedule: {
+              ...(stAfter && stAfter.schedule || {}),
+              collect: {
+                ...(cs || {}),
+                idleUntil: Date.now() + VIRTUS_COLLECT_IDLE_MS,
+                openAt: 0,
+                tokenSig: ''
+              }
+            },
+            lastScanAt: Date.now()
+          });
+
+          // Cooldown global do perfil
+          PROFILE_NEXT_COLLECT_AT.set(nome, Date.now() + VIRTUS_PROFILE_COLLECT_THROTTLE_MS);
+        } catch {}
+        setScanBlocked(nome, false);
         });
       }
     } catch (e) {
