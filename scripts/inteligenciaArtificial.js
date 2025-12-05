@@ -78,6 +78,81 @@ function isValidBRPhoneWithDDD(num) {
   }
 }
 
+function combinePhoneParts(ddd, parcial) {
+  try {
+    const d = String(ddd || '').replace(/\D/g, '');
+    const p = String(parcial || '').replace(/\D/g, '');
+    if (!d || !p) return null;
+    const full = d + p;
+    return isValidBRPhoneWithDDD(full) ? full : null;
+  } catch { return null; }
+}
+
+function findLatestDDDFromMessages(historico) {
+  try {
+    const arr = Array.isArray(historico) ? historico.slice().reverse() : [];
+    for (const m of arr) {
+      if (!m || m.autor !== 'cliente' || !m.texto) continue;
+      const t = String(m.texto).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      // Padrões: "48", "(48)", "ddd 48"
+      let mm = t.match(/\b(?:ddd\s*)?\(?([1-9]{2})\)?\b/);
+      if (mm && mm[1]) return mm[1];
+    }
+  } catch {}
+  return null;
+}
+
+function mergeWithPrevExtraction(prev, cur, historico) {
+  const out = Object.assign({}, cur || {});
+  const prevSafe = Object.assign({}, prev || {});
+  if (!out.ddd) {
+    const heur = findLatestDDDFromMessages(historico);
+    if (heur) out.ddd = heur;
+  }
+  if (!out.ddd && prevSafe.ddd) out.ddd = prevSafe.ddd;
+  if (!out.telefone_parcial && prevSafe.telefone_parcial) out.telefone_parcial = prevSafe.telefone_parcial;
+  if (!out.telefone) {
+    const combined = combinePhoneParts(out.ddd, out.telefone_parcial);
+    if (combined) {
+      out.telefone = combined;
+      if (!out.ddd) out.ddd = combined.slice(0,2);
+      if (!out.telefone_parcial) out.telefone_parcial = combined.slice(2);
+    }
+  }
+  return out;
+}
+
+function chooseNextMissingField(extraction, prev = {}) {
+  const ext = extraction || {};
+  const agg = {
+    telefone: ext.telefone || prev.telefone || null,
+    item: ext.item || prev.item || null,
+    endereco_saida: ext.endereco_saida || prev.endereco_saida || null,
+    endereco_destino: ext.endereco_destino || prev.endereco_destino || null
+  };
+  if (!isValidBRPhoneWithDDD(agg.telefone)) return 'telefone';
+  if (!agg.item) return 'item';
+  if (!agg.endereco_saida) return 'endereco_saida';
+  if (!agg.endereco_destino) return 'endereco_destino';
+  return null;
+}
+
+function buildAskTextFor(field) {
+  if (field === 'telefone') {
+    return 'Desculpa, não consegui entender o número completo. Envie tudo junto, por favor: DDD + número do WhatsApp.';
+  }
+  if (field === 'item') {
+    return 'Perfeito. O que você deseja transportar?';
+  }
+  if (field === 'endereco_saida') {
+    return 'Certo! Qual é o endereço completo de onde o item será retirado? (pode ser rua, bairro ou ponto de referência)';
+  }
+  if (field === 'endereco_destino') {
+    return 'Ótimo! E qual é o endereço completo de destino?';
+  }
+  return 'Beleza! Se puder, me traga mais detalhes, por favor.';
+}
+
 function normalizePhoneExtraction(raw) {
   // Somente campos permitidos: telefone, ddd, telefone_parcial, item, endereco_saida, endereco_destino
   // NUNCA inclua ajudante, missing, descricao, obs, itens (apenas singular "item")
@@ -171,7 +246,7 @@ function preventEcho(lastClientMsg, answer) {
     const answerNorm = String(answer).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
     if (clientNorm.length < 10) return answer;
     if (answerNorm.includes(clientNorm) || clientNorm.includes(answerNorm)) {
-      return null;
+      return answer; // NÃO retorne null, o fallback humana vai tratar caso necessário
     }
     return answer;
   } catch {
@@ -386,7 +461,9 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
     const historico = Array.isArray(mensagens) ? mensagens : [];
     const lastClientMsg = historico.filter(m => m.autor === 'cliente').slice(-1)[0]?.texto || null;
 
-    const systemPrompt = buildSystemPrompt(contexto || {});
+    let basePrompt = buildSystemPrompt(contexto || {});
+    const forcedInjection = '\n\nATENÇÃO: Você precisa responder SEMPRE, mesmo que ache que não entendeu a mensagem do cliente. NUNCA retorne resposta vazia. Se o cliente mandar telefone picado (DDD em uma mensagem e número em outra), junte os dois, confirme internamente e avance para o PRÓXIMO campo faltante. NUNCA peça dados já informados, e pergunte apenas o campo ausente.';
+
     const messages = buildMessages(historico, 30);
 
     if (!messages.length) {
@@ -396,125 +473,106 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
         control: { shouldReply: false, askField: null, finalMessage: false },
         meta: { confidence: 0.0, tokensUsed: 0, error: 'no_messages' }
       };
-      const DEBUG_MASTER = process.env.AI_DEBUG_MASTER === '1';
-      if (respond || DEBUG_MASTER) {
-        appendLog(perfil, chatId, {
-          ts: Date.now(),
-          type: 'request',
-          perfil,
-          chatId,
-          respond,
-          messagesCount: 0,
-          stateBefore,
-          result,
-          durationMs: Date.now() - startTs
-        });
-      }
+      appendLog(perfil, chatId, { ts: Date.now(), type: 'request', perfil, chatId, respond, messagesCount: 0, stateBefore, result, durationMs: Date.now() - startTs });
       return result;
     }
 
-    // Rastreabilidade/Logs por request de IA: antes da chamada GPT/LLM
-    const DEBUG_MASTER = process.env.AI_DEBUG_MASTER === '1';
-    if (respond || DEBUG_MASTER) {
-      appendLog(perfil, chatId, {
-        type: 'llm_call_start',
-        perfil,
-        chatId,
-        respond,
-        ts: Date.now(),
-        messagesCount: messages.length
-      });
+    let content = '';
+    let usage = {};
+    let result = null;
+    let attempts = 0;
+    let lastErr = null;
+    for (attempts = 1; attempts <= 2; attempts++) {
+      try {
+        const sysPrompt = attempts === 1 ? basePrompt : (basePrompt + forcedInjection);
+        const callStartTs = Date.now();
+        const out = await callOpenAI(messages, sysPrompt, respond);
+        content = out.content || '';
+        usage = out.usage || {};
+        if (!content || !String(content).trim()) throw new Error('openai_empty_response');
+        result = parseResponse(content, lastClientMsg);
+        break; // sucesso
+      } catch (e) {
+        lastErr = e;
+        if (attempts === 2) {
+          // manter último erro
+        } else {
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
     }
 
-    const callStartTs = Date.now();
-    const { content, usage } = await callOpenAI(messages, systemPrompt, respond);
-    const callDurationMs = Date.now() - callStartTs;
-    const result = parseResponse(content, lastClientMsg);
-
-    // Rastreabilidade/Logs por request de IA: após o retorno do GPT/LLM
-    if (respond || DEBUG_MASTER) {
-      appendLog(perfil, chatId, {
-        type: 'llm_call_end',
-        perfil,
-        chatId,
-        respond,
-        requestTokens: usage.prompt_tokens || 0,
-        responseTokens: usage.completion_tokens || 0,
-        totalTokens: usage.total_tokens || 0,
-        durationMs: callDurationMs,
-        ts: Date.now()
-      });
-    }
-
+    // Salva trace do ciclo (opcional, se desejado pode logar)
     stateAfter = Object.assign({}, stateBefore, {
       lastCallAt: Date.now(),
-      lastExtraction: result.extraction,
-      lastAnswer: result.answer,
+      lastExtraction: result && result.extraction || {},
+      lastAnswer: result && result.answer || null,
       totalCalls: (stateBefore.totalCalls || 0) + 1
     });
 
     await saveState(perfil, chatId, stateAfter);
 
-    // Control de logs: todos os logs detalhados só são salvos se respond===true ou AI_DEBUG_MASTER==='1'
-    if (respond || DEBUG_MASTER) {
-      appendLog(perfil, chatId, {
-        ts: Date.now(),
-        type: 'request',
-        perfil,
-        chatId,
-        respond,
-        messagesCount: messages.length,
-        systemPromptLength: systemPrompt.length,
-        requestTokens: usage.prompt_tokens || 0,
-        responseTokens: usage.completion_tokens || 0,
-        totalTokens: usage.total_tokens || 0,
-        stateBefore,
-        stateAfter,
-        rawResponse: content,
-        result,
-        durationMs: Date.now() - startTs
-      });
+    // Pós-processamento determinístico (junção DDD + parcial + avanço)
+    const prevExtraction = (stateBefore && stateBefore.lastExtraction)
+      || (stateBefore && stateBefore.data && stateBefore.data.extraction)
+      || {};
+    const mergedExtraction = mergeWithPrevExtraction(prevExtraction, result ? result.extraction : {}, historico);
+
+    let finalResult = result || {
+      extraction: mergedExtraction,
+      answer: null,
+      control: { shouldReply: false, askField: null, finalMessage: false },
+      meta: { confidence: 0.0, tokensUsed: 0 }
+    };
+
+    finalResult.extraction = mergedExtraction;
+
+    const hasTel = isValidBRPhoneWithDDD(mergedExtraction.telefone);
+    let askField = finalResult.control && typeof finalResult.control.askField !== 'undefined'
+      ? finalResult.control.askField
+      : null;
+    const nextByState = chooseNextMissingField(mergedExtraction, prevExtraction);
+
+    if (hasTel && askField === 'telefone') {
+      askField = nextByState;
+      finalResult.control.askField = askField;
+      finalResult.control.shouldReply = true;
+      finalResult.answer = buildAskTextFor(askField);
     }
 
-    if (issues && typeof issues.append === 'function') {
-      try {
-        await issues.append(perfil, 'master_call', `chat=${chatId} tokens=${usage.total_tokens || 0} respond=${respond}`);
-      } catch {}
+    if (!finalResult.answer || !finalResult.control || finalResult.control.shouldReply === false) {
+      const fieldToAsk = nextByState;
+      if (fieldToAsk) {
+        finalResult.answer = buildAskTextFor(fieldToAsk);
+        finalResult.control = finalResult.control || {};
+        finalResult.control.shouldReply = true;
+        finalResult.control.askField = fieldToAsk;
+      } else {
+        finalResult.control = finalResult.control || {};
+        finalResult.control.shouldReply = false;
+      }
     }
 
-    return result;
-
+    return finalResult;
   } catch (e) {
     const errorMsg = (e && e.message) || String(e);
     const result = {
       extraction: {},
-      answer: null,
-      control: { shouldReply: false, askField: null, finalMessage: false },
+      answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',
+      control: { shouldReply: true, askField: null, finalMessage: false },
       meta: { confidence: 0.0, tokensUsed: 0, error: errorMsg }
     };
 
-    appendLog(perfil, chatId, {
-      ts: Date.now(),
-      type: 'error',
-      perfil,
-      chatId,
-      respond,
-      stateBefore,
-      stateAfter,
-      error: errorMsg,
-      result,
-      durationMs: Date.now() - startTs
-    });
+    appendLog(perfil, chatId, { ts: Date.now(), type: 'error', perfil, chatId, respond, stateBefore, stateAfter, error: errorMsg, result, durationMs: Date.now() - startTs });
 
     if (issues && typeof issues.append === 'function') {
-      try {
-        await issues.append(perfil, 'master_error', `chat=${chatId} err=${errorMsg}`);
-      } catch {}
+      try { await issues.append(perfil, 'master_error', `chat=${chatId} err=${errorMsg}`); } catch {}
     }
 
     try { logger.error('[MASTER] error', { perfil, chatId, error: errorMsg }); } catch {}
 
-    throw e;
+    // NUNCA propague erro para fora — sempre retorna resposta ao sistema.
+    return result;
   }
 }
 

@@ -121,23 +121,11 @@ function semanticallyRelevant(m) {
     const t = normalizeContent(String(m.texto || ''));
     if (!t) return false;
 
-    // Telefone/partials (8–11 dígitos) é sempre novidade
-    if (/\b\d{8,11}\b/.test(t)) return true;
+    // Mensagem do cliente é relevante exceto ruído explícito
+    if (isNoiseNorm(t)) return false;
 
-    // Pergunta nova
-    if (/[?？]/.test(m.texto)) return true;
-
-    // Palavras-chave de endereço (aceita informal)
-    if (/\b(rua|avenida|av\.|rodovia|estrada|bairro|kobrasol|centro|mercado|shopping|posto|parque)\b/.test(t)) return true;
-
-    // Itens comuns de frete/mudança
-    if (/\b(cama|sofa|sof[aá]|guarda\-roupa|geladeira|fog[aã]o|moveis|móveis|colch[aã]o|mesa|cadeira|máquina|lavar|secadora)\b/.test(t)) return true;
-
-    // "Disponível?" isolado ou variações curtas sem mais conteúdo NÃO são novidade
-    if ((/disponivel|disponível/.test(t)) && t.length < 40) return false;
-
-    return false;
-
+    // Sempre considerar relevante qualquer texto digitado pelo cliente
+    return true;
   } catch {
     return false;
   }
