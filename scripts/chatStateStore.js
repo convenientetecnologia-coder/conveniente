@@ -24,7 +24,8 @@ function writeAtomic(file, obj) {
     const tmp = file + '.tmp';
     const fdw = fs.openSync(tmp, 'w');
     try {
-      fs.writeFileSync(fdw, JSON.stringify(obj || {}, null, 2),'utf8'); fs.fsyncSync(fdw);
+      fs.writeFileSync(fdw, JSON.stringify(obj || {}, null, 2), 'utf8');
+      fs.fsyncSync(fdw);
     } finally { fs.closeSync(fdw); }
     try { fs.unlinkSync(file); } catch {}
     fs.renameSync(tmp, file);

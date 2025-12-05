@@ -9,6 +9,43 @@ const logger = require('./logger.js');
 
 puppeteer.use(StealthPlugin());
 
+/**
+ * Impede qualquer navegação ativa (goto, reload, setContent) na page. 
+ * Ao tentar, loga 'nav_guard_block' e lança exceção.
+ * Deve ser chamado para TODA page do Messenger via patchPage ou ensurePage!
+ */
+const stepLog = require('./stepLog.js');
+
+function enforceClickOnlyNavigation(page, perfil = 'default') {
+  if (page._virtusNavGuardInstalled) return;
+  page._virtusNavGuardInstalled = true;
+
+  const kill = (methodName) => {
+    if (typeof page[methodName] !== 'function') return;
+    const orig = page[methodName].bind(page);
+    page[methodName] = async (...args) => {
+      try {
+        const target = (args && args[0]) ? String(args[0]).slice(0, 200) : '';
+        stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_block', method: methodName, target, ts: Date.now() });
+      } catch {}
+      throw new Error('nav_forbidden: ' + methodName);
+    };
+    page[methodName]._virtusNavGuard = true;
+  };
+
+  kill('goto');
+  kill('reload');
+  kill('setContent');
+
+  // Visualização: loga toda navegação profunda (hash, etc)
+  page.on('framenavigated', (frame) => {
+    try {
+      const url = String(frame.url() || '');
+      stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_framenavigated', url, ts: Date.now() });
+    } catch {}
+  });
+}
+
 // [REMOVIDO: busca de localização — proteção não necessária]
 
 /**
@@ -259,6 +296,11 @@ async function patchPage(nome, page, coords) {
     await page.evaluateOnNewDocument(() => {
       window.addEventListener('beforeunload', (e) => { try { e.stopImmediatePropagation(); } catch {} }, true);
     });
+  } catch {}
+
+  // Proteção NAV_GUARD — impede uso de page.goto, reload ou setContent
+  try {
+    enforceClickOnlyNavigation(page, nome);
   } catch {}
 }
 
@@ -2102,5 +2144,6 @@ module.exports = {
   gotoMessengerMarketplace,    // <----- NOVO: Helper de navegação inicial do Marketplace
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended
+  detectAccountSuspended,
+  enforceClickOnlyNavigation
 };

@@ -1145,8 +1145,9 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
 
     sendInProgressByPerfil.set(nomePerfil, true);
     setScanBlocked(nomePerfil, true, { reason: 'messenger_send', chatId: proximo.chatId, origin: proximo.origin || '' });
-    try {
-      const respostaFinal = String(proximo.resposta || '').trim();
+    await withNavLock(nomePerfil, async () => {
+      try {
+        const respostaFinal = String(proximo.resposta || '').trim();
       
       // BLOQUEIO: Verifica freeze antes de enviar qualquer mensagem via FSM
       let fsmState = null;
@@ -1313,19 +1314,20 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         }
       } catch {}
 
-    } catch (e) {
-      logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
-      
-      try {
-        if (proximo.key) {
-          const setPend = getPendingSet(nomePerfil);
-          setPend.delete(proximo.key);
-        }
-      } catch {}
-    } finally {
-      sendInProgressByPerfil.set(nomePerfil, false);
-      setScanBlocked(nomePerfil, false);
-    }
+      } catch (e) {
+        logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
+        
+        try {
+          if (proximo.key) {
+            const setPend = getPendingSet(nomePerfil);
+            setPend.delete(proximo.key);
+          }
+        } catch {}
+      } finally {
+        sendInProgressByPerfil.set(nomePerfil, false);
+        setScanBlocked(nomePerfil, false);
+      }
+    });
   }, 2000);
 
   filaEnvioTimers.set(nomePerfil, id);
@@ -2002,34 +2004,11 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
   
   async function gotoInboxRobust(route) {
     try {
-      await page.goto(`https://www.messenger.com${route}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-      
-  try {
-    const browserJs = require('./browser.js');
-    if (browserJs && typeof browserJs.resolveNonceIfPresent === 'function') {
-      await browserJs.resolveNonceIfPresent(page).catch(()=>{});
-    }
-    if (browserJs && typeof browserJs.clickContinuarComo === 'function') {
-      await browserJs.clickContinuarComo(page, { timeout: 12000 }).catch(()=>{});
-    }
-  } catch {}
-      
-  const ok = await Promise.race([
-    page.waitForFunction(() => {
-      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
-      const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
-          return hasAnchor || hasRow;
-        }, { timeout: 8000 }),
-        page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).catch(() => null),
-        page.waitForSelector('div[role="row"]', { timeout: 8000 }).catch(() => null)
-      ]);
-      
-      if (ok) {
-        return true;
-      } else {
-        logger.warn(`[VIRTUS][garantirMarketplace] Rota ${route} não encontrou anchors/rows`, nome ? { nome } : {});
-        return false;
-      }
+      try {
+        stepLog.appendJSONL(nome || 'global', 'virtus', { step: 'nav_guard_block', route, ts: Date.now() });
+      } catch {}
+      // Navegação bloqueada - apenas loga
+      return false;
     } catch (e) {
       logger.warn(`[VIRTUS][garantirMarketplace] Erro ao tentar rota ${route}: ${e && e.message || e}`, nome ? { nome } : {});
       return false;
@@ -2108,11 +2087,12 @@ async function scrollChatsToTop(page, nome) {
   }
 }
 
+// PATCH: bloqueia navegação por URL completamente
 async function openChatByUrl(p, chatId, { timeoutMs = 8000 } = {}) {
   try {
-    await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-    return await assertOnChat(p, chatId, { timeoutMs: 2000 });
-  } catch { return false; }
+    stepLog.appendJSONL('global', 'virtus', { step: 'nav_forbidden_openChatByUrl_call', chatId, ts: Date.now() });
+  } catch {}
+  return false;
 }
 
 async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}) {
@@ -2148,11 +2128,6 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}
 
       await sleep(250 + Math.floor(Math.random() * 200));
       try { await scrollChatsToTop(p, null); } catch {}
-    }
-    
-    // Fallback: se anchor falhou 2x, tenta por URL
-    if (retries >= 2) {
-      return await openChatByUrl(p, chatId, { timeoutMs });
     }
   } catch {}
   return false;
@@ -2695,6 +2670,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (!running || !epochOk()) return null;
             await patchPage(nome, newP, coords);
             if (!running || !epochOk()) return null;
+            try {
+              const browserJs = require('./browser.js');
+              if (browserJs && typeof browserJs.enforceClickOnlyNavigation === 'function') {
+                await browserJs.enforceClickOnlyNavigation(newP, nome);
+              }
+            } catch {}
             await ensureMinimizedWindowForPage(newP);
           } catch (e) {
             logger.warn('ensurePage: falha patchPage/minimize na nova aba', { nome }, e);
@@ -3007,30 +2988,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Early return pós-finalização (anti-loop pós-fechamento)
         if (fsmState && (fsmState.finalizado === true || (fsmState.finalization && fsmState.finalization.closingMessageQueued))) {
           stepLog.appendJSONL(nome, 'virtus', { step: 'skip_after_finalization', chatId });
-          const historicoConversaEarly = await extrairHistoricoConversa(p).catch(() => []);
-          const historicoSanEarly = sanitizeHistoricoRecords(historicoConversaEarly, "");
-          const clientMsgsEarly = historicoSanEarly.filter(m => m && m.autor === 'cliente' && String(m.texto || '').trim());
-          const lastClientTsEarly = clientMsgsEarly.length ? Number(clientMsgsEarly[clientMsgsEarly.length - 1].timestamp || 0) : 0;
-          const clientCountEarly = clientMsgsEarly.length;
-          const clientDigestEarly = clientCountEarly
-            ? sha1(clientMsgsEarly.slice(-10).map(m => normalizeContent(m.texto || '')).join('|'))
-            : '';
-          function uniqSeqNormEarly(list) {
-            const out = []; let prev = '';
-            for (const m of (list || [])) {
-              const t = normalizeContent(String(m && m.texto || ''));
-              if (!t) continue;
-              if (t !== prev) out.push(t);
-              prev = t;
-            }
-            return out;
-          }
-          const semDigestArrEarly = uniqSeqNormEarly(clientMsgsEarly).slice(-10);
-          const clientContentSigEarly = sha1(semDigestArrEarly.join('|'));
-          await virtusFSM.patch(nome, chatId, {
-            cursor: { client: { count: clientCountEarly, digest: clientDigestEarly, contentSig: clientContentSigEarly, lastTs: lastClientTsEarly } },
-            lastScanAt: Date.now(), lastCLIts: lastClientTsEarly
-          });
+          await virtusFSM.patch(nome, chatId, { lastScanAt: Date.now() });
           continue;
         }
 
@@ -3793,31 +3751,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const p = await ensurePage();
         if (!running || !epochOk()) return;
         if (!p) { await sleep(2500); continue; }
-        if (p.url() === 'about:blank' || !/messenger\.com\/marketplace/i.test(p.url())) {
-          try {
-            if (!running || !epochOk()) return;
-            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
-          } catch {
-            bumpRecoverBackoff(); if (recoverBackoffMs) await sleep(recoverBackoffMs); continue;
-          }
-        }
-        if (!running || !epochOk()) return;
-        await maybeGuaranteeMarketplaceFast(p, nome);
+        // Espera UI Messenger ficar visível, sem navegar
         try {
-          const ok = await scrollChatsToTop(p, nome);
-          setTimeout(() => {
-            if (!running || !epochOk()) return;
-            try {
-              const b = getBrowserFromPage(p);
-              if (b && b._sendLock && b._sendLock.active) return;
-            } catch {}
-            scrollChatsToTop(p, nome);
-          }, 800);
-        } catch {}
-        ready = true;
-        logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
+          await Promise.race([
+            p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 30000 }),
+            p.waitForSelector('div[role="row"]', { timeout: 30000 })
+          ]);
+        } catch {
+          stepLog.appendJSONL(nome, 'virtus', { step: 'messenger_ui_wait_timeout', ts: Date.now() });
+          await sleep(2500);
+        }
         NAV_CLICK_ONLY = true;
-        try { stepLog.appendJSONL(nome, 'virtus', { step: 'nav_click_only_lock_enabled' }); } catch {}
+        stepLog.appendJSONL(nome, 'virtus', { step: 'nav_click_only_lock_enabled' });
         
         function onNewChatDetected({ id, tempo }) {
           const chatId = id;
