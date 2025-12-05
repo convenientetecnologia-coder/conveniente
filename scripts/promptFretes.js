@@ -108,8 +108,6 @@ REGRAS DE WHATSAPP (JUNÇÃO DDD+PARCIAL BLINDADA E EXTRAÇÃO EM TEXTO LIVRE)
 
 - Se já tem WhatsApp completo, avance sem redundância.
 
-- Caso não consiga juntar, peça para enviar tudo junto e dê exemplo: "Envie assim: 99123456789 (apenas números)."
-
 
 
 ============================================================
