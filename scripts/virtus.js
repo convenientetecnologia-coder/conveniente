@@ -332,6 +332,43 @@ function pickFinalMessageFromFile() {
   return 'Perfeito! Já repassei seu pedido ao motorista — ele vai te chamar no WhatsApp em alguns minutinhos para combinar os detalhes e informar o orçamento. Qualquer coisa, fico por aqui. Aproveitando: se puder dar uma força, siga nossa página no Instagram 😊 @convenientetecnologia';
 }
 
+async function ensureFinalClosingMessage(perfil, chatId, reason = '') {
+  try {
+    let st = null; try { st = virtusFSM.get(perfil, chatId); } catch {}
+    const alreadyQueued = st && st.finalization && st.finalization.closingMessageQueued;
+    if (alreadyQueued) {
+      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'finalize_closing_message_already', chatId, reason }); } catch {}
+      return false;
+    }
+    const finalMsg = pickFinalMessageFromFile();
+    const q = await queueMessengerSend(perfil, {
+      chatId,
+      resposta: finalMsg,
+      key: `finalize_msg|${chatId}|${sha1(finalMsg)}|${Date.now()}`,
+      origin: 'finalize'
+    });
+    const now = Date.now();
+    const lockUntil = now + FINALIZACAO_FREEZE_MS;
+    await virtusFSM.patch(perfil, chatId, {
+      finalization: Object.assign({}, st && st.finalization || {}, {
+        closingMessageQueued: true,
+        closedAt: now,
+        lockUntil
+      }),
+      finalizado: true,
+      freeze: Object.assign({}, st && st.freeze || {}, {
+        finalizationUntil: lockUntil
+      })
+    });
+    clearFinalizationTimer(perfil, chatId);
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'finalize_closing_message_enqueued', chatId, origin: 'finalize', qStatus: q && q.status || 'unknown', reason }); } catch {}
+    return true;
+  } catch (e) {
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'finalize_closing_message_error', chatId, error: (e && e.message) || String(e), reason }); } catch {}
+    return false;
+  }
+}
+
 function masterJsonlPath(perfil, chatId) {
   const p = path.join(__dirname, '..', 'dados', 'perfis', String(perfil||'default'), 'chats');
   try { fsRaw.mkdirSync(p, { recursive: true }); } catch {}
@@ -380,6 +417,9 @@ async function markPedidoSent(perfil, chatId, payload, source) {
   const auditData = { source, cidade: payload && payload.cidade };
   if (payload && payload.telefone) auditData.telefone = maskPhoneLog(payload.telefone);
   await appendPedidoAudit(perfil, chatId, 'sent_ok', auditData);
+  try {
+    await ensureFinalClosingMessage(perfil, chatId, `from_markPedidoSent_source=${String(source || '')}`);
+  } catch {}
 }
 
 async function appendPedidoAudit(perfil, chatId, event, data) {
@@ -1493,6 +1533,8 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       } catch {}
     } catch {}
 
+    const isFinalize = (origin === 'finalize');
+
     // Bloqueio de finalize duplicado
     if (origin === 'finalize') {
       if (fsmState && fsmState.finalization && fsmState.finalization.closingMessageQueued) {
@@ -1557,29 +1599,36 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     }
 
     // Dedupe por cursorSig (já existente, mantenha)
-    const existeMesmoCursor = sig
-      ? fila.some(it => it && it.chatId === chatId && it.cursorSig === sig)
-      : fila.some(it =>
-          it && it.chatId === chatId &&
-          Number(it.cursorCount || 0) === cCount &&
-          String(it.cursorDigest || '') === cDigest
-        );
-
-    if (existeMesmoCursor) {
-      try {
-        const step = sig ? 'queue_skip_same_cursor_sig' : 'queue_skip_same_cursor';
-        stepLog.appendJSONL(nomePerfil, 'virtus', { step, chatId, sig, cCount, cDigest, origin });
-      } catch {}
-      try { logger.info('[QUEUE] skip_same_cursor', { nomePerfil, chatId, sig, cCount, cDigest, origin }); } catch {}
-      return { ok: false, status: 'dropped' };
+    let existeMesmoCursor = false;
+    if (!isFinalize) {
+      existeMesmoCursor = sig
+        ? fila.some(it => it && it.chatId === chatId && it.cursorSig === sig)
+        : fila.some(it =>
+            it && it.chatId === chatId &&
+            Number(it.cursorCount || 0) === cCount &&
+            String(it.cursorDigest || '') === cDigest
+          );
+      if (existeMesmoCursor) {
+        try {
+          const step = sig ? 'queue_skip_same_cursor_sig' : 'queue_skip_same_cursor';
+          stepLog.appendJSONL(nomePerfil, 'virtus', { step, chatId, sig, cCount, cDigest, origin });
+        } catch {}
+        try { logger.info('[QUEUE] skip_same_cursor', { nomePerfil, chatId, sig, cCount, cDigest, origin }); } catch {}
+        return { ok: false, status: 'dropped' };
+      }
+    } else {
+      try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_finalize_bypass_dedup', chatId, sig, cCount, cDigest }); } catch {}
     }
 
     try {
       const stSent = virtusFSM.get(nomePerfil, chatId);
       const alreadySentSig = String(stSent && stSent.cursor && stSent.cursor.ia && stSent.cursor.ia.sentSig || '');
-      if (sig && alreadySentSig && sig === alreadySentSig) {
+      if (sig && alreadySentSig && sig === alreadySentSig && !isFinalize) {
         stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_sent_sig', chatId, sig, origin, ts: Date.now() });
         return { ok: false, status: 'dropped' };
+      }
+      if (isFinalize) {
+        try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_finalize_bypass_already_sent_sig', chatId, sig }); } catch {}
       }
     } catch {}
 
@@ -2276,7 +2325,10 @@ async function finalizePedido(perfil, chatId, contexto) {
 
   try {
     const already = await loadPedidoSent(perfil, chatId).catch(()=> null);
-    if (already) return;
+    if (already) {
+      await ensureFinalClosingMessage(perfil, chatId, 'pedido_already_marked');
+      return;
+    }
 
     let state = null; try { state = virtusFSM.get(perfil, chatId); } catch {}
     if (state && state.finalizado) return;
@@ -2361,36 +2413,7 @@ async function finalizePedido(perfil, chatId, contexto) {
     // Não remove, não apaga, não considera concluído antes do callback de ACK
     // markPedidoSent será chamado pelo callback de ACK do notificador
 
-    // Mensagem final ao cliente (DO SISTEMA, não da IA)
-    try {
-      let st = null; try { st = virtusFSM.get(perfil, chatId); } catch {}
-      const alreadyQueued = st && st.finalization && st.finalization.closingMessageQueued;
-      if (!alreadyQueued) {
-        const finalMsg = pickFinalMessageFromFile();
-        await queueMessengerSend(perfil, {
-          chatId,
-          resposta: finalMsg,
-          key: `finalize_msg|${chatId}|${sha1(finalMsg)}|${Date.now()}`,
-          origin: 'finalize'
-        });
-        const now = Date.now();
-        // Bloqueio indefinido (10 anos) para não monitorar/reentrar
-        const lockUntil = Date.now() + FINALIZACAO_FREEZE_MS;
-        await virtusFSM.patch(perfil, chatId, {
-          finalization: Object.assign({}, st && st.finalization || {}, {
-            closingMessageQueued: true,
-            closedAt: now,
-            lockUntil
-          }),
-          finalizado: true,
-          freeze: Object.assign({}, st && st.freeze || {}, {
-            finalizationUntil: lockUntil
-          })
-        });
-      }
-    } catch (e) {
-      logger.warn('[FINALIZE] Falha ao enfileirar mensagem final', { perfil, chatId, error: (e && e.message) || e });
-    }
+    await ensureFinalClosingMessage(perfil, chatId, 'from_finalizePedido_after_outbox');
 
     clearFinalizationTimer(perfil, chatId);
 
