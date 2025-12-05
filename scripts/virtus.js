@@ -1380,6 +1380,10 @@ const MESSENGER_INTERVALO_MAX_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_
 const WAIT_BEFORE_REPLY_MIN_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MIN_MS || '30000', 10); // 30s
 const WAIT_BEFORE_REPLY_MAX_MS = parseInt(process.env.WAIT_BEFORE_REPLY_MAX_MS || '90000', 10); // 90s
 
+// Blindagem de chamadas à IA: evitar flood de tokens/tentativas excessivas
+const LLM_ATTEMPT_TTL_MS = parseInt(process.env.VIRTUS_LLM_ATTEMPT_TTL_MS || '60000', 10);      // 1 min (60s)
+const LLM_RETRY_BACKOFF_MS = parseInt(process.env.VIRTUS_LLM_RETRY_BACKOFF_MS || '60000', 10); // 1 min (60s)
+
 const VIRTUS_FINAL_MSG_MAX_TRIES = parseInt(process.env.VIRTUS_FINAL_MSG_MAX_TRIES || '2', 10); // tentativas no envio da mensagem final
 const VIRTUS_FINAL_MSG_RETRY_MIN_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MIN_MS || '600', 10); // 600ms
 const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MAX_MS || '900', 10); // 900ms
@@ -3257,6 +3261,49 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
             
             // Passou a barreira de coleta, pode chamar IA
+            
+            // Blindagem: não chamar IA novamente para o mesmo conteúdo
+            const nowTs = Date.now();
+            const llmScheduleNow = (stateBefore && stateBefore.schedule && stateBefore.schedule.llm) || {};
+            const lastConsumedSig = String(llmScheduleNow.lastConsumedSig || '');
+            const lastAttemptSig = String(llmScheduleNow.lastAttemptSig || '');
+            const lastAttemptAt  = Number(llmScheduleNow.lastAttemptAt || 0);
+            const retryAfter     = Number(llmScheduleNow.retryAfter || 0);
+            
+            if (lastConsumedSig === clientContentSig) {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_skip_already_consumed', chatId, sig: clientContentSig });
+              await virtusFSM.patch(nome, chatId, {
+                cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+                lastScanAt: nowTs, lastCLIts: lastClientTs
+              });
+              continue;
+            }
+            
+            if (retryAfter > nowTs && lastAttemptSig === clientContentSig) {
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'llm_call_skip_retry_window', chatId, sig: clientContentSig, retryAfter, remainingMs: retryAfter - nowTs
+              });
+              await virtusFSM.patch(nome, chatId, {
+                cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+                lastScanAt: nowTs, lastCLIts: lastClientTs
+              });
+              continue;
+            }
+            
+            if (lastAttemptSig === clientContentSig && (nowTs - lastAttemptAt) < LLM_ATTEMPT_TTL_MS) {
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'llm_call_skip_recent_attempt', chatId, sig: clientContentSig, lastAttemptAt, elapsedMs: nowTs - lastAttemptAt
+              });
+              await virtusFSM.patch(nome, chatId, {
+                cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+                data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+                lastScanAt: nowTs, lastCLIts: lastClientTs
+              });
+              continue;
+            }
+            
             // Lock por chat/inflightSig na chamada da IA, para impedir qualquer token/consulta duplicada
             const lockAcquired = await chatLock.acquire(nome, chatId, 30000); // 30s timeout
             if (!lockAcquired) {
@@ -3280,13 +3327,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const llmStartAt = Date.now();
             
             try {
-              // Atualiza inflightSig antes de chamar IA
+              // Atualiza inflightSig, lastAttemptSig, lastAttemptAt antes de chamar IA
               await virtusFSM.patch(nome, chatId, {
                 schedule: {
                   ...schedule,
                   llm: {
                     ...llmSchedule,
-                    inflightSig: clientContentSig
+                    inflightSig: clientContentSig,
+                    lastAttemptSig: clientContentSig,
+                    lastAttemptAt: Date.now(),
+                    retryAfter: 0
                   }
                 }
               });
@@ -3301,7 +3351,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               
               llmRes = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
             
-              // Após IA rodar, zera a janela e registra lastConsumedSig
+              stepLog.appendJSONL(nome, 'virtus', {
+                step: 'llm_call_end',
+                chatId,
+                consumedSig: clientContentSig,
+                tookMs: llmRes.meta && llmRes.meta.tookMs || null,
+                ts: Date.now()
+              });
+              
+              // Após IA rodar com sucesso, zera a janela e registra lastConsumedSig
               await virtusFSM.patch(nome, chatId, {
                 schedule: {
                   ...schedule,
@@ -3310,20 +3368,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                     inflightSig: null,
                     pendingSig: null,
                     collectUntil: 0,
-                    anchorTs: 0
+                    anchorTs: 0,
+                    retryAfter: 0,
+                    lastAttemptSig: clientContentSig,
+                    lastAttemptAt: Date.now()
+                  }
+                }
+              });
+            } catch (e) {
+              stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_error', chatId, error: (e && e.message) || String(e), ts: Date.now() });
+              
+              // Em caso de erro, define retryAfter para evitar flood
+              await virtusFSM.patch(nome, chatId, {
+                schedule: {
+                  ...schedule,
+                  llm: {
+                    ...(llmSchedule || {}),
+                    inflightSig: null,
+                    lastAttemptSig: clientContentSig,
+                    lastAttemptAt: Date.now(),
+                    retryAfter: Date.now() + LLM_RETRY_BACKOFF_MS
                   }
                 }
               });
               
-              stepLog.appendJSONL(nome, 'virtus', {
-                step: 'llm_call_end',
-                chatId,
-                consumedSig: clientContentSig,
-                tookMs: llmRes.meta && llmRes.meta.tookMs || null,
-                ts: Date.now()
-              });
-            } catch (e) {
-              stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_error', chatId, error: (e && e.message) || String(e), ts: Date.now() });
               throw e;
             } finally {
               // Sempre libera o lock
