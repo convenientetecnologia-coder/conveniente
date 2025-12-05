@@ -1007,6 +1007,7 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
   });
 
   const id = setInterval(async () => {
+    if (sendInProgressByPerfil.get(nomePerfil)) return;
     const fila = filaEnvioMessenger.get(nomePerfil) || [];
     if (fila.length === 0) return;
 
@@ -1040,6 +1041,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     // Remove da fila (FIFO)
     fila.shift();
 
+    sendInProgressByPerfil.set(nomePerfil, true);
+    setScanBlocked(nomePerfil, true, { reason: 'messenger_send', chatId: proximo.chatId, origin: proximo.origin || '' });
     try {
       const respostaFinal = String(proximo.resposta || '').trim();
       
@@ -1214,6 +1217,9 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
           setPend.delete(proximo.key);
         }
       } catch {}
+    } finally {
+      sendInProgressByPerfil.set(nomePerfil, false);
+      setScanBlocked(nomePerfil, false);
     }
   }, 2000);
 
@@ -1453,6 +1459,19 @@ const finalizingSetByPerfil = new Map(); // nomePerfil -> Set(chatId)
 
 // Guard de reentrância: nunca roda dois scans em paralelo para o mesmo perfil
 const scanRunningByPerfil = new Map(); // nomePerfil -> boolean
+
+const scanBlockedByPerfil = new Map();
+function isScanBlocked(perfil) { return !!scanBlockedByPerfil.get(perfil); }
+function setScanBlocked(perfil, blocked, meta = {}) {
+  if (blocked) {
+    scanBlockedByPerfil.set(perfil, { since: Date.now(), ...meta });
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'scan_blocked_on', ...meta, ts: Date.now() }); } catch {}
+  } else {
+    scanBlockedByPerfil.delete(perfil);
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'scan_blocked_off', ts: Date.now() }); } catch {}
+  }
+}
+const sendInProgressByPerfil = new Map();
 
 // Timers de coleta (45s após evento)
 const collectTimers = new Map(); // nomePerfil -> Map(chatId -> timeoutId)
@@ -2779,6 +2798,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (scanRunningByPerfil.get(nome)) {
       return; // Já está rodando
     }
+    if (isScanBlocked(nome)) {
+      try { stepLog.appendJSONL(nome, 'virtus', { step: 'scan_skip_blocked', ts: Date.now() }); } catch {}
+      return;
+    }
     scanRunningByPerfil.set(nome, true);
 
     try {
@@ -2797,6 +2820,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
 
       for (const it of lista) {
+        if (isScanBlocked(nome)) {
+          try { stepLog.appendJSONL(nome, 'virtus', { step: 'scan_loop_abort_blocked', chatId, ts: Date.now() }); } catch {}
+          break;
+        }
         const chatId = String(it.id || '').trim();
         if (!chatId) continue;
 
@@ -3723,6 +3750,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           continue;
         }
         
+        await waitForSendLockRelease(p, 30000);
+        await acquireSendGuard(p, chatId);
         try {
           try {
             urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
@@ -3811,6 +3840,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           if (attempt < MAX_TRIES) {
             await new Promise(r => setTimeout(r, 600 + Math.floor(Math.random() * 400)));
           }
+        } finally {
+          releaseSendGuard(p);
         }
       }
       
@@ -3889,7 +3920,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // REMOVIDO: resumeTimers - timers agora gerenciados pelo virtusFSM
     
     // Varredura contínua e imediata (sem locks de atendimento)
-    setInterval(() => scanAndProcessChats(nome), SCAN_INTERVAL_MS);
+    setInterval(() => {
+      if (isScanBlocked(nome)) {
+        try { stepLog.appendJSONL(nome, 'virtus', { step: 'scan_tick_skip_blocked', ts: Date.now() }); } catch {}
+        return;
+      }
+      scanAndProcessChats(nome);
+    }, SCAN_INTERVAL_MS);
     scanAndProcessChats(nome);
   }
 
