@@ -28,13 +28,33 @@ function jobFile(perfil, id) {
   return path.join(outboxDirFor(perfil), `${id}.json`);
 }
 
-function writeAtomic(file, obj) {
+function writeAtomicFsync(file, obj) {
   const dir = path.dirname(file);
   ensureDir(dir);
   const tmp = file + '.' + process.pid + '.' + Date.now() + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+  const json = JSON.stringify(obj, null, 2);
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeFileSync(fd, json, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
+  // fsync do diretório para garantir persistência do rename
+  try {
+    const dirfd = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(dirfd); } finally { fs.closeSync(dirfd); }
+  } catch {}
 }
+
+// function writeAtomic(file, obj) {
+//   const dir = path.dirname(file);
+//   ensureDir(dir);
+//   const tmp = file + '.' + process.pid + '.' + Date.now() + '.tmp';
+//   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+//   fs.renameSync(tmp, file);
+// }
 
 function readJsonSafe(file, fb = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fb; }
@@ -101,7 +121,7 @@ async function processOne(perfil, opts, file) {
     const backoff = DEFAULT_BACKOFFS[Math.min(attempts, DEFAULT_BACKOFFS.length - 1)];
     const nextAttemptAt = Date.now() + backoff;
     const upd = Object.assign({}, job, { attempts: attempts + 1, nextAttemptAt, lastStatus: status, lastResp: (data && JSON.stringify(data).slice(0,300)) || String(text||'').slice(0,300) });
-    writeAtomic(file, upd);
+    writeAtomicFsync(file, upd);
     if (opts.logger && opts.logger.error) {
       opts.logger.error('[NOTIFIER_QUEUE] http_fail', { perfil, kind: job.kind, id: job.id, status, attempts: upd.attempts });
     }
@@ -114,7 +134,7 @@ async function processOne(perfil, opts, file) {
     const backoff = DEFAULT_BACKOFFS[Math.min(attempts, DEFAULT_BACKOFFS.length - 1)];
     const nextAttemptAt = Date.now() + backoff;
     const upd = Object.assign({}, job, { attempts: attempts + 1, nextAttemptAt, lastError: (e && e.message) || String(e) });
-    writeAtomic(file, upd);
+    writeAtomicFsync(file, upd);
     if (opts.logger && opts.logger.error) {
       opts.logger.error('[NOTIFIER_QUEUE] net_fail', { perfil, kind: job.kind, id: job.id, attempts: upd.attempts, error: (e && e.message) || e });
     }
@@ -160,7 +180,7 @@ function enqueue(perfil, kind, payload) {
     nextAttemptAt: 0,
     createdAt: Date.now()
   };
-  writeAtomic(file, job);
+  writeAtomicFsync(file, job);
   return { ok: true, id, status: 'queued' };
 }
 

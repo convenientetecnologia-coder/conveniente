@@ -29,6 +29,7 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
+const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
 const { masterExtractAnswer } = require('./inteligenciaArtificial.js');
 const chatStateStore = require('./chatStateStore.js');
 const notifierQueue = require('./notifierQueue.js');
@@ -135,7 +136,7 @@ function semanticallyRelevant(m) {
     // "Disponível?" isolado ou variações curtas sem mais conteúdo NÃO são novidade
     if ((/disponivel|disponível/.test(t)) && t.length < 40) return false;
 
-    return true;
+    return false;
 
   } catch {
     return false;
@@ -448,6 +449,9 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
     const newRecent = [];
     
     for (const m of novos) {
+      const rawToCheck = String(m && m.texto || '').trim();
+      if (!rawToCheck || /^[\W_]+$/.test(rawToCheck)) continue;
+      
       // Sanitiza mensagens antes de salvar (remove telefones completos)
       const mSanitizado = Object.assign({}, m);
       if (mSanitizado.texto) {
@@ -1498,6 +1502,22 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
 
     const sig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
 
+    // earliestSendAt para replyReady, ancorado NO lastClientTsOverride
+    let earliestSendAt = undefined;
+
+    if (origin === 'finalize') {
+      let anchor = 0;
+      try {
+        const stForAnchor = virtusFSM.get(nomePerfil, chatId);
+        anchor = Number(stForAnchor && stForAnchor.data && stForAnchor.data.lastClientTs) || Date.now();
+      } catch {}
+      const jitter = virtusFSM.computeEarliestSendAt
+        ? virtusFSM.computeEarliestSendAt(nomePerfil, chatId, { origin: 'finalize', lastClientTs: anchor })
+        : (anchor + WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1)));
+      earliestSendAt = jitter;
+      try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_set_earliest_finalize', chatId, sig, anchor, earliestSendAt, origin: 'finalize', ts: Date.now() }); } catch {}
+    }
+
     if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
     const fila = filaEnvioMessenger.get(nomePerfil);
 
@@ -1548,8 +1568,15 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       return { ok: false, status: 'dropped' };
     }
 
-    // earliestSendAt para replyReady, ancorado NO lastClientTsOverride
-    let earliestSendAt = undefined;
+    try {
+      const stSent = virtusFSM.get(nomePerfil, chatId);
+      const alreadySentSig = String(stSent && stSent.cursor && stSent.cursor.ia && stSent.cursor.ia.sentSig || '');
+      if (sig && alreadySentSig && sig === alreadySentSig) {
+        stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_sent_sig', chatId, sig, origin, ts: Date.now() });
+        return { ok: false, status: 'dropped' };
+      }
+    } catch {}
+
     if (origin === 'replyReady') {
       const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0)
         ? lastClientTsOverride
@@ -2302,9 +2329,27 @@ async function finalizePedido(perfil, chatId, contexto) {
 
     // Nunca espera resposta síncrona do notificador! Apenas joga na fila persistente/outbox e retorna
     const ok = await sendPedidoToNotificador(perfil, payload);
+    if (ok) {
+      await appendPedidoAudit(perfil, chatId, 'enqueued_outbox', {
+        telefone: maskPhoneLog(tel),
+        cidade,
+        estado: uf
+      });
+    }
     if (!ok) {
       logger.warn('[FINALIZE] Falha ao enfileirar pedido no notifierQueue', { perfil, chatId });
-      return;
+      for (let i = 1; i <= 3; i++) {
+        await sleep(500 * i);
+        const ok2 = await sendPedidoToNotificador(perfil, payload);
+        if (ok2) {
+          await appendPedidoAudit(perfil, chatId, 'enqueued_outbox_retry_ok', { attempt: i });
+          break;
+        } else if (i === 3) {
+          await appendPedidoAudit(perfil, chatId, 'enqueued_outbox_fail', { attempts: 3 });
+          if (issues && typeof issues.append === 'function') await issues.append(perfil, 'finalize_outbox_write_fail', `chat=${chatId}`);
+          return;
+        }
+      }
     }
     
     // Não remove, não apaga, não considera concluído antes do callback de ACK
@@ -2324,7 +2369,7 @@ async function finalizePedido(perfil, chatId, contexto) {
         });
         const now = Date.now();
         // Bloqueio indefinido (10 anos) para não monitorar/reentrar
-        const lockUntil = now + (10 * 365 * 24 * 60 * 60 * 1000);
+        const lockUntil = Date.now() + FINALIZACAO_FREEZE_MS;
         await virtusFSM.patch(perfil, chatId, {
           finalization: Object.assign({}, st && st.finalization || {}, {
             closingMessageQueued: true,
