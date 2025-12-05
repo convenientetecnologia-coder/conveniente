@@ -25,9 +25,23 @@ function getLogPath(perfil, chatId) {
 async function loadState(perfil, chatId) {
   try {
     const file = getStatePath(perfil, chatId);
-    if (!fs.existsSync(file)) return {};
-    const content = fs.readFileSync(file, 'utf8');
-    return JSON.parse(content);
+    const lockPath = file + '.lck';
+    let fd = null;
+    try {
+      // Lock exclusivo para leitura (aberto como wx para bloqueio leve, mas pode ser só leitura se preferir)
+      fd = fs.openSync(lockPath, 'wx');
+    } catch {}
+    try {
+      if (!fs.existsSync(file)) return {};
+      const content = fs.readFileSync(file, 'utf8');
+      return JSON.parse(content);
+    } catch {
+      return {};
+    } finally {
+      // Libera file lock e exclui o .lck
+      try { if (typeof fd==='number') fs.closeSync(fd); } catch {}
+      try { fs.unlinkSync(lockPath); } catch {}
+    }
   } catch {
     return {};
   }
@@ -36,18 +50,26 @@ async function loadState(perfil, chatId) {
 async function saveState(perfil, chatId, state) {
   try {
     const file = getStatePath(perfil, chatId);
-    const dir = path.dirname(file);
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = file + '.tmp';
-    const fd = fs.openSync(tmp, 'w');
+    const lockPath = file + '.lck';
+    let fd = null;
     try {
-      fs.writeFileSync(fd, JSON.stringify(state, null, 2), 'utf8');
-      fs.fsyncSync(fd);
+      fd = fs.openSync(lockPath, 'wx');
+    } catch {}
+    try {
+      const dir = path.dirname(file);
+      fs.mkdirSync(dir, { recursive: true });
+      const tmp = file + '.tmp';
+      const fdw = fs.openSync(tmp, 'w');
+      try {
+        fs.writeFileSync(fdw, JSON.stringify(state, null, 2), 'utf8');
+        fs.fsyncSync(fdw);
+      } finally { fs.closeSync(fdw); }
+      try { fs.unlinkSync(file); } catch {}
+      fs.renameSync(tmp, file);
     } finally {
-      fs.closeSync(fd);
+      try { if (typeof fd==='number') fs.closeSync(fd); } catch {}
+      try { fs.unlinkSync(lockPath); } catch {}
     }
-    try { fs.unlinkSync(file); } catch {}
-    fs.renameSync(tmp, file);
   } catch (e) {
     try { logger.warn('[MASTER][STATE] save error', { perfil, chatId, error: (e && e.message) || e }); } catch {}
   }

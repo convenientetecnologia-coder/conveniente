@@ -15,18 +15,26 @@ function stateFile(perfil, chatId){
 
 function readSafe(file, fb){ try { return JSON.parse(fs.readFileSync(file,'utf8')); } catch { return fb; } }
 
-function writeAtomic(file, obj){
+function writeAtomic(file, obj) {
+  const lockPath = file + '.lck';
+  let fd = null;
   try {
-    ensureDir(path.dirname(file));
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch {}
+    try { fd = fs.openSync(lockPath, 'wx'); } catch {}
     const tmp = file + '.tmp';
-    const fd = fs.openSync(tmp, 'w');
-    try { fs.writeFileSync(fd, JSON.stringify(obj || {}, null, 2),'utf8'); fs.fsyncSync(fd); }
-    finally { fs.closeSync(fd); }
+    const fdw = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fdw, JSON.stringify(obj || {}, null, 2),'utf8'); fs.fsyncSync(fdw);
+    } finally { fs.closeSync(fdw); }
     try { fs.unlinkSync(file); } catch {}
-    try { fs.renameSync(tmp, file); }
-    catch { fs.copyFileSync(tmp, file); try{fs.unlinkSync(tmp);}catch{} }
+    fs.renameSync(tmp, file);
     return true;
-  } catch { return false; }
+  } catch { 
+    return false; 
+  } finally {
+    try { if (fd) fs.closeSync(fd); } catch {}
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
 }
 
 function get(perfil, chatId){

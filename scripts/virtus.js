@@ -33,6 +33,107 @@ const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
 const { masterExtractAnswer } = require('./inteligenciaArtificial.js');
 const chatStateStore = require('./chatStateStore.js');
 const notifierQueue = require('./notifierQueue.js');
+
+// Mutex de navegação por perfil
+const NAV_LOCKS = new Map();
+async function withNavLock(perfil, fn) {
+  if (!NAV_LOCKS.has(perfil)) NAV_LOCKS.set(perfil, Promise.resolve());
+  const prev = NAV_LOCKS.get(perfil);
+  let release;
+  const ticket = new Promise(res => (release = res));
+  NAV_LOCKS.set(perfil, prev.then(() => ticket));
+  const t0 = Date.now();
+  stepLog.appendJSONL(perfil, 'virtus', { step: 'navlock_acquire', ts: t0 });
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release();
+    stepLog.appendJSONL(perfil, 'virtus', { step: 'navlock_release', tookMs: Date.now()-t0, ts: Date.now() });
+    if (NAV_LOCKS.get(perfil) === ticket) NAV_LOCKS.delete(perfil);
+  }
+}
+
+const processQueueByPerfil = new Map();
+function getProcessQueue(perfil) {
+  if (!processQueueByPerfil.has(perfil)) {
+    const q = [];
+    let busy = false;
+    async function run() {
+      if (busy) return;
+      busy = true;
+      try {
+        while (q.length) {
+          const job = q.shift();
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'process_job_start', ts: Date.now() });
+          await withNavLock(perfil, job); // Job sob navegação protegida
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'process_job_end', ts: Date.now() });
+        }
+      } finally { busy = false; }
+    }
+    processQueueByPerfil.set(perfil, { q, run });
+  }
+  return processQueueByPerfil.get(perfil);
+}
+function enqueueProcess(perfil, fn) {
+  const { q, run } = getProcessQueue(perfil);
+  q.push(fn);
+  stepLog.appendJSONL(perfil, 'virtus', { step: 'process_job_enqueued', ts: Date.now() });
+  run();
+}
+
+class MinHeap {
+  constructor(cmp) { this.a = []; this.cmp = cmp; }
+  push(x){ this.a.push(x); this._up(this.a.length-1); }
+  peek(){ return this.a[0]||null; }
+  pop(){ if(this.a.length===0)return null; const r=this.a[0]; const v=this.a.pop(); if(this.a.length){ this.a[0]=v; this._down(0);} return r; }
+  _up(i){ const {a, cmp}=this; while(i){ const p=(i-1>>1); if(cmp(a[i],a[p])>=0) break; [a[i],a[p]]=[a[p],a[i]]; i=p; } }
+  _down(i){ const {a, cmp}=this; for(;;){ let l=(i<<1)+1, r=l+1, m=i; if(l<a.length && cmp(a[l],a[m])<0) m=l; if(r<a.length && cmp(a[r],a[m])<0) m=r; if(m===i) break; [a[i],a[m]]=[a[m],a[i]]; i=m; } }
+  size(){ return this.a.length; }
+  toArray(){ return this.a.slice(); }
+}
+const sendHeapByPerfil = new Map(); // nomePerfil -> MinHeap
+const heapKeyByChat = new Map();     // nomePerfil -> Map(chatId -> refObj)
+function getSendHeap(perfil) {
+  if (!sendHeapByPerfil.has(perfil)) {
+    sendHeapByPerfil.set(perfil, new MinHeap((x,y) => (Number(x.earliestSendAt||0) - Number(y.earliestSendAt||0))));
+  }
+  return sendHeapByPerfil.get(perfil);
+}
+function getHeapKeys(perfil) {
+  if (!heapKeyByChat.has(perfil)) heapKeyByChat.set(perfil, new Map());
+  return heapKeyByChat.get(perfil);
+}
+
+function clearAllChatJobs(perfil, chatId) {
+  try {
+    // heap
+    const heap = getSendHeap(perfil);
+    if (heap && heap.size()) {
+      const arr = heap.toArray().filter(n => n.chatId !== chatId);
+      sendHeapByPerfil.set(perfil, new MinHeap((x,y)=>Number(x.earliestSendAt||0)-Number(y.earliestSendAt||0)));
+      const newHeap = getSendHeap(perfil);
+      for (const it of arr) newHeap.push(it);
+    }
+    const hk = getHeapKeys(perfil); if (hk) hk.delete(chatId);
+  } catch {}
+  try { clearCollectTimer(perfil, chatId); } catch {}
+  try { clearSlaWatchdog(perfil, chatId); } catch {}
+  try { clearFinalizationTimer(perfil, chatId); } catch {}
+  try {
+    const mapAg = aguardTimers.get(perfil);
+    if (mapAg && mapAg.has(chatId)) { clearTimeout(mapAg.get(chatId)); mapAg.delete(chatId); }
+    const setAg = aguardandoRespostaMap.get(perfil);
+    if (setAg) setAg.delete(chatId);
+  } catch {}
+  try {
+    const pend = pendingKeysPorPerfil.get(perfil);
+    if (pend) {
+      for (const k of Array.from(pend)) if (k.startsWith(chatId + '||') || k.includes('|' + chatId + '|')) pend.delete(k);
+    }
+  } catch {}
+}
+
 const virtusFSM = {
   get(perfil, chatId){ return chatStateStore.get(perfil, chatId); },
   patch(perfil, chatId, patchObj){ return chatStateStore.patch(perfil, chatId, patchObj); },
@@ -361,6 +462,7 @@ async function ensureFinalClosingMessage(perfil, chatId, reason = '') {
       })
     });
     clearFinalizationTimer(perfil, chatId);
+    clearAllChatJobs(perfil, chatId);
     try { stepLog.appendJSONL(perfil, 'virtus', { step: 'finalize_closing_message_enqueued', chatId, origin: 'finalize', qStatus: q && q.status || 'unknown', reason }); } catch {}
     return true;
   } catch (e) {
@@ -1008,15 +1110,15 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
 
   const id = setInterval(async () => {
     if (sendInProgressByPerfil.get(nomePerfil)) return;
-    const fila = filaEnvioMessenger.get(nomePerfil) || [];
-    if (fila.length === 0) return;
+    const heap = getSendHeap(nomePerfil);
+    if (heap.size() === 0) return;
 
     const agora = Date.now();
     const ultima = ultimaRespostaMessenger.get(nomePerfil) || 0;
     const intervaloAleatorio = MESSENGER_INTERVALO_MIN_MS + Math.floor(Math.random() * (MESSENGER_INTERVALO_MAX_MS - MESSENGER_INTERVALO_MIN_MS));
     const tempoDesdeUltima = agora - ultima;
     if (tempoDesdeUltima < intervaloAleatorio) {
-      const proximo = fila[0];
+      const proximo = heap.peek();
       if (proximo) {
         stepLog.appendJSONL(nomePerfil, 'virtus', {
           step: 'messenger_send_defer_random',
@@ -1028,9 +1130,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       return;
     }
 
-    // Fila FIFO estrita: primeiro da fila, nunca saltar
-    // Só envia o primeiro se já passou o earliestSendAt
-    const proximo = fila[0];
+    // Min-heap: pega o próximo com menor earliestSendAt
+    const proximo = heap.peek();
     if (!proximo) return;
     
     // Verifica se earliestSendAt já passou
@@ -1038,8 +1139,9 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       return; // Ainda não é hora de enviar
     }
     
-    // Remove da fila (FIFO)
-    fila.shift();
+    // Remove do heap
+    heap.pop();
+    getHeapKeys(nomePerfil).delete(proximo.chatId);
 
     sendInProgressByPerfil.set(nomePerfil, true);
     setScanBlocked(nomePerfil, true, { reason: 'messenger_send', chatId: proximo.chatId, origin: proximo.origin || '' });
@@ -1063,7 +1165,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
           now: Date.now(),
           freezeUntil
         });
-        fila.push(proximo);
+        heap.push(proximo);
+        getHeapKeys(nomePerfil).set(proximo.chatId, proximo);
         return;
       }
       // para origin == 'finalize', envie normalmente!
@@ -1074,7 +1177,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
           earliestSendAt: scheduleAt,
           now: Date.now()
         });
-        fila.push(proximo);
+        heap.push(proximo);
+        getHeapKeys(nomePerfil).set(proximo.chatId, proximo);
         return;
       }
       
@@ -1124,7 +1228,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
         const MAX_RETRIES = parseInt(process.env.MESSENGER_MAX_RETRIES || '2', 10);
         if (proximo.__tries < MAX_RETRIES) {
           proximo.earliestSendAt = agora + 5000; // 5s no futuro
-          fila.unshift(proximo); // Refile no topo (FIFO preservado)
+          heap.push(proximo); // Refile no heap
+          getHeapKeys(nomePerfil).set(proximo.chatId, proximo);
           logger.warn('[QUEUE] requeue_after_send_fail', { nomePerfil, chatId: proximo.chatId, tries: proximo.__tries, newEarliest: proximo.earliestSendAt });
         } else {
           // Limite de tentativas, após o qual loga e dropa o item
@@ -1585,44 +1690,34 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_set_earliest_finalize', chatId, sig, anchor, earliestSendAt, origin: 'finalize', ts: Date.now() }); } catch {}
     }
 
-    if (!filaEnvioMessenger.has(nomePerfil)) filaEnvioMessenger.set(nomePerfil, []);
-    const fila = filaEnvioMessenger.get(nomePerfil);
-
-    // Merge-in-place de replyReady e monotonic earliest
+    // Merge-in-place de replyReady e monotonic earliest (usando min-heap)
     if (origin === 'replyReady') {
-      const idx = fila.findIndex(it => it && it.chatId === chatId && it.origin === 'replyReady');
-      const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0)
-        ? lastClientTsOverride
-        : Date.now();
+      const keys = getHeapKeys(nomePerfil);
+      const heap = getSendHeap(nomePerfil);
+      const existing = keys.get(chatId);
+      const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0) ? lastClientTsOverride : Date.now();
       const jitter = WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
       const newEarliest = anchor + jitter;
-      if (idx >= 0) {
-        const existing = fila[idx];
-        const mergedEarliest = Math.min(Number(existing.earliestSendAt || newEarliest), Number(newEarliest));
+      if (existing) {
         existing.resposta = payload;
         existing.cursorCount = cCount;
         existing.cursorDigest = cDigest;
         existing.cursorSig = sig || existing.cursorSig || '';
         existing.lastClientTs = lastClientTsOverride || existing.lastClientTs || 0;
-        existing.earliestSendAt = mergedEarliest;
-        try {
-          stepLog.appendJSONL(nomePerfil, 'virtus', {
-            step: 'queue_merge_update',
-            chatId, sig, cCount, cDigest,
-            earliestSendAt: mergedEarliest, ts: Date.now()
-          });
-          logger.info('[QUEUE] merge_update', { nomePerfil, chatId, sig, cCount, cDigest, earliestSendAt: mergedEarliest });
-        } catch {}
+        existing.earliestSendAt = Math.min(Number(existing.earliestSendAt||newEarliest), newEarliest);
+        stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_merge_update_heap', chatId, sig, cCount, cDigest, earliestSendAt: existing.earliestSendAt, ts: Date.now() });
         return { ok: true, status: 'merged' };
       }
     }
 
     // Dedupe por cursorSig (já existente, mantenha)
+    const heap = getSendHeap(nomePerfil);
+    const heapArr = heap.toArray();
     let existeMesmoCursor = false;
     if (!isFinalize) {
       existeMesmoCursor = sig
-        ? fila.some(it => it && it.chatId === chatId && it.cursorSig === sig)
-        : fila.some(it =>
+        ? heapArr.some(it => it && it.chatId === chatId && it.cursorSig === sig)
+        : heapArr.some(it =>
             it && it.chatId === chatId &&
             Number(it.cursorCount || 0) === cCount &&
             String(it.cursorDigest || '') === cDigest
@@ -1657,23 +1752,10 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
         : Date.now();
       const jitter = WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
       earliestSendAt = anchor + jitter;
-
-      try {
-        stepLog.appendJSONL(nomePerfil, 'virtus', {
-          step: 'queue_set_earliest',
-          chatId,
-          sig,
-          anchor,
-          jitter,
-          earliestSendAt,
-          origin,
-          ts: Date.now()
-        });
-        logger.info('[QUEUE] earliest_set', { nomePerfil, chatId, sig, anchor, jitter, earliestSendAt, origin });
-      } catch {}
     }
 
-    fila.push({
+    // Ao adicionar:
+    const node = {
       chatId,
       resposta: payload,
       key: key || (`q|${chatId}|${sha1(payload)}|${Date.now()}`),
@@ -1682,9 +1764,13 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       cursorDigest: cDigest,
       cursorSig: sig || '',
       origin: origin || '',
-      earliestSendAt, // pode ser undefined para mensagens que não são replyReady
-      lastClientTs: lastClientTsOverride || 0
-    });
+      earliestSendAt: (typeof earliestSendAt === 'number') ? earliestSendAt : Date.now(),
+      lastClientTs: lastClientTsOverride || 0,
+      __tries: 0
+    };
+    heap.push(node);
+    getHeapKeys(nomePerfil).set(chatId, node);
+    stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add_heap', chatId, sig, origin, earliestSendAt: node.earliestSendAt, ts: Date.now() });
 
     // Marca closingMessageQueued se for finalize
     if (origin === 'finalize') {
@@ -1716,35 +1802,38 @@ function getPendingSet(perfil) {
 
 
 
-async function readJson(file, fb={}) {
-  const lockAcquired = await acquireFileLock(file, 5000);
-  if (!lockAcquired) {
-    logger.warn(`[LOCK] Timeout ao adquirir lock para ${file}`);
+async function readJson(file, fb = {}) {
+  const lockPath = file + '.lck'; let fd = null;
+  try {
+    fd = acquireFileLock(lockPath); // fd é retornado!
+    const txt = await fs.readFile(file, 'utf8').catch(() => null);
+    return txt ? JSON.parse(txt) : fb;
+  } catch {
     return fb;
-  }
-  try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return fb; }
-  finally { await releaseFileLock(file); }
-}
-async function writeJsonAtomicFsync(file, obj){
-  const lockAcquired = await acquireFileLock(file, 5000);
-  if (!lockAcquired) {
-    logger.warn(`[LOCK] Timeout ao adquirir lock para escrita em ${file}`);
-    return false;
-  }
-  try {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = file + '.tmp';
-  const fd = await fs.open(tmp, 'w');
-  try {
-    await fd.writeFile(JSON.stringify(obj, null, 2), 'utf8');
-    await fd.sync();
-  } finally { await fd.close(); }
-  try { await fs.unlink(file); } catch {}
-  try { await fs.rename(tmp, file); }
-  catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp);} catch{} }
-    return true;
   } finally {
-    await releaseFileLock(file);
+    try { releaseFileLock(lockPath, fd); } catch {}
+  }
+}
+
+async function writeJsonAtomicFsync(file, obj) {
+  const lockPath = file + '.lck'; let fd = null;
+  try {
+    fd = acquireFileLock(lockPath);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    const f = await fs.open(tmp, 'w');
+    try {
+      await f.writeFile(JSON.stringify(obj, null, 2), 'utf8');
+      await f.sync();
+    } finally { await f.close(); }
+    try { await fs.unlink(file); } catch {}
+    try { await fs.rename(tmp, file); }
+    catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp); } catch {} }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { releaseFileLock(lockPath, fd); } catch {}
   }
 }
 async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
@@ -2019,6 +2108,13 @@ async function scrollChatsToTop(page, nome) {
   }
 }
 
+async function openChatByUrl(p, chatId, { timeoutMs = 8000 } = {}) {
+  try {
+    await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    return await assertOnChat(p, chatId, { timeoutMs: 2000 });
+  } catch { return false; }
+}
+
 async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}) {
   try {
     const sel = `a[href^="/marketplace/t/${chatId}"]`;
@@ -2052,6 +2148,11 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}
 
       await sleep(250 + Math.floor(Math.random() * 200));
       try { await scrollChatsToTop(p, null); } catch {}
+    }
+    
+    // Fallback: se anchor falhou 2x, tenta por URL
+    if (retries >= 2) {
+      return await openChatByUrl(p, chatId, { timeoutMs });
     }
   } catch {}
   return false;
@@ -2433,6 +2534,7 @@ async function finalizePedido(perfil, chatId, contexto) {
     // markPedidoSent será chamado pelo callback de ACK do notificador
 
     await ensureFinalClosingMessage(perfil, chatId, 'from_finalizePedido_after_outbox');
+    clearAllChatJobs(perfil, chatId);
 
     clearFinalizationTimer(perfil, chatId);
 
@@ -2956,13 +3058,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_start', chatId, ts: now });
 
-        // Abre chat e coleta histórico (coleta real)
-        const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-        if (!chatUrlMatches(urlNow, chatId)) {
-          await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
-        }
+        // Enfileira processamento serial do chat (com NavLock)
+        await enqueueProcess(nome, async () => {
+          const p = await ensurePage().catch(()=>null);
+          if (!p) return;
 
-        const historicoConversa = await extrairHistoricoConversa(p);
+          // Abre chat e coleta histórico (coleta real)
+          const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+          if (!chatUrlMatches(urlNow, chatId)) {
+            await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
+          }
+
+          const historicoConversa = await extrairHistoricoConversa(p);
         // Deduplicação: nunca aceite mensagens "Nenhuma mensagem encontrada."
         const historicoFiltered = (historicoConversa || []).filter(m => {
           const texto = String(m && m.texto || '').trim();
@@ -2981,7 +3088,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormEmpty, lastClientTs: lastClientTsEmpty || Date.now() },
             lastScanAt: now
           });
-          continue;
+          return; // Retorna da função async
         }
 
         // Deduplicação ultra forte no histórico gravado em disco
@@ -3020,7 +3127,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               lastScanAt: now, lastCLIts: lastClientTs || 0
             });
           } catch {}
-          continue;
+          return; // Retorna da função async
         }
 
         // Auto-unlock depois do freeze:
@@ -3079,7 +3186,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastCLIts: lastClientTs || 0
               });
             } catch {}
-            continue;
+            return; // Retorna da função async
           }
 
           // Prefetch de localização (não bloqueia)
@@ -3148,7 +3255,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 data: { ...(fsmState && fsmState.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
                 lastScanAt: now, lastCLIts: lastClientTs
               });
-              continue;
+              return; // Retorna da função async
             }
             // BLINDAGEM CRÍTICA: Se openAt === 0 (ou não existe), o timer já disparou (timer_fire).
             // NUNCA rearme schedule.collect.openAt aqui! Siga para schedule.llm (janela IA).
@@ -3165,7 +3272,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastCLIts: lastClientTs
               });
             } catch {}
-            continue;
+            return; // Retorna da função async
           }
 
           // Delta de novas mensagens
@@ -3211,7 +3318,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastCLIts: lastClientTs
               });
             } catch {}
-            continue;
+            return; // Retorna da função async
           }
 
           // Pipeline FSM: ingestFromVirtus
@@ -3290,7 +3397,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastScanAt: now,
                 lastCLIts: lastClientTs
               });
-              continue;
+              return; // Retorna da função async
             }
             
             // Inicia ou estende janela de coleta se necessário
@@ -3324,7 +3431,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   lastScanAt: now,
                   lastCLIts: lastClientTs
                 });
-                continue;
+                return; // Retorna da função async
               }
             }
             
@@ -3357,7 +3464,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   lastScanAt: now,
                   lastCLIts: lastClientTs
                 });
-                continue;
+                return; // Retorna da função async
               }
             }
             
@@ -3378,7 +3485,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
                 lastScanAt: nowTs, lastCLIts: lastClientTs
               });
-              continue;
+              return; // Retorna da função async
             }
             
             if (retryAfter > nowTs && lastAttemptSig === clientContentSig) {
@@ -3390,7 +3497,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
                 lastScanAt: nowTs, lastCLIts: lastClientTs
               });
-              continue;
+              return; // Retorna da função async
             }
             
             if (lastAttemptSig === clientContentSig && (nowTs - lastAttemptAt) < LLM_ATTEMPT_TTL_MS) {
@@ -3402,7 +3509,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 data: { ...(stateBefore && stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
                 lastScanAt: nowTs, lastCLIts: lastClientTs
               });
-              continue;
+              return; // Retorna da função async
             }
             
             // Lock por chat/inflightSig na chamada da IA, para impedir qualquer token/consulta duplicada
@@ -3421,7 +3528,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 lastScanAt: Date.now(),
                 lastCLIts: lastClientTs
               });
-              continue;
+              return; // Retorna da função async
             }
 
             let llmRes = null;
@@ -3504,7 +3611,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             // A PARTIR DAQUI, use SEMPRE llmRes, nunca "llm"
             if (!llmRes) {
               stepLog.appendJSONL(nome, 'virtus', { step: 'llm_result_missing', chatId, ts: Date.now() });
-              continue;
+              return; // Retorna da função async
             }
 
             // Persistência da extração (para finalização futura e consistência)
@@ -3541,7 +3648,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               // Campos completos - finalizar imediatamente, NÃO enfileirar resposta da IA
               stepLog.appendJSONL(nome, 'virtus', { step: 'auto_finalize_all_fields_complete', chatId });
               await finalizePedido(nome, chatId, {});
-              continue;
+              return; // Retorna da função async
             }
 
             const shouldAnswer = !!(llmRes && llmRes.control && llmRes.control.shouldReply);
@@ -3565,7 +3672,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 await virtusFSM.patch(nome, chatId, {
                   cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } }
                 });
-                continue;
+                return; // Retorna da função async
               }
 
               const cursorSig = `${clientCount}|${clientDigest}`;
@@ -3638,6 +3745,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch (e) {
           logger.warn('[SCAN] Falha ao processar chat', { nome, chatId, error: (e && e.message) || String(e) });
         }
+        });
       }
     } catch (e) {
       logger.warn('[SCAN] erro geral', { nome, error: (e && e.message) || String(e) });
