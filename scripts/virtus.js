@@ -34,6 +34,7 @@ const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
 const { masterExtractAnswer } = require('./inteligenciaArtificial.js');
 const chatStateStore = require('./chatStateStore.js');
 const notifierQueue = require('./notifierQueue.js');
+const fetch = global.fetch || require('node-fetch');
 
 // Mutex de navegação por perfil
 const NAV_LOCKS = new Map();
@@ -734,7 +735,7 @@ async function assertOnChatStrict(p, chatId, { timeoutMs = 4500 } = {}) {
     const { byUrl, byDom } = await getOpenChatIdStrict(p);
     lastByUrl = byUrl; lastByDom = byDom;
     const okDom = (byDom && byDom === String(chatId)) || false;
-    if (okUrl && (okDom || byDom === null)) {
+    if (okDom || okUrl) {
       try {
         stepLog.appendJSONL('GLOBAL', 'virtus', {
           step: 'assert_on_chat_end',
@@ -2019,22 +2020,24 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
     }
   }
   
-  // Fallback por URL (SOMENTE se VIRTUS_ALLOW_URL_OPEN=1 em debug)
-  if (String(process.env.VIRTUS_ALLOW_URL_OPEN || '0') === '1') {
-    try {
-      stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fallback_attempt', chatId, ts: Date.now() });
-      await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 });
-      const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 });
+  // Fallback por URL (sempre ativo)
+  try {
+    stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fallback_attempt', chatId, ts: Date.now() });
+    const urls = [
+      `https://www.messenger.com/marketplace/t/${chatId}`,
+      `https://www.facebook.com/marketplace/t/${chatId}`
+    ];
+    for (const u of urls) {
+      try { await p.goto(u, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 }); } catch {}
+      const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 }).catch(()=>false);
       if (ok) {
-        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_ok', chatId, ts: Date.now() }); } catch {}
+        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_ok', chatId, url: u, ts: Date.now() }); } catch {}
         return true;
       }
-      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
-    } catch (e) {
-      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
     }
-  } else {
-    stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fallback_disabled', chatId, ts: Date.now() });
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
+  } catch (e) {
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
   }
   try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_timeout', chatId, ts: Date.now() }); } catch {}
   return false;
@@ -2592,6 +2595,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // NAV_LOCK ativo do open ao assert/collect
       const navRes = await withNavLock(nome, async () => {
+        await maybeGuaranteeMarketplaceFast(p, nome).catch(()=>{});
         const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
         if (!chatUrlMatches(urlNow, chatId)) {
           stepLog.appendJSONL(nome, 'virtus', { step: 'open_chat_click_begin', chatId, ts: Date.now() });
