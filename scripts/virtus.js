@@ -2227,60 +2227,107 @@ async function openChatByUrl(p, chatId, { timeoutMs = 8000 } = {}) {
   return false; // Proibido usar URL para abrir chat
 }
 
-async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}) {
-  try {
-    const sel = `a[href^="/marketplace/t/${chatId}"]`;
-    try { await scrollChatsToTop(p, null); } catch {}
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      let clicked = false;
-      try {
-        clicked = await p.evaluate((anchorSel) => {
-          const anchors = Array.from(document.querySelectorAll(anchorSel)).filter(a => {
-            const st = window.getComputedStyle(a);
-            const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
-            const r = a.getBoundingClientRect();
-            return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
-          });
-          const a = anchors[0] || null;
-          if (!a) return false;
-          const row = a.closest('div[role="row"]') || a.parentElement;
-          try { (row || a).scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
-          try {
-            const evtOpts = { bubbles: true, cancelable: true, view: window };
-            (row || a).dispatchEvent(new MouseEvent('mousedown', evtOpts));
-            (row || a).dispatchEvent(new MouseEvent('mouseup', evtOpts));
-          } catch {}
-          try { (row || a).focus && (row || a).focus(); } catch {}
-          try { (row || a).click(); } catch {}
-          return true;
-        }, sel).catch(() => false);
-      } catch {}
+async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrollTries = 12, scrollStep = 700 } = {}) {
+  const sel = `a[href^="/marketplace/t/${chatId}"]`;
+  try { await scrollChatsToTop(p, null); } catch {}
 
-      if (!clicked) {
-        try {
-          const h = await p.$(sel).catch(()=>null);
-          if (h) {
-            await h.click({ delay: 20 });
-            clicked = true;
-          }
-        } catch {}
-      }
-
-      if (clicked) {
-        const ok = await assertOnChatStrict(p, chatId, { timeoutMs }).catch(()=>false);
-        if (ok) return true;
-      }
-
-      await sleep(250 + Math.floor(Math.random() * 200));
-      try { await scrollChatsToTop(p, null); } catch {}
-    }
-    
-    // Proibido fallback por URL ao abrir chat
+  async function tryClickOnce() {
+    let clicked = false;
     try {
-      stepLog.appendJSONL('global', 'virtus', { step: 'forbidden_url_fallback_skipped', chatId, ts: Date.now() });
+      clicked = await p.evaluate((anchorSel) => {
+        const anchors = Array.from(document.querySelectorAll(anchorSel)).filter(a => {
+          const st = window.getComputedStyle(a);
+          const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
+          const r = a.getBoundingClientRect();
+          return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
+        });
+        const a = anchors[0] || null;
+        if (!a) return false;
+        const row = a.closest('div[role="row"]') || a.parentElement;
+        try { (row || a).scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
+        try {
+          const evtOpts = { bubbles: true, cancelable: true, view: window };
+          (row || a).dispatchEvent(new MouseEvent('mousedown', evtOpts));
+          (row || a).dispatchEvent(new MouseEvent('mouseup', evtOpts));
+        } catch {}
+        try { (row || a).focus && (row || a).focus(); } catch {}
+        try { (row || a).click(); } catch {}
+        return true;
+      }, sel).catch(() => false);
     } catch {}
-    return false;
-  } catch {}
+
+    if (!clicked) {
+      try {
+        const h = await p.$(sel).catch(()=>null);
+        if (h) { await h.click({ delay: 20 }); clicked = true; }
+      } catch {}
+    }
+
+    return clicked;
+  }
+
+  // Tenta clicar normalmente (retry)
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const clicked = await tryClickOnce();
+
+    if (clicked) {
+      const ok = await assertOnChatStrict(p, chatId, { timeoutMs }).catch(()=>false);
+      if (ok) {
+        try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_ok', chatId, ts: Date.now() }); } catch {}
+        return true;
+      }
+    }
+
+    await sleep(250 + Math.floor(Math.random() * 200));
+  }
+
+  // Scroll para materializar itens da lista virtualizada
+  for (let i = 0; i < scrollTries; i++) {
+    try {
+      await p.evaluate((step) => {
+        function gridEl() {
+          return document.querySelector('div[role="grid"]')
+            || document.querySelector('div[role="rowgroup"]')
+            || document.querySelector('div.x78zum5.xdt5ytf')
+            || document.scrollingElement
+            || document.body;
+        }
+        const g = gridEl();
+        if (g) {
+          const next = Math.min((g.scrollTop || 0) + step, g.scrollHeight);
+          g.scrollTop = next;
+          try {
+            const first = g.querySelector && g.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
+            if (first) first.focus && first.focus();
+          } catch {}
+        }
+      }, scrollStep).catch(()=>{});
+    } catch {}
+    await sleep(200);
+    const clicked = await tryClickOnce();
+    if (clicked) {
+      const ok = await assertOnChatStrict(p, chatId, { timeoutMs }).catch(()=>false);
+      if (ok) {
+        try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_ok_after_scroll', chatId, tries: i+1, ts: Date.now() }); } catch {}
+        return true;
+      }
+    }
+  }
+  // Fallback opcional (URL), apenas para debug
+  if (String(process.env.VIRTUS_ALLOW_URL_OPEN || '0') === '1') {
+    try {
+      await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 });
+      const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 2000 });
+      if (ok) {
+        try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_url_ok', chatId, ts: Date.now() }); } catch {}
+        return true;
+      }
+      try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
+    } catch (e) {
+      try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
+    }
+  }
+  try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_fail', chatId, ts: Date.now() }); } catch {}
   return false;
 }
 
@@ -2902,17 +2949,45 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
       }
 
+      const onTarget = await assertOnChatStrict(p, chatId, { timeoutMs: 1200 }).catch(()=>false);
+      if (!onTarget) {
+        // Não abriu: refile em +5s mantendo tokenSig
+        try {
+          const stTmp = virtusFSM.get(nome, chatId) || {};
+          const schTmp = stTmp.schedule || {};
+          const colTmp = schTmp.collect || {};
+          const tokenSigNow = String(colTmp.tokenSig || '');
+          const reAt = Date.now() + 5000;
+          scheduleCollectJob(nome, chatId, reAt, tokenSigNow);
+          await virtusFSM.patch(nome, chatId, {
+            schedule: { ...(schTmp || {}), collect: { ...(colTmp || {}), openAt: reAt } }
+          });
+          stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_open_failed', chatId, reAt, ts: Date.now() });
+        } catch {}
+        setScanBlocked(nome, false);
+        return;
+      }
+
       // Extrair histórico e sanitizar
       const historicoConversa = await extrairHistoricoConversa(p);
       const historicoFiltered = (historicoConversa || []).filter(m => String(m && m.texto || '').trim() && String(m.texto).trim() !== 'Nenhuma mensagem encontrada.');
       const historicoSan = sanitizeHistoricoRecords(historicoFiltered, "");
       if (!Array.isArray(historicoSan) || !historicoSan.length) {
-        const lastClientTsEmpty = 0;
-        await virtusFSM.patch(nome, chatId, {
-          cursor: { client: { count: 0, digest: '', contentSig: '', lastTs: lastClientTsEmpty } },
-          data: { lastClientNorm: '', lastClientTs: lastClientTsEmpty || Date.now() },
-          lastScanAt: now
-        });
+        // Thread aberta, mas nada visível ainda — refile curto
+        try {
+          const stTmp = virtusFSM.get(nome, chatId) || {};
+          const schTmp = stTmp.schedule || {};
+          const colTmp = schTmp.collect || {};
+          const tokenSigNow = String(colTmp.tokenSig || '');
+          const reAt = Date.now() + 5000;
+          scheduleCollectJob(nome, chatId, reAt, tokenSigNow);
+          await virtusFSM.patch(nome, chatId, {
+            schedule: { ...(schTmp || {}), collect: { ...(colTmp || {}), openAt: reAt } },
+            lastScanAt: now
+          });
+          stepLog.appendJSONL(nome, 'virtus', { step: 'collect_empty_refire', chatId, reAt, ts: Date.now() });
+        } catch {}
+        setScanBlocked(nome, false);
         return;
       }
 
