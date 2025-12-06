@@ -1213,6 +1213,15 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     const proximo = pickEarliestSendJobSync(nomePerfil);
     if (!proximo) return;
 
+    if (hasActiveCollectClaimForSync(nomePerfil, proximo.chatId)) {
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_collect_claim_same_chat', chatId: proximo.chatId, ts: Date.now() });
+      return;
+    }
+    if (hasActiveCollectClaimSync(nomePerfil)) {
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_collect_claim_any', ts: Date.now() });
+      return;
+    }
+
     if (hasDueCollectJobForSync(nomePerfil, proximo.chatId)) {
       stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_due_collect_same_chat', chatId: proximo.chatId, ts: Date.now() });
       return;
@@ -1581,6 +1590,12 @@ const COLETA_FINAL_MS = parseInt(process.env.VIRTUS_COLETA_FINAL_MS || '600000',
 const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '259200000', 10); // 72h
 const VIRTUS_COLLECT_IDLE_MS = parseInt(process.env.VIRTUS_COLLECT_IDLE_MS || '0', 10); // repouso por chat pós-coleta (padrão 0)
 const VIRTUS_COLLECT_GAP_MS = parseInt(process.env.VIRTUS_COLLECT_GAP_MS || '1500', 10); // espaçamento entre coletas (anti-spam)
+
+// Claims/reaper/anti-drift/scan-blocked watchdog
+const VIRTUS_CLAIM_STALE_MS = parseInt(process.env.VIRTUS_CLAIM_STALE_MS || '900000', 10); // 15min
+const VIRTUS_CLAIM_HEARTBEAT_MS = parseInt(process.env.VIRTUS_CLAIM_HEARTBEAT_MS || '15000', 10); // 15s
+const VIRTUS_COLLECT_ENQUEUE_MAX_WAIT_MS = parseInt(process.env.VIRTUS_COLLECT_ENQUEUE_MAX_WAIT_MS || '300000', 10); // 5min – anti-clock-drift
+const SCAN_BLOCK_MAX_MS = parseInt(process.env.VIRTUS_SCAN_BLOCK_MAX_MS || '600000', 10); // 10min watchdog scanBlocked
 
 // Variáveis globais para controle de backoff e falhas
 let recoverBackoffMs = 0;
@@ -2926,10 +2941,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const now = Date.now();
     setScanBlocked(nome, true, { reason: 'collect', chatId });
     try {
+      const st0 = (() => { try { return virtusFSM.get(nome, chatId) || {}; } catch { return {}; } })();
+      const sch0 = st0.schedule || {};
+      const col0 = sch0.collect || {};
+      const tokenSig0 = String(col0.tokenSig || (st0.cursor && st0.cursor.feed && (st0.cursor.feed.pendingSig || st0.cursor.feed.sig)) || '');
+
       const p = await ensurePage().catch(()=>null);
-      if (!p) { 
+      if (!p) {
+        const reAt = Date.now() + 5000;
+        try {
+          scheduleCollectJob(nome, chatId, reAt, tokenSig0);
+          await virtusFSM.patch(nome, chatId, {
+            schedule: { ...(sch0 || {}), collect: { ...(col0 || {}), openAt: reAt, tokenSig: tokenSig0 } }
+          });
+          stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_page', chatId, reAt, ts: Date.now() });
+        } catch {}
         setScanBlocked(nome, false);
-        return; 
+        return;
       }
 
       // Consome openAt no FSM (se ainda >0) e desagenda arquivo de coleta
@@ -3272,12 +3300,70 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
+  function listCollectClaimFilesSync(perfil) {
+    const dir = collectQueueDir(perfil);
+    try {
+      const files = fsRaw.readdirSync(dir);
+      return files.filter(f => f.startsWith('collect_') && f.endsWith('.json.claim'))
+        .map(f => path.join(dir, f));
+    } catch { return []; }
+  }
+
+  function claimToJsonPath(claimPath) {
+    return String(claimPath).endsWith('.claim') ? claimPath.slice(0, -('.claim'.length)) : claimPath;
+  }
+
+  function resurrectAllCollectClaimsOnBoot(perfil) {
+    const claims = listCollectClaimFilesSync(perfil);
+    for (const c of claims) {
+      try {
+        const jsonPath = claimToJsonPath(c);
+        fsRaw.renameSync(c, jsonPath);
+        stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_claim_boot_resurrect', file: path.basename(jsonPath), ts: Date.now() });
+      } catch (e) {
+        stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_claim_boot_resurrect_fail', file: path.basename(c), err: (e && e.message) || String(e), ts: Date.now() });
+      }
+    }
+  }
+
+  function reapStaleCollectClaims(perfil) {
+    const claims = listCollectClaimFilesSync(perfil);
+    const now = Date.now();
+    for (const c of claims) {
+      try {
+        const st = fsRaw.statSync(c);
+        const age = now - Number(st.mtimeMs || st.ctimeMs || now);
+        if (age >= VIRTUS_CLAIM_STALE_MS) {
+          const jsonPath = claimToJsonPath(c);
+          fsRaw.renameSync(c, jsonPath);
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_claim_reap', file: path.basename(jsonPath), ageMs: age, ts: now });
+        }
+      } catch (e) {
+        stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_claim_reap_fail', file: path.basename(c), err: (e && e.message) || String(e), ts: Date.now() });
+      }
+    }
+  }
+
+  function hasActiveCollectClaimSync(perfil) {
+    const dir = collectQueueDir(perfil);
+    try {
+      const files = fsRaw.readdirSync(dir);
+      return files.some(f => f.startsWith('collect_') && f.endsWith('.json.claim'));
+    } catch { return false; }
+  }
+
+  function hasActiveCollectClaimForSync(perfil, chatId) {
+    try { return fsRaw.existsSync(collectJobPath(perfil, chatId) + '.claim'); } catch { return false; }
+  }
+
   function startCollectRunner(perfil) {
     if (collectRunnerTimers.has(perfil)) return;
+    resurrectAllCollectClaimsOnBoot(perfil);
     // Captura runCollectForChat na closure para garantir acesso quando enqueueProcess executar
     const runCollectFn = runCollectForChat;
     const id = setInterval(() => {
       try {
+        reapStaleCollectClaims(perfil);
         const dir = collectQueueDir(perfil);
         const files = listJsonFilesSync(dir, 'collect_');
         if (!files.length) return;
@@ -3290,7 +3376,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         for (const f of files) {
           try {
             const d = JSON.parse(fsRaw.readFileSync(f, 'utf8'));
-            if (Number(d.openAt || 0) <= now) {
+            const dueByOpenAt = Number(d.openAt || 0) <= now;
+            const dueByAge = Number(d.enqueuedAt || 0) > 0 && (now - Number(d.enqueuedAt)) >= VIRTUS_COLLECT_ENQUEUE_MAX_WAIT_MS;
+            if (dueByOpenAt || dueByAge) {
               if (!winnerData || Number(d.openAt || 0) < Number(winnerData.openAt || 0)) {
                 winner = f; winnerData = d;
               }
@@ -3310,10 +3398,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         lastCollectAtByPerfil.set(perfil, now);
         stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_job_dispatch_disk', chatId: winnerData.chatId, ts: now });
 
+        // Heartbeat enquanto o job roda
+        const hb = setInterval(() => { try {
+          const nowDate = new Date();
+          fsRaw.utimesSync(claim, nowDate, nowDate);
+        } catch {} }, VIRTUS_CLAIM_HEARTBEAT_MS);
+
         // Enfileira no processQueue e remove o claim após enfileirar
         enqueueProcess(perfil, async () => {
           try { await runCollectFn(perfil, String(winnerData.chatId || '')); }
-          finally { try { fsRaw.unlinkSync(claim); } catch {} }
+          finally { try { clearInterval(hb); } catch {}; try { fsRaw.unlinkSync(claim); } catch {} }
         });
       } catch {}
     }, 300);
@@ -3490,7 +3584,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       for (const it of lista) {
         if (isScanBlocked(nome)) {
-          try { stepLog.appendJSONL(nome, 'virtus', { step: 'scan_loop_abort_blocked', chatId, ts: Date.now() }); } catch {}
+          try { stepLog.appendJSONL(nome, 'virtus', { step: 'scan_loop_abort_blocked', chatId: (it && it.id) || null, ts: Date.now() }); } catch {}
           break;
         }
         const chatId = String(it.id || '').trim();
@@ -3913,6 +4007,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       scanAndProcessChats(nome);
     }, SCAN_INTERVAL_MS);
     scanAndProcessChats(nome);
+
+    // Watchdog para scanBlockedByPerfil
+    setInterval(() => {
+      try {
+        const meta = scanBlockedByPerfil.get(nome);
+        if (!meta || !meta.since) return;
+        const age = Date.now() - Number(meta.since || 0);
+        if (age > SCAN_BLOCK_MAX_MS) {
+          stepLog.appendJSONL(nome, 'virtus', { step: 'scan_blocked_watchdog_release', ageMs: age, prevMeta: meta, ts: Date.now() });
+          setScanBlocked(nome, false);
+        }
+      } catch {}
+    }, 60000);
   }
 
   runner();
