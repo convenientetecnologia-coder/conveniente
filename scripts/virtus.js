@@ -1210,6 +1210,14 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
     const jobs = listSendJobsSync(nomePerfil);
     if (!jobs.length) return;
 
+    const proximo = pickEarliestSendJobSync(nomePerfil);
+    if (!proximo) return;
+
+    if (hasDueCollectJobForSync(nomePerfil, proximo.chatId)) {
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_due_collect_same_chat', chatId: proximo.chatId, ts: Date.now() });
+      return;
+    }
+
     // Prioridade para coletas vencidas no DISCO
     if (hasDueCollectJobSync(nomePerfil)) {
       const dir = collectQueueDir(nomePerfil);
@@ -1242,8 +1250,6 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       return;
     }
 
-    const proximo = pickEarliestSendJobSync(nomePerfil);
-    if (!proximo) return;
     if (Number(proximo.earliestSendAt || 0) > agora) return;
 
     sendInProgressByPerfil.set(nomePerfil, true);
@@ -1359,13 +1365,7 @@ async function marcarRespondido(nomePerfil, chatId) {
 async function extrairHistoricoConversa(page) {
   try {
     const historico = await page.evaluate(() => {
-      function norm(s) {
-        try {
-          return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      }
+      function norm(s){ try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); } catch { return String(s||'').toLowerCase().trim(); } }
 
       function parseAbbrToTs(el) {
         try {
@@ -1399,14 +1399,28 @@ async function extrairHistoricoConversa(page) {
         }
       }
 
-      // EXTRAÇÃO APENAS DO CONTAINER PRINCIPAL DA THREAD (div[role="main"])
       const main = document.querySelector('div[role="main"]');
       if (!main) return [];
 
-      const rows = Array.from(main.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-200);
-      const out = [];
+      // 1) Container do composer (input)
+      const composer = main.querySelector('div[contenteditable="true"][role="textbox"], div[contenteditable="true"][aria-label], div[role="combobox"][contenteditable="true"]');
+      let convoRoot = null;
+      if (composer) {
+        let n = composer.parentElement;
+        for (let i=0;i<6 && n;i++){
+          if (n.querySelector && n.querySelector('abbr[aria-label]')) { convoRoot = n; break; }
+          n = n.parentElement;
+        }
+      }
+      if (!convoRoot) convoRoot = main;
 
-      for (const r of rows) {
+      const grids = Array.from(main.querySelectorAll('div[role="grid"]'));
+      const isInsideGrid = (el) => grids.some(g => g.contains(el));
+      const candidates = Array.from(convoRoot.querySelectorAll('div[role="article"], div[data-testid], div[dir]'))
+        .filter(el => el && !isInsideGrid(el) && !el.closest('a[href^="/marketplace/t/"]'));
+
+      const out = [];
+      for (const r of candidates) {
         try {
           const rawTxt = (r.innerText || r.textContent || '').trim();
           if (!rawTxt) continue;
@@ -1480,17 +1494,14 @@ async function extrairHistoricoConversa(page) {
         } catch {}
       }
 
-      out.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-      
-      // Monotonicidade de timestamps
-      for (let i = 1; i < out.length; i++) {
-        const prev = Number(out[i - 1].timestamp || 0);
-        const cur  = Number(out[i].timestamp || 0);
+      out.sort((a,b) => (a.timestamp||0)-(b.timestamp||0));
+      for (let i=1;i<out.length;i++){
+        const prev = Number(out[i-1].timestamp || 0);
+        const cur = Number(out[i].timestamp || 0);
         if (cur <= prev) {
           out[i].timestamp = prev + 1;
         }
       }
-      
       return out;
     });
 
@@ -1705,6 +1716,15 @@ function hasDueCollectJobSync(perfil) {
   return false;
 }
 
+function hasDueCollectJobForSync(perfil, chatId) {
+  try {
+    const f = collectJobPath(perfil, chatId);
+    if (!fsRaw.existsSync(f)) return false;
+    const d = JSON.parse(fsRaw.readFileSync(f, 'utf8'));
+    return Number(d.openAt || 0) <= Date.now();
+  } catch { return false; }
+}
+
 // REMOVIDO: runCollectForChat e startCollectRunner movidas para dentro de startVirtus para ter acesso a ensurePage
 
 // Timers de coleta (45s após evento)
@@ -1792,14 +1812,19 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     const alreadySentSig = String(fsmState?.cursor?.ia?.sentSig || '');
     const alreadyQueuedSig = String(fsmState?.cursor?.ia?.queuedSig || '');
     const cmpSig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
+    const existingOnDisk = await loadSendJob(nomePerfil, chatId);
     if (cmpSig) {
       if (alreadySentSig && cmpSig === alreadySentSig && origin !== 'finalize') {
         stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_sent_sig', chatId, sig: cmpSig, origin, ts: Date.now() });
         return { ok: false, status: 'dropped' };
       }
       if (alreadyQueuedSig && cmpSig === alreadyQueuedSig && origin !== 'finalize') {
-        stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_queued_sig', chatId, sig: cmpSig, origin, ts: Date.now() });
-        return { ok: false, status: 'dropped' };
+        if (!existingOnDisk) {
+          // ACK fantasma: prosseguir
+        } else {
+          stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_queued_sig', chatId, sig: cmpSig, origin, ts: Date.now() });
+          return { ok: false, status: 'dropped' };
+        }
       }
     }
 
@@ -2210,17 +2235,23 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2 } = {}
       let clicked = false;
       try {
         clicked = await p.evaluate((anchorSel) => {
-          const anchors = Array.from(document.querySelectorAll(anchorSel))
-            .filter(a => {
-              const st = window.getComputedStyle(a);
-              const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
-              const r = a.getBoundingClientRect();
-              return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
-            });
+          const anchors = Array.from(document.querySelectorAll(anchorSel)).filter(a => {
+            const st = window.getComputedStyle(a);
+            const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
+            const r = a.getBoundingClientRect();
+            return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
+          });
           const a = anchors[0] || null;
           if (!a) return false;
-          try { a.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
-          a.click();
+          const row = a.closest('div[role="row"]') || a.parentElement;
+          try { (row || a).scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
+          try {
+            const evtOpts = { bubbles: true, cancelable: true, view: window };
+            (row || a).dispatchEvent(new MouseEvent('mousedown', evtOpts));
+            (row || a).dispatchEvent(new MouseEvent('mouseup', evtOpts));
+          } catch {}
+          try { (row || a).focus && (row || a).focus(); } catch {}
+          try { (row || a).click(); } catch {}
           return true;
         }, sel).catch(() => false);
       } catch {}
@@ -3120,8 +3151,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
 
         const cursorSig = `${clientCount}|${clientDigest}`;
-        await virtusFSM.ackQueued(nome, chatId, cursorSig);
-
         const queueResult = await queueMessengerSend(nome, {
           chatId,
           resposta: reply,
