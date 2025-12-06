@@ -21,6 +21,7 @@ const ATENDIMENTO_FILES = [
   "scripts/inteligenciaArtificial.js", // agora só OpenAI/master
   "scripts/chatStateStore.js",
   "scripts/stepLog.js", // logging de passos do atendimento
+  "scripts/logger.js", // sistema de logger geral
   "scripts/chatLock.js", // sistema de locks de chat
   "scripts/manifestStore.js", // dados do perfil (cidade, estado) usados no contexto
   "scripts/notifierQueue.js", // fila persistente (outbox) para envio de pedidos ao notificador

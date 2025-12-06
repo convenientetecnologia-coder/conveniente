@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
+const stepLog = require('./stepLog.js');
+const audit = stepLog.audit;
 
 function ensureDir(p){ try { fs.mkdirSync(p, { recursive: true }); } catch {} }
 
@@ -71,23 +73,31 @@ function monotonicMerge(prev, next) {
 }
 
 function get(perfil, chatId){
+  audit(perfil, 'virtus', 'debug', 'state_get_start', { chatId });
   const file = stateFile(perfil, chatId);
   const lockPath = file + '.lck';
   let fd = null;
   try {
     fd = acquireFileLock(lockPath);
     let s = readSafe(file, null);
+    const existed = !!s;
     if (!s) {
       s = initState();
       writeAtomicNoLock(file, s);
+      audit(perfil, 'virtus', 'info', 'state_get_init', { chatId });
     }
+    audit(perfil, 'virtus', 'info', 'state_get_end', { chatId, exists: existed });
     return s;
+  } catch (e) {
+    audit(perfil, 'virtus', 'error', 'state_get_err', { chatId, error: (e && e.message) || String(e) });
+    throw e;
   } finally {
     try { releaseFileLock(lockPath, fd); } catch {}
   }
 }
 
 function patch(perfil, chatId, patchObj){
+  audit(perfil, 'virtus', 'debug', 'state_patch_start', { chatId, patchKeys: Object.keys(patchObj || {}) });
   const file = stateFile(perfil, chatId);
   const lockPath = file + '.lck';
   let fd = null;
@@ -97,7 +107,11 @@ function patch(perfil, chatId, patchObj){
     if (!cur) cur = initState();
     let next = monotonicMerge(cur, patchObj || {});
     writeAtomicNoLock(file, next);
+    audit(perfil, 'virtus', 'info', 'state_patch_end', { chatId });
     return next;
+  } catch (e) {
+    audit(perfil, 'virtus', 'error', 'state_patch_err', { chatId, error: (e && e.message) || String(e) });
+    throw e;
   } finally {
     try { releaseFileLock(lockPath, fd); } catch {}
   }

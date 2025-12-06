@@ -48,4 +48,19 @@ function attemptId() {
   return `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
 }
 
-module.exports = { appendJSONL, attemptId };
+function audit(perfil, flow, level, tag, ctx = {}) {
+  const payload = { ts: Date.now(), step: tag, ...ctx };
+  try { appendJSONL(perfil, flow, payload); } catch {}
+  try {
+    const line = `[${flow.toUpperCase()}][${tag.toUpperCase()}] ` + 
+      Object.entries({ perfil, ...ctx })
+        .map(([k,v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v).slice(0,200)}`)
+        .join(' ');
+    if (level === 'error') require('./logger.js').error(line);
+    else if (level === 'warn') require('./logger.js').warn(line);
+    else if (level === 'debug') require('./logger.js').debug(line);
+    else require('./logger.js').info(line);
+  } catch {}
+}
+
+module.exports = { appendJSONL, attemptId, audit };

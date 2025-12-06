@@ -7,6 +7,8 @@
 const fetch = global.fetch || require('node-fetch');
 
 const logger = require('./logger.js');
+const stepLog = require('./stepLog.js');
+const audit = stepLog.audit;
 let issues = null;
 try { issues = require('./issues.js'); } catch {}
 // Funções de persistência removidas: loadState, saveState, appendLog não são mais usadas
@@ -412,7 +414,7 @@ function buildMessages(historico = [], maxMessages = 30) {
 
 // ========== CHAMADA OPENAI ==========
 
-async function callOpenAI(messages, systemPrompt, respond) {
+async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId = null) {
   const apiKey = process.env.OPENAI_API_KEY;
   const apiUrl = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
   const model = process.env.OPENAI_MODEL_MASTER || 'gpt-5.1';
@@ -433,11 +435,11 @@ async function callOpenAI(messages, systemPrompt, respond) {
     response_format: { type: 'json_object' }
   };
 
-  console.log(`[IA][HTTP][POST] model=${model} messages=${allMessages.length} timeout=30000ms`);
+  const timeoutMs = 30000;
+  audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_post', { chatId, model, messagesLen: allMessages.length, timeoutMs });
 
   const Controller = global.AbortController || require('node-abort-controller');
   const controller = new Controller();
-  const timeoutMs = 30000;
   const t = setTimeout(() => { try { controller.abort(); } catch {} }, timeoutMs);
 
   try {
@@ -464,12 +466,12 @@ async function callOpenAI(messages, systemPrompt, respond) {
     if (!content || !String(content).trim()) throw new Error('openai_empty_response');
 
     const usage = data.usage || {};
-    console.log(`[IA][HTTP][OK] tokens_prompt=${usage.prompt_tokens||0} tokens_completion=${usage.completion_tokens||0}`);
+    audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_ok', { chatId, promptTokens: usage.prompt_tokens || 0, completionTokens: usage.completion_tokens || 0 });
 
     return { content: String(content).trim(), usage };
   } catch (e) {
     clearTimeout(t);
-    console.log(`[IA][HTTP][ERR] ${e && e.message || String(e)}`);
+    audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_http_err', { chatId, error: e && e.message || String(e) });
     throw e;
   }
 }
@@ -558,6 +560,7 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
     const messages = buildMessages(historico, 30);
 
     if (!messages.length) {
+      audit(perfil, 'virtus', 'warn', 'llm_no_messages', { chatId });
       return {
         extraction: {},
         answer: null,
@@ -567,18 +570,19 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
     }
 
     try {
-      console.log(`[IA][CALL_START] perfil=${perfil} chat=${chatId} mensagens=${messages.length}`);
-      const out = await callOpenAI(messages, sysPrompt, respond);
+      audit(perfil, 'virtus', 'info', 'llm_master_start', { chatId, msgsLen: messages.length, respond });
+      const out = await callOpenAI(messages, sysPrompt, respond, perfil, chatId);
       const result = parseResponse(out.content || '', lastClientMsg);
       
-      const summary = result
-        ? `askField=${result?.control?.askField||null} shouldReply=${!!result?.control?.shouldReply} answer=${String(result.answer||'').slice(0,40)}`
-        : '(parse fail)';
-      console.log(`[IA][CALL_END] perfil=${perfil} chat=${chatId} ${summary}`);
+      if (!result || !result.answer) {
+        audit(perfil, 'virtus', 'warn', 'llm_empty_or_parse_fail', { chatId });
+      } else {
+        audit(perfil, 'virtus', 'info', 'llm_parse_ok', { chatId, askField: result?.control?.askField, shouldReply: !!result?.control?.shouldReply, answerSnippet: String(result.answer||'').slice(0,72) });
+      }
       
       return result;
     } catch (e) {
-      console.log(`[IA][HTTP][ERR] ${e && e.message || String(e)}`);
+      audit(perfil, 'virtus', 'error', 'llm_exception', { chatId, error: (e && e.message) || String(e) });
       return {
         extraction: {},
         answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',
@@ -587,6 +591,7 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
       };
     }
   } catch (e) {
+    audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_exception', { chatId, error: (e && e.message) || String(e) });
     return {
       extraction: {},
       answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',

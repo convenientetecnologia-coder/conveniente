@@ -2,6 +2,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const logger = require('./logger.js');
+const stepLog = require('./stepLog.js');
+const audit = stepLog.audit;
 
 const DEFAULT_BACKOFFS = [5000, 15000, 30000, 60000, 120000, 300000, 600000]; // 5s,15s,30s,1m,2m,5m,10m
 const workers = new Map(); // perfil -> { running: boolean, options, intervalId }
@@ -84,6 +87,7 @@ function listJobs(perfil) {
 }
 
 async function httpPostJson(url, body) {
+  audit('GLOBAL', 'virtus', 'debug', 'outbox_http_post', { url, bodyBytes: JSON.stringify(body).length });
   const fetch = global.fetch || require('node-fetch');
   const resp = await fetch(url, {
     method:'POST',
@@ -103,6 +107,8 @@ async function processOne(perfil, opts, file) {
   const attempts = Number(job.attempts || 0);
   const nextAt  = Number(job.nextAttemptAt || 0);
   if (now < nextAt) return;
+  
+  audit(perfil, 'virtus', 'info', 'outbox_proc_start', { file, kind: job.kind, attempts });
 
   // monta request
   const base = opts && opts.url ? String(opts.url) : '';
@@ -122,14 +128,7 @@ async function processOne(perfil, opts, file) {
         try { await opts.onJobOk(perfil, job); } catch {}
       }
       try { fs.unlinkSync(file); } catch {}
-      if (opts.logger && opts.logger.info) {
-        opts.logger.info('[NOTIFIER_QUEUE] ok', { perfil, kind: job.kind, id: job.id, attempts });
-      }
-      if (opts.stepLog) {
-        try {
-          opts.stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_ok', kind: job.kind, id: job.id, attempts, ts: Date.now() });
-        } catch {}
-      }
+      audit(perfil, 'virtus', 'info', 'outbox_proc_ok', { id: job.id, kind: job.kind, attempts });
       return;
     }
     // Falha HTTP
@@ -140,12 +139,7 @@ async function processOne(perfil, opts, file) {
     if (isDeterministicConfigError(text) || (attempts + 1) >= MAX_ATTEMPTS) {
       // move to dead-letter e abre issue
       const deadPath = moveToDeadletter(perfil, file);
-      if (opts.logger && opts.logger.error) {
-        opts.logger.error('[NOTIFIER_QUEUE] dead_letter', { perfil, kind: job.kind, id: job.id, attempts: attempts+1, deadPath });
-      }
-      if (opts.stepLog) {
-        try { opts.stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_dead_letter', kind: job.kind, id: job.id, attempts: attempts+1, deadPath, ts: Date.now() }); } catch {}
-      }
+      audit(perfil, 'virtus', 'error', 'outbox_proc_deadletter', { id: job.id, kind: job.kind, attempts: attempts+1, deadPath });
       try {
         const issues = require('./issues.js');
         if (issues && typeof issues.append === 'function') {
@@ -155,14 +149,7 @@ async function processOne(perfil, opts, file) {
       return;
     }
     writeAtomicFsync(file, upd);
-    if (opts.logger && opts.logger.error) {
-      opts.logger.error('[NOTIFIER_QUEUE] http_fail', { perfil, kind: job.kind, id: job.id, status, attempts: upd.attempts });
-    }
-    if (opts.stepLog) {
-      try {
-        opts.stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_fail', kind: job.kind, id: job.id, status, attempts: upd.attempts, ts: Date.now() });
-      } catch {}
-    }
+    audit(perfil, 'virtus', 'warn', 'outbox_proc_retry', { id: job.id, kind: job.kind, attempts: attempts+1, nextAttemptAtISO: new Date(nextAttemptAt).toISOString() });
   } catch (e) {
     const backoff = DEFAULT_BACKOFFS[Math.min(attempts, DEFAULT_BACKOFFS.length - 1)];
     const nextAttemptAt = Date.now() + backoff;
@@ -171,12 +158,7 @@ async function processOne(perfil, opts, file) {
     const MAX_ATTEMPTS = 5;
     if ((attempts + 1) >= MAX_ATTEMPTS) {
       const deadPath = moveToDeadletter(perfil, file);
-      if (opts.logger && opts.logger.error) {
-        opts.logger.error('[NOTIFIER_QUEUE] dead_letter', { perfil, kind: job.kind, id: job.id, attempts: attempts+1, deadPath });
-      }
-      if (opts.stepLog) {
-        try { opts.stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_dead_letter', kind: job.kind, id: job.id, attempts: attempts+1, deadPath, ts: Date.now() }); } catch {}
-      }
+      audit(perfil, 'virtus', 'error', 'outbox_proc_deadletter', { id: job.id, kind: job.kind, attempts: attempts+1, deadPath });
       try {
         const issues = require('./issues.js');
         if (issues && typeof issues.append === 'function') {
@@ -186,20 +168,15 @@ async function processOne(perfil, opts, file) {
       return;
     }
     writeAtomicFsync(file, upd);
-    if (opts.logger && opts.logger.error) {
-      opts.logger.error('[NOTIFIER_QUEUE] net_fail', { perfil, kind: job.kind, id: job.id, attempts: upd.attempts, error: (e && e.message) || e });
-    }
-    if (opts.stepLog) {
-      try {
-        opts.stepLog.appendJSONL(perfil, 'virtus', { step: 'notifier_fail', kind: job.kind, id: job.id, attempts: upd.attempts, error: (e && e.message)||String(e), ts: Date.now() });
-      } catch {}
-    }
+    audit(perfil, 'virtus', 'error', 'outbox_proc_error', { id: job && job.id, kind: job && job.kind, attempts: attempts+1, error: (e && e.message) || String(e) });
   }
 }
 
 function ensureWorker(perfil, options) {
   if (workers.has(perfil)) return;
   const opts = Object.assign({}, options || {});
+
+  audit(perfil, 'virtus', 'info', 'outbox_worker_start', { tick: 2000 });
 
   const tick = async () => {
     try {
@@ -209,6 +186,7 @@ function ensureWorker(perfil, options) {
           return sa - sb;
         } catch { return 0; }
       });
+      audit(perfil, 'virtus', 'debug', 'outbox_worker_tick', { jobs: files.length });
       for (const f of files) {
         await processOne(perfil, opts, f);
       }
@@ -222,7 +200,11 @@ function ensureWorker(perfil, options) {
 function enqueue(perfil, kind, payload) {
   const id = jobIdFor(kind, payload);
   const file = jobFile(perfil, id);
-  if (fs.existsSync(file)) return { ok: true, id, status: 'exists' };
+  const exists = fs.existsSync(file);
+  if (exists) {
+    audit(perfil, 'virtus', 'info', 'outbox_enqueue', { kind, id, status: 'exists' });
+    return { ok: true, id, status: 'exists' };
+  }
   const job = {
     id,
     kind,
@@ -232,6 +214,7 @@ function enqueue(perfil, kind, payload) {
     createdAt: Date.now()
   };
   writeAtomicFsync(file, job);
+  audit(perfil, 'virtus', 'info', 'outbox_enqueue', { kind, id, status: 'queued' });
   return { ok: true, id, status: 'queued' };
 }
 
@@ -251,6 +234,7 @@ function stopWorker(perfil) {
     worker.running = false;
     if (worker.intervalId) { try { clearInterval(worker.intervalId); } catch {} }
     workers.delete(perfil);
+    audit(perfil, 'virtus', 'info', 'outbox_worker_stop', {});
   }
 }
 

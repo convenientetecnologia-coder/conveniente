@@ -10,6 +10,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const stepLog = require('./stepLog.js');
+const audit = stepLog.audit;
 
 const locks = new Map();
 const heldLocks = new Map();
@@ -59,31 +61,40 @@ function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
     heldLocks.set(lockPath, h);
     return h.fd;
   }
+  audit('GLOBAL', 'virtus', 'debug', 'manifest_flock_acquire_start', { lockPath, maxWaitMs });
   const start = Date.now();
-  while (true) {
-    try {
-      const fd = fs.openSync(lockPath, 'wx');
+  try {
+    while (true) {
       try {
-        const meta = { pid: process.pid, host: os.hostname(), startedAt: Date.now() };
-        fs.writeFileSync(fd, JSON.stringify(meta), 'utf8');
-        fs.fsyncSync(fd);
-      } catch {}
-      heldLocks.set(lockPath, { fd, count: 1, ownerPid: process.pid });
-      return fd;
-    } catch (e) {
-      if (e && e.code === 'EEXIST') {
-        if (isLockStale(lockPath)) {
-          try { fs.unlinkSync(lockPath); } catch {}
+        const fd = fs.openSync(lockPath, 'wx');
+        try {
+          const meta = { pid: process.pid, host: os.hostname(), startedAt: Date.now() };
+          fs.writeFileSync(fd, JSON.stringify(meta), 'utf8');
+          fs.fsyncSync(fd);
+        } catch {}
+        heldLocks.set(lockPath, { fd, count: 1, ownerPid: process.pid });
+        audit('GLOBAL', 'virtus', 'info', 'manifest_flock_acquire_ok', { lockPath });
+        return fd;
+      } catch (e) {
+        if (e && e.code === 'EEXIST') {
+          if (isLockStale(lockPath)) {
+            audit('GLOBAL', 'virtus', 'warn', 'manifest_flock_stale_removed', { lockPath });
+            try { fs.unlinkSync(lockPath); } catch {}
+            continue;
+          }
+          if ((Date.now() - start) >= maxWaitMs) {
+            audit('GLOBAL', 'virtus', 'error', 'manifest_flock_timeout', { lockPath, maxWaitMs });
+            throw new Error('file_lock_timeout:' + lockPath);
+          }
+          safeSleep(stepDelayMs);
           continue;
         }
-        if ((Date.now() - start) >= maxWaitMs) {
-          throw new Error('file_lock_timeout:' + lockPath);
-        }
-        safeSleep(stepDelayMs);
-        continue;
+        throw e;
       }
-      throw e;
     }
+  } catch (e) {
+    audit('GLOBAL', 'virtus', 'error', 'manifest_flock_acquire_error', { lockPath, error: (e && e.message) || String(e) });
+    throw e;
   }
 }
 
@@ -93,10 +104,15 @@ function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
  * @param {number} fdIgnored - File descriptor (ignorado, usado apenas para compatibilidade)
  */
 function releaseFileLock(lockPath, fdIgnored) {
+  audit('GLOBAL', 'virtus', 'debug', 'manifest_flock_release', { lockPath });
   const h = heldLocks.get(lockPath);
   if (!h) {
-    try { if (typeof fdIgnored === 'number') fs.closeSync(fdIgnored); } catch {}
-    try { fs.unlinkSync(lockPath); } catch {}
+    try { if (typeof fdIgnored === 'number') fs.closeSync(fdIgnored); } catch (e) {
+      audit('GLOBAL', 'virtus', 'warn', 'manifest_flock_release_error', { lockPath, error: (e && e.message) || String(e) });
+    }
+    try { fs.unlinkSync(lockPath); } catch (e) {
+      audit('GLOBAL', 'virtus', 'warn', 'manifest_flock_release_error', { lockPath, error: (e && e.message) || String(e) });
+    }
     return;
   }
   h.count = Math.max(0, (h.count || 1) - 1);
@@ -104,8 +120,12 @@ function releaseFileLock(lockPath, fdIgnored) {
     heldLocks.set(lockPath, h);
     return;
   }
-  try { fs.closeSync(h.fd); } catch {}
-  try { fs.unlinkSync(lockPath); } catch {}
+  try { fs.closeSync(h.fd); } catch (e) {
+    audit('GLOBAL', 'virtus', 'warn', 'manifest_flock_release_error', { lockPath, error: (e && e.message) || String(e) });
+  }
+  try { fs.unlinkSync(lockPath); } catch (e) {
+    audit('GLOBAL', 'virtus', 'warn', 'manifest_flock_release_error', { lockPath, error: (e && e.message) || String(e) });
+  }
   heldLocks.delete(lockPath);
 }
 
@@ -161,6 +181,7 @@ function withLock(nome, fn) {
 async function read(nome) {
   return withLock(nome, async () => {
     const file = getManifestPath(nome);
+    audit(nome, 'virtus', 'debug', 'manifest_read_start', { file });
     const lockPath = getLockPath(file);
     let fd = null;
     try {
@@ -172,18 +193,26 @@ async function read(nome) {
         try {
           if (fs.existsSync(file)) {
             const data = fs.readFileSync(file, 'utf8');
-            return JSON.parse(data);
+            const result = JSON.parse(data);
+            audit(nome, 'virtus', 'info', 'manifest_read_end', { file, exists: true });
+            return result;
           }
           // fallback: tente ler o .tmp se existe (escrita atômica em progresso)
           const tmp = file + '.tmp';
           if (fs.existsSync(tmp)) {
             const data = fs.readFileSync(tmp, 'utf8');
-            return JSON.parse(data);
+            const result = JSON.parse(data);
+            audit(nome, 'virtus', 'info', 'manifest_read_end', { file, exists: true });
+            return result;
           }
         } catch {}
         await sleep(20);
       }
+      audit(nome, 'virtus', 'info', 'manifest_read_end', { file, exists: false });
       return null;
+    } catch (e) {
+      audit(nome || 'GLOBAL', 'virtus', 'error', 'manifest_error', { file, error: (e && e.message) || String(e) });
+      throw e;
     } finally {
       // Libera lock físico após ler
       if (fd !== null) releaseFileLock(lockPath, fd);
@@ -195,13 +224,18 @@ async function read(nome) {
 async function write(nome, man) {
   return withLock(nome, async () => {
     const file = getManifestPath(nome);
+    audit(nome, 'virtus', 'debug', 'manifest_write_start', { file });
     const lockPath = getLockPath(file);
     let fd = null;
     try {
       // Adquire lock físico antes de escrever
       fd = acquireFileLock(lockPath);
       writeJsonAtomic(file, man);
+      audit(nome, 'virtus', 'info', 'manifest_write_end', { file });
       return true;
+    } catch (e) {
+      audit(nome || 'GLOBAL', 'virtus', 'error', 'manifest_error', { file, error: (e && e.message) || String(e) });
+      throw e;
     } finally {
       // Libera lock físico após escrever
       if (fd !== null) releaseFileLock(lockPath, fd);
@@ -213,6 +247,7 @@ async function write(nome, man) {
 async function update(nome, patchFn) {
   return withLock(nome, async () => {
     const file = getManifestPath(nome);
+    audit(nome, 'virtus', 'debug', 'manifest_update_start', { file });
     const lockPath = getLockPath(file);
     let fd = null;
     try {
@@ -224,7 +259,11 @@ async function update(nome, patchFn) {
       // Sempre garante merge: mescla campos do cur manifest caso patchFn não os retorne!
       next = Object.assign({}, cur, next);
       writeJsonAtomic(file, next);
+      audit(nome, 'virtus', 'info', 'manifest_update_end', { file });
       return next;
+    } catch (e) {
+      audit(nome || 'GLOBAL', 'virtus', 'error', 'manifest_error', { file, error: (e && e.message) || String(e) });
+      throw e;
     } finally {
       // Libera lock físico após escrever
       if (fd !== null) releaseFileLock(lockPath, fd);

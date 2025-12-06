@@ -48,11 +48,9 @@ function log({ level = LEVELS.INFO, msg = '', ctx = {}, errorObj = null }) {
   const line = `${COLOR.ts}[${ts}]${COLOR.reset} ${color}[${level.toUpperCase()}]${COLOR.reset} ${base}`;
   // Terminal
   if (level === LEVELS.ERROR) {
-    console.error(line);
-  } else if (level === LEVELS.WARN) {
-    console.warn(line);
+    process.stderr.write(line + '\n');
   } else {
-    console.log(line);
+    process.stdout.write(line + '\n');
   }
   // Arquivo (opcional)
   if (LOG_TO_FILE) {

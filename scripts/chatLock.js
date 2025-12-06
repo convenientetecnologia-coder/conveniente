@@ -6,6 +6,8 @@ const path = require('path');
 let issues = null;
 try { issues = require('./issues.js'); } catch {}
 const logger = require('./logger.js');
+const stepLog = require('./stepLog.js');
+const audit = stepLog.audit;
 
 const LOCK_DIR = path.join(__dirname, '..', 'dados', 'locks');
 const STALE_MS = 30 * 60 * 1000; // 30min (limite para stale locks)
@@ -44,6 +46,7 @@ function isStale(fp) {
 async function acquire(perfil, chatId, timeoutMs) {
   ensureDir();
   const f = key(perfil, chatId);
+  audit(perfil, 'virtus', 'debug', 'chatlock_acquire_start', { chatId, file: f, timeoutMs });
   const startTime = Date.now();
   
   // Reentrância: se já possuímos, apenas incrementa contagem e retorna sucesso
@@ -76,6 +79,7 @@ async function acquire(perfil, chatId, timeoutMs) {
           }
         } catch {}
         logger.warn('[CHATLOCK] acquire_timeout', { perfil, chatId, file: f, timeoutMs, elapsed });
+        audit(perfil, 'virtus', 'error', 'chatlock_acquire_timeout', { chatId, file: f, timeoutMs });
         return false;
       }
     }
@@ -92,6 +96,7 @@ async function acquire(perfil, chatId, timeoutMs) {
       // Mantém o FD aberto durante a execução (garante exclusividade)
       openFDs.set(f, { fd, acquiredAt: Date.now(), count: 1 });
       
+      audit(perfil, 'virtus', 'info', 'chatlock_acquired', { chatId, file: f });
       logger.debug('[CHATLOCK] acquired', { perfil, chatId, file: f });
       return true;
       
@@ -109,6 +114,7 @@ async function acquire(perfil, chatId, timeoutMs) {
             } catch {}
             logger.info('[CHATLOCK] timeout_release', { perfil, chatId, file: f, reason: 'stale_lock' });
             
+            audit(perfil, 'virtus', 'warn', 'chatlock_stale_removed', { chatId, file: f });
             fs.unlinkSync(f);
             // Tenta novamente imediatamente
             continue;
@@ -136,6 +142,7 @@ async function acquire(perfil, chatId, timeoutMs) {
             }
           } catch {}
           logger.warn('[CHATLOCK] acquire_fail', { perfil, chatId, file: f, reason: 'lock_exists' });
+          audit(perfil, 'virtus', 'warn', 'chatlock_acquire_fail', { chatId, file: f, reason: 'lock_exists' });
           return false;
         }
         
@@ -151,6 +158,7 @@ async function acquire(perfil, chatId, timeoutMs) {
         }
       } catch {}
       logger.error('[CHATLOCK] acquire_error', { perfil, chatId, file: f, error: (e && e.message) || e });
+      audit(perfil, 'virtus', 'error', 'chatlock_acquire_error', { chatId, file: f, error: (e && e.message) || String(e) });
       return false;
     }
   }
@@ -163,6 +171,7 @@ async function acquire(perfil, chatId, timeoutMs) {
  */
 function release(perfil, chatId) {
   const f = key(perfil, chatId);
+  audit(perfil, 'virtus', 'debug', 'chatlock_release', { chatId, file: f });
   const entry = openFDs.get(f);
   
   if (entry && typeof entry.fd === 'number') {
@@ -176,6 +185,7 @@ function release(perfil, chatId) {
       fs.closeSync(entry.fd);
     } catch (e) {
       logger.warn('[CHATLOCK] close_fd_error', { perfil, chatId, file: f, error: (e && e.message) || e });
+      audit(perfil, 'virtus', 'warn', 'chatlock_release_error', { chatId, file: f, error: (e && e.message) || e });
     }
     openFDs.delete(f);
   }
@@ -187,6 +197,7 @@ function release(perfil, chatId) {
     }
   } catch (e) {
     logger.warn('[CHATLOCK] unlink_error', { perfil, chatId, file: f, error: (e && e.message) || e });
+    audit(perfil, 'virtus', 'warn', 'chatlock_release_error', { chatId, file: f, error: (e && e.message) || e });
   }
   
   logger.debug('[CHATLOCK] released', { perfil, chatId, file: f });
@@ -203,9 +214,11 @@ function touch(perfil, chatId) {
     if (fs.existsSync(f)) {
       const now = new Date();
       fs.utimesSync(f, now, now);
+      audit(perfil, 'virtus', 'debug', 'chatlock_touch', { chatId, file: f });
     }
   } catch (e) {
     logger.warn('[CHATLOCK] touch_error', { perfil, chatId, file: f, error: (e && e.message) || e });
+    audit(perfil, 'virtus', 'warn', 'chatlock_touch_error', { chatId, file: f, error: (e && e.message) || e });
   }
 }
 
