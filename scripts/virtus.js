@@ -1877,9 +1877,9 @@ async function scrollChatsToTop(page, nome) {
 
 // REMOVIDO: openChatByUrl - não mais utilizado
 
-async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrollTries = 12, scrollStep = 700 } = {}) {
+async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 2, scrollTries = 12, scrollStep = 700 } = {}) {
   const sel = `a[href^="/marketplace/t/${chatId}"]`;
-  try { await scrollChatsToTop(p, null); } catch {}
+  try { await scrollChatsToTop(p, perfil); } catch {}
 
   async function tryClickOnce() {
     let clicked = false;
@@ -1918,13 +1918,13 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrol
 
   // Tenta clicar normalmente (retry)
   for (let attempt = 0; attempt <= retries; attempt++) {
-    try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_attempt', chatId, attempt: attempt + 1, ts: Date.now() }); } catch {}
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_attempt', chatId, attempt: attempt + 1, ts: Date.now() }); } catch {}
     const clicked = await tryClickOnce();
 
     if (clicked) {
       const ok = await assertOnChatStrict(p, chatId, { timeoutMs }).catch(()=>false);
       if (ok) {
-        try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_ok', chatId, ts: Date.now() }); } catch {}
+        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_ok', chatId, ts: Date.now() }); } catch {}
         return true;
       }
     }
@@ -1934,7 +1934,7 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrol
 
   // Scroll para materializar itens da lista virtualizada
   for (let i = 0; i < scrollTries; i++) {
-    try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_attempt', chatId, scrollTry: i+1, ts: Date.now() }); } catch {}
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_attempt', chatId, scrollTry: i+1, ts: Date.now() }); } catch {}
     try {
       await p.evaluate((step) => {
         function gridEl() {
@@ -1960,26 +1960,25 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrol
     if (clicked) {
       const ok = await assertOnChatStrict(p, chatId, { timeoutMs }).catch(()=>false);
       if (ok) {
-        try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_ok_after_scroll', chatId, tries: i+1, ts: Date.now() }); } catch {}
+        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_ok_after_scroll', chatId, tries: i+1, ts: Date.now() }); } catch {}
         return true;
       }
     }
   }
-  // Fallback opcional (URL), apenas para debug
-  if (String(process.env.VIRTUS_ALLOW_URL_OPEN || '0') === '1') {
-    try {
-      await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 });
-      const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 2000 });
-      if (ok) {
-        try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_url_ok', chatId, ts: Date.now() }); } catch {}
-        return true;
-      }
-      try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
-    } catch (e) {
-      try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
+  
+  // Fallback por URL (sempre tenta, mesmo sem VIRTUS_ALLOW_URL_OPEN)
+  try {
+    await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 });
+    const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 5000 });
+    if (ok) {
+      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_ok', chatId, ts: Date.now() }); } catch {}
+      return true;
     }
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
+  } catch (e) {
+    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
   }
-  try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_timeout', chatId, ts: Date.now() }); } catch {}
+  try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_timeout', chatId, ts: Date.now() }); } catch {}
   return false;
 }
 
@@ -2523,21 +2522,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_page' });
         console.log(`[COLLECT][REQUEUE_NO_PAGE] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_page', chatId, reAt, ts: Date.now() });
-        return;
+        return { status: 'requeued' };
       }
 
-      const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-      if (!chatUrlMatches(urlNow, chatId)) {
-        await openChatByClick(p, chatId, { timeoutMs: 4000, retries: 1, scrollTries: 6 });
-      }
+      // Navegação dentro de withNavLock
+      const navSuccess = await withNavLock(nome, async () => {
+        const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+        if (!chatUrlMatches(urlNow, chatId)) {
+          await openChatByClick(p, nome, chatId, { timeoutMs: 5000, retries: 1, scrollTries: 6 });
+        }
+        return await assertOnChatStrict(p, chatId, { timeoutMs: 5000 }).catch(()=>false);
+      });
 
-      const onTarget = await assertOnChatStrict(p, chatId, { timeoutMs: 1200 }).catch(()=>false);
-      if (!onTarget) {
+      if (!navSuccess) {
         const reAt = Date.now() + 5000;
         await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'not_on_target' });
         console.log(`[COLLECT][REQUEUE_NOT_ON_TARGET] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_not_on_target', chatId, reAt, ts: Date.now() });
-        return;
+        return { status: 'requeued' };
       }
 
       // Extrair histórico e sanitizar
@@ -2549,7 +2551,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_messages' });
         console.log(`[COLLECT][REQUEUE_NO_MESSAGES] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_messages', chatId, reAt, ts: Date.now() });
-        return;
+        return { status: 'requeued' };
       }
 
       await appendChatHistoryLog(nome, chatId, historicoSan);
@@ -2575,7 +2577,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         });
         console.log(`[COLLECT][SKIP_FINALIZATION_LOCK] perfil=${nome} chat=${chatId} lockUntil=${new Date(finalLockUntil).toISOString()}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_finalization_lock', chatId, lockUntil: finalLockUntil, ts: Date.now() });
-        return;
+        return { status: 'done' };
       }
 
       if (fsmState && fsmState.finalizado && !(finalLockUntil > Date.now())) {
@@ -2614,7 +2616,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         });
         console.log(`[COLLECT][SKIP_OLD_CHAT] perfil=${nome} chat=${chatId} lastClientTs=${lastClientTs}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_old_chat', chatId, lastClientTs, ts: Date.now() });
-        return;
+        return { status: 'done' };
       }
 
       // Cursor/digest/contentSig
@@ -2651,7 +2653,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         });
         console.log(`[COLLECT][SKIP_NO_NEW_MSGS] perfil=${nome} chat=${chatId} contentSig=${clientContentSig} prevSig=${prevContentSig}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_no_new_msgs', chatId, contentSig: clientContentSig, prevContentSig, ts: Date.now() });
-        return;
+        return { status: 'done' };
       }
 
       // Chama IA UMA ÚNICA VEZ
@@ -2665,7 +2667,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         });
         console.log(`[COLLECT][LOCK_SKIP] perfil=${nome} chat=${chatId}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_lock_skip', chatId, ts: Date.now() });
-        return;
+        return { status: 'done' };
       }
 
       let llmRes = null;
@@ -2685,7 +2687,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!llmRes) {
         console.log(`[COLLECT][SKIP_NO_LLM_RES] perfil=${nome} chat=${chatId}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_no_llm_res', chatId, ts: Date.now() });
-        return;
+        return { status: 'done' };
       }
 
       const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llmRes.extraction || {} });
@@ -2703,7 +2705,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (hasWhatsApp && hasItem && hasSaida && hasDestino) {
         stepLog.appendJSONL(nome, 'virtus', { step: 'auto_finalize_all_fields_complete', chatId });
         await finalizePedido(nome, chatId, {});
-        return;
+        return { status: 'done' };
       }
 
       const shouldAnswer = !!(llmRes && llmRes.control && llmRes.control.shouldReply);
@@ -2721,7 +2723,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (askField && lastAskedField === askField && (Date.now() - lastAskedAt) < DEBOUNCE_MS) {
           stepLog.appendJSONL(nome, 'virtus', { step: 'ask_debounce_skip', chatId, askField, sinceMs: Date.now() - lastAskedAt });
           await virtusFSM.patch(nome, chatId, { cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } } });
-          return;
+          return { status: 'done' };
         }
 
         const cursorSig = `${clientCount}|${clientDigest}`;
@@ -2755,8 +2757,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         lastScanAt: Date.now()
       });
 
+      return { status: 'done' };
     } catch (e) {
       logger.warn('[RUN_COLLECT] erro', { nome, chatId, error: (e && e.message) || String(e) });
+      return { status: 'error', error: (e && e.message) || String(e) };
     }
   }
 
@@ -2825,10 +2829,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const { job } = c;
           console.log(`[SCHED][COLLECT_PICK] perfil=${perfil} chat=${job.chatId} dueAt=${new Date(job.dueAt).toISOString()}`);
           stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_pick', chatId: job.chatId, dueAt: job.dueAt, ts: Date.now() });
-          await runCollectForChat(perfil, job.chatId);
-          console.log(`[SCHED][COLLECT_DONE] perfil=${perfil} chat=${job.chatId}`);
-          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_done_scheduler', chatId: job.chatId, ts: Date.now() });
-          deleteJob(perfil, 'collect', job.chatId);
+          
+          const result = await runCollectForChat(perfil, job.chatId).catch(e => ({ status: 'error', error: e && e.message || String(e) }));
+          
+          console.log(`[SCHED][COLLECT_DONE] perfil=${perfil} chat=${job.chatId} status=${result && result.status || 'unknown'}`);
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_done_scheduler', chatId: job.chatId, status: result && result.status || 'unknown', ts: Date.now() });
+          
+          if (result && result.status === 'requeued') {
+            console.log(`[SCHED][COLLECT_KEEP] perfil=${perfil} chat=${job.chatId} reason=requeued`);
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_keep_job_requeued', chatId: job.chatId, ts: Date.now() });
+          } else {
+            deleteJob(perfil, 'collect', job.chatId);
+          }
         }
       } catch (e) {
         logger.warn('[JOB_SCHEDULER] erro', { perfil, error: (e && e.message) || String(e) });
@@ -3136,7 +3148,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           
           urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
-            await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
+            await openChatByClick(p, nome, chatId, { timeoutMs: 8000, retries: 2 });
           }
           
           const okOn = await assertOnChatStrict(p, chatId, { timeoutMs: 2000 });
