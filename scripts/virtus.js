@@ -464,13 +464,21 @@ async function enqueueJob(perfil, job) {
     if (exists) {
       // merge devido: mantém earliest dueAt, mescla as payloads
       const cur = JSON.parse(fsRaw.readFileSync(file, 'utf8'));
-      cur.dueAt = Math.min(Number(cur.dueAt || job.dueAt), job.dueAt);
+      const targetDue = Math.min(Number(cur.dueAt || job.dueAt), job.dueAt);
+      const guard = Date.now() + MIN_REQUEUE_MS;
+      cur.dueAt = Math.max(targetDue, guard);
       finalDueAt = cur.dueAt;
       cur.payload = Object.assign({}, cur.payload || {}, job.payload || {});
       await writeJsonAtomicFsyncStrict(file, cur);
     } else {
-      finalDueAt = job.dueAt;
+      const targetDue = Number(job.dueAt);
+      const guard = Date.now() + MIN_REQUEUE_MS;
+      finalDueAt = Math.max(targetDue, guard);
+      job.dueAt = finalDueAt;
       await writeJsonAtomicFsyncStrict(file, job);
+    }
+    if (finalDueAt > job.dueAt) {
+      stepLog.appendJSONL(perfil, 'virtus', { step: 'job_due_guard', kind: job.kind, chatId: job.chatId, original: job.dueAt, guarded: finalDueAt, ts: Date.now() });
     }
     console.log(`[JOBS][ENQUEUE] perfil=${perfil} kind=${job.kind} chat=${job.chatId} dueAt=${new Date(finalDueAt).toISOString()} origin=${job.payload?.origin||''}`);
     stepLog.appendJSONL(perfil, 'virtus', { step: 'job_enqueued', kind: job.kind, chatId: job.chatId, dueAt: finalDueAt, origin: job.payload?.origin||'', ts: Date.now() });
@@ -487,9 +495,13 @@ async function rescheduleJob(perfil, kind, chatId, nextDueAt, payloadMerge = {})
     fd = acquireFileLock(lockPath);
     const exists = fsRaw.existsSync(file);
     const cur = exists ? JSON.parse(fsRaw.readFileSync(file, 'utf8')) : { kind, chatId, dueAt: Number(nextDueAt), payload: {} };
-    cur.dueAt = Number(nextDueAt);
+    const guard = Date.now() + MIN_REQUEUE_MS;
+    cur.dueAt = Math.max(Number(nextDueAt), guard);
     cur.payload = Object.assign({}, cur.payload || {}, payloadMerge || {});
     await writeJsonAtomicFsyncStrict(file, cur);
+    if (cur.dueAt > nextDueAt) {
+      stepLog.appendJSONL(perfil, 'virtus', { step: 'job_due_guard', kind, chatId, original: nextDueAt, guarded: cur.dueAt, ts: Date.now() });
+    }
     console.log(`[JOBS][RESCHEDULE] perfil=${perfil} kind=${kind} chat=${chatId} dueAt=${new Date(cur.dueAt).toISOString()} payloadKeys=${Object.keys(cur.payload||{}).join(',')}`);
     stepLog.appendJSONL(perfil, 'virtus', { step: 'job_rescheduled', kind, chatId, dueAt: cur.dueAt, ts: Date.now() });
   } catch (e) {
@@ -1370,8 +1382,14 @@ const VIRTUS_FINAL_MSG_RETRY_MIN_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETR
 const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETRY_MAX_MS || '900', 10); // 900ms
 
 const MAX_CHAT_AGE_MS = parseInt(process.env.VIRTUS_CHAT_MAX_AGE_MS || '28800000', 10); // 8h
-const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 5s
+const SCAN_INTERVAL_MS = Math.max(10000, parseInt(process.env.VIRTUS_SCAN_MS || process.env.SCAN_INTERVAL_MS || '10000', 10));
 const SCAN_NAV_TIMEOUT_MS = parseInt(process.env.SCAN_NAV_TIMEOUT_MS || '30000', 10); // 30s para navegar no chat
+
+// Constantes globais de throttle/requeue
+const MIN_REQUEUE_MS = Math.max(10000, parseInt(process.env.VIRTUS_MIN_REQUEUE_MS || '10000', 10));
+const SEND_REQUEUE_MIN_MS = Math.max(MIN_REQUEUE_MS, parseInt(process.env.VIRTUS_SEND_REQUEUE_MIN_MS || '15000', 10));
+const COLLECT_FAIL_PAUSE_MS = Math.max(600000, parseInt(process.env.VIRTUS_COLLECT_FAIL_PAUSE_MS || '600000', 10));
+const COLLECT_THROTTLE_MS = Math.max(10000, parseInt(process.env.VIRTUS_COLLECT_THROTTLE_MS || '10000', 10));
 
 const COLETA_FINAL_MS = parseInt(process.env.VIRTUS_COLETA_FINAL_MS || '600000', 10); // 10min
 const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '259200000', 10); // 72h
@@ -1464,6 +1482,35 @@ function clearAguardTimer(nomePerfil, chatId) {
 const pollingIntervals = new Map();       // nomePerfil -> intervalId
 const filaEnvioTimers = new Map();        // nomePerfil -> intervalId
 const handshakesFeitos = new Set();       // Set(nomePerfil)
+
+// Throttle e in-flight control por chat
+const collectInFlightByPerfil = new Map();
+const sendInFlightByPerfil = new Map();
+const lastCollectAttemptAtByPerfil = new Map();
+const lastSendAttemptAtByPerfil = new Map();
+
+function getInFlightSet(map, perfil) {
+  if (!map.has(perfil)) map.set(perfil, new Set());
+  return map.get(perfil);
+}
+
+function getAttemptMap(map, perfil) {
+  if (!map.has(perfil)) map.set(perfil, new Map());
+  return map.get(perfil);
+}
+
+// Contador de falhas
+const collectFailCounts = new Map();
+function incCollectFail(perfil, chatId) {
+  const k = `${perfil}::${chatId}`;
+  const n = 1 + (collectFailCounts.get(k) || 0);
+  collectFailCounts.set(k, n);
+  return n;
+}
+
+function resetCollectFail(perfil, chatId) {
+  collectFailCounts.delete(`${perfil}::${chatId}`);
+}
 
 function stripRedundantRecap(s) {
   try {
@@ -1877,7 +1924,7 @@ async function scrollChatsToTop(page, nome) {
 
 // REMOVIDO: openChatByUrl - não mais utilizado
 
-async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 2, scrollTries = 12, scrollStep = 700 } = {}) {
+async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 1, scrollTries = 2, scrollStep = 700 } = {}) {
   const sel = `a[href^="/marketplace/t/${chatId}"]`;
   try { await scrollChatsToTop(p, perfil); } catch {}
 
@@ -2518,10 +2565,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       const p = await ensurePage().catch(()=>null);
       if (!p) {
-        const reAt = Date.now() + 5000;
-        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_page' });
-        console.log(`[COLLECT][REQUEUE_NO_PAGE] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
-        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_page', chatId, reAt, ts: Date.now() });
+        const tries = incCollectFail(nome, chatId);
+        const wait = (tries >= 3) ? COLLECT_FAIL_PAUSE_MS : (MIN_REQUEUE_MS + Math.floor(Math.random()*5000));
+        const reAt = Date.now() + wait;
+        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_page', tries });
+        console.log(`[COLLECT][REQUEUE_NO_PAGE] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()} tries=${tries}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_page', chatId, reAt, tries, ts: Date.now() });
+        if (tries >= 3) {
+          console.log(`[COLLECT][PAUSE] perfil=${nome} chat=${chatId} reason=3_fails`);
+          stepLog.appendJSONL(nome, 'virtus', { step: 'collect_pause_3_fails', chatId, pauseMs: COLLECT_FAIL_PAUSE_MS, ts: Date.now() });
+        }
         return { status: 'requeued' };
       }
 
@@ -2529,16 +2582,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const navSuccess = await withNavLock(nome, async () => {
         const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
         if (!chatUrlMatches(urlNow, chatId)) {
-          await openChatByClick(p, nome, chatId, { timeoutMs: 5000, retries: 1, scrollTries: 6 });
+          await openChatByClick(p, nome, chatId, { timeoutMs: 5000, retries: 1, scrollTries: 2 });
         }
         return await assertOnChatStrict(p, chatId, { timeoutMs: 5000 }).catch(()=>false);
       });
 
       if (!navSuccess) {
-        const reAt = Date.now() + 5000;
-        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'not_on_target' });
-        console.log(`[COLLECT][REQUEUE_NOT_ON_TARGET] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
-        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_not_on_target', chatId, reAt, ts: Date.now() });
+        const tries = incCollectFail(nome, chatId);
+        const wait = (tries >= 3) ? COLLECT_FAIL_PAUSE_MS : (MIN_REQUEUE_MS + Math.floor(Math.random()*5000));
+        const reAt = Date.now() + wait;
+        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'not_on_target', tries });
+        console.log(`[COLLECT][REQUEUE_NOT_ON_TARGET] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()} tries=${tries}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_not_on_target', chatId, reAt, tries, ts: Date.now() });
+        if (tries >= 3) {
+          console.log(`[COLLECT][PAUSE] perfil=${nome} chat=${chatId} reason=3_fails`);
+          stepLog.appendJSONL(nome, 'virtus', { step: 'collect_pause_3_fails', chatId, pauseMs: COLLECT_FAIL_PAUSE_MS, ts: Date.now() });
+        }
         return { status: 'requeued' };
       }
 
@@ -2547,10 +2606,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const historicoFiltered = (historicoConversa || []).filter(m => String(m && m.texto || '').trim() && String(m.texto).trim() !== 'Nenhuma mensagem encontrada.');
       const historicoSan = sanitizeHistoricoRecords(historicoFiltered, "");
       if (!Array.isArray(historicoSan) || !historicoSan.length) {
-        const reAt = Date.now() + 5000;
-        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_messages' });
-        console.log(`[COLLECT][REQUEUE_NO_MESSAGES] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
-        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_messages', chatId, reAt, ts: Date.now() });
+        const tries = incCollectFail(nome, chatId);
+        const wait = (tries >= 3) ? COLLECT_FAIL_PAUSE_MS : (MIN_REQUEUE_MS + Math.floor(Math.random()*5000));
+        const reAt = Date.now() + wait;
+        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_messages', tries });
+        console.log(`[COLLECT][REQUEUE_NO_MESSAGES] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()} tries=${tries}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_messages', chatId, reAt, tries, ts: Date.now() });
+        if (tries >= 3) {
+          console.log(`[COLLECT][PAUSE] perfil=${nome} chat=${chatId} reason=3_fails`);
+          stepLog.appendJSONL(nome, 'virtus', { step: 'collect_pause_3_fails', chatId, pauseMs: COLLECT_FAIL_PAUSE_MS, ts: Date.now() });
+        }
         return { status: 'requeued' };
       }
 
@@ -2690,6 +2755,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return { status: 'done' };
       }
 
+      // Reset contador de falhas quando IA é chamada com sucesso
+      resetCollectFail(nome, chatId);
+
       const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llmRes.extraction || {} });
       await virtusFSM.patch(nome, chatId, { data: mergedData });
 
@@ -2770,6 +2838,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       console.log(`[SCHED][INIT_SKIP] perfil=${perfil} reason=already_running`);
       return;
     }
+    
+    // Constantes do scheduler (usar globais definidas no topo)
+    const SCHED_TICK_MS = Math.max(1000, parseInt(process.env.VIRTUS_SCHED_TICK_MS || '1000', 10));
+    
     console.log(`[SCHED][INIT] perfil=${perfil}`);
     stepLog.appendJSONL(perfil, 'virtus', { step: 'scheduler_init', ts: Date.now() });
     let heartbeatCounter = 0;
@@ -2777,9 +2849,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try {
         const now = Date.now();
         
-        // Heartbeat a cada 60s (120 iterações de 500ms)
+        // Heartbeat a cada 60s
         heartbeatCounter++;
-        if (heartbeatCounter >= 120) {
+        const heartbeatInterval = Math.floor(60000 / SCHED_TICK_MS);
+        if (heartbeatCounter >= heartbeatInterval) {
           heartbeatCounter = 0;
           console.log(`[SCHED][HEARTBEAT] perfil=${perfil} ts=${new Date(now).toISOString()}`);
           stepLog.appendJSONL(perfil, 'virtus', { step: 'scheduler_heartbeat', ts: now });
@@ -2789,6 +2862,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const s = pickNextSend(perfil, now);
         if (s) {
           const { job } = s;
+          
+          // Throttle e in-flight control para SEND
+          const inFlightSend = getInFlightSet(sendInFlightByPerfil, perfil);
+          const lastSendMap = getAttemptMap(lastSendAttemptAtByPerfil, perfil);
+          
+          if (inFlightSend.has(job.chatId)) {
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'send_skip_inflight', chatId: job.chatId, ts: now });
+            return;
+          }
+          
           console.log(`[SCHED][SEND_PICK] perfil=${perfil} chat=${job.chatId} dueAt=${new Date(job.dueAt).toISOString()} tries=${job.payload?.__tries||0}`);
           stepLog.appendJSONL(perfil, 'virtus', { step: 'send_pick', chatId: job.chatId, dueAt: job.dueAt, tries: job.payload?.__tries||0, ts: Date.now() });
           
@@ -2799,26 +2882,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             deleteJob(perfil, 'send', job.chatId);
             return;
           }
-          const ok = await enviarRespostaMessengerSeguraFn(job.chatId, resposta);
-          if (ok) {
-            await virtusFSM.ackSent(perfil, job.chatId, job.payload?.cursorSig || '');
-            console.log(`[SCHED][SEND_OK] perfil=${perfil} chat=${job.chatId} sig=${job.payload?.cursorSig||''}`);
-            stepLog.appendJSONL(perfil, 'virtus', { step: 'send_ok', chatId: job.chatId, cursorSig: job.payload?.cursorSig||'', ts: Date.now() });
-            deleteJob(perfil, 'send', job.chatId);
-          } else {
-            // retry limitado disco
-            job.payload = job.payload || {};
-            job.payload.__tries = 1 + Number(job.payload.__tries || 0);
-            if (job.payload.__tries > 2) {
-              console.log(`[SCHED][SEND_DROP] perfil=${perfil} chat=${job.chatId} tries=${job.payload.__tries}`);
-              stepLog.appendJSONL(perfil, 'virtus', { step: 'send_drop', chatId: job.chatId, tries: job.payload.__tries, ts: Date.now() });
+          
+          inFlightSend.add(job.chatId);
+          lastSendMap.set(job.chatId, now);
+          
+          try {
+            const ok = await enviarRespostaMessengerSeguraFn(job.chatId, resposta);
+            if (ok) {
+              await virtusFSM.ackSent(perfil, job.chatId, job.payload?.cursorSig || '');
+              console.log(`[SCHED][SEND_OK] perfil=${perfil} chat=${job.chatId} sig=${job.payload?.cursorSig||''}`);
+              stepLog.appendJSONL(perfil, 'virtus', { step: 'send_ok', chatId: job.chatId, cursorSig: job.payload?.cursorSig||'', ts: Date.now() });
               deleteJob(perfil, 'send', job.chatId);
             } else {
-              const next = Date.now() + 5000;
-              console.log(`[SCHED][SEND_REQUEUE] perfil=${perfil} chat=${job.chatId} next=${new Date(next).toISOString()} tries=${job.payload.__tries}`);
-              stepLog.appendJSONL(perfil, 'virtus', { step: 'send_requeue', chatId: job.chatId, nextDueAt: next, tries: job.payload.__tries, ts: Date.now() });
-              await rescheduleJob(perfil, 'send', job.chatId, next, job.payload);
+              // retry limitado disco
+              job.payload = job.payload || {};
+              job.payload.__tries = 1 + Number(job.payload.__tries || 0);
+              if (job.payload.__tries > 2) {
+                console.log(`[SCHED][SEND_DROP] perfil=${perfil} chat=${job.chatId} tries=${job.payload.__tries}`);
+                stepLog.appendJSONL(perfil, 'virtus', { step: 'send_drop', chatId: job.chatId, tries: job.payload.__tries, ts: Date.now() });
+                deleteJob(perfil, 'send', job.chatId);
+              } else {
+                const next = Date.now() + SEND_REQUEUE_MIN_MS;
+                console.log(`[SCHED][SEND_REQUEUE] perfil=${perfil} chat=${job.chatId} next=${new Date(next).toISOString()} tries=${job.payload.__tries}`);
+                stepLog.appendJSONL(perfil, 'virtus', { step: 'send_requeue', chatId: job.chatId, nextDueAt: next, tries: job.payload.__tries, ts: Date.now() });
+                await rescheduleJob(perfil, 'send', job.chatId, next, job.payload);
+              }
             }
+          } finally {
+            inFlightSend.delete(job.chatId);
           }
           return;
         }
@@ -2827,25 +2918,48 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const c = pickNextCollect(perfil, now);
         if (c) {
           const { job } = c;
+          
+          // Throttle e in-flight control para COLLECT
+          const inFlightCollect = getInFlightSet(collectInFlightByPerfil, perfil);
+          const lastCollectMap = getAttemptMap(lastCollectAttemptAtByPerfil, perfil);
+          
+          if (inFlightCollect.has(job.chatId)) {
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_skip_inflight', chatId: job.chatId, ts: now });
+            return;
+          }
+          
+          const lastC = lastCollectMap.get(job.chatId) || 0;
+          if (now - lastC < COLLECT_THROTTLE_MS) {
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_skip_throttle', chatId: job.chatId, sinceMs: now-lastC, minMs: COLLECT_THROTTLE_MS, ts: now });
+            return;
+          }
+          
           console.log(`[SCHED][COLLECT_PICK] perfil=${perfil} chat=${job.chatId} dueAt=${new Date(job.dueAt).toISOString()}`);
           stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_pick', chatId: job.chatId, dueAt: job.dueAt, ts: Date.now() });
           
-          const result = await runCollectForChat(perfil, job.chatId).catch(e => ({ status: 'error', error: e && e.message || String(e) }));
+          inFlightCollect.add(job.chatId);
+          lastCollectMap.set(job.chatId, now);
           
-          console.log(`[SCHED][COLLECT_DONE] perfil=${perfil} chat=${job.chatId} status=${result && result.status || 'unknown'}`);
-          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_done_scheduler', chatId: job.chatId, status: result && result.status || 'unknown', ts: Date.now() });
-          
-          if (result && result.status === 'requeued') {
-            console.log(`[SCHED][COLLECT_KEEP] perfil=${perfil} chat=${job.chatId} reason=requeued`);
-            stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_keep_job_requeued', chatId: job.chatId, ts: Date.now() });
-          } else {
-            deleteJob(perfil, 'collect', job.chatId);
+          try {
+            const result = await runCollectForChat(perfil, job.chatId).catch(e => ({ status: 'error', error: e && e.message || String(e) }));
+            
+            console.log(`[SCHED][COLLECT_DONE] perfil=${perfil} chat=${job.chatId} status=${result && result.status || 'unknown'}`);
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_done_scheduler', chatId: job.chatId, status: result && result.status || 'unknown', ts: Date.now() });
+            
+            if (result && result.status === 'requeued') {
+              console.log(`[SCHED][COLLECT_KEEP] perfil=${perfil} chat=${job.chatId} reason=requeued`);
+              stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_keep_job_requeued', chatId: job.chatId, ts: Date.now() });
+            } else {
+              deleteJob(perfil, 'collect', job.chatId);
+            }
+          } finally {
+            inFlightCollect.delete(job.chatId);
           }
         }
       } catch (e) {
         logger.warn('[JOB_SCHEDULER] erro', { perfil, error: (e && e.message) || String(e) });
       }
-    }, 500);
+    }, SCHED_TICK_MS);
     filaEnvioTimers.set(perfil, id);
   }
 
@@ -3148,7 +3262,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           
           urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
           if (!chatUrlMatches(urlNow, chatId)) {
-            await openChatByClick(p, nome, chatId, { timeoutMs: 8000, retries: 2 });
+            await openChatByClick(p, nome, chatId, { timeoutMs: 8000, retries: 1, scrollTries: 2 });
           }
           
           const okOn = await assertOnChatStrict(p, chatId, { timeoutMs: 2000 });
