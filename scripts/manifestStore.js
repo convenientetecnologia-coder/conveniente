@@ -73,7 +73,7 @@ function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
           fs.fsyncSync(fd);
         } catch {}
         heldLocks.set(lockPath, { fd, count: 1, ownerPid: process.pid });
-        audit('GLOBAL', 'virtus', 'info', 'manifest_flock_acquire_ok', { lockPath });
+        audit('GLOBAL', 'virtus', 'debug', 'manifest_flock_acquire_ok', { lockPath });
         return fd;
       } catch (e) {
         if (e && e.code === 'EEXIST') {
@@ -194,7 +194,7 @@ async function read(nome) {
           if (fs.existsSync(file)) {
             const data = fs.readFileSync(file, 'utf8');
             const result = JSON.parse(data);
-            audit(nome, 'virtus', 'info', 'manifest_read_end', { file, exists: true });
+            audit(nome, 'virtus', 'debug', 'manifest_read_end', { file, exists: true });
             return result;
           }
           // fallback: tente ler o .tmp se existe (escrita atômica em progresso)
@@ -202,13 +202,13 @@ async function read(nome) {
           if (fs.existsSync(tmp)) {
             const data = fs.readFileSync(tmp, 'utf8');
             const result = JSON.parse(data);
-            audit(nome, 'virtus', 'info', 'manifest_read_end', { file, exists: true });
+            audit(nome, 'virtus', 'debug', 'manifest_read_end', { file, exists: true });
             return result;
           }
         } catch {}
         await sleep(20);
       }
-      audit(nome, 'virtus', 'info', 'manifest_read_end', { file, exists: false });
+      audit(nome, 'virtus', 'debug', 'manifest_read_end', { file, exists: false });
       return null;
     } catch (e) {
       audit(nome || 'GLOBAL', 'virtus', 'error', 'manifest_error', { file, error: (e && e.message) || String(e) });
