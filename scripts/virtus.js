@@ -1217,33 +1217,8 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_collect_claim_same_chat', chatId: proximo.chatId, ts: Date.now() });
       return;
     }
-    if (hasActiveCollectClaimSync(nomePerfil)) {
-      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_collect_claim_any', ts: Date.now() });
-      return;
-    }
-
     if (hasDueCollectJobForSync(nomePerfil, proximo.chatId)) {
       stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_due_collect_same_chat', chatId: proximo.chatId, ts: Date.now() });
-      return;
-    }
-
-    // Prioridade para coletas vencidas no DISCO
-    if (hasDueCollectJobSync(nomePerfil)) {
-      const dir = collectQueueDir(nomePerfil);
-      const fsDue = listJsonFilesSync(dir, 'collect_');
-      let nextOpenAt = null, nextChat = null;
-      const now = Date.now();
-      for (const f of fsDue) {
-        try {
-          const d = JSON.parse(fsRaw.readFileSync(f, 'utf8'));
-          if (Number(d.openAt || 0) <= now) {
-            if (nextOpenAt == null || Number(d.openAt) < Number(nextOpenAt)) {
-              nextOpenAt = d.openAt; nextChat = d.chatId;
-            }
-          }
-        } catch {}
-      }
-      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_due_collect', chatId: nextChat || null, openAt: nextOpenAt || null, ts: Date.now() });
       return;
     }
 
@@ -1584,7 +1559,7 @@ const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETR
 
 const MAX_CHAT_AGE_MS = parseInt(process.env.VIRTUS_CHAT_MAX_AGE_MS || '28800000', 10); // 8h
 const SCAN_INTERVAL_MS = parseInt(process.env.VIRTUS_SCAN_MS || '5000', 10); // 5s
-const SCAN_NAV_TIMEOUT_MS = 30000; // 30s para navegar no chat
+const SCAN_NAV_TIMEOUT_MS = parseInt(process.env.SCAN_NAV_TIMEOUT_MS || '30000', 10); // 30s para navegar no chat
 
 const COLETA_FINAL_MS = parseInt(process.env.VIRTUS_COLETA_FINAL_MS || '600000', 10); // 10min
 const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '259200000', 10); // 72h
@@ -2283,6 +2258,7 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrol
 
   // Tenta clicar normalmente (retry)
   for (let attempt = 0; attempt <= retries; attempt++) {
+    try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_attempt', chatId, attempt: attempt + 1, ts: Date.now() }); } catch {}
     const clicked = await tryClickOnce();
 
     if (clicked) {
@@ -2298,6 +2274,7 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrol
 
   // Scroll para materializar itens da lista virtualizada
   for (let i = 0; i < scrollTries; i++) {
+    try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_attempt', chatId, scrollTry: i+1, ts: Date.now() }); } catch {}
     try {
       await p.evaluate((step) => {
         function gridEl() {
@@ -2342,7 +2319,7 @@ async function openChatByClick(p, chatId, { timeoutMs = 8000, retries = 2, scrol
       try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
     }
   }
-  try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_fail', chatId, ts: Date.now() }); } catch {}
+  try { stepLog.appendJSONL('global', 'virtus', { step: 'open_chat_click_timeout', chatId, ts: Date.now() }); } catch {}
   return false;
 }
 
@@ -2748,9 +2725,7 @@ async function armFinalizationTimerIfNeeded(perfil, chatId, historicoSan, contex
         const tid = setTimeout(() => {
           try {
             enqueueProcess(perfil, async () => {
-              await withNavLock(perfil, async () => {
-                await finalizePedido(perfil, chatId, contexto || {});
-              });
+              await finalizePedido(perfil, chatId, contexto || {});
             });
           } catch {}
         }, delay);
@@ -2939,12 +2914,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // Funções que dependem de ensurePage devem estar após sua definição
   async function runCollectForChat(nome, chatId) {
     const now = Date.now();
+    const jobStart = Date.now();
+    function timedOut() { return (Date.now() - jobStart) >= SCAN_NAV_TIMEOUT_MS; }
     setScanBlocked(nome, true, { reason: 'collect', chatId });
     try {
       const st0 = (() => { try { return virtusFSM.get(nome, chatId) || {}; } catch { return {}; } })();
       const sch0 = st0.schedule || {};
       const col0 = sch0.collect || {};
       const tokenSig0 = String(col0.tokenSig || (st0.cursor && st0.cursor.feed && (st0.cursor.feed.pendingSig || st0.cursor.feed.sig)) || '');
+
+      if (timedOut()) {
+        const reAt = Date.now() + 5000;
+        scheduleCollectJob(nome, chatId, reAt, tokenSig0);
+        await virtusFSM.patch(nome, chatId, { schedule: { ...(sch0||{}), collect: { ...(col0||{}), openAt: reAt, tokenSig: tokenSig0 } } });
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_timeout', chatId, reAt, tookMs: Date.now() - jobStart, ts: Date.now() });
+        setScanBlocked(nome, false);
+        return;
+      }
 
       const p = await ensurePage().catch(()=>null);
       if (!p) {
@@ -2972,11 +2958,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       } catch {}
 
       // Abrir chat por click se necessário
+      if (timedOut()) {
+        const reAt = Date.now() + 5000;
+        scheduleCollectJob(nome, chatId, reAt, tokenSig0);
+        await virtusFSM.patch(nome, chatId, { schedule: { ...(sch0||{}), collect: { ...(col0||{}), openAt: reAt, tokenSig: tokenSig0 } } });
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_timeout', chatId, reAt, tookMs: Date.now() - jobStart, ts: Date.now() });
+        setScanBlocked(nome, false);
+        return;
+      }
       const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
       if (!chatUrlMatches(urlNow, chatId)) {
-        await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
+        await openChatByClick(p, chatId, { timeoutMs: 4000, retries: 1, scrollTries: 6 });
       }
 
+      if (timedOut()) {
+        const reAt = Date.now() + 5000;
+        scheduleCollectJob(nome, chatId, reAt, tokenSig0);
+        await virtusFSM.patch(nome, chatId, { schedule: { ...(sch0||{}), collect: { ...(col0||{}), openAt: reAt, tokenSig: tokenSig0 } } });
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_timeout', chatId, reAt, tookMs: Date.now() - jobStart, ts: Date.now() });
+        setScanBlocked(nome, false);
+        return;
+      }
       const onTarget = await assertOnChatStrict(p, chatId, { timeoutMs: 1200 }).catch(()=>false);
       if (!onTarget) {
         // Não abriu: refile em +5s mantendo tokenSig
@@ -3391,8 +3393,18 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const last = Number(lastCollectAtByPerfil.get(perfil) || 0);
         if (now - last < VIRTUS_COLLECT_GAP_MS) return;
 
+        // Blindagem de claim: verifica se já existe claim para este chat
+        if (hasActiveCollectClaimForSync(perfil, String(winnerData.chatId || ''))) {
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_claim_skip_existing', chatId: winnerData.chatId, ts: Date.now() });
+          return;
+        }
+
         // Claim: renomeia para evitar dispatch duplo
         const claim = winner + '.claim';
+        if (fsRaw.existsSync(claim)) {
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_claim_exists_skip', chatId: winnerData.chatId, ts: now });
+          return;
+        }
         try { fsRaw.renameSync(winner, claim); } catch { return; }
 
         lastCollectAtByPerfil.set(perfil, now);
@@ -3711,7 +3723,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         // BARREIRA DE COLETA (45s): Só processa coleta real se openAt venceu ou não existe
         if (openAt > 0 && now < openAt) {
-          // Ainda dentro do timer, não processa coleta real
+          // Ainda dentro do timer, não processa coleta real - apenas atualiza feed.cursor.sig/preview/seenAt
+          await virtusFSM.patch(nome, chatId, {
+            cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
+          });
           continue;
         }
 
