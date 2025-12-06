@@ -176,6 +176,19 @@ function sanitizeFeedPreview(s) {
   }
 }
 
+function isActionableFeedPreview(preview) {
+  try {
+    const n = sanitizeFeedPreview(preview || '');
+    if (!n) return false;
+    // Detecta ruídos comuns do preview do Marketplace (não aciona timers)
+    if (/^marketplace\b/.test(n) && /\bnao\s+lidas?\b/.test(n)) return false;
+    if (/^marketplace\b$/.test(n)) return false;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 function nearEqual(a, b) {
   const na = normalizeContent(a), nb = normalizeContent(b);
   if (!na || !nb) return false;
@@ -3142,7 +3155,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           },
           schedule: {
             ...(stAfter && stAfter.schedule || {}),
-            collect: { ...(cs || {}), idleUntil: Date.now() + VIRTUS_COLLECT_IDLE_MS, openAt: 0, tokenSig: '' }
+            collect: { ...(cs || {}), idleUntil: Date.now() + Math.max(VIRTUS_COLLECT_IDLE_MS, 15000), openAt: 0, tokenSig: '' }
           },
           lastScanAt: Date.now()
         });
@@ -3400,7 +3413,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const feedSig = sha1(sanitizeFeedPreview(feedPreviewRaw));
 
         // 4.2) Se ainda em cooldown por chat, não agenda, só atualiza feed cursor
-        if (idleUntil > now) {
+        if (idleUntil && idleUntil >= now) {
           await virtusFSM.patch(nome, chatId, {
             cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
           });
@@ -3431,15 +3444,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         // 4.4) Mudança real do feed (sig estável) e não consumida: reprograma 45s com novo token
         if (feedSig && feedSig !== prevFeedSig && feedSig !== lastConsumedFeedSig) {
+          const actionable = isActionableFeedPreview(it.preview);
+
           await virtusFSM.patch(nome, chatId, {
-            cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now, pendingSig: feedSig } }
+            cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now, pendingSig: actionable ? feedSig : (feedCursor.pendingSig || '') } }
           });
-          if (!finalLocked) {
+
+          if (!finalLocked && actionable) {
             const newOpenAt = now + 45000;
             await virtusFSM.patch(nome, chatId, {
               schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: newOpenAt, startedAt: collectSchedule.startedAt || now, tokenSig: feedSig } }
             });
-            // Agenda coleta em disco (sem setTimeout)
             scheduleCollectJob(nome, chatId, newOpenAt, feedSig);
             stepLog.appendJSONL(nome, 'virtus', { step: 'feed_change_set_timer', chatId, openAt: newOpenAt, feedSig, ts: now });
           }
@@ -3512,10 +3527,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire_enqueued_from_scan', chatId, ts: Date.now() });
           continue;
         }
-
-        // Enfileira processamento serial do chat (com NavLock)
-        enqueueProcess(nome, () => runCollectFn(nome, chatId));
-        continue;
       }
 
       // Continua para o próximo chat no loop
