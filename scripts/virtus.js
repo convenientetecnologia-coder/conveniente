@@ -1486,14 +1486,19 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       resposta = sanitized;
       payload = String(resposta || '').trim();
     }
-    if (!payload) return { ok: false, status: 'dropped' };
+    if (!payload) {
+      console.log(`[QUEUE][DROP_EMPTY] perfil=${nomePerfil} chat=${chatId}`);
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_drop_empty', chatId, ts: Date.now() });
+      return { ok: false, status: 'dropped' };
+    }
 
     let fsmState = null;
     try { fsmState = virtusFSM.get(nomePerfil, chatId); } catch {}
 
     const isFinalize = (origin === 'finalize');
     if (isFinalize && fsmState && fsmState.finalization && fsmState.finalization.closingMessageQueued) {
-      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_finalize_duplicate', chatId });
+      console.log(`[QUEUE][DROP_FINALIZE_DUPLICATE] perfil=${nomePerfil} chat=${chatId}`);
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_finalize_duplicate', chatId, ts: Date.now() });
       return { ok: false, status: 'dropped' };
     }
 
@@ -1507,10 +1512,12 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     const cmpSig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
     if (cmpSig) {
       if (alreadySentSig && cmpSig === alreadySentSig && origin !== 'finalize') {
+        console.log(`[QUEUE][DROP_ALREADY_SENT] perfil=${nomePerfil} chat=${chatId} sig=${cmpSig}`);
         stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_sent_sig', chatId, sig: cmpSig, origin, ts: Date.now() });
         return { ok: false, status: 'dropped' };
       }
       if (alreadyQueuedSig && cmpSig === alreadyQueuedSig && origin !== 'finalize') {
+        console.log(`[QUEUE][DROP_ALREADY_QUEUED] perfil=${nomePerfil} chat=${chatId} sig=${cmpSig}`);
         stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_queued_sig', chatId, sig: cmpSig, origin, ts: Date.now() });
         return { ok: false, status: 'dropped' };
       }
@@ -2566,6 +2573,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormLock, lastClientTs: lastClientTs || Date.now() },
           lastScanAt: now
         });
+        console.log(`[COLLECT][SKIP_FINALIZATION_LOCK] perfil=${nome} chat=${chatId} lockUntil=${new Date(finalLockUntil).toISOString()}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_finalization_lock', chatId, lockUntil: finalLockUntil, ts: Date.now() });
         return;
       }
 
@@ -2640,6 +2649,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           data: { ...(fsmState && fsmState.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
           lastScanAt: Date.now()
         });
+        console.log(`[COLLECT][SKIP_NO_NEW_MSGS] perfil=${nome} chat=${chatId} contentSig=${clientContentSig} prevSig=${prevContentSig}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_no_new_msgs', chatId, contentSig: clientContentSig, prevContentSig, ts: Date.now() });
         return;
       }
 
@@ -2671,7 +2682,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { chatLock.release(nome, chatId); } catch {}
       }
 
-      if (!llmRes) return;
+      if (!llmRes) {
+        console.log(`[COLLECT][SKIP_NO_LLM_RES] perfil=${nome} chat=${chatId}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_no_llm_res', chatId, ts: Date.now() });
+        return;
+      }
 
       const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llmRes.extraction || {} });
       await virtusFSM.patch(nome, chatId, { data: mergedData });
@@ -2747,10 +2762,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   // Worker único que processa send e collect em disco
   function startJobScheduler(perfil, enviarRespostaMessengerSeguraFn) {
-    if (filaEnvioTimers.has(perfil)) return;
+    if (filaEnvioTimers.has(perfil)) {
+      console.log(`[SCHED][INIT_SKIP] perfil=${perfil} reason=already_running`);
+      return;
+    }
+    console.log(`[SCHED][INIT] perfil=${perfil}`);
+    stepLog.appendJSONL(perfil, 'virtus', { step: 'scheduler_init', ts: Date.now() });
+    let heartbeatCounter = 0;
     const id = setInterval(async () => {
       try {
         const now = Date.now();
+        
+        // Heartbeat a cada 60s (120 iterações de 500ms)
+        heartbeatCounter++;
+        if (heartbeatCounter >= 120) {
+          heartbeatCounter = 0;
+          console.log(`[SCHED][HEARTBEAT] perfil=${perfil} ts=${new Date(now).toISOString()}`);
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'scheduler_heartbeat', ts: now });
+        }
 
         // PRIORIDADE: SEND
         const s = pickNextSend(perfil, now);
@@ -2760,9 +2789,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           stepLog.appendJSONL(perfil, 'virtus', { step: 'send_pick', chatId: job.chatId, dueAt: job.dueAt, tries: job.payload?.__tries||0, ts: Date.now() });
           
           const resposta = String(job.payload?.resposta || '').trim();
-          if (!resposta) { 
-            deleteJob(perfil, 'send', job.chatId); 
-            return; 
+          if (!resposta) {
+            console.log(`[SCHED][SEND_DROP_EMPTY] perfil=${perfil} chat=${job.chatId}`);
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'send_drop_empty', chatId: job.chatId, ts: Date.now() });
+            deleteJob(perfil, 'send', job.chatId);
+            return;
           }
           const ok = await enviarRespostaMessengerSeguraFn(job.chatId, resposta);
           if (ok) {
@@ -2906,10 +2937,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return; // Já está rodando
     }
     scanRunningByPerfil.set(nome, true);
+    const scanBegin = Date.now();
 
     try {
+      console.log(`[SCAN][BEGIN] perfil=${nome}`);
+      stepLog.appendJSONL(nome, 'virtus', { step: 'scan_begin', ts: scanBegin });
+      
       const p = await ensurePage().catch(()=>null);
       if (!p) {
+        const took = Date.now() - scanBegin;
+        console.log(`[SCAN][END] perfil=${nome} took=${took}ms reason=no_page`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'scan_end', took, reason: 'no_page', ts: Date.now() });
         scanRunningByPerfil.set(nome, false);
         return;
       }
@@ -2918,6 +2956,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       const lista = await coletaChatsMarketplaceTodos(p);
       if (!Array.isArray(lista) || !lista.length) {
+        const took = Date.now() - scanBegin;
+        console.log(`[SCAN][END] perfil=${nome} took=${took}ms reason=no_chats`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'scan_end', took, reason: 'no_chats', ts: Date.now() });
         scanRunningByPerfil.set(nome, false);
         return;
       }
@@ -2969,7 +3010,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         console.log(`[SCAN][FEED_SEEN] perfil=${nome} chat=${chatId} feedSig=${feedSig}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'scan_feed_seen', chatId, feedSig, ts: now });
       }
+      
+      const took = Date.now() - scanBegin;
+      console.log(`[SCAN][END] perfil=${nome} took=${took}ms chats=${lista.length}`);
+      stepLog.appendJSONL(nome, 'virtus', { step: 'scan_end', took, chats: lista.length, ts: Date.now() });
     } catch (e) {
+      const took = Date.now() - scanBegin;
+      console.log(`[SCAN][END][ERR] perfil=${nome} took=${took}ms error=${(e && e.message) || String(e)}`);
+      stepLog.appendJSONL(nome, 'virtus', { step: 'scan_end_error', took, error: (e && e.message) || String(e), ts: Date.now() });
       logger.warn('[SCAN] erro geral', { nome, error: (e && e.message) || String(e) });
     } finally {
       scanRunningByPerfil.set(nome, false);
@@ -3035,13 +3083,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     if (!running || !epochOk()) return;
     
-    try {
-      await fazerHandshakeNotificador(nome);
-      if (NOTIFICADOR_OUTBOUND) {
-        iniciarPollingRespostas(nome);
-      }
-      
-      async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
+    // Define função no escopo amplo do runner (antes de qualquer try)
+    async function enviarRespostaMessengerSeguraLocal(chatId, resposta) {
       const MAX_TRIES = 2;
       let lastErr = null;
       let attempts = 0;
@@ -3074,18 +3117,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               await waitForSendLockRelease(p, 12000);
               await acquireSendGuard(p, chatId);
               try {
-                await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+                const ok = await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+                if (ok) {
+                  virtusFSM.flowLog(nome, chatId, 'send_ok', {
+                    attempts: attempt,
+                    url: urlNow,
+                    hasComposer: true,
+                    cursorSig: ''
+                  });
+                  return true;
+                }
               } finally {
                 releaseSendGuard(p);
               }
-              // Log send_ok
-              virtusFSM.flowLog(nome, chatId, 'send_ok', {
-                attempts: attempt,
-                url: urlNow,
-                hasComposer: true,
-                cursorSig: ''
-              });
-              return true;
             }
           } catch {}
           
@@ -3121,19 +3165,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await waitForSendLockRelease(p, 12000);
           await acquireSendGuard(p, chatId);
           try {
-            await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+            const ok = await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
+            if (ok) {
+              virtusFSM.flowLog(nome, chatId, 'send_ok', {
+                attempts: attempt,
+                url: urlNow,
+                hasComposer: true,
+                cursorSig: ''
+              });
+              return true;
+            }
           } finally {
             releaseSendGuard(p);
           }
-          
-          // Log send_ok
-          virtusFSM.flowLog(nome, chatId, 'send_ok', {
-            attempts: attempt,
-            url: urlNow,
-            hasComposer: true,
-            cursorSig: ''
-          });
-          return true;
         } catch (err) {
           lastErr = err;
           const msgErr = (err && err.message) ? err.message : String(err);
@@ -3193,33 +3237,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     }
     
-        // Callback de URL para logging diários, nunca depende de ensurePage diretamente
-        const getUrlNowFn = async () => {
-          try {
-            const p = await ensurePage().catch(() => null);
-            return (p && typeof p.url === 'function') ? (p.url() || '') : '';
-          } catch {
-            return '';
-          }
-        };
-        
-        // Inicializa o worker da fila persistente do notificador para o perfil
-        notifierQueue.ensureWorker(nome, {
-          url: NOTIFICADOR_URL,
-          servidor: NOTIFICADOR_SERVIDOR,
-          logger,
-          stepLog,
-          onJobOk: async (perfilCb, job) => {
-            if (job && job.kind === 'pedido') {
-              try { 
-                await markPedidoSent(perfilCb, job.payload.chat_id, job.payload, 'virtus_finalizacao');
-              } catch (e) {
-                logger.warn('[NOTIFIER_QUEUE] markPedidoSent fail', { perfil: perfilCb, chatId: job && job.payload && job.payload.chat_id, error: e && e.message || e });
-              }
+    // Inicializa notificador (dentro de try separado)
+    try {
+      await fazerHandshakeNotificador(nome);
+      if (NOTIFICADOR_OUTBOUND) {
+        iniciarPollingRespostas(nome);
+      }
+      
+      // Inicializa o worker da fila persistente do notificador para o perfil
+      notifierQueue.ensureWorker(nome, {
+        url: NOTIFICADOR_URL,
+        servidor: NOTIFICADOR_SERVIDOR,
+        logger,
+        stepLog,
+        onJobOk: async (perfilCb, job) => {
+          if (job && job.kind === 'pedido') {
+            try { 
+              await markPedidoSent(perfilCb, job.payload.chat_id, job.payload, 'virtus_finalizacao');
+            } catch (e) {
+              logger.warn('[NOTIFIER_QUEUE] markPedidoSent fail', { perfil: perfilCb, chatId: job && job.payload && job.payload.chat_id, error: e && e.message || e });
             }
           }
-        });
-      // REMOVIDO: bindPedidosEventsIfNeeded - toda orquestração agora via virtusFSM
+        }
+      });
     } catch (e) {
       logger.warn('[NOTIFICADOR] falha init filas/handshake (modo legado)', { nome, error: e && e.message || e });
     }
@@ -3228,16 +3268,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     
     // Logs iniciais
     console.log(`[VIRTUS][START] perfil=${nome} scanInterval=${SCAN_INTERVAL_MS}ms`);
-    console.log(`[VIRTUS][SCHEDULER_STARTED] perfil=${nome}`);
     console.log(`[NOTIFICADOR][HANDSHAKE] perfil=${nome} outbound=${NOTIFICADOR_OUTBOUND}`);
     
     // Inicia o scheduler único (apenas uma vez)
     startJobScheduler(nome, enviarRespostaMessengerSeguraLocal);
+    console.log(`[VIRTUS][SCHEDULER_STARTED] perfil=${nome}`);
+    stepLog.appendJSONL(nome, 'virtus', { step: 'scheduler_init_ok', ts: Date.now() });
     
     // Varredura contínua e imediata (sem locks de atendimento)
-    setInterval(() => {
+    if (!global.__virtusScanTimers) global.__virtusScanTimers = new Map();
+    const scanTimerId = setInterval(() => {
       scanAndProcessChats(nome);
     }, SCAN_INTERVAL_MS);
+    global.__virtusScanTimers.set(nome, scanTimerId);
     scanAndProcessChats(nome);
   }
 
@@ -3253,6 +3296,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (tPoll) { clearInterval(tPoll); pollingIntervals.delete(nome); }
       const tFila = filaEnvioTimers.get(nome);
       if (tFila) { clearInterval(tFila); filaEnvioTimers.delete(nome); }
+      
+      // Limpeza do timer de scan
+      if (global.__virtusScanTimers && global.__virtusScanTimers.has(nome)) {
+        try { clearInterval(global.__virtusScanTimers.get(nome)); } catch {}
+        global.__virtusScanTimers.delete(nome);
+      }
       
       // Para o worker da fila persistente do notificador
       notifierQueue.stopWorker(nome);
