@@ -726,14 +726,15 @@ async function getOpenChatIdStrict(p) {
   } catch { return { byUrl: null, byDom: null }; }
 }
 
-async function assertOnChatStrict(p, chatId, { timeoutMs = 2000 } = {}) {
+async function assertOnChatStrict(p, chatId, { timeoutMs = 4500 } = {}) {
+  const finalTimeout = Math.max(4500, timeoutMs);
   const t0 = Date.now();
   while (true) {
     const okUrl = await assertOnChat(p, chatId, { timeoutMs: 0 }).catch(()=>false);
     const { byUrl, byDom } = await getOpenChatIdStrict(p);
     const okDom = (byDom && byDom === String(chatId)) || false;
     if (okUrl && (okDom || byDom === null)) return true;
-    if (!timeoutMs || (Date.now()-t0) >= timeoutMs) return false;
+    if (!finalTimeout || (Date.now()-t0) >= finalTimeout) return false;
     await sleep(120);
   }
 }
@@ -1180,135 +1181,84 @@ async function extrairHistoricoConversa(page) {
           const raw = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
           const t = norm(raw);
           const now = Date.now();
-
           if (!t) return 0;
           if (/\bagora\b|just now|now/i.test(raw)) return now;
-          
-          let m = t.match(/\b(\d+)\s*(s|seg|second|seconds?)\b/);
-          if (m) return now - (parseInt(m[1], 10) * 1000);
-          
-          m = t.match(/\b(\d+)\s*(min|mins?|minute|minuto)\b/);
-          if (m) return now - (parseInt(m[1], 10) * 60000);
-          
-          m = t.match(/\b(\d+)\s*(h|hora|horas|hour|hours?)\b/);
-          if (m) return now - (parseInt(m[1], 10) * 3600000);
-          
-          m = t.match(/\b(\d+)\s*(d|dia|dias|day|days)\b/);
-          if (m) return now - (parseInt(m[1], 10) * 86400000);
-          
+          let m = t.match(/\b(\d+)\s*(s|seg|second|seconds?)\b/); if (m) return now - (parseInt(m[1], 10) * 1000);
+          m = t.match(/\b(\d+)\s*(min|mins?|minute|minuto)\b/);    if (m) return now - (parseInt(m[1], 10) * 60000);
+          m = t.match(/\b(\d+)\s*(h|hora|horas|hour|hours?)\b/);   if (m) return now - (parseInt(m[1], 10) * 3600000);
+          m = t.match(/\b(\d+)\s*(d|dia|dias|day|days)\b/);        if (m) return now - (parseInt(m[1], 10) * 86400000);
           if (/\bontem\b|yesterday\b/.test(t)) return now - 86400000;
-          
           const dp = Date.parse(raw);
-          if (Number.isFinite(dp)) return dp;
-          
-          return 0;
-        } catch {
-          return 0;
-        }
+          return Number.isFinite(dp) ? dp : 0;
+        } catch { return 0; }
+      }
+
+      function isNoise(t) {
+        const s = norm(t).replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
+        if (!s) return true;
+        if (/^(inserir|mensagem nao lida|hoje|ontem|enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(s)) return true;
+        if (/^\d{1,2}:\d{2}$/.test(s)) return true;
+        if (/^\s*[·•]\s*$/.test(t)) return true;
+        return false;
       }
 
       const main = document.querySelector('div[role="main"]');
       if (!main) return [];
 
-      // 1) Container do composer (input)
-      const composer = main.querySelector('div[contenteditable="true"][role="textbox"], div[contenteditable="true"][aria-label], div[role="combobox"][contenteditable="true"]');
-      let convoRoot = null;
+      // Busca o grid de mensagens mais próximo do composer
+      const composer = main.querySelector('div[contenteditable="true"][role="textbox"], div[role="combobox"][contenteditable="true"], div[contenteditable="true"][aria-label]');
+      let grid = null;
       if (composer) {
         let n = composer.parentElement;
-        for (let i=0;i<6 && n;i++){
-          if (n.querySelector && n.querySelector('abbr[aria-label]')) { convoRoot = n; break; }
+        for (let i = 0; i < 8 && n && !grid; i++) {
+          grid = n.querySelector && n.querySelector('div[role="grid"]');
           n = n.parentElement;
         }
       }
-      if (!convoRoot) convoRoot = main;
+      if (!grid) grid = main.querySelector('div[role="grid"]');
+      if (!grid) return [];
 
-      const grids = Array.from(main.querySelectorAll('div[role="grid"]'));
-      const isInsideGrid = (el) => grids.some(g => g.contains(el));
-      const candidates = Array.from(convoRoot.querySelectorAll('div[role="article"], div[data-testid], div[dir]'))
-        .filter(el => el && !isInsideGrid(el) && !el.closest('a[href^="/marketplace/t/"]'));
-
+      const rows = Array.from(grid.querySelectorAll('div[role="row"]')).slice(-120);
       const out = [];
-      for (const r of candidates) {
+
+      for (const row of rows) {
+        const rawTxt = (row.innerText || row.textContent || '').trim();
+        if (!rawTxt) continue;
+
+        // Heurística: identifica mensagens "minhas" (IA/perfil)
+        let isMine = false;
         try {
-          const rawTxt = (r.innerText || r.textContent || '').trim();
-          if (!rawTxt) continue;
-
-          let isMine = false;
-          
-          // Autoria baseada em data-testid="outgoing"
-          try {
-            if (r.getAttribute('data-testid') === 'outgoing') {
-              isMine = true;
-            }
-          } catch {}
-
-          // Autoria baseada em flex-end/textAlign
-          if (!isMine) {
-            try {
-              const st = window.getComputedStyle(r);
-              if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) {
-                isMine = true;
-              }
-            } catch {}
-          }
-
-          // Autoria baseada em prefixos
-          if (!isMine) {
-            const nraw = norm(rawTxt);
-            if (/\b(you\s+sent|voc[eê]\s+enviou)\b/i.test(nraw)) isMine = true;
-            if (/^\s*(voc[eê]:|voce:|you:)\b/i.test(rawTxt)) isMine = true;
-          }
-
-          // Só captura mensagens do cliente (não da IA)
-          if (isMine) continue;
-
-          // Extrai timestamp do abbr
-          let ts = 0;
-          try {
-            const ab = r.querySelector('abbr[aria-label]');
-            if (ab) ts = parseAbbrToTs(ab);
-            if (!ts) {
-              const sps = Array.from(r.querySelectorAll('span')).slice(0, 10);
-              for (const s of sps) {
-                const ab2 = s.querySelector('abbr[aria-label]');
-                if (ab2) {
-                  ts = parseAbbrToTs(ab2);
-                  if (ts) break;
-                }
-              }
-            }
-          } catch {}
-
-          const textoLimpo = rawTxt.trim();
-          if (!textoLimpo) continue;
-
-          // Filtro bruto de ruído
-          try {
-            const stopNorm = (textoLimpo || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
-            if (/^conveniente(?:\s+contingencia)?$/.test(stopNorm)) continue;
-            if (stopNorm === 'inserir') continue;
-            if (/^mensagem\s+nao\s+lida/.test(stopNorm)) continue;
-            if (/^\d{1,2}:\d{2}$/.test(stopNorm)) continue;
-            if (/^(hoje|ontem)\b/.test(stopNorm)) continue;
-            if (/^\s*[·•]\s*$/.test(textoLimpo)) continue;
-            if (/^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(stopNorm)) continue;
-          } catch {}
-
-          out.push({
-            texto: textoLimpo,
-            autor: 'cliente',
-            timestamp: ts || Date.now()
-          });
+          if (row.querySelector('[data-testid="outgoing"]')) isMine = true;
         } catch {}
+        if (!isMine) {
+          try {
+            const st = window.getComputedStyle(row);
+            if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) isMine = true;
+          } catch {}
+        }
+        if (!isMine) {
+          const nraw = norm(rawTxt);
+          if (/\b(you\s+sent|voc[eê]\s+enviou|^voc[eê]:|^voce:|^you:)/i.test(nraw)) isMine = true;
+        }
+        if (isMine) continue;
+
+        if (isNoise(rawTxt)) continue;
+
+        let ts = 0;
+        try {
+          const ab = row.querySelector('abbr[aria-label]') || row.closest('*:has(abbr[aria-label])')?.querySelector('abbr[aria-label]');
+          if (ab) ts = parseAbbrToTs(ab);
+        } catch {}
+        if (!ts) ts = Date.now();
+
+        out.push({ texto: rawTxt.trim(), autor: 'cliente', timestamp: ts });
       }
 
       out.sort((a,b) => (a.timestamp||0)-(b.timestamp||0));
       for (let i=1;i<out.length;i++){
         const prev = Number(out[i-1].timestamp || 0);
-        const cur = Number(out[i].timestamp || 0);
-        if (cur <= prev) {
-          out[i].timestamp = prev + 1;
-        }
+        const cur  = Number(out[i].timestamp || 0);
+        if (cur <= prev) out[i].timestamp = prev + 1;
       }
       return out;
     });
@@ -2013,17 +1963,20 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
     }
   }
   
-  // Fallback por URL (sempre tenta, mesmo sem VIRTUS_ALLOW_URL_OPEN)
-  try {
-    await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 });
-    const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 5000 });
-    if (ok) {
-      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_ok', chatId, ts: Date.now() }); } catch {}
-      return true;
+  // Fallback por URL (SOMENTE se VIRTUS_ALLOW_URL_OPEN=1 em debug)
+  if (String(process.env.VIRTUS_ALLOW_URL_OPEN || '0') === '1') {
+    try {
+      stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fallback_attempt', chatId, ts: Date.now() });
+      await p.goto(`https://www.messenger.com/marketplace/t/${chatId}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 });
+      const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 });
+      if (ok) {
+        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_ok', chatId, ts: Date.now() }); } catch {}
+        return true;
+      }
+      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
+    } catch (e) {
+      try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
     }
-    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
-  } catch (e) {
-    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
   }
   try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_timeout', chatId, ts: Date.now() }); } catch {}
   return false;
@@ -2582,9 +2535,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const navSuccess = await withNavLock(nome, async () => {
         const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
         if (!chatUrlMatches(urlNow, chatId)) {
-          await openChatByClick(p, nome, chatId, { timeoutMs: 5000, retries: 1, scrollTries: 2 });
+          await openChatByClick(p, nome, chatId, { timeoutMs: 6000, retries: 1, scrollTries: 2 });
         }
-        return await assertOnChatStrict(p, chatId, { timeoutMs: 5000 }).catch(()=>false);
+        return await assertOnChatStrict(p, chatId, { timeoutMs: 6000 }).catch(()=>false);
       });
 
       if (!navSuccess) {
@@ -3227,19 +3180,58 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           continue;
         }
         
-        await waitForSendLockRelease(p, 30000);
-        await acquireSendGuard(p, chatId);
+        // NAV_LOCK e verificação de contexto antes de enviar
         try {
-          try {
-            urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
-            const okChat = chatUrlMatches(urlNow, chatId);
-            let campo = null;
-            hasComposer = false;
-            if (okChat) {
-              campo = await waitForComposer(p, 1500).catch(()=>null);
-              hasComposer = !!campo;
-            }
-            if (okChat && hasComposer) {
+          const sendSuccess = await withNavLock(nome, async () => {
+            await waitForSendLockRelease(p, 30000);
+            await acquireSendGuard(p, chatId);
+            try {
+              // Verifica contexto antes de qualquer manipulação
+              urlNow = (p && typeof p.url === 'function') ? (p.url() || '') : '';
+              const { byUrl, byDom } = await getOpenChatIdStrict(p);
+              const okUrl = chatUrlMatches(urlNow, chatId);
+              const okDom = (byDom && byDom === String(chatId)) || false;
+              
+              if (!okUrl || !okDom) {
+                // Não está no chat correto, abre via clique
+                console.log(`[SEND][NAV] perfil=${nome} chat=${chatId} not_on_target, opening...`);
+                stepLog.appendJSONL(nome, 'virtus', { step: 'send_nav_open', chatId, urlNow, byDom, ts: Date.now() });
+                await openChatByClick(p, nome, chatId, { timeoutMs: 7000, retries: 1, scrollTries: 2 });
+                
+                // Verifica novamente após abrir
+                const okOn = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 });
+                if (!okOn) {
+                  console.log(`[SEND][NAV_FAIL] perfil=${nome} chat=${chatId} could_not_open`);
+                  stepLog.appendJSONL(nome, 'virtus', { step: 'send_nav_fail', chatId, ts: Date.now() });
+                  throw new Error('chat_not_opened');
+                }
+              }
+              
+              // Agora está no chat correto, busca composer
+              let campo = await waitForComposer(p, 10000);
+              if (!campo) {
+                const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+                campo = await refocusComposerNoReload(p, chatId, anchorSel);
+              }
+              
+              if (!campo) {
+                console.log(`[SEND][COMPOSER_FAIL] perfil=${nome} chat=${chatId}`);
+                stepLog.appendJSONL(nome, 'virtus', { step: 'send_composer_fail', chatId, ts: Date.now() });
+                throw new Error('composer_not_available');
+              }
+              
+              hasComposer = true;
+              await campo.focus();
+              await new Promise(r => setTimeout(r, 120));
+              
+              // Verifica contexto novamente antes de enviar
+              const finalCheck = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 });
+              if (!finalCheck) {
+                console.log(`[SEND][CONTEXT_LOST] perfil=${nome} chat=${chatId}`);
+                stepLog.appendJSONL(nome, 'virtus', { step: 'send_context_lost', chatId, ts: Date.now() });
+                throw new Error('context_lost');
+              }
+              
               await waitForSendLockRelease(p, 12000);
               await acquireSendGuard(p, chatId);
               try {
@@ -3256,53 +3248,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               } finally {
                 releaseSendGuard(p);
               }
+              return false;
+            } finally {
+              releaseSendGuard(p);
             }
-          } catch {}
+          });
           
-          
-          urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
-          if (!chatUrlMatches(urlNow, chatId)) {
-            await openChatByClick(p, nome, chatId, { timeoutMs: 8000, retries: 1, scrollTries: 2 });
-          }
-          
-          const okOn = await assertOnChatStrict(p, chatId, { timeoutMs: 2000 });
-          if (!okOn) {
-            throw new Error('chat_not_opened');
-          }
-          
-          let campo = await waitForComposer(p, 10000);
-          if (!campo) {
-            const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
-            campo = await refocusComposerNoReload(p, chatId, anchorSel);
-          }
-          
-          if (!campo) {
-            throw new Error('composer_not_available');
-          }
-          
-          hasComposer = true;
-          await campo.focus();
-          await new Promise(r => setTimeout(r, 120));
-          
-          if (!(await assertOnChatStrict(p, chatId, { timeoutMs: 2000 }))) {
-            throw new Error('context_lost');
-          }
-          
-          await waitForSendLockRelease(p, 12000);
-          await acquireSendGuard(p, chatId);
-          try {
-            const ok = await sendMessageSafe(p, campo, String(resposta || ''), nome, chatId);
-            if (ok) {
-              virtusFSM.flowLog(nome, chatId, 'send_ok', {
-                attempts: attempt,
-                url: urlNow,
-                hasComposer: true,
-                cursorSig: ''
-              });
-              return true;
-            }
-          } finally {
-            releaseSendGuard(p);
+          if (sendSuccess) {
+            return true;
           }
         } catch (err) {
           lastErr = err;
