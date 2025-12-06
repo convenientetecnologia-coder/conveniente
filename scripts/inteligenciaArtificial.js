@@ -433,6 +433,8 @@ async function callOpenAI(messages, systemPrompt, respond) {
     response_format: { type: 'json_object' }
   };
 
+  console.log(`[IA][HTTP][POST] model=${model} messages=${allMessages.length} timeout=30000ms`);
+
   const Controller = global.AbortController || require('node-abort-controller');
   const controller = new Controller();
   const timeoutMs = 30000;
@@ -461,9 +463,13 @@ async function callOpenAI(messages, systemPrompt, respond) {
 
     if (!content || !String(content).trim()) throw new Error('openai_empty_response');
 
-    return { content: String(content).trim(), usage: data.usage || {} };
+    const usage = data.usage || {};
+    console.log(`[IA][HTTP][OK] tokens_prompt=${usage.prompt_tokens||0} tokens_completion=${usage.completion_tokens||0}`);
+
+    return { content: String(content).trim(), usage };
   } catch (e) {
     clearTimeout(t);
+    console.log(`[IA][HTTP][ERR] ${e && e.message || String(e)}`);
     throw e;
   }
 }
@@ -560,14 +566,19 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
       };
     }
 
-    let content, usage;
     try {
+      console.log(`[IA][CALL_START] perfil=${perfil} chat=${chatId} mensagens=${messages.length}`);
       const out = await callOpenAI(messages, sysPrompt, respond);
-      content = out.content || '';
-      usage = out.usage || {};
-      if (!content || !String(content).trim()) throw new Error('openai_empty_response');
+      const result = parseResponse(out.content || '', lastClientMsg);
+      
+      const summary = result
+        ? `askField=${result?.control?.askField||null} shouldReply=${!!result?.control?.shouldReply} answer=${String(result.answer||'').slice(0,40)}`
+        : '(parse fail)';
+      console.log(`[IA][CALL_END] perfil=${perfil} chat=${chatId} ${summary}`);
+      
+      return result;
     } catch (e) {
-      // fallback: mensagem padrão de erro amigável
+      console.log(`[IA][HTTP][ERR] ${e && e.message || String(e)}`);
       return {
         extraction: {},
         answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',
@@ -575,10 +586,6 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
         meta: { confidence: 0.0, tokensUsed: 0, error: (e && e.message) || String(e) }
       };
     }
-
-    const result = parseResponse(content, lastClientMsg);
-
-    return result;
   } catch (e) {
     return {
       extraction: {},

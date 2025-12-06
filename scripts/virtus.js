@@ -375,9 +375,9 @@ async function ensureFinalClosingMessage(perfil, chatId, reason = '') {
         finalizationUntil: lockUntil
       })
     });
-    clearFinalizationTimer(perfil, chatId);
-    clearAllChatJobs(perfil, chatId);
+    // REMOVIDO: clearFinalizationTimer e clearAllChatJobs - send final NUNCA deve ser apagado
     try { stepLog.appendJSONL(perfil, 'virtus', { step: 'finalize_closing_message_enqueued', chatId, origin: 'finalize', qStatus: q && q.status || 'unknown', reason }); } catch {}
+    console.log(`[FINALIZE][CLOSING_MSG_ENQUEUED] perfil=${perfil} chat=${chatId} reason=${reason}`);
     return true;
   } catch (e) {
     try { stepLog.appendJSONL(perfil, 'virtus', { step: 'finalize_closing_message_error', chatId, error: (e && e.message) || String(e), reason }); } catch {}
@@ -460,17 +460,43 @@ async function enqueueJob(perfil, job) {
   try {
     fd = acquireFileLock(lockPath);
     const exists = fsRaw.existsSync(file);
+    let finalDueAt;
     if (exists) {
       // merge devido: mantém earliest dueAt, mescla as payloads
       const cur = JSON.parse(fsRaw.readFileSync(file, 'utf8'));
       cur.dueAt = Math.min(Number(cur.dueAt || job.dueAt), job.dueAt);
+      finalDueAt = cur.dueAt;
       cur.payload = Object.assign({}, cur.payload || {}, job.payload || {});
       await writeJsonAtomicFsyncStrict(file, cur);
     } else {
+      finalDueAt = job.dueAt;
       await writeJsonAtomicFsyncStrict(file, job);
     }
+    console.log(`[JOBS][ENQUEUE] perfil=${perfil} kind=${job.kind} chat=${job.chatId} dueAt=${new Date(finalDueAt).toISOString()} origin=${job.payload?.origin||''}`);
+    stepLog.appendJSONL(perfil, 'virtus', { step: 'job_enqueued', kind: job.kind, chatId: job.chatId, dueAt: finalDueAt, origin: job.payload?.origin||'', ts: Date.now() });
   } finally { 
     try { releaseFileLock(lockPath, fd); } catch {} 
+  }
+}
+
+async function rescheduleJob(perfil, kind, chatId, nextDueAt, payloadMerge = {}) {
+  const file = jobPath(perfil, kind, chatId);
+  const lockPath = file + '.lck';
+  let fd = null;
+  try {
+    fd = acquireFileLock(lockPath);
+    const exists = fsRaw.existsSync(file);
+    const cur = exists ? JSON.parse(fsRaw.readFileSync(file, 'utf8')) : { kind, chatId, dueAt: Number(nextDueAt), payload: {} };
+    cur.dueAt = Number(nextDueAt);
+    cur.payload = Object.assign({}, cur.payload || {}, payloadMerge || {});
+    await writeJsonAtomicFsyncStrict(file, cur);
+    console.log(`[JOBS][RESCHEDULE] perfil=${perfil} kind=${kind} chat=${chatId} dueAt=${new Date(cur.dueAt).toISOString()} payloadKeys=${Object.keys(cur.payload||{}).join(',')}`);
+    stepLog.appendJSONL(perfil, 'virtus', { step: 'job_rescheduled', kind, chatId, dueAt: cur.dueAt, ts: Date.now() });
+  } catch (e) {
+    console.log(`[JOBS][RESCHEDULE][ERR] perfil=${perfil} kind=${kind} chat=${chatId} error=${(e && e.message) || e}`);
+    stepLog.appendJSONL(perfil, 'virtus', { step: 'job_reschedule_error', kind, chatId, error: (e && e.message) || String(e), ts: Date.now() });
+  } finally {
+    try { releaseFileLock(lockPath, fd); } catch {}
   }
 }
 
@@ -2039,21 +2065,24 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     }
   } catch {}
   if (!campo) {
+    console.log(`[SEND][ABORT] perfil=${nome} chat=${chatId} reason=no_composer`);
     await logIssue(nome, 'mil_action', `virtus_no_composer chat=${chatId}`);
-    return;
+    return false;
   }
 
   try {
     const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
     if (!chatUrlMatches(urlNow, chatId)) {
+      console.log(`[SEND][ABORT] perfil=${nome} chat=${chatId} reason=url_mismatch_before_type url=${urlNow}`);
       await logIssue(nome, 'mil_action', `virtus_context_abort: url_mismatch_before_type chat=${chatId} url="${urlNow}"`);
-      return; // aborta o envio neste chat
+      return false; // aborta o envio neste chat
     }
   } catch {}
 
   if (!(await assertOnChatStrict(p, chatId, { timeoutMs: 0 }))) {
+    console.log(`[SEND][ABORT] perfil=${nome} chat=${chatId} reason=not_on_chat_before_type`);
     await logIssue(nome, 'mil_action', `virtus_context_abort: before_type (chat ${chatId})`);
-    return;
+    return false;
   }
 
   const ctrlKey = (process.platform === 'darwin') ? 'Meta' : 'Control';
@@ -2087,15 +2116,17 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       const urlNow2 = (typeof p.url === 'function') ? (p.url() || '') : '';
       if (!chatUrlMatches(urlNow2, chatId)) {
         await clearComposerIfAny(p, campo);
+        console.log(`[SEND][ABORT] perfil=${nome} chat=${chatId} reason=url_mismatch_before_enter url=${urlNow2}`);
         await logIssue(nome, 'mil_action', `virtus_context_abort: url_mismatch_before_enter chat=${chatId} url="${urlNow2}"`);
-        return; // aborta o envio neste chat
+        return false; // aborta o envio neste chat
       }
     } catch {}
 
     if (!(await assertOnChatStrict(p, chatId, { timeoutMs: 0 }))) {
       await clearComposerIfAny(p, campo);
+      console.log(`[SEND][ABORT] perfil=${nome} chat=${chatId} reason=not_on_chat_before_enter`);
       await logIssue(nome, 'mil_action', `virtus_context_abort: before_enter (chat ${chatId})`);
-      return;
+      return false;
     }
 
     const expected = safeMsg.trim();
@@ -2199,13 +2230,15 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
         }, { timeout: 12000 }, before.total, expectedNorm).catch(() => false);
         
         if (!sentRetry) {
+          console.log(`[SEND][FAILED_CONFIRMATION] perfil=${nome} chat=${chatId} reason=confirmation_failed_and_retry_failed`);
           await logIssue(nome, 'virtus_send_failed', 'send_confirmation_failed_and_retry_failed');
-          return; // ABORTA — NÃO loga "enviado"
+          return false; // ABORTA — NÃO loga "enviado"
         }
         mensagemEnviada = true;
       } catch {
+        console.log(`[SEND][FAILED_CONFIRMATION] perfil=${nome} chat=${chatId} reason=retry_exception`);
         await logIssue(nome, 'virtus_send_failed', 'send_confirmation_retry_exception');
-        return; // ABORTA
+        return false; // ABORTA
       }
     }
     
@@ -2214,8 +2247,12 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       try {
         await appendIaLine(nome, chatId, safeMsg);
       } catch {}
+      console.log(`[SEND][OK] perfil=${nome} chat=${chatId}`);
+      return true;
     }
 
+    console.log(`[SEND][FAILED_CONFIRMATION] perfil=${nome} chat=${chatId} reason=no_confirmation`);
+    return false;
   } finally {
     setVirtusInputLock(nome, false);
   }
@@ -2326,9 +2363,8 @@ async function finalizePedido(perfil, chatId, contexto) {
     // markPedidoSent será chamado pelo callback de ACK do notificador
 
     await ensureFinalClosingMessage(perfil, chatId, 'from_finalizePedido_after_outbox');
-    clearAllChatJobs(perfil, chatId);
-
-    clearFinalizationTimer(perfil, chatId);
+    // Só limpa job collect, send final NUNCA deve ser apagado
+    try { deleteJob(perfil, 'collect', chatId); } catch {}
 
     logger.info('[FINALIZE] Pedido concluído e notificado', { perfil, chatId, telefone: maskPhoneLog(tel) });
   } finally {
@@ -2467,16 +2503,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const now = Date.now();
     try {
       const st0 = (() => { try { return virtusFSM.get(nome, chatId) || {}; } catch { return {}; } })();
-      const sch0 = st0.schedule || {};
-      const col0 = sch0.collect || {};
-      const tokenSig0 = String(col0.tokenSig || (st0.cursor && st0.cursor.feed && (st0.cursor.feed.pendingSig || st0.cursor.feed.sig)) || '');
+      // Compatibilidade: lê tokenSig de campos legados se existir, senão usa feed.sig
+      const tokenSig0 = String(
+        (st0.schedule && st0.schedule.collect && st0.schedule.collect.tokenSig) ||
+        (st0.cursor && st0.cursor.feed && (st0.cursor.feed.pendingSig || st0.cursor.feed.sig)) ||
+        ''
+      );
 
       const p = await ensurePage().catch(()=>null);
       if (!p) {
         const reAt = Date.now() + 5000;
-        try {
-          await enqueueJob(nome, { kind: 'collect', chatId, dueAt: reAt, payload: { tokenSig: tokenSig0 } });
-        } catch {}
+        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_page' });
+        console.log(`[COLLECT][REQUEUE_NO_PAGE] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_page', chatId, reAt, ts: Date.now() });
         return;
       }
 
@@ -2488,9 +2527,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const onTarget = await assertOnChatStrict(p, chatId, { timeoutMs: 1200 }).catch(()=>false);
       if (!onTarget) {
         const reAt = Date.now() + 5000;
-        try {
-          await enqueueJob(nome, { kind: 'collect', chatId, dueAt: reAt, payload: { tokenSig: tokenSig0 } });
-        } catch {}
+        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'not_on_target' });
+        console.log(`[COLLECT][REQUEUE_NOT_ON_TARGET] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_not_on_target', chatId, reAt, ts: Date.now() });
         return;
       }
 
@@ -2500,18 +2539,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const historicoSan = sanitizeHistoricoRecords(historicoFiltered, "");
       if (!Array.isArray(historicoSan) || !historicoSan.length) {
         const reAt = Date.now() + 5000;
-        try {
-          await enqueueJob(nome, { kind: 'collect', chatId, dueAt: reAt, payload: { tokenSig: tokenSig0 } });
-        } catch {}
+        await rescheduleJob(nome, 'collect', chatId, reAt, { reason: 'no_messages' });
+        console.log(`[COLLECT][REQUEUE_NO_MESSAGES] perfil=${nome} chat=${chatId} next=${new Date(reAt).toISOString()}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_requeue_no_messages', chatId, reAt, ts: Date.now() });
         return;
       }
 
       await appendChatHistoryLog(nome, chatId, historicoSan);
       stepLog.appendJSONL(nome, 'virtus', { step: 'collect_done', chatId, historicoCount: historicoSan.length, ts: Date.now() });
 
-      // Locks/congelamento de 72h
+      // Locks/congelamento de 72h (compatibilidade: lê de freeze legado se existir)
       let fsmState = null; try { fsmState = virtusFSM.get(nome, chatId); } catch {}
-      const finalLockUntil = fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil ? Number(fsmState.freeze.finalizationUntil) : 0;
+      const finalLockUntil = (fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil) 
+        ? Number(fsmState.freeze.finalizationUntil) 
+        : ((fsmState && fsmState.finalization && fsmState.finalization.lockUntil) ? Number(fsmState.finalization.lockUntil) : 0);
       if (finalLockUntil > Date.now()) {
         const clientMsgsLock = historicoSan.filter(m => m.autor === 'cliente');
         const lastClientTs = clientMsgsLock.length ? Number(clientMsgsLock[clientMsgsLock.length - 1].timestamp || 0) : 0;
@@ -2562,6 +2603,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormAge, lastClientTs: lastClientTs || Date.now() },
           lastScanAt: Date.now()
         });
+        console.log(`[COLLECT][SKIP_OLD_CHAT] perfil=${nome} chat=${chatId} lastClientTs=${lastClientTs}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_skip_old_chat', chatId, lastClientTs, ts: Date.now() });
         return;
       }
 
@@ -2609,13 +2652,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
           lastScanAt: Date.now()
         });
+        console.log(`[COLLECT][LOCK_SKIP] perfil=${nome} chat=${chatId}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'collect_lock_skip', chatId, ts: Date.now() });
         return;
       }
 
       let llmRes = null;
       try {
+        console.log(`[IA][CALL_START] perfil=${nome} chat=${chatId} msgs=${historicoSan.length}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_start', chatId, contentSig: clientContentSig, ts: Date.now() });
         llmRes = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
+        console.log(`[IA][CALL_END] perfil=${nome} chat=${chatId} askField=${llmRes?.control?.askField||null} shouldReply=${!!llmRes?.control?.shouldReply}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_end', chatId, consumedSig: clientContentSig, tookMs: llmRes.meta && llmRes.meta.tookMs || null, ts: Date.now() });
       } catch (e) {
         stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_error', chatId, error: (e && e.message) || String(e), ts: Date.now() });
@@ -2672,7 +2719,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           cursorSig,
           lastClientTsOverride: lastClientTs
         });
-
+        
+        // Log após enfileirar (dueAt calculado dentro de queueMessengerSend)
+        const dueAt = lastClientTs + WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
+        console.log(`[REPLY][ENQUEUE] perfil=${nome} chat=${chatId} dueAt=${new Date(dueAt).toISOString()} sig=${cursorSig}`);
         stepLog.appendJSONL(nome, 'virtus', { step: 'reply_enqueued', chatId, status: queueResult && queueResult.status || 'unknown', cursorSig, ts: Date.now() });
         if (askField) await virtusFSM.patch(nome, chatId, { schedule: { ...(stateBeforeDebounce && stateBeforeDebounce.schedule || {}), lastAskedField: askField, lastAskedAt: Date.now() } });
         stepLog.appendJSONL(nome, 'virtus', { step: 'ciclo_final', chatId, status: 'respondido', hasReply: true, askField: askField || null, ts: Date.now() });
@@ -2706,6 +2756,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const s = pickNextSend(perfil, now);
         if (s) {
           const { job } = s;
+          console.log(`[SCHED][SEND_PICK] perfil=${perfil} chat=${job.chatId} dueAt=${new Date(job.dueAt).toISOString()} tries=${job.payload?.__tries||0}`);
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'send_pick', chatId: job.chatId, dueAt: job.dueAt, tries: job.payload?.__tries||0, ts: Date.now() });
+          
           const resposta = String(job.payload?.resposta || '').trim();
           if (!resposta) { 
             deleteJob(perfil, 'send', job.chatId); 
@@ -2714,16 +2767,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const ok = await enviarRespostaMessengerSeguraFn(job.chatId, resposta);
           if (ok) {
             await virtusFSM.ackSent(perfil, job.chatId, job.payload?.cursorSig || '');
+            console.log(`[SCHED][SEND_OK] perfil=${perfil} chat=${job.chatId} sig=${job.payload?.cursorSig||''}`);
+            stepLog.appendJSONL(perfil, 'virtus', { step: 'send_ok', chatId: job.chatId, cursorSig: job.payload?.cursorSig||'', ts: Date.now() });
             deleteJob(perfil, 'send', job.chatId);
           } else {
             // retry limitado disco
             job.payload = job.payload || {};
             job.payload.__tries = 1 + Number(job.payload.__tries || 0);
             if (job.payload.__tries > 2) {
+              console.log(`[SCHED][SEND_DROP] perfil=${perfil} chat=${job.chatId} tries=${job.payload.__tries}`);
+              stepLog.appendJSONL(perfil, 'virtus', { step: 'send_drop', chatId: job.chatId, tries: job.payload.__tries, ts: Date.now() });
               deleteJob(perfil, 'send', job.chatId);
             } else {
-              job.dueAt = now + 5000;
-              await enqueueJob(perfil, job);
+              const next = Date.now() + 5000;
+              console.log(`[SCHED][SEND_REQUEUE] perfil=${perfil} chat=${job.chatId} next=${new Date(next).toISOString()} tries=${job.payload.__tries}`);
+              stepLog.appendJSONL(perfil, 'virtus', { step: 'send_requeue', chatId: job.chatId, nextDueAt: next, tries: job.payload.__tries, ts: Date.now() });
+              await rescheduleJob(perfil, 'send', job.chatId, next, job.payload);
             }
           }
           return;
@@ -2733,7 +2792,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const c = pickNextCollect(perfil, now);
         if (c) {
           const { job } = c;
+          console.log(`[SCHED][COLLECT_PICK] perfil=${perfil} chat=${job.chatId} dueAt=${new Date(job.dueAt).toISOString()}`);
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_pick', chatId: job.chatId, dueAt: job.dueAt, ts: Date.now() });
           await runCollectForChat(perfil, job.chatId);
+          console.log(`[SCHED][COLLECT_DONE] perfil=${perfil} chat=${job.chatId}`);
+          stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_done_scheduler', chatId: job.chatId, ts: Date.now() });
           deleteJob(perfil, 'collect', job.chatId);
         }
       } catch (e) {
@@ -2880,6 +2943,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             cursor: { ...(fsmState && fsmState.cursor || {}), feed: { sig: feedSig, preview: (it.preview || ''), seenAt: now } }
           });
           await enqueueJob(nome, { kind: 'collect', chatId, dueAt: now + 45000, payload: { tokenSig: feedSig } });
+          console.log(`[SCAN][DISCOVER] perfil=${nome} chat=${chatId} feedSig=${feedSig}`);
+          stepLog.appendJSONL(nome, 'virtus', { step: 'scan_discover', chatId, feedSig, ts: now });
           continue;
         }
 
@@ -2891,6 +2956,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           });
           if (actionable) {
             await enqueueJob(nome, { kind: 'collect', chatId, dueAt: now + 45000, payload: { tokenSig: feedSig } });
+            console.log(`[SCAN][FEED_CHANGED] perfil=${nome} chat=${chatId} feedSig=${feedSig} prevSig=${prevFeedSig}`);
+            stepLog.appendJSONL(nome, 'virtus', { step: 'scan_feed_changed', chatId, feedSig, prevFeedSig, ts: now });
           }
           continue;
         }
@@ -2899,6 +2966,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         await virtusFSM.patch(nome, chatId, {
           cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
         });
+        console.log(`[SCAN][FEED_SEEN] perfil=${nome} chat=${chatId} feedSig=${feedSig}`);
+        stepLog.appendJSONL(nome, 'virtus', { step: 'scan_feed_seen', chatId, feedSig, ts: now });
       }
     } catch (e) {
       logger.warn('[SCAN] erro geral', { nome, error: (e && e.message) || String(e) });
@@ -2956,8 +3025,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         } catch {}
         ready = true;
         logger.info('Aba zero da Virtus iniciada e garantida: Marketplace pronta.', { nome });
-
-        startJobScheduler(nome, enviarRespostaMessengerSeguraLocal);
 
         // [REMOVIDO: Handler de localização — localização vem do manifest]
       } catch (err) {
@@ -3135,7 +3202,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return '';
           }
         };
-        startJobScheduler(nome, enviarRespostaMessengerSeguraLocal);
         
         // Inicializa o worker da fila persistente do notificador para o perfil
         notifierQueue.ensureWorker(nome, {
@@ -3159,6 +3225,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     
     // REMOVIDO: resumeTimers - timers agora gerenciados pelo virtusFSM
+    
+    // Logs iniciais
+    console.log(`[VIRTUS][START] perfil=${nome} scanInterval=${SCAN_INTERVAL_MS}ms`);
+    console.log(`[VIRTUS][SCHEDULER_STARTED] perfil=${nome}`);
+    console.log(`[NOTIFICADOR][HANDSHAKE] perfil=${nome} outbound=${NOTIFICADOR_OUTBOUND}`);
+    
+    // Inicia o scheduler único (apenas uma vez)
+    startJobScheduler(nome, enviarRespostaMessengerSeguraLocal);
     
     // Varredura contínua e imediata (sem locks de atendimento)
     setInterval(() => {
