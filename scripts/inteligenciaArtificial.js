@@ -5,80 +5,12 @@
 // Função principal: masterExtractAnswer
 
 const fetch = global.fetch || require('node-fetch');
-const fs = require('fs');
-const path = require('path');
 
 const logger = require('./logger.js');
 let issues = null;
 try { issues = require('./issues.js'); } catch {}
-const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
-
-// ========== HELPERS DE PERSISTÊNCIA ==========
-
-function getStatePath(perfil, chatId) {
-  return path.join(__dirname, '..', 'dados', 'perfis', String(perfil || ''), 'chats', `${String(chatId || '')}.state.json`);
-}
-
-function getLogPath(perfil, chatId) {
-  return path.join(__dirname, '..', 'dados', 'perfis', String(perfil || ''), 'chats', `${String(chatId || '')}.master.jsonl`);
-}
-
-async function loadState(perfil, chatId) {
-  try {
-    const file = getStatePath(perfil, chatId);
-    const lockPath = file + '.lck';
-    let fd = null;
-    try {
-      fd = acquireFileLock(lockPath);
-      if (!fs.existsSync(file)) return {};
-      const content = fs.readFileSync(file, 'utf8');
-      return JSON.parse(content);
-    } catch {
-      return {};
-    } finally {
-      try { releaseFileLock(lockPath, fd); } catch {}
-    }
-  } catch {
-    return {};
-  }
-}
-
-async function saveState(perfil, chatId, state) {
-  try {
-    const file = getStatePath(perfil, chatId);
-    const lockPath = file + '.lck';
-    let fd = null;
-    try {
-      fd = acquireFileLock(lockPath);
-      const dir = path.dirname(file);
-      fs.mkdirSync(dir, { recursive: true });
-      const tmp = file + '.tmp';
-      const fdw = fs.openSync(tmp, 'w');
-      try {
-        fs.writeFileSync(fdw, JSON.stringify(state, null, 2), 'utf8');
-        fs.fsyncSync(fdw);
-      } finally { fs.closeSync(fdw); }
-      try { fs.unlinkSync(file); } catch {}
-      fs.renameSync(tmp, file);
-    } finally {
-      try { releaseFileLock(lockPath, fd); } catch {}
-    }
-  } catch (e) {
-    try { logger.warn('[MASTER][STATE] save error', { perfil, chatId, error: (e && e.message) || e }); } catch {}
-  }
-}
-
-function appendLog(perfil, chatId, entry) {
-  try {
-    const file = getLogPath(perfil, chatId);
-    const dir = path.dirname(file);
-    fs.mkdirSync(dir, { recursive: true });
-    const line = JSON.stringify(entry) + '\n';
-    fs.appendFileSync(file, line, 'utf8');
-  } catch (e) {
-    try { logger.warn('[MASTER][LOG] append error', { perfil, chatId, error: (e && e.message) || e }); } catch {}
-  }
-}
+// Funções de persistência removidas: loadState, saveState, appendLog não são mais usadas
+// TODO estado relevante é mantido exclusivamente pelo chatStateStore (virtus.js)
 
 // ========== VALIDAÇÃO E NORMALIZAÇÃO DE TELEFONE ==========
 
@@ -612,149 +544,48 @@ function parseResponse(rawContent, lastClientMsg) {
 // ========== FUNÇÃO PRINCIPAL ==========
 
 async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respond = false }) {
-  const startTs = Date.now();
-  let stateBefore = {};
-  let stateAfter = {};
-
   try {
-    stateBefore = await loadState(perfil, chatId);
-
     const historico = Array.isArray(mensagens) ? mensagens : [];
     const lastClientMsg = historico.filter(m => m.autor === 'cliente').slice(-1)[0]?.texto || null;
 
-    let basePrompt = buildSystemPrompt(contexto || {});
-    const forcedInjection = '\n\nATENÇÃO: Proibido repetir ou recapitular o que já foi entendido. Apenas pergunte o próximo campo faltante, sem mencionar os campos já informados. Se o cliente enviar DDD e parcial separados, junte internamente e avance para o próximo campo. Nunca peça dados já informados; pergunte somente o que falta. Você nunca deve dizer frases como "já anotei", "já registrei", "perfeito, já anotei", "já confirmei", "já foi", etc. Seja sempre objetivo e direto. Não use muletas tipo "perfeito", "certo", "ótimo" no início da resposta. Não ecoe, não recapitule. Dê sempre apenas a próxima pergunta.';
-
+    const sysPrompt = buildSystemPrompt(contexto || {});
     const messages = buildMessages(historico, 30);
 
     if (!messages.length) {
-      const result = {
+      return {
         extraction: {},
         answer: null,
         control: { shouldReply: false, askField: null, finalMessage: false },
         meta: { confidence: 0.0, tokensUsed: 0, error: 'no_messages' }
       };
-      appendLog(perfil, chatId, { ts: Date.now(), type: 'request', perfil, chatId, respond, messagesCount: 0, stateBefore, result, durationMs: Date.now() - startTs });
-      return result;
     }
 
-    let content = '';
-    let usage = {};
-    let result = null;
-    let attempts = 0;
-    let lastErr = null;
-    for (attempts = 1; attempts <= 2; attempts++) {
-      try {
-        const sysPrompt = attempts === 1 ? basePrompt : (basePrompt + forcedInjection);
-        const callStartTs = Date.now();
-        const out = await callOpenAI(messages, sysPrompt, respond);
-        content = out.content || '';
-        usage = out.usage || {};
-        if (!content || !String(content).trim()) throw new Error('openai_empty_response');
-        result = parseResponse(content, lastClientMsg);
-        break; // sucesso
-      } catch (e) {
-        lastErr = e;
-        if (attempts === 2) {
-          // manter último erro
-        } else {
-          await new Promise(r => setTimeout(r, 300));
-        }
-      }
-    }
-
-    // Salva trace do ciclo (opcional, se desejado pode logar)
-    stateAfter = Object.assign({}, stateBefore, {
-      lastCallAt: Date.now(),
-      lastExtraction: result && result.extraction || {},
-      lastAnswer: result && result.answer || null,
-      totalCalls: (stateBefore.totalCalls || 0) + 1
-    });
-
-    await saveState(perfil, chatId, stateAfter);
-
-    // Pós-processamento determinístico (junção DDD + parcial + avanço)
-    const prevExtraction = (stateBefore && stateBefore.lastExtraction)
-      || (stateBefore && stateBefore.data && stateBefore.data.extraction)
-      || {};
-    const mergedExtraction = mergeWithPrevExtraction(prevExtraction, result ? result.extraction : {}, historico);
-
-    let finalResult = result || {
-      extraction: mergedExtraction,
-      answer: null,
-      control: { shouldReply: false, askField: null, finalMessage: false },
-      meta: { confidence: 0.0, tokensUsed: 0 }
-    };
-
-    finalResult.extraction = mergedExtraction;
-
-    const hasTel = isValidBRPhoneWithDDD(mergedExtraction.telefone);
-    let askField = finalResult.control && typeof finalResult.control.askField !== 'undefined'
-      ? finalResult.control.askField
-      : null;
-    const nextByState = chooseNextMissingField(mergedExtraction, prevExtraction);
-
-    if (hasTel && askField === 'telefone') {
-      askField = nextByState;
-      finalResult.control.askField = askField;
-      finalResult.control.shouldReply = true;
-      finalResult.answer = buildAskTextFor(askField);
-    }
-
-    if (!finalResult.answer || !finalResult.control || finalResult.control.shouldReply === false) {
-      const fieldToAsk = nextByState;
-      if (fieldToAsk) {
-        finalResult.answer = buildAskTextFor(fieldToAsk);
-        finalResult.control = finalResult.control || {};
-        finalResult.control.shouldReply = true;
-        finalResult.control.askField = fieldToAsk;
-      } else {
-        finalResult.control = finalResult.control || {};
-        finalResult.control.shouldReply = false;
-      }
-    }
-
-    // Anti-redundância: se o modelo insistir em "já anotei / já registrei", trocamos pela próxima pergunta faltante
+    let content, usage;
     try {
-      const prevExtraction = (stateBefore && stateBefore.lastExtraction) || (stateBefore && stateBefore.data && stateBefore.data.extraction) || {};
-      if (
-        finalResult.answer &&
-        /j[áa]\s+(anotei|registrei|notei|peguei|adicionei)/i.test(finalResult.answer)
-      ) {
-        const askField = chooseNextMissingField(finalResult.extraction, prevExtraction);
-        if (askField) {
-          finalResult.answer = buildAskTextFor(askField);
-          finalResult.control = finalResult.control || {};
-          finalResult.control.shouldReply = true;
-          finalResult.control.askField = askField;
-        }
-      }
-      // Também remove prefixos de muleta ("Perfeito", "Certo", "Ótimo") se existirem
-      if (finalResult.answer) {
-        finalResult.answer = String(finalResult.answer).replace(/^(perfeito|certo|ótimo|otimo)[,!.\s]+/i, '').trim();
-      }
-    } catch {}
+      const out = await callOpenAI(messages, sysPrompt, respond);
+      content = out.content || '';
+      usage = out.usage || {};
+      if (!content || !String(content).trim()) throw new Error('openai_empty_response');
+    } catch (e) {
+      // fallback: mensagem padrão de erro amigável
+      return {
+        extraction: {},
+        answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',
+        control: { shouldReply: true, askField: null, finalMessage: false },
+        meta: { confidence: 0.0, tokensUsed: 0, error: (e && e.message) || String(e) }
+      };
+    }
 
-    return finalResult;
+    const result = parseResponse(content, lastClientMsg);
+
+    return result;
   } catch (e) {
-    const errorMsg = (e && e.message) || String(e);
-    const result = {
+    return {
       extraction: {},
       answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',
       control: { shouldReply: true, askField: null, finalMessage: false },
-      meta: { confidence: 0.0, tokensUsed: 0, error: errorMsg }
+      meta: { confidence: 0.0, tokensUsed: 0, error: (e && e.message) || String(e) }
     };
-
-    appendLog(perfil, chatId, { ts: Date.now(), type: 'error', perfil, chatId, respond, stateBefore, stateAfter, error: errorMsg, result, durationMs: Date.now() - startTs });
-
-    if (issues && typeof issues.append === 'function') {
-      try { await issues.append(perfil, 'master_error', `chat=${chatId} err=${errorMsg}`); } catch {}
-    }
-
-    try { logger.error('[MASTER] error', { perfil, chatId, error: errorMsg }); } catch {}
-
-    // NUNCA propague erro para fora — sempre retorna resposta ao sistema.
-    return result;
   }
 }
 

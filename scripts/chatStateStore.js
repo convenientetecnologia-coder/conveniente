@@ -34,8 +34,15 @@ function writeAtomicNoLock(file, obj) {
 
 function initState() {
   return { 
-    cursor:{ client:{ count:0, digest:'', lastTs:0, contentSig:'' }, ia:{ sentSig:'', queuedSig:'' }, feed:{} },
-    freeze:{}, schedule:{}, data:{}, finalization:{} 
+    // Somente campos essenciais ao ciclo minimalista:
+    cursor: {
+      client: { count: 0, digest: '', lastTs: 0, contentSig: '' }, 
+      ia: { sentSig: '', queuedSig: '' }, 
+      feed: {}
+    },
+    data: {},        // Só dados essenciais para Última extração, lastClientNorm/lastClientTs/etc
+    finalization: {}  // Finalização de atendimento (campo backend)
+    // CAMPO 'schedule', 'freeze' não mais escritos no initState - mantidos apenas em estados legados para compatibilidade
   };
 }
 
