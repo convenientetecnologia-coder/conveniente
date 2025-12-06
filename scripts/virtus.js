@@ -1145,51 +1145,44 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
 
   const id = setInterval(async () => {
     if (sendInProgressByPerfil.get(nomePerfil)) return;
-    const heap = getSendHeap(nomePerfil);
-    if (heap.size() === 0) return;
+    const jobs = listSendJobsSync(nomePerfil);
+    if (!jobs.length) return;
 
-    // Prioridade para coletas vencidas
-    if (isCollectDue(nomePerfil)) {
-      const { heap: collectHeap } = getCollectPQ(nomePerfil);
-      const nxt = collectHeap && collectHeap.peek();
-      stepLog.appendJSONL(nomePerfil, 'virtus', {
-        step: 'send_tick_defer_due_collect',
-        chatId: nxt && nxt.chatId || null,
-        openAt: nxt && nxt.openAt || null,
-        ts: Date.now()
-      });
-      return; // adia envio, deixa runner de coleta despachar
+    // Prioridade para coletas vencidas no DISCO
+    if (hasDueCollectJobSync(nomePerfil)) {
+      const dir = collectQueueDir(nomePerfil);
+      const fsDue = listJsonFilesSync(dir, 'collect_');
+      let nextOpenAt = null, nextChat = null;
+      const now = Date.now();
+      for (const f of fsDue) {
+        try {
+          const d = JSON.parse(fsRaw.readFileSync(f, 'utf8'));
+          if (Number(d.openAt || 0) <= now) {
+            if (nextOpenAt == null || Number(d.openAt) < Number(nextOpenAt)) {
+              nextOpenAt = d.openAt; nextChat = d.chatId;
+            }
+          }
+        } catch {}
+      }
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'send_tick_defer_due_collect', chatId: nextChat || null, openAt: nextOpenAt || null, ts: Date.now() });
+      return;
     }
 
+    // Respeita cooldown aleatório 30–90s
     const agora = Date.now();
     const ultima = ultimaRespostaMessenger.get(nomePerfil) || 0;
     const intervaloAleatorio = MESSENGER_INTERVALO_MIN_MS + Math.floor(Math.random() * (MESSENGER_INTERVALO_MAX_MS - MESSENGER_INTERVALO_MIN_MS));
-    const tempoDesdeUltima = agora - ultima;
-    if (tempoDesdeUltima < intervaloAleatorio) {
-      const proximo = heap.peek();
-      if (proximo) {
-        stepLog.appendJSONL(nomePerfil, 'virtus', {
-          step: 'messenger_send_defer_random',
-          chatId: proximo.chatId,
-          remainingMs: intervaloAleatorio - tempoDesdeUltima,
-          ts: agora
-        });
+    if ((agora - ultima) < intervaloAleatorio) {
+      const peekJob = pickEarliestSendJobSync(nomePerfil);
+      if (peekJob) {
+        stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'messenger_send_defer_random', chatId: peekJob.chatId, remainingMs: intervaloAleatorio - (agora - ultima), ts: agora });
       }
       return;
     }
 
-    // Min-heap: pega o próximo com menor earliestSendAt
-    const proximo = heap.peek();
+    const proximo = pickEarliestSendJobSync(nomePerfil);
     if (!proximo) return;
-    
-    // Verifica se earliestSendAt já passou
-    if (typeof proximo.earliestSendAt === 'number' && proximo.earliestSendAt > agora) {
-      return; // Ainda não é hora de enviar
-    }
-    
-    // Remove do heap
-    heap.pop();
-    getHeapKeys(nomePerfil).delete(proximo.chatId);
+    if (Number(proximo.earliestSendAt || 0) > agora) return;
 
     sendInProgressByPerfil.set(nomePerfil, true);
     setScanBlocked(nomePerfil, true, { reason: 'messenger_send', chatId: proximo.chatId, origin: proximo.origin || '' });
@@ -1208,159 +1201,70 @@ function iniciarFilaEnvioMessenger(nomePerfil, enviarRespostaMessengerSeguraFn, 
       // Verifica freeze e schedule antes de enviar
       const freezeUntil = (fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil) ? Number(fsmState.freeze.finalizationUntil) : 0;
       if (freezeUntil > Date.now() && proximo.origin !== 'finalize') {
-        logger.info('[QUEUE] Ignorado devido a bloqueio de 72h', { nomePerfil: nomePerfil, chatId: proximo.chatId, freezeUntil });
         virtusFSM.flowLog(nomePerfil, proximo.chatId, 'queue_defer_frozen', {
           earliestSendAt: proximo.earliestSendAt || null,
           now: Date.now(),
           freezeUntil
         });
-        heap.push(proximo);
-        getHeapKeys(nomePerfil).set(proximo.chatId, proximo);
+        // reprograma em +5s
+        proximo.__tries = Number(proximo.__tries || 0);
+        proximo.earliestSendAt = Date.now() + 5000;
+        await writeSendJob(nomePerfil, proximo.chatId, proximo);
         return;
       }
-      // para origin == 'finalize', envie normalmente!
-      
+
       const scheduleAt = (fsmState && fsmState.schedule && fsmState.schedule.nextAllowedSendAt) ? Number(fsmState.schedule.nextAllowedSendAt) : 0;
       if (scheduleAt > Date.now()) {
-        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'queue_defer_earliest', {
-          earliestSendAt: scheduleAt,
-          now: Date.now()
-        });
-        heap.push(proximo);
-        getHeapKeys(nomePerfil).set(proximo.chatId, proximo);
+        proximo.earliestSendAt = scheduleAt;
+        await writeSendJob(nomePerfil, proximo.chatId, proximo);
+        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'queue_defer_earliest', { earliestSendAt: scheduleAt, now: Date.now() });
         return;
       }
       
-      // Logs ultra detalhados: messenger_send_attempt
-      stepLog.appendJSONL(nomePerfil, 'virtus', {
-        step: 'messenger_send_attempt',
-        chatId: proximo.chatId,
-        origin: proximo.origin || '',
-        cursorSig: proximo.cursorSig || '',
-        ts: agora
-      });
-      
-      let ok = true;
-      let attempts = (proximo.__tries || 0) + 1;
-      let urlNow = '';
-      
-      if (enviarRespostaMessengerSeguraFn) {
-        ok = await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
-      }
-      
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'messenger_send_attempt', chatId: proximo.chatId, origin: proximo.origin || '', cursorSig: proximo.cursorSig || '', ts: agora });
+
+      const ok = await enviarRespostaMessengerSeguraFn(proximo.chatId, respostaFinal);
       if (!ok) {
-        proximo.__tries = attempts;
-        urlNow = await getUrlNow();
-        
-        // Logs ultra detalhados: messenger_send_fail
-        stepLog.appendJSONL(nomePerfil, 'virtus', {
-          step: 'messenger_send_fail',
-          chatId: proximo.chatId,
-          attempts: proximo.__tries,
-          url: urlNow,
-          ts: Date.now()
-        });
-        
-        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'error_send', {
-          reason: 'send_failed',
-          attempts: proximo.__tries,
-          url: urlNow,
-          hasComposer: false,
-          cursorSig: proximo.cursorSig || '',
-          snapshot: {
-            freeze: (fsmState && fsmState.freeze) || {},
-            schedule: (fsmState && fsmState.schedule) || {}
-          }
-        });
-        
-        // Em caso de erro, refile esse no topo da fila, com earliestSendAt para 5s no futuro (não trava, não trava a ordem)
+        proximo.__tries = Number(proximo.__tries || 0) + 1;
         const MAX_RETRIES = parseInt(process.env.MESSENGER_MAX_RETRIES || '2', 10);
         if (proximo.__tries < MAX_RETRIES) {
-          proximo.earliestSendAt = agora + 5000; // 5s no futuro
-          heap.push(proximo); // Refile no heap
-          getHeapKeys(nomePerfil).set(proximo.chatId, proximo);
-          logger.warn('[QUEUE] requeue_after_send_fail', { nomePerfil, chatId: proximo.chatId, tries: proximo.__tries, newEarliest: proximo.earliestSendAt });
+          proximo.earliestSendAt = Date.now() + 5000;
+          await writeSendJob(nomePerfil, proximo.chatId, proximo);
+          stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'messenger_send_fail_requeue', chatId: proximo.chatId, tries: proximo.__tries, ts: Date.now() });
         } else {
-          // Limite de tentativas, após o qual loga e dropa o item
-          logger.error('[QUEUE] drop_after_max_retries', { nomePerfil, chatId: proximo.chatId, maxRetries: MAX_RETRIES });
-          stepLog.appendJSONL(nomePerfil, 'virtus', {
-            step: 'messenger_send_dropped',
-            chatId: proximo.chatId,
-            attempts: proximo.__tries,
-            ts: Date.now()
-          });
+          await deleteSendJob(nomePerfil, proximo.chatId);
+          stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'messenger_send_dropped', chatId: proximo.chatId, attempts: proximo.__tries, ts: Date.now() });
         }
         if (proximo.key) getPendingSet(nomePerfil).delete(proximo.key);
         return;
       }
-      
-      // Logs ultra detalhados: messenger_send_ok
-      urlNow = await getUrlNow();
-      stepLog.appendJSONL(nomePerfil, 'virtus', {
-        step: 'messenger_send_ok',
-        chatId: proximo.chatId,
-        url: urlNow,
-        ts: Date.now()
-      });
 
+      // OK — remove do disco
+      await deleteSendJob(nomePerfil, proximo.chatId);
       ultimaRespostaMessenger.set(nomePerfil, Date.now());
+      if (marcarRespondidoFn) await marcarRespondidoFn(proximo.chatId); else await marcarRespondido(nomePerfil, proximo.chatId);
 
-      if (marcarRespondidoFn) {
-        await marcarRespondidoFn(proximo.chatId);
-      } else {
-        await marcarRespondido(nomePerfil, proximo.chatId);
-      }
-
-      // Log send_ok e ACK no FSM
       try {
-        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'send_ok', {
-          attempts: 1,
-          url: urlNow,
-          hasComposer: true,
-          cursorSig: proximo.cursorSig || ''
-        });
+        virtusFSM.flowLog(nomePerfil, proximo.chatId, 'send_ok', { attempts: 1, url: await getUrlNow(), hasComposer: true, cursorSig: proximo.cursorSig || '' });
         await virtusFSM.ackSent(nomePerfil, proximo.chatId, proximo.cursorSig || '');
-        
-        // Logs ultra detalhados: ACK
-        stepLog.appendJSONL(nomePerfil, 'virtus', {
-          step: 'messenger_ack',
-          chatId: proximo.chatId,
-          cursorSig: proximo.cursorSig || '',
-          ts: Date.now()
-        });
-      } catch (e) {
-        logger.warn('[FSM][ACK] Falha ao logar send_ok/ackSent: ' + ((e && e.message) || e), { nomePerfil, chatId: proximo.chatId });
-      }
-      
-      // ACK somente se veio do notificador
+        stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'messenger_ack', chatId: proximo.chatId, cursorSig: proximo.cursorSig || '', ts: Date.now() });
+      } catch {}
+
       if (proximo.fromNotifier) {
-      try {
-        await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            servidor: NOTIFICADOR_SERVIDOR,
-            perfil: nomePerfil,
-            chat_id: proximo.chatId
-          })
-        });
-        logger.info('[NOTIFICADOR] ACK enviado', { nomePerfil, chatId: proximo.chatId });
-      } catch (e) {
-        logger.warn('[NOTIFICADOR] Falha ao enviar ACK (será reofertado após TTL do lock)', {
-          nomePerfil, chatId: proximo.chatId, error: e && e.message || e
-        });
+        try {
+          await fetch(`${NOTIFICADOR_URL}/api/virtus/ack`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ servidor: NOTIFICADOR_SERVIDOR, perfil: nomePerfil, chat_id: proximo.chatId })
+          });
+          logger.info('[NOTIFICADOR] ACK enviado', { nomePerfil, chatId: proximo.chatId });
+        } catch (e) {
+          logger.warn('[NOTIFICADOR] Falha ao enviar ACK', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
         }
       }
-      
+
       try { const setA = getSetAguardando(nomePerfil); setA.delete(proximo.chatId); } catch {}
       try { clearAguardTimer(nomePerfil, proximo.chatId); } catch {}
-
-        try {
-          if (proximo.key) {
-            const setPend = getPendingSet(nomePerfil);
-            setPend.delete(proximo.key);
-          }
-        } catch {}
+      if (proximo.key) { try { getPendingSet(nomePerfil).delete(proximo.key); } catch {} }
       });
     } catch (e) {
       logger.error('[MESSENGER] Erro ao enviar resposta', { nomePerfil, chatId: proximo.chatId, error: e && e.message || e });
@@ -1699,6 +1603,327 @@ function hasDueCollectJobSync(perfil) {
   return false;
 }
 
+async function runCollectForChat(nome, chatId) {
+  const now = Date.now();
+  setScanBlocked(nome, true, { reason: 'collect', chatId });
+  try {
+    const p = await ensurePage().catch(()=>null);
+    if (!p) { return; }
+
+    // Consome openAt no FSM (se ainda >0) e desagenda arquivo de coleta
+    try {
+      const st = virtusFSM.get(nome, chatId) || {};
+      const sch = st.schedule || {};
+      const col = sch.collect || {};
+      if (Number(col.openAt || 0) > 0) {
+        await virtusFSM.patch(nome, chatId, { schedule: { ...sch, collect: { ...col, openAt: 0 } } });
+      }
+      await unscheduleCollectJob(nome, chatId);
+    } catch {}
+
+    // Abrir chat por click se necessário
+    const urlNow = (typeof p.url === 'function') ? (p.url() || '') : '';
+    if (!chatUrlMatches(urlNow, chatId)) {
+      await openChatByClick(p, chatId, { timeoutMs: 8000, retries: 2 });
+    }
+
+    // Extrair histórico e sanitizar
+    const historicoConversa = await extrairHistoricoConversa(p);
+    const historicoFiltered = (historicoConversa || []).filter(m => String(m && m.texto || '').trim() && String(m.texto).trim() !== 'Nenhuma mensagem encontrada.');
+    const historicoSan = sanitizeHistoricoRecords(historicoFiltered, "");
+    if (!Array.isArray(historicoSan) || !historicoSan.length) {
+      const lastClientTsEmpty = 0;
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: 0, digest: '', contentSig: '', lastTs: lastClientTsEmpty } },
+        data: { lastClientNorm: '', lastClientTs: lastClientTsEmpty || Date.now() },
+        lastScanAt: now
+      });
+      return;
+    }
+
+    await appendChatHistoryLog(nome, chatId, historicoSan);
+    stepLog.appendJSONL(nome, 'virtus', { step: 'collect_done', chatId, historicoCount: historicoSan.length, ts: Date.now() });
+
+    // Locks/congelamento de 72h
+    let fsmState = null; try { fsmState = virtusFSM.get(nome, chatId); } catch {}
+    const finalLockUntil = fsmState && fsmState.freeze && fsmState.freeze.finalizationUntil ? Number(fsmState.freeze.finalizationUntil) : 0;
+    if (finalLockUntil > Date.now()) {
+      const clientMsgsLock = historicoSan.filter(m => m.autor === 'cliente');
+      const lastClientTs = clientMsgsLock.length ? Number(clientMsgsLock[clientMsgsLock.length - 1].timestamp || 0) : 0;
+      const clientCountLock = clientMsgsLock.length;
+      const clientDigestLock = clientCountLock ? sha1(clientMsgsLock.slice(-10).map(m => normalizeContent(m.texto || '')).join('|')) : '';
+      const uniqSeq = (list)=>{ const o=[]; let prev=''; for(const m of list){ const t=normalizeContent(m.texto||''); if(t && t!==prev) o.push(t); prev=t; } return o; };
+      const contentSigLock = sha1(uniqSeq(clientMsgsLock).slice(-10).join('|'));
+      const lastClientNormLock = clientCountLock ? normalizeContent(clientMsgsLock[clientCountLock - 1].texto || '') : '';
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCountLock, digest: clientDigestLock, contentSig: contentSigLock, lastTs: lastClientTs || 0 } },
+        data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormLock, lastClientTs: lastClientTs || Date.now() },
+        lastScanAt: now
+      });
+      return;
+    }
+
+    if (fsmState && fsmState.finalizado && !(finalLockUntil > Date.now())) {
+      await virtusFSM.patch(nome, chatId, {
+        finalizado: false,
+        finalization: Object.assign({}, fsmState.finalization || {}, { unlockedAt: now }),
+        freeze: Object.assign({}, fsmState.freeze || {}, { finalizationUntil: 0 })
+      });
+      fsmState = virtusFSM.get(nome, chatId);
+    }
+
+    if (!fsmState || !fsmState.discoveredAt) {
+      await virtusFSM.patch(nome, chatId, { discoveredAt: Date.now() });
+    }
+
+    try { await armFinalizationTimerIfNeeded(nome, chatId, historicoSan, {}); } catch {}
+    try { 
+      const manifest = await manifestStore.read(nome).catch(()=>null);
+      if (manifest && manifest.cidade) {
+        // Prefetch já feito via manifest
+      }
+    } catch {}
+
+    const clientMsgs = historicoSan.filter(m => m.autor === 'cliente');
+    const lastClientTs = clientMsgs.length ? Number(clientMsgs[clientMsgs.length - 1].timestamp || 0) : 0;
+    if (!lastClientTs || (Date.now() - lastClientTs) > MAX_CHAT_AGE_MS) {
+      const clientCountAge = clientMsgs.length;
+      const clientDigestAge = clientCountAge ? sha1(clientMsgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|')) : '';
+      const uniqSeq = (list)=>{ const o=[]; let prev=''; for(const m of list){ const t=normalizeContent(m.texto||''); if(t && t!==prev) o.push(t); prev=t; } return o; };
+      const clientContentSigAge = sha1(uniqSeq(clientMsgs).slice(-10).join('|'));
+      const lastClientNormAge = clientCountAge ? normalizeContent(clientMsgs[clientCountAge - 1].texto || '') : '';
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCountAge, digest: clientDigestAge, contentSig: clientContentSigAge, lastTs: lastClientTs || 0 } },
+        data: { ...(fsmState && fsmState.data || {}), lastClientNorm: lastClientNormAge, lastClientTs: lastClientTs || Date.now() },
+        lastScanAt: Date.now()
+      });
+      return;
+    }
+
+    // Cursor/digest/contentSig
+    const clientCount = clientMsgs.length;
+    const clientDigest = clientCount ? sha1(clientMsgs.slice(-10).map(m => normalizeContent(m.texto || '')).join('|')) : '';
+    const uniqSeq = (list)=>{ const o=[]; let prev=''; for(const m of list){ const t=normalizeContent(m.texto||''); if(t && t!==prev) o.push(t); prev=t; } return o; };
+    const clientContentSig = sha1(uniqSeq(clientMsgs).slice(-10).join('|'));
+    const clientLastNorm = clientCount ? normalizeContent(clientMsgs[clientCount - 1].texto || '') : '';
+    let prevCount = 0, prevDigest = '', prevContentSig = '', lastClientNormPrev = '';
+    try {
+      const st = virtusFSM.get(nome, chatId);
+      prevCount = Number(st && st.cursor && st.cursor.client && st.cursor.client.count || 0);
+      prevDigest = String(st && st.cursor && st.cursor.client && st.cursor.client.digest || '');
+      prevContentSig = String(st && st.cursor && st.cursor.client && st.cursor.client.contentSig || '');
+      lastClientNormPrev = String(st && st.data && st.data.lastClientNorm || '');
+    } catch {}
+
+    const changed = !!clientContentSig && clientContentSig !== prevContentSig;
+
+    // Semântica (filtro) — como já estava no código
+    const novasMsgs = (clientCount > prevCount) ? clientMsgs.slice(prevCount) : [clientMsgs[clientMsgs.length - 1]].filter(Boolean);
+    const preFiltradas = (novasMsgs || []).filter(semanticallyRelevant);
+    const novasFiltradas = preFiltradas.filter(m => {
+      const t = normalizeContent(String(m && m.texto || ''));
+      if (!t) return false;
+      if (lastClientNormPrev && (nearEqual(t, lastClientNormPrev) || t.includes(lastClientNormPrev) || lastClientNormPrev.includes(t))) return false;
+      return true;
+    });
+    if (!novasFiltradas.length) {
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+        data: { ...(fsmState && fsmState.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
+        lastScanAt: Date.now()
+      });
+      return;
+    }
+
+    // Janela LLM 45s fora de timers RAM: se a janela estiver aberta, verifica; se precisar abrir, grava no FSM e retorna
+    const stateBefore = virtusFSM.get(nome, chatId) || {};
+    const schedule = stateBefore.schedule || {};
+    const collectSchedule = schedule.collect || {};
+    const llmSchedule = schedule.llm || {};
+    const alreadyWaited = !!(collectSchedule && collectSchedule.startedAt && Number(collectSchedule.openAt || 0) === 0);
+    const COLLECT_WAIT_MS = 45000;
+    const nowTs = Date.now();
+    const collectUntil = Number(llmSchedule.collectUntil || 0);
+    const pendingSig = String(llmSchedule.pendingSig || '');
+
+    if (collectUntil > nowTs && pendingSig === clientContentSig) {
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+        data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+        lastScanAt: nowTs
+      });
+      return;
+    }
+    if (!llmSchedule.pendingSig || llmSchedule.pendingSig !== clientContentSig) {
+      const newCollectUntil = alreadyWaited ? nowTs : Math.max(collectUntil, lastClientTs + COLLECT_WAIT_MS);
+      await virtusFSM.patch(nome, chatId, { schedule: { ...schedule, llm: { pendingSig: clientContentSig, collectUntil: newCollectUntil, anchorTs: lastClientTs } } });
+      if (newCollectUntil > nowTs) {
+        await virtusFSM.patch(nome, chatId, {
+          cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+          data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+          lastScanAt: nowTs
+        });
+        return;
+      }
+    }
+
+    if (llmSchedule.pendingSig && llmSchedule.pendingSig !== clientContentSig) {
+      const newCollectUntil = alreadyWaited ? nowTs : (lastClientTs + COLLECT_WAIT_MS);
+      await virtusFSM.patch(nome, chatId, { schedule: { ...schedule, llm: { pendingSig: clientContentSig, collectUntil: newCollectUntil, anchorTs: lastClientTs } } });
+      if (newCollectUntil > nowTs) {
+        await virtusFSM.patch(nome, chatId, {
+          cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+          data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+          lastScanAt: nowTs
+        });
+        return;
+      }
+    }
+
+    const llmNow = virtusFSM.get(nome, chatId) || {};
+    const llmSchedNow = (llmNow && llmNow.schedule && llmNow.schedule.llm) || {};
+    const lastConsumedSig = String(llmSchedNow.lastConsumedSig || '');
+    const lastAttemptSig  = String(llmSchedNow.lastAttemptSig  || '');
+    const lastAttemptAt   = Number(llmSchedNow.lastAttemptAt   || 0);
+    const retryAfter      = Number(llmSchedNow.retryAfter      || 0);
+
+    if (lastConsumedSig === clientContentSig) {
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+        data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+        lastScanAt: nowTs
+      });
+      return;
+    }
+    if (retryAfter > nowTs && lastAttemptSig === clientContentSig) {
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+        data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+        lastScanAt: nowTs
+      });
+      return;
+    }
+    if (lastAttemptSig === clientContentSig && (nowTs - lastAttemptAt) < LLM_ATTEMPT_TTL_MS) {
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+        data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || nowTs },
+        lastScanAt: nowTs
+      });
+      return;
+    }
+
+    const lockAcquired = await chatLock.acquire(nome, chatId, 30000);
+    if (!lockAcquired) {
+      await virtusFSM.patch(nome, chatId, {
+        cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } },
+        data: { ...(stateBefore.data || {}), lastClientNorm: clientLastNorm, lastClientTs: lastClientTs || Date.now() },
+        lastScanAt: Date.now()
+      });
+      return;
+    }
+
+    let llmRes = null;
+    try {
+      await virtusFSM.patch(nome, chatId, { schedule: { ...schedule, llm: { ...llmSchedule, inflightSig: clientContentSig, lastAttemptSig: clientContentSig, lastAttemptAt: Date.now(), retryAfter: 0 } } });
+      stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_start', chatId, pendingSig: clientContentSig, inflightSig: clientContentSig, ts: Date.now() });
+      llmRes = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
+      stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_end', chatId, consumedSig: clientContentSig, tookMs: llmRes.meta && llmRes.meta.tookMs || null, ts: Date.now() });
+      await virtusFSM.patch(nome, chatId, { schedule: { ...schedule, llm: { lastConsumedSig: clientContentSig, inflightSig: null, pendingSig: null, collectUntil: 0, anchorTs: 0, retryAfter: 0, lastAttemptSig: clientContentSig, lastAttemptAt: Date.now() } } });
+    } catch (e) {
+      stepLog.appendJSONL(nome, 'virtus', { step: 'llm_call_error', chatId, error: (e && e.message) || String(e), ts: Date.now() });
+      await virtusFSM.patch(nome, chatId, { schedule: { ...schedule, llm: { ...(llmSchedule || {}), inflightSig: null, lastAttemptSig: clientContentSig, lastAttemptAt: Date.now(), retryAfter: Date.now() + LLM_RETRY_BACKOFF_MS } } });
+      throw e;
+    } finally {
+      try { chatLock.release(nome, chatId); } catch {}
+    }
+
+    if (!llmRes) return;
+
+    const mergedData = Object.assign({}, stateBefore.data || {}, { extraction: llmRes.extraction || {} });
+    await virtusFSM.patch(nome, chatId, { data: mergedData });
+
+    appendMasterJSONL(nome, chatId, { kind: 'master_request', systemPromptLength: llmRes.meta && llmRes.meta.systemPromptLength || null, tokens: llmRes.meta && llmRes.meta.tokens || null, tookMs: llmRes.meta && llmRes.meta.tookMs || null });
+
+    const extraction = llmRes.extraction || {};
+    const tel = String(extraction.telefone || '').trim();
+    const hasWhatsApp = isValidBRPhoneWithDDD(tel);
+    const hasItem = !!(extraction.item && String(extraction.item).trim());
+    const hasSaida = !!(extraction.endereco_saida && String(extraction.endereco_saida).trim());
+    const hasDestino = !!(extraction.endereco_destino && String(extraction.endereco_destino).trim());
+
+    if (hasWhatsApp && hasItem && hasSaida && hasDestino) {
+      stepLog.appendJSONL(nome, 'virtus', { step: 'auto_finalize_all_fields_complete', chatId });
+      await finalizePedido(nome, chatId, {});
+      return;
+    }
+
+    const shouldAnswer = !!(llmRes && llmRes.control && llmRes.control.shouldReply);
+    let reply = (llmRes && llmRes.answer) ? String(llmRes.answer) : null;
+    const lastClient = (novasFiltradas && novasFiltradas.length) ? novasFiltradas[novasFiltradas.length - 1] : null;
+    if (reply && lastClient && lastClient.texto) reply = antiEchoReply(reply, lastClient.texto);
+
+    if (shouldAnswer && reply) {
+      const DEBOUNCE_MS = parseInt(process.env.VIRTUS_ASK_DEBOUNCE_MS || '45000', 10);
+      const stateBeforeDebounce = virtusFSM.get(nome, chatId);
+      const lastAskedField = (stateBeforeDebounce && stateBeforeDebounce.schedule && stateBeforeDebounce.schedule.lastAskedField) || null;
+      const lastAskedAt = (stateBeforeDebounce && stateBeforeDebounce.schedule && stateBeforeDebounce.schedule.lastAskedAt) || 0;
+      const askField = (llmRes && llmRes.control && llmRes.control.askField) || null;
+
+      if (askField && lastAskedField === askField && (Date.now() - lastAskedAt) < DEBOUNCE_MS) {
+        stepLog.appendJSONL(nome, 'virtus', { step: 'ask_debounce_skip', chatId, askField, sinceMs: Date.now() - lastAskedAt });
+        await virtusFSM.patch(nome, chatId, { cursor: { client: { count: clientCount, digest: clientDigest, contentSig: clientContentSig, lastTs: lastClientTs } } });
+        return;
+      }
+
+      const cursorSig = `${clientCount}|${clientDigest}`;
+      await virtusFSM.ackQueued(nome, chatId, cursorSig);
+
+      const queueResult = await queueMessengerSend(nome, {
+        chatId,
+        resposta: reply,
+        key: `master|${chatId}|${sha1(reply)}|${Date.now()}`,
+        earliestSendAt: undefined,
+        origin: 'replyReady',
+        cursorSig,
+        lastClientTsOverride: lastClientTs
+      });
+
+      stepLog.appendJSONL(nome, 'virtus', { step: 'reply_enqueued', chatId, status: queueResult && queueResult.status || 'unknown', cursorSig, ts: Date.now() });
+      if (askField) await virtusFSM.patch(nome, chatId, { schedule: { ...(stateBeforeDebounce && stateBeforeDebounce.schedule || {}), lastAskedField: askField, lastAskedAt: Date.now() } });
+      stepLog.appendJSONL(nome, 'virtus', { step: 'ciclo_final', chatId, status: 'respondido', hasReply: true, askField: askField || null, ts: Date.now() });
+    } else {
+      stepLog.appendJSONL(nome, 'virtus', { step: 'ciclo_final', chatId, status: 'atendido', hasReply: false, shouldReply: shouldAnswer, ts: Date.now() });
+    }
+
+    // Atualiza cursor feed e cooldown do chat (idle por chat)
+    try {
+      const stAfter = virtusFSM.get(nome, chatId);
+      const cs = (stAfter && stAfter.schedule && stAfter.schedule.collect) || {};
+      const tokenSigFinal = String(cs.tokenSig || '');
+      await virtusFSM.patch(nome, chatId, {
+        cursor: {
+          ...(stAfter && stAfter.cursor || {}),
+          feed: {
+            ...((stAfter && stAfter.cursor && stAfter.cursor.feed) || {}),
+            lastConsumedSig: tokenSigFinal || (stAfter && stAfter.cursor && stAfter.cursor.feed && stAfter.cursor.feed.pendingSig) || '',
+            pendingSig: ''
+          }
+        },
+        schedule: {
+          ...(stAfter && stAfter.schedule || {}),
+          collect: { ...(cs || {}), idleUntil: Date.now() + VIRTUS_COLLECT_IDLE_MS, openAt: 0, tokenSig: '' }
+        },
+        lastScanAt: Date.now()
+      });
+    } catch {}
+
+  } catch (e) {
+    logger.warn('[RUN_COLLECT] erro', { nome, chatId, error: (e && e.message) || String(e) });
+  } finally {
+    setScanBlocked(nome, false);
+  }
+}
+
 function startCollectRunner(perfil) {
   if (collectRunnerTimers.has(perfil)) return;
   const id = setInterval(() => {
@@ -1813,91 +2038,20 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     }
     if (!payload) return { ok: false, status: 'dropped' };
 
-    // Snapshot de estado atual do chat via FSM
     let fsmState = null;
-    try {
-      try {
-        fsmState = virtusFSM.get(nomePerfil, chatId);
-      } catch {}
-    } catch {}
+    try { fsmState = virtusFSM.get(nomePerfil, chatId); } catch {}
 
     const isFinalize = (origin === 'finalize');
-
-    // Bloqueio de finalize duplicado
-    if (origin === 'finalize') {
-      if (fsmState && fsmState.finalization && fsmState.finalization.closingMessageQueued) {
-        try {
-          stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_finalize_duplicate', chatId });
-        } catch {}
-        return { ok: false, status: 'dropped' };
-      }
+    if (isFinalize && fsmState && fsmState.finalization && fsmState.finalization.closingMessageQueued) {
+      stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_finalize_duplicate', chatId });
+      return { ok: false, status: 'dropped' };
     }
 
     const cCount = Number((typeof cursorCountOverride === 'number') ? cursorCountOverride : ((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.count) || 0));
     const cDigest = (typeof cursorDigestOverride === 'string') ? cursorDigestOverride : ((fsmState && fsmState.cursor && fsmState.cursor.client && fsmState.cursor.client.digest) || '');
-
     const sig = String(cursorSig || (cCount && cDigest ? `${cCount}|${cDigest}` : ''));
 
-    // earliestSendAt para replyReady, ancorado NO lastClientTsOverride
-    let earliestSendAt = undefined;
-
-    if (origin === 'finalize') {
-      let anchor = 0;
-      try {
-        const stForAnchor = virtusFSM.get(nomePerfil, chatId);
-        anchor = Number(stForAnchor && stForAnchor.data && stForAnchor.data.lastClientTs) || Date.now();
-      } catch {}
-      const jitter = virtusFSM.computeEarliestSendAt
-        ? virtusFSM.computeEarliestSendAt(nomePerfil, chatId, { origin: 'finalize', lastClientTs: anchor })
-        : (anchor + WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1)));
-      earliestSendAt = jitter;
-      try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_set_earliest_finalize', chatId, sig, anchor, earliestSendAt, origin: 'finalize', ts: Date.now() }); } catch {}
-    }
-
-    // Merge-in-place de replyReady e monotonic earliest (usando min-heap)
-    if (origin === 'replyReady') {
-      const keys = getHeapKeys(nomePerfil);
-      const heap = getSendHeap(nomePerfil);
-      const existing = keys.get(chatId);
-      const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0) ? lastClientTsOverride : Date.now();
-      const jitter = WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
-      const newEarliest = anchor + jitter;
-      if (existing) {
-        existing.resposta = payload;
-        existing.cursorCount = cCount;
-        existing.cursorDigest = cDigest;
-        existing.cursorSig = sig || existing.cursorSig || '';
-        existing.lastClientTs = lastClientTsOverride || existing.lastClientTs || 0;
-        existing.earliestSendAt = Math.min(Number(existing.earliestSendAt||newEarliest), newEarliest);
-        stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_merge_update_heap', chatId, sig, cCount, cDigest, earliestSendAt: existing.earliestSendAt, ts: Date.now() });
-        return { ok: true, status: 'merged' };
-      }
-    }
-
-    // Dedupe por cursorSig (já existente, mantenha)
-    const heap = getSendHeap(nomePerfil);
-    const heapArr = heap.toArray();
-    let existeMesmoCursor = false;
-    if (!isFinalize) {
-      existeMesmoCursor = sig
-        ? heapArr.some(it => it && it.chatId === chatId && it.cursorSig === sig)
-        : heapArr.some(it =>
-            it && it.chatId === chatId &&
-            Number(it.cursorCount || 0) === cCount &&
-            String(it.cursorDigest || '') === cDigest
-          );
-      if (existeMesmoCursor) {
-        try {
-          const step = sig ? 'queue_skip_same_cursor_sig' : 'queue_skip_same_cursor';
-          stepLog.appendJSONL(nomePerfil, 'virtus', { step, chatId, sig, cCount, cDigest, origin });
-        } catch {}
-        try { logger.info('[QUEUE] skip_same_cursor', { nomePerfil, chatId, sig, cCount, cDigest, origin }); } catch {}
-        return { ok: false, status: 'dropped' };
-      }
-    } else {
-      try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_finalize_bypass_dedup', chatId, sig, cCount, cDigest }); } catch {}
-    }
-
+    // DEDUPE contra já enviado
     try {
       const stSent = virtusFSM.get(nomePerfil, chatId);
       const alreadySentSig = String(stSent && stSent.cursor && stSent.cursor.ia && stSent.cursor.ia.sentSig || '');
@@ -1905,22 +2059,53 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
         stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_already_sent_sig', chatId, sig, origin, ts: Date.now() });
         return { ok: false, status: 'dropped' };
       }
-      if (isFinalize) {
-        try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_finalize_bypass_already_sent_sig', chatId, sig }); } catch {}
-      }
     } catch {}
 
+    let earliestSendAt = undefined;
+    if (origin === 'finalize') {
+      let anchor = 0;
+      try {
+        const stForAnchor = virtusFSM.get(nomePerfil, chatId);
+        anchor = Number(stForAnchor && stForAnchor.data && stForAnchor.data.lastClientTs) || Date.now();
+      } catch {}
+      earliestSendAt = virtusFSM.computeEarliestSendAt ? virtusFSM.computeEarliestSendAt(nomePerfil, chatId, { origin: 'finalize', lastClientTs: anchor }) : (anchor + WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1)));
+    }
+
+    // Merge/update se já existir job em disco para este chat
+    const existing = await loadSendJob(nomePerfil, chatId);
     if (origin === 'replyReady') {
-      const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0)
-        ? lastClientTsOverride
-        : Date.now();
+      const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0) ? lastClientTsOverride : Date.now();
+      const jitter = WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
+      const newEarliest = anchor + jitter;
+
+      if (existing) {
+        // Se cursorSig igual, não duplique
+        if (sig && String(existing.cursorSig || '') === sig) {
+          stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_skip_same_cursor_sig_disk', chatId, sig, origin });
+          return { ok: false, status: 'dropped' };
+        }
+        existing.resposta = payload;
+        existing.cursorCount = cCount;
+        existing.cursorDigest = cDigest;
+        existing.cursorSig = sig || existing.cursorSig || '';
+        existing.lastClientTs = lastClientTsOverride || existing.lastClientTs || 0;
+        existing.earliestSendAt = Math.min(Number(existing.earliestSendAt || newEarliest), newEarliest);
+        await writeSendJob(nomePerfil, chatId, existing);
+        stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_merge_update_disk', chatId, sig, earliestSendAt: existing.earliestSendAt, ts: Date.now() });
+        return { ok: true, status: 'merged' };
+      } else {
+        earliestSendAt = newEarliest;
+      }
+    }
+
+    if (earliestSendAt == null) {
+      const anchor = (typeof lastClientTsOverride === 'number' && lastClientTsOverride > 0) ? lastClientTsOverride : Date.now();
       const jitter = WAIT_BEFORE_REPLY_MIN_MS + Math.floor(Math.random() * (WAIT_BEFORE_REPLY_MAX_MS - WAIT_BEFORE_REPLY_MIN_MS + 1));
       earliestSendAt = anchor + jitter;
     }
 
-    // Ao adicionar:
     const node = {
-      chatId,
+      chatId: String(chatId),
       resposta: payload,
       key: key || (`q|${chatId}|${sha1(payload)}|${Date.now()}`),
       fromNotifier: !!fromNotifier,
@@ -1928,15 +2113,12 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       cursorDigest: cDigest,
       cursorSig: sig || '',
       origin: origin || '',
-      earliestSendAt: (typeof earliestSendAt === 'number') ? earliestSendAt : Date.now(),
+      earliestSendAt: Number(earliestSendAt || Date.now()),
       lastClientTs: lastClientTsOverride || 0,
-      __tries: 0
+      __tries: Number(existing && existing.__tries || 0)
     };
-    heap.push(node);
-    getHeapKeys(nomePerfil).set(chatId, node);
-    stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add_heap', chatId, sig, origin, earliestSendAt: node.earliestSendAt, ts: Date.now() });
+    await writeSendJob(nomePerfil, chatId, node);
 
-    // Marca closingMessageQueued se for finalize
     if (origin === 'finalize') {
       try {
         await virtusFSM.patch(nomePerfil, chatId, {
@@ -1945,10 +2127,9 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
       } catch {}
     }
 
-    try { stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add', chatId, sig, cCount, cDigest, origin, earliestSendAt, ts: Date.now() }); } catch {}
-    try { logger.info('[QUEUE] add', { nomePerfil, chatId, sig, cCount, cDigest, origin, earliestSendAt }); } catch {}
+    stepLog.appendJSONL(nomePerfil, 'virtus', { step: 'queue_add_disk', chatId, sig, origin, earliestSendAt: node.earliestSendAt, ts: Date.now() });
+    logger.info('[QUEUE] add_disk', { nomePerfil, chatId, sig, origin, earliestSendAt: node.earliestSendAt });
     return { ok: true, status: 'enqueued' };
-
   } catch {
     return { ok: false, status: 'dropped' };
   }
@@ -3104,15 +3285,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: timerOpenAt, startedAt: now, tokenSig: feedSig } }
             });
             stepLog.appendJSONL(nome, 'virtus', { step: 'feed_detect_set_timer', chatId, openAt: timerOpenAt, feedSig, ts: now });
-            // Arma timer apenas 1x por chatId
-            if (!getCollectTimerMap(nome).has(chatId)) {
-              const delay = Math.max(0, timerOpenAt - Date.now());
-              const timerId = setTimeout(() => {
-                try { stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() }); } catch {}
-                try { scheduleCollectJob(nome, chatId, Date.now(), feedSig); } catch {}
-              }, delay);
-              getCollectTimerMap(nome).set(chatId, timerId);
-            }
+            // Agenda coleta em disco (sem setTimeout)
+            scheduleCollectJob(nome, chatId, timerOpenAt, feedSig);
           } else {
             // Congelado ou sem sig: só atualiza cursor
             await virtusFSM.patch(nome, chatId, {
@@ -3133,13 +3307,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await virtusFSM.patch(nome, chatId, {
               schedule: { ...(schedule || {}), collect: { ...(collectSchedule || {}), openAt: newOpenAt, startedAt: collectSchedule.startedAt || now, tokenSig: feedSig } }
             });
-            clearCollectTimer(nome, chatId);
-            const delay = Math.max(0, newOpenAt - Date.now());
-            const tid = setTimeout(() => {
-              try { stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() }); } catch {}
-              try { scheduleCollectJob(nome, chatId, Date.now(), feedSig); } catch {}
-            }, delay);
-            getCollectTimerMap(nome).set(chatId, tid);
+            // Agenda coleta em disco (sem setTimeout)
+            scheduleCollectJob(nome, chatId, newOpenAt, feedSig);
             stepLog.appendJSONL(nome, 'virtus', { step: 'feed_change_set_timer', chatId, openAt: newOpenAt, feedSig, ts: now });
           }
           continue;
@@ -3173,40 +3342,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           });
           stepLog.appendJSONL(nome, 'virtus', { step: 'timer_start', chatId, openAt: timerOpenAt, ts: now });
-          
-          // Armamento idempotente, nunca rearma se já existe timer
-          if (!getCollectTimerMap(nome).has(chatId)) {
-            const delay = Math.max(0, timerOpenAt - Date.now());
-            const timerId = setTimeout(() => {
-              try { stepLog.appendJSONL(nome, 'virtus', { step: 'timer_fire', chatId, ts: Date.now() }); } catch {}
-              try { 
-                const st = virtusFSM.get(nome, chatId) || {};
-                const sch = st.schedule || {};
-                const col = sch.collect || {};
-                scheduleCollectJob(nome, chatId, Date.now(), String(col.tokenSig || ''));
-              } catch {}
-              clearSlaWatchdog(nome, chatId);
-              const slaTimeout = 6 * 60 * 1000;
-              const slaTimerId = setTimeout(() => {
-                try {
-                  const state = virtusFSM.get(nome, chatId);
-                  const hasResponse = state && state.lastIARespondedAt && (Date.now() - state.lastIARespondedAt) < slaTimeout;
-                  if (!hasResponse) {
-                    stepLog.appendJSONL(nome, 'virtus', {
-                      step: 'pending_sla_breach',
-                      chatId,
-                      timerFiredAt: timerOpenAt,
-                      now: Date.now(),
-                      elapsedMs: Date.now() - timerOpenAt,
-                      hasResponse: false
-                    });
-                  }
-                } catch {}
-              }, slaTimeout);
-              getSlaWatchdogMap(nome).set(chatId, slaTimerId);
-            }, delay);
-            getCollectTimerMap(nome).set(chatId, timerId);
-          }
+          // Agenda coleta em disco (sem setTimeout)
+          scheduleCollectJob(nome, chatId, timerOpenAt, '');
           continue;
         }
 
@@ -3233,11 +3370,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           continue;
         }
 
-        // Timer vencido — agenda coleta imediatamente no PQ e consome openAt
+        // Timer vencido — agenda coleta imediatamente no disco e consome openAt
         if (openAt > 0) {
           const tokenSigNow = String((collectSchedule && collectSchedule.tokenSig) || '');
           scheduleCollectJob(nome, chatId, Date.now(), tokenSigNow);
-          clearCollectTimer(nome, chatId);
           await virtusFSM.patch(nome, chatId, {
             schedule: { ...schedule, collect: { ...collectSchedule, openAt: 0 } }
           });
