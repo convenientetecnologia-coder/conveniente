@@ -202,7 +202,7 @@ Cliente: "48"
 
 Cliente: "Oi, faz frete?"
 
-  IA: "Oi! Faço sim. Eu apenas anoto o pedido e quem informa valores é o motorista pelo WhatsApp. Qual seu WhatsApp com DDD? E o que você deseja transportar? Exemplo: 48999999999"
+  IA: "Oi! Faço sim. Eu apenas anoto o pedido e quem informa valores é o motorista pelo WhatsApp. Qual seu WhatsApp com DDD? E o que você deseja transportar?
 
 
 

@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_BACKOFFS = [5000, 15000, 30000, 60000, 120000, 300000, 600000]; // 5s,15s,30s,1m,2m,5m,10m
-const workers = new Map(); // perfil -> { running: boolean, options }
+const workers = new Map(); // perfil -> { running: boolean, options, intervalId }
 
 function sha1(str) {
   const crypto = require('crypto');
@@ -200,7 +200,6 @@ async function processOne(perfil, opts, file) {
 function ensureWorker(perfil, options) {
   if (workers.has(perfil)) return;
   const opts = Object.assign({}, options || {});
-  workers.set(perfil, { running: true, options: opts });
 
   const tick = async () => {
     try {
@@ -216,7 +215,8 @@ function ensureWorker(perfil, options) {
     } catch {}
   };
 
-  setInterval(tick, 2000);
+  const intervalId = setInterval(tick, 2000);
+  workers.set(perfil, { running: true, options: opts, intervalId });
 }
 
 function enqueue(perfil, kind, payload) {
@@ -246,13 +246,10 @@ function enqueueChat(perfil, payload) {
 }
 
 function stopWorker(perfil) {
-  // Nota: ensureWorker usa setInterval que não pode ser facilmente parado
-  // Em produção, workers devem continuar rodando mesmo após stop do virtus
-  // para garantir processamento da outbox. Esta função é um placeholder.
   const worker = workers.get(perfil);
   if (worker) {
-    // Marca como não rodando (mas não para o interval)
     worker.running = false;
+    if (worker.intervalId) { try { clearInterval(worker.intervalId); } catch {} }
     workers.delete(perfil);
   }
 }

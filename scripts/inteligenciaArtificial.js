@@ -391,12 +391,22 @@ function detectPromptInjection(text) {
 function preventEcho(lastClientMsg, answer) {
   try {
     if (!lastClientMsg || !answer) return answer;
-    const clientNorm = String(lastClientMsg).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-    const answerNorm = String(answer).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-    if (clientNorm.length < 10) return answer;
-    if (answerNorm.includes(clientNorm) || clientNorm.includes(answerNorm)) {
-      return answer; // NÃO retorne null, o fallback humana vai tratar caso necessário
+
+    const clean = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim().toLowerCase();
+
+    const a = clean(answer), c = clean(lastClientMsg);
+
+    if (!c) return answer;
+
+    // similaridade simples por inclusão e tamanho
+    const includes = a.includes(c) || c.includes(a);
+    const lenClose = Math.abs(a.length - c.length) <= 6;
+
+    if (includes && (c.length <= 50) && lenClose) {
+      // força pergunta direta do próximo campo
+      return null;
     }
+
     return answer;
   } catch {
     return answer;
@@ -560,6 +570,15 @@ function parseResponse(rawContent, lastClientMsg) {
 
     if (answer && typeof answer !== 'string') answer = null;
     if (answer) answer = answer.trim() || null;
+
+    // Se o resultado do anti-eco (answer) for null, então imediatamente retorne a próxima pergunta pendente pelo campo faltante
+    if (!answer) {
+      const normalized = normalizePhoneExtraction(rawExtraction);
+      const fieldToAsk = chooseNextMissingField(normalized, {});
+      if (fieldToAsk) {
+        answer = buildAskTextFor(fieldToAsk);
+      }
+    }
 
     const normalized = normalizePhoneExtraction(rawExtraction);
 

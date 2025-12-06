@@ -1,9 +1,8 @@
-// chatStateStore.js
-
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
+const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
 
 function ensureDir(p){ try { fs.mkdirSync(p, { recursive: true }); } catch {} }
 
@@ -15,13 +14,14 @@ function stateFile(perfil, chatId){
 
 function readSafe(file, fb){ try { return JSON.parse(fs.readFileSync(file,'utf8')); } catch { return fb; } }
 
-function writeAtomic(file, obj) {
+function writeAtomicLocked(file, obj) {
   const lockPath = file + '.lck';
   let fd = null;
   try {
-    try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch {}
-    try { fd = fs.openSync(lockPath, 'wx'); } catch {}
-    const tmp = file + '.tmp';
+    fd = acquireFileLock(lockPath);
+    const dir = path.dirname(file);
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const tmp = file + '.' + process.pid + '.' + Date.now() + '.tmp';
     const fdw = fs.openSync(tmp, 'w');
     try {
       fs.writeFileSync(fdw, JSON.stringify(obj || {}, null, 2), 'utf8');
@@ -29,22 +29,21 @@ function writeAtomic(file, obj) {
     } finally { fs.closeSync(fdw); }
     try { fs.unlinkSync(file); } catch {}
     fs.renameSync(tmp, file);
+    // fsync no diretório para blindar metadata
+    try {
+      const dfd = fs.openSync(dir, 'r'); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+    } catch {}
     return true;
-  } catch { 
-    return false; 
   } finally {
-    try { if (fd) fs.closeSync(fd); } catch {}
-    try { fs.unlinkSync(lockPath); } catch {}
+    try { releaseFileLock(lockPath, fd); } catch {}
   }
 }
 
-function get(perfil, chatId){
-  const file = stateFile(perfil, chatId);
-  const s = readSafe(file, null);
-  if (s) return s;
-  const init = { cursor:{ client:{ count:0, digest:'', lastTs:0 }, ia:{ sentSig:'' } }, freeze:{}, schedule:{}, data:{}, finalization:{} };
-  writeAtomic(file, init);
-  return init;
+function initState() {
+  return { 
+    cursor:{ client:{ count:0, digest:'', lastTs:0, contentSig:'' }, ia:{ sentSig:'', queuedSig:'' }, feed:{} },
+    freeze:{}, schedule:{}, data:{}, finalization:{} 
+  };
 }
 
 function deepMerge(a, b) {
@@ -59,12 +58,49 @@ function deepMerge(a, b) {
   return a;
 }
 
+function monotonicMerge(prev, next) {
+  // Garante que timestamps não retrocedam
+  const out = deepMerge({ ...prev }, next || {});
+  const keys = ['lastScanAt', 'lastIARespondedAt', 'discoveredAt', 'chatLogLastTs'];
+  for (const k of keys) {
+    const p = Number(prev && prev[k] || 0);
+    const n = Number(out && out[k] || 0);
+    if (p && n && n < p) out[k] = p;
+  }
+  return out;
+}
+
+function get(perfil, chatId){
+  const file = stateFile(perfil, chatId);
+  const lockPath = file + '.lck';
+  let fd = null;
+  try {
+    fd = acquireFileLock(lockPath);
+    let s = readSafe(file, null);
+    if (!s) {
+      s = initState();
+      writeAtomicLocked(file, s);
+    }
+    return s;
+  } finally {
+    try { releaseFileLock(lockPath, fd); } catch {}
+  }
+}
+
 function patch(perfil, chatId, patchObj){
   const file = stateFile(perfil, chatId);
-  const cur = get(perfil, chatId);
-  const next = deepMerge({ ...cur }, patchObj || {});
-  writeAtomic(file, next);
-  return next;
+  const lockPath = file + '.lck';
+  let fd = null;
+  try {
+    fd = acquireFileLock(lockPath);
+    let cur = readSafe(file, null);
+    if (!cur) cur = initState();
+    let next = monotonicMerge(cur, patchObj || {});
+    writeAtomicLocked(file, next);
+    return next;
+  } finally {
+    try { releaseFileLock(lockPath, fd); } catch {}
+  }
 }
 
 module.exports = { get, patch };
