@@ -1716,58 +1716,30 @@ async function maybeGuaranteeMarketplaceFast(page, nome) {
 
 async function coletaChatsMarketplaceTodos(page) {
   try {
-    const items = await page.$$eval('a[href], a[role="link"]', els => {
-      function _extraiId(href) {
-        try {
-          const s = String(href || '');
-          const matchT = s.match(/\/marketplace\/t\/(\d+)/);
-          const matchV = s.match(/\/marketplace\/v\/(\d+)/);
-          const id = matchT ? matchT[1] : (matchV ? matchV[1] : null);
-          return id && /^\d+$/.test(id) ? id : null;
-        } catch { return null; }
+    const items = await page.evaluate(() => {
+      function extraiIdT(href) {
+        const m = String(href || '').match(/\/marketplace\/t\/(\d+)/);
+        return m ? m[1] : null;
       }
-      function _rowOf(a) {
-        return a.closest && a.closest('div[role="row"]') || a.parentElement || null;
-      }
-      function _tempoOf(row) {
-        if (!row) return '';
-        try {
-          const ab = row.querySelector('abbr[aria-label]');
-          if (ab) {
-            const t1 = (ab.innerText || '').trim(); if (t1) return t1;
-            const t2 = (ab.getAttribute('aria-label') || '').trim(); if (t2) return t2;
-          }
-        } catch {}
-        try {
-          const spans = Array.from(row.querySelectorAll('span'));
-          for (const s of spans) {
-            const txt = (s.innerText || s.textContent || '').trim();
-            if (!txt) continue;
-            if (/agora|now|just\s*now/i.test(txt)) return txt;
-            if (/\d+\s(s|seg|sec|secs?|seconds?|min|m|mins?|minutes?|hora|horas?|h|hours?|dia|dias?|d|seman|sem|weeks?|w)/i.test(txt)) return txt;
-          }
-        } catch {}
-        return '';
-      }
-      function _previewOf(row) {
-        if (!row) return '';
-        try {
-          const txt = (row.innerText || row.textContent || '').replace(/\s+/g, ' ').trim();
-          return (txt || '').slice(0, 400);
-        } catch { return ''; }
-      }
-      const anchors = els.filter(a => {
-        const href = a.getAttribute('href') || a.href || '';
-        return !!href && (href.includes('/marketplace/t/') || href.includes('/marketplace/v/'));
-      });
+      const root = document.querySelector('div[role="grid"]') ||
+        document.querySelector('div[role="rowgroup"]') ||
+        document.querySelector('div.x78zum5.xdt5ytf') ||
+        document.body;
+
+      const anchors = Array.from(root.querySelectorAll('a[href^="/marketplace/t/"]'));
       const arr = anchors.map(a => {
         const href = a.getAttribute('href') || a.href || '';
-        const id = _extraiId(href);
-        const row = _rowOf(a);
-        const tempo = _tempoOf(row);
-        const preview = _previewOf(row);
-        return { id, tempo, href, preview };
-      }).filter(o => o.id);
+        const id = extraiIdT(href);
+        const row = a.closest('div[role="row"]') || a.parentElement;
+        let tempo = '';
+        try {
+          const ab = row && row.querySelector('abbr[aria-label]');
+          if (ab) tempo = (ab.getAttribute('aria-label') || ab.innerText || ab.textContent || '').trim();
+        } catch {}
+        const preview = row ? ((row.innerText || row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 400)) : '';
+        return id ? { id, tempo, href, preview, kind: 't' } : null;
+      }).filter(Boolean);
+
       const map = new Map();
       for (const it of arr) if (!map.has(it.id)) map.set(it.id, it);
       return Array.from(map.values());
@@ -1883,18 +1855,22 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
 async function findChatAnchorById(page, chatId) {
   try {
     const anchor = await page.evaluate((id) => {
-      const sel = `a[href^="/marketplace/t/${id}"], a[href^="/marketplace/v/${id}"]`;
-      const anchors = Array.from(document.querySelectorAll(sel)).filter(a => {
-        const st = window.getComputedStyle(a);
-        const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
-        const r = a.getBoundingClientRect();
-        return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
-      });
-      if (anchors.length === 0) return null;
-      const a = anchors[0];
+      function firstVisible(list) {
+        for (const a of list) {
+          const st = window.getComputedStyle(a);
+          const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
+          const r = a.getBoundingClientRect();
+          if (a.offsetParent !== null && vis && r.width > 0 && r.height > 0) return a;
+        }
+        return null;
+      }
+      const withinGrid = document.querySelector('div[role="grid"], div[role="rowgroup"]') || document;
+      const ts = Array.from(withinGrid.querySelectorAll(`a[href^="/marketplace/t/${id}"]`));
+      const a = firstVisible(ts);
+      if (!a) return null;
       const href = a.getAttribute('href') || a.href || '';
       const rect = a.getBoundingClientRect();
-      return { href, visible: true, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      return { href, visible: true, x: rect.x, y: rect.y, width: rect.width, height: rect.height, kind: 't' };
     }, chatId);
     return anchor;
   } catch {
@@ -1905,31 +1881,36 @@ async function findChatAnchorById(page, chatId) {
 async function smartAnchorClick(page, chatId) {
   try {
     const clicked = await page.evaluate((id) => {
-      const sel = `a[href^="/marketplace/t/${id}"], a[href^="/marketplace/v/${id}"]`;
-      const anchors = Array.from(document.querySelectorAll(sel)).filter(a => {
-        const st = window.getComputedStyle(a);
-        const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
-        const r = a.getBoundingClientRect();
-        return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
-      });
-      const a = anchors[0] || null;
+      function firstVisible(list) {
+        for (const a of list) {
+          const st = window.getComputedStyle(a);
+          const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
+          const r = a.getBoundingClientRect();
+          if (a.offsetParent !== null && vis && r.width > 0 && r.height > 0) return a;
+        }
+        return null;
+      }
+      const withinGrid = document.querySelector('div[role="grid"], div[role="rowgroup"]') || document;
+      const ts = Array.from(withinGrid.querySelectorAll(`a[href^="/marketplace/t/${id}"]`));
+      const a = firstVisible(ts);
       if (!a) return false;
-      const row = a.closest('div[role="row"]') || a.parentElement;
-      try { (row || a).scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
+
+      const target = a.closest('div[role="row"]') || a;
+      try { target.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
       try {
-        const rect = (row || a).getBoundingClientRect();
+        const rect = target.getBoundingClientRect();
         const x = rect.x + rect.width / 2;
         const y = rect.y + rect.height / 2;
         const evtOpts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
-        (row || a).dispatchEvent(new MouseEvent('mousemove', evtOpts));
-        (row || a).dispatchEvent(new MouseEvent('mousedown', evtOpts));
-        (row || a).dispatchEvent(new MouseEvent('mouseup', evtOpts));
+        target.dispatchEvent(new MouseEvent('mousemove', evtOpts));
+        target.dispatchEvent(new MouseEvent('mousedown', evtOpts));
+        target.dispatchEvent(new MouseEvent('mouseup', evtOpts));
       } catch {}
-      try { (row || a).focus && (row || a).focus(); } catch {}
-      try { (row || a).click(); } catch {}
+      try { target.focus && target.focus(); } catch {}
+      try { target.click(); } catch {}
       return true;
     }, chatId);
-    if (clicked) await sleep(100);
+    if (clicked) await sleep(120);
     return clicked;
   } catch {
     return false;
@@ -1958,10 +1939,25 @@ async function waitForChatContext(page, chatId, { timeoutMs = 6000 } = {}) {
 async function isContentUnavailablePage(page) {
   try {
     const unavailable = await page.evaluate(() => {
-      const text = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
-      const hasError = /conteúdo não está disponível|content.*not.*available|este conteúdo|this content/i.test(text);
-      const hasErrorDiv = !!document.querySelector('[role="alert"], [data-testid*="error"], .x1ey2m1c, .x78zum5[role="main"]');
-      return hasError || hasErrorDiv;
+      const hasComposer = !!document.querySelector('div[contenteditable="true"][role="textbox"], div[role="combobox"][contenteditable="true"]');
+      if (hasComposer) return false; // Se há composer, estamos num chat funcional.
+
+      const bodyText = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
+      const alertEl = document.querySelector('[role="alert"], [data-testid*="error"]');
+      const alertText = (alertEl?.innerText || alertEl?.textContent || '').toLowerCase();
+
+      const patterns = [
+        'conteúdo não está disponível',
+        'conteudo nao esta disponivel',
+        "this content isn't available",
+        'this content isnt available',
+        'content is not available'
+      ];
+
+      const matchBody = patterns.some(p => bodyText.includes(p));
+      const matchAlert = patterns.some(p => alertText.includes(p));
+
+      return !!(matchBody || matchAlert);
     });
     return !!unavailable;
   } catch {
@@ -2092,7 +2088,19 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
     }
     
     // Aguarda contexto do chat (pathname + composer + DOM)
+    const tAssert0 = Date.now();
     const ok = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
+    try {
+      const ids = await getOpenChatIdStrict(p);
+      stepLog.appendJSONL(perfil, 'virtus', {
+        step: 'assert_on_chat_end',
+        chatId,
+        ok: !!ok,
+        byUrl: ids && ids.byUrl || null,
+        byDom: ids && ids.byDom || null,
+        tookMs: Date.now() - tAssert0
+      });
+    } catch {}
     if (ok) {
       audit(perfil, 'virtus', 'info', 'open_chat_click_ok', { chatId });
       return true;
@@ -2146,7 +2154,19 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
       continue;
     }
     
+    const tAssert1 = Date.now();
     const ok = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
+    try {
+      const ids = await getOpenChatIdStrict(p);
+      stepLog.appendJSONL(perfil, 'virtus', {
+        step: 'assert_on_chat_end',
+        chatId,
+        ok: !!ok,
+        byUrl: ids && ids.byUrl || null,
+        byDom: ids && ids.byDom || null,
+        tookMs: Date.now() - tAssert1
+      });
+    } catch {}
     if (ok) {
       audit(perfil, 'virtus', 'info', 'open_chat_click_ok_after_scroll', { chatId, scrollTry: i+1 });
       return true;
