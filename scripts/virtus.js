@@ -691,7 +691,10 @@ async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
   while (true) {
     const ok = await p.evaluate((id) => {
-      try { return (location && typeof location.pathname === 'string') ? location.pathname.includes('/marketplace/t/' + id) : false; }
+      try {
+        if (!location || typeof location.pathname !== 'string') return false;
+        return location.pathname.includes(`/marketplace/t/${id}`) || location.pathname.includes(`/marketplace/v/${id}`);
+      }
       catch { return false; }
     }, chatId).catch(() => false);
     if (ok) return true;
@@ -706,19 +709,18 @@ async function getOpenChatIdStrict(p) {
       function extraiIdDoHref(href) {
         try {
           const s = String(href || '');
-          const pos = s.indexOf('/marketplace/t/');
-          if (pos < 0) return null;
-          const rest = s.slice(pos + '/marketplace/t/'.length);
-          const id = rest.split(/[/?#]/)[0];
+          const matchT = s.match(/\/marketplace\/t\/(\d+)/);
+          const matchV = s.match(/\/marketplace\/v\/(\d+)/);
+          const id = matchT ? matchT[1] : (matchV ? matchV[1] : null);
           return id && /^\d+$/.test(id) ? id : null;
         } catch { return null; }
       }
       const byUrl = (typeof location === 'object' && location && location.pathname) ? extraiIdDoHref(location.pathname) : null;
       let byDom = null;
       // procurar link ativo no INBOX (aria-current=page/current) OU na thread
-      const active = document.querySelector('a[aria-current="page"][href^="/marketplace/t/"]')
-                  || document.querySelector('a[aria-current="true"][href^="/marketplace/t/"]')
-                  || document.querySelector('a[href^="/marketplace/t/"].x1i10hfl'); // fallback
+      const active = document.querySelector('a[aria-current="page"][href^="/marketplace/t/"], a[aria-current="page"][href^="/marketplace/v/"]')
+                  || document.querySelector('a[aria-current="true"][href^="/marketplace/t/"], a[aria-current="true"][href^="/marketplace/v/"]')
+                  || document.querySelector('a[href^="/marketplace/t/"].x1i10hfl, a[href^="/marketplace/v/"].x1i10hfl'); // fallback
       if (active) byDom = extraiIdDoHref(active.getAttribute('href') || active.href || '');
       return { byUrl, byDom };
     });
@@ -789,7 +791,7 @@ function sleep(ms) {
 function chatUrlMatches(url, chatId) {
   try {
     const u = String(url || '');
-    const re = new RegExp(`/marketplace/t/${chatId}(?:[/?#]|$)`);
+    const re = new RegExp(`/marketplace/(t|v)/${chatId}(?:[/?#]|$)`);
     return re.test(u);
   } catch { return false; }
 }
@@ -1683,10 +1685,9 @@ async function wasRecentlySentByMe(page, maxAgeMs=10*60*1000) {
 function extraiIdDoHref(href) {
   try {
     const s = String(href || '');
-    const pos = s.indexOf('/marketplace/t/');
-    if (pos < 0) return null;
-    const rest = s.slice(pos + '/marketplace/t/'.length);
-    const id = rest.split(/[/?#]/)[0];
+    const matchT = s.match(/\/marketplace\/t\/(\d+)/);
+    const matchV = s.match(/\/marketplace\/v\/(\d+)/);
+    const id = matchT ? matchT[1] : (matchV ? matchV[1] : null);
     return id && /^\d+$/.test(id) ? id : null;
   } catch { return null;   }
 }
@@ -1698,7 +1699,7 @@ async function maybeGuaranteeMarketplaceFast(page, nome) {
   // Se já estamos no Marketplace, só valida a presença de âncoras/rows
   if (/messenger.com\/marketplace/i.test(url)) {
     const ok = await page.evaluate(() =>
-      !!document.querySelector('a[href^="/marketplace/t/"]') || !!document.querySelector('div[role="row"]')
+      !!document.querySelector('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]') || !!document.querySelector('div[role="row"]')
     ).catch(()=>false);
     return !!ok;
   }
@@ -1719,10 +1720,9 @@ async function coletaChatsMarketplaceTodos(page) {
       function _extraiId(href) {
         try {
           const s = String(href || '');
-          const pos = s.indexOf('/marketplace/t/');
-          if (pos < 0) return null;
-          const rest = s.slice(pos + '/marketplace/t/'.length);
-          const id = rest.split(/[/?#]/)[0];
+          const matchT = s.match(/\/marketplace\/t\/(\d+)/);
+          const matchV = s.match(/\/marketplace\/v\/(\d+)/);
+          const id = matchT ? matchT[1] : (matchV ? matchV[1] : null);
           return id && /^\d+$/.test(id) ? id : null;
         } catch { return null; }
       }
@@ -1758,7 +1758,7 @@ async function coletaChatsMarketplaceTodos(page) {
       }
       const anchors = els.filter(a => {
         const href = a.getAttribute('href') || a.href || '';
-        return !!href && href.includes('/marketplace/t/');
+        return !!href && (href.includes('/marketplace/t/') || href.includes('/marketplace/v/'));
       });
       const arr = anchors.map(a => {
         const href = a.getAttribute('href') || a.href || '';
@@ -1786,7 +1786,7 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     const alreadyOk = await Promise.race([
       page.evaluate(() =>
         !!(
-          document.querySelector('a[href^="/marketplace/t/"]') ||
+          document.querySelector('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]') ||
           document.querySelector('div[role="row"]') ||
           document.querySelector('div[contenteditable="true"][role="textbox"]')
         )
@@ -1827,13 +1827,13 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
     }
   } catch {}
       
-  const ok = await Promise.race([
-    page.waitForFunction(() => {
-      const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"]');
-      const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
+      const ok = await Promise.race([
+        page.waitForFunction(() => {
+          const hasAnchor = !!document.querySelector('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]');
+          const hasRow = document.querySelectorAll('div[role="row"]').length > 0;
           return hasAnchor || hasRow;
         }, { timeout: 8000 }),
-        page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).catch(() => null),
+        page.waitForSelector('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]', { timeout: 8000 }).catch(() => null),
         page.waitForSelector('div[role="row"]', { timeout: 8000 }).catch(() => null)
       ]);
       
@@ -1854,7 +1854,7 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
   
   if (/messenger.com\/marketplace/i.test(url)) {
     try {
-      const hasAnchor = await page.$('a[href^="/marketplace/t/"]').catch(() => null);
+      const hasAnchor = await page.$('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]').catch(() => null);
       const hasRow = await page.$('div[role="row"]').catch(() => null);
       if (hasAnchor || hasRow) {
         return;
@@ -1876,6 +1876,132 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
   
   logger.warn('[VIRTUS][garantirMarketplace] Nenhuma rota conseguiu carregar marketplace com anchors/rows', nome ? { nome } : {});
   throw new Error('Marketplace UI não ficou pronta a tempo em nenhuma rota');
+}
+
+// HELPERS PARA ABERTURA DE CHAT APENAS POR CLIQUE (NUNCA GOTO THREAD)
+
+async function findChatAnchorById(page, chatId) {
+  try {
+    const anchor = await page.evaluate((id) => {
+      const sel = `a[href^="/marketplace/t/${id}"], a[href^="/marketplace/v/${id}"]`;
+      const anchors = Array.from(document.querySelectorAll(sel)).filter(a => {
+        const st = window.getComputedStyle(a);
+        const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
+        const r = a.getBoundingClientRect();
+        return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
+      });
+      if (anchors.length === 0) return null;
+      const a = anchors[0];
+      const href = a.getAttribute('href') || a.href || '';
+      const rect = a.getBoundingClientRect();
+      return { href, visible: true, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    }, chatId);
+    return anchor;
+  } catch {
+    return null;
+  }
+}
+
+async function smartAnchorClick(page, chatId) {
+  try {
+    const clicked = await page.evaluate((id) => {
+      const sel = `a[href^="/marketplace/t/${id}"], a[href^="/marketplace/v/${id}"]`;
+      const anchors = Array.from(document.querySelectorAll(sel)).filter(a => {
+        const st = window.getComputedStyle(a);
+        const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
+        const r = a.getBoundingClientRect();
+        return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
+      });
+      const a = anchors[0] || null;
+      if (!a) return false;
+      const row = a.closest('div[role="row"]') || a.parentElement;
+      try { (row || a).scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
+      try {
+        const rect = (row || a).getBoundingClientRect();
+        const x = rect.x + rect.width / 2;
+        const y = rect.y + rect.height / 2;
+        const evtOpts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+        (row || a).dispatchEvent(new MouseEvent('mousemove', evtOpts));
+        (row || a).dispatchEvent(new MouseEvent('mousedown', evtOpts));
+        (row || a).dispatchEvent(new MouseEvent('mouseup', evtOpts));
+      } catch {}
+      try { (row || a).focus && (row || a).focus(); } catch {}
+      try { (row || a).click(); } catch {}
+      return true;
+    }, chatId);
+    if (clicked) await sleep(100);
+    return clicked;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForChatContext(page, chatId, { timeoutMs = 6000 } = {}) {
+  const t0 = Date.now();
+  while (true) {
+    try {
+      const ok = await page.evaluate((id) => {
+        const pathOk = (typeof location === 'object' && location && location.pathname) 
+          ? (location.pathname.includes(`/marketplace/t/${id}`) || location.pathname.includes(`/marketplace/v/${id}`))
+          : false;
+        const composer = document.querySelector('div[contenteditable="true"][role="textbox"], div[role="combobox"][contenteditable="true"], div[contenteditable="true"][aria-label]');
+        const composerOk = composer && window.getComputedStyle(composer).display !== 'none' && composer.offsetParent !== null;
+        return pathOk && composerOk;
+      }, chatId);
+      if (ok) return true;
+    } catch {}
+    if ((Date.now() - t0) >= timeoutMs) return false;
+    await sleep(120);
+  }
+}
+
+async function isContentUnavailablePage(page) {
+  try {
+    const unavailable = await page.evaluate(() => {
+      const text = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
+      const hasError = /conteúdo não está disponível|content.*not.*available|este conteúdo|this content/i.test(text);
+      const hasErrorDiv = !!document.querySelector('[role="alert"], [data-testid*="error"], .x1ey2m1c, .x78zum5[role="main"]');
+      return hasError || hasErrorDiv;
+    });
+    return !!unavailable;
+  } catch {
+    return false;
+  }
+}
+
+async function goBackToInboxIfNeeded(page, perfil) {
+  try {
+    const clicked = await page.evaluate(() => {
+      const buttons = [
+        ...Array.from(document.querySelectorAll('a, button, [role="button"]')).filter(el => {
+          const text = (el.innerText || el.textContent || '').toLowerCase();
+          return /voltar|back|caixa de entrada|inbox|início|home/i.test(text);
+        }),
+        document.querySelector('a[href*="/marketplace"], a[href*="/inbox"]'),
+        document.querySelector('[aria-label*="Voltar"], [aria-label*="Back"], [aria-label*="Inbox"]')
+      ];
+      if (buttons.length > 0) {
+        try {
+          const btn = buttons[0];
+          btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+          btn.click();
+          return true;
+        } catch {}
+      }
+      return false;
+    });
+    if (clicked) {
+      await sleep(100);
+      await sleep(1000);
+      try {
+        await garantirMarketplace(page, { nome: perfil, allowNavigate: true });
+      } catch {}
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 async function scrollChatsToTop(page, nome) {
@@ -1904,7 +2030,7 @@ async function scrollChatsToTop(page, nome) {
       }
 
       try {
-        let firstA = grid.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
+        let firstA = grid.querySelector('a[role="link"], a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]');
         if (firstA) {
           firstA.focus && firstA.focus();
           firstA.scrollIntoView({block: "start", behavior: "smooth"});
@@ -1923,72 +2049,62 @@ async function scrollChatsToTop(page, nome) {
 
 // REMOVIDO: openChatByUrl - não mais utilizado
 
+// PROIBIDO GOTO THREAD: Esta função NUNCA usa page.goto para threads, apenas cliques na lista lateral
 async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 1, scrollTries = 2, scrollStep = 700 } = {}) {
-  const sel = `a[href^="/marketplace/t/${chatId}"]`;
-  try { await scrollChatsToTop(p, perfil); } catch {}
-
-  // Log de anchors antes de tentar clicar
+  audit(perfil, 'virtus', 'info', 'open_chat_click_start', { chatId });
+  
+  // Garante marketplace na raiz
   try {
-    const anchorCount = await p.$$eval(sel, els => els.length).catch(()=>0);
-    stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_pre_click', chatId, sel, anchorCount, ts: Date.now() });
+    await maybeGuaranteeMarketplaceFast(p, perfil).catch(()=>{});
   } catch {}
+  
+  // Role lista para cima
+  try { await scrollChatsToTop(p, perfil); } catch {}
+  await sleep(300);
 
-  async function tryClickOnce() {
-    let clicked = false;
-    try {
-      clicked = await p.evaluate((anchorSel) => {
-        const anchors = Array.from(document.querySelectorAll(anchorSel)).filter(a => {
-          const st = window.getComputedStyle(a);
-          const vis = st && st.visibility !== 'hidden' && st.display !== 'none';
-          const r = a.getBoundingClientRect();
-          return a.offsetParent !== null && vis && r.width > 0 && r.height > 0;
-        });
-        const a = anchors[0] || null;
-        if (!a) return false;
-        const row = a.closest('div[role="row"]') || a.parentElement;
-        try { (row || a).scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
-        try {
-          const evtOpts = { bubbles: true, cancelable: true, view: window };
-          (row || a).dispatchEvent(new MouseEvent('mousedown', evtOpts));
-          (row || a).dispatchEvent(new MouseEvent('mouseup', evtOpts));
-        } catch {}
-        try { (row || a).focus && (row || a).focus(); } catch {}
-        try { (row || a).click(); } catch {}
-        return true;
-      }, sel).catch(() => false);
-    } catch {}
-
-    if (!clicked) {
-      try {
-        const h = await p.$(sel).catch(()=>null);
-        if (h) { await h.click({ delay: 20 }); clicked = true; }
-      } catch {}
-    }
-
-    return clicked;
-  }
-
-  // Tenta clicar normalmente (retry)
+  // Tenta encontrar a âncora
   for (let attempt = 0; attempt <= retries; attempt++) {
-    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_attempt', chatId, attempt: attempt + 1, ts: Date.now() }); } catch {}
-    const clicked = await tryClickOnce();
+    audit(perfil, 'virtus', 'debug', 'open_chat_click_attempt', { chatId, attempt: attempt + 1 });
     
-    stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_clicked', chatId, clicked, ts: Date.now() });
-
-    if (clicked) {
-      const ok = await assertOnChatStrict(p, chatId, { timeoutMs }).catch(()=>false);
-      if (ok) {
-        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_ok', chatId, ts: Date.now() }); } catch {}
-        return true;
-      }
+    const anchor = await findChatAnchorById(p, chatId);
+    if (!anchor) {
+      await sleep(250 + Math.floor(Math.random() * 200));
+      continue;
     }
-
+    
+    // Clique na âncora
+    const clicked = await smartAnchorClick(p, chatId);
+    if (!clicked) {
+      await sleep(250 + Math.floor(Math.random() * 200));
+      continue;
+    }
+    
+    await sleep(500);
+    
+    // Verifica se apareceu tela de erro
+    if (await isContentUnavailablePage(p)) {
+      audit(perfil, 'virtus', 'warn', 'open_chat_content_unavailable', { chatId });
+      await goBackToInboxIfNeeded(p, perfil);
+      await sleep(1000);
+      try { await scrollChatsToTop(p, perfil); } catch {}
+      await sleep(300);
+      continue;
+    }
+    
+    // Aguarda contexto do chat (pathname + composer + DOM)
+    const ok = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
+    if (ok) {
+      audit(perfil, 'virtus', 'info', 'open_chat_click_ok', { chatId });
+      return true;
+    }
+    
     await sleep(250 + Math.floor(Math.random() * 200));
   }
 
   // Scroll para materializar itens da lista virtualizada
   for (let i = 0; i < scrollTries; i++) {
-    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_attempt', chatId, scrollTry: i+1, ts: Date.now() }); } catch {}
+    audit(perfil, 'virtus', 'debug', 'open_chat_click_scroll_attempt', { chatId, scrollTry: i+1 });
+    
     try {
       await p.evaluate((step) => {
         function gridEl() {
@@ -2003,43 +2119,42 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
           const next = Math.min((g.scrollTop || 0) + step, g.scrollHeight);
           g.scrollTop = next;
           try {
-            const first = g.querySelector && g.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
+            const first = g.querySelector && g.querySelector('a[role="link"], a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]');
             if (first) first.focus && first.focus();
           } catch {}
         }
       }, scrollStep).catch(()=>{});
     } catch {}
-    await sleep(200);
-    const clicked = await tryClickOnce();
-    if (clicked) {
-      const ok = await assertOnChatStrict(p, chatId, { timeoutMs }).catch(()=>false);
-      if (ok) {
-        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_ok_after_scroll', chatId, tries: i+1, ts: Date.now() }); } catch {}
-        return true;
-      }
+    
+    await sleep(300);
+    
+    const anchor = await findChatAnchorById(p, chatId);
+    if (!anchor) continue;
+    
+    const clicked = await smartAnchorClick(p, chatId);
+    if (!clicked) continue;
+    
+    await sleep(500);
+    
+    // Verifica se apareceu tela de erro
+    if (await isContentUnavailablePage(p)) {
+      audit(perfil, 'virtus', 'warn', 'open_chat_content_unavailable_scroll', { chatId, scrollTry: i+1 });
+      await goBackToInboxIfNeeded(p, perfil);
+      await sleep(1000);
+      try { await scrollChatsToTop(p, perfil); } catch {}
+      await sleep(300);
+      continue;
+    }
+    
+    const ok = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
+    if (ok) {
+      audit(perfil, 'virtus', 'info', 'open_chat_click_ok_after_scroll', { chatId, scrollTry: i+1 });
+      return true;
     }
   }
   
-  // Fallback por URL (sempre ativo)
-  try {
-    stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fallback_attempt', chatId, ts: Date.now() });
-    const urls = [
-      `https://www.messenger.com/marketplace/t/${chatId}`,
-      `https://www.facebook.com/marketplace/t/${chatId}`
-    ];
-    for (const u of urls) {
-      try { await p.goto(u, { waitUntil: 'domcontentloaded', timeout: timeoutMs + 6000 }); } catch {}
-      const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 }).catch(()=>false);
-      if (ok) {
-        try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_ok', chatId, url: u, ts: Date.now() }); } catch {}
-        return true;
-      }
-    }
-    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_fail', chatId, ts: Date.now() }); } catch {}
-  } catch (e) {
-    try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_url_exception', chatId, err: (e && e.message) || String(e), ts: Date.now() }); } catch {}
-  }
-  try { stepLog.appendJSONL(perfil, 'virtus', { step: 'open_chat_click_timeout', chatId, ts: Date.now() }); } catch {}
+  // PROIBIDO GOTO THREAD: Nenhum fallback por page.goto para threads
+  audit(perfil, 'virtus', 'warn', 'open_chat_click_timeout', { chatId });
   return false;
 }
 
@@ -3307,7 +3422,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               // Agora está no chat correto, busca composer
               let campo = await waitForComposer(p, 10000);
               if (!campo) {
-                const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+                const anchorSel = `a[href^="/marketplace/t/${chatId}"], a[href^="/marketplace/v/${chatId}"]`;
                 campo = await refocusComposerNoReload(p, chatId, anchorSel);
               }
               
