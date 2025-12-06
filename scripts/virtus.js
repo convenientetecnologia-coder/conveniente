@@ -57,6 +57,16 @@ async function withNavLock(perfil, fn) {
   }
 }
 
+// Guardião NAV_INTENT para permitir clique somente dentro de job válido
+const NAV_INTENT = new Map();
+function setNavIntent(perfil, intent) {
+  if (!intent) { NAV_INTENT.delete(perfil); return; }
+  NAV_INTENT.set(perfil, { ...intent, setAt: Date.now() });
+}
+function getNavIntent(perfil) {
+  return NAV_INTENT.get(perfil) || null;
+}
+
 // processQueueByPerfil e enqueueProcess removidos - agora usando fila única em disco
 
 // REMOVIDO: MinHeap, sendHeapByPerfil, heapKeyByChat - agora usando filas em disco
@@ -1389,6 +1399,7 @@ const VIRTUS_FINAL_MSG_RETRY_MAX_MS = parseInt(process.env.VIRTUS_FINAL_MSG_RETR
 const MAX_CHAT_AGE_MS = parseInt(process.env.VIRTUS_CHAT_MAX_AGE_MS || '28800000', 10); // 8h
 const SCAN_INTERVAL_MS = Math.max(10000, parseInt(process.env.VIRTUS_SCAN_MS || process.env.SCAN_INTERVAL_MS || '10000', 10));
 const SCAN_NAV_TIMEOUT_MS = parseInt(process.env.SCAN_NAV_TIMEOUT_MS || '30000', 10); // 30s para navegar no chat
+const SCAN_COLLECT_MIN_GAP_MS = Math.max(60000, parseInt(process.env.VIRTUS_SCAN_COLLECT_MIN_GAP_MS || '180000', 10)); // 3min default
 
 // Constantes globais de throttle/requeue
 const MIN_REQUEUE_MS = Math.max(10000, parseInt(process.env.VIRTUS_MIN_REQUEUE_MS || '10000', 10));
@@ -2075,8 +2086,18 @@ async function scrollChatsToTop(page, nome) {
 // REMOVIDO: openChatByUrl - não mais utilizado
 
 // PROIBIDO GOTO THREAD: Esta função NUNCA usa page.goto para threads, apenas cliques na lista lateral
-async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 1, scrollTries = 2, scrollStep = 700 } = {}) {
-  audit(perfil, 'virtus', 'info', 'open_chat_click_start', { chatId });
+async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 1, scrollTries = 2, scrollStep = 700, jobContext = null } = {}) {
+  const ctx = jobContext || getNavIntent(perfil);
+  const jobKind = ctx && ctx.kind;
+  const jobReady = !!(ctx && ctx.jobReady);
+  const dueAt = ctx && ctx.dueAt ? new Date(ctx.dueAt).toISOString() : null;
+
+  if (!jobKind || !jobReady) {
+    audit(perfil, 'virtus', 'warn', 'open_chat_click_blocked_no_job', { chatId, hasCtx: !!ctx });
+    return false;
+  }
+
+  audit(perfil, 'virtus', 'info', 'open_chat_click_start', { chatId, jobKind, jobReady, dueAt });
   
   // Garante marketplace na raiz
   try {
@@ -3147,6 +3168,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           inFlightSend.add(job.chatId);
           lastSendMap.set(job.chatId, now);
           
+          setNavIntent(perfil, { kind: 'send', chatId: job.chatId, jobReady: true, dueAt: job.dueAt });
           try {
             const ok = await enviarRespostaMessengerSeguraFn(job.chatId, resposta);
             if (ok) {
@@ -3167,6 +3189,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               }
             }
           } finally {
+            setNavIntent(perfil, null);
             inFlightSend.delete(job.chatId);
           }
           return;
@@ -3197,6 +3220,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           inFlightCollect.add(job.chatId);
           lastCollectMap.set(job.chatId, now);
           
+          setNavIntent(perfil, { kind: 'collect', chatId: job.chatId, jobReady: true, dueAt: job.dueAt });
           try {
             const result = await runCollectForChat(perfil, job.chatId).catch(e => ({ status: 'error', error: e && e.message || String(e) }));
             
@@ -3218,6 +3242,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               deleteJob(perfil, 'collect', job.chatId);
             }
           } finally {
+            setNavIntent(perfil, null);
             inFlightCollect.delete(job.chatId);
           }
         }
@@ -3341,7 +3366,21 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         return;
       }
 
-      try { await maybeGuaranteeMarketplaceFast(p, nome); } catch {}
+      const onInbox = await p.evaluate(() => {
+        try {
+          return !!(
+            document.querySelector('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]') ||
+            document.querySelector('div[role="row"]')
+          );
+        } catch { return false; }
+      }).catch(() => false);
+
+      if (!onInbox) {
+        const took = Date.now() - scanBegin;
+        audit(nome, 'virtus', 'info', 'scan_end', { took, reason: 'not_inbox_no_nav' });
+        scanRunningByPerfil.set(nome, false);
+        return;
+      }
 
       const lista = await coletaChatsMarketplaceTodos(p);
       if (!Array.isArray(lista) || !lista.length) {
@@ -3383,6 +3422,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
           });
           if (actionable) {
+            const lastScanAt = Number(fsmState && fsmState.lastScanAt || 0);
+            if ((now - lastScanAt) < SCAN_COLLECT_MIN_GAP_MS) {
+              audit(nome, 'virtus', 'info', 'scan_skip_collect_gap', {
+                chatId, sinceMs: (now - lastScanAt), minMs: SCAN_COLLECT_MIN_GAP_MS
+              });
+              continue;
+            }
+
+            const existingPath = jobPath(nome, 'collect', chatId);
+            let existing = null;
+            try { if (fsRaw.existsSync(existingPath)) existing = loadJob(existingPath); } catch {}
+            if (existing && Number(existing.dueAt || 0) >= now) {
+              audit(nome, 'virtus', 'info', 'scan_skip_collect_already_queued', { chatId, dueAt: new Date(existing.dueAt).toISOString() });
+              continue;
+            }
+
             await enqueueJob(nome, { kind: 'collect', chatId, dueAt: now + 45000, payload: { tokenSig: feedSig } });
             audit(nome, 'virtus', 'info', 'scan_feed_changed', { chatId, feedSig, prevSig: prevFeedSig });
           }
