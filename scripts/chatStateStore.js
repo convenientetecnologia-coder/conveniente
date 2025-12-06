@@ -14,29 +14,22 @@ function stateFile(perfil, chatId){
 
 function readSafe(file, fb){ try { return JSON.parse(fs.readFileSync(file,'utf8')); } catch { return fb; } }
 
-function writeAtomicLocked(file, obj) {
-  const lockPath = file + '.lck';
-  let fd = null;
+function writeAtomicNoLock(file, obj) {
+  const dir = path.dirname(file);
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  const tmp = file + '.' + process.pid + '.' + Date.now() + '.tmp';
+  const fdw = fs.openSync(tmp, 'w');
   try {
-    fd = acquireFileLock(lockPath);
-    const dir = path.dirname(file);
-    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-    const tmp = file + '.' + process.pid + '.' + Date.now() + '.tmp';
-    const fdw = fs.openSync(tmp, 'w');
-    try {
-      fs.writeFileSync(fdw, JSON.stringify(obj || {}, null, 2), 'utf8');
-      fs.fsyncSync(fdw);
-    } finally { fs.closeSync(fdw); }
-    try { fs.unlinkSync(file); } catch {}
-    fs.renameSync(tmp, file);
-    // fsync no diretório para blindar metadata
-    try {
-      const dfd = fs.openSync(dir, 'r'); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
-    } catch {}
-    return true;
-  } finally {
-    try { releaseFileLock(lockPath, fd); } catch {}
-  }
+    fs.writeFileSync(fdw, JSON.stringify(obj || {}, null, 2), 'utf8');
+    fs.fsyncSync(fdw);
+  } finally { fs.closeSync(fdw); }
+  try { fs.unlinkSync(file); } catch {}
+  fs.renameSync(tmp, file);
+  try {
+    const dfd = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+  } catch {}
+  return true;
 }
 
 function initState() {
@@ -79,7 +72,7 @@ function get(perfil, chatId){
     let s = readSafe(file, null);
     if (!s) {
       s = initState();
-      writeAtomicLocked(file, s);
+      writeAtomicNoLock(file, s);
     }
     return s;
   } finally {
@@ -96,7 +89,7 @@ function patch(perfil, chatId, patchObj){
     let cur = readSafe(file, null);
     if (!cur) cur = initState();
     let next = monotonicMerge(cur, patchObj || {});
-    writeAtomicLocked(file, next);
+    writeAtomicNoLock(file, next);
     return next;
   } finally {
     try { releaseFileLock(lockPath, fd); } catch {}

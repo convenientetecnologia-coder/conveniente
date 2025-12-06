@@ -9,44 +9,104 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const locks = new Map();
+const heldLocks = new Map();
 
 /** Espera não bloqueante (promise-based). */
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-/**
- * Adquire lock de arquivo físico (cross-process).
- * Tenta abrir o arquivo lockPath em modo 'wx' (exclusive), retry/backoff caso já exista.
- * @param {string} lockPath - Caminho do arquivo de lock (.lck)
- * @param {number} maxRetries - Número máximo de tentativas (padrão 300 = 5s com delay de 15ms)
- * @param {number} delay - Delay entre tentativas em ms (padrão 15ms)
- * @returns {number} File descriptor do lock adquirido
- * @throws {Error} Se timeout após maxRetries tentativas
- */
-function acquireFileLock(lockPath, maxRetries = 300, delay = 15) {
-  for (let i = 0; i < maxRetries; i++) {
+function isProcessAlive(pid) {
+  if (!pid || typeof pid !== 'number' || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function isLockStale(lockPath, maxAgeMs = 2 * 60 * 1000) {
+  try {
+    if (!fs.existsSync(lockPath)) return false;
+    const st = fs.statSync(lockPath);
+    if ((Date.now() - st.mtimeMs) > maxAgeMs) return true;
     try {
-      const fd = fs.openSync(lockPath, 'wx');
-      return fd;
-    } catch (e) {
-      if (i === maxRetries - 1) throw new Error('file_lock_timeout:' + lockPath);
-      // Cross-process sleep usando Atomics.wait
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
-    }
+      const txt = fs.readFileSync(lockPath, 'utf8');
+      const meta = JSON.parse(txt);
+      if (meta && meta.pid && !isProcessAlive(Number(meta.pid))) return true;
+    } catch {}
+    return false;
+  } catch {
+    return false;
   }
-  throw new Error('file_lock_timeout:' + lockPath);
+}
+
+function safeSleep(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {/* busy-wait */}
 }
 
 /**
- * Libera lock de arquivo físico (cross-process).
- * Fecha o file descriptor e remove o arquivo de lock.
+ * Adquire lock de arquivo físico (cross-process) com suporte a reentrância e limpeza de locks stale.
  * @param {string} lockPath - Caminho do arquivo de lock (.lck)
- * @param {number} fd - File descriptor retornado por acquireFileLock
+ * @param {number} maxWaitMs - Tempo máximo de espera em ms (padrão 5000)
+ * @param {number} stepDelayMs - Delay entre tentativas em ms (padrão 10)
+ * @returns {number} File descriptor do lock adquirido
+ * @throws {Error} Se timeout após maxWaitMs
  */
-function releaseFileLock(lockPath, fd) {
-  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
+function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
+  // Reentrância: se já possuímos, apenas incremente contagem
+  const h = heldLocks.get(lockPath);
+  if (h && typeof h.fd === 'number') {
+    h.count = (h.count || 1) + 1;
+    heldLocks.set(lockPath, h);
+    return h.fd;
+  }
+  const start = Date.now();
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      try {
+        const meta = { pid: process.pid, host: os.hostname(), startedAt: Date.now() };
+        fs.writeFileSync(fd, JSON.stringify(meta), 'utf8');
+        fs.fsyncSync(fd);
+      } catch {}
+      heldLocks.set(lockPath, { fd, count: 1, ownerPid: process.pid });
+      return fd;
+    } catch (e) {
+      if (e && e.code === 'EEXIST') {
+        if (isLockStale(lockPath)) {
+          try { fs.unlinkSync(lockPath); } catch {}
+          continue;
+        }
+        if ((Date.now() - start) >= maxWaitMs) {
+          throw new Error('file_lock_timeout:' + lockPath);
+        }
+        safeSleep(stepDelayMs);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+/**
+ * Libera lock de arquivo físico (cross-process) com suporte a reentrância.
+ * @param {string} lockPath - Caminho do arquivo de lock (.lck)
+ * @param {number} fdIgnored - File descriptor (ignorado, usado apenas para compatibilidade)
+ */
+function releaseFileLock(lockPath, fdIgnored) {
+  const h = heldLocks.get(lockPath);
+  if (!h) {
+    try { if (typeof fdIgnored === 'number') fs.closeSync(fdIgnored); } catch {}
+    try { fs.unlinkSync(lockPath); } catch {}
+    return;
+  }
+  h.count = Math.max(0, (h.count || 1) - 1);
+  if (h.count > 0) {
+    heldLocks.set(lockPath, h);
+    return;
+  }
+  try { fs.closeSync(h.fd); } catch {}
   try { fs.unlinkSync(lockPath); } catch {}
+  heldLocks.delete(lockPath);
 }
 
 /** Resolve o caminho absoluto do manifest.json de um perfil (por slug/nome). */

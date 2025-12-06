@@ -11,6 +11,7 @@ const path = require('path');
 const logger = require('./logger.js');
 let issues = null;
 try { issues = require('./issues.js'); } catch {}
+const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
 
 // ========== HELPERS DE PERSISTÊNCIA ==========
 
@@ -28,19 +29,14 @@ async function loadState(perfil, chatId) {
     const lockPath = file + '.lck';
     let fd = null;
     try {
-      // Lock exclusivo para leitura (aberto como wx para bloqueio leve, mas pode ser só leitura se preferir)
-      fd = fs.openSync(lockPath, 'wx');
-    } catch {}
-    try {
+      fd = acquireFileLock(lockPath);
       if (!fs.existsSync(file)) return {};
       const content = fs.readFileSync(file, 'utf8');
       return JSON.parse(content);
     } catch {
       return {};
     } finally {
-      // Libera file lock e exclui o .lck
-      try { if (typeof fd==='number') fs.closeSync(fd); } catch {}
-      try { fs.unlinkSync(lockPath); } catch {}
+      try { releaseFileLock(lockPath, fd); } catch {}
     }
   } catch {
     return {};
@@ -53,9 +49,7 @@ async function saveState(perfil, chatId, state) {
     const lockPath = file + '.lck';
     let fd = null;
     try {
-      fd = fs.openSync(lockPath, 'wx');
-    } catch {}
-    try {
+      fd = acquireFileLock(lockPath);
       const dir = path.dirname(file);
       fs.mkdirSync(dir, { recursive: true });
       const tmp = file + '.tmp';
@@ -67,8 +61,7 @@ async function saveState(perfil, chatId, state) {
       try { fs.unlinkSync(file); } catch {}
       fs.renameSync(tmp, file);
     } finally {
-      try { if (typeof fd==='number') fs.closeSync(fd); } catch {}
-      try { fs.unlinkSync(lockPath); } catch {}
+      try { releaseFileLock(lockPath, fd); } catch {}
     }
   } catch (e) {
     try { logger.warn('[MASTER][STATE] save error', { perfil, chatId, error: (e && e.message) || e }); } catch {}

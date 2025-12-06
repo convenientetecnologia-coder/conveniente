@@ -20,7 +20,7 @@ function key(perfil, chatId) {
 }
 
 // Armazenamento dos FDs abertos para cada lock ativo
-// Chave: caminho do arquivo de lock, Valor: { fd: number, acquiredAt: timestamp }
+// Chave: caminho do arquivo de lock, Valor: { fd: number, acquiredAt: timestamp, count: number }
 const openFDs = new Map();
 
 function isStale(fp) {
@@ -46,14 +46,17 @@ async function acquire(perfil, chatId, timeoutMs) {
   const f = key(perfil, chatId);
   const startTime = Date.now();
   
-  // Se já está em openFDs, significa que este processo já tem o lock
+  // Reentrância: se já possuímos, apenas incrementa contagem e retorna sucesso
   if (openFDs.has(f)) {
     const entry = openFDs.get(f);
     if (entry && typeof entry.fd === 'number') {
       try {
         // Verifica se o FD ainda está válido
         fs.fstatSync(entry.fd);
-        return true; // Já possui o lock
+        // Incrementa contagem e retorna sucesso imediato
+        entry.count = (entry.count || 1) + 1;
+        openFDs.set(f, entry);
+        return true;
       } catch {
         // FD inválido, remove e tenta adquirir novamente
         openFDs.delete(f);
@@ -87,7 +90,7 @@ async function acquire(perfil, chatId, timeoutMs) {
       fs.fsyncSync(fd); // Garante escrita em disco
       
       // Mantém o FD aberto durante a execução (garante exclusividade)
-      openFDs.set(f, { fd, acquiredAt: Date.now() });
+      openFDs.set(f, { fd, acquiredAt: Date.now(), count: 1 });
       
       logger.debug('[CHATLOCK] acquired', { perfil, chatId, file: f });
       return true;
@@ -163,6 +166,11 @@ function release(perfil, chatId) {
   const entry = openFDs.get(f);
   
   if (entry && typeof entry.fd === 'number') {
+    entry.count = Math.max(0, (entry.count || 1) - 1);
+    if (entry.count > 0) {
+      openFDs.set(f, entry);
+      return;
+    }
     try {
       // Fecha o FD (libera o lock no sistema de arquivos)
       fs.closeSync(entry.fd);
