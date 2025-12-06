@@ -61,7 +61,6 @@ function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
     heldLocks.set(lockPath, h);
     return h.fd;
   }
-  audit('GLOBAL', 'virtus', 'debug', 'manifest_flock_acquire_start', { lockPath, maxWaitMs });
   const start = Date.now();
   try {
     while (true) {
@@ -73,7 +72,6 @@ function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
           fs.fsyncSync(fd);
         } catch {}
         heldLocks.set(lockPath, { fd, count: 1, ownerPid: process.pid });
-        audit('GLOBAL', 'virtus', 'debug', 'manifest_flock_acquire_ok', { lockPath });
         return fd;
       } catch (e) {
         if (e && e.code === 'EEXIST') {
@@ -104,7 +102,6 @@ function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
  * @param {number} fdIgnored - File descriptor (ignorado, usado apenas para compatibilidade)
  */
 function releaseFileLock(lockPath, fdIgnored) {
-  audit('GLOBAL', 'virtus', 'debug', 'manifest_flock_release', { lockPath });
   const h = heldLocks.get(lockPath);
   if (!h) {
     try { if (typeof fdIgnored === 'number') fs.closeSync(fdIgnored); } catch (e) {
@@ -181,7 +178,6 @@ function withLock(nome, fn) {
 async function read(nome) {
   return withLock(nome, async () => {
     const file = getManifestPath(nome);
-    audit(nome, 'virtus', 'debug', 'manifest_read_start', { file });
     const lockPath = getLockPath(file);
     let fd = null;
     try {
@@ -194,7 +190,6 @@ async function read(nome) {
           if (fs.existsSync(file)) {
             const data = fs.readFileSync(file, 'utf8');
             const result = JSON.parse(data);
-            audit(nome, 'virtus', 'debug', 'manifest_read_end', { file, exists: true });
             return result;
           }
           // fallback: tente ler o .tmp se existe (escrita atômica em progresso)
@@ -202,13 +197,11 @@ async function read(nome) {
           if (fs.existsSync(tmp)) {
             const data = fs.readFileSync(tmp, 'utf8');
             const result = JSON.parse(data);
-            audit(nome, 'virtus', 'debug', 'manifest_read_end', { file, exists: true });
             return result;
           }
         } catch {}
         await sleep(20);
       }
-      audit(nome, 'virtus', 'debug', 'manifest_read_end', { file, exists: false });
       return null;
     } catch (e) {
       audit(nome || 'GLOBAL', 'virtus', 'error', 'manifest_error', { file, error: (e && e.message) || String(e) });
