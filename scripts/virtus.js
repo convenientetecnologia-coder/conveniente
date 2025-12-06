@@ -82,43 +82,11 @@ function enqueueProcess(perfil, fn) {
   run();
 }
 
-class MinHeap {
-  constructor(cmp) { this.a = []; this.cmp = cmp; }
-  push(x){ this.a.push(x); this._up(this.a.length-1); }
-  peek(){ return this.a[0]||null; }
-  pop(){ if(this.a.length===0)return null; const r=this.a[0]; const v=this.a.pop(); if(this.a.length){ this.a[0]=v; this._down(0);} return r; }
-  _up(i){ const {a, cmp}=this; while(i){ const p=(i-1>>1); if(cmp(a[i],a[p])>=0) break; [a[i],a[p]]=[a[p],a[i]]; i=p; } }
-  _down(i){ const {a, cmp}=this; for(;;){ let l=(i<<1)+1, r=l+1, m=i; if(l<a.length && cmp(a[l],a[m])<0) m=l; if(r<a.length && cmp(a[r],a[m])<0) m=r; if(m===i) break; [a[i],a[m]]=[a[m],a[i]]; i=m; } }
-  size(){ return this.a.length; }
-  toArray(){ return this.a.slice(); }
-}
-const sendHeapByPerfil = new Map(); // nomePerfil -> MinHeap
-const heapKeyByChat = new Map();     // nomePerfil -> Map(chatId -> refObj)
-function getSendHeap(perfil) {
-  if (!sendHeapByPerfil.has(perfil)) {
-    sendHeapByPerfil.set(perfil, new MinHeap((x,y) => (Number(x.earliestSendAt||0) - Number(y.earliestSendAt||0))));
-  }
-  return sendHeapByPerfil.get(perfil);
-}
-function getHeapKeys(perfil) {
-  if (!heapKeyByChat.has(perfil)) heapKeyByChat.set(perfil, new Map());
-  return heapKeyByChat.get(perfil);
-}
+// REMOVIDO: MinHeap, sendHeapByPerfil, heapKeyByChat - agora usando filas em disco
 
 function clearAllChatJobs(perfil, chatId) {
-  try {
-    // heap
-    const heap = getSendHeap(perfil);
-    if (heap && heap.size()) {
-      const arr = heap.toArray().filter(n => n.chatId !== chatId);
-      sendHeapByPerfil.set(perfil, new MinHeap((x,y)=>Number(x.earliestSendAt||0)-Number(y.earliestSendAt||0)));
-      const newHeap = getSendHeap(perfil);
-      for (const it of arr) newHeap.push(it);
-    }
-    const hk = getHeapKeys(perfil); if (hk) hk.delete(chatId);
-  } catch {}
-  try { clearCollectTimer(perfil, chatId); } catch {}
-  try { clearSlaWatchdog(perfil, chatId); } catch {}
+  try { deleteSendJob(perfil, chatId); } catch {}
+  try { unscheduleCollectJob(perfil, chatId); } catch {}
   try { clearFinalizationTimer(perfil, chatId); } catch {}
   try {
     const mapAg = aguardTimers.get(perfil);
@@ -528,6 +496,55 @@ async function writeJsonAtomicFsyncStrict(file, obj) {
   try { fsRaw.unlinkSync(file); } catch {}
   try { fsRaw.renameSync(tmp, file); }
   catch { fsRaw.copyFileSync(tmp, file); try { fsRaw.unlinkSync(tmp); } catch {} }
+}
+
+// === Helpers de filas em disco (coleta e envio) ===
+function queuesBaseDir(perfil) {
+  return path.join(__dirname, '..', 'dados', 'perfis', String(perfil || 'default'), 'queues');
+}
+
+function sendQueueDir(perfil) {
+  const d = path.join(queuesBaseDir(perfil), 'send');
+  try { fsRaw.mkdirSync(d, { recursive: true }); } catch {}
+  return d;
+}
+
+function collectQueueDir(perfil) {
+  const d = path.join(queuesBaseDir(perfil), 'collect');
+  try { fsRaw.mkdirSync(d, { recursive: true }); } catch {}
+  return d;
+}
+
+function sendJobPath(perfil, chatId) {
+  return path.join(sendQueueDir(perfil), `send_${chatId}.json`);
+}
+
+function collectJobPath(perfil, chatId) {
+  return path.join(collectQueueDir(perfil), `collect_${chatId}.json`);
+}
+
+async function readJsonIfExists(file) {
+  try {
+    if (!fsRaw.existsSync(file)) return null;
+    const txt = await fs.readFile(file, 'utf8').catch(()=>null);
+    if (!txt) return null;
+    return JSON.parse(txt);
+  } catch { return null; }
+}
+
+async function writeJsonAtomic(file, obj) {
+  return writeJsonAtomicFsyncStrict(file, obj);
+}
+
+async function deleteFileIfExists(file) {
+  try { if (fsRaw.existsSync(file)) fsRaw.unlinkSync(file); } catch {}
+}
+
+function listJsonFilesSync(dir, prefix) {
+  try {
+    const all = fsRaw.readdirSync(dir);
+    return all.filter(fn => fn.startsWith(prefix) && fn.endsWith('.json')).map(fn => path.join(dir, fn));
+  } catch { return []; }
 }
 
 async function markPedidoSent(perfil, chatId, payload, source) {
@@ -1611,76 +1628,125 @@ function setScanBlocked(perfil, blocked, meta = {}) {
   }
 }
 const sendInProgressByPerfil = new Map();
-const collectPQByPerfil = new Map();      // nomePerfil -> MinHeap({ chatId, openAt, tokenSig, enqueuedAt })
-const collectIndexByPerfil = new Map();   // nomePerfil -> Map(chatId -> node)
+// REMOVIDO: collectPQByPerfil, collectIndexByPerfil - agora usando filas em disco
 const collectRunnerTimers = new Map();    // nomePerfil -> intervalId
 const lastCollectAtByPerfil = new Map();  // nomePerfil -> timestamp última coleta despachada
 
-function getCollectPQ(perfil) {
-  if (!collectPQByPerfil.has(perfil)) {
-    collectPQByPerfil.set(perfil, new MinHeap((x, y) => (Number(x.openAt || 0) - Number(y.openAt || 0))));
-    collectIndexByPerfil.set(perfil, new Map());
-  }
-  return { heap: collectPQByPerfil.get(perfil), index: collectIndexByPerfil.get(perfil) };
-}
-
+// === Coleta: fila em disco ===
 function scheduleCollectJob(perfil, chatId, openAt, tokenSig = '') {
-  try {
-    const o = Number(openAt || 0);
-    const now = Date.now();
-    const { heap, index } = getCollectPQ(perfil);
-    // Recria heap sem o item do chatId (idempotente)
-    const arr = heap.toArray().filter(n => n && n.chatId !== chatId);
-    const newHeap = new MinHeap((x, y) => (Number(x.openAt || 0) - Number(y.openAt || 0)));
-    for (const it of arr) newHeap.push(it);
-    const node = { chatId: String(chatId), openAt: o, tokenSig: String(tokenSig || ''), enqueuedAt: now };
-    newHeap.push(node);
-    collectPQByPerfil.set(perfil, newHeap);
-    const newIndex = new Map(arr.map(n => [n.chatId, n]));
-    newIndex.set(chatId, node);
-    collectIndexByPerfil.set(perfil, newIndex);
-    stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_job_scheduled', chatId, openAt: o, tokenSig: node.tokenSig, ts: now });
-  } catch {}
+  const file = collectJobPath(perfil, chatId);
+  const payload = {
+    chatId: String(chatId),
+    openAt: Number(openAt || 0),
+    tokenSig: String(tokenSig || ''),
+    enqueuedAt: Date.now()
+  };
+  writeJsonAtomic(file, payload).catch(()=>{});
+  stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_job_scheduled_disk', chatId, openAt: payload.openAt, tokenSig: payload.tokenSig, ts: Date.now() });
 }
 
-function isCollectDue(perfil) {
-  try {
-    const { heap } = getCollectPQ(perfil);
-    const nxt = heap.peek();
-    return !!(nxt && Number(nxt.openAt || 0) <= Date.now());
-  } catch { return false; }
+async function unscheduleCollectJob(perfil, chatId) {
+  try { await deleteFileIfExists(collectJobPath(perfil, chatId)); } catch {}
+  try { await deleteFileIfExists(collectJobPath(perfil, chatId) + '.claim'); } catch {}
+}
+
+// === Envio: fila em disco ===
+async function loadSendJob(perfil, chatId) {
+  return readJsonIfExists(sendJobPath(perfil, chatId));
+}
+
+async function writeSendJob(perfil, chatId, job) {
+  await writeJsonAtomic(sendJobPath(perfil, chatId), job);
+}
+
+async function deleteSendJob(perfil, chatId) {
+  await deleteFileIfExists(sendJobPath(perfil, chatId));
+}
+
+function listSendJobsSync(perfil) {
+  const dir = sendQueueDir(perfil);
+  const files = listJsonFilesSync(dir, 'send_');
+  const out = [];
+  for (const f of files) {
+    try {
+      const d = JSON.parse(fsRaw.readFileSync(f, 'utf8'));
+      if (d && d.chatId) out.push(d);
+    } catch {}
+  }
+  return out;
+}
+
+function pickEarliestSendJobSync(perfil) {
+  const arr = listSendJobsSync(perfil);
+  if (!arr.length) return null;
+  let best = null;
+  for (const j of arr) {
+    if (best == null || Number(j.earliestSendAt || 0) < Number(best.earliestSendAt || 0)) best = j;
+  }
+  return best;
+}
+
+function hasDueCollectJobSync(perfil) {
+  const dir = collectQueueDir(perfil);
+  const files = listJsonFilesSync(dir, 'collect_');
+  const now = Date.now();
+  for (const f of files) {
+    try {
+      const data = JSON.parse(fsRaw.readFileSync(f, 'utf8'));
+      if (Number(data.openAt || 0) <= now) return true;
+    } catch {}
+  }
+  return false;
 }
 
 function startCollectRunner(perfil) {
   if (collectRunnerTimers.has(perfil)) return;
   const id = setInterval(() => {
     try {
-      const { heap, index } = getCollectPQ(perfil);
-      const nxt = heap.peek();
-      if (!nxt) return;
+      const dir = collectQueueDir(perfil);
+      const files = listJsonFilesSync(dir, 'collect_');
+      if (!files.length) return;
+
       const now = Date.now();
-      if (Number(nxt.openAt || 0) > now) return;
+
+      // Escolhe o job due com menor openAt
+      let winner = null;
+      let winnerData = null;
+      for (const f of files) {
+        try {
+          const d = JSON.parse(fsRaw.readFileSync(f, 'utf8'));
+          if (Number(d.openAt || 0) <= now) {
+            if (!winnerData || Number(d.openAt || 0) < Number(winnerData.openAt || 0)) {
+              winner = f; winnerData = d;
+            }
+          }
+        } catch {}
+      }
+
+      if (!winner || !winnerData) return;
+
       const last = Number(lastCollectAtByPerfil.get(perfil) || 0);
       if (now - last < VIRTUS_COLLECT_GAP_MS) return;
 
-      // Despacha 1 coleta (serial) — prioridade sobre envio
-      heap.pop();
-      index.delete(nxt.chatId);
-      lastCollectAtByPerfil.set(perfil, now);
-      stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_job_dispatch', chatId: nxt.chatId, ts: now });
+      // Claim: renomeia para evitar dispatch duplo
+      const claim = winner + '.claim';
+      try { fsRaw.renameSync(winner, claim); } catch { return; }
 
-      // Usa a mesma fila serial de navegação
-      enqueueProcess(perfil, () => runCollectForChat(perfil, nxt.chatId));
+      lastCollectAtByPerfil.set(perfil, now);
+      stepLog.appendJSONL(perfil, 'virtus', { step: 'collect_job_dispatch_disk', chatId: winnerData.chatId, ts: now });
+
+      // Enfileira no processQueue e remove o claim após enfileirar
+      enqueueProcess(perfil, async () => {
+        try { await runCollectForChat(perfil, String(winnerData.chatId || '')); }
+        finally { try { fsRaw.unlinkSync(claim); } catch {} }
+      });
     } catch {}
   }, 300);
   collectRunnerTimers.set(perfil, id);
 }
 
 // Timers de coleta (45s após evento)
-const collectTimers = new Map(); // nomePerfil -> Map(chatId -> timeoutId)
-
-// SLA watchdog timers (6 minutos após timer_fire)
-const slaWatchdogTimers = new Map(); // nomePerfil -> Map(chatId -> timeoutId)
+// REMOVIDO: collectTimers, slaWatchdogTimers - agora usando filas em disco
 
 function getFinalizationMap(perfil) {
   if (!finalizationTimers.has(perfil)) finalizationTimers.set(perfil, new Map());
@@ -2964,30 +3030,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
   }
 
-  // Funções auxiliares para timer de coleta e SLA
-  function getCollectTimerMap(perfil) {
-    if (!collectTimers.has(perfil)) collectTimers.set(perfil, new Map());
-    return collectTimers.get(perfil);
-  }
-
-  function getSlaWatchdogMap(perfil) {
-    if (!slaWatchdogTimers.has(perfil)) slaWatchdogTimers.set(perfil, new Map());
-    return slaWatchdogTimers.get(perfil);
-  }
-
-  function clearCollectTimer(perfil, chatId) {
-    try {
-      const m = getCollectTimerMap(perfil);
-      if (m.has(chatId)) { clearTimeout(m.get(chatId)); m.delete(chatId); }
-    } catch {}
-  }
-
-  function clearSlaWatchdog(perfil, chatId) {
-    try {
-      const m = getSlaWatchdogMap(perfil);
-      if (m.has(chatId)) { clearTimeout(m.get(chatId)); m.delete(chatId); }
-    } catch {}
-  }
+  // REMOVIDO: getCollectTimerMap, getSlaWatchdogMap, clearCollectTimer, clearSlaWatchdog - agora usando filas em disco
 
   async function scanAndProcessChats(nome) {
     // Guard de reentrância: nunca roda dois scans em paralelo para o mesmo perfil
@@ -3218,127 +3261,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   // REMOVIDO: timersFechamento, dadosColetados, pedidosEnviados, enviarPedidoParaNotificador, enviarMensagemFinal
   // Toda lógica de business agora gerenciada pelo virtusFSM
-
-
-  async function ensureLocationPrefetch(chatId) {
-    try {
-      const man = await manifestStore.read(nome).catch(()=>null);
-      const cidade = man && man.cidade || null;
-      const estado = man && man.estado || null;
-      if (cidade) {
-        await virtusFSM.patch(nome, chatId, { cidade, estado });
-      }
-    } catch {}
-  }
-
-  async function runner() {
-    const attId = stepLog.attemptId();
-
-    let manifestFrozenUntil = 0;
-    try {
-      const manifest = await manifestStore.read(nome);
-      if (manifest && manifest.frozenUntil) {
-        manifestFrozenUntil = Number(manifest.frozenUntil);
-      }
-    } catch {}
-
-    if (manifestFrozenUntil > Date.now()) {
-      logger.warn(`[VIRTUS][${nome}] Manifesto congelado até ${new Date(manifestFrozenUntil).toISOString()}`);
-      return;
-    }
-
-    running = true;
-    logger.info(`[VIRTUS][${nome}] Iniciando runner`);
-
-    try {
-      const p = await ensurePage();
-      if (!p) {
-        logger.warn(`[VIRTUS][${nome}] ensurePage retornou null`);
-        running = false;
-        return;
-      }
-
-      // Espera UI Messenger ficar visível, sem navegar
-      try {
-        await Promise.race([
-          p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 30000 }),
-          p.waitForSelector('div[role="row"]', { timeout: 30000 })
-        ]);
-      } catch {
-        stepLog.appendJSONL(nome, 'virtus', { step: 'messenger_ui_wait_timeout', ts: Date.now() });
-        await sleep(2500);
-      }
-      NAV_CLICK_ONLY = true;
-      stepLog.appendJSONL(nome, 'virtus', { step: 'nav_click_only_lock_enabled' });
-
-      // Instala NAV_GUARD no browser.js
-      try {
-        const browserJs = require('./browser.js');
-        if (browserJs && typeof browserJs.enforceClickOnlyNavigation === 'function') {
-          await browserJs.enforceClickOnlyNavigation(p, nome);
-        }
-      } catch {}
-
-      const onNewChatDetected = (payload) => {
-        try {
-          if (!payload || !payload.id) return;
-          const chatId = String(payload.id || '').trim();
-          if (!chatId) return;
-          stepLog.appendJSONL(nome, 'virtus', { step: 'new_chat_detected', chatId, ts: Date.now() });
-        } catch {}
-      };
-
-      await installChatFeedObserver(p, nome, onNewChatDetected);
-
-      startCollectRunner(nome);
-
-      // [REMOVIDO: Handler de localização — localização vem do manifest]
-    } catch (err) {
-      if (!running) return;
-      logger.error(`[VIRTUS][${nome}] Erro no runner`, { error: err && err.message || err });
-      running = false;
-      return;
-    }
-
-    // Loop principal de scan
-    setInterval(() => {
-      if (isScanBlocked(nome)) {
-        try { stepLog.appendJSONL(nome, 'virtus', { step: 'scan_tick_skip_blocked', ts: Date.now() }); } catch {}
-        return;
-      }
-      scanAndProcessChats(nome);
-    }, SCAN_INTERVAL_MS);
-
-    // Inicia fila de envio
-    iniciarFilaEnvioMessenger(nome, enviarRespostaMessengerSeguraLocal, marcarRespondidoLocal, async () => {
-      try {
-        const p = await ensurePage().catch(() => null);
-        return (p && typeof p.url === 'function') ? (p.url() || '') : '';
-      } catch {
-        return '';
-      }
-    });
-
-    // Inicia polling do notificador
-    iniciarPollingNotificador(nome);
-
-    logger.info(`[VIRTUS][${nome}] Runner iniciado com sucesso`);
-  }
-
-  // REMOVIDO: timersFechamento, dadosColetados, pedidosEnviados, enviarPedidoParaNotificador, enviarMensagemFinal
-  // Toda lógica de business agora gerenciada pelo virtusFSM
-
-
-  async function ensureLocationPrefetch(chatId) {
-    try {
-      const man = await manifestStore.read(nome).catch(()=>null);
-      const cidade = man && man.cidade || null;
-      const estado = man && man.estado || null;
-      if (cidade) {
-        await virtusFSM.patch(nome, chatId, { cidade, estado });
-      }
-    } catch {}
-  }
 
   async function runner() {
     const attId = stepLog.attemptId();
