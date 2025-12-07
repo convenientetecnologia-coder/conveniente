@@ -340,6 +340,44 @@ function preventEcho(lastClientMsg, answer) {
   }
 }
 
+function hasAssistantGreeting(historico) {
+  try {
+    return (historico || []).some(m =>
+      m && m.autor === 'ia' &&
+      /^(oi|ol[aá]|bom\s+dia|boa\s+(tarde|noite|dia))\b/i.test(String(m.texto || ''))
+    );
+  } catch { return false; }
+}
+
+function hasAssistantDisclaimer(historico) {
+  try {
+    return (historico || []).some(m =>
+      m && m.autor === 'ia' &&
+      /eu\s+apenas\s+anoto\s+o\s+pedido/i.test(String(m.texto || ''))
+    );
+  } catch { return false; }
+}
+
+// Remove saudação e disclaimer repetidos se já houver no histórico
+function stripDuplicateGreetingAndDisclaimer(answer, historico) {
+  try {
+    if (!answer) return answer;
+    let out = String(answer);
+
+    const greetedBefore = hasAssistantGreeting(historico);
+    const disclaimerBefore = hasAssistantDisclaimer(historico);
+
+    if (greetedBefore) {
+      out = out.replace(/^(?:\s*(?:oi|ol[aá]|bom\s+dia|boa\s+(?:tarde|noite|dia))\b[!.,\s]*)+/i, '').trim();
+    }
+    if (disclaimerBefore) {
+      out = out.replace(/\s*eu\s+apenas\s+anoto\s+o\s+pedido[\s\S]*?(?:whatsapp|zap)[^.!?]*[.!?]?\s*/i, ' ').trim();
+    }
+    out = out.replace(/\s+([,.!?;:])/g, '$1').replace(/([,.!?;:]){2,}/g, '$1').trim();
+    return out || answer;
+  } catch { return answer; }
+}
+
 // ========== CONSTRUÇÃO DE PROMPTS ==========
 
 const { promptFretes } = require('./promptFretes.js');
@@ -573,6 +611,9 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
       audit(perfil, 'virtus', 'info', 'llm_master_start', { chatId, msgsLen: messages.length, respond });
       const out = await callOpenAI(messages, sysPrompt, respond, perfil, chatId);
       const result = parseResponse(out.content || '', lastClientMsg);
+      
+      // Anti-saudação/disclaimer duplicado (aplica filtro pós-LLM)
+      result.answer = stripDuplicateGreetingAndDisclaimer(result.answer, historico);
       
       if (!result || !result.answer) {
         audit(perfil, 'virtus', 'warn', 'llm_empty_or_parse_fail', { chatId });

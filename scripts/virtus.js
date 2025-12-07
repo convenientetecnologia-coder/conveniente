@@ -3421,25 +3421,21 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await virtusFSM.patch(nome, chatId, {
             cursor: { ...(fsmState && fsmState.cursor || {}), feed: { ...(feedCursor || {}), sig: feedSig, preview: (it.preview || ''), seenAt: now } }
           });
+
           if (actionable) {
-            const lastScanAt = Number(fsmState && fsmState.lastScanAt || 0);
-            if ((now - lastScanAt) < SCAN_COLLECT_MIN_GAP_MS) {
-              audit(nome, 'virtus', 'info', 'scan_skip_collect_gap', {
-                chatId, sinceMs: (now - lastScanAt), minMs: SCAN_COLLECT_MIN_GAP_MS
-              });
-              continue;
-            }
-
-            const existingPath = jobPath(nome, 'collect', chatId);
-            let existing = null;
-            try { if (fsRaw.existsSync(existingPath)) existing = loadJob(existingPath); } catch {}
-            if (existing && Number(existing.dueAt || 0) >= now) {
-              audit(nome, 'virtus', 'info', 'scan_skip_collect_already_queued', { chatId, dueAt: new Date(existing.dueAt).toISOString() });
-              continue;
-            }
-
-            await enqueueJob(nome, { kind: 'collect', chatId, dueAt: now + 45000, payload: { tokenSig: feedSig } });
-            audit(nome, 'virtus', 'info', 'scan_feed_changed', { chatId, feedSig, prevSig: prevFeedSig });
+            // BLINDADO: SEM throttle, SEM skip por collect existente
+            const targetDue = now + 45000; // 45s
+            await enqueueJob(nome, {
+              kind: 'collect',
+              chatId,
+              dueAt: targetDue,
+              payload: { tokenSig: feedSig, origin: 'scan_feed_changed' }
+            });
+            audit(nome, 'virtus', 'info', 'scan_feed_changed_collect_enqueued', {
+              chatId, feedSig, dueAt: new Date(targetDue).toISOString()
+            });
+          } else {
+            audit(nome, 'virtus', 'info', 'scan_feed_seen', { chatId, feedSig });
           }
           continue;
         }
