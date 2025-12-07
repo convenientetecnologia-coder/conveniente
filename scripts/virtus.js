@@ -221,7 +221,7 @@ function isNoiseNorm(n) {
   if (/\bconveniente\b/.test(t) && t.length <= 80) return true;
 
   // Linhas curtas com tempo relativo, sem conteúdo semântico
-  if (/\b(min|mins?|minuto|minutos|hora|horas|day|days|dia|dias)\b/.test(t) && t.length <= 40) return true;
+  if (/\b\d+\s*(s|seg|secs?|seconds?|min|mins?|minute|minuto|minutos|h|hora|horas|d|dia|dias|day|days)\b/.test(t) && t.length <= 40) return true;
 
   return false;
 }
@@ -2171,11 +2171,6 @@ async function onDomEvent(perfil, evt) {
     let state = null; try { state = virtusFSM.get(perfil, evt.chatId); } catch {}
     if (state && state.cursor && state.cursor.feed && state.cursor.feed.sig === feedSig) {
       audit(perfil, 'virtus', 'info', 'detec_feed_nochange', { chatId: evt.chatId, feedSig });
-      const lastClientTs = Number(state?.cursor?.client?.lastTs || 0);
-      if (!lastClientTs || (Date.now() - lastClientTs) > 60000) {
-        startCollectWait(perfil, evt.chatId, 'feed_changed_no_clientmsg', Number(evt.ts)||Date.now());
-        audit(perfil, 'virtus', 'debug', 'feed_event_coalesced', { chatId: evt.chatId, reason: 'no_recent_clientmsg' });
-      }
       return;
     }
     await virtusFSM.patch(perfil, evt.chatId, {
@@ -3292,9 +3287,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 }).catch(()=>false);
         if (!ok) return { ok: false, historico: [] };
+        await p.waitForFunction(() => {
+          const main = document.querySelector('div[role="main"]');
+          const grid = main && (main.querySelector('div[role="grid"]') || main.querySelector('div[role="rowgroup"]'));
+          if (!grid) return false;
+          const rows = grid.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]');
+          return rows.length > 0;
+        }, { timeout: 2000 }).catch(()=>{});
         // FAZ A COLETA PADRÃO (collector.js)
-        const hist = await collectClientMessagesFromMessenger(p);
-        return { ok: true, historico: hist };
+        const raw = await collectClientMessagesFromMessenger(p);
+        const hist1 = Array.isArray(raw) ? raw : (Array.isArray(raw?.out) ? raw.out : []);
+        if (raw && raw.dbg) {
+          try { stepLog.appendJSONL('GLOBAL','virtus',{ step:'collector_stats', chatId, ...raw.dbg }); } catch {}
+        }
+        let historicoConversa = hist1;
+        if (!historicoConversa || historicoConversa.length === 0) {
+          const alt = await extrairHistoricoConversa(p);
+          if (Array.isArray(alt)) historicoConversa = alt;
+          // log de depuração
+          try { stepLog.appendJSONL('GLOBAL','virtus',{ step:'collector_fallback_used', chatId }); } catch {}
+        }
+        return { ok: true, historico: historicoConversa };
       });
 
       if (!navRes || !navRes.ok) {
