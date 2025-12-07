@@ -1764,6 +1764,9 @@ async function maybeGuaranteeMarketplaceFast(page, nome) {
     const ok = await page.evaluate(() =>
       !!document.querySelector('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]') || !!document.querySelector('div[role="row"]')
     ).catch(()=>false);
+    if (ok) {
+      await ensureObserversInstalled(page, nome).catch(()=>{});
+    }
     return !!ok;
   }
 
@@ -1849,7 +1852,10 @@ async function garantirMarketplace(page, { timeoutMs = 25000, nome = null, allow
       ).catch(()=>false),
       new Promise(r => setTimeout(()=>r(false), 800))
     ]);
-    if (alreadyOk) return;
+    if (alreadyOk) {
+      await ensureObserversInstalled(page, nome).catch(()=>{});
+      return;
+    }
   } catch {}
 
   if (!allowNavigate) {
@@ -2115,9 +2121,12 @@ async function onDomEvent(perfil, evt) {
     }
     startCollectWait(perfil, evt.chatId, 'feed_changed', evt.ts);
   } else if (evt.type === 'client_msg') {
+    // Sanitizar timestamp para evitar NaN
+    let evtTs = Number(evt.ts || Date.now());
+    if (!Number.isFinite(evtTs) || evtTs <= 0) evtTs = Date.now();
     // Calcular msgSig no Node
     const textoNorm = String(evt.textoNorm || evt.texto || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    const msgSig = sha1(`cliente|${textoNorm}|${Math.floor((evt.ts || Date.now())/60000)}`);
+    const msgSig = sha1(`cliente|${textoNorm}|${Math.floor(evtTs/60000)}`);
     audit(perfil, 'virtus', 'info', 'detec_event', { type: 'client_msg', chatId: evt.chatId, msgSig });
     let st = null;
     try { st = virtusFSM.get(perfil, evt.chatId); } catch {}
@@ -2126,7 +2135,7 @@ async function onDomEvent(perfil, evt) {
       audit(perfil, 'virtus', 'warn', 'detec_ignored_dup_msgsig', { chatId: evt.chatId, msgSig });
       return;
     }
-    await appendChatHistoryLog(perfil, evt.chatId, [{ autor: 'cliente', texto: evt.texto, timestamp: evt.ts }]);
+    await appendChatHistoryLog(perfil, evt.chatId, [{ autor: 'cliente', texto: evt.texto, timestamp: evtTs }]);
     // ATUALIZE recentMsgSigs e lastMsgSig no chatStateStore. Mantenha a janela em 50.
     await virtusFSM.patch(perfil, evt.chatId, {
       cursor: {
@@ -2138,19 +2147,31 @@ async function onDomEvent(perfil, evt) {
         }
       }
     });
-    startCollectWait(perfil, evt.chatId, 'client_msg', evt.ts);
+    startCollectWait(perfil, evt.chatId, 'client_msg', evtTs);
   }
 }
 
 // Ponte de eventos do DOM para Node
 async function installDomEventBridge(page, perfil) {
-  await page.exposeFunction('virtusEmit', async (evt) => onDomEvent(perfil, evt)); // Ponte DOM->Node
-  await page.exposeFunction('virtusSha1', (str) => sha1(str)); // Expor sha1 para DOM
+  async function safeExpose(name, fn) {
+    try { await page.exposeFunction(name, fn);}
+    catch (e) { const msg = String((e && e.message) || e); if (!/already exists|duplicate/i.test(msg)) throw e; }
+  }
+  await safeExpose('virtusEmit', async (evt) => onDomEvent(perfil, evt));
+  await safeExpose('virtusSha1', (str) => sha1(str));
+  // Futuro: toda navegação
   await page.evaluateOnNewDocument(() => {
-    window.__virtusEmit = (e) => { if (window.virtusEmit) window.virtusEmit(e); };
-    window.__virtusObserversInstalled = false;
-    window.sha1 = window.virtusSha1 || ((s) => s); // Fallback se não disponível
+    window.__virtusEmit = (e) => { try { if (window.virtusEmit) return window.virtusEmit(e); } catch {} };
+    window.__virtusObserversInstalled = !!window.__virtusObserversInstalled;
+    window.sha1 = window.virtusSha1 || ((s) => s);
   });
+  // Documento atual (CRÍTICO)
+  await page.evaluate(() => {
+    window.__virtusEmit = (e) => { try { if (window.virtusEmit) return window.virtusEmit(e); } catch {} };
+    window.sha1 = window.virtusSha1 || ((s) => s);
+    window.__virtusBridgeNow = true;
+  }).catch(()=>{});
+  audit(perfil, 'virtus', 'info', 'dom_bridge_ready', { nowDoc: true });
 }
 
 async function installInboxObserver(page) {
@@ -2192,7 +2213,12 @@ async function installThreadObserver(page) {
         if (autor !== 'cliente') return;
         const abbr = row.querySelector('abbr[aria-label]');
         let ts = Date.now();
-        if (abbr) ts = new Date(abbr.getAttribute('aria-label') || Date.now()).getTime();
+        if (abbr) {
+          try {
+            const parsed = new Date(abbr.getAttribute('aria-label') || Date.now()).getTime();
+            if (parsed && Number.isFinite(parsed) && parsed > 0) ts = parsed;
+          } catch {}
+        }
         const textoNorm = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
         const chatId = (window.location.pathname.match(/\/marketplace\/[tv]\/(\d+)/)||[])[1];
         if (!chatId) return;
@@ -2210,6 +2236,13 @@ async function installThreadObserver(page) {
 async function ensureObserversInstalled(page, perfil) {
   await installInboxObserver(page).catch(()=>{});
   await installThreadObserver(page).catch(()=>{});
+  const state = await page.evaluate(() => ({
+    inboxObs: !!window.__virtusInboxObs,
+    threadObs: !!window.__virtusThreadObs,
+    hasEmit: typeof window.__virtusEmit === 'function',
+    hasBinding: typeof window.virtusEmit === 'function'
+  })).catch(()=>null);
+  audit(perfil, 'virtus', 'info', 'observers_state', state || {});
 }
 
 async function scrollChatsToTop(page, nome) {
@@ -3884,5 +3917,7 @@ function __dumpQueuesState(perfil) {
 module.exports = {
   startVirtus,
   markPedidoSent,
-  __dumpQueuesState
+  __dumpQueuesState,
+  queueMessengerSend,
+  getPendingSet
 };
