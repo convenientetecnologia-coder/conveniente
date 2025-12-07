@@ -1,4 +1,12 @@
 // scripts/stepLog.js
+// 
+// TAGS OBRIGATÓRIAS DO PIPELINE VIRTUS:
+// - Entrada de evento: 'detec_event'
+// - Fila 45s: 'fila_coleta_start', 'fila_coleta_reset', 'coletado_job_enqueued'
+// - Coleta: 'coletado_exec_ok', 'coletado_skip_no_new', 'llm_call_start', 'llm_call_end', 'llm_skip_duplicate', 'llm_exception'
+// - Fila 30–90s: 'fila_envio_enqueued', 'fila_envio_pick'
+// - Envio: 'send_context_verified', 'enviado_usuario_ok', 'enviado_usuario_fail'
+// - Finalização: 'finalize_closing_msg_enqueued', 'done', 'queue_drop_no_cursorSig', 'detec_ignored_dup_msgsig'
 
 'use strict';
 const fs = require('fs');
@@ -48,9 +56,37 @@ function attemptId() {
   return `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
 }
 
+// Contador de ignorados por dedup (métrica opcional)
+const dedupCounters = new Map(); // tag -> count
+
+function incrementDedupCounter(tag) {
+  const count = (dedupCounters.get(tag) || 0) + 1;
+  dedupCounters.set(tag, count);
+  return count;
+}
+
+function getDedupCounters() {
+  const out = {};
+  for (const [tag, count] of dedupCounters.entries()) {
+    out[tag] = count;
+  }
+  return out;
+}
+
+function resetDedupCounters() {
+  dedupCounters.clear();
+}
+
 function audit(perfil, flow, level, tag, ctx = {}) {
   const payload = { ts: Date.now(), step: tag, ...ctx };
   try { appendJSONL(perfil, flow, payload); } catch {}
+  
+  // Incrementa contador de dedup para tags de ignorados
+  const dedupTags = ['detec_ignored_dup_msgsig', 'queue_drop_no_cursorSig', 'coletado_skip_no_new', 'llm_skip_duplicate'];
+  if (dedupTags.includes(tag)) {
+    incrementDedupCounter(tag);
+  }
+  
   try {
     const line = `[${flow.toUpperCase()}][${tag.toUpperCase()}] ` + 
       Object.entries({ perfil, ...ctx })
@@ -63,4 +99,4 @@ function audit(perfil, flow, level, tag, ctx = {}) {
   } catch {}
 }
 
-module.exports = { appendJSONL, attemptId, audit };
+module.exports = { appendJSONL, attemptId, audit, incrementDedupCounter, getDedupCounters, resetDedupCounters };

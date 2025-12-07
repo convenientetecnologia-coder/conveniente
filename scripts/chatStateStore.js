@@ -38,8 +38,20 @@ function initState() {
   return { 
     // Somente campos essenciais ao ciclo minimalista:
     cursor: {
-      client: { count: 0, digest: '', lastTs: 0, contentSig: '' }, 
-      ia: { sentSig: '', queuedSig: '' }, 
+      client: { 
+        count: 0, 
+        digest: '', 
+        lastTs: 0, 
+        contentSig: '', 
+        lastMsgSig: '',          // NOVO: fingerprint da última mensagem cliente
+        recentMsgSigs: []        // NOVO: fingerprint das últimas 50 mensagens cliente
+      }, 
+      ia: { 
+        sentSig: '', 
+        queuedSig: '', 
+        lastLlmSig: '',          // NOVO: fingerprint do último contentSig processado pela LLM
+        lastLlmAt: 0             // NOVO: timestamp da última chamada bem-sucedida da LLM
+      }, 
       feed: {}
     },
     data: {},        // Só dados essenciais para Última extração, lastClientNorm/lastClientTs/etc
@@ -68,6 +80,18 @@ function monotonicMerge(prev, next) {
     const p = Number(prev && prev[k] || 0);
     const n = Number(out && out[k] || 0);
     if (p && n && n < p) out[k] = p;
+  }
+  // Garantir monotonicidade de lastLlmAt em cursor.ia
+  if (prev && prev.cursor && prev.cursor.ia && prev.cursor.ia.lastLlmAt) {
+    const prevLlmAt = Number(prev.cursor.ia.lastLlmAt || 0);
+    if (out && out.cursor && out.cursor.ia && out.cursor.ia.lastLlmAt) {
+      const nextLlmAt = Number(out.cursor.ia.lastLlmAt || 0);
+      if (prevLlmAt && nextLlmAt && nextLlmAt < prevLlmAt) {
+        if (!out.cursor) out.cursor = {};
+        if (!out.cursor.ia) out.cursor.ia = {};
+        out.cursor.ia.lastLlmAt = prevLlmAt;
+      }
+    }
   }
   return out;
 }
@@ -105,7 +129,29 @@ function patch(perfil, chatId, patchObj){
     fd = acquireFileLock(lockPath);
     let cur = readSafe(file, null);
     if (!cur) cur = initState();
+    
+    // MERGE robusto nos campos de fingerprint:
     let next = monotonicMerge(cur, patchObj || {});
+
+    // TRATAMENTO ESPECIAL recentMsgSigs: concatena, remove duplicatas e limita a 50
+    if (cur &&
+        cur.cursor && cur.cursor.client && Array.isArray(cur.cursor.client.recentMsgSigs) &&
+        next.cursor && next.cursor.client && Array.isArray(next.cursor.client.recentMsgSigs)
+    ) {
+      const prev = cur.cursor.client.recentMsgSigs;
+      const add  = next.cursor.client.recentMsgSigs;
+      const unique = Array.from(new Set([...prev, ...add])).slice(-50); // 50 mais recentes
+      next.cursor.client.recentMsgSigs = unique;
+    } else if (next.cursor && next.cursor.client && Array.isArray(next.cursor.client.recentMsgSigs)) {
+      // Se não havia antes mas há agora, apenas remove duplicatas e limita a 50
+      next.cursor.client.recentMsgSigs = Array.from(new Set(next.cursor.client.recentMsgSigs)).slice(-50);
+    } else if (cur && cur.cursor && cur.cursor.client && Array.isArray(cur.cursor.client.recentMsgSigs)) {
+      // Se havia antes mas não há no patch, mantém o anterior
+      if (!next.cursor) next.cursor = {};
+      if (!next.cursor.client) next.cursor.client = {};
+      next.cursor.client.recentMsgSigs = cur.cursor.client.recentMsgSigs;
+    }
+
     writeAtomicNoLock(file, next);
     audit(perfil, 'virtus', 'info', 'state_patch_end', { chatId });
     return next;

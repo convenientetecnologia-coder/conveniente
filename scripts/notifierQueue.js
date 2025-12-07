@@ -1,5 +1,7 @@
 'use strict';
 
+// ATENÇÃO: NÃO existe mais polling inbound. Consuma SSE via notifierInboundSSE.js (novo script) para receber respostas externas.
+
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger.js');

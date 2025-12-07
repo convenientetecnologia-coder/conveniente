@@ -4,6 +4,7 @@
 // 
 // IMPORTANTE: NENHUM código deve gravar em manifest.json sem explicitamente usar o lock com acquireFileLock/releaseFileLock.
 // O lock físico (manifest.json.lck) garante exclusão mútua inter-process.
+// LOCKS FÍSICOS SÃO SEMPRE PROMISE-BASED COM DELAY NÃO BLOQUEANTE PARA ESCALABILIDADE.
 
 'use strict';
 
@@ -40,20 +41,16 @@ function isLockStale(lockPath, maxAgeMs = 2 * 60 * 1000) {
   }
 }
 
-function safeSleep(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {/* busy-wait */}
-}
 
 /**
  * Adquire lock de arquivo físico (cross-process) com suporte a reentrância e limpeza de locks stale.
  * @param {string} lockPath - Caminho do arquivo de lock (.lck)
  * @param {number} maxWaitMs - Tempo máximo de espera em ms (padrão 5000)
  * @param {number} stepDelayMs - Delay entre tentativas em ms (padrão 10)
- * @returns {number} File descriptor do lock adquirido
+ * @returns {Promise<number>} File descriptor do lock adquirido
  * @throws {Error} Se timeout após maxWaitMs
  */
-function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
+async function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
   // Reentrância: se já possuímos, apenas incremente contagem
   const h = heldLocks.get(lockPath);
   if (h && typeof h.fd === 'number') {
@@ -84,7 +81,7 @@ function acquireFileLock(lockPath, maxWaitMs = 5000, stepDelayMs = 10) {
             audit('GLOBAL', 'virtus', 'error', 'manifest_flock_timeout', { lockPath, maxWaitMs });
             throw new Error('file_lock_timeout:' + lockPath);
           }
-          safeSleep(stepDelayMs);
+          await sleep(stepDelayMs);
           continue;
         }
         throw e;
@@ -182,7 +179,7 @@ async function read(nome) {
     let fd = null;
     try {
       // Adquire lock físico antes de ler
-      fd = acquireFileLock(lockPath);
+      fd = await acquireFileLock(lockPath);
       
       // Tolerante a janela de rename: 5 tentativas com backoff (20ms)
       for (let i = 0; i < 5; i++) {
@@ -222,7 +219,7 @@ async function write(nome, man) {
     let fd = null;
     try {
       // Adquire lock físico antes de escrever
-      fd = acquireFileLock(lockPath);
+      fd = await acquireFileLock(lockPath);
       writeJsonAtomic(file, man);
       audit(nome, 'virtus', 'info', 'manifest_write_end', { file });
       return true;
@@ -245,7 +242,7 @@ async function update(nome, patchFn) {
     let fd = null;
     try {
       // Adquire lock físico antes de ler
-      fd = acquireFileLock(lockPath);
+      fd = await acquireFileLock(lockPath);
       
       const cur = readJsonSafe(file, {}) || {};
       let next = await Promise.resolve(patchFn(cur)) || cur;
