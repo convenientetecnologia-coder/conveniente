@@ -148,14 +148,18 @@ function normalizeContent(s) {
 function sanitizeFeedPreview(s) {
   try {
     let t = String(s || '')
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g,'')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
       .toLowerCase();
 
-    // Remove indicações de tempo/voláteis
-    t = t.replace(/\b(agora|just\s*now|now|hoje|ontem)\b/g, ' ');
+    t = t.replace(/\b(agora|just\s*now|now|hoje|ontem|yesterday)\b/g, ' ');
     t = t.replace(/\b\d{1,2}:\d{2}\b/g, ' ');
     t = t.replace(/\b\d+\s*(s|seg|sec|secs?|seconds?|min|mins?|minute|minuto|minutos|h|hora|horas|d|dia|dias|sem|semana|semanas|week|weeks)\b/g, ' ');
+    t = t.replace(/\b(voce:|v[oó]ce:|you:)\b/g, ' ');
+    t = t.replace(/\b(voce\s+enviou|you\s+sent)\b/g, ' ');
+    t = t.replace(/\b(mensagem\s+nao\s+lida)\b/g, ' ');
+    t = t.replace(/\b(inserir|carregando\.\.\.|carregando)\b/g, ' ');
+    t = t.replace(/\b(enviado|enviada|delivered|visto|visualizado|lida|seen)\b/g, ' ');
+    t = t.replace(/[·•]/g, ' ');
     t = t.replace(/\s+/g, ' ').trim();
     return t;
   } catch {
@@ -190,6 +194,11 @@ function isNoiseNorm(n) {
   const t0 = normalizeContent(s);
   const t = t0.replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
   if (!t) return true;
+
+  if (/\b(carregando|carregando\.\.\.|inserir)\b/.test(t)) return true;
+  if (/^voce\s*:|^you\s*:/.test(t)) return true;
+  if (/\b(voce\s+enviou|you\s+sent)\b/.test(t)) return true;
+  if (/\b(mensagem\s+nao\s+lida)\b/.test(t)) return true;
 
   // Lixos comuns do Messenger/Marketplace
   if (t === 'inserir') return true;
@@ -682,6 +691,13 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
     for (const m of novos) {
       const rawToCheck = String(m && m.texto || '').trim();
       if (!rawToCheck || /^[\W_]+$/.test(rawToCheck)) continue;
+      
+      // Filtro de ruído antes de gravar
+      const textoNormCheck = normalizeContent(rawToCheck);
+      if (isNoiseNorm(textoNormCheck) || /^voce\s*:|^you\s*:|^(voce\s+enviou|you\s+sent)|^(inserir|carregando|mensagem\s+nao\s+lida)|^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/i.test(textoNormCheck)) {
+        audit(perfil, 'virtus', 'warn', 'chatlog_drop_noise', { chatId, texto: rawToCheck.slice(0, 100) });
+        continue;
+      }
       
       // Sanitiza mensagens antes de salvar (remove telefones completos)
       const mSanitizado = Object.assign({}, m);
@@ -2106,7 +2122,12 @@ async function onDomEvent(perfil, evt) {
   if (evt.type === 'feed_changed') {
     // Calcular feedSig corretamente com sanitizeFeedPreview
     const previewRaw = String(evt.preview || '').slice(0, 400);
-    const feedSig = sha1(sanitizeFeedPreview(previewRaw));
+    const cleaned = sanitizeFeedPreview(previewRaw);
+    if (!cleaned || isNoiseNorm(cleaned)) {
+      audit(perfil, 'virtus', 'warn', 'detec_feed_noise_drop', { chatId: evt.chatId, previewRaw: previewRaw.slice(0, 100) });
+      return;
+    }
+    const feedSig = sha1(cleaned);
     audit(perfil, 'virtus', 'info', 'detec_event', { type: 'feed_changed', chatId: evt.chatId, feedSig });
     let state = null; try { state = virtusFSM.get(perfil, evt.chatId); } catch {}
     if (state && state.cursor && state.cursor.feed && state.cursor.feed.sig === feedSig) {
@@ -2125,7 +2146,12 @@ async function onDomEvent(perfil, evt) {
     let evtTs = Number(evt.ts || Date.now());
     if (!Number.isFinite(evtTs) || evtTs <= 0) evtTs = Date.now();
     // Calcular msgSig no Node
-    const textoNorm = String(evt.textoNorm || evt.texto || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const textoNormRaw = String(evt.textoNorm || evt.texto || '');
+    const textoNorm = normalizeContent(textoNormRaw);
+    if (!textoNorm || isNoiseNorm(textoNorm) || /^voce\s*:|^you\s*:|^(voce\s+enviou|you\s+sent)|^(inserir|carregando|mensagem\s+nao\s+lida)/i.test(textoNorm)) {
+      audit(perfil, 'virtus', 'warn', 'detec_client_noise_drop', { chatId: evt.chatId, texto: textoNormRaw.slice(0, 100) });
+      return;
+    }
     const msgSig = sha1(`cliente|${textoNorm}|${Math.floor(evtTs/60000)}`);
     audit(perfil, 'virtus', 'info', 'detec_event', { type: 'client_msg', chatId: evt.chatId, msgSig });
     let st = null;
@@ -2180,22 +2206,81 @@ async function installInboxObserver(page) {
     window.__virtusInboxObs = true;
     const root = document.querySelector('div[role="grid"], div[role="rowgroup"], div.x78zum5.xdt5ytf') || document.body;
     if (!root) return;
-    const emit = (chg) => {
-      Array.from(root.querySelectorAll('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]')).forEach(a => {
+
+    window.__virtusFeedSigById = window.__virtusFeedSigById || new Map();
+
+    function norm(s) {
+      try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+      catch { return String(s||'').toLowerCase().trim(); }
+    }
+    function sanitizePreview(txt) {
+      // Use a mesma lógica do sanitizeFeedPreview do backend inline
+      let t = norm(txt);
+      t = t.replace(/\b(agora|hoje|ontem|yesterday)\b/g, ' ');
+      t = t.replace(/\b(voce:|v[oó]ce:|you:)\b/g, ' ');
+      t = t.replace(/\b(voce\s+enviou|you\s+sent)\b/g, ' ');
+      t = t.replace(/\b(mensagem\s+nao\s+lida)\b/g, ' ');
+      t = t.replace(/\b(inserir|carregando\.\.\.|carregando)\b/g, ' ');
+      t = t.replace(/\b(enviado|enviada|delivered|visto|visualizado|lida|seen)\b/g, ' ');
+      t = t.replace(/[·•]/g, ' ');
+      t = t.replace(/\b\d{1,2}:\d{2}\b/g, ' ');
+      t = t.replace(/\b\d+\s*(s|seg|sec|mins?|minute|minuto|minutos|hour|hora|horas|d|dia|dias|week|weeks)\b/g, ' ');
+      t = t.replace(/\s+/g, ' ').trim();
+      return t;
+    }
+    function isPreviewNoise(p) {
+      const n = sanitizePreview(p);
+      if (!n) return true;
+      if (n.length <= 2) return true;
+      if (/^(enviado|lida|seen|visualizado)$/.test(n)) return true;
+      return false;
+    }
+
+    function processRow(row) {
+      try {
+        const a = row.querySelector('a[href^="/marketplace/t/"], a[href^="/marketplace/v/"]');
+        if (!a) return;
         const href = a.getAttribute('href') || a.href || '';
-        const id = (href.match(/\/marketplace\/[tv]\/(\d+)/)||[])[1];
-        if (id) {
-          const row = a.closest('div[role="row"]') || a.parentElement;
-          const preview = row ? ((row.innerText||row.textContent||'').trim().slice(0,400)) : '';
-          window.__virtusEmit && window.__virtusEmit({
-            type: 'feed_changed', chatId: id, preview, ts: Date.now()
-          });
+        const m = href.match(/\/marketplace\/[tv]\/(\d+)/);
+        const id = m ? m[1] : null;
+        if (!id) return;
+
+        const rawPreview = (row.innerText || row.textContent || '').slice(0, 800);
+        if (isPreviewNoise(rawPreview)) return;
+
+        const cleaned = sanitizePreview(rawPreview);
+        const sig = (window.sha1 ? window.sha1(cleaned) : cleaned);
+        const last = window.__virtusFeedSigById.get(id);
+
+        if (last === sig) return;
+        window.__virtusFeedSigById.set(id, sig);
+
+        window.__virtusEmit && window.__virtusEmit({
+          type: 'feed_changed', chatId: id, preview: rawPreview, ts: Date.now()
+        });
+      } catch {}
+    }
+
+    const obs = new MutationObserver((records) => {
+      const rows = new Set();
+      for (const r of records) {
+        if (r.target && r.target.closest) {
+          const row = r.target.closest('div[role="row"]');
+          if (row) rows.add(row);
         }
-      });
-    };
-    const obs = new MutationObserver(emit);
+        for (const n of Array.from(r.addedNodes||[])) {
+          if (!(n instanceof Element)) continue;
+          const row = n.closest('div[role="row"]');
+          if (row) rows.add(row);
+        }
+      }
+      for (const row of rows) processRow(row);
+    });
     obs.observe(root, { childList: true, subtree: true });
-    emit();
+
+    // varredura inicial mínima
+    const initRows = Array.from(root.querySelectorAll('div[role="row"]')).slice(0, 50);
+    for (const r of initRows) processRow(r);
   });
 }
 
@@ -2203,33 +2288,86 @@ async function installThreadObserver(page) {
   await page.evaluate(() => {
     if (window.__virtusThreadObs) return;
     window.__virtusThreadObs = true;
+
     const grid = document.querySelector('div[role="main"]') || document.body;
     if (!grid) return;
-    const emit = (chg) => {
-      Array.from(grid.querySelectorAll('div[role="row"],div[data-testid],div[role="article"]')).forEach(row => {
-        const autor = row.querySelector('[data-testid="outgoing"]') ? 'ia' : 'cliente';
-        const texto = (row.innerText || row.textContent || '').trim();
-        if (!texto) return;
-        if (autor !== 'cliente') return;
-        const abbr = row.querySelector('abbr[aria-label]');
-        let ts = Date.now();
-        if (abbr) {
-          try {
-            const parsed = new Date(abbr.getAttribute('aria-label') || Date.now()).getTime();
-            if (parsed && Number.isFinite(parsed) && parsed > 0) ts = parsed;
-          } catch {}
+
+    window.__virtusMsgSeen = window.__virtusMsgSeen || new Map(); // chatId -> Map(sig->ts)
+
+    function nowMinBucket(ts) { return Math.floor((ts || Date.now()) / 60000); }
+    function norm(s) { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+    function isUiMine(row, textNorm) {
+      try {
+        if (row.querySelector('[data-testid="outgoing"]')) return true;
+      } catch {}
+      if (/^(voce:|you:)\b/.test(textNorm)) return true;
+      if (/\b(voce\s+enviou|you\s+sent)\b/.test(textNorm)) return true;
+      try {
+        const st = window.getComputedStyle(row);
+        if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) return true;
+      } catch {}
+      return false;
+    }
+    function isThreadNoise(textNorm) {
+      if (!textNorm) return true;
+      if (/^(inserir|carregando|mensagem nao lida|hoje|ontem)$/.test(textNorm)) return true;
+      if (/^\d{1,2}:\d{2}$/.test(textNorm)) return true;
+      if (/^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(textNorm)) return true;
+      if (/^\W+$/.test(textNorm)) return true;
+      return false;
+    }
+    function emitRow(row) {
+      const texto = (row.innerText || row.textContent || '').trim();
+      if (!texto) return;
+
+      const textoNorm = norm(texto);
+      if (isThreadNoise(textoNorm)) return;
+      if (isUiMine(row, textoNorm)) return;
+
+      const abbr = row.querySelector('abbr[aria-label]');
+      let ts = Date.now();
+      if (abbr) {
+        const raw = abbr.getAttribute('aria-label') || abbr.innerText || abbr.textContent || '';
+        const dp = Date.parse(raw);
+        if (Number.isFinite(dp) && dp > 0) ts = dp;
+      }
+
+      const chatIdMatch = (window.location.pathname.match(/\/marketplace\/[tv]\/(\d+)/)||[]);
+      const chatId = chatIdMatch[1];
+      if (!chatId) return;
+
+      const sig = (window.sha1 ? window.sha1(`cliente|${textoNorm}|${nowMinBucket(ts)}`) : `${textoNorm}|${nowMinBucket(ts)}`);
+
+      const map = window.__virtusMsgSeen.get(chatId) || new Map();
+      if (map.has(sig)) return;
+      map.set(sig, Date.now());
+
+      // purge TTL 3 min
+      for (const [k, v] of Array.from(map.entries())) {
+        if (Date.now() - v > 180000) map.delete(k);
+      }
+
+      window.__virtusMsgSeen.set(chatId, map);
+
+      window.__virtusEmit && window.__virtusEmit({ type: 'client_msg', chatId, texto, ts, textoNorm });
+    }
+
+    const obs = new MutationObserver((records) => {
+      const rows = new Set();
+      for (const r of records) {
+        for (const n of Array.from(r.addedNodes || [])) {
+          if (!(n instanceof Element)) continue;
+          const row = n.closest && n.closest('div[role="row"],div[role="article"],div[data-testid]');
+          if (row) rows.add(row);
         }
-        const textoNorm = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-        const chatId = (window.location.pathname.match(/\/marketplace\/[tv]\/(\d+)/)||[])[1];
-        if (!chatId) return;
-        window.__virtusEmit && window.__virtusEmit({
-          type: 'client_msg', chatId, texto, ts, textoNorm
-        });
-      });
-    };
-    const obs = new MutationObserver(emit);
+        if (r.target && r.target.closest) {
+          const row = r.target.closest('div[role="row"],div[role="article"],div[data-testid]');
+          if (row) rows.add(row);
+        }
+      }
+      for (const row of rows) emitRow(row);
+    });
     obs.observe(grid, { childList: true, subtree: true });
-    emit();
   });
 }
 
