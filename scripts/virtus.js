@@ -1435,6 +1435,10 @@ const FINALIZACAO_FREEZE_MS = parseInt(process.env.VIRTUS_FINAL_FREEZE_MS || '25
 const VIRTUS_COLLECT_IDLE_MS = parseInt(process.env.VIRTUS_COLLECT_IDLE_MS || '0', 10); // repouso por chat pós-coleta (padrão 0)
 const VIRTUS_COLLECT_GAP_MS = parseInt(process.env.VIRTUS_COLLECT_GAP_MS || '1500', 10); // espaçamento entre coletas (anti-spam)
 
+// Novas flags de robustez (dedupe e feed)
+const VIRTUS_FEED_EVENTS = String(process.env.VIRTUS_FEED_EVENTS || '0') === '1'; // 0 = ignora eventos de feed_changed
+const VIRTUS_MSG_DEDUP_TTL_MS = Math.max(600000, parseInt(process.env.VIRTUS_MSG_DEDUP_TTL_MS || '7200000', 10)); // 2h mínimo
+
 // Claims/reaper/anti-drift/scan-blocked watchdog
 const VIRTUS_CLAIM_STALE_MS = parseInt(process.env.VIRTUS_CLAIM_STALE_MS || '900000', 10); // 15min
 const VIRTUS_CLAIM_HEARTBEAT_MS = parseInt(process.env.VIRTUS_CLAIM_HEARTBEAT_MS || '15000', 10); // 15s
@@ -2139,10 +2143,23 @@ async function goBackToInboxIfNeeded(page, perfil) {
   }
 }
 
+async function enqueueCollectNow(perfil, chatId, reason = 'client_msg') {
+  try {
+    await enqueueJob(perfil, { kind: 'collect', chatId, dueAt: Date.now(), payload: { origin: reason, fast: true } });
+    audit(perfil, 'virtus', 'info', 'job_created', { kind: 'collect', chatId, origin: reason });
+  } catch (e) {
+    audit(perfil, 'virtus', 'error', 'collect_enqueue_error', { chatId, error: (e && e.message) || String(e) });
+  }
+}
+
 async function onDomEvent(perfil, evt) {
   if (!evt || !evt.type) return;
   audit(perfil, 'virtus', 'debug', 'onDomEvent_called', { type: evt.type, chatId: evt.chatId });
   if (evt.type === 'feed_changed') {
+    if (!VIRTUS_FEED_EVENTS) {
+      audit(perfil, 'virtus', 'info', 'feed_event_disabled', { chatId: evt.chatId });
+      return;
+    }
     const previewRaw = String(evt.preview || '').slice(0, 400);
     const cleaned = sanitizeFeedPreview(previewRaw);
     if (!cleaned || isNoiseNorm(cleaned)) {
@@ -2154,7 +2171,6 @@ async function onDomEvent(perfil, evt) {
     let state = null; try { state = virtusFSM.get(perfil, evt.chatId); } catch {}
     if (state && state.cursor && state.cursor.feed && state.cursor.feed.sig === feedSig) {
       audit(perfil, 'virtus', 'info', 'detec_feed_nochange', { chatId: evt.chatId, feedSig });
-      // Mesmo sem mudança, mantenha o coalesce se não houver job/cliente recente
       const lastClientTs = Number(state?.cursor?.client?.lastTs || 0);
       if (!lastClientTs || (Date.now() - lastClientTs) > 60000) {
         startCollectWait(perfil, evt.chatId, 'feed_changed_no_clientmsg', Number(evt.ts)||Date.now());
@@ -2168,18 +2184,14 @@ async function onDomEvent(perfil, evt) {
     if (!state || !state.discoveredAt) {
       await virtusFSM.patch(perfil, evt.chatId, { discoveredAt: Date.now() });
     }
-    // NOVO: arme coleta a partir do feed em 45s (coalesce anti-ruído)
     startCollectWait(perfil, evt.chatId, 'feed_changed', Number(evt.ts)||Date.now());
     audit(perfil, 'virtus', 'info', 'feed_event_coalesced', { chatId: evt.chatId, feedSig });
     return;
   } else if (evt.type === 'client_msg') {
-    // Sanitizar timestamp para evitar NaN
     let evtTs = Number(evt.ts || Date.now());
     if (!Number.isFinite(evtTs) || evtTs <= 0) evtTs = Date.now();
-    // Calcular msgSig no Node
     const textoNormRaw = String(evt.textoNorm || evt.texto || '');
     const textoNorm = normalizeContent(textoNormRaw);
-    // Camada final de blindagem: verifica ruído ANYWHERE no texto
     const hasNoise = !textoNorm || isNoiseNorm(textoNorm) || 
       /\b(voce:|você:|you:)\b/.test(textoNorm) ||
       /\b(voce\s+enviou|você\s+enviou|you\s+sent)\b/.test(textoNorm) ||
@@ -2192,28 +2204,28 @@ async function onDomEvent(perfil, evt) {
       audit(perfil, 'virtus', 'warn', 'detec_client_noise_drop', { chatId: evt.chatId, texto: textoNormRaw.slice(0, 100), motivo: 'ruido_detectado' });
       return;
     }
-    const msgSig = sha1(`cliente|${textoNorm}|${Math.floor(evtTs/10000)}`);
-    audit(perfil, 'virtus', 'info', 'detec_event', { type: 'client_msg', chatId: evt.chatId, msgSig });
+    const stableSig = sha1(`cliente|${textoNorm}`);
+    audit(perfil, 'virtus', 'info', 'detec_event', { type: 'client_msg', chatId: evt.chatId, sig: stableSig });
     let st = null;
     try { st = virtusFSM.get(perfil, evt.chatId); } catch {}
     const recentMsgSigs = (st && st.cursor && st.cursor.client && Array.isArray(st.cursor.client.recentMsgSigs)) ? st.cursor.client.recentMsgSigs : [];
-    if (recentMsgSigs && recentMsgSigs.includes(msgSig)) {
-      audit(perfil, 'virtus', 'warn', 'detec_ignored_dup_msgsig', { chatId: evt.chatId, msgSig });
+    if (recentMsgSigs && recentMsgSigs.includes(stableSig)) {
+      audit(perfil, 'virtus', 'warn', 'detec_ignored_dup_msgsig', { chatId: evt.chatId, sig: stableSig });
       return;
     }
-    await appendChatHistoryLog(perfil, evt.chatId, [{ autor: 'cliente', texto: evt.texto, timestamp: evtTs }]);
-    // ATUALIZE recentMsgSigs e lastMsgSig no chatStateStore. Mantenha a janela em 50.
     await virtusFSM.patch(perfil, evt.chatId, {
       cursor: {
         ...(st && st.cursor || {}),
         client: {
           ...(st && st.cursor && st.cursor.client || {}),
-          lastMsgSig: msgSig,
-          recentMsgSigs: Array.from((recentMsgSigs || []).concat([msgSig])).slice(-50)
+          lastMsgSig: stableSig,
+          lastTs: evtTs,
+          recentMsgSigs: Array.from((recentMsgSigs || []).concat([stableSig])).slice(-50)
         }
       }
     });
-    startCollectWait(perfil, evt.chatId, 'client_msg', evtTs);
+    // Coleta imediata quando o cliente fala (sem 45s)
+    await enqueueCollectNow(perfil, evt.chatId, 'client_msg');
   } else if (evt.type === 'thread_dedup_hit') {
     // Log de dedup hit do thread observer
     audit(perfil, 'virtus', 'info', 'thread_dedup_hit', { chatId: evt.chatId, sig: evt.sig, bucket: evt.bucket, textoHash: evt.textoHash });
@@ -2386,11 +2398,12 @@ async function installThreadObserver(page) {
       const chatId = m ? m[1] : null;
       if (!chatId) return;
       const ts = parseAbbrTs(row);
-      const sig = (window.sha1 ? window.sha1(`cliente|${textoNorm}|${nowMinBucket(ts)}`) : `${textoNorm}|${nowMinBucket(ts)}`);
+      const sig = (window.sha1 ? window.sha1(`cliente|${textoNorm}`) : `cliente|${textoNorm}`);
       const map = window.__virtusMsgSeen.get(chatId) || new Map();
       if (map.has(sig)) return;
       map.set(sig, Date.now());
-      for (const [k, v] of Array.from(map.entries())) { if (Date.now() - v > 180000) map.delete(k); }
+      const ttl = (typeof window.__virtusMsgTtlMs === 'number' && window.__virtusMsgTtlMs > 0) ? window.__virtusMsgTtlMs : (2*60*60*1000);
+      for (const [k, v] of Array.from(map.entries())) { if (Date.now() - v > ttl) map.delete(k); }
       window.__virtusMsgSeen.set(chatId, map);
       try { window.__virtusEmit && window.__virtusEmit({ type: 'audit', tag: 'dom_detected_client_msg', chatId, texto: textoRaw, ts }); } catch {}
       window.__virtusEmit && window.__virtusEmit({ type: 'client_msg', chatId, texto: textoRaw, ts, textoNorm });
@@ -2417,6 +2430,7 @@ async function installThreadObserver(page) {
 async function ensureObserversInstalled(page, perfil) {
   await installInboxObserver(page).catch(()=>{});
   await installThreadObserver(page).catch(()=>{});
+  try { await page.evaluate((ttl) => { window.__virtusMsgTtlMs = Number(ttl||0); }, VIRTUS_MSG_DEDUP_TTL_MS); } catch {}
   const state = await page.evaluate(() => ({
     inboxObs: !!window.__virtusInboxObs,
     threadObs: !!window.__virtusThreadObs,
