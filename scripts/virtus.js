@@ -1254,43 +1254,36 @@ async function extrairHistoricoConversa(page) {
       function isNoise(t) {
         const s = norm(t).replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
         if (!s) return true;
-        if (/\b(inserir|mensagem\s+nao\s+lida|hoje|ontem|enviado|enviada|sent|delivered|visto|visualizado|lida|seen)\b/.test(s)) return true;
+        if (/\b(inserir|carregando|mensagem\s+nao\s+lida|hoje|ontem)\b/.test(s)) return true;
         if (/^\d{1,2}:\d{2}$/.test(s)) return true;
+        if (/\b(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)\b/.test(s)) return true;
         if (/[·•]/.test(t)) return true;
         if (/\b(voce:|você:|you:)\b/.test(s)) return true;
         if (/\b(voce\s+enviou|você\s+enviou|you\s+sent)\b/.test(s)) return true;
+        if (/^\W+$/.test(s)) return true;
+        return false;
+      }
+      function isUiMine(row, textNorm) {
+        try { if (row.querySelector('[data-testid*="outgoing"]')) return true; } catch {}
+        if (/\b(voce:|você:|you:)\b/.test(textNorm)) return true;
+        if (/\b(voce\s+enviou|você\s+enviou|you\s+sent)\b/.test(textNorm)) return true;
+        try {
+          const wrap = row.closest('[data-testid*="message"], [data-pagelet*="thread"]') || row;
+          const st = window.getComputedStyle(wrap);
+          if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) return true;
+        } catch {}
         return false;
       }
 
-      // MAIN robusto
-      const main =
-        document.querySelector('main[role="main"]') ||
-        document.querySelector('[role="main"]') ||
-        document.querySelector('main') ||
-        document.body;
-
-      // Grid/conteiner robusto - restrito ao grid de mensagens
-      function findGrid(root) {
-        if (!root) return null;
-        // Prioriza grid específico de mensagens
-        let g =
-          root.querySelector('div[role="grid"][aria-label*="Mensagens na conversa"]') ||
-          root.querySelector('div[aria-label*="Mensagens na conversa"][role="grid"]') ||
-          root.querySelector('div[role="grid"]') ||
-          root.querySelector('div[role="rowgroup"]') ||
-          root.querySelector('div[role="list"]') ||
-          root.querySelector('div.x78zum5.xdt5ytf[data-virtualized="false"]') ||
-          root.querySelector('div.x78zum5.xdt5ytf');
-
-        if (!g) {
-          // fallback: maior scrollable
-          const cand = Array.from(document.querySelectorAll('div')).filter(d => d.scrollHeight > (d.clientHeight + 30));
-          g = cand.sort((a,b)=>(b.scrollHeight-b.clientHeight)-(a.scrollHeight-a.clientHeight))[0] || null;
-        }
-        return g || document.body;
-      }
-
-      const grid = findGrid(main);
+      // 1) Composer (campo de digitação) como âncora
+      const composer = document.querySelector('div[contenteditable="true"][role="textbox"], div[role="combobox"][contenteditable="true"], div[contenteditable="true"][aria-label]');
+      if (!composer) return { out: [], dbg: { dbg_mainFound: false, dbg_gridFound: false, dbg_rowsScanned: 0, dbg_clientMsgs: 0, dbg_firstRowText: '' } };
+      // 2) Container da conversa
+      const convoRoot = composer.closest('div[role="main"]') || composer.closest('section') || composer.parentElement;
+      if (!convoRoot) return { out: [], dbg: { dbg_mainFound: false, dbg_gridFound: false, dbg_rowsScanned: 0, dbg_clientMsgs: 0, dbg_firstRowText: '' } };
+      // 3) Grid DENTRO da conversa
+      const grid = convoRoot.querySelector('div[role="grid"][aria-label*="Mensagens na conversa"], div[aria-label*="Mensagens na conversa"][role="grid"], div[role="grid"][aria-label*="Messages"], div[aria-label*="Messages"][role="grid"]');
+      if (!grid) return { out: [], dbg: { dbg_mainFound: false, dbg_gridFound: false, dbg_rowsScanned: 0, dbg_clientMsgs: 0, dbg_firstRowText: '' } };
       const rows = Array.from(grid.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-220);
 
       const out = [];
@@ -1300,24 +1293,11 @@ async function extrairHistoricoConversa(page) {
         if (isNoise(rawTxt)) continue;
 
           // Nunca processar headings/divisores/status
-          if (row.tagName && /^(H1|H2|H3|H4|H5|H6|ABBR|BUTTON|IMG)$/i.test(row.tagName)) continue;
-          if (row.getAttribute && (row.getAttribute('role') === 'img' || row.getAttribute('role') === 'button' || row.getAttribute('role') === 'heading')) continue;
+          if (row.getAttribute && row.getAttribute('role') === 'heading') continue;
+          if (!grid.contains(row)) continue;
           
-          let isMine = false;
-        try { if (row.querySelector('[data-testid="outgoing"]')) isMine = true; } catch {}
-          if (!isMine) {
-            try {
-            const st = window.getComputedStyle(row);
-            if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) isMine = true;
-            } catch {}
-          }
-          if (!isMine) {
-            const nraw = norm(rawTxt);
-          if (/\b(you\s+sent|voc[eê]\s+enviou|voc[eê]:|voce:|you:)/i.test(nraw)) isMine = true;
-          }
-          // Nunca aceitar linha com bullet+"Você:"
-          if (/\s*[·•]\s*(voce:|você:|you:)/i.test(rawTxt)) continue;
-        if (isMine) continue; // só cliente
+          const nraw = norm(rawTxt);
+          if (isUiMine(row, nraw)) continue; // só cliente
 
           let ts = 0;
           try {
@@ -1338,7 +1318,7 @@ async function extrairHistoricoConversa(page) {
 
       // Estatística de depuração (retornamos junto, Virtus filtra abaixo)
       const dbg = {
-        dbg_mainFound: !!main,
+        dbg_mainFound: !!composer,
         dbg_gridFound: !!grid,
         dbg_rowsScanned: rows.length,
         dbg_clientMsgs: out.length,
@@ -2173,7 +2153,7 @@ async function onDomEvent(perfil, evt) {
     if (!state || !state.discoveredAt) {
       await virtusFSM.patch(perfil, evt.chatId, { discoveredAt: Date.now() });
     }
-    startCollectWait(perfil, evt.chatId, 'feed_changed', evt.ts);
+    audit(perfil, 'virtus', 'debug', 'feed_event_ignored', { chatId: evt.chatId, feedSig });
   } else if (evt.type === 'client_msg') {
     // Sanitizar timestamp para evitar NaN
     let evtTs = Number(evt.ts || Date.now());
@@ -2334,26 +2314,26 @@ async function installThreadObserver(page) {
     if (window.__virtusThreadObs) return;
     window.__virtusThreadObs = true;
 
-    const grid = document.querySelector('div[role="grid"][aria-label*="Mensagens na conversa"]') || 
-                 document.querySelector('div[aria-label*="Mensagens na conversa"][role="grid"]') ||
-                 document.querySelector('div[role="main"]') || 
-                 document.body;
-    if (!grid) return;
+    // 1) Composer (campo de digitação)
+    const composer = document.querySelector('div[contenteditable="true"][role="textbox"], div[role="combobox"][contenteditable="true"], div[contenteditable="true"][aria-label]');
+    if (!composer) { window.__virtusThreadObs = false; return; }
+    // 2) Container da conversa
+    const convoRoot = composer.closest('div[role="main"]') || composer.closest('section') || composer.parentElement;
+    if (!convoRoot) { window.__virtusThreadObs = false; return; }
+    // 3) Grid DENTRO da conversa
+    const grid = convoRoot.querySelector('div[role="grid"][aria-label*="Mensagens na conversa"], div[aria-label*="Mensagens na conversa"][role="grid"], div[role="grid"][aria-label*="Messages"], div[aria-label*="Messages"][role="grid"]');
+    if (!grid) { window.__virtusThreadObs = false; return; }
 
-    window.__virtusMsgSeen = window.__virtusMsgSeen || new Map(); // chatId -> Map(sig->ts)
-
+    window.__virtusMsgSeen = window.__virtusMsgSeen || new Map();
     function nowMinBucket(ts) { return Math.floor((ts || Date.now()) / 10000); }
     function norm(s) { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
     function isUiMine(row, textNorm) {
-      try {
-        if (row.querySelector('[data-testid="outgoing"]')) return true;
-      } catch {}
+      try { if (row.querySelector('[data-testid*="outgoing"]')) return true; } catch {}
       if (/\b(voce:|você:|you:)\b/.test(textNorm)) return true;
       if (/\b(voce\s+enviou|você\s+enviou|you\s+sent)\b/.test(textNorm)) return true;
-      if (row.tagName && /^(H4|H5|H6|BUTTON|IMG|ABBR)$/i.test(row.tagName)) return true;
-      if (row.getAttribute('role') === 'img' || row.getAttribute('role') === 'button') return true;
       try {
-        const st = window.getComputedStyle(row);
+        const wrap = row.closest('[data-testid*="message"], [data-pagelet*="thread"]') || row;
+        const st = window.getComputedStyle(wrap);
         if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) return true;
       } catch {}
       return false;
@@ -2367,60 +2347,40 @@ async function installThreadObserver(page) {
       if (/^\W+$/.test(textNorm)) return true;
       return false;
     }
+    function parseAbbrTs(row) {
+      try {
+        const abbr = row.querySelector('abbr[aria-label]');
+        if (!abbr) return Date.now();
+        const raw = abbr.getAttribute('aria-label') || abbr.innerText || abbr.textContent || '';
+        const dp = Date.parse(raw); return Number.isFinite(dp) && dp > 0 ? dp : Date.now();
+      } catch { return Date.now(); }
+    }
     function emitRow(row) {
-      // Nunca processar headings/divisores/status
-      if (row.tagName && /^(H1|H2|H3|H4|H5|H6|ABBR)$/i.test(row.tagName)) return;
-      if (row.getAttribute('role') === 'img' || row.getAttribute('role') === 'button' || row.getAttribute('role') === 'heading') return;
-      if (row.querySelector('abbr[aria-label]') && !row.textContent) return; // só abbr sem texto
-      
-      const texto = (row.innerText || row.textContent || '').trim();
-      if (!texto) return;
-
-      const textoNorm = norm(texto);
+      if (!grid.contains(row)) return;
+      if (row.getAttribute('role') === 'heading') return;
+      const textoRaw = (row.innerText || row.textContent || '').trim();
+      if (!textoRaw) return;
+      const textoNorm = norm(textoRaw);
       if (isThreadNoise(textoNorm)) return;
       if (isUiMine(row, textoNorm)) return;
-
-      const abbr = row.querySelector('abbr[aria-label]');
-      let ts = Date.now();
-      if (abbr) {
-        const raw = abbr.getAttribute('aria-label') || abbr.innerText || abbr.textContent || '';
-        const dp = Date.parse(raw);
-        if (Number.isFinite(dp) && dp > 0) ts = dp;
-      }
-
-      const chatIdMatch = (window.location.pathname.match(/\/marketplace\/[tv]\/(\d+)/)||[]);
-      const chatId = chatIdMatch[1];
+      const path = location && location.pathname || '';
+      const m = path.match(/\/marketplace\/[tv]\/(\d+)/);
+      const chatId = m ? m[1] : null;
       if (!chatId) return;
-
+      const ts = parseAbbrTs(row);
       const sig = (window.sha1 ? window.sha1(`cliente|${textoNorm}|${nowMinBucket(ts)}`) : `${textoNorm}|${nowMinBucket(ts)}`);
-
       const map = window.__virtusMsgSeen.get(chatId) || new Map();
-      if (map.has(sig)) {
-        // Audit log para dedup hit
-        try {
-          window.__virtusEmit && window.__virtusEmit({ type: 'thread_dedup_hit', chatId, sig, bucket: nowMinBucket(ts), textoHash: textoNorm.slice(0, 50) });
-        } catch {}
-        return;
-      }
+      if (map.has(sig)) return;
       map.set(sig, Date.now());
-
-      // purge TTL 3 min
-      for (const [k, v] of Array.from(map.entries())) {
-        if (Date.now() - v > 180000) map.delete(k);
-      }
-
+      for (const [k, v] of Array.from(map.entries())) { if (Date.now() - v > 180000) map.delete(k); }
       window.__virtusMsgSeen.set(chatId, map);
-
-      window.__virtusEmit && window.__virtusEmit({ type: 'client_msg', chatId, texto, ts, textoNorm });
+      window.__virtusEmit && window.__virtusEmit({ type: 'client_msg', chatId, texto: textoRaw, ts, textoNorm });
     }
-
-    const obs = new MutationObserver((records) => {
+    const obs = new MutationObserver((recs) => {
       const rows = new Set();
-      for (const r of records) {
+      for (const r of recs) {
         for (const n of Array.from(r.addedNodes || [])) {
           if (!(n instanceof Element)) continue;
-          if (n.tagName && /^(H1|H2|H3|H4|H5|H6|ABBR|BUTTON|IMG)$/i.test(n.tagName)) continue;
-          if (n.getAttribute && (n.getAttribute('role') === 'img' || n.getAttribute('role') === 'button' || n.getAttribute('role') === 'heading')) continue;
           const row = n.closest && n.closest('div[role="row"],div[role="article"],div[data-testid]');
           if (row) rows.add(row);
         }
@@ -3379,6 +3339,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       } catch {}
 
       const clientMsgs = historicoSan.filter(m => m.autor === 'cliente');
+      // Verificar se existe bolha de cliente recente (recentMsgSigs)
+      const recentMsgSigs = (fsmState && fsmState.cursor && fsmState.cursor.client && Array.isArray(fsmState.cursor.client.recentMsgSigs)) ? fsmState.cursor.client.recentMsgSigs : [];
+      if (!recentMsgSigs || recentMsgSigs.length === 0) {
+        audit(nome, 'virtus', 'warn', 'collect_skip_no_recent_msgsig', { chatId });
+        deleteJob(nome, 'collect', chatId);
+        return { status: 'done' };
+      }
       const lastClientTs = clientMsgs.length ? Number(clientMsgs[clientMsgs.length - 1].timestamp || 0) : 0;
       if (!lastClientTs || (Date.now() - lastClientTs) > MAX_CHAT_AGE_MS) {
         const clientCountAge = clientMsgs.length;
