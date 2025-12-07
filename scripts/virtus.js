@@ -1436,7 +1436,7 @@ const VIRTUS_COLLECT_IDLE_MS = parseInt(process.env.VIRTUS_COLLECT_IDLE_MS || '0
 const VIRTUS_COLLECT_GAP_MS = parseInt(process.env.VIRTUS_COLLECT_GAP_MS || '1500', 10); // espaçamento entre coletas (anti-spam)
 
 // Novas flags de robustez (dedupe e feed)
-const VIRTUS_FEED_EVENTS = String(process.env.VIRTUS_FEED_EVENTS || '0') === '1'; // 0 = ignora eventos de feed_changed
+const VIRTUS_FEED_EVENTS = true;
 const VIRTUS_MSG_DEDUP_TTL_MS = Math.max(600000, parseInt(process.env.VIRTUS_MSG_DEDUP_TTL_MS || '7200000', 10)); // 2h mínimo
 
 // Claims/reaper/anti-drift/scan-blocked watchdog
@@ -2184,8 +2184,8 @@ async function onDomEvent(perfil, evt) {
     if (!state || !state.discoveredAt) {
       await virtusFSM.patch(perfil, evt.chatId, { discoveredAt: Date.now() });
     }
-    startCollectWait(perfil, evt.chatId, 'feed_changed', Number(evt.ts)||Date.now());
-    audit(perfil, 'virtus', 'info', 'feed_event_coalesced', { chatId: evt.chatId, feedSig });
+    await enqueueCollectNow(perfil, evt.chatId, 'feed_changed');
+    audit(perfil, 'virtus', 'info', 'feed_event_enqueued_immediate', { chatId: evt.chatId, feedSig });
     return;
   } else if (evt.type === 'client_msg') {
     let evtTs = Number(evt.ts || Date.now());
