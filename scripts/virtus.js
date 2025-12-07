@@ -38,6 +38,8 @@ const fetch = global.fetch || require('node-fetch');
 
 // Mutex de navegação por perfil
 const NAV_LOCKS = new Map();
+const NAV_LOCK_START_TIMES = new Map(); // perfil -> startTime
+const NAV_LOCK_RELEASES = new Map(); // perfil -> release function
 async function withNavLock(perfil, fn) {
   if (!NAV_LOCKS.has(perfil)) NAV_LOCKS.set(perfil, Promise.resolve());
   const prev = NAV_LOCKS.get(perfil);
@@ -45,6 +47,8 @@ async function withNavLock(perfil, fn) {
   const ticket = new Promise(res => (release = res));
   NAV_LOCKS.set(perfil, prev.then(() => ticket));
   const t0 = Date.now();
+  NAV_LOCK_START_TIMES.set(perfil, t0);
+  NAV_LOCK_RELEASES.set(perfil, release);
   audit(perfil, 'virtus', 'info', 'navlock_acquire', { ts: t0 });
   try {
     await prev;
@@ -53,6 +57,8 @@ async function withNavLock(perfil, fn) {
     release();
     const took = Date.now() - t0;
     audit(perfil, 'virtus', 'info', 'navlock_release', { tookMs: took });
+    NAV_LOCK_START_TIMES.delete(perfil);
+    NAV_LOCK_RELEASES.delete(perfil);
     if (NAV_LOCKS.get(perfil) === ticket) NAV_LOCKS.delete(perfil);
   }
 }
@@ -195,29 +201,26 @@ function isNoiseNorm(n) {
   const t = t0.replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
   if (!t) return true;
 
+  // Ruído mesmo no meio do texto
   if (/\b(carregando|carregando\.\.\.|inserir)\b/.test(t)) return true;
-  if (/^voce\s*:|^you\s*:/.test(t)) return true;
+  if (/\b(voce:|v[oó]ce:|you:)\b/.test(t)) return true;
   if (/\b(voce\s+enviou|you\s+sent)\b/.test(t)) return true;
   if (/\b(mensagem\s+nao\s+lida)\b/.test(t)) return true;
+  if (/\b(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)\b/.test(t)) return true;
+  if (/\b(hoje|ontem)\b/.test(t) && t.length <= 40) return true;
+  if (/[·•]/g.test(s)) return true;
+  if (/^\d{1,2}:\d{2}$/.test(t)) return true;
 
   // Lixos comuns do Messenger/Marketplace
   if (t === 'inserir') return true;
   if (t.startsWith('mensagem nao lida')) return true;
-  if (/^\d{1,2}:\d{2}$/.test(t)) return true;              // "03:26"
-  if (/^(hoje|ontem)\b/.test(t)) return true;
   if (/^\s*[·•]\s*$/.test(s)) return true;                 // bullet solto
-  if (/^voce:|^v[oó]ce:|^you:/.test(t)) return true;       // prefixos de autoria no texto
-  if (/^voce\s+enviou\b|^you\s+sent\b/.test(t)) return true;
   if (/^\W+$/.test(s)) return true;                        // só sinais
   // Marcas do cabeçalho "Conveniente …" (curtas)
   if (/\bconveniente\b/.test(t) && t.length <= 80) return true;
 
   // Linhas curtas com tempo relativo, sem conteúdo semântico
   if (/\b(min|mins?|minuto|minutos|hora|horas|day|days|dia|dias)\b/.test(t) && t.length <= 40) return true;
-
-  // Status de mensagem (enviado, entregue, visto, etc)
-  if (/^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(t)) return true;
-  if (/\b(you\s+sent|voc[eê]\s+enviou)\b/.test(t)) return true;
 
   return false;
 }
@@ -692,10 +695,19 @@ async function appendChatHistoryLog(perfil, chatId, historicoArr) {
       const rawToCheck = String(m && m.texto || '').trim();
       if (!rawToCheck || /^[\W_]+$/.test(rawToCheck)) continue;
       
-      // Filtro de ruído antes de gravar
+      // Filtro de ruído rigoroso antes de gravar (verifica ANYWHERE no texto)
       const textoNormCheck = normalizeContent(rawToCheck);
-      if (isNoiseNorm(textoNormCheck) || /^voce\s*:|^you\s*:|^(voce\s+enviou|you\s+sent)|^(inserir|carregando|mensagem\s+nao\s+lida)|^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/i.test(textoNormCheck)) {
-        audit(perfil, 'virtus', 'warn', 'chatlog_drop_noise', { chatId, texto: rawToCheck.slice(0, 100) });
+      const hasNoise = isNoiseNorm(textoNormCheck) || 
+        /\b(voce:|você:|you:)\b/.test(textoNormCheck) ||
+        /\b(mensagem\s+nao\s+lida)\b/.test(textoNormCheck) ||
+        /\b(inserir)\b/.test(textoNormCheck) ||
+        /\b(you\s+sent|você\s+enviou|voce\s+enviou)\b/.test(textoNormCheck) ||
+        /\b(enviado|enviada|lida|seen|visualizado|delivered)\b/.test(textoNormCheck) ||
+        /\b(hoje|ontem)\b/.test(textoNormCheck) ||
+        /[·•]/.test(rawToCheck) ||
+        /^\d{1,2}:\d{2}$/.test(textoNormCheck);
+      if (hasNoise) {
+        audit(perfil, 'virtus', 'warn', 'chatlog_drop_noise', { chatId, texto: rawToCheck.slice(0, 100), motivo: 'ruido_detectado' });
         continue;
       }
       
@@ -799,7 +811,8 @@ async function assertOnChatStrict(p, chatId, { timeoutMs = 4500 } = {}) {
     const { byUrl, byDom } = await getOpenChatIdStrict(p);
     lastByUrl = byUrl; lastByDom = byDom;
     const okDom = (byDom && byDom === String(chatId)) || false;
-    if (okDom || okUrl) {
+    // Contexto rigoroso: só retorna true se BYURL exato E BYDOM exato E IGUAIS ao chatId
+    if (okUrl && okDom && String(lastByUrl) === String(chatId) && String(lastByDom) === String(chatId)) {
       try {
         stepLog.appendJSONL('GLOBAL', 'virtus', {
           step: 'assert_on_chat_end',
@@ -807,6 +820,9 @@ async function assertOnChatStrict(p, chatId, { timeoutMs = 4500 } = {}) {
         });
       } catch {}
       return true;
+    }
+    if (!okUrl || !okDom || String(lastByUrl) !== String(chatId) || String(lastByDom) !== String(chatId)) {
+      audit('GLOBAL', 'virtus', 'warn', 'nav_ctx_mismatch', { chatId, byUrl: lastByUrl, byDom: lastByDom, expected: String(chatId) });
     }
     if (!finalTimeout || (Date.now()-t0) >= finalTimeout) {
       try {
@@ -1238,9 +1254,11 @@ async function extrairHistoricoConversa(page) {
       function isNoise(t) {
         const s = norm(t).replace(/[.,;:!?\u200B-\u200D\uFEFF]/g, '').trim();
         if (!s) return true;
-        if (/^(inserir|mensagem nao lida|hoje|ontem|enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(s)) return true;
+        if (/\b(inserir|mensagem\s+nao\s+lida|hoje|ontem|enviado|enviada|sent|delivered|visto|visualizado|lida|seen)\b/.test(s)) return true;
         if (/^\d{1,2}:\d{2}$/.test(s)) return true;
-        if (/^\s*[·•]\s*$/.test(t)) return true;
+        if (/[·•]/.test(t)) return true;
+        if (/\b(voce:|você:|you:)\b/.test(s)) return true;
+        if (/\b(voce\s+enviou|você\s+enviou|you\s+sent)\b/.test(s)) return true;
         return false;
       }
 
@@ -1251,10 +1269,13 @@ async function extrairHistoricoConversa(page) {
         document.querySelector('main') ||
         document.body;
 
-      // Grid/conteiner robusto
+      // Grid/conteiner robusto - restrito ao grid de mensagens
       function findGrid(root) {
         if (!root) return null;
+        // Prioriza grid específico de mensagens
         let g =
+          root.querySelector('div[role="grid"][aria-label*="Mensagens na conversa"]') ||
+          root.querySelector('div[aria-label*="Mensagens na conversa"][role="grid"]') ||
           root.querySelector('div[role="grid"]') ||
           root.querySelector('div[role="rowgroup"]') ||
           root.querySelector('div[role="list"]') ||
@@ -1278,6 +1299,10 @@ async function extrairHistoricoConversa(page) {
           if (!rawTxt) continue;
         if (isNoise(rawTxt)) continue;
 
+          // Nunca processar headings/divisores/status
+          if (row.tagName && /^(H1|H2|H3|H4|H5|H6|ABBR|BUTTON|IMG)$/i.test(row.tagName)) continue;
+          if (row.getAttribute && (row.getAttribute('role') === 'img' || row.getAttribute('role') === 'button' || row.getAttribute('role') === 'heading')) continue;
+          
           let isMine = false;
         try { if (row.querySelector('[data-testid="outgoing"]')) isMine = true; } catch {}
           if (!isMine) {
@@ -1288,8 +1313,10 @@ async function extrairHistoricoConversa(page) {
           }
           if (!isMine) {
             const nraw = norm(rawTxt);
-          if (/\b(you\s+sent|voc[eê]\s+enviou|^voc[eê]:|^voce:|^you:)/i.test(nraw)) isMine = true;
+          if (/\b(you\s+sent|voc[eê]\s+enviou|voc[eê]:|voce:|you:)/i.test(nraw)) isMine = true;
           }
+          // Nunca aceitar linha com bullet+"Você:"
+          if (/\s*[·•]\s*(voce:|você:|you:)/i.test(rawTxt)) continue;
         if (isMine) continue; // só cliente
 
           let ts = 0;
@@ -1464,9 +1491,15 @@ function startCollectWait(perfil, chatId, reason, anchorTs) {
   const timers      = mapFor(COLLECT_WAIT_MAP, perfil);
   const dueMap      = mapFor(COLLECT_DUE_MAP, perfil);
   const eventTsMap  = mapFor(COLLECT_LAST_EVENT_TS, perfil);
-  const due = Date.now() + 45000;
+  const now = Date.now();
+  const lastEventTs = eventTsMap.get(chatId) || 0;
+  // Cheque evt.ts > lastEventTs antes de resetar (minimiza resets por ruído)
+  if (anchorTs && anchorTs <= lastEventTs) {
+    return; // Ignora eventos antigos/ruído
+  }
+  const due = now + 45000;
   dueMap.set(chatId, due);
-  eventTsMap.set(chatId, anchorTs || Date.now());
+  eventTsMap.set(chatId, anchorTs || now);
   if (timers.has(chatId)) {
     clearTimeout(timers.get(chatId));
     audit(perfil, 'virtus', 'info', 'fila_coleta_reset', { chatId, dueAtISO: new Date(due).toISOString(), reason });
@@ -1618,7 +1651,7 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     if (origin !== 'finalize' && !sig) {
       // Tentar calcular do histórico se disponível
       try {
-        const chatLogRecent = fsmState?.data?.chatLogRecent || [];
+        const chatLogRecent = Array.isArray(fsmState?.chatLogRecent) ? fsmState.chatLogRecent : [];
         if (Array.isArray(chatLogRecent) && chatLogRecent.length > 0) {
           const lastClientMsgs = chatLogRecent.filter(m => m && m.autor === 'cliente').slice(-5);
           if (lastClientMsgs.length > 0) {
@@ -2148,11 +2181,20 @@ async function onDomEvent(perfil, evt) {
     // Calcular msgSig no Node
     const textoNormRaw = String(evt.textoNorm || evt.texto || '');
     const textoNorm = normalizeContent(textoNormRaw);
-    if (!textoNorm || isNoiseNorm(textoNorm) || /^voce\s*:|^you\s*:|^(voce\s+enviou|you\s+sent)|^(inserir|carregando|mensagem\s+nao\s+lida)/i.test(textoNorm)) {
-      audit(perfil, 'virtus', 'warn', 'detec_client_noise_drop', { chatId: evt.chatId, texto: textoNormRaw.slice(0, 100) });
+    // Camada final de blindagem: verifica ruído ANYWHERE no texto
+    const hasNoise = !textoNorm || isNoiseNorm(textoNorm) || 
+      /\b(voce:|você:|you:)\b/.test(textoNorm) ||
+      /\b(voce\s+enviou|você\s+enviou|you\s+sent)\b/.test(textoNorm) ||
+      /\b(inserir|carregando|mensagem\s+nao\s+lida)\b/.test(textoNorm) ||
+      /\b(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)\b/.test(textoNorm) ||
+      /\b(hoje|ontem)\b/.test(textoNorm) ||
+      /[·•]/.test(textoNormRaw) ||
+      /^\d{1,2}:\d{2}$/.test(textoNorm);
+    if (hasNoise) {
+      audit(perfil, 'virtus', 'warn', 'detec_client_noise_drop', { chatId: evt.chatId, texto: textoNormRaw.slice(0, 100), motivo: 'ruido_detectado' });
       return;
     }
-    const msgSig = sha1(`cliente|${textoNorm}|${Math.floor(evtTs/60000)}`);
+    const msgSig = sha1(`cliente|${textoNorm}|${Math.floor(evtTs/10000)}`);
     audit(perfil, 'virtus', 'info', 'detec_event', { type: 'client_msg', chatId: evt.chatId, msgSig });
     let st = null;
     try { st = virtusFSM.get(perfil, evt.chatId); } catch {}
@@ -2174,6 +2216,9 @@ async function onDomEvent(perfil, evt) {
       }
     });
     startCollectWait(perfil, evt.chatId, 'client_msg', evtTs);
+  } else if (evt.type === 'thread_dedup_hit') {
+    // Log de dedup hit do thread observer
+    audit(perfil, 'virtus', 'info', 'thread_dedup_hit', { chatId: evt.chatId, sig: evt.sig, bucket: evt.bucket, textoHash: evt.textoHash });
   }
 }
 
@@ -2289,19 +2334,24 @@ async function installThreadObserver(page) {
     if (window.__virtusThreadObs) return;
     window.__virtusThreadObs = true;
 
-    const grid = document.querySelector('div[role="main"]') || document.body;
+    const grid = document.querySelector('div[role="grid"][aria-label*="Mensagens na conversa"]') || 
+                 document.querySelector('div[aria-label*="Mensagens na conversa"][role="grid"]') ||
+                 document.querySelector('div[role="main"]') || 
+                 document.body;
     if (!grid) return;
 
     window.__virtusMsgSeen = window.__virtusMsgSeen || new Map(); // chatId -> Map(sig->ts)
 
-    function nowMinBucket(ts) { return Math.floor((ts || Date.now()) / 60000); }
+    function nowMinBucket(ts) { return Math.floor((ts || Date.now()) / 10000); }
     function norm(s) { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
     function isUiMine(row, textNorm) {
       try {
         if (row.querySelector('[data-testid="outgoing"]')) return true;
       } catch {}
-      if (/^(voce:|you:)\b/.test(textNorm)) return true;
-      if (/\b(voce\s+enviou|you\s+sent)\b/.test(textNorm)) return true;
+      if (/\b(voce:|você:|you:)\b/.test(textNorm)) return true;
+      if (/\b(voce\s+enviou|você\s+enviou|you\s+sent)\b/.test(textNorm)) return true;
+      if (row.tagName && /^(H4|H5|H6|BUTTON|IMG|ABBR)$/i.test(row.tagName)) return true;
+      if (row.getAttribute('role') === 'img' || row.getAttribute('role') === 'button') return true;
       try {
         const st = window.getComputedStyle(row);
         if (st && (st.justifyContent === 'flex-end' || st.textAlign === 'right')) return true;
@@ -2310,13 +2360,19 @@ async function installThreadObserver(page) {
     }
     function isThreadNoise(textNorm) {
       if (!textNorm) return true;
-      if (/^(inserir|carregando|mensagem nao lida|hoje|ontem)$/.test(textNorm)) return true;
+      if (/\b(inserir|carregando|mensagem\s+nao\s+lida|hoje|ontem)\b/.test(textNorm)) return true;
       if (/^\d{1,2}:\d{2}$/.test(textNorm)) return true;
-      if (/^(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)$/.test(textNorm)) return true;
+      if (/\b(enviado|enviada|sent|delivered|visto|visualizado|lida|seen)\b/.test(textNorm)) return true;
+      if (/[·•]/.test(textNorm)) return true;
       if (/^\W+$/.test(textNorm)) return true;
       return false;
     }
     function emitRow(row) {
+      // Nunca processar headings/divisores/status
+      if (row.tagName && /^(H1|H2|H3|H4|H5|H6|ABBR)$/i.test(row.tagName)) return;
+      if (row.getAttribute('role') === 'img' || row.getAttribute('role') === 'button' || row.getAttribute('role') === 'heading') return;
+      if (row.querySelector('abbr[aria-label]') && !row.textContent) return; // só abbr sem texto
+      
       const texto = (row.innerText || row.textContent || '').trim();
       if (!texto) return;
 
@@ -2339,7 +2395,13 @@ async function installThreadObserver(page) {
       const sig = (window.sha1 ? window.sha1(`cliente|${textoNorm}|${nowMinBucket(ts)}`) : `${textoNorm}|${nowMinBucket(ts)}`);
 
       const map = window.__virtusMsgSeen.get(chatId) || new Map();
-      if (map.has(sig)) return;
+      if (map.has(sig)) {
+        // Audit log para dedup hit
+        try {
+          window.__virtusEmit && window.__virtusEmit({ type: 'thread_dedup_hit', chatId, sig, bucket: nowMinBucket(ts), textoHash: textoNorm.slice(0, 50) });
+        } catch {}
+        return;
+      }
       map.set(sig, Date.now());
 
       // purge TTL 3 min
@@ -2357,6 +2419,8 @@ async function installThreadObserver(page) {
       for (const r of records) {
         for (const n of Array.from(r.addedNodes || [])) {
           if (!(n instanceof Element)) continue;
+          if (n.tagName && /^(H1|H2|H3|H4|H5|H6|ABBR|BUTTON|IMG)$/i.test(n.tagName)) continue;
+          if (n.getAttribute && (n.getAttribute('role') === 'img' || n.getAttribute('role') === 'button' || n.getAttribute('role') === 'heading')) continue;
           const row = n.closest && n.closest('div[role="row"],div[role="article"],div[data-testid]');
           if (row) rows.add(row);
         }
@@ -2502,7 +2566,7 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
       return true;
     }
     
-    // Fallback via SPA se a UI não mudou
+    // Se assertOnChatStrict falha, tente hard-nav + retry
     const hardNav = await p.evaluate((id) => {
       const a = document.querySelector(`a[href^="/marketplace/t/${id}"], a[href^="/marketplace/v/${id}"], div[role="row"] a[href*="/marketplace/t/${id}"], div[role="row"] a[href*="/marketplace/v/${id}"]`);
       if (!a) return false;
@@ -2512,9 +2576,28 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
     }, chatId).catch(()=>false);
     
     if (hardNav) {
+      await sleep(1000);
       const okHard = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
       if (okHard) {
         audit(perfil, 'virtus', 'info', 'open_chat_click_ok_hardnav', { chatId });
+        await ensureObserversInstalled(p, perfil).catch(()=>{});
+        return true;
+      }
+    }
+
+    // Se ainda falhou, tenta goBackToInboxIfNeeded + garantirMarketplace + retry
+    if (!ok && !hardNav) {
+      audit(perfil, 'virtus', 'warn', 'open_chat_ctx_mismatch_retry', { chatId });
+      await goBackToInboxIfNeeded(p, perfil);
+      await sleep(1000);
+      try {
+        await garantirMarketplace(p, { nome: perfil, allowNavigate: true });
+      } catch {}
+      await sleep(500);
+      const retryOk = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
+      if (retryOk) {
+        audit(perfil, 'virtus', 'info', 'open_chat_click_ok_after_recovery', { chatId });
+        await ensureObserversInstalled(p, perfil).catch(()=>{});
         return true;
       }
     }
@@ -2602,17 +2685,42 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
     }, chatId).catch(()=>false);
     
     if (hardNav) {
+      await sleep(1000);
       const okHard = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
       if (okHard) {
-        audit(perfil, 'virtus', 'info', 'open_chat_click_ok_hardnav', { chatId, scrollTry: i+1 });
+        audit(perfil, 'virtus', 'info', 'open_chat_click_ok_hardnav_scroll', { chatId, scrollTry: i+1 });
         await ensureObserversInstalled(p, perfil).catch(()=>{});
         return true;
       }
     }
+    
+    // Se ainda falhou no scroll, tenta goBackToInboxIfNeeded + garantirMarketplace + retry
+    if (!ok && !hardNav) {
+      audit(perfil, 'virtus', 'warn', 'open_chat_ctx_mismatch_retry_scroll', { chatId, scrollTry: i+1 });
+      await goBackToInboxIfNeeded(p, perfil);
+      await sleep(1000);
+      try {
+        await garantirMarketplace(p, { nome: perfil, allowNavigate: true });
+      } catch {}
+      await sleep(500);
+      const retryOk = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
+      if (retryOk) {
+        audit(perfil, 'virtus', 'info', 'open_chat_click_ok_after_recovery_scroll', { chatId, scrollTry: i+1 });
+        await ensureObserversInstalled(p, perfil).catch(()=>{});
+        return true;
+      }
+    }
+    
   }
   
   // PROIBIDO GOTO THREAD: Nenhum fallback por page.goto para threads
-  audit(perfil, 'virtus', 'warn', 'open_chat_click_timeout', { chatId });
+  audit(perfil, 'virtus', 'warn', 'open_chat_click_timeout', { chatId, motivo: 'ctx_mismatch_ou_timeout' });
+  // Requeue com razão ctx_mismatch
+  try {
+    const reAt = Date.now() + 10000;
+    await rescheduleJob(perfil, 'collect', chatId, reAt, { reason: 'ctx_mismatch' });
+    audit(perfil, 'virtus', 'warn', 'open_chat_requeue_ctx_mismatch', { chatId, reAt: new Date(reAt).toISOString() });
+  } catch {}
   return false;
 }
 
@@ -3493,9 +3601,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               audit(perfil, 'virtus', 'warn', 'watchdog_overdue_jobs', { count: overdueJobs.length, jobs: overdueJobs.slice(0, 5).map(f => { const j = loadJob(f); return { kind: j?.kind, chatId: j?.chatId, dueAt: j?.dueAt }; }) });
             }
             
-            // Watchdog: locks presos (NAV_LOCKS)
-            if (NAV_LOCKS.has(perfil)) {
-              audit(perfil, 'virtus', 'warn', 'watchdog_nav_lock_active', {});
+            // Watchdog: locks presos (NAV_LOCKS) - força release se > 60s
+            if (NAV_LOCKS.has(perfil) && NAV_LOCK_START_TIMES.has(perfil)) {
+              const lockStart = NAV_LOCK_START_TIMES.get(perfil) || now;
+              const lockDuration = now - lockStart;
+              if (lockDuration > 60000) {
+                audit(perfil, 'virtus', 'error', 'navlock_force_release', { stuckMs: lockDuration });
+                // Força release do lock
+                try {
+                  const releaseFn = NAV_LOCK_RELEASES.get(perfil);
+                  if (releaseFn) releaseFn();
+                  NAV_LOCK_START_TIMES.delete(perfil);
+                  NAV_LOCK_RELEASES.delete(perfil);
+                  NAV_LOCKS.delete(perfil);
+                } catch {}
+              } else {
+                audit(perfil, 'virtus', 'warn', 'watchdog_nav_lock_active', { durationMs: lockDuration });
+              }
             }
             
             // Watchdog: send guards presos
