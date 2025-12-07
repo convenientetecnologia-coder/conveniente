@@ -3,6 +3,11 @@
 // scripts/inteligenciaArtificial.js
 // Implementação única OpenAI GPT-5.1 para ciclo mestre de atendimento
 // Função principal: masterExtractAnswer
+//
+// PARADIGMA: Este script recebe mensagens JÁ LIMPAS do collector.js
+// - Não faz parsing/sanitização/filtro de ruído/preview/eco do Messenger DOM
+// - Toda limpeza anti-ruído é responsabilidade do collector.js (única fonte de mensagens)
+// - Apenas processa extração, normalização, anti-prompt-injection e parsing IA
 
 const fetch = global.fetch || require('node-fetch');
 
@@ -432,6 +437,8 @@ Responda APENAS com o JSON válido, sem explicações adicionais.`;
   return [header, jsonSpec].join('\n\n');
 }
 
+// buildMessages: Recebe histórico já limpo pelo collector.js
+// Não faz filtro de ruído/preview/eco do Messenger - isso é responsabilidade do collector
 function buildMessages(historico = [], maxMessages = 30) {
   try {
     const arr = Array.isArray(historico) ? historico : [];
@@ -441,6 +448,7 @@ function buildMessages(historico = [], maxMessages = 30) {
       const role = (m.autor === 'ia' || m.autor === 'assistant') ? 'assistant' : 'user';
       const content = sanitizeSecrets(String(m.texto || ''));
       if (!content.trim()) continue;
+      // Anti-prompt-injection: segurança da IA, não filtro de ruído do Messenger
       if (detectPromptInjection(content)) continue;
       messages.push({ role, content });
     }
@@ -630,9 +638,13 @@ function parseResponse(rawContent, lastClientMsg, perfil = null, chatId = null) 
 
 // ========== FUNÇÃO PRINCIPAL ==========
 
+// masterExtractAnswer: Recebe array de mensagens já limpo pelo collector.js
+// Formato esperado: [{ autor: 'cliente'|'ia', texto: string, timestamp: number }]
+// Não faz sanitização/filtro de ruído/preview - collector.js é responsável por isso
 async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respond = false }) {
   try {
     const historico = Array.isArray(mensagens) ? mensagens : [];
+    // Busca última mensagem do cliente apenas para anti-eco (não é filtro de ruído)
     const lastClientMsg = historico.filter(m => m.autor === 'cliente').slice(-1)[0]?.texto || null;
 
     const sysPrompt = buildSystemPrompt(contexto || {});

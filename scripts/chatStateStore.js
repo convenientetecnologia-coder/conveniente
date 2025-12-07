@@ -1,5 +1,16 @@
 'use strict';
 
+// scripts/chatStateStore.js
+// Gerenciamento de estado FSM por chat (cursor, data, finalization)
+//
+// PARADIGMA: Este módulo é 100% neutro - apenas gerencia estado, sem filtrar/sanitizar mensagens
+// - Recebe mensagens já limpas do collector.js (via pipeline Virtus)
+// - NUNCA filtra ruído, preview, eco, status ou normaliza conteúdo de mensagens
+// - Apenas persiste estado: cursor (client/ia/feed), data, finalization
+// - Toda limpeza anti-ruído é responsabilidade do collector.js
+//
+// Regra de ouro: "Se precisar mudar algo sobre preview/ruído/eco de mensagem, mexa apenas no collector.js."
+
 const fs = require('fs');
 const path = require('path');
 const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');

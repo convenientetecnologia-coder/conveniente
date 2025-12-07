@@ -25,6 +25,7 @@ const ATENDIMENTO_FILES = [
   "scripts/chatLock.js", // sistema de locks de chat
   "scripts/manifestStore.js", // dados do perfil (cidade, estado) usados no contexto
   "scripts/notifierQueue.js", // fila persistente (outbox) para envio de pedidos ao notificador
+  "scripts/collector.js", // coletor de dados/conversas
 ];
 
 /**

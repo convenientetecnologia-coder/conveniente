@@ -34,6 +34,7 @@ const { acquireFileLock, releaseFileLock } = require('./manifestStore.js');
 const { masterExtractAnswer } = require('./inteligenciaArtificial.js');
 const chatStateStore = require('./chatStateStore.js');
 const notifierQueue = require('./notifierQueue.js');
+const collectClientMessagesFromMessenger = require('./collector.js');
 const fetch = global.fetch || require('node-fetch');
 
 // Mutex de navegação por perfil
@@ -3277,7 +3278,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         const ok = await assertOnChatStrict(p, chatId, { timeoutMs: 6000 }).catch(()=>false);
         if (!ok) return { ok: false, historico: [] };
-        const hist = await extrairHistoricoConversa(p);
+        // FAZ A COLETA PADRÃO (collector.js)
+        const hist = await collectClientMessagesFromMessenger(p);
         return { ok: true, historico: hist };
       });
 
