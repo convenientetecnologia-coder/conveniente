@@ -811,17 +811,24 @@ async function assertOnChatStrict(p, chatId, { timeoutMs = 4500 } = {}) {
     const { byUrl, byDom } = await getOpenChatIdStrict(p);
     lastByUrl = byUrl; lastByDom = byDom;
     const okDom = (byDom && byDom === String(chatId)) || false;
-    // Contexto rigoroso: só retorna true se BYURL exato E BYDOM exato E IGUAIS ao chatId
-    if (okUrl && okDom && String(lastByUrl) === String(chatId) && String(lastByDom) === String(chatId)) {
+
+    const composerVisible = await p.evaluate(() => {
+      const c = document.querySelector('div[contenteditable="true"][role="textbox"], div[role="combobox"][contenteditable="true"], div[contenteditable="true"][aria-label]');
+      if (!c) return false;
+      const st = window.getComputedStyle(c);
+      return st && st.display !== 'none' && c.offsetParent !== null;
+    }).catch(()=>false);
+
+    if (okUrl && (okDom || composerVisible)) {
       try {
         stepLog.appendJSONL('GLOBAL', 'virtus', {
           step: 'assert_on_chat_end',
-          chatId, ok: true, byUrl: lastByUrl, byDom: lastByDom, tookMs: Date.now()-t0
+          chatId, ok: true, byUrl: lastByUrl, byDom: lastByDom, tookMs: Date.now()-t0, fallback: (!okDom && composerVisible) ? 'url+composer' : null
         });
       } catch {}
       return true;
     }
-    if (!okUrl || !okDom || String(lastByUrl) !== String(chatId) || String(lastByDom) !== String(chatId)) {
+    if (!okUrl || (!okDom && !composerVisible) || String(lastByUrl) !== String(chatId)) {
       audit('GLOBAL', 'virtus', 'warn', 'nav_ctx_mismatch', { chatId, byUrl: lastByUrl, byDom: lastByDom, expected: String(chatId) });
     }
     if (!finalTimeout || (Date.now()-t0) >= finalTimeout) {
@@ -1495,7 +1502,7 @@ function startCollectWait(perfil, chatId, reason, anchorTs) {
       dueMap.delete(chatId);
       eventTsMap.delete(chatId);
       timers.delete(chatId);
-      audit(perfil, 'virtus', 'info', 'coletado_job_enqueued', { chatId, origin: 'dom_event_coalesced' });
+      audit(perfil, 'virtus', 'info', 'job_created', { kind: 'collect', chatId, origin: 'dom_event_coalesced' });
       await enqueueJob(perfil, { kind: 'collect', chatId, dueAt: Date.now(), payload: { origin: 'dom_event_coalesced', fast: true } });
     } catch(e){
       audit(perfil, 'virtus', 'error', 'coletado_job_enqueue_error', { chatId, err: String(e && e.message || e) });
@@ -1697,6 +1704,7 @@ async function queueMessengerSend(nomePerfil, { chatId, resposta, key, fromNotif
     }
 
     audit(nomePerfil, 'virtus', 'info', 'fila_envio_enqueued', { chatId, sig, origin, earliestSendAt: earliestSendAt ? new Date(earliestSendAt).toISOString() : null });
+    audit(nomePerfil, 'virtus', 'info', 'job_send_enqueued', { chatId, cursorSig: sig, dueAtISO: new Date(dueAt).toISOString() });
     return { ok: true, status: 'enqueued' };
   } catch {
     return { ok: false, status: 'dropped' };
@@ -2132,8 +2140,8 @@ async function goBackToInboxIfNeeded(page, perfil) {
 
 async function onDomEvent(perfil, evt) {
   if (!evt || !evt.type) return;
+  audit(perfil, 'virtus', 'debug', 'onDomEvent_called', { type: evt.type, chatId: evt.chatId });
   if (evt.type === 'feed_changed') {
-    // Calcular feedSig corretamente com sanitizeFeedPreview
     const previewRaw = String(evt.preview || '').slice(0, 400);
     const cleaned = sanitizeFeedPreview(previewRaw);
     if (!cleaned || isNoiseNorm(cleaned)) {
@@ -2145,6 +2153,12 @@ async function onDomEvent(perfil, evt) {
     let state = null; try { state = virtusFSM.get(perfil, evt.chatId); } catch {}
     if (state && state.cursor && state.cursor.feed && state.cursor.feed.sig === feedSig) {
       audit(perfil, 'virtus', 'info', 'detec_feed_nochange', { chatId: evt.chatId, feedSig });
+      // Mesmo sem mudança, mantenha o coalesce se não houver job/cliente recente
+      const lastClientTs = Number(state?.cursor?.client?.lastTs || 0);
+      if (!lastClientTs || (Date.now() - lastClientTs) > 60000) {
+        startCollectWait(perfil, evt.chatId, 'feed_changed_no_clientmsg', Number(evt.ts)||Date.now());
+        audit(perfil, 'virtus', 'debug', 'feed_event_coalesced', { chatId: evt.chatId, reason: 'no_recent_clientmsg' });
+      }
       return;
     }
     await virtusFSM.patch(perfil, evt.chatId, {
@@ -2153,7 +2167,10 @@ async function onDomEvent(perfil, evt) {
     if (!state || !state.discoveredAt) {
       await virtusFSM.patch(perfil, evt.chatId, { discoveredAt: Date.now() });
     }
-    audit(perfil, 'virtus', 'debug', 'feed_event_ignored', { chatId: evt.chatId, feedSig });
+    // NOVO: arme coleta a partir do feed em 45s (coalesce anti-ruído)
+    startCollectWait(perfil, evt.chatId, 'feed_changed', Number(evt.ts)||Date.now());
+    audit(perfil, 'virtus', 'info', 'feed_event_coalesced', { chatId: evt.chatId, feedSig });
+    return;
   } else if (evt.type === 'client_msg') {
     // Sanitizar timestamp para evitar NaN
     let evtTs = Number(evt.ts || Date.now());
@@ -2374,6 +2391,7 @@ async function installThreadObserver(page) {
       map.set(sig, Date.now());
       for (const [k, v] of Array.from(map.entries())) { if (Date.now() - v > 180000) map.delete(k); }
       window.__virtusMsgSeen.set(chatId, map);
+      try { window.__virtusEmit && window.__virtusEmit({ type: 'audit', tag: 'dom_detected_client_msg', chatId, texto: textoRaw, ts }); } catch {}
       window.__virtusEmit && window.__virtusEmit({ type: 'client_msg', chatId, texto: textoRaw, ts, textoNorm });
     }
     const obs = new MutationObserver((recs) => {
@@ -2521,6 +2539,7 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
       });
     } catch {}
       if (ok) {
+      audit(perfil, 'virtus', 'info', 'opened_chat', { chatId });
       audit(perfil, 'virtus', 'info', 'open_chat_click_ok', { chatId });
       await ensureObserversInstalled(p, perfil).catch(()=>{});
       return true;
@@ -2539,6 +2558,7 @@ async function openChatByClick(p, perfil, chatId, { timeoutMs = 8000, retries = 
       await sleep(1000);
       const okHard = await assertOnChatStrict(p, chatId, { timeoutMs: Math.min(timeoutMs, 6000) });
       if (okHard) {
+        audit(perfil, 'virtus', 'info', 'opened_chat', { chatId });
         audit(perfil, 'virtus', 'info', 'open_chat_click_ok_hardnav', { chatId });
         await ensureObserversInstalled(p, perfil).catch(()=>{});
         return true;
@@ -2956,6 +2976,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
         await appendIaLine(nome, chatId, safeMsg);
       } catch {}
       audit(nome, 'virtus', 'info', 'send_ok', { chatId });
+      audit(nome, 'virtus', 'info', 'send_executed', { chatId });
       return true;
     }
 
@@ -3220,6 +3241,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // Funções que dependem de ensurePage devem estar após sua definição
   async function runCollectForChat(nome, chatId) {
     const now = Date.now();
+    audit(nome, 'virtus', 'info', 'runCollectForChat_initiated', { chatId });
     // Early log
     audit(nome, 'virtus', 'info', 'collect_start', { chatId });
     
@@ -3275,6 +3297,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       const historicoConversa = navRes.historico || [];
       const historicoFiltered = (historicoConversa || []).filter(m => String(m && m.texto || '').trim() && String(m.texto).trim() !== 'Nenhuma mensagem encontrada.');
       const historicoSan = sanitizeHistoricoRecords(historicoFiltered, "");
+      
+      audit(nome, 'virtus', 'info', 'historicoColetado_n', { chatId, raw: historicoConversa.length });
+      audit(nome, 'virtus', 'info', 'historySanitized', { chatId, sanitized: historicoSan.length });
       
       // Logs RAW/sanitized após sucesso
       stepLog.appendJSONL(nome, 'virtus', { step: 'collect_raw_count', chatId, rawCount: historicoConversa.length, ts: Date.now() });
@@ -3429,6 +3454,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       let llmRes = null;
       try {
+        audit(nome, 'virtus', 'info', 'llmStarted', { chatId, contentSig: clientContentSig, msgs: historicoSan.length });
         audit(nome, 'virtus', 'info', 'enviado_llm_start', { chatId, msgs: historicoSan.length, contentSig: clientContentSig });
         llmRes = await masterExtractAnswer({ perfil: nome, chatId, mensagens: historicoSan, contexto: {}, respond: true });
         audit(nome, 'virtus', 'info', 'enviado_llm_ok', { chatId, askField: llmRes?.control?.askField||null, shouldReply: !!llmRes?.control?.shouldReply, tookMs: llmRes.meta && llmRes.meta.tookMs || null });
@@ -3604,6 +3630,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (sendJobs.length > 10 || collectJobs.length > 20) {
               audit(perfil, 'virtus', 'warn', 'watchdog_queue_backlog', { sendCount: sendJobs.length, collectCount: collectJobs.length });
             }
+            
+            // HEARTBEAT auto-cura da threadObs durante o scheduler
+            try {
+              const p = await ensurePage().catch(()=>null);
+              if (p) {
+                const st = await p.evaluate(() => ({
+                  inboxObs: !!window.__virtusInboxObs,
+                  threadObs: !!window.__virtusThreadObs,
+                  hasEmit: typeof window.__virtusEmit === 'function'
+                })).catch(()=>null);
+                if (!st || !st.threadObs) {
+                  await ensureObserversInstalled(p, perfil).catch(()=>{});
+                  audit(perfil, 'virtus', 'info', 'watchdog_thread_obs_retry', { prevThreadObs: st && st.threadObs || false });
+                }
+              }
+            } catch {}
           } catch (e) {
             audit(perfil, 'virtus', 'error', 'watchdog_error', { error: (e && e.message) || String(e) });
           }
