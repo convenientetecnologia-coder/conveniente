@@ -474,7 +474,7 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
     messages: allMessages,
     temperature: respond ? 0.6 : 0.0,
     top_p: respond ? 0.9 : 1.0,
-    max_completion_tokens: respond ? 900 : 1200,
+    max_tokens: respond ? 900 : 1200,
     response_format: { type: 'json_object' }
   };
 
