@@ -789,32 +789,80 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function scrapeChatHistory(p) {
+    // Aguarda boot mínimo da thread (não explode)
+    try {
+      await p.waitForFunction(() =>
+        Array.from(document.querySelectorAll('div[dir="auto"]')).some(d => (d.innerText || d.textContent || '').trim().length > 0),
+        { timeout: 4000 }
+      ).catch(()=>{});
+    } catch {}
     try {
       return await p.evaluate(() => {
-        const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
-        function authorHeuristic(node) {
+        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }catch{return String(s||'').trim();} }
+        // Novas bubbles: todas div[dir="auto"] com texto significativo
+        const candidates = Array.from(document.querySelectorAll('div[dir="auto"]'))
+          .map(el => ({
+            text: norm(el.innerText || el.textContent || ''),
+            el
+          }))
+          .filter(x => x.text && x.text.length > 0);
+        // Heurística de autor: alinhamento ou ancestrais "Você enviou"
+        const rows = Array.from(document.querySelectorAll('div[role="row"]')).slice(-200);
+        const meHints = new Set();
+        rows.forEach(r => {
+          const t = norm(r.innerText || r.textContent || '');
+          if (/voce enviou|você enviou|you sent/i.test(t)) meHints.add(r);
+        });
+        function isMine(el) {
           try {
-            const st = window.getComputedStyle(node);
+            let n = el;
+            for (let i=0; i<6 && n; i++, n = n.parentElement) {
+              if (meHints.has(n)) return true;
+            }
+            const st = window.getComputedStyle(el.closest('div[role="row"]') || el);
             const jc = (st && st.justifyContent) || '';
             const ta = (st && st.textAlign) || '';
-            const txt = (node.innerText || node.textContent || '').toLowerCase();
-            if (jc.includes('flex-end') || ta === 'right' || /v[oó]c[eê]\s+enviou|you\s+sent/.test(txt)) return 'ia';
-            return 'cliente';
-          } catch { return 'cliente'; }
+            return (jc.includes('flex-end') || ta === 'right');
+          } catch { return false; }
         }
-        const containers = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid^="message"]')).slice(-40);
+        // Filtro spam
+        const blacklist = /^(inserir|saiba mais|thiago iniciou essa conversa|mensagem enviada|cuidado com golpes|ver perfil do comprador)$/i;
         const msgs = [];
-        for (const c of containers) {
-          const text = norm(c.innerText || c.textContent || '');
-          if (!text) continue;
-          if (/^v[oó]c[eê]\s+(curtiu|chamou|reagiu)|^you\s+(liked|reacted|called)/i.test(text)) continue;
-          msgs.push({ autor: authorHeuristic(c), texto: text });
+        for (const c of candidates.slice(-120)) {
+          if (!c.text || blacklist.test(c.text)) continue;
+          const autor = isMine(c.el) ? 'ia' : 'cliente';
+          msgs.push({ autor, texto: c.text });
         }
         return msgs.slice(-30);
       });
     } catch {
       return [];
     }
+  }
+
+  async function ensureConversationReady(p, chatId, { timeoutMs = 20000 } = {}) {
+    try {
+      // Cura sessão antes do DOM
+      const browserJs = require('./browser.js');
+      await browserJs.resolveNonceIfPresent(p).catch(()=>{});
+      await browserJs.clickContinuarComo(p, { timeout: 8000 }).catch(()=>{});
+    } catch {}
+    // Aguarda container de mensagens real da conversa
+    const selConversation = [
+      'div[aria-label^="Mensagens na conversa"]',
+      'div[role="grid"][aria-label*="conversa"]',
+      'div[role="grid"][aria-label*="Mensagens"]'
+    ];
+    for (const sel of selConversation) {
+      const h = await p.waitForSelector(sel, { timeout: timeoutMs }).catch(()=>null);
+      if (h) return true;
+    }
+    // Fallback: aguarda função/DOM principal
+    return await p.waitForFunction(() => {
+      const a = document.querySelector('div[aria-label^="Mensagens na conversa"]');
+      const b = document.querySelector('div[role="grid"][aria-label]');
+      return !!(a || b);
+    }, { timeout: timeoutMs }).then(()=>true).catch(()=>false);
   }
 
   function scheduleCollector(chatId) {
@@ -841,28 +889,57 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!running || !epochOk()) return;
       const p = await ensurePage();
       if (!p) return;
+      // Garante Marketplace logado e contexto visual
       await garantirMarketplace(p);
       await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-      await sleep(400);
-      const historicoMsgs = await scrapeChatHistory(p);
+      // Ciclo de 3 tentativas de estabilização do DOM
+      let historicoMsgs = [];
+      for (let tryNo = 1; tryNo <= 3; tryNo++) {
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'conv_wait', chatId, tryNo });
+        const ready = await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
+        await sleep(300 + (tryNo*150));
+        try {
+          historicoMsgs = await scrapeChatHistory(p);
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_result', chatId, tryNo, len: (historicoMsgs||[]).length, sample: (historicoMsgs[0] && historicoMsgs[0].texto) ? String(historicoMsgs[0].texto).slice(0,80) : '' });
+        } catch (e) {
+          const emsg = (e && e.message) || String(e);
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_error', chatId, tryNo, error: emsg });
+          if (/detached/i.test(emsg)) {
+            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+            continue;
+          }
+        }
+        if (Array.isArray(historicoMsgs) && historicoMsgs.length > 0) break;
+        await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+        await sleep(500);
+      }
       stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_done', chatId, msgs: historicoMsgs.length });
+      if (!historicoMsgs || historicoMsgs.length === 0) {
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'no_messages_after_retries' });
+        AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
+        return;
+      }
       const ctx = {};
       stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_start', chatId });
-      const llm = await masterExtractAnswer({
-        perfil: nome,
-        chatId,
-        mensagens: historicoMsgs,
-        contexto: ctx,
-        respond: true
-      });
+      let llm;
+      try {
+        llm = await masterExtractAnswer({
+          perfil: nome,
+          chatId,
+          mensagens: historicoMsgs,
+          contexto: ctx,
+          respond: true
+        });
+      } catch (e) {
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_exception', chatId, error: (e && e.message) || String(e) });
+        return;
+      }
       if (!llm || !llm.control || llm.control.shouldReply !== true || !llm.answer || !String(llm.answer).trim()) {
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: llm && llm.meta && llm.meta.error || 'no_answer' });
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: (llm && llm.meta && llm.meta.error) || 'no_answer' });
         AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
         return;
       }
       enqueueSend(chatId, llm.answer, attemptId);
-    } catch (e) {
-      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_exception', chatId, error: (e && e.message) || String(e) });
     } finally {
       try {
         const r = AI_COLLECTORS.get(chatId);
