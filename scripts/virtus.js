@@ -208,6 +208,20 @@ function isRecentIncoming(tempoLabel) {
   return false;
 }
 
+// Parser de idade da mensagem: converte "agora", "5 s", "10 min" em milissegundos
+function parseMessageAgeMs(tempoLabel) {
+  if (!tempoLabel) return 0;
+  const t = String(tempoLabel).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+  if (/\b(agora|now)\b/.test(t)) return 0;
+  const secMatch = t.match(/\b(\d+)\s*(s|seg|secs?|seconds?)\b/);
+  if (secMatch) return parseInt(secMatch[1], 10) * 1000;
+  const minMatch = t.match(/\b(\d+)\s*(min|m|mins?|minutes?|minutos?)\b/);
+  if (minMatch) return parseInt(minMatch[1], 10) * 60 * 1000;
+  const hourMatch = t.match(/\b(\d+)\s*(h|hora|hours?|horas?)\b/);
+  if (hourMatch) return parseInt(hourMatch[1], 10) * 60 * 60 * 1000;
+  return 0; // desconhecido, assume 0
+}
+
 // Extratores e coleta
 function extraiIdDoHref(href) {
   try {
@@ -827,6 +841,74 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     failCounts.delete(chatId);
   }
 
+  // Fast-scrape: tenta coletar mensagens do DOM externo sem abrir o chat
+  async function fastScrapeChatHistory(p, chatId) {
+    try {
+      return await p.evaluate((cid) => {
+        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }catch{return String(s||'').trim();} }
+        // Procura o link do chat na lista
+        const link = Array.from(document.querySelectorAll('a[href^="/marketplace/t/"]')).find(a => {
+          const href = a.getAttribute('href') || a.href || '';
+          return href.includes(`/marketplace/t/${cid}`);
+        });
+        if (!link) return null;
+        const row = link.closest('div[role="row"]') || link.parentElement;
+        if (!row) return null;
+        // Tenta extrair preview da última mensagem do row
+        const spans = Array.from(row.querySelectorAll('span'));
+        const previews = spans.map(s => norm(s.innerText || s.textContent || '')).filter(t => t.length > 0);
+        if (previews.length === 0) return null;
+        // Retorna apenas a última mensagem visível como preview
+        const lastPreview = previews[previews.length - 1];
+        if (!lastPreview || lastPreview.length < 3) return null;
+        // Assume que é do cliente (preview geralmente mostra mensagem recebida)
+        return [{ autor: 'cliente', texto: lastPreview }];
+      }, chatId);
+    } catch {
+      return null;
+    }
+  }
+
+  // Proteção anti-duplicata de saudação: verifica se já foi enviada saudação recentemente
+  function isGreeting(text) {
+    if (!text) return false;
+    const t = String(text).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+    const greetingPatterns = [
+      /^(oi|ol[aá]|olá|hello|hi|hey|bom dia|boa tarde|boa noite|bem vindo|bem-vindo|bemvindo)$/i,
+      /^(oi|ol[aá]|olá|hello|hi|hey)\s+/i,
+      /^(bom dia|boa tarde|boa noite)\s+/i,
+      /^bem\s*vind[oa]s?/i
+    ];
+    return greetingPatterns.some(p => p.test(t));
+  }
+
+  function stripGreeting(text) {
+    if (!text) return text;
+    let t = String(text).trim();
+    const greetingPatterns = [
+      /^(oi|ol[aá]|olá|hello|hi|hey|bom dia|boa tarde|boa noite|bem vindo|bem-vindo|bemvindo)[\s,\.!]*/i,
+      /^(oi|ol[aá]|olá|hello|hi|hey)[\s,\.!]+\s*/i,
+      /^(bom dia|boa tarde|boa noite)[\s,\.!]+\s*/i,
+      /^bem\s*vind[oa]s?[\s,\.!]+\s*/i
+    ];
+    for (const p of greetingPatterns) {
+      t = t.replace(p, '').trim();
+    }
+    return t;
+  }
+
+  async function wasGreetingSentRecently(chatId, windowHours = 24) {
+    try {
+      const ts = respondedCache.get(chatId) || Number(historico[chatId] || 0);
+      if (!ts) return false;
+      const agora = agoraEpoch();
+      const ageHours = (agora - ts) / 3600;
+      return ageHours < windowHours;
+    } catch {
+      return false;
+    }
+  }
+
   async function scrapeChatHistory(p) {
     // Aguarda boot mínimo da thread (não explode)
     try {
@@ -904,17 +986,46 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }, { timeout: timeoutMs }).then(()=>true).catch(()=>false);
   }
 
-  function scheduleCollector(chatId) {
+  async function scheduleCollector(chatId, idadeMs = 0) {
     try {
       const now = Date.now();
-      if (state.aiCollectors.has(chatId)) return;
-      if (state.aiNoopUntil.has(chatId) && state.aiNoopUntil.get(chatId) > now) return;
+      if (state.aiCollectors.has(chatId)) {
+        stepLog.appendJSONL(nome, 'virtus', { step: 'enqueue_skip_pending', chatId, reason: 'collector_already_scheduled' });
+        return;
+      }
+      if (state.aiNoopUntil.has(chatId) && state.aiNoopUntil.get(chatId) > now) {
+        stepLog.appendJSONL(nome, 'virtus', { step: 'enqueue_skip_pending', chatId, reason: 'noop_window' });
+        return;
+      }
+      // Verifica se já está responded
+      const ts = respondedCache.get(chatId) || Number(historico[chatId] || 0);
+      const agora = agoraEpoch();
+      const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
+      if (jaRespondido) {
+        stepLog.appendJSONL(nome, 'virtus', { step: 'enqueue_skip_responded_window', chatId, age: agora - ts });
+        return;
+      }
+      // Verifica se já está pending
+      try {
+        const pend = await pendingList(nome);
+        if (pend && pend[chatId]) {
+          stepLog.appendJSONL(nome, 'virtus', { step: 'enqueue_skip_pending', chatId, reason: 'already_pending' });
+          return;
+        }
+      } catch {}
+      
       const attemptId = stepLog.attemptId();
-      state.aiCollectors.set(chatId, { timer: null, startedAt: now, attemptId });
-      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_started', chatId, windowMs: AI_COLLECT_WINDOW_MS });
+      // Calcula delay baseado na idade real da mensagem
+      const delayMs = Math.max(0, AI_COLLECT_WINDOW_MS - idadeMs);
+      state.aiCollectors.set(chatId, { timer: null, startedAt: now, attemptId, idadeMs, delayMs });
+      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_started', chatId, windowMs: AI_COLLECT_WINDOW_MS, idadeMs, delayMs });
       const t = setTimeout(() => {
+        const ref = state.aiCollectors.get(chatId);
+        const fireTime = Date.now();
+        const actualDelay = ref ? (fireTime - ref.startedAt) : delayMs;
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_fire', chatId, actualDelay, expectedDelay: delayMs });
         finalizeCollector(chatId).catch(()=>{});
-      }, AI_COLLECT_WINDOW_MS);
+      }, delayMs);
       const ref = state.aiCollectors.get(chatId);
       if (ref) ref.timer = t;
     } catch {}
@@ -932,33 +1043,51 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       try {
         // Garante Marketplace logado e contexto visual
         await garantirMarketplace(p);
-        const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
-        if (!opened) {
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
-          state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
-          return;
-        }
-        // Ciclo de 3 tentativas de estabilização do DOM
-        let historicoMsgs = [];
-        for (let tryNo = 1; tryNo <= 3; tryNo++) {
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'conv_wait', chatId, tryNo });
-          const ready = await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
-          await sleep(300 + (tryNo*150));
-          try {
-            historicoMsgs = await scrapeChatHistory(p);
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_result', chatId, tryNo, len: (historicoMsgs||[]).length, sample: (historicoMsgs[0] && historicoMsgs[0].texto) ? String(historicoMsgs[0].texto).slice(0,80) : '' });
-          } catch (e) {
-            const emsg = (e && e.message) || String(e);
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_error', chatId, tryNo, error: emsg });
-            if (/detached/i.test(emsg)) {
-              const reopened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
-              if (!reopened) break;
-              continue;
-            }
+        
+        // Fast-scrape: tenta coletar sem abrir o chat primeiro
+        let historicoMsgs = null;
+        try {
+          historicoMsgs = await fastScrapeChatHistory(p, chatId);
+          if (historicoMsgs && Array.isArray(historicoMsgs) && historicoMsgs.length > 0) {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_used', chatId, len: historicoMsgs.length });
+          } else {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_empty', chatId });
           }
-          if (Array.isArray(historicoMsgs) && historicoMsgs.length > 0) break;
-          await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-          await sleep(500);
+        } catch (e) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_error', chatId, error: (e && e.message) || String(e) });
+        }
+        
+        // Se fast-scrape falhou ou retornou vazio, abre o chat
+        if (!historicoMsgs || !Array.isArray(historicoMsgs) || historicoMsgs.length === 0) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'open_chat', chatId });
+          const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+          if (!opened) {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
+            state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
+            return;
+          }
+          // Ciclo de 3 tentativas de estabilização do DOM
+          historicoMsgs = [];
+          for (let tryNo = 1; tryNo <= 3; tryNo++) {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'conv_wait', chatId, tryNo });
+            const ready = await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
+            await sleep(300 + (tryNo*150));
+            try {
+              historicoMsgs = await scrapeChatHistory(p);
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_result', chatId, tryNo, len: (historicoMsgs||[]).length, sample: (historicoMsgs[0] && historicoMsgs[0].texto) ? String(historicoMsgs[0].texto).slice(0,80) : '' });
+            } catch (e) {
+              const emsg = (e && e.message) || String(e);
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_error', chatId, tryNo, error: emsg });
+              if (/detached/i.test(emsg)) {
+                const reopened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+                if (!reopened) break;
+                continue;
+              }
+            }
+            if (Array.isArray(historicoMsgs) && historicoMsgs.length > 0) break;
+            await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+            await sleep(500);
+          }
         }
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_done', chatId, msgs: historicoMsgs.length });
         if (!historicoMsgs || historicoMsgs.length === 0) {
@@ -986,7 +1115,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
           return;
         }
-        enqueueSend(chatId, llm.answer, attemptId);
+        let answerText = String(llm.answer).trim();
+        // Proteção anti-duplicata de saudação
+        if (isGreeting(answerText)) {
+          const wasSent = await wasGreetingSentRecently(chatId, 24);
+          if (wasSent) {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'greeting_stripped', chatId, reason: 'greeting_sent_recently' });
+            // Remove saudação e tenta usar o resto
+            answerText = stripGreeting(answerText);
+            if (!answerText || answerText.length < 3) {
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'only_greeting_after_strip' });
+              state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
+              return;
+            }
+          }
+        }
+        // Remove saudação redundante mesmo se não foi enviada recentemente (fail-safe)
+        const stripped = stripGreeting(answerText);
+        if (stripped !== answerText && stripped.length >= 3) {
+          answerText = stripped;
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'greeting_stripped', chatId, reason: 'redundancy_removal' });
+        }
+        enqueueSend(chatId, answerText, attemptId);
       } finally {
         await releaseCrit();
       }
@@ -1111,7 +1261,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       } catch {}
       const todos = await coletaChatsMarketplaceTodos(p);
       const filtrados = todos.filter(c => c.id && isRecentIncoming(c.tempo));
-      return filtrados;
+      // Adiciona idadeMs para cada chat
+      return filtrados.map(c => ({
+        ...c,
+        idadeMs: parseMessageAgeMs(c.tempo)
+      }));
     } catch (err) {
       logger.error('Erro ao coletar chats', { nome }, err);
       return [];
@@ -1195,13 +1349,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     const chatsNovos = await coletaChatsMarketplaceRecentes();
     const agora = agoraEpoch();
 
-    chatsNovos.forEach(c => {
+    for (const c of chatsNovos) {
       const ts = respondedCache.get(c.id) || Number(historico[c.id] || 0);
       const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
       if (!jaRespondido) {
-        scheduleCollector(c.id);
+        await scheduleCollector(c.id, c.idadeMs || 0);
       }
-    });
+    }
 
     return false;
   }
