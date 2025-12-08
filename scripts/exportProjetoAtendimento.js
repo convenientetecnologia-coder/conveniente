@@ -16,16 +16,16 @@ const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 
 // Arquivos específicos do atendimento
 const ATENDIMENTO_FILES = [
-  "scripts/virtus.js",
+  "scripts/api_perfis.js",
+  "scripts/browser.js",
+  "scripts/chatLock.js",
+  "scripts/inteligenciaArtificial.js",
+  "scripts/logger.js",
+  "scripts/manifestStore.js",
   "scripts/promptFretes.js",
-  "scripts/inteligenciaArtificial.js", // agora só OpenAI/master
-  "scripts/chatStateStore.js",
-  "scripts/stepLog.js", // logging de passos do atendimento
-  "scripts/logger.js", // sistema de logger geral
-  "scripts/chatLock.js", // sistema de locks de chat
-  "scripts/manifestStore.js", // dados do perfil (cidade, estado) usados no contexto
-  "scripts/notifierQueue.js", // fila persistente (outbox) para envio de pedidos ao notificador
-  "scripts/collector.js", // coletor de dados/conversas
+  "scripts/stepLog.js",
+  "scripts/virtus.js",
+  "scripts/worker.js",
 ];
 
 /**

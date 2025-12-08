@@ -1,20 +1,10 @@
 // scripts/worker.js
-// [REMOVIDO] Fila/locks/busca de localizacao extintos por nova regra. Localizacao vem apenas do manifest do perfil.
-
 const path = require('path');
 const fs = require('fs');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 const browserHelper = require('./browser.js');
-
-// [REMOVIDO] Fila/locks/busca de localizacao extintos por nova regra.
-
-// Snapshot status throttle (evita overkill em ambientes multi-perfil)
-let _lastSnapAt = 0;
-
-// [REMOVIDO] Fila/locks/busca de localizacao extintos por nova regra.
-
 const virtusHelper = require('./virtus.js');
 const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
@@ -426,7 +416,7 @@ async function killProcessTreeByRootPid(pid) {
 
 async function killStrayChromes() {
   // Intencionalmente no-op: 110% sem WMI/PowerShell e sem ps-list
-      return;
+  return;
 }
 
 try {
@@ -606,8 +596,6 @@ await issues.append(nome, type, msg);
 }
 
 const controllers = new Map();
-// Atualiza global.controllers para uso pela fila de busca de localização
-global.controllers = controllers;
 
 const robeMeta = {};
 
@@ -802,22 +790,6 @@ async function activateOnce(nome, source = '') {
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
         }
-
-        // PÓS-ACTIVATE: CHECK DE HEADROOM (RAM) IMEDIATAMENTE DEPOIS DE ABRIR PERFIL
-        if (HEADROOM_AFTER_OPEN_MB > 0) {
-          const freeMB = getAvailableMB();
-          if (freeMB < HEADROOM_AFTER_OPEN_MB) {
-            try { browser && browser.close && await browser.close(); } catch {}
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].activationHeldUntil = Date.now() + 5000;
-            setKillGuard(nome, 30000);
-            await reportAction(nome, 'open_rollback_memory', `Memória livre após abrir perfil caiu abaixo do headroom (${freeMB}MB < ${HEADROOM_AFTER_OPEN_MB}MB)`);
-            logger.warn(`[OPEN] rollback por swap/headroom`, { nome, freeMB, limit:HEADROOM_AFTER_OPEN_MB });
-            if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
-            return { ok:false, error:'headroom_below_min_after_open', freeMB, limit:HEADROOM_AFTER_OPEN_MB };
-          }
-        }
-
         const proc = browser.process && browser.process();
         if (proc && proc.pid && Number.isFinite(proc.pid)) {
           robeMeta[nome] = robeMeta[nome] || {};
@@ -842,17 +814,6 @@ async function activateOnce(nome, source = '') {
           }, 2000);
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
-
-        // [NAV_INIT] garantir UI do Marketplace após abrir o browser (sem usar o chat ativo!)
-        try {
-          const pages = await browser.pages().catch(()=>[]);
-          const main = pages && pages[0];
-          if (main) {
-            await browserHelper.gotoMessengerMarketplace(main, nome);
-          }
-        } catch (e) {
-          logger.warn('[NAV_INIT] falha ao preparar marketplace', { nome, error: (e && e.message)||String(e) });
-        }
 
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activatedAt = Date.now();
@@ -1100,7 +1061,6 @@ function getWorkingProfileNames() {
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
-
     const pages = await browser.pages();
     let closed = 0;
 
@@ -1108,7 +1068,7 @@ async function closeExtraPages(browser, mainPage, nome) {
     const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
     const inRobe = (browser && browser._robeActiveFor === nome) || (nome && robeMeta[nome] && robeMeta[nome].emExecucao === true);
     const inConfig = ctrl && ctrl.configurando === true;
-    const inHuman  = ctrl && ctrl.humanControl === true;
+    const inHuman = ctrl && ctrl.humanControl === true;
 
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       for (const p of pages) {
@@ -1127,14 +1087,12 @@ async function closeExtraPages(browser, mainPage, nome) {
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
       const again = await browser.pages();
       for (const p of again) {
-        try {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && again[0] && p === again[0]) continue;
         let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
         closed++;
-        } catch {}
       }
     }
 
@@ -1330,8 +1288,8 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
             const arr = Array.isArray(obj && obj.traceEvents) ? obj.traceEvents : [];
             for (const e of arr) {
               if (e && typeof e.pid === 'number') pids.add(e.pid);
-      }
-    } catch {}
+            }
+          } catch {} 
         } finally {
           resolve(Array.from(pids));
         }
@@ -1351,7 +1309,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
     const res = await tracingComplete;
     try { await session.detach && session.detach().catch(()=>{}); } catch {}
     return Array.isArray(res) ? res : [];
-        } catch {
+  } catch {
     return [];
   }
 }
@@ -1359,7 +1317,7 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
 async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}) {
   try {
     if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) return [];
-          robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome] = robeMeta[nome] || {};
     const cache = robeMeta[nome]._pidCache || { pids: [], ts: 0 };
     const expired = (Date.now() - cache.ts) > PIDS_CACHE_TTL_MS;
     if (!forceRefresh && !expired && Array.isArray(cache.pids) && cache.pids.length) {
@@ -1390,8 +1348,8 @@ async function ramCpuMonitorTick() {
     const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000);
     const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
-              return;
-            }
+    return;
+  }
 
   _ramTickBusy = true;
   const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '12000', 10); // 12s padrão Windows
@@ -1404,8 +1362,8 @@ async function ramCpuMonitorTick() {
       for (const nome of Object.keys(robeMeta)) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].ramMB = null;
-            robeMeta[nome].cpuPercent = null;
-          }
+        robeMeta[nome].cpuPercent = null;
+      }
       await snapshotStatusAndWrite();
       return;
     }
@@ -1450,8 +1408,8 @@ async function ramCpuMonitorTick() {
         const RAM_CORRECTION_FACTOR = parseFloat(process.env.RAM_CORRECTION_FACTOR || '0.435'); // 0.435 = ~43.5% (ajuste fino)
         const pids = await getControllerPidsCached(nome, ctrl, { forceRefresh: false });
         let totalMB = 0;
-          if (Array.isArray(pids) && pids.length) {
-              for (const pid of pids) {
+        if (Array.isArray(pids) && pids.length) {
+          for (const pid of pids) {
             const v = pidMemMap[pid];
             if (typeof v === 'number' && v >= 0) totalMB += v;
           }
@@ -1478,14 +1436,14 @@ async function ramCpuMonitorTick() {
 
       } catch {
         try {
-        robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].ramMB = null;
           robeMeta[nome].cpuPercent = null;
         } catch {}
       }
     }
 
-  await snapshotStatusAndWrite();
+    await snapshotStatusAndWrite();
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
   } finally {
@@ -1736,11 +1694,8 @@ async function robeTickGlobal() {
   }
 }
 
-// Intervalo do robeTickGlobal controlável por env (padrão 3000ms para maior reatividade)
-const ROBE_TICK_INTERVAL_MS = parseInt(process.env.ROBE_TICK_INTERVAL_MS || '3000', 10);
-const ROBE_TICK_INITIAL_MS = Math.floor(ROBE_TICK_INTERVAL_MS / 2);
-setInterval(robeTickGlobal, ROBE_TICK_INTERVAL_MS);
-setTimeout(robeTickGlobal, ROBE_TICK_INITIAL_MS);
+setInterval(robeTickGlobal, 7000);
+setTimeout(robeTickGlobal, 3500);
 
 async function fotosGcTick() {
   try {
@@ -1941,7 +1896,7 @@ const handlers = {
   async ['criar-perfil']({ cidade, cookies }) {
     logger.info('[HANDLER] criar-perfil chamada', { cidadeProvided: !!cidade, cookiesProvided: !!cookies });
     if (!cidade || !cookies) return { ok: false, error: 'Cidade e cookies obrigatórios.' };
-    if (!fs.existsSync(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
+    if (!fs.existsExists(perfisDir)) fs.mkdirSync(perfisDir, { recursive: true });
 
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
@@ -2720,10 +2675,6 @@ const handlers = {
 };
 
 async function snapshotStatusAndWrite() {
-  // Throttle: limita frequência de writes (800ms mínimo entre writes)
-  if ((Date.now() - _lastSnapAt) < 800) return;
-  _lastSnapAt = Date.now();
-
 _statusLock = _statusLock.then(async () => {
 try {
 try {
@@ -3595,18 +3546,6 @@ async function isPageLikelyAlive(page, nome) {
 }
 
 async function recoveryStep(nome, page, step) {
-  // BLOQUEIO: não recuperar se Virtus ativo e na URL de chat
-  try {
-    const urlNow = page && typeof page.url === 'function' ? (page.url() || '') : '';
-    const ctrl = controllers.get(nome);
-    const virtusOn = !!(ctrl && ctrl.trabalhando && !ctrl.humanControl && !ctrl.configurando);
-    if (/messenger\.com\/marketplace\/t\/\d+/.test(urlNow) && virtusOn) {
-      try { await issues.append(nome, 'mil_action', 'health_recovery_skip_on_chat'); } catch {}
-      logger.warn('[NURSE_RECOVER_SKIP] Em chat ativo da Virtus — NUNCA reload/goto para recuperar', { nome, urlNow });
-      return false;
-    }
-  } catch {}
-  
   const st = getHealth(nome);
   const now = Date.now();
   if (st.nextTryAt && st.nextTryAt > now) return false;
@@ -3810,6 +3749,7 @@ async function periodicAboutBlankCleanup() {
       try {
         if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
 
+        // Proteções: não limpa se Robe está ativo, configurando, ou em modo humano
         const inRobe = (ctrl.browser._robeActiveFor === nome) || (robeMeta[nome] && robeMeta[nome].emExecucao === true);
         const sendLockActive = ctrl.browser._sendLock && ctrl.browser._sendLock.active;
         const inConfig = ctrl.configurando === true;
@@ -3817,35 +3757,48 @@ async function periodicAboutBlankCleanup() {
 
         if (inRobe || sendLockActive || inConfig || inHuman) continue;
 
+        // Varre todas as páginas procurando about:blank órfãs
         const pages = await ctrl.browser.pages().catch(() => []);
         if (!Array.isArray(pages) || pages.length <= 1) continue;
 
         const mainPage = ctrl.mainPage || pages[0];
-
+        
+        // Proteção extra: verifica se há create item aberto (só verifica uma vez)
         const hasCreateItem = pages.some(pg => {
-          try { const u = pg.url ? pg.url() : ''; return /facebook\.com\/marketplace\/create\/item/i.test(u); }
-          catch { return false; }
+          try {
+            const u = pg.url ? pg.url() : '';
+            return /facebook\.com\/marketplace\/create\/item/i.test(u);
+          } catch { return false; }
         });
-
+        
+        // Se há create item, não limpa (pode ser que o Robe esteja prestes a usar)
         if (hasCreateItem) continue;
 
         let closed = 0;
 
         for (const p of pages) {
           try {
+            // Nunca fecha a página principal
             if (p === mainPage) continue;
+            if (!mainPage && p === pages[0]) continue;
+
+            // Verifica se é about:blank
             let url = '';
             try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-            if (!url || url === 'about:blank') {
-              await p.close({ runBeforeUnload: false }).catch(() => {});
-              closed++;
-            }
+            if (!url || url !== 'about:blank') continue;
+
+            // Fecha a aba about:blank órfã
+            // (já verificamos que não há Robe ativo e não há create item)
+            await p.close({ runBeforeUnload: false }).catch(() => {});
+            closed++;
           } catch {}
         }
 
         if (closed > 0) {
           totalClosed += closed;
-          try { await issues.append(nome, 'mil_action', `periodic_cleanup_aboutblank n=${closed}`); } catch {}
+          try {
+            await issues.append(nome, 'mil_action', `periodic_cleanup_aboutblank n=${closed}`);
+          } catch {}
         }
       } catch (e) {
         if (process.env.PRUNE_DEBUG === '1') {

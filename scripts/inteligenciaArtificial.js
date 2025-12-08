@@ -3,17 +3,17 @@
 // scripts/inteligenciaArtificial.js
 // Implementação única OpenAI GPT-5.1 para ciclo mestre de atendimento
 // Função principal: masterExtractAnswer
-//
-// PARADIGMA: Este script recebe mensagens JÁ LIMPAS do collector.js
-// - Não faz parsing/sanitização/filtro de ruído/preview/eco do Messenger DOM
-// - Toda limpeza anti-ruído é responsabilidade do collector.js (única fonte de mensagens)
-// - Apenas processa extração, normalização, anti-prompt-injection e parsing IA
 
 const fetch = global.fetch || require('node-fetch');
 
 const logger = require('./logger.js');
 const stepLog = require('./stepLog.js');
-const audit = stepLog.audit;
+const audit = (perfil, flow, level, event, extra) => {
+  try {
+    if (typeof stepLog.audit === 'function') return stepLog.audit(perfil, flow, level, event, extra);
+    return stepLog.appendJSONL(perfil, flow, { level, event, ...(extra||{}) });
+  } catch {}
+};
 let issues = null;
 try { issues = require('./issues.js'); } catch {}
 // Funções de persistência removidas: loadState, saveState, appendLog não são mais usadas
@@ -437,8 +437,6 @@ Responda APENAS com o JSON válido, sem explicações adicionais.`;
   return [header, jsonSpec].join('\n\n');
 }
 
-// buildMessages: Recebe histórico já limpo pelo collector.js
-// Não faz filtro de ruído/preview/eco do Messenger - isso é responsabilidade do collector
 function buildMessages(historico = [], maxMessages = 30) {
   try {
     const arr = Array.isArray(historico) ? historico : [];
@@ -448,7 +446,6 @@ function buildMessages(historico = [], maxMessages = 30) {
       const role = (m.autor === 'ia' || m.autor === 'assistant') ? 'assistant' : 'user';
       const content = sanitizeSecrets(String(m.texto || ''));
       if (!content.trim()) continue;
-      // Anti-prompt-injection: segurança da IA, não filtro de ruído do Messenger
       if (detectPromptInjection(content)) continue;
       messages.push({ role, content });
     }
@@ -459,23 +456,6 @@ function buildMessages(historico = [], maxMessages = 30) {
 }
 
 // ========== CHAMADA OPENAI ==========
-
-function isTransientError(error) {
-  if (!error) return false;
-  const msg = String(error.message || error || '').toLowerCase();
-  const code = String(error.code || '').toLowerCase();
-  return (
-    msg.includes('timeout') ||
-    msg.includes('aborted') ||
-    code === 'econnreset' ||
-    code === 'econnrefused' ||
-    code === 'etimedout' ||
-    code === 'enotfound' ||
-    code === 'econnaborted' ||
-    msg.includes('network') ||
-    msg.includes('fetch failed')
-  );
-}
 
 async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId = null) {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -501,66 +481,47 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
   const timeoutMs = 30000;
   audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_post', { chatId, model, messagesLen: allMessages.length, timeoutMs });
 
-  let lastError = null;
-  const maxAttempts = 2;
+  const Controller = global.AbortController || require('node-abort-controller');
+  const controller = new Controller();
+  const t = setTimeout(() => { try { controller.abort(); } catch {} }, timeoutMs);
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const Controller = global.AbortController || require('node-abort-controller');
-    const controller = new Controller();
-    const t = setTimeout(() => { try { controller.abort(); } catch {} }, timeoutMs);
+  try {
+    const resp = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(params),
+      signal: controller.signal
+    });
 
-    try {
-      const resp = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(params),
-        signal: controller.signal
-      });
+    clearTimeout(t);
 
-      clearTimeout(t);
-
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
-        throw new Error(`OpenAI HTTP ${resp.status}: ${text.substring(0, 200)}`);
-      }
-
-      const data = await resp.json();
-      const content = data?.choices?.[0]?.message?.content || '';
-
-      if (!content || !String(content).trim()) throw new Error('openai_empty_response');
-
-      const usage = data.usage || {};
-      audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_ok', { chatId, promptTokens: usage.prompt_tokens || 0, completionTokens: usage.completion_tokens || 0 });
-
-      return { content: String(content).trim(), usage };
-    } catch (e) {
-      clearTimeout(t);
-      lastError = e;
-      
-      // Se for erro transitório e ainda tiver tentativas, faz retry
-      if (isTransientError(e) && attempt < maxAttempts) {
-        audit(perfil || 'GLOBAL', 'virtus', 'warn', 'llm_http_retry', { chatId, attempt, error: e && e.message || String(e) });
-        await new Promise(resolve => setTimeout(resolve, 1200));
-        continue;
-      }
-      
-      // Se não for transitório ou já tentou todas as vezes, lança o erro
-      audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_http_err', { chatId, error: e && e.message || String(e) });
-      throw e;
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`OpenAI HTTP ${resp.status}: ${text.substring(0, 200)}`);
     }
-  }
 
-  // Fallback caso algo dê errado no loop (não deveria chegar aqui)
-  audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_http_err', { chatId, error: lastError && lastError.message || String(lastError) });
-  throw lastError || new Error('openai_call_failed');
+    const data = await resp.json();
+    const content = data?.choices?.[0]?.message?.content || '';
+
+    if (!content || !String(content).trim()) throw new Error('openai_empty_response');
+
+    const usage = data.usage || {};
+    audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_ok', { chatId, promptTokens: usage.prompt_tokens || 0, completionTokens: usage.completion_tokens || 0 });
+
+    return { content: String(content).trim(), usage };
+  } catch (e) {
+    clearTimeout(t);
+    audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_http_err', { chatId, error: e && e.message || String(e) });
+    throw e;
+  }
 }
 
 // ========== PARSING E VALIDAÇÃO DE RESPOSTA ==========
 
-function parseResponse(rawContent, lastClientMsg, perfil = null, chatId = null) {
+function parseResponse(rawContent, lastClientMsg) {
   try {
     let parsed = null;
     try {
@@ -580,12 +541,7 @@ function parseResponse(rawContent, lastClientMsg, perfil = null, chatId = null) 
     const meta = parsed.meta || {};
 
     if (answer && lastClientMsg) {
-      const beforeEcho = answer;
       answer = preventEcho(lastClientMsg, answer);
-      if (beforeEcho && !answer) {
-        // preventEcho retornou null (eco detectado), força pergunta do próximo campo
-        audit(perfil || 'GLOBAL', 'virtus', 'warn', 'llm_echo_detected', { chatId, lastClientMsg: String(lastClientMsg || '').slice(0, 100) });
-      }
     }
 
     if (answer && typeof answer !== 'string') answer = null;
@@ -638,13 +594,9 @@ function parseResponse(rawContent, lastClientMsg, perfil = null, chatId = null) 
 
 // ========== FUNÇÃO PRINCIPAL ==========
 
-// masterExtractAnswer: Recebe array de mensagens já limpo pelo collector.js
-// Formato esperado: [{ autor: 'cliente'|'ia', texto: string, timestamp: number }]
-// Não faz sanitização/filtro de ruído/preview - collector.js é responsável por isso
 async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respond = false }) {
   try {
     const historico = Array.isArray(mensagens) ? mensagens : [];
-    // Busca última mensagem do cliente apenas para anti-eco (não é filtro de ruído)
     const lastClientMsg = historico.filter(m => m.autor === 'cliente').slice(-1)[0]?.texto || null;
 
     const sysPrompt = buildSystemPrompt(contexto || {});
@@ -663,7 +615,7 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
     try {
       audit(perfil, 'virtus', 'info', 'llm_master_start', { chatId, msgsLen: messages.length, respond });
       const out = await callOpenAI(messages, sysPrompt, respond, perfil, chatId);
-      const result = parseResponse(out.content || '', lastClientMsg, perfil, chatId);
+      const result = parseResponse(out.content || '', lastClientMsg);
       
       // Anti-saudação/disclaimer duplicado (aplica filtro pós-LLM)
       result.answer = stripDuplicateGreetingAndDisclaimer(result.answer, historico);

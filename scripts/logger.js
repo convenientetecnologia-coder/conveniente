@@ -21,7 +21,7 @@ const COLOR = {
 
 const LOG_TO_FILE = !!process.env.LOG_TO_FILE; // Para logar também num arquivo (append)
 const LOG_FILE = path.join(__dirname, '..', 'dados', 'logger.log');
-const DEBUG_MODE = process.env.DEBUG || process.env.LOG_DEBUG || '0';
+const DEBUG_MODE = process.env.DEBUG || process.env.LOG_DEBUG || '1';
 
 function shouldLog(level) {
   // Exibe DEBUG somente se ativado
@@ -48,9 +48,11 @@ function log({ level = LEVELS.INFO, msg = '', ctx = {}, errorObj = null }) {
   const line = `${COLOR.ts}[${ts}]${COLOR.reset} ${color}[${level.toUpperCase()}]${COLOR.reset} ${base}`;
   // Terminal
   if (level === LEVELS.ERROR) {
-    process.stderr.write(line + '\n');
+    console.error(line);
+  } else if (level === LEVELS.WARN) {
+    console.warn(line);
   } else {
-    process.stdout.write(line + '\n');
+    console.log(line);
   }
   // Arquivo (opcional)
   if (LOG_TO_FILE) {

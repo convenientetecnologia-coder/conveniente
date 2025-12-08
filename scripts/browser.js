@@ -6,11 +6,8 @@ const path = require('path');
 const os = require('os');
 const utils = require('./utils.js');
 const logger = require('./logger.js');
-const stepLog = require('./stepLog.js');
 
 puppeteer.use(StealthPlugin());
-
-// [REMOVIDO: busca de localização — proteção não necessária]
 
 /**
  * Traz a janela do navegador para frente e maximiza.
@@ -82,54 +79,6 @@ async function injectCookies(page, cookies) {
     if (process.env.BROWSER_DEBUG === '1') {
       logger.warn('[browser.js] Erro ao injetar cookies: ' + (e && e.message));
     }
-  }
-}
-
-function installThreadNavGuard(page, perfil = 'default') {
-  try {
-    if (!page || page._virtusThreadNavGuardInstalled) return;
-    page._virtusThreadNavGuardInstalled = true;
-
-    const isThreadUrl = (u) => {
-      try {
-        const s = String(u || '');
-        if (!s) return false;
-        // Absoluto ou relativo
-        if (/^https?:\/\/(www\.)?messenger\.com\/marketplace\/t\/\d+(?:[/?#]|$)/i.test(s)) return true;
-        if (/^\/marketplace\/t\/\d+(?:[/?#]|$)/i.test(s)) return true;
-        return false;
-      } catch { return false; }
-    };
-
-    // Monkey-patch goto
-    const origGoto = typeof page.goto === 'function' ? page.goto.bind(page) : null;
-    if (origGoto) {
-      page.goto = async (...args) => {
-        const target = (args && args[0]) ? String(args[0]) : '';
-        if (isThreadUrl(target)) {
-          try { stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_block_goto_thread', target, ts: Date.now() }); } catch {}
-          throw new Error('nav_forbidden_thread_goto');
-        }
-        return origGoto(...args);
-      };
-    }
-
-    // Monkey-patch reload
-    const origReload = typeof page.reload === 'function' ? page.reload.bind(page) : null;
-    if (origReload) {
-      page.reload = async (...args) => {
-        let cur = '';
-        try { cur = String(page.url() || ''); } catch {}
-        if (isThreadUrl(cur)) {
-          try { stepLog.appendJSONL(perfil, 'virtus', { step: 'nav_guard_block_reload_thread', current: cur, ts: Date.now() }); } catch {}
-          throw new Error('nav_forbidden_thread_reload');
-        }
-        return origReload(...args);
-      };
-    }
-
-  } catch {
-    // Nada — guard nunca deve quebrar a page
   }
 }
 
@@ -297,7 +246,6 @@ async function patchPage(nome, page, coords) {
         page._virtusIntercepted = true;
         interceptionConfigured = true;
       }
-      try { installThreadNavGuard(page, nome); } catch {}
     } catch (err) {
       // log silencioso
     }
@@ -487,8 +435,8 @@ function ensureChromeProfilePreferences(userDataDir) {
  * Após prune, robeMeta[nome].numPages atualizado, para uso no painel/status.json.
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
+  // 1) Sempre fecha about:blank extras (nunca aguarda flags)
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-
   try {
     const pages = await browser.pages();
     for (const p of pages) {
@@ -503,16 +451,18 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
     }
   } catch {}
 
+  // 2) Se em Robe/config/etc, não faz prune amplo
   const isRobeActive = robeMeta && nome && robeMeta[nome] && robeMeta[nome].emExecucao === true;
   const sendLockActive = ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active;
-  const isConfig      = ctrl && ctrl.configurando === true;
-  const isHuman       = ctrl && ctrl.humanControl === true;
+  const isConfig = ctrl && ctrl.configurando === true;
+  const isHuman = ctrl && ctrl.humanControl === true;
   const robeActiveFor = (browser && browser._robeActiveFor === nome);
 
   if (isRobeActive || robeActiveFor || sendLockActive || isConfig || isHuman) {
     return;
   }
 
+  // 3) Prune amplo padrão (mais de 1 page)
   const t0 = Date.now();
   while ((Date.now() - t0) < timeoutMs) {
     try {
@@ -534,17 +484,14 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
 
 // ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
 function installOneTabGuard(browser, nome, {
-  allow = () => false,
-  maxPagesWhenAllow = 2,
-  onNumPages = null,
+  allow = () => false,              // função externa que diz se “mais de 1 aba” é permitido
+  maxPagesWhenAllow = 2,            // máximo permitido quando allow() é true (Robe/config)
+  onNumPages = null,                // callback para atualizar robeMeta[nome].numPages
   log = (m,ctx)=>{ try{require('./logger.js').info(m,ctx);}catch{} }
 } = {}) {
   try {
     if (!browser || browser._oneTabGuardInstalled) return;
     browser._oneTabGuardInstalled = true;
-    const delay = (ms) => new Promise(r => setTimeout(r, ms));
-
-    // [REMOVIDO: busca de localização — waitIfBuscaAtiva não necessária]
 
     async function reportNum() {
       try {
@@ -552,44 +499,33 @@ function installOneTabGuard(browser, nome, {
         if (onNumPages) onNumPages(Array.isArray(pages) ? pages.length : 0);
       } catch {}
     }
-
-    // Lock/debounce para não rodar o enforceHardCap em paralelo
-    browser._enforceHardCapRunning = false;
-
     async function enforceHardCap() {
-      if (browser._enforceHardCapRunning) return;
-      browser._enforceHardCapRunning = true;
+      if (browser && browser._robeActiveFor === nome) return; // Nunca prune se Robe ativo para este perfil
       try {
-        // Não prune se este perfil está em ciclo de robe ativo
-        if (browser && browser._robeActiveFor === nome) return;
-
-        try {
-          const pages = await browser.pages();
-          let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
-          if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
-          const lim = (allow && allow()) ? limOpt : 1;
-          if (Array.isArray(pages) && pages.length > lim) {
-            for (let i = pages.length - 1; i >= 1; i--) {
-              if (pages.length <= lim) break;
-              const p = pages[i];
-              // Proteção: não fecha tela de criar item
-              let u = '';
-              try { u = await p.url().catch(()=>''); } catch {}
-              if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
-              try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-            }
-            const cur = await browser.pages();
-            log('[PRUNER][HARD] Guard fechou abas extras', { nome, final: (cur && cur.length) || 0, lim });
+        const pages = await browser.pages();
+        let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
+        if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
+        const lim = (allow && allow()) ? limOpt : 1;
+        if (Array.isArray(pages) && pages.length > lim) {
+          // Mantenha a primeira (main) e feche todas as demais
+          for (let i = pages.length - 1; i >= 1; i--) {
+            if (pages.length <= lim) break;
+            const p = pages[i];
+            let u = '';
+            try { u = await p.url().catch(()=>''); } catch {}
+            if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // Nunca fechar create item
+            try { await p.close({ runBeforeUnload: false }).catch(()=>{}); }
+            catch {}
           }
-        } catch (e) {
-          if (process.env.PRUNE_DEBUG === '1') {
-            log('[PRUNER][HARD] erro enforce', { nome, error: (e && e.message) || String(e) });
-          }
-        } finally {
-          await reportNum();
+          const cur = await browser.pages();
+          log('[PRUNER][HARD] Guard fechou abas extras', { nome, final: (cur && cur.length) || 0, lim });
+        }
+      } catch (e) {
+        if (process.env.PRUNE_DEBUG === '1') {
+          log('[PRUNER][HARD] erro enforce', { nome, error: (e && e.message) || String(e) });
         }
       } finally {
-        browser._enforceHardCapRunning = false;
+        await reportNum();
       }
     }
 
@@ -607,8 +543,8 @@ function installOneTabGuard(browser, nome, {
       await reportNum();
     });
 
-    // Enforce inicial (com lock)
-    setTimeout(() => { enforceHardCap().catch(()=>{}); }, 400);
+    // Varredura inicial
+    setTimeout(enforceHardCap, 400);
 
   } catch {}
 }
@@ -1472,6 +1408,14 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
     let removed = 0;
     for (const p of targets) {
       try {
+        if (!fs.existsExists) {} // placeholder
+      } catch {}
+    }
+
+    // Ajuste: checagem correta de existência e remoção
+    removed = 0;
+    for (const p of targets) {
+      try {
         if (!fs.existsSync(p)) continue;
         // Proteção adicional contra alvos críticos
         const pNorm = path.normalize(p);
@@ -1966,6 +1910,7 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
           if (sup > Date.now()) return;
           if (page.isClosed && page.isClosed()) return;
+          // AQUI pode acessar page.url() pois mainFrame já existe
           const u = page.url ? page.url() : '';
           if (!u || u === 'about:blank') {
             try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
@@ -2091,36 +2036,6 @@ async function detectAccountSuspended(page) {
   return { banned: false };
 }
 
-/**
- * Helper para navegação inicial obrigatória para Messenger Marketplace.
- * Use após abrir o navegador, para garantir que a aba principal vai para marketplace de forma limpa — só seguir quando anchors/rows forem detectados.
- * 
- * Parâmetros:
- * - page: objeto Page (do Puppeteer)
- * - nome: nome do perfil (para log)
- * - timeoutMs: tempo máximo de espera (default 30000ms)
- * 
- * Usage (em worker.js ou Virtus como preferir):
- *   await browserHelper.gotoMessengerMarketplace(page, nome);
- */
-async function gotoMessengerMarketplace(page, nome, timeoutMs=30000) {
-  try {
-    await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-
-    const ok = await Promise.race([
-      page.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }).then(()=>true).catch(()=>false),
-      page.waitForSelector('div[role="row"]', { timeout: 8000 }).then(()=>true).catch(()=>false)
-    ]);
-
-    logger.info('[NAV_INIT][browser] ' + (ok ? 'OK' : 'NOK'), { nome, url: (typeof page.url === 'function'?page.url():''), ts: (new Date()).toISOString() });
-
-    return ok;
-  } catch (e) {
-    logger.warn('[NAV_INIT][browser] falha', { nome, error: (e&&e.message)||String(e) });
-    return false;
-  }
-}
-
 module.exports = {
   openBrowser,
   configureProfile,
@@ -2149,9 +2064,7 @@ module.exports = {
   clickContinuarComo,
   installOneTabGuard,
   installAboutBlankKiller,
-  gotoMessengerMarketplace,    // <----- NOVO: Helper de navegação inicial do Marketplace
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended,
-  installThreadNavGuard
+  detectAccountSuspended
 };

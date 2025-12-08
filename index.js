@@ -1,7 +1,4 @@
 // index.js (main do projeto, pasta principal)
-// Carregar variáveis de ambiente do arquivo .env PRIMEIRO (antes de qualquer import)
-require('dotenv').config();
-
 const express = require('express');
 const path = require('path');
 const cors = require('cors');
