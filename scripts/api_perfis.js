@@ -495,29 +495,6 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
-  // ===== PASSO 3 — Adicionar endpoint POST /api/perfis/:nome/custom-virtus-message =====
-  // POST /api/perfis/:nome/custom-virtus-message — atualiza mensagem personalizada Virtus
-  app.post('/api/perfis/:nome/custom-virtus-message', async (req, res) => {
-    const nome = req.params.nome;
-    const { enabled, message } = req.body || {};
-    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
-    try { assertPerfilExists(fileStore, nome); } catch(e) {
-      logger.warn('Tentativa de custom-virtus para perfil inexistente', { nome, error: e && e.message });
-      return res.json({ ok:false, error:e.message });
-    }
-    try {
-      await manifestStore.update(nome, m => {
-        m = m || {};
-        m.customVirtusMessageEnabled = !!enabled;
-        m.customVirtusMessage = String(message || '');
-        return m;
-      });
-      res.json({ ok:true });
-    } catch (e) {
-      res.json({ ok:false, error: (e && e.message) || String(e) });
-    }
-  });
-
   // *** INÍCIO DA ALTERAÇÃO SOLICITADA ***
   // Define o modo do Robe por perfil ('itens' ou 'veiculos')
   app.post('/api/perfis/:nome/robe-mode', async (req, res) => {
