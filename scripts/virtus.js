@@ -1165,51 +1165,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       return;
     } catch {}
 
-    log('[BOOTSTRAP] Primeiro boot sem histórico. Scrollando Marketplace por 60s e marcando TODOS os chats como respondidos.');
+    log('[BOOTSTRAP] Primeiro boot sem histórico: SNAPSHOT INSTANTÂNEO (sem varredura/scroll).');
     if (!running || !epochOk()) return;
     const p = await ensurePage();
     if (!p) { log('[BOOTSTRAP] Falha ao garantir aba zero.'); return; }
     if (!running || !epochOk()) return;
     await garantirMarketplace(p);
-    try {
-      await Promise.race([
-        p.waitForSelector('a[href^="/marketplace/t/"]', { timeout: 8000 }),
-        p.waitForSelector('div[role="row"] span', { timeout: 8000 })
-      ]);
-    } catch {}
-    
-    const t0 = Date.now();
-    const maxMs = 60000;
-    const todosIds = new Set();
-    
-    while ((Date.now() - t0) < maxMs && running && epochOk()) {
-      try {
-        const todos = await coletaChatsMarketplaceTodos(p);
-        for (const c of todos) {
-          if (c.id) todosIds.add(c.id);
-        }
-        try {
-          const contSel = await findScrollContainerSelector(p);
-          await p.evaluate((selector) => {
-            const el = document.querySelector(selector) || document.scrollingElement || document.body;
-            if (el) el.scrollTop = el.scrollHeight;
-          }, contSel);
-        } catch {
-          try { await p.evaluate(() => window.scrollBy(0, Math.max(400, window.innerHeight * 0.8))); } catch {}
-        }
-        await sleep(800 + Math.floor(Math.random() * 500));
-      } catch {}
-    }
-    
+    try { await scrollChatsToTop(p, nome); } catch {}
+    await sleep(350); // Pequeno delay para DOM estabilizar
+
+    // Único passe, snapshot imediato de todos os chats visíveis neste momento!
+    const todos = await coletaChatsMarketplaceTodos(p);
+    const ids = new Set();
+    for (const c of todos) if (c.id) ids.add(c.id);
+
     const agora = agoraEpoch();
     historico = {};
-    for (const id of todosIds) {
-      historico[id] = agora;
-    }
+    for (const id of ids) historico[id] = agora;
+
+    // Sempre grava — mesmo se vazio
     await salvaHistorico();
     await carregaHistorico();
     await reconcilePendingsIfAny();
-    log(`[BOOTSTRAP] Concluído. ${todosIds.size} chats marcados como respondidos no primeiro boot.`);
+    log(`[BOOTSTRAP] Snapshot inicial gravado. chats=${ids.size} (arquivo criado mesmo vazio).`);
   }
 
   async function atualizaFila() {
