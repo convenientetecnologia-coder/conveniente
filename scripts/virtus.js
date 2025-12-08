@@ -36,10 +36,42 @@ const AI_NOOP_UNTIL = new Map();      // chatId -> timestamp Ms
 const SEND_QUEUE = [];                // [{ chatId, answer, attemptId }]
 let SEND_WORKER_ACTIVE = false;
 
+const MAX_LOCK_REQUEUE = parseInt(process.env.VIRTUS_MAX_LOCK_REQUEUE || '5', 10);
+
 // Locks por perfil de input
 const VIRTUS_INPUT_LOCKS = new Map();
 function setVirtusInputLock(nome, v){ if (v) VIRTUS_INPUT_LOCKS.set(nome,true); else VIRTUS_INPUT_LOCKS.delete(nome); }
 function isVirtusLocked(nome){ return VIRTUS_INPUT_LOCKS.has(nome); }
+
+// ==== [PATCH] CRITICAL LOCK (ENVIO/COLETA) + BLOQUEIO DE SCROLL ====
+const CRITICAL_CHAINS = new Map(); // nome -> promise chain para serializar coletores/envios
+
+async function acquireCritical(p, nome, owner, chatId) {
+  const prev = CRITICAL_CHAINS.get(nome) || Promise.resolve();
+  let unlock;
+  const next = prev.then(() => new Promise(res => { unlock = res; }));
+  CRITICAL_CHAINS.set(nome, next);
+  await prev;
+  try {
+    const b = getBrowserFromPage(p);
+    if (b) b._virtusCritical = { active: true, owner: String(owner||'unknown'), chatId: String(chatId||''), since: Date.now() };
+  } catch {}
+  setVirtusInputLock(nome, true);
+  try { stepLog.appendJSONL(nome, 'virtus', { step: 'critical_lock_begin', owner, chatId }); } catch {}
+  try { stepLog.appendJSONL(nome, 'virtus', { step: 'scroll_lock_begin', owner, chatId }); } catch {}
+  return async function release() {
+    try { stepLog.appendJSONL(nome, 'virtus', { step: 'scroll_lock_end', owner, chatId }); } catch {}
+    setVirtusInputLock(nome, false);
+    try {
+      const b = getBrowserFromPage(p);
+      if (b && b._virtusCritical && b._virtusCritical.owner === owner && b._virtusCritical.chatId === String(chatId||'')) {
+        b._virtusCritical.active = false;
+      }
+    } catch {}
+    try { stepLog.appendJSONL(nome, 'virtus', { step: 'critical_lock_end', owner, chatId }); } catch {}
+    try { unlock && unlock(); } catch {}
+  };
+}
 
 // Helpers globais de send-lock/contexto
 function getBrowserFromPage(p) { try { return typeof p.browser === 'function' ? p.browser() : null; } catch { return null; } }
@@ -327,48 +359,28 @@ async function scrollChatsToTop(page, nome) {
   if (isVirtusLocked(nome)) return false;
   try {
     const b = getBrowserFromPage(page);
-    if (b && b._sendLock && b._sendLock.active) return false;
+    if (b && ((b._sendLock && b._sendLock.active) || (b._virtusCritical && b._virtusCritical.active))) {
+      return false;
+    }
   } catch {}
   if (!page) return false;
   try {
     const res = await page.evaluate(() => {
-      // Procure vários elementos "scrolláveis"
-      // 1. grid por role
       let grid = document.querySelector('div[role="grid"]');
-      // 2. por data-virtualized e classes do FB
       if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf[data-virtualized="false"]');
-      // 3. rowgroup
       if (!grid) grid = document.querySelector('div[role="rowgroup"]');
-      // 4. fallback classe base
       if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf');
-      // 5. heurística de altura
-      if (!grid) grid = Array.from(document.querySelectorAll('div'))
-        .find(d => d.scrollHeight > 400 && d.scrollHeight > d.clientHeight + 30);
-      // 6. fallback body
+      if (!grid) grid = Array.from(document.querySelectorAll('div')).find(d => d.scrollHeight > 400 && d.scrollHeight > d.clientHeight + 30);
       if (!grid) grid = document.body;
       if (!grid) return false;
-
-      // Forçar scrollTop em grid e ancestrais
       grid.scrollTop = 0;
       let node = grid.parentElement;
       for (let i = 0; i < 4 && node; i++) {
         if (node.scrollHeight > node.clientHeight + 30) node.scrollTop = 0;
         node = node.parentElement;
       }
-
-      // Tentativa extra: clicar em cima no topo para garantir foco no chat mais recente
-      try {
-        let firstA = grid.querySelector('a[role="link"], a[href^="/marketplace/t/"]');
-        if (firstA) {
-          firstA.focus && firstA.focus();
-          // Eventual scrollIntoView + toTop
-          firstA.scrollIntoView({block: "start", behavior: "smooth"});
-        }
-      } catch {}
-
-      // Se scroll ainda não foi suficiente (scrollTop > 0 depois do set), repete
+      // SEM foco durante regiões críticas
       setTimeout(() => { if (grid.scrollTop > 0) grid.scrollTop = 0; }, 250);
-
       return grid.scrollTop === 0;
     });
     return !!res;
@@ -486,6 +498,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
   setVirtusInputLock(nome, true);
   try {
+    try { stepLog.appendJSONL(nome, 'virtus', { step: 'composer_guard_begin', chatId }); } catch {}
     // Foco real no composer
     await campo.click({ delay: 20 }).catch(()=>{});
     // Limpeza: Select All + Backspace/Delete
@@ -516,7 +529,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
     // Envia (um único Enter)
     await p.keyboard.press('Enter');
 
-    // Aguarda confirmação: bolha “Você enviou” ou composer vazio
+    // Aguarda confirmação: bolha "Você enviou" ou composer vazio
     const sent = await Promise.race([
       (async () => {
         try {
@@ -541,6 +554,7 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
 
   } finally {
     setVirtusInputLock(nome, false);
+    try { stepLog.appendJSONL(nome, 'virtus', { step: 'composer_guard_end', chatId }); } catch {}
   }
 }
 // ========== FIM DA FUNÇÃO sendMessageSafe ==========
@@ -959,63 +973,68 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!running || !epochOk()) return;
       const p = await ensurePage();
       if (!p) return;
-      // Garante Marketplace logado e contexto visual
-      await garantirMarketplace(p);
-      const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
-      if (!opened) {
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
-        AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
-        return;
-      }
-      // Ciclo de 3 tentativas de estabilização do DOM
-      let historicoMsgs = [];
-      for (let tryNo = 1; tryNo <= 3; tryNo++) {
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'conv_wait', chatId, tryNo });
-        const ready = await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
-        await sleep(300 + (tryNo*150));
-        try {
-          historicoMsgs = await scrapeChatHistory(p);
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_result', chatId, tryNo, len: (historicoMsgs||[]).length, sample: (historicoMsgs[0] && historicoMsgs[0].texto) ? String(historicoMsgs[0].texto).slice(0,80) : '' });
-        } catch (e) {
-          const emsg = (e && e.message) || String(e);
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_error', chatId, tryNo, error: emsg });
-          if (/detached/i.test(emsg)) {
-            const reopened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
-            if (!reopened) break;
-            continue;
-          }
-        }
-        if (Array.isArray(historicoMsgs) && historicoMsgs.length > 0) break;
-        await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-        await sleep(500);
-      }
-      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_done', chatId, msgs: historicoMsgs.length });
-      if (!historicoMsgs || historicoMsgs.length === 0) {
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'no_messages_after_retries' });
-        AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
-        return;
-      }
-      const ctx = {};
-      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_start', chatId });
-      let llm;
+      const releaseCrit = await acquireCritical(p, nome, 'collect', chatId);
       try {
-        llm = await masterExtractAnswer({
-          perfil: nome,
-          chatId,
-          mensagens: historicoMsgs,
-          contexto: ctx,
-          respond: true
-        });
-      } catch (e) {
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_exception', chatId, error: (e && e.message) || String(e) });
-        return;
+        // Garante Marketplace logado e contexto visual
+        await garantirMarketplace(p);
+        const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+        if (!opened) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
+          AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
+          return;
+        }
+        // Ciclo de 3 tentativas de estabilização do DOM
+        let historicoMsgs = [];
+        for (let tryNo = 1; tryNo <= 3; tryNo++) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'conv_wait', chatId, tryNo });
+          const ready = await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
+          await sleep(300 + (tryNo*150));
+          try {
+            historicoMsgs = await scrapeChatHistory(p);
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_result', chatId, tryNo, len: (historicoMsgs||[]).length, sample: (historicoMsgs[0] && historicoMsgs[0].texto) ? String(historicoMsgs[0].texto).slice(0,80) : '' });
+          } catch (e) {
+            const emsg = (e && e.message) || String(e);
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_error', chatId, tryNo, error: emsg });
+            if (/detached/i.test(emsg)) {
+              const reopened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+              if (!reopened) break;
+              continue;
+            }
+          }
+          if (Array.isArray(historicoMsgs) && historicoMsgs.length > 0) break;
+          await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+          await sleep(500);
+        }
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_done', chatId, msgs: historicoMsgs.length });
+        if (!historicoMsgs || historicoMsgs.length === 0) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'no_messages_after_retries' });
+          AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
+          return;
+        }
+        const ctx = {};
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_start', chatId });
+        let llm;
+        try {
+          llm = await masterExtractAnswer({
+            perfil: nome,
+            chatId,
+            mensagens: historicoMsgs,
+            contexto: ctx,
+            respond: true
+          });
+        } catch (e) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_exception', chatId, error: (e && e.message) || String(e) });
+          return;
+        }
+        if (!llm || !llm.control || llm.control.shouldReply !== true || !llm.answer || !String(llm.answer).trim()) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: (llm && llm.meta && llm.meta.error) || 'no_answer' });
+          AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
+          return;
+        }
+        enqueueSend(chatId, llm.answer, attemptId);
+      } finally {
+        await releaseCrit();
       }
-      if (!llm || !llm.control || llm.control.shouldReply !== true || !llm.answer || !String(llm.answer).trim()) {
-        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: (llm && llm.meta && llm.meta.error) || 'no_answer' });
-        AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
-        return;
-      }
-      enqueueSend(chatId, llm.answer, attemptId);
     } finally {
       try {
         const r = AI_COLLECTORS.get(chatId);
@@ -1027,7 +1046,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   function enqueueSend(chatId, answer, attemptId) {
     try {
-      SEND_QUEUE.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now() });
+      if (SEND_QUEUE.find(it => it && it.chatId === chatId)) {
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_dedup_skip', chatId });
+        return;
+      }
+      SEND_QUEUE.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now(), attempts: 0 });
+      try { pendingAdd(nome, chatId, attemptId || stepLog.attemptId()).catch(()=>{}); } catch {}
       stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'queued_send', chatId, answerLen: String(answer||'').length });
       processSendQueue().catch(()=>{});
     } catch {}
@@ -1050,6 +1074,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             if (issues && typeof issues.append === 'function') {
               await issues.append(nome, 'chat_lock_busy', `sendQueue chat=${chatId}`);
             }
+            const attempts = (item.attempts || 0) + 1;
+            if (attempts <= MAX_LOCK_REQUEUE) {
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_requeue_lock_busy', chatId, attempts });
+              SEND_QUEUE.push({ ...item, attempts });
+              await sleep(250 + Math.floor(Math.random()*250));
+            } else {
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_drop_lock_saturation', chatId, attempts });
+            }
             continue;
           }
           _chatLockAcquired = true;
@@ -1058,34 +1090,39 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_abort_no_page', chatId });
             continue;
           }
-          await garantirMarketplace(p);
-          const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
-          if (!opened) {
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'composer_missing_send', chatId, reason: 'open_by_click_failed' });
-            if (issues && typeof issues.append === 'function') {
-              await issues.append(nome, 'virtus_no_composer', `open_by_click_failed chat=${chatId} (sendQueue)`);
+          const releaseCrit = await acquireCritical(p, nome, 'send', chatId);
+          try {
+            await garantirMarketplace(p);
+            const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+            if (!opened) {
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'composer_missing_send', chatId, reason: 'open_by_click_failed' });
+              if (issues && typeof issues.append === 'function') {
+                await issues.append(nome, 'virtus_no_composer', `open_by_click_failed chat=${chatId} (sendQueue)`);
+              }
+              continue;
             }
-            continue;
-          }
-          await acquireSendGuard(p, chatId);
-          const campo = await waitForComposer(p, 10000);
-          if (!campo) {
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'composer_missing_send', chatId });
-            if (issues && typeof issues.append === 'function') {
-              await issues.append(nome, 'virtus_no_composer', `composer ausente chat=${chatId} (sendQueue)`);
+            await acquireSendGuard(p, chatId);
+            const campo = await waitForComposer(p, 10000);
+            if (!campo) {
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'composer_missing_send', chatId });
+              if (issues && typeof issues.append === 'function') {
+                await issues.append(nome, 'virtus_no_composer', `composer ausente chat=${chatId} (sendQueue)`);
+              }
+              continue;
             }
-            continue;
+            await sendMessageSafe(p, campo, answer, nome, chatId);
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ok', chatId });
+            const tsNow = agoraEpoch();
+            historico[chatId] = tsNow;
+            setResponded(chatId, tsNow);
+            await salvaHistorico();
+            await pendingDel(nome, chatId);
+            // cooldown aleatório entre respostas (30–90s)
+            const delay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
+            await sleep(delay);
+          } finally {
+            await releaseCrit();
           }
-          await sendMessageSafe(p, campo, answer, nome, chatId);
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ok', chatId });
-          const tsNow = agoraEpoch();
-          historico[chatId] = tsNow;
-          setResponded(chatId, tsNow);
-          await salvaHistorico();
-          await pendingDel(nome, chatId);
-          // cooldown aleatório entre respostas (30–90s)
-          const delay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
-          await sleep(delay);
         } catch (e) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_fail', chatId, error: (e && e.message) || String(e) });
           if (issues && typeof issues.append === 'function') {
@@ -1668,22 +1705,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         scrollInterval = setInterval(async () => {
           if (!running || !epochOk()) return;
           try {
+            const b = getBrowserFromPage(p);
+            if (b && ((b._sendLock && b._sendLock.active) || (b._virtusCritical && b._virtusCritical.active))) return;
+          } catch {}
+          try {
             const ok = await scrollChatsToTop(p, nome);
             if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
             if (ok) {
               lastScrollToTop = Date.now();
             }
           } catch {}
-          // Reforço após 800ms para garantir Messenger reativo
-          setTimeout(() => {
-            if (!running || !epochOk()) return;
-            try {
-              const b = getBrowserFromPage(p);
-              if (b && b._sendLock && b._sendLock.active) return;
-            } catch {}
-            scrollChatsToTop(p, nome);
-          }, 800);
         }, 30000);
+        setTimeout(() => {
+          if (!running || !epochOk()) return;
+          try {
+            const b = getBrowserFromPage(p);
+            if (b && ((b._sendLock && b._sendLock.active) || (b._virtusCritical && b._virtusCritical.active))) return;
+          } catch {}
+          scrollChatsToTop(p, nome);
+        }, 800);
       }
       try {
         const scrolled = await scrollChatsToTop(p, nome);
