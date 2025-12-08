@@ -379,6 +379,76 @@ async function scrollChatsToTop(page, nome) {
 
 // ========== FIM DOS GUARDRAILS E FUNÇÕES NOVAS ==========
 
+async function findScrollContainerSelector(p) {
+  try {
+    const sel = await p.evaluate(() => {
+      const cands = ['div[role="grid"]','div[role="rowgroup"]','div.x78zum5.xdt5ytf'];
+      for (const s of cands) {
+        const el = document.querySelector(s);
+        if (el && el.scrollHeight > el.clientHeight) return s;
+      }
+      return 'body';
+    });
+    return sel || 'body';
+  } catch { return 'body'; }
+}
+
+async function waitForChatAnchor(p, chatId, { timeoutMs = 12000 } = {}) {
+  const sel = `a[href^="/marketplace/t/${chatId}"]`;
+  const t0 = Date.now();
+  while ((Date.now() - t0) < timeoutMs) {
+    const h = await p.$(sel).catch(()=>null);
+    if (h) return h;
+    // Scroll incremental
+    try {
+      const contSel = await findScrollContainerSelector(p);
+      await p.evaluate((selector) => {
+        const el = document.querySelector(selector) || document.scrollingElement || document.body;
+        if (!el) return;
+        const delta = Math.max(400, Math.floor(el.clientHeight * 0.8));
+        el.scrollTop = Math.min(el.scrollTop + delta, el.scrollHeight);
+      }, contSel);
+    } catch {}
+    await sleep(200);
+  }
+  return null;
+}
+
+async function clickChatInFeed(p, chatId, { timeoutMs = 20000, attemptId = null, nome = 'GLOBAL' } = {}) {
+  await garantirMarketplace(p, { timeoutMs: 25000 }).catch(()=>{});
+  stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId || stepLog.attemptId(), step: 'open_click_begin', chatId });
+  try { await scrollChatsToTop(p, nome); } catch {}
+  await sleep(200);
+
+  const anchor = await waitForChatAnchor(p, chatId, { timeoutMs: 16000 });
+  if (!anchor) {
+    stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId || stepLog.attemptId(), step: 'open_click_anchor_missing', chatId });
+    return false;
+  }
+  stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId || stepLog.attemptId(), step: 'open_click_anchor_found', chatId });
+  try {
+    await p.evaluate((el) => {
+      el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+      el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    }, anchor);
+  } catch {
+    try { await anchor.click({ delay: 50 }); } catch {}
+  }
+  const okPath = await assertOnChat(p, chatId, { timeoutMs: 8000 });
+  if (!okPath) {
+    const ready = await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
+    if (!ready) {
+      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId || stepLog.attemptId(), step: 'open_click_thread_failed', chatId });
+      return false;
+    }
+  }
+  stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId || stepLog.attemptId(), step: 'open_click_thread_active', chatId });
+  return true;
+}
+
 // ========== INÍCIO DA FUNÇÃO sendMessageSafe ==========
 async function sendMessageSafe(p, campo, msg, nome, chatId) {
   // 0) Reobtenha o composer se campo for ausente ou suspeito
@@ -891,7 +961,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (!p) return;
       // Garante Marketplace logado e contexto visual
       await garantirMarketplace(p);
-      await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+      const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+      if (!opened) {
+        stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
+        AI_NOOP_UNTIL.set(chatId, Date.now() + AI_NOOP_MS);
+        return;
+      }
       // Ciclo de 3 tentativas de estabilização do DOM
       let historicoMsgs = [];
       for (let tryNo = 1; tryNo <= 3; tryNo++) {
@@ -905,7 +980,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const emsg = (e && e.message) || String(e);
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_error', chatId, tryNo, error: emsg });
           if (/detached/i.test(emsg)) {
-            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+            const reopened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+            if (!reopened) break;
             continue;
           }
         }
@@ -983,7 +1059,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             continue;
           }
           await garantirMarketplace(p);
-          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+          if (!opened) {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'composer_missing_send', chatId, reason: 'open_by_click_failed' });
+            if (issues && typeof issues.append === 'function') {
+              await issues.append(nome, 'virtus_no_composer', `open_by_click_failed chat=${chatId} (sendQueue)`);
+            }
+            continue;
+          }
           await acquireSendGuard(p, chatId);
           const campo = await waitForComposer(p, 10000);
           if (!campo) {
@@ -1064,7 +1147,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (age < 8*60*1000) continue; // deixa “aquecendo” 8min antes de reconciliar
         try {
           if (!running || !epochOk()) return;
-          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil:'domcontentloaded', timeout: 20000 }).catch(()=>{});
+          const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, nome });
+          if (!opened) {
+            await pendingDel(nome, chatId);
+            continue;
+          }
           const looksSent = await wasRecentlySentByMe(p, 10*60*1000);
           if (looksSent) {
             // considera “committed”
@@ -1360,10 +1447,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let campo = await waitForComposer(p, 10000);
         if (!campo) {
-          logger.warn('Composer não encontrado. Fallback: goto direto e revalidar.', { nome, chatId });
+          logger.warn('Composer não encontrado. Fallback: click no feed e revalidar.', { nome, chatId });
           try {
             if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            const reopened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, nome });
+            if (!reopened) {
+              try { await pendingDel(nome, chatId); } catch {}
+              fila = fila.filter(id => id !== chatId);
+              chatAtivo = null;
+              return;
+            }
             await sleep(800);
           } catch {}
           if (await isChatBlocked(p)) {
