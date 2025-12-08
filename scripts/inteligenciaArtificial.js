@@ -1,5 +1,8 @@
 'use strict';
 
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
 // scripts/inteligenciaArtificial.js
 // Implementação única OpenAI GPT-5.1 para ciclo mestre de atendimento
 // Função principal: masterExtractAnswer
@@ -14,6 +17,13 @@ const audit = (perfil, flow, level, event, extra) => {
     return stepLog.appendJSONL(perfil, flow, { level, event, ...(extra||{}) });
   } catch {}
 };
+audit('system', 'virtus', 'info', 'dotenv_probe', {
+  file: 'inteligenciaArtificial.js',
+  hasKey: !!process.env.OPENAI_API_KEY,
+  keyPrefix: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.slice(0,8) : null,
+  model: process.env.OPENAI_MODEL_MASTER || null,
+  apiUrl: process.env.OPENAI_API_URL || null
+});
 let issues = null;
 try { issues = require('./issues.js'); } catch {}
 // Funções de persistência removidas: loadState, saveState, appendLog não são mais usadas
@@ -462,6 +472,13 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
   const apiUrl = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
   const model = process.env.OPENAI_MODEL_MASTER || 'gpt-5.1';
 
+  audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_env_probe', {
+    chatId,
+    hasKey: !!apiKey,
+    keyPrefix: apiKey ? apiKey.slice(0,8) : null,
+    model, apiUrl
+  });
+
   if (!apiKey) throw new Error('OPENAI_API_KEY ausente');
 
   const allMessages = [
@@ -480,6 +497,22 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
 
   const timeoutMs = 30000;
   audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_post', { chatId, model, messagesLen: allMessages.length, timeoutMs });
+
+  const headersPreview = {
+    'Content-Type': 'application/json',
+    'Authorization': apiKey ? `Bearer ${apiKey.slice(0,8)}...` : 'ABSENT'
+  };
+  audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_reqinfo', {
+    chatId, apiUrl,
+    headers: headersPreview,
+    body: {
+      model: params.model,
+      temperature: params.temperature,
+      top_p: params.top_p,
+      max_completion_tokens: params.max_completion_tokens,
+      messagesLen: allMessages.length
+    }
+  });
 
   const Controller = global.AbortController || require('node-abort-controller');
   const controller = new Controller();

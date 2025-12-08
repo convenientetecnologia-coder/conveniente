@@ -1,7 +1,10 @@
 // scripts/worker.js
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
 const fs = require('fs');
 const logger = require('./logger.js');
+logger.info(`[WORKER][ENV] OPENAI_KEY_PREFIX=${(process.env.OPENAI_API_KEY || '').slice(0,8) || 'ABSENT'} model=${process.env.OPENAI_MODEL_MASTER || 'unset'} url=${process.env.OPENAI_API_URL || 'unset'}`);
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 const browserHelper = require('./browser.js');

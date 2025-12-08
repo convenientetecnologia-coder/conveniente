@@ -16,6 +16,7 @@ const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 
 // Arquivos específicos do atendimento
 const ATENDIMENTO_FILES = [
+  "index.js",
   "scripts/api_perfis.js",
   "scripts/browser.js",
   "scripts/chatLock.js",

@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 // index.js (main do projeto, pasta principal)
 const express = require('express');
 const path = require('path');
@@ -7,6 +9,7 @@ const open = require('open'); // <-- adicione/mova isso aqui!
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
+logger.info(`[ENV][MAIN] OPENAI_KEY_PREFIX=${(process.env.OPENAI_API_KEY || '').slice(0,8) || 'ABSENT'} model=${process.env.OPENAI_MODEL_MASTER || 'unset'} url=${process.env.OPENAI_API_URL || 'unset'}`);
 
 // Helpers/pontes
 const fileStore = require('./scripts/fileStore.js');
