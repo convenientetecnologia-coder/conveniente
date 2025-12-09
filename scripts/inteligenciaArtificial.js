@@ -11,10 +11,22 @@ const fetch = global.fetch || require('node-fetch');
 
 const logger = require('./logger.js');
 const stepLog = require('./stepLog.js');
+const sanitizePII = stepLog.sanitizePII || ((str) => str); // Fallback se não existir
 const audit = (perfil, flow, level, event, extra) => {
   try {
-    if (typeof stepLog.audit === 'function') return stepLog.audit(perfil, flow, level, event, extra);
-    return stepLog.appendJSONL(perfil, flow, { level, event, ...(extra||{}) });
+    // Sanitizar campos sensíveis antes de logar
+    const sanitizedExtra = {};
+    if (extra) {
+      for (const [key, value] of Object.entries(extra)) {
+        if (typeof value === 'string' && (key === 'sample' || key === 'extra' || key === 'answerSnippet' || key.includes('text') || key.includes('msg'))) {
+          sanitizedExtra[key] = sanitizePII(value);
+        } else {
+          sanitizedExtra[key] = value;
+        }
+      }
+    }
+    if (typeof stepLog.audit === 'function') return stepLog.audit(perfil, flow, level, event, sanitizedExtra);
+    return stepLog.appendJSONL(perfil, flow, { level, event, ...sanitizedExtra });
   } catch {}
 };
 audit('system', 'virtus', 'info', 'dotenv_probe', {
@@ -491,7 +503,7 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
     messages: allMessages,
     temperature: respond ? 0.6 : 0.0,
     top_p: respond ? 0.9 : 1.0,
-    max_completion_tokens: respond ? 900 : 1200,
+    max_tokens: respond ? 900 : 1200,
     response_format: { type: 'json_object' }
   };
 
@@ -509,7 +521,7 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
       model: params.model,
       temperature: params.temperature,
       top_p: params.top_p,
-      max_completion_tokens: params.max_completion_tokens,
+      max_tokens: params.max_tokens,
       messagesLen: allMessages.length
     }
   });
@@ -580,16 +592,25 @@ function parseResponse(rawContent, lastClientMsg) {
     if (answer && typeof answer !== 'string') answer = null;
     if (answer) answer = answer.trim() || null;
 
+    // Normalizar extração primeiro para garantir estrutura padronizada
+    const normalized = normalizePhoneExtraction(rawExtraction);
+    
+    // Garantir que extraction só tenha campos permitidos (telefone, ddd, telefone_parcial, item, endereco_saida, endereco_destino)
+    const allowedExtractionFields = ['telefone', 'ddd', 'telefone_parcial', 'item', 'endereco_saida', 'endereco_destino'];
+    const cleanExtraction = {};
+    for (const field of allowedExtractionFields) {
+      if (normalized[field] !== undefined && normalized[field] !== null) {
+        cleanExtraction[field] = normalized[field];
+      }
+    }
+
     // Se o resultado do anti-eco (answer) for null, então imediatamente retorne a próxima pergunta pendente pelo campo faltante
     if (!answer) {
-      const normalized = normalizePhoneExtraction(rawExtraction);
-      const fieldToAsk = chooseNextMissingField(normalized, {});
+      const fieldToAsk = chooseNextMissingField(cleanExtraction, {});
       if (fieldToAsk) {
         answer = buildAskTextFor(fieldToAsk);
       }
     }
-
-    const normalized = normalizePhoneExtraction(rawExtraction);
 
     // Retorno padronizado: ajuste askField para nunca ser "itens", sempre "item"
     let askField = control.askField || null;
@@ -602,13 +623,24 @@ function parseResponse(rawContent, lastClientMsg) {
       askField = null;
     }
 
+    // Garantir campos de controle corretos
+    const hasWhatsapp = isValidBRPhoneWithDDD(cleanExtraction.telefone);
+    const hasItem = !!(cleanExtraction.item);
+    const hasEnderecoSaida = !!(cleanExtraction.endereco_saida);
+    const hasEnderecoDestino = !!(cleanExtraction.endereco_destino);
+    const allFieldsComplete = hasWhatsapp && hasItem && hasEnderecoSaida && hasEnderecoDestino;
+    
+    // finalMessage: true SOMENTE quando for para encerrar INTERAÇÕES (todos os campos preenchidos)
+    // O timer de 10 minutos pós-WhatsApp é responsabilidade do Virtus
+    const finalMessage = control.finalMessage === true || allFieldsComplete;
+
     return {
-      extraction: normalized,
+      extraction: cleanExtraction,
       answer,
       control: {
         shouldReply: !!answer,
         askField: askField,
-        finalMessage: control.finalMessage === true
+        finalMessage: finalMessage
       },
       meta: {
         confidence: typeof meta.confidence === 'number' ? Math.max(0, Math.min(1, meta.confidence)) : 0.8,
@@ -650,13 +682,41 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
       const out = await callOpenAI(messages, sysPrompt, respond, perfil, chatId);
       const result = parseResponse(out.content || '', lastClientMsg);
       
-      // Anti-saudação/disclaimer duplicado (aplica filtro pós-LLM)
+      // Anti-saudação/disclaimer duplicado (aplica filtro pós-LLM) - APLICAR RIGOROSAMENTE
       result.answer = stripDuplicateGreetingAndDisclaimer(result.answer, historico);
+      
+      // Se answer ficou vazio ou nulo após strip, forçar próxima pergunta apropriada
+      if (!result.answer || !String(result.answer).trim()) {
+        const normalized = result.extraction || {};
+        const fieldToAsk = chooseNextMissingField(normalized, {});
+        if (fieldToAsk) {
+          result.answer = buildAskTextFor(fieldToAsk);
+          result.control.askField = fieldToAsk;
+          result.control.shouldReply = true;
+        } else {
+          audit(perfil, 'virtus', 'warn', 'llm_empty_or_parse_fail', { chatId, reason: 'answer_empty_after_strip_no_field_to_ask' });
+        }
+      }
+      
+      // Garantir que control.finalMessage seja true quando WhatsApp está preenchido e todos os campos preenchidos
+      // (O timer de 10 minutos é responsabilidade do Virtus, mas podemos sinalizar quando tudo está completo)
+      const extraction = result.extraction || {};
+      const hasWhatsapp = isValidBRPhoneWithDDD(extraction.telefone);
+      const hasItem = !!(extraction.item);
+      const hasEnderecoSaida = !!(extraction.endereco_saida);
+      const hasEnderecoDestino = !!(extraction.endereco_destino);
+      const allFieldsComplete = hasWhatsapp && hasItem && hasEnderecoSaida && hasEnderecoDestino;
+      
+      if (allFieldsComplete) {
+        result.control.finalMessage = true;
+      }
       
       if (!result || !result.answer) {
         audit(perfil, 'virtus', 'warn', 'llm_empty_or_parse_fail', { chatId });
       } else {
-        audit(perfil, 'virtus', 'info', 'llm_parse_ok', { chatId, askField: result?.control?.askField, shouldReply: !!result?.control?.shouldReply, answerSnippet: String(result.answer||'').slice(0,72) });
+        // Sanitizar answerSnippet antes de logar
+        const answerSnippet = sanitizePII(String(result.answer||'').slice(0,72));
+        audit(perfil, 'virtus', 'info', 'llm_parse_ok', { chatId, askField: result?.control?.askField, shouldReply: !!result?.control?.shouldReply, finalMessage: result?.control?.finalMessage, answerSnippet });
       }
       
       return result;

@@ -143,6 +143,28 @@ const HIST_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_re
 // ======= ADIÇÃO: Pending Ledger Helpers & Heurística =======
 const PENDING_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_pending.json');
 
+// ======= ADIÇÃO: Chat State Helpers (persistência de estado por chatid) =======
+const CHATS_STATE_JSON_NAME = c => path.join(__dirname, '../dados/perfis', c, 'chats_state.json');
+
+async function readChatState(perfil, chatId) {
+  const file = CHATS_STATE_JSON_NAME(perfil);
+  const cur = await readJson(file, {});
+  return cur[chatId] || null;
+}
+
+async function updateChatState(perfil, chatId, updates) {
+  const file = CHATS_STATE_JSON_NAME(perfil);
+  const cur = await readJson(file, {});
+  if (!cur[chatId]) cur[chatId] = {};
+  Object.assign(cur[chatId], updates);
+  await writeJsonAtomicFsync(file, cur);
+}
+
+async function getAllChatStates(perfil) {
+  const file = CHATS_STATE_JSON_NAME(perfil);
+  return await readJson(file, {});
+}
+
 async function readJson(file, fb={}) {
   try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return fb; }
 }
@@ -1014,6 +1036,36 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       } catch {}
       
+      // REGRA INVIOLÁVEL: Verifica windowEndsAt antes de agendar collector
+      const chatState = await readChatState(nome, chatId);
+      if (chatState && chatState.windowEndsAt) {
+        const agoraEpochNow = agoraEpoch();
+        if (agoraEpochNow < chatState.windowEndsAt) {
+          const waitSeconds = chatState.windowEndsAt - agoraEpochNow;
+          stepLog.appendJSONL(nome, 'virtus', { 
+            step: 'collector_waiting_window', 
+            chatId, 
+            windowEndsAt: chatState.windowEndsAt, 
+            waitSeconds,
+            firstSeenAt: chatState.firstSeenAt 
+          });
+          // Agenda para depois do windowEndsAt
+          const delayMs = waitSeconds * 1000;
+          const attemptId = stepLog.attemptId();
+          state.aiCollectors.set(chatId, { timer: null, startedAt: now, attemptId, idadeMs, delayMs, waitingWindow: true });
+          const t = setTimeout(() => {
+            const ref = state.aiCollectors.get(chatId);
+            const fireTime = Date.now();
+            const actualDelay = ref ? (fireTime - ref.startedAt) : delayMs;
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_fire', chatId, actualDelay, expectedDelay: delayMs, reason: 'window_ended' });
+            finalizeCollector(chatId).catch(()=>{});
+          }, delayMs);
+          const ref = state.aiCollectors.get(chatId);
+          if (ref) ref.timer = t;
+          return;
+        }
+      }
+      
       const attemptId = stepLog.attemptId();
       // Calcula delay baseado na idade real da mensagem
       const delayMs = Math.max(0, AI_COLLECT_WINDOW_MS - idadeMs);
@@ -1059,7 +1111,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         
         // Se fast-scrape falhou ou retornou vazio, abre o chat
         if (!historicoMsgs || !Array.isArray(historicoMsgs) || historicoMsgs.length === 0) {
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'open_chat', chatId });
+          const chatState = await readChatState(nome, chatId);
+          const timerExpired = chatState && chatState.windowEndsAt ? (agoraEpoch() >= chatState.windowEndsAt) : false;
+          const timeSinceFirstSeen = chatState && chatState.firstSeenAt ? (agoraEpoch() - chatState.firstSeenAt) : 0;
+          stepLog.appendJSONL(nome, 'virtus', { 
+            attempt: attemptId, 
+            step: 'chat_window_opened_for_collection', 
+            chatId, 
+            timerExpired, 
+            timeSinceFirstSeen,
+            windowEndsAt: chatState?.windowEndsAt 
+          });
           const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
           if (!opened) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
@@ -1089,6 +1151,20 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             await sleep(500);
           }
         }
+        
+        // Log de histórico coletado com hashes
+        const msgHashes = historicoMsgs ? historicoMsgs.map(m => {
+          const txt = String(m.texto || '').slice(0, 50);
+          return txt.length > 0 ? txt.replace(/\s+/g, ' ').trim().slice(0, 30) : '';
+        }).filter(h => h.length > 0) : [];
+        stepLog.appendJSONL(nome, 'virtus', { 
+          attempt: attemptId, 
+          step: 'chat_history_collected', 
+          chatId, 
+          len: historicoMsgs?.length || 0, 
+          hashes: msgHashes.slice(0, 5) 
+        });
+        
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_done', chatId, msgs: historicoMsgs.length });
         if (!historicoMsgs || historicoMsgs.length === 0) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'no_messages_after_retries' });
@@ -1114,6 +1190,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: (llm && llm.meta && llm.meta.error) || 'no_answer' });
           state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
           return;
+        }
+        
+        // Verifica se WhatsApp foi coletado e atualiza estado
+        const extracted = ctx.extracted || {};
+        const whatsapp = extracted.telefone || extracted.whatsapp || null;
+        if (whatsapp && /^\d{10,11}$/.test(String(whatsapp).replace(/\D/g, ''))) {
+          const now = agoraEpoch();
+          const whatsCollectedAt = now;
+          const deadline10m = now + 600; // 10 minutos em segundos
+          await updateChatState(nome, chatId, {
+            whatsCollectedAt,
+            deadline10m,
+            phase: 'coletando-campos',
+            fields: {
+              whatsapp: String(whatsapp),
+              item: extracted.item || null,
+              enderecos: extracted.endereco_saida || extracted.endereco_destino || null,
+              cidade: null
+            }
+          });
+          stepLog.appendJSONL(nome, 'virtus', { 
+            attempt: attemptId, 
+            step: 'whatsapp_detected', 
+            chatId, 
+            whatsapp, 
+            timestamp: whatsCollectedAt,
+            deadline10m 
+          });
         }
         let answerText = String(llm.answer).trim();
         // Proteção anti-duplicata de saudação
@@ -1155,8 +1259,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_dedup_skip', chatId });
         return;
       }
-      state.sendQueue.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now(), attempts: 0 });
-      try { pendingAdd(nome, chatId, attemptId || stepLog.attemptId()).catch(()=>{}); } catch {}
+      const answerHash = String(answer || '').slice(0, 50).replace(/\s+/g, ' ').trim();
+      state.sendQueue.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now(), attempts: 0, answerHash });
+      // NÃO cria pending aqui - só após lock/open/composer
       stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'queued_send', chatId, answerLen: String(answer||'').length });
       processSendQueue().catch(()=>{});
     } catch {}
@@ -1190,6 +1295,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             continue;
           }
           const releaseCrit = await acquireCritical(p, nome, 'send', chatId);
+          let pendingCreated = false;
           try {
             await garantirMarketplace(p);
             const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
@@ -1209,18 +1315,129 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               }
               continue;
             }
+            
+            // REGRA: pendingAdd só DEPOIS de lock/open/composer
+            try {
+              const answerHash = item.answerHash || String(answer || '').slice(0, 50).replace(/\s+/g, ' ').trim();
+              const file = PENDING_JSON_NAME(nome);
+              const cur = await readJson(file, {});
+              cur[chatId] = { 
+                attemptId, 
+                startedAt: Date.now(), 
+                phase: 'typed',
+                attempts: (item.attempts || 0) + 1,
+                answerHash
+              };
+              await writeJsonAtomicFsync(file, cur);
+              pendingCreated = true;
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'pending_created', chatId, phase: 'typed' });
+            } catch (e) {
+              stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'pending_create_failed', chatId, error: (e && e.message) || String(e) });
+            }
+            
             await sendMessageSafe(p, campo, answer, nome, chatId);
+            
+            // Verifica ACK positivo antes de marcar responded
+            const ackOk = await p.evaluate(() => {
+              const norm = s => String(s||'').toLowerCase();
+              const nodes = Array.from(document.querySelectorAll('div[role="row"],div[role="article"],div[data-testid]')).slice(-25);
+              const hasYouSent = nodes.some(el => /you\s+sent|v[ou]c[eê]\s+enviou/.test(norm(el.innerText||el.textContent||'')));
+              if (hasYouSent) return true;
+              // Verifica se composer está limpo
+              const composer = document.querySelector('div[contenteditable="true"][role="textbox"]');
+              if (composer && (composer.innerText || composer.textContent || '').trim().length === 0) {
+                // Verifica se há nova bubble "me" após o composer
+                const bubbles = Array.from(document.querySelectorAll('div[dir="auto"]')).slice(-5);
+                const meBubbles = bubbles.filter(b => {
+                  const style = window.getComputedStyle(b.closest('div[role="row"]') || b);
+                  return style && (style.justifyContent === 'flex-end' || style.textAlign === 'right');
+                });
+                if (meBubbles.length > 0) return true;
+              }
+              return false;
+            }).catch(() => false);
+            
+            if (!ackOk) {
+              item.attempts = (item.attempts || 0) + 1;
+              if (item.attempts <= 3) {
+                stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ack_failed_requeue', chatId, attempts: item.attempts });
+                state.sendQueue.push(item); // Requeue
+                if (pendingCreated) {
+                  try { await pendingDel(nome, chatId); } catch {}
+                  pendingCreated = false;
+                }
+                continue;
+              } else {
+                stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ack_failed_max_attempts', chatId, attempts: item.attempts });
+                if (issues && typeof issues.append === 'function') {
+                  try { await issues.append(nome, 'virtus_send_no_ack', `chat=${chatId} sem ACK após ${item.attempts} tentativas`); } catch {}
+                }
+                if (pendingCreated) {
+                  try { await pendingDel(nome, chatId); } catch {}
+                  pendingCreated = false;
+                }
+                continue;
+              }
+            }
+            
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ok', chatId });
+            
+            // REGRA: Delay 30-90s ANTES de marcar responded
+            const delay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_delay_before_responded', chatId, delayMs: delay });
+            await sleep(delay);
+            
+            // Verifica deadline10m e fecha pedido se necessário
+            const chatState = await readChatState(nome, chatId);
+            if (chatState && chatState.whatsCollectedAt && chatState.deadline10m) {
+              const agora = agoraEpoch();
+              const fields = chatState.fields || {};
+              const hasWhatsapp = !!(fields.whatsapp);
+              const hasCidade = !!(fields.cidade);
+              const hasItem = !!(fields.item);
+              
+              if (agora >= chatState.deadline10m) {
+                // Timeout de 10min: fecha como incompleto
+                if (hasWhatsapp && !hasCidade) {
+                  await updateChatState(nome, chatId, { phase: 'finalizado', fields: { ...fields, cidade: 'incompleto' } });
+                  stepLog.appendJSONL(nome, 'virtus', { 
+                    attempt: attemptId, 
+                    step: 'pedido_fechado_automatico', 
+                    chatId, 
+                    causa: 'fechamento automático 10min',
+                    whatsapp: hasWhatsapp,
+                    cidade: hasCidade,
+                    item: hasItem
+                  });
+                }
+              } else if (hasWhatsapp && hasCidade && hasItem) {
+                // Todos os campos preenchidos antes do deadline
+                await updateChatState(nome, chatId, { phase: 'finalizado' });
+                stepLog.appendJSONL(nome, 'virtus', { 
+                  attempt: attemptId, 
+                  step: 'pedido_fechado_completo', 
+                  chatId, 
+                  causa: 'fechamento completo before deadline',
+                  whatsapp: hasWhatsapp,
+                  cidade: hasCidade,
+                  item: hasItem
+                });
+              }
+            }
+            
+            // REGRA: Marca responded só após ACK e delay
             const tsNow = agoraEpoch();
             historico[chatId] = tsNow;
             setResponded(chatId, tsNow);
             await salvaHistorico();
-            await pendingDel(nome, chatId);
-            // cooldown aleatório entre respostas (30–90s)
-            const delay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
-            await sleep(delay);
+            if (pendingCreated) {
+              try { await pendingDel(nome, chatId); } catch {}
+            }
           } finally {
             await releaseCrit();
+            if (pendingCreated && !running) {
+              try { await pendingDel(nome, chatId); } catch {}
+            }
           }
         } catch (e) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_fail', chatId, error: (e && e.message) || String(e) });
@@ -1344,14 +1561,90 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     log(`[BOOTSTRAP] Snapshot inicial gravado. chats=${ids.size} (arquivo criado mesmo vazio).`);
   }
 
+  // Função auxiliar para evaluateChatsState (similar à worker.js)
+  async function evaluateChatsState(p) {
+    try {
+      const res = await p.evaluate(() => {
+        const norm = (s) => (s||'').toLowerCase();
+        let grid = Array.from(document.querySelectorAll('div[role="grid"]'))
+        .find(g => {
+          const al = (g.getAttribute('aria-label') || g.getAttribute('aria-labelledby') || '');
+          const t = norm(al);
+          return t.includes('conversas') || t.includes('conversations');
+        });
+        if (!grid) {
+          const pagelet = document.querySelector('div[data-pagelet="MWThreadList"]');
+          if (pagelet) {
+            const g2 = pagelet.querySelector('div[role="grid"]');
+            if (g2) grid = g2;
+          }
+        }
+        let rows = 0, anchors = 0, skeletons = 0;
+        if (grid) {
+          rows = grid.querySelectorAll('div[role="row"]').length;
+          anchors = grid.querySelectorAll('a[href^="/marketplace/t/"]').length;
+          skeletons = grid.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
+        } else {
+          skeletons = document.querySelectorAll('div[role="status"][data-visualcompletion="loading-state"]').length;
+        }
+        return { hasGrid: !!grid, rows, anchors, skeletons };
+      });
+      return res || { hasGrid:false, rows:0, anchors:0, skeletons:0 };
+    } catch {
+      return { hasGrid:false, rows:0, anchors:0, skeletons:0 };
+    }
+  }
+
   async function atualizaFila() {
     let mudancaFila = false;
+    const p = await ensurePage();
+    let chatsState = null;
+    try {
+      chatsState = await evaluateChatsState(p);
+    } catch {}
+    const ts = Date.now();
     const chatsNovos = await coletaChatsMarketplaceRecentes();
     const agora = agoraEpoch();
+
+    // Log mesmo se não houver chats novos
+    if (chatsNovos.length === 0) {
+      stepLog.appendJSONL(nome, 'virtus', { 
+        step: 'poll_zero_new_chats', 
+        rows: chatsState?.rows || 0, 
+        anchors: chatsState?.anchors || 0, 
+        skeletons: chatsState?.skeletons || 0, 
+        ts 
+      });
+    }
 
     for (const c of chatsNovos) {
       const ts = respondedCache.get(c.id) || Number(historico[c.id] || 0);
       const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
+      
+      // Verifica se já está pending ou agendado
+      const pend = await pendingList(nome).catch(() => ({}));
+      const jaPending = pend && pend[c.id];
+      const jaAgendado = state.aiCollectors.has(c.id);
+      
+      if (!jaRespondido && !jaPending && !jaAgendado) {
+        // Chat novo: registra firstSeenAt e windowEndsAt
+        const now = Date.now();
+        const firstSeenAt = agoraEpoch();
+        const windowEndsAt = firstSeenAt + Math.floor(AI_COLLECT_WINDOW_MS / 1000);
+        await updateChatState(nome, c.id, {
+          firstSeenAt,
+          windowEndsAt,
+          phase: 'aguardando'
+        });
+        stepLog.appendJSONL(nome, 'virtus', { 
+          step: 'chat_new_detected', 
+          chatId: c.id, 
+          firstSeenAt, 
+          windowEndsAt,
+          windowMs: AI_COLLECT_WINDOW_MS 
+        });
+      }
+      
       if (!jaRespondido) {
         await scheduleCollector(c.id, c.idadeMs || 0);
       }
