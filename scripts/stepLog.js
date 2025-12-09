@@ -4,6 +4,32 @@
 const fs = require('fs');
 const path = require('path');
 
+// Funções auxiliares para logs humanos no terminal
+function tsHuman(ms){ 
+  try{ 
+    return new Date(ms||Date.now()).toISOString().replace('T',' ').split('.')[0]; 
+  } catch{ 
+    return String(ms||Date.now()); 
+  } 
+}
+
+function termEcho(perfil, flow, payload) {
+  try {
+    const t = tsHuman(payload.ts || Date.now());
+    const step = String(payload.step || payload.event || 'event');
+    const lvl = String(payload.level || '').toLowerCase();
+    const chatId = payload.chatId ?  ` chatId=${payload.chatId}` : '';
+    const extraR = payload.reason ?  ` reason=${payload.reason}` : '';
+    const extraLen = (typeof payload.len === 'number') ?  ` len=${payload.len}` : '';
+    const msg = `[${t}] [${flow}] [${perfil}] ${step}${chatId}${extraR}${extraLen}`;
+    const danger = /error|fail|exception|timeout|thread_failed|no_composer|blocked|ack_failed/i.test(step + ' ' + lvl + ' ' + (payload.reason || ''));
+    const warn   = /warn|skip|busy|missing|retry|noop|anchor_missing|poll_zero/i.test(step + ' ' + lvl + ' ' + (payload.reason || ''));
+    if (danger)       console.error(msg);
+    else if (warn)    console.warn(msg);
+    else              console.log(msg);
+  } catch {}
+}
+
 function ensureDir(p) { 
   try { fs.mkdirSync(p, { recursive: true }); } catch {} 
 }
@@ -58,6 +84,7 @@ function appendJSONL(perfil, flow, obj) {
     capRotate(file);
     const line = JSON.stringify({ ts: Date.now(), ...obj }) + '\n';
     fs.appendFileSync(file, line);
+    try { termEcho(perfil, flow, obj); } catch {}
   } catch {}
 }
 
@@ -93,6 +120,7 @@ function attemptId() {
 function audit(perfil, flow, level, event, extra) {
   try {
     appendJSONL(perfil, flow, { level: String(level||'info'), event: String(event||''), ...(extra||{}) });
+    try { termEcho(perfil, flow, { ts: Date.now(), level, event, ...(extra||{}) }); } catch {}
   } catch {}
 }
 

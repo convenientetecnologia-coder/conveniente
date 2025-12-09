@@ -1049,6 +1049,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             waitSeconds,
             firstSeenAt: chatState.firstSeenAt 
           });
+          console.log(`[VIRTUS][${nome}] Aguardando janela ativa de coleta para chatId=${chatId}; abre em ${Math.round(waitSeconds)}s`);
           // Agenda para depois do windowEndsAt
           const delayMs = waitSeconds * 1000;
           const attemptId = stepLog.attemptId();
@@ -1104,9 +1105,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_used', chatId, len: historicoMsgs.length });
           } else {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_empty', chatId });
+            console.log(`[VIRTUS][${nome}] Fast-scrape vazio para chatId=${chatId}, abrindo chat...`);
           }
         } catch (e) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_error', chatId, error: (e && e.message) || String(e) });
+          console.warn(`[VIRTUS][${nome}] [WARN] Erro no fast-scrape — chatId=${chatId} error=${(e && e.message) || String(e)}`);
         }
         
         // Se fast-scrape falhou ou retornou vazio, abre o chat
@@ -1122,12 +1125,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             timeSinceFirstSeen,
             windowEndsAt: chatState?.windowEndsAt 
           });
+          console.log(`[VIRTUS][${nome}] Timer expirado: abrindo chat chatId=${chatId} para coletar mensagens...`);
           const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
           if (!opened) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
+            console.warn(`[VIRTUS][${nome}] Falha ao abrir chat (clickChatInFeed=false) chatId=${chatId}`);
             state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
             return;
           }
+          console.log(`[VIRTUS][${nome}] Chat aberto OK chatId=${chatId}. Coletando histórico...`);
           // Ciclo de 3 tentativas de estabilização do DOM
           historicoMsgs = [];
           for (let tryNo = 1; tryNo <= 3; tryNo++) {
@@ -1140,6 +1146,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             } catch (e) {
               const emsg = (e && e.message) || String(e);
               stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'scrape_error', chatId, tryNo, error: emsg });
+              console.warn(`[VIRTUS][${nome}] [WARN] Erro ao coletar histórico — chatId=${chatId} tryNo=${tryNo} error=${emsg}`);
               if (/detached/i.test(emsg)) {
                 const reopened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
                 if (!reopened) break;
@@ -1166,13 +1173,16 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         });
         
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_done', chatId, msgs: historicoMsgs.length });
+        console.log(`[VIRTUS][${nome}] chat_history_collected chatId=${chatId} len=${historicoMsgs?.length||0}`);
         if (!historicoMsgs || historicoMsgs.length === 0) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'no_messages_after_retries' });
+          console.warn(`[VIRTUS][${nome}] Coleta vazia após abertura de chat chatId=${chatId}. Marcando NOOP 15min e abortando.`);
           state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
           return;
         }
         const ctx = {};
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_start', chatId });
+        console.log(`[VIRTUS][${nome}] Enviando histórico para IA chatId=${chatId}...`);
         let llm;
         try {
           llm = await masterExtractAnswer({
@@ -1184,6 +1194,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           });
         } catch (e) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_exception', chatId, error: (e && e.message) || String(e) });
+          console.error(`[VIRTUS][${nome}] [ERRO] Exceção ao chamar IA — chatId=${chatId} error=${(e && e.message) || String(e)}`);
           return;
         }
         if (!llm || !llm.control || llm.control.shouldReply !== true || !llm.answer || !String(llm.answer).trim()) {
@@ -1218,6 +1229,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             timestamp: whatsCollectedAt,
             deadline10m 
           });
+          console.log(`[VIRTUS][${nome}] WhatsApp detectado chatId=${chatId}. Janela de 10 minutos iniciada (deadline=${new Date(deadline10m*1000).toISOString()})`);
         }
         let answerText = String(llm.answer).trim();
         // Proteção anti-duplicata de saudação
@@ -1229,6 +1241,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             answerText = stripGreeting(answerText);
             if (!answerText || answerText.length < 3) {
               stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'only_greeting_after_strip' });
+              console.warn(`[VIRTUS][${nome}] [WARN] Resposta ficou vazia após remover saudação — chatId=${chatId} reason=only_greeting_after_strip`);
               state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
               return;
             }
@@ -1240,6 +1253,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           answerText = stripped;
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'greeting_stripped', chatId, reason: 'redundancy_removal' });
         }
+        console.log(`[VIRTUS][${nome}] Resposta programada para envio chatId=${chatId}: "${String(answerText).slice(0,64)}..."`);
         enqueueSend(chatId, answerText, attemptId);
       } finally {
         await releaseCrit();
@@ -1276,11 +1290,13 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const { chatId, answer, attemptId } = item || {};
         if (!chatId || !answer) continue;
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_dequeued', chatId });
+        console.log(`[VIRTUS][${nome}] Enviando resposta ao chatId=${chatId}: "${String(answer).slice(0,64)}..."`);
         let _chatLockAcquired = false;
         let p = null;
         try {
           if (!chatLock.acquire(nome, chatId)) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'chat_lock_busy', chatId });
+            console.warn(`[VIRTUS][${nome}] chat_lock_busy chatId=${chatId} — envio postergado.`);
             if (issues && typeof issues.append === 'function') {
               await issues.append(nome, 'chat_lock_busy', `sendQueue chat=${chatId}`);
             }
@@ -1292,6 +1308,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           p = await ensurePage();
           if (!p) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_abort_no_page', chatId });
+            console.warn(`[VIRTUS][${nome}] [WARN] Página não disponível para envio — chatId=${chatId}`);
             continue;
           }
           const releaseCrit = await acquireCritical(p, nome, 'send', chatId);
@@ -1301,6 +1318,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
             if (!opened) {
               stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'composer_missing_send', chatId, reason: 'open_by_click_failed' });
+              console.warn(`[VIRTUS][${nome}] [WARN] Falha ao abrir chat para envio — chatId=${chatId} reason=open_by_click_failed`);
               if (issues && typeof issues.append === 'function') {
                 await issues.append(nome, 'virtus_no_composer', `open_by_click_failed chat=${chatId} (sendQueue)`);
               }
@@ -1310,6 +1328,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             const campo = await waitForComposer(p, 10000);
             if (!campo) {
               stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'composer_missing_send', chatId });
+              console.warn(`[VIRTUS][${nome}] [WARN] Composer ausente — chatId=${chatId}`);
               if (issues && typeof issues.append === 'function') {
                 await issues.append(nome, 'virtus_no_composer', `composer ausente chat=${chatId} (sendQueue)`);
               }
@@ -1361,6 +1380,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               item.attempts = (item.attempts || 0) + 1;
               if (item.attempts <= 3) {
                 stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ack_failed_requeue', chatId, attempts: item.attempts });
+                console.warn(`[VIRTUS][${nome}] Falha para confirmar envio (ACK) chatId=${chatId} tentativas=${item.attempts||0}`);
                 state.sendQueue.push(item); // Requeue
                 if (pendingCreated) {
                   try { await pendingDel(nome, chatId); } catch {}
@@ -1369,6 +1389,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 continue;
               } else {
                 stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ack_failed_max_attempts', chatId, attempts: item.attempts });
+                console.warn(`[VIRTUS][${nome}] Falha para confirmar envio (ACK) chatId=${chatId} tentativas=${item.attempts||0}`);
                 if (issues && typeof issues.append === 'function') {
                   try { await issues.append(nome, 'virtus_send_no_ack', `chat=${chatId} sem ACK após ${item.attempts} tentativas`); } catch {}
                 }
@@ -1381,10 +1402,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
             
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ok', chatId });
+            console.log(`[VIRTUS][${nome}] Resposta enviada com sucesso chatId=${chatId}`);
             
             // REGRA: Delay 30-90s ANTES de marcar responded
             const delay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_delay_before_responded', chatId, delayMs: delay });
+            console.log(`[VIRTUS][${nome}] Delay applied before marcar responded chatId=${chatId} delayMs=${delay}`);
             await sleep(delay);
             
             // Verifica deadline10m e fecha pedido se necessário
@@ -1409,6 +1432,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                     cidade: hasCidade,
                     item: hasItem
                   });
+                  console.log(`[VIRTUS][${nome}] Fechamento automático após 10min chatId=${chatId} (faltou campos).`);
                 }
               } else if (hasWhatsapp && hasCidade && hasItem) {
                 // Todos os campos preenchidos antes do deadline
@@ -1422,6 +1446,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                   cidade: hasCidade,
                   item: hasItem
                 });
+                console.log(`[VIRTUS][${nome}] Pedido fechado completo chatId=${chatId} (todos os campos antes do prazo).`);
               }
             }
             
@@ -1441,6 +1466,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         } catch (e) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_fail', chatId, error: (e && e.message) || String(e) });
+          console.error(`[VIRTUS][${nome}] [ERRO] Falha ao enviar mensagem — chatId=${chatId} error=${(e && e.message) || String(e)}`);
           if (issues && typeof issues.append === 'function') {
             try { await issues.append(nome, 'virtus_send_failed', `queue chat=${chatId} ${e && e.message || e}`); } catch {}
           }
@@ -1615,6 +1641,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         skeletons: chatsState?.skeletons || 0, 
         ts 
       });
+      console.log(`[VIRTUS][${nome}] Nenhum chat novo detectado para atendimento.`);
     }
 
     for (const c of chatsNovos) {
@@ -1643,6 +1670,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           windowEndsAt,
           windowMs: AI_COLLECT_WINDOW_MS 
         });
+        console.log(`[VIRTUS][${nome}] Timer 45s iniciado para chatId=${c.id} (firstSeen=${new Date(firstSeenAt*1000).toISOString()})`);
       }
       
       if (!jaRespondido) {
