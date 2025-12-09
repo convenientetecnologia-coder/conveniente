@@ -878,7 +878,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   // Fast-scrape: tenta coletar mensagens do DOM externo sem abrir o chat
   async function fastScrapeChatHistory(p, chatId) {
     try {
-      return await p.evaluate((cid) => {
+      const lastPreview = await p.evaluate((cid) => {
         function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }catch{return String(s||'').trim();} }
         // Procura o link do chat na lista
         const link = Array.from(document.querySelectorAll('a[href^="/marketplace/t/"]')).find(a => {
@@ -893,11 +893,12 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const previews = spans.map(s => norm(s.innerText || s.textContent || '')).filter(t => t.length > 0);
         if (previews.length === 0) return null;
         // Retorna apenas a última mensagem visível como preview
-        const lastPreview = previews[previews.length - 1];
-        if (!lastPreview || lastPreview.length < 3) return null;
-        // Assume que é do cliente (preview geralmente mostra mensagem recebida)
-        return [{ autor: 'cliente', texto: lastPreview }];
+        const last = previews[previews.length - 1];
+        if (!last || last.length < 3) return null;
+        return last;
       }, chatId);
+      // ao final de fastScrapeChatHistory:
+      return lastPreview ? [{ autor: 'hint', texto: lastPreview }] : null;
     } catch {
       return null;
     }
@@ -944,52 +945,89 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function scrapeChatHistory(p) {
-    // Aguarda boot mínimo da thread (não explode)
+    // PATCH: coleta robusta de bolhas somente dentro do grid de mensagens
     try {
       await p.waitForFunction(() =>
-        Array.from(document.querySelectorAll('div[dir="auto"]')).some(d => (d.innerText || d.textContent || '').trim().length > 0),
-        { timeout: 4000 }
+        !!document.querySelector('div[aria-label^="Mensagens na conversa"],div[role="grid"][aria-label*="conversa"],div[role="grid"][aria-label*="Mensagens"]'),
+        { timeout: 5000 }
       ).catch(()=>{});
     } catch {}
     try {
-      return await p.evaluate(() => {
-        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }catch{return String(s||'').trim();} }
-        // Novas bubbles: todas div[dir="auto"] com texto significativo
-        const candidates = Array.from(document.querySelectorAll('div[dir="auto"]'))
-          .map(el => ({
-            text: norm(el.innerText || el.textContent || ''),
-            el
-          }))
-          .filter(x => x.text && x.text.length > 0);
-        // Heurística de autor: alinhamento ou ancestrais "Você enviou"
-        const rows = Array.from(document.querySelectorAll('div[role="row"]')).slice(-200);
-        const meHints = new Set();
-        rows.forEach(r => {
-          const t = norm(r.innerText || r.textContent || '');
-          if (/voce enviou|você enviou|you sent/i.test(t)) meHints.add(r);
-        });
-        function isMine(el) {
+      const msgs = await p.evaluate(() => {
+        const norm = (s) => (s || '')
+          .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+          .replace(/\s+/g,' ').trim();
+
+        const isVisible = (el) => {
           try {
-            let n = el;
-            for (let i=0; i<6 && n; i++, n = n.parentElement) {
-              if (meHints.has(n)) return true;
-            }
-            const st = window.getComputedStyle(el.closest('div[role="row"]') || el);
-            const jc = (st && st.justifyContent) || '';
-            const ta = (st && st.textAlign) || '';
-            return (jc.includes('flex-end') || ta === 'right');
+            const st = getComputedStyle(el);
+            if (!st || st.visibility === 'hidden' || st.display === 'none') return false;
+            if (el.offsetParent === null) return false;
+            const r = el.getBoundingClientRect();
+            return r && r.width > 0 && r.height > 0;
           } catch { return false; }
+        };
+
+        // container da conversa (grid)
+        const grid =
+          document.querySelector('div[aria-label^="Mensagens na conversa"]') ||
+          document.querySelector('div[role="grid"][aria-label*="conversa"]') ||
+          document.querySelector('div[role="grid"][aria-label*="Mensagens"]');
+        if (!grid) return [];
+
+        const rows = Array.from(grid.querySelectorAll('div[role="row"]')).slice(-160);
+
+        // Sistema/ruídos frequentes do Messenger (PT/EN/ES)
+        const SYS_RX = new RegExp([
+          '^classificar o vendedor$', '^mais opcoes?$', '^mais opções$',
+          '^marketplace$', '^r\\$\\s?\\d+', '^visto por\\b', '^(reagir|responder|mais)$',
+          '^inserir$', '^mensagem$', '^escrever para\\b', '^aa$', '^gif$', '^escolh(a|e) (um|uma) (emoji|figurinha|gif)$',
+          '^clipe de voz$', 'arquivo de ate 25 mb', 'figurinha', 'emoji',
+          '^[a-z0-9]{1,2}\\s?h$', // "4 h", "2 h"
+          '^(seg|ter|qua|qui|sex|sab|dom),?\\s?\\d{1,2}:\\d{2}$', // datas abreviadas
+          '^matheo$', // nomes/labels acima da mensagem
+          'carregando\\.\\.\\.'
+        ].join('|'), 'i');
+
+        function autorResolve(row) {
+          try {
+            const txt = norm(row.innerText || row.textContent || '');
+            if (/(voce|v[óo]c[eê])\s+enviou|you\s+sent/i.test(txt)) return 'ia';
+            const st = getComputedStyle(row);
+            if (st && (String(st.justifyContent||'').includes('flex-end') || String(st.textAlign||'') === 'right')) {
+              return 'ia';
+            }
+          } catch {}
+          return 'cliente';
         }
-        // Filtro spam
-        const blacklist = /^(inserir|saiba mais|thiago iniciou essa conversa|mensagem enviada|cuidado com golpes|ver perfil do comprador)$/i;
-        const msgs = [];
-        for (const c of candidates.slice(-120)) {
-          if (!c.text || blacklist.test(c.text)) continue;
-          const autor = isMine(c.el) ? 'ia' : 'cliente';
-          msgs.push({ autor, texto: c.text });
+
+        function textsFromRow(row) {
+          const nodes = Array.from(row.querySelectorAll('div[dir="auto"]'))
+            .filter(isVisible)
+            .filter(el => !el.closest('[contenteditable="true"]'))
+            .filter(el => !el.closest('[role="button"]'))
+            .filter(el => !el.closest('[role="toolbar"]'))
+            .filter(el => !el.closest('[aria-label^="Reagir"]'))
+            .filter(el => !el.closest('[aria-label^="Responder"]'))
+            .filter(el => !el.closest('[aria-label^="Mais"]'));
+
+          const texts = nodes
+            .map(el => norm(el.innerText || el.textContent || ''))
+            .filter(t => t && t.length >= 2 && !SYS_RX.test(t));
+          return texts;
         }
-        return msgs.slice(-30);
+
+        const out = [];
+        for (const row of rows) {
+          const autor = autorResolve(row);
+          const texts = textsFromRow(row);
+          for (const t of texts) {
+            out.push({ autor, texto: t });
+          }
+        }
+        return out.slice(-40);
       });
+      return Array.isArray(msgs) ? msgs : [];
     } catch {
       return [];
     }
@@ -1203,11 +1241,42 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
         
-        // Deduplicar chamada da IA por histórico/digest
-        const histSig = historyDigest(historicoMsgs);
+        // NEW: finalizeCollector — abortar IA sem bolha nova cliente
+        const debugMsgs = Array.isArray(historicoMsgs) ? historicoMsgs : [];
+        for (let i = Math.max(0, debugMsgs.length - 12); i < debugMsgs.length; i++) {
+          const m = debugMsgs[i];
+          try {
+            require('./stepLog.js').appendJSONL(nome, 'virtus', {
+              step: 'dom_bubble_debug',
+              chatId,
+              idx: i,
+              autor: m && m.autor,
+              sample: (m && m.texto ? String(m.texto).slice(0, 80) : '')
+            });
+          } catch {}
+        }
+        const last = debugMsgs.slice(-1)[0] || null;
+        if (!last || last.autor !== 'cliente') {
+          require('./stepLog.js').appendJSONL(nome, 'virtus', {
+            step: 'llm_skip_no_new_client_bubble',
+            chatId,
+            len: debugMsgs.length
+          });
+          // NÃO atualize hash, NÃO enqueueSend, NÃO rode IA, apenas aguarde novo evento.
+          state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
+          return;
+        }
+        
+        // NEW: historyDigest só após bolha cliente válida
+        const histSig = (function(){
+          try {
+            const slim = (debugMsgs || []).map(m => ({ a: m.autor, t: String(m.texto||'').slice(0,120) }));
+            return require('crypto').createHash('sha1').update(JSON.stringify(slim)).digest('hex');
+          } catch { return null; }
+        })();
         const stPrev = await readChatState(nome, chatId).catch(()=>null);
         if (stPrev && (stPrev.llmInFlightSig === histSig || stPrev.lastHistSig === histSig)) {
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_skip_duplicate_history', chatId });
+          require('./stepLog.js').appendJSONL(nome, 'virtus', { step: 'llm_skip_duplicate_history', chatId });
           await updateChatState(nome, chatId, { llmInFlightSig: null }).catch(()=>{});
           state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
           return;
@@ -1290,6 +1359,15 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           answerText = stripped;
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'greeting_stripped', chatId, reason: 'redundancy_removal' });
         }
+        
+        // fix: finalizeCollector só enqueueSend se resposta IA não for vazia
+        if (!answerText || answerText.trim().length < 2) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'empty_after_filters' });
+          await updateChatState(nome, chatId, { llmInFlightSig: null }).catch(()=>{});
+          state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
+          return;
+        }
+        
         console.log(`[VIRTUS][${nome}] Resposta programada para envio chatId=${chatId}: "${String(answerText).slice(0,64)}..."`);
         // RIGOR: enqueueSend só é chamado após collector bem-sucedido (histórico coletado e LLM processado)
         enqueueSend(chatId, answerText, attemptId);

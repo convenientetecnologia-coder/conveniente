@@ -78,13 +78,22 @@ function sanitizePII(str) {
 }
 
 // Alterado conforme instrução: agora chama capRotate antes de gravar
+// Garante sanitização automática de campos sensíveis antes de logar (especialmente para dom_bubble_debug)
 function appendJSONL(perfil, flow, obj) {
   try {
     const file = fileFor(perfil, flow);
     capRotate(file);
-    const line = JSON.stringify({ ts: Date.now(), ...obj }) + '\n';
+    // Sanitizar campos sensíveis comuns (especialmente sample, texto, mensagem do DOM/bubble)
+    const sanitized = { ...obj };
+    const sensitiveFields = ['sample', 'texto', 'mensagem', 'text', 'message'];
+    for (const field of sensitiveFields) {
+      if (field in sanitized && typeof sanitized[field] === 'string') {
+        sanitized[field] = sanitizePII(sanitized[field]);
+      }
+    }
+    const line = JSON.stringify({ ts: Date.now(), ...sanitized }) + '\n';
     fs.appendFileSync(file, line);
-    try { termEcho(perfil, flow, obj); } catch {}
+    try { termEcho(perfil, flow, sanitized); } catch {}
   } catch {}
 }
 
@@ -99,18 +108,46 @@ function appendJSONL(perfil, flow, obj) {
  * - timer ou elapsed: para eventos de timers (início/fim de janela, tempo decorrido)
  * - extra: campos adicionais que expliquem por que o evento ocorreu (automático/humano, "por timeout", "por falta de campo", "coletou completo", etc.)
  * - sample: campo de amostra de texto (sempre sanitizado via sanitizePII antes de salvar)
+ * - texto: campo de texto de mensagem/bolha (sempre sanitizado via sanitizePII antes de salvar)
+ * - mensagem: campo de mensagem (sempre sanitizado via sanitizePII antes de salvar)
  * 
- * Use esta função em qualquer ponto que for logar step/timer/preview/histórico/contexto potencialmente sensível.
+ * Use esta função em qualquer ponto que for logar step/timer/preview/histórico/contexto potencialmente sensível,
+ * especialmente dados vindos do DOM/bubbles (autor, texto, sample, mensagem, etc.).
  * 
  * @param {string} perfil - Nome do perfil
  * @param {string} flow - Nome do fluxo (ex: 'virtus', 'worker')
  * @param {object} obj - Objeto com os dados do log (será sanitizado automaticamente)
  */
 function appendJSONLSafe(perfil, flow, obj) {
-  // Antes de logar, sanitize "sample", "extra", etc.
-  if ('sample' in obj && typeof obj.sample === 'string') obj.sample = sanitizePII(obj.sample);
-  if ('extra' in obj && typeof obj.extra === 'string') obj.extra = sanitizePII(obj.extra);
-  appendJSONL(perfil, flow, obj);
+  try {
+    // Criar cópia do objeto para não modificar o original
+    const sanitized = { ...obj };
+    // Sanitizar TODOS os campos de texto que podem conter dados sensíveis do DOM/bubble
+    const textFields = ['sample', 'extra', 'texto', 'mensagem', 'text', 'message', 'answer', 'error', 'reason'];
+    for (const field of textFields) {
+      if (field in sanitized && typeof sanitized[field] === 'string') {
+        sanitized[field] = sanitizePII(sanitized[field]);
+      }
+    }
+    // Também sanitizar campos aninhados ou arrays que possam conter texto
+    if (sanitized.data && typeof sanitized.data === 'object') {
+      for (const key in sanitized.data) {
+        if (typeof sanitized.data[key] === 'string') {
+          sanitized.data[key] = sanitizePII(sanitized.data[key]);
+        }
+      }
+    }
+    appendJSONL(perfil, flow, sanitized);
+  } catch (e) {
+    // Fallback: tentar sanitizar campos básicos e logar
+    try {
+      if ('sample' in obj && typeof obj.sample === 'string') obj.sample = sanitizePII(obj.sample);
+      if ('texto' in obj && typeof obj.texto === 'string') obj.texto = sanitizePII(obj.texto);
+      appendJSONL(perfil, flow, obj);
+    } catch {
+      appendJSONL(perfil, flow, obj);
+    }
+  }
 }
 
 function attemptId() {
@@ -119,8 +156,21 @@ function attemptId() {
 
 function audit(perfil, flow, level, event, extra) {
   try {
-    appendJSONL(perfil, flow, { level: String(level||'info'), event: String(event||''), ...(extra||{}) });
-    try { termEcho(perfil, flow, { ts: Date.now(), level, event, ...(extra||{}) }); } catch {}
+    // Sanitizar campos sensíveis no extra antes de logar
+    const sanitizedExtra = {};
+    if (extra && typeof extra === 'object') {
+      for (const [key, value] of Object.entries(extra)) {
+        if (typeof value === 'string') {
+          sanitizedExtra[key] = sanitizePII(value);
+        } else {
+          sanitizedExtra[key] = value;
+        }
+      }
+    }
+    const payload = { level: String(level||'info'), event: String(event||''), ...sanitizedExtra };
+    appendJSONL(perfil, flow, payload);
+    // termEcho já é chamado dentro de appendJSONL, mas garantimos que também seja chamado explicitamente
+    try { termEcho(perfil, flow, { ts: Date.now(), level, event, ...sanitizedExtra }); } catch {}
   } catch {}
 }
 
