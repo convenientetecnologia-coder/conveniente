@@ -554,14 +554,26 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
         const text = await resp.text().catch(() => '');
         const errorText = text.substring(0, 200);
         // Se for erro 400 pedindo max_completion_tokens, tenta retry com o parâmetro correto
+        // Garantir robustez: não travar ciclo por erro de parâmetro LLM
         if (resp.status === 400 && /max_completion_tokens/i.test(errorText) && !paramsToUse.max_completion_tokens) {
           const retryParams = { ...paramsToUse };
           delete retryParams.max_tokens;
           retryParams.max_completion_tokens = paramsToUse.max_tokens || 900;
-          audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_retry_params', { chatId, reason: '400_requested_max_completion_tokens' });
+          const sanitizedError = sanitizePII(errorText);
+          audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_retry_params', { chatId, reason: '400_requested_max_completion_tokens', error: sanitizedError });
           return await doRequest(retryParams);
         }
-        throw new Error(`OpenAI HTTP ${resp.status}: ${errorText}`);
+        // Se for erro 400 pedindo max_tokens (caso inverso), tenta retry também
+        if (resp.status === 400 && /max_tokens/i.test(errorText) && !paramsToUse.max_tokens && paramsToUse.max_completion_tokens) {
+          const retryParams = { ...paramsToUse };
+          delete retryParams.max_completion_tokens;
+          retryParams.max_tokens = paramsToUse.max_completion_tokens || 900;
+          const sanitizedError = sanitizePII(errorText);
+          audit(perfil || 'GLOBAL', 'virtus', 'info', 'llm_http_retry_params', { chatId, reason: '400_requested_max_tokens', error: sanitizedError });
+          return await doRequest(retryParams);
+        }
+        const sanitizedError = sanitizePII(errorText);
+        throw new Error(`OpenAI HTTP ${resp.status}: ${sanitizedError}`);
       }
 
       const data = await resp.json();
@@ -582,7 +594,11 @@ async function callOpenAI(messages, systemPrompt, respond, perfil = null, chatId
   try {
     return await doRequest(params);
   } catch (e) {
-    audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_http_err', { chatId, error: e && e.message || String(e) });
+    // Sanitizar erro antes de logar
+    const errorMsg = (e && e.message) || String(e);
+    const sanitizedErrorMsg = sanitizePII(errorMsg);
+    audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_http_err', { chatId, error: sanitizedErrorMsg });
+    // Não fechar nem continuar ciclo IA apenas por erro de parâmetro LLM - lança exceção para ser tratada pelo chamador
     throw e;
   }
 }
@@ -671,11 +687,14 @@ function parseResponse(rawContent, lastClientMsg) {
       }
     };
   } catch (e) {
+    // Sanitizar erro antes de incluir no meta
+    const errorMsg = (e && e.message) || String(e);
+    const sanitizedErrorMsg = sanitizePII(errorMsg);
     return {
       extraction: {},
       answer: null,
       control: { shouldReply: false, askField: null, finalMessage: false },
-      meta: { confidence: 0.0, tokensUsed: 0, error: (e && e.message) || String(e) }
+      meta: { confidence: 0.0, tokensUsed: 0, error: sanitizedErrorMsg }
     };
   }
 }
@@ -743,21 +762,27 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
       
       return result;
     } catch (e) {
-      audit(perfil, 'virtus', 'error', 'llm_exception', { chatId, error: (e && e.message) || String(e) });
+      // Sanitizar erro antes de logar
+      const errorMsg = (e && e.message) || String(e);
+      const sanitizedErrorMsg = sanitizePII(errorMsg);
+      audit(perfil, 'virtus', 'error', 'llm_exception', { chatId, error: sanitizedErrorMsg });
       return {
         extraction: {},
         answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',
         control: { shouldReply: true, askField: null, finalMessage: false },
-        meta: { confidence: 0.0, tokensUsed: 0, error: (e && e.message) || String(e) }
+        meta: { confidence: 0.0, tokensUsed: 0, error: sanitizedErrorMsg }
       };
     }
   } catch (e) {
-    audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_exception', { chatId, error: (e && e.message) || String(e) });
+    // Sanitizar erro antes de logar
+    const errorMsg = (e && e.message) || String(e);
+    const sanitizedErrorMsg = sanitizePII(errorMsg);
+    audit(perfil || 'GLOBAL', 'virtus', 'error', 'llm_exception', { chatId, error: sanitizedErrorMsg });
     return {
       extraction: {},
       answer: 'Desculpa, não consegui entender direito sua última mensagem. Pode enviar novamente, por gentileza?',
       control: { shouldReply: true, askField: null, finalMessage: false },
-      meta: { confidence: 0.0, tokensUsed: 0, error: (e && e.message) || String(e) }
+      meta: { confidence: 0.0, tokensUsed: 0, error: sanitizedErrorMsg }
     };
   }
 }

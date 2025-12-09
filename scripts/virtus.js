@@ -1097,45 +1097,44 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // Garante Marketplace logado e contexto visual
         await garantirMarketplace(p);
         
-        // Fast-scrape: tenta coletar sem abrir o chat primeiro
-        let historicoMsgs = null;
+        // Fast-scrape apenas para logs/plotagem, NUNCA para decisão
         try {
-          historicoMsgs = await fastScrapeChatHistory(p, chatId);
-          if (historicoMsgs && Array.isArray(historicoMsgs) && historicoMsgs.length > 0) {
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_used', chatId, len: historicoMsgs.length });
-          } else {
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_empty', chatId });
-            console.log(`[VIRTUS][${nome}] Fast-scrape vazio para chatId=${chatId}, abrindo chat...`);
+          const fastScrapePreview = await fastScrapeChatHistory(p, chatId);
+          if (fastScrapePreview && Array.isArray(fastScrapePreview) && fastScrapePreview.length > 0) {
+            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_preview', chatId, len: fastScrapePreview.length });
           }
         } catch (e) {
-          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'fast_scrape_error', chatId, error: (e && e.message) || String(e) });
-          console.warn(`[VIRTUS][${nome}] [WARN] Erro no fast-scrape — chatId=${chatId} error=${(e && e.message) || String(e)}`);
+          // Ignora erro de fast-scrape, não afeta decisão
         }
         
-        // Se fast-scrape falhou ou retornou vazio, abre o chat
-        if (!historicoMsgs || !Array.isArray(historicoMsgs) || historicoMsgs.length === 0) {
-          const chatState = await readChatState(nome, chatId);
-          const timerExpired = chatState && chatState.windowEndsAt ? (agoraEpoch() >= chatState.windowEndsAt) : false;
-          const timeSinceFirstSeen = chatState && chatState.firstSeenAt ? (agoraEpoch() - chatState.firstSeenAt) : 0;
-          stepLog.appendJSONL(nome, 'virtus', { 
-            attempt: attemptId, 
-            step: 'chat_window_opened_for_collection', 
-            chatId, 
-            timerExpired, 
-            timeSinceFirstSeen,
-            windowEndsAt: chatState?.windowEndsAt 
-          });
-          console.log(`[VIRTUS][${nome}] Timer expirado: abrindo chat chatId=${chatId} para coletar mensagens...`);
-          const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
-          if (!opened) {
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
-            console.warn(`[VIRTUS][${nome}] Falha ao abrir chat (clickChatInFeed=false) chatId=${chatId}`);
-            state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
-            return;
-          }
-          console.log(`[VIRTUS][${nome}] Chat aberto OK chatId=${chatId}. Coletando histórico...`);
-          // Ciclo de 3 tentativas de estabilização do DOM
-          historicoMsgs = [];
+        // RIGOR: SEMPRE abre o chat após timer expirar (não usa fast_scrape para decidir)
+        const chatState = await readChatState(nome, chatId);
+        const timerExpired = chatState && chatState.windowEndsAt ? (agoraEpoch() >= chatState.windowEndsAt) : false;
+        const timeSinceFirstSeen = chatState && chatState.firstSeenAt ? (agoraEpoch() - chatState.firstSeenAt) : 0;
+        stepLog.appendJSONL(nome, 'virtus', { 
+          attempt: attemptId, 
+          step: 'chat_window_opened_for_collection', 
+          chatId, 
+          timerExpired, 
+          timeSinceFirstSeen,
+          windowEndsAt: chatState?.windowEndsAt 
+        });
+        console.log(`[VIRTUS][${nome}] Timer expirado: abrindo chat chatId=${chatId} para coleta real...`);
+        const opened = await clickChatInFeed(p, chatId, { timeoutMs: 20000, attemptId, nome });
+        if (!opened) {
+          stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'llm_no_send', chatId, reason: 'open_by_click_failed' });
+          console.warn(`[VIRTUS][${nome}] Falha ao abrir chat (clickChatInFeed=false) chatId=${chatId}`);
+          state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
+          return;
+        }
+        console.log(`[VIRTUS][${nome}] Chat aberto OK chatId=${chatId}. Coletando histórico...`);
+        
+        // SEMPRE executa ensureConversationReady e scrapeChatHistory após abrir
+        await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
+        let historicoMsgs = await scrapeChatHistory(p);
+        
+        // Se histórico vazio, tenta novamente com ciclo de tentativas
+        if (!historicoMsgs || historicoMsgs.length === 0) {
           for (let tryNo = 1; tryNo <= 3; tryNo++) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'conv_wait', chatId, tryNo });
             const ready = await ensureConversationReady(p, chatId, { timeoutMs: 16000 });
@@ -1254,6 +1253,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'greeting_stripped', chatId, reason: 'redundancy_removal' });
         }
         console.log(`[VIRTUS][${nome}] Resposta programada para envio chatId=${chatId}: "${String(answerText).slice(0,64)}..."`);
+        // RIGOR: enqueueSend só é chamado após collector bem-sucedido (histórico coletado e LLM processado)
         enqueueSend(chatId, answerText, attemptId);
       } finally {
         await releaseCrit();
@@ -1269,10 +1269,14 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   function enqueueSend(chatId, answer, attemptId) {
     try {
+      // RIGOR: Verifica se já existe item na fila para este chatId (evita duplicação)
       if (state.sendQueue.find(it => it && it.chatId === chatId)) {
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_dedup_skip', chatId });
+        console.warn(`[VIRTUS][${nome}] [WARN] Envio duplicado ignorado — chatId=${chatId}`);
         return;
       }
+      // RIGOR: Esta função só deve ser chamada após collector bem-sucedido (histórico coletado e LLM processado)
+      // processSendQueue NÃO pode enviar resposta se chat não foi coletado/handled
       const answerHash = String(answer || '').slice(0, 50).replace(/\s+/g, ' ').trim();
       state.sendQueue.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now(), attempts: 0, answerHash });
       // NÃO cria pending aqui - só após lock/open/composer
