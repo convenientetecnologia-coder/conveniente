@@ -14,11 +14,12 @@ const stepLog = require('./stepLog.js');
 const sanitizePII = stepLog.sanitizePII || ((str) => str); // Fallback se não existir
 const audit = (perfil, flow, level, event, extra) => {
   try {
-    // Sanitizar campos sensíveis antes de logar
+    // Sanitização exaustiva: TODOS os campos de string são sanitizados para evitar vazamento de PII
     const sanitizedExtra = {};
     if (extra) {
       for (const [key, value] of Object.entries(extra)) {
-        if (typeof value === 'string' && (key === 'sample' || key === 'extra' || key === 'answerSnippet' || key.includes('text') || key.includes('msg'))) {
+        if (typeof value === 'string') {
+          // Sanitiza TODAS as strings para garantir proteção completa
           sanitizedExtra[key] = sanitizePII(value);
         } else {
           sanitizedExtra[key] = value;
