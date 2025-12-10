@@ -132,6 +132,25 @@ function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+function scheduleClosure(perfil, chatId, deadlineSec) {
+  const key = `${perfil}__${chatId}`;
+  if (CLOSURE_TIMERS.has(key)) return;
+  const ms = Math.max(0, (deadlineSec * 1000) - Date.now());
+  const t = setTimeout(async () => {
+    CLOSURE_TIMERS.delete(key);
+    try {
+      const st = await readChatState(perfil, chatId);
+      if (!st || st.phase === 'finalizado') return;
+      const fields = st.fields || {};
+      const hasWhatsapp = !!fields.whatsapp;
+      if (!hasWhatsapp) return;
+      await updateChatState(perfil, chatId, { phase: 'finalizado', fields: { ...fields, cidade: fields.cidade || 'não informado', item: fields.item || 'não informado', enderecos: fields.enderecos || 'não informado' }, lockedUntil: Date.now() + 72*3600*1000 });
+      stepLog.appendJSONL(perfil, 'virtus', { step:'pedido_fechado_automatico', chatId, causa:'deadline_10m', deadlineSec });
+    } catch {}
+  }, ms);
+  CLOSURE_TIMERS.set(key, t);
+}
+
 // Adicionado helper local para registrar issues
 async function logIssue(nome, type, message) {
   try {
@@ -235,8 +254,15 @@ function isRecentIncoming(tempoLabel) {
   if (!tempoLabel) return false;
   const t = String(tempoLabel).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
   if (/\b(agora|now)\b/.test(t)) return true;
-  if (/\b\d+\s*(s|seg|secs?|seconds?)\b/.test(t)) return true;
-  if (/\b\d+\s*(min|m|mins?|minutes?|minutos?)\b/.test(t)) return true;
+  const secMatch = t.match(/\b(\d+)\s*(s|seg|secs?|seconds?)\b/);
+  if (secMatch) return parseInt(secMatch[1],10) <= 30;
+  const minMatch = t.match(/\b(\d+)\s*(min|m|mins?|minutes?|minutos?)\b/);
+  if (minMatch) return parseInt(minMatch[1],10) <= 5;
+  const hourMatch = t.match(/\b(\d+)\s*(h|hora|hours?|horas?)\b/);
+  if (hourMatch) {
+    const h = parseInt(hourMatch[1],10);
+    return h <= 2;
+  }
   return false;
 }
 
@@ -250,8 +276,12 @@ function parseMessageAgeMs(tempoLabel) {
   const minMatch = t.match(/\b(\d+)\s*(min|m|mins?|minutes?|minutos?)\b/);
   if (minMatch) return parseInt(minMatch[1], 10) * 60 * 1000;
   const hourMatch = t.match(/\b(\d+)\s*(h|hora|hours?|horas?)\b/);
-  if (hourMatch) return parseInt(hourMatch[1], 10) * 60 * 60 * 1000;
-  return 0; // desconhecido, assume 0
+  if (hourMatch) {
+    const h = parseInt(hourMatch[1], 10);
+    if (h > 2) return Number.MAX_SAFE_INTEGER; // Ignorar chats antigos
+    return h * 60 * 60 * 1000;
+  }
+  return Number.MAX_SAFE_INTEGER;
 }
 
 // Extratores e coleta
@@ -304,9 +334,33 @@ async function coletaChatsMarketplaceTodos(page) {
         const row = el.closest('div[role="row"]') || el.parentElement;
         const tempo = _extraiTempo(row);
         const rowText = (row && (row.innerText || row.textContent) || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        const fromMine = /(voce\s+enviou|você\s+enviou|you\s+sent)/i.test(rowText);
-        return { id, tempo, href, fromMine };
+        const previewTxt = rowText || '';
+        const isMineByPreview = /v[óo]c[eê]\s+enviou|you\s+sent/i.test(previewTxt) || /^thiago\s*:/i.test(previewTxt);
+        const isUnreadLabel = /mensagem n[ãa]o lida/i.test(previewTxt);
+        const recentEnough = tempo && (function(ageMs) {
+          if (!ageMs || ageMs === Number.MAX_SAFE_INTEGER) return false;
+          return ageMs <= 5 * 60 * 1000;
+        })(_parseMessageAgeMs(tempo));
+        const fromMine = isMineByPreview;
+        return { id, tempo, href, fromMine, isUnread: isUnreadLabel, recentEnough };
       }).filter(o => o.id);
+      
+      function _parseMessageAgeMs(tempoLabel) {
+        if (!tempoLabel) return Number.MAX_SAFE_INTEGER;
+        const t = String(tempoLabel).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+        if (/\b(agora|now)\b/.test(t)) return 0;
+        const secMatch = t.match(/\b(\d+)\s*(s|seg|secs?|seconds?)\b/);
+        if (secMatch) return parseInt(secMatch[1], 10) * 1000;
+        const minMatch = t.match(/\b(\d+)\s*(min|m|mins?|minutes?|minutos?)\b/);
+        if (minMatch) return parseInt(minMatch[1], 10) * 60 * 1000;
+        const hourMatch = t.match(/\b(\d+)\s*(h|hora|hours?|horas?)\b/);
+        if (hourMatch) {
+          const h = parseInt(hourMatch[1], 10);
+          if (h > 2) return Number.MAX_SAFE_INTEGER;
+          return h * 60 * 60 * 1000;
+        }
+        return Number.MAX_SAFE_INTEGER;
+      }
       const map = new Map();
       for (const it of arr) if (!map.has(it.id)) map.set(it.id, it);
       return Array.from(map.values());
@@ -1180,6 +1234,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
         
         // RIGOR: SEMPRE abre o chat após timer expirar (não usa fast_scrape para decidir)
+        // Antes de abrir, comparar hash histórico
+        const stPrev = await readChatState(nome, chatId).catch(()=>null);
+        if (stPrev && stPrev.lastHistSig) {
+          // Calcula hash do histórico atual (fast_scrape preview) para comparar
+          const fastPreviewHash = (function() {
+            try {
+              if (!fastScrapePreview || !Array.isArray(fastScrapePreview) || fastScrapePreview.length === 0) return null;
+              const slim = fastScrapePreview.map(m => ({ a: m.autor, t: String(m.texto||'').slice(0,120) }));
+              return require('crypto').createHash('sha1').update(JSON.stringify(slim)).digest('hex');
+            } catch { return null; }
+          })();
+          if (fastPreviewHash && fastPreviewHash === stPrev.lastHistSig) {
+            stepLog.appendJSONL(nome,'virtus',{ step:'collector_skip_same_history', chatId });
+            await updateChatState(nome, chatId, { llmInFlightSig: null }).catch(()=>{});
+            state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
+            return;
+          }
+        }
         const chatState = await readChatState(nome, chatId);
         const timerExpired = chatState && chatState.windowEndsAt ? (agoraEpoch() >= chatState.windowEndsAt) : false;
         const timeSinceFirstSeen = chatState && chatState.firstSeenAt ? (agoraEpoch() - chatState.firstSeenAt) : 0;
@@ -1286,9 +1358,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             return require('crypto').createHash('sha1').update(JSON.stringify(slim)).digest('hex');
           } catch { return null; }
         })();
-        const stPrev = await readChatState(nome, chatId).catch(()=>null);
-        if (stPrev && (stPrev.llmInFlightSig === histSig || stPrev.lastHistSig === histSig)) {
-          require('./stepLog.js').appendJSONL(nome, 'virtus', { step: 'llm_skip_duplicate_history', chatId });
+        const stPrev2 = await readChatState(nome, chatId).catch(()=>null);
+        if (stPrev2 && stPrev2.lastHistSig === histSig) {
+          stepLog.appendJSONL(nome,'virtus',{ step:'collector_skip_same_history', chatId });
           await updateChatState(nome, chatId, { llmInFlightSig: null }).catch(()=>{});
           state.aiNoopUntil.set(chatId, Date.now() + AI_NOOP_MS);
           return;
@@ -1347,6 +1419,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             deadline10m 
           });
           console.log(`[VIRTUS][${nome}] WhatsApp detectado chatId=${chatId}. Janela de 10 minutos iniciada (deadline=${new Date(deadline10m*1000).toISOString()})`);
+          scheduleClosure(nome, chatId, deadline10m);
         }
         let answerText = String(llm.answer).trim();
         // Proteção anti-duplicata de saudação
@@ -1393,6 +1466,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const deadline10mFinal = chatStateFinal && chatStateFinal.deadline10m ? chatStateFinal.deadline10m : null;
         const deadlineReachedFinal = deadline10mFinal && agoraEpoch() >= deadline10mFinal;
         if (allFieldsCompleteFinal || deadlineReachedFinal) {
+          const key = `${nome}__${chatId}`;
+          if (CLOSURE_TIMERS.has(key)) { clearTimeout(CLOSURE_TIMERS.get(key)); CLOSURE_TIMERS.delete(key); }
           const lockedUntil = Date.now() + (72 * 3600 * 1000); // 72h
           await updateChatState(nome, chatId, { phase: 'finalizado', lockedUntil }).catch(()=>{});
           chatLock.acquire(nome, chatId);
@@ -1426,16 +1501,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // RIGOR: Esta função só deve ser chamada após collector bem-sucedido (histórico coletado e LLM processado)
       // processSendQueue NÃO pode enviar resposta se chat não foi coletado/handled
       const answerHash = String(answer || '').slice(0, 50).replace(/\s+/g, ' ').trim();
-      state.sendQueue.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now(), attempts: 0, answerHash });
+      const sendAt = Date.now() + randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
+      state.sendQueue.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now(), sendAt, attempts: 0, answerHash: String(answer||'').slice(0,50).replace(/\s+/g,' ').trim() });
       // Dedupe rigoroso por pending/hold imediato
       try { pendingAdd(nome, chatId, attemptId).catch(()=>{}); } catch {}
       try {
         updateChatState(nome, chatId, {
           sendQueuedAt: Date.now(),
-          sendHoldUntil: Date.now() + (MAX_SEND_DELAY_MS + 10000)
+          sendHoldUntil: sendAt
         }).catch(()=>{});
       } catch {}
-      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'queued_send', chatId, answerLen: String(answer||'').length });
+      stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'queued_send', chatId, answerLen: String(answer||'').length, sendAt });
       processSendQueue().catch(()=>{});
     } catch {}
   }
@@ -1450,7 +1526,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }
       }
       while (running && epochOk() && state.sendQueue.length > 0) {
-        const item = state.sendQueue.shift();
+        stepLog.logSLA(nome, null, 'send_queue', { sendQueueLength: state.sendQueue.length, aiCollectorsSize: state.aiCollectors.size });
+        if (state.sendQueue.length > 3) {
+          try {
+            const issues = require('./issues.js');
+            if (issues && typeof issues.append === 'function') {
+              issues.append('system','mil_action',`send_queue_backlog>${state.sendQueue.length}`).catch(()=>{});
+            }
+          } catch {}
+        }
+        const item = state.sendQueue[0];
+        if (!item || !item.chatId) { state.sendQueue.shift(); continue; }
+        if (item.sendAt && item.sendAt > Date.now()) {
+          const waitMs = Math.min(5000, item.sendAt - Date.now());
+          setTimeout(() => processSendQueue().catch(()=>{}), waitMs);
+          break;
+        }
+        state.sendQueue.shift();
         const { chatId, answer, attemptId } = item || {};
         if (!chatId || !answer) continue;
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_dequeued', chatId });
@@ -1670,7 +1762,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         ]);
       } catch {}
       const todos = await coletaChatsMarketplaceTodos(p);
-      const filtrados = todos.filter(c => c.id && isRecentIncoming(c.tempo) && !c.fromMine);
+      const filtrados = todos.filter(c => c.id && !c.fromMine && c.recentEnough && c.isUnread);
       // Adiciona idadeMs para cada chat
       return filtrados.map(c => ({
         ...c,
