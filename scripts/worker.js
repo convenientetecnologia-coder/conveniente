@@ -1650,7 +1650,7 @@ async function robeTickGlobal() {
           robeUpdateMeta(nome, { emExecucao: false });
           if (virtusWasRunning && automationAllowed(ctrl)) {
             try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome);
               ctrl.trabalhando = true;
               await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
             } catch {
@@ -1668,7 +1668,7 @@ async function robeTickGlobal() {
         if (virtusWasRunning) {
           if (automationAllowed(ctrl)) {
             try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome);
               ctrl.trabalhando = true;
             } catch (e) {
               ctrl.virtus = null;
@@ -1864,7 +1864,7 @@ async function start_work({ nome }) {
       }
       ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
 
-      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome);
       ctrl.trabalhando = true;
       try {
         await browserHelper.forceCloseExtras(ctrl.browser);
@@ -2200,7 +2200,7 @@ const handlers = {
       }
 
       if (automationAllowed(ctrl)) {
-        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome);
         ctrl.trabalhando = true;
       }
 
@@ -2352,7 +2352,7 @@ const handlers = {
               robeUpdateMeta(nome, { emExecucao: false });
               if (virtusWasRunning && automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome);
                   ctrl.trabalhando = true;
                   await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
                 } catch {
@@ -2370,7 +2370,7 @@ const handlers = {
             if (virtusWasRunning) {
               if (automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome);
                   ctrl.trabalhando = true;
                 } catch (e) {
                   ctrl.virtus = null;
@@ -3442,7 +3442,7 @@ async function nurseTick() {
       }
       if (want.virtus === 'on' && automationAllowed(ctrl)) {
         try { 
-          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 }); 
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome); 
           ctrl.trabalhando = true; 
         } catch {}
       }
