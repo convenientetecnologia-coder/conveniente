@@ -1512,7 +1512,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         }).catch(()=>{});
       } catch {}
       stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'queued_send', chatId, answerLen: String(answer||'').length, sendAt });
-      processSendQueue().catch(()=>{});
+      process.nextTick(() => {
+        try { processSendQueue(); } catch {}
+      });
     } catch {}
   }
 
@@ -1520,33 +1522,28 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     if (state.sendWorkerActive) return;
     state.sendWorkerActive = true;
     try {
-      if (state.aiCollectors.size > 3 || state.sendQueue.length > 3) {
-        if (issues && typeof issues.append === 'function') {
-          try { await issues.append('system','queue_overload',`aiCollectors=${state.aiCollectors.size} sendQueue=${state.sendQueue.length}`); } catch {}
-        }
-      }
+      // força limpeza de locks >60s antes de começar
+      try { chatLock.forceUnlockStale(60_000); } catch {}
+      stepLog.appendJSONL(nome, 'virtus', { step: 'send_queue_start', len: state.sendQueue.length });
+
       while (running && epochOk() && state.sendQueue.length > 0) {
         stepLog.logSLA(nome, null, 'send_queue', { sendQueueLength: state.sendQueue.length, aiCollectorsSize: state.aiCollectors.size });
-        if (state.sendQueue.length > 3) {
-          try {
-            const issues = require('./issues.js');
-            if (issues && typeof issues.append === 'function') {
-              issues.append('system','mil_action',`send_queue_backlog>${state.sendQueue.length}`).catch(()=>{});
-            }
-          } catch {}
-        }
+
         const item = state.sendQueue[0];
         if (!item || !item.chatId) { state.sendQueue.shift(); continue; }
         if (item.sendAt && item.sendAt > Date.now()) {
           const waitMs = Math.min(5000, item.sendAt - Date.now());
-          setTimeout(() => processSendQueue().catch(()=>{}), waitMs);
+          setTimeout(() => { try { processSendQueue(); } catch {} }, waitMs);
           break;
         }
         state.sendQueue.shift();
         const { chatId, answer, attemptId } = item || {};
         if (!chatId || !answer) continue;
         stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_dequeued', chatId });
-        console.log(`[VIRTUS][${nome}] Enviando resposta ao chatId=${chatId}: "${String(answer).slice(0,64)}..."`);
+
+        // limpa locks stale antes de tentar adquirir
+        try { chatLock.forceUnlockStale(60_000); } catch {}
+
         let _chatLockAcquired = false;
         let p = null;
         try {
@@ -1737,10 +1734,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           }
         }
       }
-    } finally {
-      state.sendWorkerActive = false;
+      } finally {
+        state.sendWorkerActive = false;
+        try { stepLog.appendJSONL(nome, 'virtus', { step: 'send_queue_end', len: state.sendQueue.length }); } catch {}
+      }
     }
-  }
 
   async function coletaChatsMarketplaceRecentes() {
     try {
