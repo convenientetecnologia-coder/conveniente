@@ -1,4 +1,6 @@
 // scripts/logger.js
+// logger.critical(msg, ctx) é para uso exclusivo em logs de corrida de locks/pendings/recovery
+// logger.audit(msg, ctx) é para eventos de auditoria que não são warning, nem info, nem debug
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +18,8 @@ const COLOR = {
   warn: '\x1b[33m',
   error: '\x1b[31m',
   debug: '\x1b[35m',
+  critical: '\x1b[41m',
+  audit: '\x1b[32m',
   ts: '\x1b[90m'
 };
 
@@ -47,10 +51,14 @@ function log({ level = LEVELS.INFO, msg = '', ctx = {}, errorObj = null }) {
   const color = COLOR[level] || '';
   const line = `${COLOR.ts}[${ts}]${COLOR.reset} ${color}[${level.toUpperCase()}]${COLOR.reset} ${base}`;
   // Terminal
-  if (level === LEVELS.ERROR) {
+  if (level === 'critical') {
+    console.error(line);
+  } else if (level === LEVELS.ERROR) {
     console.error(line);
   } else if (level === LEVELS.WARN) {
     console.warn(line);
+  } else if (level === 'audit') {
+    console.log(line);
   } else {
     console.log(line);
   }
@@ -67,6 +75,8 @@ module.exports = {
   warn: (msg, ctx) => log({ level: LEVELS.WARN, msg, ctx }),
   error: (msg, ctx, errorObj) => log({ level: LEVELS.ERROR, msg, ctx, errorObj }),
   debug: (msg, ctx) => log({ level: LEVELS.DEBUG, msg, ctx }),
+  critical: (msg, ctx) => log({ level: 'critical', msg, ctx }),
+  audit: (msg, ctx) => log({ level: 'audit', msg, ctx }),
   LEVELS,
   log // acesso bruto
 };

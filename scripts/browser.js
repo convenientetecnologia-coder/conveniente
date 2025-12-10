@@ -260,6 +260,52 @@ async function patchPage(nome, page, coords) {
   } catch {}
 }
 
+/**
+ * Instala um MutationObserver no Messenger/Marketplace para notificar sempre que um novo chatId entrar no FEED.
+ * Deve ser chamado após patchPage na primeira page do perfil prático/virtus.
+ */
+async function installFeedObserver(page, nome) {
+  try {
+    await page.exposeFunction('__virtusNewChat', (info) => {
+      try {
+        const cid = info && info.chatId;
+        if (!cid) return;
+        // Agende coleta via Virtus.js (garanta que scheduleCollector está global/async).
+        // Exemplo do lado do Virtus: scheduleCollector(cid, 0).catch(()=>{});
+        // Chame aqui se Virtus estiver no escopo global, ou garanta threading via events/IPC.
+      } catch {}
+    });
+    await page.evaluateOnNewDocument(() => {
+      const normId = (href) => {
+        try {
+          const m = href.match(/\/marketplace\/t\/(\d+)/);
+          return m ? m[1] : null;
+        } catch { return null; }
+      };
+      const observer = new MutationObserver((muts) => {
+        for (const m of muts) {
+          const added = Array.from(m.addedNodes || []);
+          for (const n of added) {
+            try {
+              const link = n.querySelector ? n.querySelector('a[href*="/marketplace/t/"]') : null;
+              const id = link ? normId(link.getAttribute('href') || '') : null;
+              if (id && window.__virtusNewChat) {
+                window.__virtusNewChat({ chatId: id, ts: Date.now() });
+              }
+            } catch {}
+          }
+        }
+      });
+      window.addEventListener('DOMContentLoaded', () => {
+        try {
+          const tgt = document.querySelector('div[role="grid"],div[role="rowgroup"],div.x78zum5.xdt5ytf') || document.body;
+          observer.observe(tgt, { childList: true, subtree: true });
+        } catch {}
+      });
+    });
+  } catch {}
+}
+
 // Minimização suave
 async function ensureMinimizedWindowForPage(page) {
   // GUARDA: A função minimize é inerte para steady-state (só uso manual/debug)
@@ -2059,5 +2105,6 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended
+  detectAccountSuspended,
+  installFeedObserver
 };

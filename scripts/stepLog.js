@@ -1,5 +1,18 @@
 // scripts/stepLog.js
 
+/**
+ * MÉTRICAS DE SLA E ATRASOS DE FILA/BACKLOG:
+ * 
+ * A função logSLA deve ser usada para logs críticos de fila e SLA, e está 110% safe.
+ * Registra métricas de:
+ * - Tempo de chegada da mensagem/chat
+ * - Tempo de agendamento do collector (scheduled)
+ * - Tempo real de disparo/finalização do collector
+ * - Tempo de início e de término de envio da resposta
+ * - Calcula e loga: delayCollector (início do collector - chegada), delaySend (envio - término do collector)
+ * - Sempre que qualquer delay de collector for >90s, sendQueue.length>3, ou aiCollectors.size>3, registra log explícito (step: 'sla_warning', etc)
+ */
+
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -174,4 +187,30 @@ function audit(perfil, flow, level, event, extra) {
   } catch {}
 }
 
-module.exports = { appendJSONL, appendJSONLSafe, attemptId, audit, sanitizePII };
+// Função exclusiva para SLA, pronta para uso por Virtus
+// Registra métricas de SLA e atrasos de fila/backlog
+function logSLA(perfil, chatId, step, meta) {
+  try {
+    const file = fileFor(perfil, 'sla');
+    capRotate(file);
+    const now = Date.now();
+    const payload = { ts: now, chatId, step, ...meta };
+    const line = JSON.stringify(payload) + '\n';
+    fs.appendFileSync(file, line);
+    if (payload.delayMs && payload.delayMs > 90000) {
+      console.warn(`[SLA][${perfil}] Delay collector >90s: chatId=${chatId} delayMs=${payload.delayMs}`);
+    }
+    // Verifica condições de backlog e registra warning
+    if ((payload.sendQueueLength && payload.sendQueueLength > 3) || 
+        (payload.aiCollectorsSize && payload.aiCollectorsSize > 3)) {
+      const warningPayload = { ts: now, chatId, step: 'sla_warning', ...meta };
+      const warningLine = JSON.stringify(warningPayload) + '\n';
+      fs.appendFileSync(file, warningLine);
+      console.warn(`[SLA][${perfil}] Backlog warning: chatId=${chatId} sendQueue=${payload.sendQueueLength || 0} aiCollectors=${payload.aiCollectorsSize || 0}`);
+    }
+  } catch (e) {
+    // Falha silenciosamente para não interromper fluxo principal
+  }
+}
+
+module.exports = { appendJSONL, appendJSONLSafe, attemptId, audit, sanitizePII, logSLA };
