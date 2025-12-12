@@ -18,17 +18,13 @@ const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 const ATENDIMENTO_FILES = [
   "index.js",
   "scripts/api_perfis.js",
-  "scripts/api_issues.js",
   "scripts/browser.js",
   "scripts/chatLock.js",
-  "scripts/chatStore.js",
   "scripts/inteligenciaArtificial.js",
-  "scripts/issues.js",
   "scripts/logger.js",
   "scripts/manifestStore.js",
   "scripts/promptFretes.js",
   "scripts/stepLog.js",
-  "scripts/utils.js",
   "scripts/virtus.js",
   "scripts/worker.js",
 ];
