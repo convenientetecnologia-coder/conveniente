@@ -4,7 +4,7 @@
  * Virtus V2 - LLM Worker Stage (Processo Independente)
  * 
  * Responsabilidades EXCLUSIVAS:
- * - Consome collected/*/inbox/*.json
+ * - Consome collected/<perfil>/inbox/*.json
  * - Chama masterExtractAnswer (LLM)
  * - Escreve replies/<perfil>/inbox/*.json
  * - Move collected para done
