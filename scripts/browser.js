@@ -266,13 +266,24 @@ async function patchPage(nome, page, coords) {
  */
 async function installFeedObserver(page, nome) {
   try {
+    // Sistema de eventos para novos chats detectados pelo MutationObserver
+    const virtusEvents = global.__virtusEventsMap || (global.__virtusEventsMap = new Map());
+    if (!virtusEvents.has(nome)) {
+      virtusEvents.set(nome, []);
+    }
+    const eventQueue = virtusEvents.get(nome);
+
     await page.exposeFunction('__virtusNewChat', (info) => {
       try {
         const cid = info && info.chatId;
         if (!cid) return;
-        // Agende coleta via Virtus.js (garanta que scheduleCollector está global/async).
-        // Exemplo do lado do Virtus: scheduleCollector(cid, 0).catch(()=>{});
-        // Chame aqui se Virtus estiver no escopo global, ou garanta threading via events/IPC.
+        // Empurra evento para fila do perfil (event-driven para Virtus)
+        const event = { chatId: String(cid), ts: info.ts || Date.now() };
+        eventQueue.push(event);
+        // Limita tamanho da fila (mantém últimos 100 eventos por perfil)
+        if (eventQueue.length > 100) {
+          eventQueue.shift();
+        }
       } catch {}
     });
     await page.evaluateOnNewDocument(() => {

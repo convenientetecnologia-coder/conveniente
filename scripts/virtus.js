@@ -16,7 +16,7 @@ const fs = require('fs/promises');
 const fsRaw = require('fs'); // Necessário para uso síncrono dentro de getPerfilManifest
 const path = require('path');
 const crypto = require('crypto');
-const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
+const { patchPage, ensureMinimizedWindowForPage, installFeedObserver } = require('./browser.js');
 const utils = require('./utils.js');
 const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
@@ -42,6 +42,17 @@ const MAX_SEND_DELAY_MS = parseInt(process.env.MESSENGER_INTERVALO_MAX_MS || '90
 const AI_NOOP_MS        = parseInt(process.env.VIRTUS_AI_NOOP_MS || '900000', 10); // 15min
 
 const MAX_LOCK_REQUEUE = parseInt(process.env.VIRTUS_MAX_LOCK_REQUEUE || '5', 10);
+
+// Locks assíncronos para operações de estado de chat (updateChatState/pendingAdd/pendingDel)
+const CHAT_STATE_LOCKS = new Map();
+function withChatStateLock(perfil, fn) {
+  const prev = CHAT_STATE_LOCKS.get(perfil) || Promise.resolve();
+  const job = prev.then(fn).finally(() => {
+    if (CHAT_STATE_LOCKS.get(perfil) === job) CHAT_STATE_LOCKS.delete(perfil);
+  });
+  CHAT_STATE_LOCKS.set(perfil, job);
+  return job;
+}
 
 // Locks por perfil de input
 const VIRTUS_INPUT_LOCKS = new Map();
@@ -132,6 +143,8 @@ function randomBetween(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+const CLOSURE_TIMERS = new Map(); // key `${perfil}__${chatId}` -> timeoutId
+
 function scheduleClosure(perfil, chatId, deadlineSec) {
   const key = `${perfil}__${chatId}`;
   if (CLOSURE_TIMERS.has(key)) return;
@@ -182,11 +195,13 @@ async function readChatState(perfil, chatId) {
 }
 
 async function updateChatState(perfil, chatId, updates) {
-  const file = CHATS_STATE_JSON_NAME(perfil);
-  const cur = await readJson(file, {});
-  if (!cur[chatId]) cur[chatId] = {};
-  Object.assign(cur[chatId], updates);
-  await writeJsonAtomicFsync(file, cur);
+  return withChatStateLock(perfil, async () => {
+    const file = CHATS_STATE_JSON_NAME(perfil);
+    const cur = await readJson(file, {});
+    if (!cur[chatId]) cur[chatId] = {};
+    Object.assign(cur[chatId], updates);
+    await writeJsonAtomicFsync(file, cur);
+  });
 }
 
 async function getAllChatStates(perfil) {
@@ -210,15 +225,19 @@ async function writeJsonAtomicFsync(file, obj){
   catch { await fs.copyFile(tmp, file); try { await fs.unlink(tmp);} catch{} }
 }
 async function pendingAdd(perfil, chatId, attemptId) {
-  const file = PENDING_JSON_NAME(perfil);
-  const cur = await readJson(file, {});
-  cur[chatId] = { attemptId, startedAt: Date.now() };
-  await writeJsonAtomicFsync(file, cur);
+  return withChatStateLock(perfil, async () => {
+    const file = PENDING_JSON_NAME(perfil);
+    const cur = await readJson(file, {});
+    cur[chatId] = { attemptId, startedAt: Date.now() };
+    await writeJsonAtomicFsync(file, cur);
+  });
 }
 async function pendingDel(perfil, chatId) {
-  const file = PENDING_JSON_NAME(perfil);
-  const cur = await readJson(file, {});
-  if (cur[chatId]) { delete cur[chatId]; await writeJsonAtomicFsync(file, cur); }
+  return withChatStateLock(perfil, async () => {
+    const file = PENDING_JSON_NAME(perfil);
+    const cur = await readJson(file, {});
+    if (cur[chatId]) { delete cur[chatId]; await writeJsonAtomicFsync(file, cur); }
+  });
 }
 async function pendingList(perfil) {
   const file = PENDING_JSON_NAME(perfil);
@@ -655,7 +674,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     aiCollectors: new Map(),
     aiNoopUntil: new Map(),
     sendQueue: [],
-    sendWorkerActive: false
+    sendWorkerActive: false,
+    lastSendAtByPerfil: 0  // Rate limiter: último envio confirmado do perfil
   };
 
   let running = true;
@@ -664,7 +684,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 12 * 3600; // 12h de bloqueio
-  const POLL_INTERVAL_MS = parseInt(process.env.VIRTUS_POLL_MS || '5000', 10);
+  const POLL_INTERVAL_MS = parseInt(process.env.VIRTUS_POLL_MS || '1000', 10);
 
   // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
@@ -677,9 +697,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
   const respondedCache = new Map();
 
-  // MILITAR: Timers unificados
-  let filaInterval = null;
-  let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
+  // Timers unificados
+  let scrollInterval = null; // cleaning interval to prevent interval leak
 
   let lastScrollToTop = 0;
 
@@ -1187,8 +1206,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
       
       const attemptId = stepLog.attemptId();
-      // Calcula delay baseado na idade real da mensagem
-      const delayMs = Math.max(0, AI_COLLECT_WINDOW_MS - idadeMs + jitter);
+      // Calcula delay baseado na idade real da mensagem com jitter
+      const jitterMs = randomBetween(0, 800);
+      const base = AI_COLLECT_WINDOW_MS - (idadeMs || 0);
+      const delayMs = Math.max(0, Math.min(AI_COLLECT_WINDOW_MS, base + jitterMs));
       state.aiCollectors.set(chatId, { timer: null, startedAt: now, attemptId, idadeMs, delayMs });
       stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'collector_started', chatId, windowMs: AI_COLLECT_WINDOW_MS, idadeMs, delayMs });
       const t = setTimeout(() => {
@@ -1457,7 +1478,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         // RIGOR: enqueueSend só é chamado após collector bem-sucedido (histórico coletado e LLM processado)
         // Patch F - Final message/lock 72h: marcar phase: 'finalizado' quando todos os campos coletados ou deadline 10min atingido
         const extractedFinal = (llm && llm.extraction) || {};
-        const hasWhatsappFinal = isValidBRPhoneWithDDD(extractedFinal.telefone);
+        const hasWhatsappFinal = extractedFinal.telefone && /^\d{10,11}$/.test(String(extractedFinal.telefone).replace(/\D/g, ''));
         const hasItemFinal = !!(extractedFinal.item);
         const hasEnderecoSaidaFinal = !!(extractedFinal.endereco_saida);
         const hasEnderecoDestinoFinal = !!(extractedFinal.endereco_destino);
@@ -1501,7 +1522,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // RIGOR: Esta função só deve ser chamada após collector bem-sucedido (histórico coletado e LLM processado)
       // processSendQueue NÃO pode enviar resposta se chat não foi coletado/handled
       const answerHash = String(answer || '').slice(0, 50).replace(/\s+/g, ' ').trim();
-      const sendAt = Date.now() + randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
+      // Patch F: Rate limiter global por perfil - garante gap mínimo entre envios do mesmo perfil
+      const now = Date.now();
+      const gap = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
+      const sendAt = Math.max(now + gap, state.lastSendAtByPerfil + gap);
       state.sendQueue.push({ chatId, answer, attemptId: attemptId || stepLog.attemptId(), queuedAt: Date.now(), sendAt, attempts: 0, answerHash: String(answer||'').slice(0,50).replace(/\s+/g,' ').trim() });
       // Dedupe rigoroso por pending/hold imediato
       try { pendingAdd(nome, chatId, attemptId).catch(()=>{}); } catch {}
@@ -1660,11 +1684,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_ok', chatId });
             console.log(`[VIRTUS][${nome}] Resposta enviada com sucesso chatId=${chatId}`);
             
-            // REGRA: Delay 30-90s ANTES de marcar responded
-            const delay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
-            stepLog.appendJSONL(nome, 'virtus', { attempt: attemptId, step: 'send_delay_before_responded', chatId, delayMs: delay });
-            console.log(`[VIRTUS][${nome}] Delay applied before marcar responded chatId=${chatId} delayMs=${delay}`);
-            await sleep(delay);
+            // Patch F: Atualiza rate limiter - marca último envio confirmado do perfil
+            state.lastSendAtByPerfil = Date.now();
             
             // Verifica deadline10m e fecha pedido se necessário
             const chatState = await readChatState(nome, chatId);
@@ -1880,6 +1901,69 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   async function atualizaFila() {
     let mudancaFila = false;
+    
+    // Patch E: Consumir eventos do observer (event-driven) ANTES de polling pesado
+    try {
+      const virtusEvents = global.__virtusEventsMap;
+      if (virtusEvents && virtusEvents.has(nome)) {
+        const eventQueue = virtusEvents.get(nome);
+        if (Array.isArray(eventQueue) && eventQueue.length > 0) {
+          // Processa eventos em batch (remove todos de uma vez para evitar race)
+          const eventos = eventQueue.splice(0, eventQueue.length);
+          const agora = agoraEpoch();
+          
+          for (const evt of eventos) {
+            try {
+              const chatId = String(evt.chatId || '').trim();
+              if (!chatId) continue;
+              
+              // Dedupe: verifica se já está responded/pending/agendado
+              const ts = respondedCache.get(chatId) || Number(historico[chatId] || 0);
+              const jaRespondido = ts && (agora - ts) < NO_REPEAT_WINDOW_SEC;
+              const pend = await pendingList(nome).catch(() => ({}));
+              const jaPending = pend && pend[chatId];
+              const jaAgendado = state.aiCollectors.has(chatId);
+              
+              if (!jaRespondido && !jaPending && !jaAgendado) {
+                // Chat novo detectado via observer: registra estado e agenda collector
+                const firstSeenAt = agoraEpoch();
+                const windowEndsAt = firstSeenAt + Math.floor(AI_COLLECT_WINDOW_MS / 1000);
+                await updateChatState(nome, chatId, {
+                  firstSeenAt,
+                  windowEndsAt,
+                  phase: 'aguardando'
+                });
+                stepLog.appendJSONL(nome, 'virtus', {
+                  step: 'chat_new_detected_observer',
+                  chatId,
+                  firstSeenAt,
+                  windowEndsAt,
+                  windowMs: AI_COLLECT_WINDOW_MS,
+                  source: 'observer'
+                });
+                console.log(`[VIRTUS][${nome}] Chat detectado via observer: chatId=${chatId} (firstSeen=${new Date(firstSeenAt*1000).toISOString()})`);
+                
+                // Agenda collector (idadeMs=0 pois é detecção em tempo real)
+                await scheduleCollector(chatId, 0);
+                mudancaFila = true;
+              }
+            } catch (e) {
+              // Ignora erro individual de evento, continua processando outros
+              stepLog.appendJSONL(nome, 'virtus', { step: 'observer_event_error', error: (e && e.message) || String(e) });
+            }
+          }
+          
+          if (eventos.length > 0) {
+            stepLog.appendJSONL(nome, 'virtus', { step: 'observer_events_processed', count: eventos.length, remaining: eventQueue.length });
+          }
+        }
+      }
+    } catch (e) {
+      // Se falhar ao consumir eventos, continua com polling (fallback)
+      stepLog.appendJSONL(nome, 'virtus', { step: 'observer_consume_error', error: (e && e.message) || String(e) });
+    }
+    
+    // Fallback: Polling tradicional (mantido para robustez)
     const p = await ensurePage();
     let chatsState = null;
     try {
@@ -1952,7 +2036,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch {}
     if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
       running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
@@ -1964,7 +2047,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       logger.error(`[VIRTUS][${nome}] Browser morto/desconectado — encerrando Virtus`, { nome });
       if (issues) try { await logIssue(nome, 'virtus_page_dead', 'browser morto/disconnected'); } catch {}
       running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       return;
     }
@@ -1978,7 +2060,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         logger.error(`[VIRTUS][${nome}] Page fechada/desconectada — encerrando Virtus`, { nome });
         if (issues) try { await logIssue(nome, 'virtus_page_dead', 'page closed/disconnected'); } catch {}
         running = false;
-        if (filaInterval) clearInterval(filaInterval), filaInterval = null;
         if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
         return;
       }
@@ -2104,7 +2185,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     } catch {}
     if (manifestFrozenUntil && manifestFrozenUntil > Date.now()) {
       running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       logger.warn(`[VIRTUS][${nome}] virtus_stop_frozen window — congelado até ${new Date(manifestFrozenUntil).toISOString()}`, { nome });
       return;
@@ -2151,8 +2231,19 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     }
     if (!running || !epochOk()) return;
     await bootstrapHistorico();
-    filaInterval = setInterval(filaManagerLoop, POLL_INTERVAL_MS);
-    filaManagerLoop();
+    
+    // Função pollLoop não-overlapping
+    async function pollLoop() {
+      while (running && epochOk()) {
+        const t0 = Date.now();
+        await filaManagerLoop().catch(()=>{});
+        const dt = Date.now() - t0;
+        const sleepMs = Math.max(0, POLL_INTERVAL_MS - dt);
+        await sleep(sleepMs);
+      }
+    }
+    
+    pollLoop();
   }
 
   runner();
@@ -2161,7 +2252,6 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     stop: async () => {
       stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'stop' });
       running = false;
-      if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
       try {
         for (const [cid, ref] of state.aiCollectors.entries()) {
