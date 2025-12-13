@@ -241,38 +241,58 @@ async function listRecentUnreadChats(page) {
  * @returns {Promise<boolean>} true se abriu com sucesso
  */
 async function openChat(page, chatId, { timeoutMs = 20000 } = {}) {
+  const absUrl = `https://www.messenger.com/marketplace/t/${chatId}`;
+  
+  // 1) FAST PATH: goto direto
+  try {
+    const cur = (page.url && page.url()) || '';
+    if (!cur.includes(`/marketplace/t/${chatId}`)) {
+      await page.goto(absUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: Math.min(20000, timeoutMs)
+      }).catch(() => {});
+    }
+  } catch {}
+  
+  // Heal login/nonce
+  try {
+    if (browserHelper && typeof browserHelper.resolveNonceIfPresent === 'function') {
+      await browserHelper.resolveNonceIfPresent(page).catch(() => {});
+    }
+    if (browserHelper && typeof browserHelper.clickContinuarComo === 'function') {
+      await browserHelper.clickContinuarComo(page, { timeout: 12000 }).catch(() => {});
+    }
+  } catch {}
+  
+  // HARD ASSERT: só é sucesso se estiver no chatId
+  if (await assertOnChat(page, chatId, { timeoutMs: 8000 })) {
+    await ensureConversationReady(page, chatId, { timeoutMs: 20000 }).catch(() => {});
+    return true;
+  }
+  
+  // 2) FALLBACK: feed click (se não deu pra navegar direto)
   await ensureMarketplace(page, { timeoutMs: 25000 }).catch(() => {});
   
-  // Scroll para o topo da lista
   try {
     await page.evaluate(() => {
-      let grid = document.querySelector('div[role="grid"]');
-      if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf[data-virtualized="false"]');
-      if (!grid) grid = document.querySelector('div[role="rowgroup"]');
-      if (!grid) grid = document.querySelector('div.x78zum5.xdt5ytf');
-      if (!grid) grid = Array.from(document.querySelectorAll('div')).find((d) => d.scrollHeight > 400 && d.scrollHeight > d.clientHeight + 30);
-      if (!grid) grid = document.body;
+      let grid = document.querySelector('div[role="grid"]') || document.querySelector('div[role="rowgroup"]') || document.body;
       if (grid) grid.scrollTop = 0;
     });
   } catch {}
   
   await sleep(200);
   
-  // Encontra e clica no anchor do chat
   const sel = `a[href^="/marketplace/t/${chatId}"]`;
   const t0 = Date.now();
   let anchor = null;
   
-  // Busca com scroll incremental
   while ((Date.now() - t0) < Math.min(timeoutMs, 16000)) {
     try {
       anchor = await page.$(sel);
       if (anchor) break;
       
-      // Scroll incremental
       await page.evaluate(() => {
-        const contSel = 'div[role="grid"]';
-        const el = document.querySelector(contSel) || document.scrollingElement || document.body;
+        const el = document.querySelector('div[role="grid"]') || document.scrollingElement || document.body;
         if (!el) return;
         const delta = Math.max(400, Math.floor(el.clientHeight * 0.8));
         el.scrollTop = Math.min(el.scrollTop + delta, el.scrollHeight);
@@ -281,34 +301,23 @@ async function openChat(page, chatId, { timeoutMs = 20000 } = {}) {
     await sleep(200);
   }
   
-  if (!anchor) {
-    return false;
-  }
+  if (!anchor) return false;
   
-  // Clica no anchor
   try {
     await page.evaluate((el) => {
       el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-      el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
       el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     }, anchor);
   } catch {
-    try {
-      await anchor.click({ delay: 50 });
-    } catch {}
+    try { await anchor.click({ delay: 50 }); } catch {}
   }
   
-  // Aguarda estar no chat
-  const onChat = await assertOnChat(page, chatId, { timeoutMs: 8000 });
-  if (!onChat) {
-    const ready = await ensureConversationReady(page, chatId, { timeoutMs: 16000 });
-    if (!ready) {
-      return false;
-    }
+  // HARD ASSERT DE NOVO
+  if (!(await assertOnChat(page, chatId, { timeoutMs: 8000 }))) {
+    return false;
   }
   
+  await ensureConversationReady(page, chatId, { timeoutMs: 20000 }).catch(() => {});
   return true;
 }
 

@@ -843,13 +843,16 @@ async function activateOnce(nome, source = '') {
                 allow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
-                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true));
+                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || c.trabalhando === true));
                 },
                 maxPagesWhenAllow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
+                  const vPages = parseInt(process.env.VIRTUS_UI_PAGES || '12', 10);
                   if (c && c.humanControl === true) return Number.MAX_SAFE_INTEGER;
-                  return rm.emExecucao === true ? 3 : 10;
+                  if (rm.emExecucao === true) return Math.max(3, vPages);
+                  if (c && c.trabalhando === true) return Math.max(3, vPages);
+                  return 10;
                 },
                 onNumPages: (n) => {
                   robeMeta[nome] = robeMeta[nome] || {};
@@ -1080,6 +1083,7 @@ async function closeExtraPages(browser, mainPage, nome) {
         try {
           if (mainPage && p === mainPage) continue;
           if (!mainPage && pages[0] && p === pages[0]) continue;
+          if (p && p._virtusKeep === true) continue; // MILITAR: não fecha página Virtus
           let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
             await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1094,6 +1098,7 @@ async function closeExtraPages(browser, mainPage, nome) {
       for (const p of again) {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && again[0] && p === again[0]) continue;
+        if (p && p._virtusKeep === true) continue; // MILITAR: não fecha página Virtus
         let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1744,7 +1749,7 @@ try {
   }
   if (ctrl.virtusSender && typeof ctrl.virtusSender.stop === 'function') {
     await ctrl.virtusSender.stop().catch(()=>{});
-  }
+}
 } catch {}
 ctrl.virtusCollector = null;
 ctrl.virtusSender = null;
@@ -1888,21 +1893,25 @@ async function start_work({ nome }) {
       }
       ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
 
+      // MILITAR: limpa lixo ANTES de iniciar Virtus
+      await browserHelper.forceCloseExtras(ctrl.browser).catch(() => {});
+      
+      ctrl.trabalhando = true;
+      
       // PATCH 12: Inicia ambos workers V2
       ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
       ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-      ctrl.trabalhando = true;
+      
+      // MILITAR: pool sobe depois dos workers
+      const virtusPagePool = require('./virtusPagePool.js');
+      await virtusPagePool.warmUp(ctrl.browser, nome).catch(() => {});
+      
       try {
-        await browserHelper.forceCloseExtras(ctrl.browser);
         const ps = await ctrl.browser.pages();
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].numPages = (ps && ps.length) || 0;
         await snapshotStatusAndWrite();
       } catch {}
-
-      if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
-        await browserHelper.forceCloseExtras(ctrl.browser);
-      }
 
       try {
         await unfreezeCooldownIfWorking(nome);
@@ -3830,6 +3839,7 @@ async function periodicAboutBlankCleanup() {
             // Nunca fecha a página principal
             if (p === mainPage) continue;
             if (!mainPage && p === pages[0]) continue;
+            if (p && p._virtusKeep === true) continue; // MILITAR: não fecha página Virtus
 
             // Verifica se é about:blank
             let url = '';

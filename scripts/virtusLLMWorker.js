@@ -26,7 +26,8 @@ const logger = require('./logger.js');
 const stepLog = require('./stepLog.js');
 
 // Constantes
-const PROCESS_INTERVAL_MS = 2000; // 2s entre processamentos
+const PROCESS_INTERVAL_MS = 250; // 250ms entre processamentos (SLA <2s)
+const LLM_CONCURRENCY = parseInt(process.env.VIRTUS_LLM_CONCURRENCY || '4', 10); // paralelismo
 const STALE_REQUEUE_MS = 5 * 60 * 1000; // 5min - itens presos em processing voltam para inbox
 const MAX_ATTEMPTS = 3; // máximo de tentativas de processamento LLM
 
@@ -411,14 +412,14 @@ async function processPerfilInbox(perfil) {
   
   if (files.length === 0) return 0;
   
-  // PATCH #6: Ordenação determinística por collectedAt (ou mtime)
+  // Ordenação determinística por collectedAt (ou mtime)
   const items = [];
   for (const file of files) {
     try {
       const item = await virtusDiskQueue.readJsonSafe(file, null);
       if (item && item.id) {
         const stats = await fs.stat(file).catch(() => ({ mtimeMs: 0 }));
-        items.push({ file, item, collectedAt: item.collectedAt || stats.mtimeMs });
+        items.push({ file, item, collectedAt: item.collectedAt || stats.mtimeMs, perfil });
       }
     } catch {}
   }
@@ -426,27 +427,7 @@ async function processPerfilInbox(perfil) {
   // Ordena por collectedAt asc (FIFO real)
   items.sort((a, b) => a.collectedAt - b.collectedAt);
   
-  if (items.length === 0) return 0;
-  
-  // Processa primeiro item (claim por rename)
-  const firstFile = items[0].file;
-  
-  // Claim via rename para processing
-  const processingDir = virtusV2Paths.collectedProcessingDir(perfil);
-  await virtusDiskQueue.ensureDir(processingDir);
-  
-  let claimedFile = null;
-  try {
-    claimedFile = await virtusDiskQueue.claimFile(firstFile, processingDir);
-  } catch (err) {
-    // Claim falhou (arquivo já foi claimado por outro worker ou não existe mais)
-    return 0;
-  }
-  
-  // Processa item
-  await processCollectedItem(perfil, claimedFile);
-  
-  return 1;
+  return items;
 }
 
 /**
@@ -469,7 +450,7 @@ async function requeueStaleProcessing(perfil) {
 }
 
 /**
- * Loop principal do LLM Worker
+ * Loop principal do LLM Worker - PROCESSAR MÚLTIPLOS ITENS EM PARALELO
  */
 async function mainLoop() {
   logger.info('[virtusLLMWorker] Iniciando Virtus LLM Worker V2');
@@ -479,14 +460,42 @@ async function mainLoop() {
       // Lista perfis com collected/inbox
       const perfis = await listPerfisWithCollected();
       
-      // Processa inbox de cada perfil (um item por vez)
+      // Coleta candidatos (1 mais antigo por perfil)
+      const candidates = [];
       for (const perfil of perfis) {
         try {
-          await processPerfilInbox(perfil);
+          const items = await processPerfilInbox(perfil);
+          if (Array.isArray(items) && items.length > 0) {
+            candidates.push(items[0]); // mais antigo de cada perfil
+          }
         } catch (err) {
-          logger.warn(`[virtusLLMWorker] Erro ao processar perfil`, { perfil, err: String(err) });
+          logger.warn(`[virtusLLMWorker] Erro ao listar perfil`, { perfil, err: String(err) });
         }
       }
+      
+      // Ordena globalmente por collectedAt
+      candidates.sort((a, b) => a.collectedAt - b.collectedAt);
+      
+      // Processa até LLM_CONCURRENCY em paralelo
+      const toProcess = candidates.slice(0, LLM_CONCURRENCY);
+      await Promise.allSettled(toProcess.map(async ({ file, perfil }) => {
+        try {
+          const processingDir = virtusV2Paths.collectedProcessingDir(perfil);
+          await virtusDiskQueue.ensureDir(processingDir);
+          
+          let claimedFile = null;
+          try {
+            claimedFile = await virtusDiskQueue.claimFile(file, processingDir);
+          } catch {
+            // Claim falhou (arquivo já foi claimado por outro worker ou não existe mais)
+            return;
+          }
+          
+          await processCollectedItem(perfil, claimedFile);
+        } catch (err) {
+          logger.warn(`[virtusLLMWorker] Erro ao processar item`, { file, perfil, err: String(err) });
+        }
+      }));
       
       // Requeue stale processing de cada perfil
       for (const perfil of perfis) {

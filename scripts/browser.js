@@ -941,6 +941,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
             let u = '';
             try { u = await p.url(); } catch {}
             if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
+            if (p && p._virtusKeep === true) continue; // <<< MILITAR: não fecha página Virtus
             if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
           }
         }

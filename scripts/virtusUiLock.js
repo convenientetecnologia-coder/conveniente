@@ -5,13 +5,22 @@ const stepLog = require('./stepLog.js');
 const LOCKS = new Map();
 
 /**
- * Mutex por perfil para qualquer ação de UI (openChat/scrape/send).
- * Serializa collector + sender + detection do próprio collector.
+ * ASSINATURAS SUPORTADAS:
+ *  - withVirtusUiLock(perfil, owner, chatId, fn)              -> key = perfil (legacy)
+ *  - withVirtusUiLock(perfil, owner, chatId, lockKey, fn)     -> key = lockKey (MILITAR)
+ *
+ * USE lockKey = `page:${page._virtusLockKey}` PARA PARALELIZAR ENTRE TABS.
  */
-async function withVirtusUiLock(perfil, owner, chatId, fn) {
-  if (!perfil || typeof fn !== 'function') return fn();
+async function withVirtusUiLock(perfil, owner, chatId, keyOrFn, maybeFn) {
+  const hasKey = (typeof keyOrFn === 'string' && keyOrFn.length > 0);
+  const fn = hasKey ? maybeFn : keyOrFn;
+  const key = hasKey ? keyOrFn : String(perfil || 'GLOBAL');
   
-  const prev = LOCKS.get(perfil) || Promise.resolve();
+  if (typeof fn !== 'function') {
+    throw new Error('withVirtusUiLock: fn obrigatório');
+  }
+  
+  const prev = LOCKS.get(key) || Promise.resolve();
   const queuedAt = Date.now();
   
   const job = prev
@@ -21,6 +30,7 @@ async function withVirtusUiLock(perfil, owner, chatId, fn) {
       if (waitMs > 10) {
         stepLog.appendJSONL(perfil, 'virtus_ui_lock', {
           step: 'ui_lock_wait',
+          key,
           owner: String(owner || ''),
           chatId: chatId ? String(chatId) : null,
           waitMs
@@ -29,6 +39,7 @@ async function withVirtusUiLock(perfil, owner, chatId, fn) {
       
       stepLog.appendJSONL(perfil, 'virtus_ui_lock', {
         step: 'ui_lock_acquire',
+        key,
         owner: String(owner || ''),
         chatId: chatId ? String(chatId) : null
       });
@@ -38,16 +49,17 @@ async function withVirtusUiLock(perfil, owner, chatId, fn) {
       } finally {
         stepLog.appendJSONL(perfil, 'virtus_ui_lock', {
           step: 'ui_lock_release',
+          key,
           owner: String(owner || ''),
           chatId: chatId ? String(chatId) : null
         });
       }
     })
     .finally(() => {
-      if (LOCKS.get(perfil) === job) LOCKS.delete(perfil);
+      if (LOCKS.get(key) === job) LOCKS.delete(key);
     });
   
-  LOCKS.set(perfil, job);
+  LOCKS.set(key, job);
   return job;
 }
 

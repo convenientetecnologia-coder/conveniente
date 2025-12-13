@@ -25,6 +25,8 @@ const virtusMessenger = require('./virtusMessenger.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
 const { withVirtusUiLock } = require('./virtusUiLock.js');
+const virtusPagePool = require('./virtusPagePool.js');
+const virtusChatLock = require('./virtusChatLock.js');
 
 // Constantes
 const MIN_SEND_DELAY_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '30000', 10); // 30s
@@ -66,24 +68,6 @@ async function ensurePage(browser, perfil) {
   }
 }
 
-/**
- * Lê estado de send_state/<perfil>.json (nextSendSlotAt persistente)
- */
-async function readSendState(perfil) {
-  const file = virtusV2Paths.sendStateFile(perfil);
-  return await virtusDiskQueue.readJsonSafe(file, { nextSendSlotAt: 0 });
-}
-
-/**
- * Atualiza estado de send_state/<perfil>.json (nextSendSlotAt persistente)
- */
-async function updateSendState(perfil, updates) {
-  const file = virtusV2Paths.sendStateFile(perfil);
-  const current = await readSendState(perfil);
-  const updated = { ...current, ...updates, updatedAt: Date.now() };
-  await virtusDiskQueue.writeJsonAtomic(file, updated);
-  return updated;
-}
 
 /**
  * Verifica se item já foi enviado (3 barreiras cumulativas)
@@ -119,7 +103,7 @@ async function isAlreadySent(perfil, replyId, replyText) {
 }
 
 /**
- * Agenda um reply para envio (calcula sendAt com anti-flood persistente)
+ * Agenda um reply para envio (sendAt individual sem serialização)
  */
 async function scheduleReply(perfil, replyItem) {
   const replyId = replyItem.id;
@@ -128,54 +112,47 @@ async function scheduleReply(perfil, replyItem) {
   
   await virtusDiskQueue.ensureDir(scheduledDir);
   
-  // Lê send_state para obter nextSendSlotAt persistente
-  const sendState = await readSendState(perfil);
   const now = Date.now();
+  const base = Number(replyItem.collectedAt || replyItem.llmAt || now);
+  const delay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
   
-  // Calcula delay aleatório
-  const randomDelay = randomBetween(MIN_SEND_DELAY_MS, MAX_SEND_DELAY_MS);
+  // SLA: delay começa na COLETA
+  let sendAt = base + delay;
   
-  // Calcula sendAt garantindo que respeita nextSendSlotAt (anti-flood monotônico)
-  const proposedSendAt = now + randomDelay;
-  const sendAt = Math.max(proposedSendAt, sendState.nextSendSlotAt || now);
+  // se já passou (backlog), envia ASAP e loga violação
+  if (sendAt < now) sendAt = now;
   
-  // Adiciona sendAt ao item (copia firstSeenAt)
   const scheduledItem = {
     ...replyItem,
     sendAt,
     scheduledAt: now,
-    firstSeenAt: replyItem.firstSeenAt || replyItem.llmAt || now
+    firstSeenAt: replyItem.firstSeenAt || replyItem.collectedAt || replyItem.llmAt || now
   };
   
-  // Move de inbox para scheduled
   const inboxFile = path.join(inboxDir, `${replyId}.json`);
   const scheduledFile = path.join(scheduledDir, `${replyId}.json`);
   
+  // idempotência militar: se já existe scheduled, não reescreva; só limpe inbox
   try {
-    // NÃO avance sendState se o inboxFile nem existe.
-    await fs.access(inboxFile);
-
-    // Move primeiro, escreve depois.
-    await virtusDiskQueue.moveFile(inboxFile, scheduledFile);
-    await virtusDiskQueue.writeJsonAtomic(scheduledFile, scheduledItem);
-
-    // Agora sim: avance o sendState (somente após sucesso).
-    const newNextSendSlotAt = sendAt + MIN_SEND_DELAY_MS;
-    await updateSendState(perfil, { nextSendSlotAt: newNextSendSlotAt });
-    
-    stepLog.appendJSONL(perfil, 'virtus_sender', {
-      step: 'reply_scheduled',
-      replyId,
-      chatId: replyItem.chatId,
-      sendAt,
-      delayMs: sendAt - now
-    });
-    
+    await fs.access(scheduledFile);
+    await fs.unlink(inboxFile).catch(() => {});
+    stepLog.appendJSONL(perfil, 'virtus_sender', { step:'reply_schedule_skip_already_scheduled', replyId, chatId: replyItem.chatId });
     return true;
-  } catch (err) {
-    logger.warn(`[virtusSender][${perfil}] Erro ao agendar reply`, { replyId, err: String(err) });
-    return false;
-  }
+  } catch {}
+  
+  // write-first, delete-after: nunca deixa item "semi movido"
+  await virtusDiskQueue.writeJsonAtomic(scheduledFile, scheduledItem);
+  await fs.unlink(inboxFile).catch(() => {});
+  
+  stepLog.appendJSONL(perfil, 'virtus_sender', {
+    step: 'reply_scheduled',
+    replyId,
+    chatId: replyItem.chatId,
+    sendAt,
+    delayFromCollectMs: sendAt - base
+  });
+  
+  return true;
 }
 
 /**
@@ -232,12 +209,20 @@ async function processScheduledReply(browser, perfil, replyItem, { claimedFile }
   const histSig = replyItem.histSig;
   const attemptId = stepLog.attemptId();
   
+  if (!virtusChatLock.acquire(perfil, chatId, 'sender')) {
+    await requeueClaimed(perfil, replyItem, claimedFile, (replyItem.attempts||0)+1, 5000, 'chat_locked');
+    return false;
+  }
+  
   try {
+    const sendPlannedAt = replyItem.sendAt || Date.now();
+    
     stepLog.appendJSONL(perfil, 'virtus_sender', {
       attempt: attemptId,
       step: 'send_begin',
       replyId,
-      chatId
+      chatId,
+      sendPlannedAt
     });
     
     // Verifica se já foi enviado (barreiras 1 e 2)
@@ -254,71 +239,117 @@ async function processScheduledReply(browser, perfil, replyItem, { claimedFile }
       return true;
     }
     
-    // Garante página
-    const page = await ensurePage(browser, perfil);
-    if (!page) {
+    // Adquire página IO do pool
+    const io = await virtusPagePool.acquireIoPage(browser, perfil);
+    if (!io || !io.page) {
       throw new Error('no_page');
     }
     
-    return await withVirtusUiLock(perfil, 'sender_send', chatId, async () => {
-      // Abre chat
-      const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
-      if (!opened) {
-        throw new Error('open_failed');
-      }
-      
-      // Verifica histSig atual do chat (stale reply check)
-      const currentHistory = await virtusMessenger.scrapeHistory(page);
-      const currentHistSig = virtusIds.historySig(currentHistory);
-      
-      if (currentHistSig !== histSig) {
-        // HistSig mudou → resposta está stale → move para canceled
+    const page = io.page;
+    const lockKey = `page:${page._virtusLockKey}`;
+    const sendUiBeginAt = Date.now();
+    const sendJitterMs = sendUiBeginAt - sendPlannedAt;
+    
+    if (sendJitterMs > 2000) {
+      stepLog.appendJSONL(perfil, 'virtus_sender', {
+        step: 'SLA_VIOLATION_send_jitter',
+        replyId,
+        chatId,
+        sendJitterMs,
+        sendPlannedAt,
+        sendUiBeginAt
+      });
+    }
+    
+    try {
+      return await withVirtusUiLock(perfil, 'sender_send', chatId, lockKey, async () => {
+        // Abre chat
+        const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
+        if (!opened) {
+          throw new Error('open_failed');
+        }
+        
+        // CONFIRMAÇÃO FINAL (não confia em DOM pronto)
+        const onChat = await virtusMessenger.assertOnChat(page, chatId, { timeoutMs: 0 });
+        if (!onChat) {
+          throw new Error('open_failed_not_on_chat');
+        }
+        
+        // Verifica histSig atual do chat (stale reply check)
+        const currentHistory = await virtusMessenger.scrapeHistory(page);
+        const currentHistSig = virtusIds.historySig(currentHistory);
+        
+        if (currentHistSig !== histSig) {
+          // HistSig mudou → resposta está stale → move para canceled
+          stepLog.appendJSONL(perfil, 'virtus_sender', {
+            attempt: attemptId,
+            step: 'send_canceled_stale',
+            replyId,
+            chatId,
+            oldHistSig: histSig,
+            newHistSig: currentHistSig
+          });
+          
+          await moveToCanceled(perfil, replyItem, 'histSig_changed', claimedFile);
+          return true; // finalizado (canceled)
+        }
+        
+        // Barreira 3: verifica último outgoing no chat
+        const lastOutgoing = await virtusMessenger.readLastOutgoingText(page);
+        if (lastOutgoing && lastOutgoing.trim() === replyText.trim()) {
+          // Último envio já é igual ao texto → já foi enviado
+          stepLog.appendJSONL(perfil, 'virtus_sender', {
+            attempt: attemptId,
+            step: 'send_skip_last_outgoing_match',
+            replyId,
+            chatId
+          });
+          
+          await moveToSent(perfil, replyItem, claimedFile);
+          return true;
+        }
+        
+        // Envia mensagem
+        const sent = await virtusMessenger.sendText(page, chatId, replyText);
+        if (!sent) {
+          throw new Error('send_ack_failed');
+        }
+        
+        const sendSentAt = Date.now();
+        const collectedAt = Number(replyItem.collectedAt || replyItem.firstSeenAt || 0);
+        const respDelayMs = collectedAt > 0 ? (sendSentAt - collectedAt) : 0;
+        
+        if (respDelayMs > 0 && (respDelayMs < 30000 || respDelayMs > 92000)) {
+          stepLog.appendJSONL(perfil, 'virtus_sender', {
+            step: 'SLA_VIOLATION_resp_delay',
+            replyId,
+            chatId,
+            respDelayMs,
+            collectedAt,
+            sendSentAt
+          });
+        }
+        
+        // Move para sent e registra no ledger
+        await moveToSent(perfil, replyItem, claimedFile);
+        
         stepLog.appendJSONL(perfil, 'virtus_sender', {
           attempt: attemptId,
-          step: 'send_canceled_stale',
+          step: 'send_success',
           replyId,
           chatId,
-          oldHistSig: histSig,
-          newHistSig: currentHistSig
+          sendPlannedAt,
+          sendUiBeginAt,
+          sendSentAt,
+          sendJitterMs,
+          respDelayMs
         });
         
-        await moveToCanceled(perfil, replyItem, 'histSig_changed', claimedFile);
-        return true; // finalizado (canceled)
-      }
-      
-      // Barreira 3: verifica último outgoing no chat
-      const lastOutgoing = await virtusMessenger.readLastOutgoingText(page);
-      if (lastOutgoing && lastOutgoing.trim() === replyText.trim()) {
-        // Último envio já é igual ao texto → já foi enviado
-        stepLog.appendJSONL(perfil, 'virtus_sender', {
-          attempt: attemptId,
-          step: 'send_skip_last_outgoing_match',
-          replyId,
-          chatId
-        });
-        
-        await moveToSent(perfil, replyItem, claimedFile);
         return true;
-      }
-      
-      // Envia mensagem
-      const sent = await virtusMessenger.sendText(page, chatId, replyText);
-      if (!sent) {
-        throw new Error('send_ack_failed');
-      }
-      
-      // Move para sent e registra no ledger
-      await moveToSent(perfil, replyItem, claimedFile);
-      
-      stepLog.appendJSONL(perfil, 'virtus_sender', {
-        attempt: attemptId,
-        step: 'send_success',
-        replyId,
-        chatId
       });
-      
-      return true;
-    });
+    } finally {
+      try { io.release(); } catch {}
+    }
   } catch (err) {
     stepLog.appendJSONL(perfil, 'virtus_sender', {
       attempt: attemptId,
@@ -338,6 +369,8 @@ async function processScheduledReply(browser, perfil, replyItem, { claimedFile }
     }
     
     return false;
+  } finally {
+    virtusChatLock.release(perfil, chatId);
   }
 }
 
@@ -494,13 +527,13 @@ async function processScheduledReplies(browser, perfil) {
     return 0;
   }
   
-  // PATCH #6: Ordenação determinística por sendAt
+  // PATCH #6: Ordenação determinística por sendAt - FILTRA APENAS DUE
   const items = [];
   const now = Date.now();
   for (const file of files) {
     try {
       const replyItem = await virtusDiskQueue.readJsonSafe(file, null);
-      if (replyItem && replyItem.id && replyItem.sendAt) {
+      if (replyItem && replyItem.id && replyItem.sendAt && replyItem.sendAt <= now) {
         items.push({ file, replyItem });
       }
     } catch {}
@@ -509,13 +542,9 @@ async function processScheduledReplies(browser, perfil) {
   // Ordena por sendAt asc (FIFO real)
   items.sort((a, b) => (a.replyItem.sendAt || 0) - (b.replyItem.sendAt || 0));
   
-  let processed = 0;
-  
-  for (const { file, replyItem } of items) {
+  // Processa todos em paralelo
+  await Promise.allSettled(items.map(async ({ file, replyItem }) => {
     try {
-      // Se não está due ainda, skip
-      if (replyItem.sendAt > now) continue;
-      
       // Claim via rename para processing
       const processingDir = virtusV2Paths.repliesProcessingDir(perfil);
       await virtusDiskQueue.ensureDir(processingDir);
@@ -526,13 +555,12 @@ async function processScheduledReplies(browser, perfil) {
       
       // Processa envio
       await processScheduledReply(browser, perfil, claimedItem, { claimedFile });
-      processed++;
     } catch (err) {
       logger.warn(`[virtusSender][${perfil}] Erro ao processar scheduled reply`, { file, err: String(err) });
     }
-  }
+  }));
   
-  return processed;
+  return items.length;
 }
 
 /**
@@ -623,7 +651,7 @@ function startVirtusSender(browser, perfil, options = {}) {
         logger.warn(`[virtusSender][${perfil}] Erro no scheduled loop`, { err: String(err) });
       }
       
-      await new Promise((r) => setTimeout(r, 3000)); // processa a cada 3s
+      await new Promise((r) => setTimeout(r, 250)); // processa a cada 250ms (SLA <2s)
     }
   }
   

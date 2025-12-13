@@ -25,6 +25,8 @@ const browserHelper = require('./browser.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
 const { withVirtusUiLock } = require('./virtusUiLock.js');
+const virtusPagePool = require('./virtusPagePool.js');
+const virtusChatLock = require('./virtusChatLock.js');
 
 // Constantes
 const AI_COLLECT_WINDOW_MS = parseInt(process.env.VIRTUS_AI_COLLECT_MS || '45000', 10); // 45s
@@ -126,14 +128,14 @@ async function updateCollectDue(perfil, chatId, { firstSeenAt, dueAt, source = '
   
   const now = Date.now();
   const prevStage = existing?.stage || 'pending';
-  const prevPreview = existing?.previewSig || null;
-  const nextPreview = previewSig || prevPreview;
-  const previewChanged = !!(nextPreview && prevPreview && nextPreview !== prevPreview);
-
-  // Se já está "collected" e preview não mudou, NÃO re-agendar (mata loop de recoleta)
-  if (!previewChanged && prevStage === 'collected' && !stage) {
-    return existing;
-  }
+  const prevPreview = (existing && typeof existing.previewSig === 'string') ? existing.previewSig : null;
+  const nextPreview = (typeof previewSig === 'string' && previewSig) ? previewSig : prevPreview;
+  
+  // MILITAR: null -> "abc" CONTA COMO MUDANÇA (senão você perde chat)
+  const previewChanged = (typeof previewSig === 'string' && previewSig && previewSig !== prevPreview);
+  
+  // NUNCA faça early-return aqui. "collected" NÃO é terminal se o chat reapareceu como unread.
+  // O dedup real é por histSig/eventId, não por preview.
 
   const newFirstSeenAt = previewChanged ? (firstSeenAt || now) : (firstSeenAt || existing?.firstSeenAt || now);
   
@@ -189,6 +191,8 @@ async function updateCollectDue(perfil, chatId, { firstSeenAt, dueAt, source = '
  */
 async function detectChatsPoll(page, perfil) {
   try {
+    const batchId = stepLog.attemptId();
+    
     const chats = await withVirtusUiLock(perfil, 'collector_detect', null, async () => {
       // DETECT é low-priority: nunca segure UI lock por 25s.
       await virtusMessenger.ensureMarketplace(page, { timeoutMs: 3500 }).catch(() => {});
@@ -206,7 +210,8 @@ async function detectChatsPoll(page, perfil) {
         firstSeenAt: now - idadeMs,
         dueAt: now + Math.max(0, AI_COLLECT_WINDOW_MS - idadeMs),
         previewSig: chat.previewSig || null,
-        source: 'poll'
+        source: 'poll',
+        batchId
       }).catch(() => {});
     }
     
@@ -246,6 +251,7 @@ async function processObserverEvents(perfil) {
     
     // Remove todos de uma vez para evitar race
     const eventos = eventQueue.splice(0, eventQueue.length);
+    const batchId = stepLog.attemptId();
     let processed = 0;
     
     for (const evt of eventos) {
@@ -258,7 +264,8 @@ async function processObserverEvents(perfil) {
           firstSeenAt: evt.ts || now,
           dueAt: now + AI_COLLECT_WINDOW_MS,
           source: 'observer',
-          previewSig: evt.previewSig || null
+          previewSig: evt.previewSig || null,
+          batchId
         });
         
         processed++;
@@ -277,16 +284,25 @@ async function processObserverEvents(perfil) {
 async function collectChatHistory(page, perfil, chatId) {
   const attemptId = stepLog.attemptId();
   
-  return await withVirtusUiLock(perfil, 'collector_collect', chatId, async () => {
+  if (!virtusChatLock.acquire(perfil, chatId, 'collector')) {
+    stepLog.appendJSONL(perfil, 'virtus_collector', { step:'collect_skip_chat_locked', chatId });
+    return { ok:false, retry:true, reason:'chat_locked' };
+  }
+  
+  const lockKey = `page:${page._virtusLockKey}`;
+  return await withVirtusUiLock(perfil, 'collector_collect', chatId, lockKey, async () => {
     try {
+      const collectOpenBeginAt = Date.now();
       stepLog.appendJSONL(perfil, 'virtus_collector', {
         attempt: attemptId,
         step: 'collect_begin',
-        chatId
+        chatId,
+        collectOpenBeginAt
       });
       
       // Abre chat
       const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
+      const collectOpenOkAt = Date.now();
       if (!opened) {
         stepLog.appendJSONL(perfil, 'virtus_collector', {
           attempt: attemptId,
@@ -309,6 +325,7 @@ async function collectChatHistory(page, perfil, chatId) {
       
       // Coleta histórico
       const history = await virtusMessenger.scrapeHistory(page);
+      const collectScrapeOkAt = Date.now();
       if (!Array.isArray(history) || history.length === 0) {
         stepLog.appendJSONL(perfil, 'virtus_collector', {
           attempt: attemptId,
@@ -375,6 +392,7 @@ async function collectChatHistory(page, perfil, chatId) {
       
       // Grava atomicamente
       await virtusDiskQueue.writeJsonAtomic(collectedFile, record);
+      const collectWrittenAt = Date.now();
       
       stepLog.appendJSONL(perfil, 'virtus_collector', {
         attempt: attemptId,
@@ -382,7 +400,11 @@ async function collectChatHistory(page, perfil, chatId) {
         chatId,
         eventId: eventId_val,
         histSig,
-        historyLen: history.length
+        historyLen: history.length,
+        collectOpenBeginAt,
+        collectOpenOkAt,
+        collectScrapeOkAt,
+        collectWrittenAt
       });
       
       return { ok: true, retry: false, reason: 'collected', histSig, eventId: eventId_val };
@@ -395,6 +417,8 @@ async function collectChatHistory(page, perfil, chatId) {
       });
       logger.error(`[virtusCollector][${perfil}] Erro ao coletar chat ${chatId}`, { err });
       return { ok: false, retry: true, reason: 'exception', error: String(err) };
+    } finally {
+      virtusChatLock.release(perfil, chatId);
     }
   });
 }
@@ -402,6 +426,10 @@ async function collectChatHistory(page, perfil, chatId) {
 /**
  * Processa collect_due files que estão prontos (dueAt <= now)
  */
+const DUE_BUCKET_MS = 2000;
+
+function dueBucket(ts) { return Math.floor(Number(ts||0) / DUE_BUCKET_MS); }
+
 async function processDueCollects(browser, perfil) {
   const dir = virtusV2Paths.collectDueDir(perfil);
   
@@ -412,85 +440,122 @@ async function processDueCollects(browser, perfil) {
     return 0;
   }
   
-  // PATCH #6: Ordenação determinística por dueAt e firstSeenAt
-  const records = [];
+  if (!files.length) return 0;
+  
+  const now = Date.now();
+  const rows = [];
+  
   for (const file of files) {
     try {
-      const record = await virtusDiskQueue.readJsonSafe(file, null);
-      if (record && record.chatId) {
-        records.push({ file, record });
-      }
+      const rec = await virtusDiskQueue.readJsonSafe(file, null);
+      if (!rec || !rec.chatId) continue;
+      
+      const st = rec.stage || 'pending';
+      if (st === 'collected' || st === 'dead') continue;
+      
+      if (rec.dueAt && rec.dueAt > now) continue;
+      
+      rows.push(rec);
     } catch {}
   }
   
-  // Ordena por dueAt asc, depois firstSeenAt asc (FIFO real)
-  records.sort((a, b) => {
-    const dueCmp = (a.record.dueAt || 0) - (b.record.dueAt || 0);
-    if (dueCmp !== 0) return dueCmp;
-    return (a.record.firstSeenAt || 0) - (b.record.firstSeenAt || 0);
-  });
+  rows.sort((a,b) => (a.dueAt||0)-(b.dueAt||0) || (a.firstSeenAt||0)-(b.firstSeenAt||0));
   
-  const now = Date.now();
+  // agrupa
+  const groups = new Map();
+  for (const r of rows) {
+    const key = `${r.batchId || 'noBatch'}__${dueBucket(r.dueAt)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  
   let processed = 0;
   
-  for (const { file, record } of records) {
-    try {
-      if ((record.stage || 'pending') === 'collected') continue;
-      if (record.dueAt && record.dueAt > now) continue;
+  for (const [gk, grp] of groups.entries()) {
+    const batchStartAt = Date.now();
+    
+    stepLog.appendJSONL(perfil, 'virtus_collector', {
+      step: 'collect_batch_begin',
+      batchKey: gk,
+      n: grp.length,
+      chatIds: grp.map(x => x.chatId)
+    });
+    
+    await Promise.allSettled(grp.map(async (r) => {
+      const io = await virtusPagePool.acquireIoPage(browser, perfil);
+      if (!io || !io.page) return;
       
-      // Instrumentação: loga antes de coletar
-      stepLog.appendJSONL(perfil, 'virtus_collector', {
-        step: 'collect_due_due',
-        chatId: record.chatId,
-        firstSeenAt: record.firstSeenAt,
-        dueAt: record.dueAt
-      });
-      
-      // Garante página
-      const page = await ensurePage(browser, perfil);
-      if (!page) continue;
-      
-      // Coleta histórico
-      const res = await collectChatHistory(page, perfil, record.chatId);
-
-      if (res && res.ok === true && res.retry === false) {
-        await updateCollectDue(perfil, record.chatId, {
-          stage: 'collected',
-          source: 'collect',
-          previewSig: record.previewSig || null,
-          lastCollected: {
-            at: Date.now(),
-            histSig: res.histSig || null,
-            eventId: res.eventId || null,
-            reason: res.reason || 'ok'
+      try {
+        // IMPORTANTÍSSIMO: se res.histSig === r.lastCollected?.histSig -> SKIP e marque collected sem recriar evento
+        const res = await collectChatHistory(io.page, perfil, r.chatId);
+        
+        if (res && res.ok === true && res.retry === false) {
+          // Se histSig igual ao último coletado, não recriar evento mas marcar como collected
+          if (res.histSig === r.lastCollected?.histSig) {
+            await updateCollectDue(perfil, r.chatId, {
+              stage: 'collected',
+              source: 'collect',
+              previewSig: r.previewSig || null,
+              lastCollected: r.lastCollected
+            }).catch(() => {});
+          } else {
+            await updateCollectDue(perfil, r.chatId, {
+              stage: 'collected',
+              source: 'collect',
+              previewSig: r.previewSig || null,
+              lastCollected: {
+                at: Date.now(),
+                histSig: res.histSig || null,
+                eventId: res.eventId || null,
+                reason: res.reason || 'ok'
+              }
+            }).catch(() => {});
           }
-        }).catch(() => {});
-      } else {
-        const nextAttempts = Number(record.attempts || 0) + 1;
-        const backoff = Math.min(300000, 5000 * Math.pow(2, Math.max(0, nextAttempts - 1)));
-        const willDead = nextAttempts >= COLLECT_MAX_ATTEMPTS;
-        await updateCollectDue(perfil, record.chatId, {
-          firstSeenAt: record.firstSeenAt || now,
-          dueAt: willDead ? (now + 60*60*1000) : (now + backoff),
-          source: 'collect_retry',
-          previewSig: record.previewSig || null,
-          stage: willDead ? 'dead' : 'pending',
-          attempts: nextAttempts,
-          lastError: (res && res.reason) ? String(res.reason) : 'collect_failed'
-        }).catch(() => {});
-        stepLog.appendJSONL(perfil, 'virtus_collector', {
-          step: willDead ? 'collect_due_deadletter' : 'collect_due_retry_scheduled',
-          chatId: record.chatId,
-          attempts: nextAttempts,
-          backoffMs: willDead ? (60*60*1000) : backoff,
-          reason: (res && res.reason) ? String(res.reason) : 'collect_failed'
-        });
+        } else {
+          const nextAttempts = Number(r.attempts || 0) + 1;
+          const backoff = Math.min(300000, 5000 * Math.pow(2, Math.max(0, nextAttempts - 1)));
+          const willDead = nextAttempts >= COLLECT_MAX_ATTEMPTS;
+          await updateCollectDue(perfil, r.chatId, {
+            firstSeenAt: r.firstSeenAt || now,
+            dueAt: willDead ? (now + 60*60*1000) : (now + backoff),
+            source: 'collect_retry',
+            previewSig: r.previewSig || null,
+            stage: willDead ? 'dead' : 'pending',
+            attempts: nextAttempts,
+            lastError: (res && res.reason) ? String(res.reason) : 'collect_failed'
+          }).catch(() => {});
+          stepLog.appendJSONL(perfil, 'virtus_collector', {
+            step: willDead ? 'collect_due_deadletter' : 'collect_due_retry_scheduled',
+            chatId: r.chatId,
+            attempts: nextAttempts,
+            backoffMs: willDead ? (60*60*1000) : backoff,
+            reason: (res && res.reason) ? String(res.reason) : 'collect_failed'
+          });
+        }
+      } finally {
+        try { io.release(); } catch {}
       }
-      
-      processed++;
-    } catch (err) {
-      logger.warn(`[virtusCollector][${perfil}] Erro ao processar collect_due`, { file, err: String(err) });
+    }));
+    
+    const batchEndAt = Date.now();
+    const batchSpreadMs = batchEndAt - batchStartAt;
+    
+    stepLog.appendJSONL(perfil, 'virtus_collector', {
+      step: 'collect_batch_end',
+      batchKey: gk,
+      ms: batchSpreadMs
+    });
+    
+    if (batchSpreadMs > 4000) {
+      stepLog.appendJSONL(perfil, 'virtus_collector', {
+        step: 'SLA_VIOLATION_collect_batch_spread',
+        batchKey: gk,
+        spreadMs: batchSpreadMs,
+        n: grp.length
+      });
     }
+    
+    processed += grp.length;
   }
   
   return processed;
@@ -557,7 +622,7 @@ function startVirtusCollector(browser, perfil, options = {}) {
   
   // Setup observer events (instala uma vez)
   let observerInstalled = false;
-  ensurePage(browser, perfil).then(async (page) => {
+  virtusPagePool.getListPage(browser, perfil).then(async (page) => {
     if (page && !observerInstalled) {
       await setupObserverEvents(perfil, page);
       observerInstalled = true;
@@ -574,7 +639,7 @@ function startVirtusCollector(browser, perfil, options = {}) {
           continue;
         }
         
-        const page = await ensurePage(browser, perfil);
+        const page = await virtusPagePool.getListPage(browser, perfil);
         if (!page) {
           await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
           continue;
