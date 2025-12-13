@@ -47,6 +47,37 @@ async function listPerfisWithCollected() {
 }
 
 /**
+ * Verifica se reply existe em qualquer diretório (dedup global)
+ */
+async function replyExistsAnywhere(perfil, replyId) {
+  const dirs = [
+    virtusV2Paths.repliesInboxDir(perfil),
+    virtusV2Paths.repliesScheduledDir(perfil),
+    virtusV2Paths.repliesProcessingDir(perfil),
+    virtusV2Paths.repliesSentDir(perfil),
+    virtusV2Paths.repliesCanceledDir(perfil),
+    virtusV2Paths.repliesDeadDir(perfil),
+  ];
+
+  for (const dir of dirs) {
+    await virtusDiskQueue.ensureDir(dir);
+    // existe como arquivo "normal"?
+    try {
+      await fs.access(path.join(dir, `${replyId}.json`));
+      return true;
+    } catch {}
+  }
+
+  // processing pode estar como *.json.claim-*
+  try {
+    const processingFiles = await virtusDiskQueue.listJsonFiles(virtusV2Paths.repliesProcessingDir(perfil));
+    if (processingFiles.some(f => path.basename(f).startsWith(`${replyId}.json`))) return true;
+  } catch {}
+
+  return false;
+}
+
+/**
  * Processa um item collected/inbox
  */
 async function processCollectedItem(perfil, collectedFile) {
@@ -103,7 +134,7 @@ async function processCollectedItem(perfil, collectedFile) {
       });
       
       // Move para done mesmo sem resposta (coleta válida, só não gerou reply)
-      await moveCollectedToDone(perfil, collectedItem);
+      await moveCollectedToDone(perfil, collectedItem, collectedFile);
       return true;
     }
     
@@ -118,29 +149,21 @@ async function processCollectedItem(perfil, collectedFile) {
         reason: 'answer_too_short'
       });
       
-      await moveCollectedToDone(perfil, collectedItem);
+      await moveCollectedToDone(perfil, collectedItem, collectedFile);
       return true;
     }
     
-    // Verifica se reply já existe (deduplicação)
-    const repliesInboxDir = virtusV2Paths.repliesInboxDir(perfil);
-    await virtusDiskQueue.ensureDir(repliesInboxDir);
-    const replyFile = path.join(repliesInboxDir, `${replyId}.json`);
-    
-    try {
-      await fs.access(replyFile);
-      // Reply já existe - skip (idempotência)
+    // Verifica se reply já existe em qualquer lugar (dedup global)
+    if (await replyExistsAnywhere(perfil, replyId)) {
       stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
         attempt: attemptId,
-        step: 'llm_skip_duplicate',
+        step: 'llm_skip_duplicate_anywhere',
         replyId,
         chatId
       });
       
-      await moveCollectedToDone(perfil, collectedItem);
+      await moveCollectedToDone(perfil, collectedItem, collectedFile);
       return true;
-    } catch {
-      // Reply não existe - prossegue
     }
     
     // Cria reply item
@@ -184,7 +207,7 @@ async function processCollectedItem(perfil, collectedFile) {
     });
     
     // Move collected para done
-    await moveCollectedToDone(perfil, collectedItem);
+    await moveCollectedToDone(perfil, collectedItem, collectedFile);
     
     return true;
   } catch (err) {
@@ -204,10 +227,10 @@ async function processCollectedItem(perfil, collectedFile) {
       
       if (attempts >= MAX_ATTEMPTS) {
         // Manda para dead após N tentativas
-        await moveCollectedToDead(perfil, collectedItem, `max_attempts_exceeded: ${attempts}`, String(err));
+        await moveCollectedToDead(perfil, collectedItem, collectedFile, `max_attempts_exceeded: ${attempts}`, String(err));
       } else {
         // Volta para inbox para retry
-        await requeueCollectedItem(perfil, collectedItem, attempts, String(err));
+        await requeueCollectedItem(perfil, collectedItem, collectedFile, attempts, String(err));
       }
     } catch {
       // Falha ao ler/requeue, continua
@@ -220,41 +243,22 @@ async function processCollectedItem(perfil, collectedFile) {
 /**
  * Move collected item para done
  */
-async function moveCollectedToDone(perfil, collectedItem) {
+async function moveCollectedToDone(perfil, collectedItem, processingFile) {
   const collectedId = collectedItem.id;
-  const processingDir = virtusV2Paths.collectedProcessingDir(perfil);
   const doneDir = virtusV2Paths.collectedDoneDir(perfil);
   
   await virtusDiskQueue.ensureDir(doneDir);
   
-  // Procura arquivo em processing (pode ter sufixo de claim)
-  let processingFile = null;
-  try {
-    const processingFiles = await virtusDiskQueue.listJsonFiles(processingDir);
-    for (const pf of processingFiles) {
-      if (path.basename(pf).startsWith(`${collectedId}.json`)) {
-        processingFile = pf;
-        break;
-      }
-    }
-  } catch {}
-  
-  if (!processingFile) {
-    // Se não está em processing, não pode mover (já foi processado ou não existe)
-    return;
-  }
-  
   const doneFile = path.join(doneDir, `${collectedId}.json`);
   
   try {
-    await virtusDiskQueue.moveFile(processingFile, doneFile);
-    
     const doneItem = {
       ...collectedItem,
       doneAt: Date.now(),
       status: 'done'
     };
     await virtusDiskQueue.writeJsonAtomic(doneFile, doneItem);
+    if (processingFile) await fs.unlink(processingFile).catch(() => {});
   } catch (err) {
     logger.warn(`[virtusLLMWorker] Erro ao mover para done`, { collectedId, err: String(err) });
   }
@@ -263,31 +267,15 @@ async function moveCollectedToDone(perfil, collectedItem) {
 /**
  * Move collected item para dead
  */
-async function moveCollectedToDead(perfil, collectedItem, reason, error) {
+async function moveCollectedToDead(perfil, collectedItem, processingFile, reason, error) {
   const collectedId = collectedItem.id;
-  const processingDir = virtusV2Paths.collectedProcessingDir(perfil);
   const deadDir = virtusV2Paths.collectedDeadDir(perfil);
   
   await virtusDiskQueue.ensureDir(deadDir);
   
-  let processingFile = null;
-  try {
-    const processingFiles = await virtusDiskQueue.listJsonFiles(processingDir);
-    for (const pf of processingFiles) {
-      if (path.basename(pf).startsWith(`${collectedId}.json`)) {
-        processingFile = pf;
-        break;
-      }
-    }
-  } catch {}
-  
-  if (!processingFile) return;
-  
   const deadFile = path.join(deadDir, `${collectedId}.json`);
   
   try {
-    await virtusDiskQueue.moveFile(processingFile, deadFile);
-    
     const deadItem = {
       ...collectedItem,
       deadAt: Date.now(),
@@ -296,6 +284,7 @@ async function moveCollectedToDead(perfil, collectedItem, reason, error) {
       status: 'dead'
     };
     await virtusDiskQueue.writeJsonAtomic(deadFile, deadItem);
+    if (processingFile) await fs.unlink(processingFile).catch(() => {});
   } catch (err) {
     logger.warn(`[virtusLLMWorker] Erro ao mover para dead`, { collectedId, err: String(err) });
   }
@@ -304,33 +293,17 @@ async function moveCollectedToDead(perfil, collectedItem, reason, error) {
 /**
  * Requeue collected item (volta para inbox para retry)
  */
-async function requeueCollectedItem(perfil, collectedItem, attempts, error) {
+async function requeueCollectedItem(perfil, collectedItem, processingFile, attempts, error) {
   const collectedId = collectedItem.id;
-  const processingDir = virtusV2Paths.collectedProcessingDir(perfil);
   const inboxDir = virtusV2Paths.collectedInboxDir(perfil);
   
   await virtusDiskQueue.ensureDir(inboxDir);
-  
-  let processingFile = null;
-  try {
-    const processingFiles = await virtusDiskQueue.listJsonFiles(processingDir);
-    for (const pf of processingFiles) {
-      if (path.basename(pf).startsWith(`${collectedId}.json`)) {
-        processingFile = pf;
-        break;
-      }
-    }
-  } catch {}
-  
-  if (!processingFile) return;
   
   // Remove sufixo de claim para voltar ao nome original
   const baseName = virtusDiskQueue.stripClaimSuffix(path.basename(processingFile));
   const inboxFile = path.join(inboxDir, baseName);
   
   try {
-    await virtusDiskQueue.moveFile(processingFile, inboxFile);
-    
     const requeuedItem = {
       ...collectedItem,
       attempts,
@@ -338,6 +311,7 @@ async function requeueCollectedItem(perfil, collectedItem, attempts, error) {
       lastErrorAt: Date.now()
     };
     await virtusDiskQueue.writeJsonAtomic(inboxFile, requeuedItem);
+    if (processingFile) await fs.unlink(processingFile).catch(() => {});
   } catch (err) {
     logger.warn(`[virtusLLMWorker] Erro ao requeue item`, { collectedId, err: String(err) });
   }
@@ -358,8 +332,25 @@ async function processPerfilInbox(perfil) {
   
   if (files.length === 0) return 0;
   
+  // PATCH #6: Ordenação determinística por collectedAt (ou mtime)
+  const items = [];
+  for (const file of files) {
+    try {
+      const item = await virtusDiskQueue.readJsonSafe(file, null);
+      if (item && item.id) {
+        const stats = await fs.stat(file).catch(() => ({ mtimeMs: 0 }));
+        items.push({ file, item, collectedAt: item.collectedAt || stats.mtimeMs });
+      }
+    } catch {}
+  }
+  
+  // Ordena por collectedAt asc (FIFO real)
+  items.sort((a, b) => a.collectedAt - b.collectedAt);
+  
+  if (items.length === 0) return 0;
+  
   // Processa primeiro item (claim por rename)
-  const firstFile = files[0];
+  const firstFile = items[0].file;
   
   // Claim via rename para processing
   const processingDir = virtusV2Paths.collectedProcessingDir(perfil);

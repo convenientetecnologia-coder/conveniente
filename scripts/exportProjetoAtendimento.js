@@ -14,19 +14,45 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const OUT_FILE = path.join(ROOT, "projeto atendimento.txt");
 
-// Arquivos específicos do atendimento
+// Arquivos específicos do atendimento - Virtus V2 + Core
 const ATENDIMENTO_FILES = [
+  // Core - Inicialização e orquestração
   "index.js",
-  "scripts/api_perfis.js",
-  "scripts/browser.js",
-  "scripts/chatLock.js",
-  "scripts/inteligenciaArtificial.js",
-  "scripts/logger.js",
-  "scripts/manifestStore.js",
-  "scripts/promptFretes.js",
-  "scripts/stepLog.js",
-  "scripts/virtus.js",
   "scripts/worker.js",
+  
+  // Virtus V2 - Arquitetura em estágios separados
+  "scripts/virtusCollector.js",      // Estágio 1: Coleta de mensagens do DOM
+  "scripts/virtusMessenger.js",       // Interface com Messenger (abrir chats, navegação)
+  "scripts/virtusLLMWorker.js",       // Estágio 2: Processamento LLM (processo separado)
+  "scripts/virtusSender.js",          // Estágio 3: Envio de respostas
+  "scripts/virtusDiskQueue.js",       // Fila em disco (persistência)
+  "scripts/virtusV2Paths.js",         // Caminhos do sistema V2
+  "scripts/virtusIds.js",             // Utilitários de IDs/hashes
+  
+  // Virtus Legacy (para referência/comparação)
+  "scripts/virtus_legacy.js",
+  
+  // Browser e controle de navegação
+  "scripts/browser.js",
+  
+  // Inteligência Artificial e prompts
+  "scripts/inteligenciaArtificial.js",
+  "scripts/promptFretes.js",
+  
+  // Concorrência e locks
+  "scripts/chatLock.js",
+  
+  // Logging e observabilidade
+  "scripts/logger.js",
+  "scripts/stepLog.js",
+  
+  // Infraestrutura e suporte
+  "scripts/issues.js",                // Sistema de issues
+  "scripts/utils.js",                 // Utilitários gerais
+  "scripts/api_issues.js",            // API de issues
+  "scripts/api_perfis.js",            // API de perfis
+  "scripts/manifestStore.js",         // Armazenamento de manifestos
+  "scripts/fileStore.js",             // Armazenamento de arquivos
 ];
 
 /**

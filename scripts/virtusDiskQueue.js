@@ -120,6 +120,13 @@ async function claimFile(srcFile, processingDir) {
   // Rename atômico (move para processing)
   await fsp.rename(srcFile, dst);
   
+  // CRÍTICO: em Windows, rename preserva mtime; sem isso requeueStale pode
+  // re-enfileirar imediatamente backlog antigo como "stale".
+  try {
+    const now = new Date();
+    await fsp.utimes(dst, now, now);
+  } catch {}
+  
   return dst;
 }
 
@@ -140,7 +147,7 @@ async function moveFile(src, dst) {
 }
 
 /**
- * Lista todos os arquivos JSON de um diretório
+ * Lista todos os arquivos JSON de um diretório (inclui .json.claim-*)
  */
 async function listJsonFiles(dir) {
   let list = [];
@@ -152,8 +159,11 @@ async function listJsonFiles(dir) {
     return [];
   }
   
+  // Aceita arquivos .json e .json.claim-*
+  const isJsonLike = (name) => /\.json(\.claim-[^.]+)?$/i.test(String(name || ''));
+  
   return list
-    .filter(ent => ent.isFile() && ent.name.endsWith('.json'))
+    .filter(ent => ent.isFile() && isJsonLike(ent.name))
     .map(ent => path.join(dir, ent.name));
 }
 

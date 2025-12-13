@@ -24,6 +24,7 @@ const virtusIds = require('./virtusIds.js');
 const virtusMessenger = require('./virtusMessenger.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
+const { withVirtusUiLock } = require('./virtusUiLock.js');
 
 // Constantes
 const MIN_SEND_DELAY_MS = parseInt(process.env.MESSENGER_INTERVALO_MIN_MS || '30000', 10); // 30s
@@ -142,11 +143,12 @@ async function scheduleReply(perfil, replyItem) {
   const newNextSendSlotAt = sendAt + MIN_SEND_DELAY_MS;
   await updateSendState(perfil, { nextSendSlotAt: newNextSendSlotAt });
   
-  // Adiciona sendAt ao item
+  // Adiciona sendAt ao item (copia firstSeenAt)
   const scheduledItem = {
     ...replyItem,
     sendAt,
-    scheduledAt: now
+    scheduledAt: now,
+    firstSeenAt: replyItem.firstSeenAt || replyItem.llmAt || now
   };
   
   // Move de inbox para scheduled
@@ -176,9 +178,20 @@ async function scheduleReply(perfil, replyItem) {
 }
 
 /**
+ * Helper: finaliza arquivo de reply (escreve destino e deleta claimed)
+ */
+async function finalizeReplyFile({ perfil, replyId, targetDir, item, claimedFile }) {
+  await virtusDiskQueue.ensureDir(targetDir);
+  const dest = path.join(targetDir, `${replyId}.json`);
+  await virtusDiskQueue.writeJsonAtomic(dest, item);
+  if (claimedFile) await fs.unlink(claimedFile).catch(() => {});
+  return dest;
+}
+
+/**
  * Processa item scheduled (envia se sendAt <= now)
  */
-async function processScheduledReply(browser, perfil, replyItem) {
+async function processScheduledReply(browser, perfil, replyItem, { claimedFile } = {}) {
   const replyId = replyItem.id;
   const chatId = replyItem.chatId;
   const replyText = replyItem.replyText || replyItem.text || '';
@@ -203,7 +216,7 @@ async function processScheduledReply(browser, perfil, replyItem) {
       });
       
       // Move para sent mesmo sem reenviar (já está enviado)
-      await moveToSent(perfil, replyItem);
+      await moveToSent(perfil, replyItem, claimedFile);
       return true;
     }
     
@@ -219,75 +232,77 @@ async function processScheduledReply(browser, perfil, replyItem) {
       return false;
     }
     
-    // Abre chat
-    const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
-    if (!opened) {
+    return await withVirtusUiLock(perfil, 'sender_send', chatId, async () => {
+      // Abre chat
+      const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
+      if (!opened) {
+        stepLog.appendJSONL(perfil, 'virtus_sender', {
+          attempt: attemptId,
+          step: 'send_fail_open',
+          replyId,
+          chatId
+        });
+        return false;
+      }
+      
+      // Verifica histSig atual do chat (stale reply check)
+      const currentHistory = await virtusMessenger.scrapeHistory(page);
+      const currentHistSig = virtusIds.historySig(currentHistory);
+      
+      if (currentHistSig !== histSig) {
+        // HistSig mudou → resposta está stale → move para canceled
+        stepLog.appendJSONL(perfil, 'virtus_sender', {
+          attempt: attemptId,
+          step: 'send_canceled_stale',
+          replyId,
+          chatId,
+          oldHistSig: histSig,
+          newHistSig: currentHistSig
+        });
+        
+        await moveToCanceled(perfil, replyItem, 'histSig_changed', claimedFile);
+        return false;
+      }
+      
+      // Barreira 3: verifica último outgoing no chat
+      const lastOutgoing = await virtusMessenger.readLastOutgoingText(page);
+      if (lastOutgoing && lastOutgoing.trim() === replyText.trim()) {
+        // Último envio já é igual ao texto → já foi enviado
+        stepLog.appendJSONL(perfil, 'virtus_sender', {
+          attempt: attemptId,
+          step: 'send_skip_last_outgoing_match',
+          replyId,
+          chatId
+        });
+        
+        await moveToSent(perfil, replyItem, claimedFile);
+        return true;
+      }
+      
+      // Envia mensagem
+      const sent = await virtusMessenger.sendText(page, chatId, replyText);
+      if (!sent) {
+        stepLog.appendJSONL(perfil, 'virtus_sender', {
+          attempt: attemptId,
+          step: 'send_fail_ack',
+          replyId,
+          chatId
+        });
+        return false;
+      }
+      
+      // Move para sent e registra no ledger
+      await moveToSent(perfil, replyItem, claimedFile);
+      
       stepLog.appendJSONL(perfil, 'virtus_sender', {
         attempt: attemptId,
-        step: 'send_fail_open',
+        step: 'send_success',
         replyId,
         chatId
       });
-      return false;
-    }
-    
-    // Verifica histSig atual do chat (stale reply check)
-    const currentHistory = await virtusMessenger.scrapeHistory(page);
-    const currentHistSig = virtusIds.historySig(currentHistory);
-    
-    if (currentHistSig !== histSig) {
-      // HistSig mudou → resposta está stale → move para canceled
-      stepLog.appendJSONL(perfil, 'virtus_sender', {
-        attempt: attemptId,
-        step: 'send_canceled_stale',
-        replyId,
-        chatId,
-        oldHistSig: histSig,
-        newHistSig: currentHistSig
-      });
       
-      await moveToCanceled(perfil, replyItem, 'histSig_changed');
-      return false;
-    }
-    
-    // Barreira 3: verifica último outgoing no chat
-    const lastOutgoing = await virtusMessenger.readLastOutgoingText(page);
-    if (lastOutgoing && lastOutgoing.trim() === replyText.trim()) {
-      // Último envio já é igual ao texto → já foi enviado
-      stepLog.appendJSONL(perfil, 'virtus_sender', {
-        attempt: attemptId,
-        step: 'send_skip_last_outgoing_match',
-        replyId,
-        chatId
-      });
-      
-      await moveToSent(perfil, replyItem);
       return true;
-    }
-    
-    // Envia mensagem
-    const sent = await virtusMessenger.sendText(page, chatId, replyText);
-    if (!sent) {
-      stepLog.appendJSONL(perfil, 'virtus_sender', {
-        attempt: attemptId,
-        step: 'send_fail_ack',
-        replyId,
-        chatId
-      });
-      return false;
-    }
-    
-    // Move para sent e registra no ledger
-    await moveToSent(perfil, replyItem);
-    
-    stepLog.appendJSONL(perfil, 'virtus_sender', {
-      attempt: attemptId,
-      step: 'send_success',
-      replyId,
-      chatId
     });
-    
-    return true;
   } catch (err) {
     stepLog.appendJSONL(perfil, 'virtus_sender', {
       attempt: attemptId,
@@ -302,10 +317,10 @@ async function processScheduledReply(browser, perfil, replyItem) {
     const attempts = (replyItem.attempts || 0) + 1;
     if (attempts >= MAX_ATTEMPTS) {
       // Manda para dead após N tentativas
-      await moveToDead(perfil, replyItem, `max_attempts_exceeded: ${attempts}`);
+      await moveToDead(perfil, replyItem, `max_attempts_exceeded: ${attempts}`, claimedFile);
     } else {
       // Volta para scheduled com novo sendAt (retry em 30s)
-      await requeueScheduled(perfil, replyItem, attempts);
+      await requeueClaimed(perfil, replyItem, claimedFile, attempts, 30_000);
     }
     
     return false;
@@ -315,52 +330,24 @@ async function processScheduledReply(browser, perfil, replyItem) {
 /**
  * Move item para sent e registra no ledger
  */
-async function moveToSent(perfil, replyItem) {
+async function moveToSent(perfil, replyItem, claimedFile) {
   const replyId = replyItem.id;
-  const scheduledDir = virtusV2Paths.repliesScheduledDir(perfil);
-  const processingDir = virtusV2Paths.repliesProcessingDir(perfil);
   const sentDir = virtusV2Paths.repliesSentDir(perfil);
   
-  await virtusDiskQueue.ensureDir(sentDir);
+  const sentItem = {
+    ...replyItem,
+    sentAt: Date.now(),
+    status: 'sent',
+    firstSeenAt: replyItem.firstSeenAt || replyItem.llmAt || Date.now()
+  };
   
-  const scheduledFile = path.join(scheduledDir, `${replyId}.json`);
-  const sentFile = path.join(sentDir, `${replyId}.json`);
-  
-  // Verifica se já está em processing (foi claimed)
-  let processingFile = null;
-  try {
-    const processingFiles = await virtusDiskQueue.listJsonFiles(processingDir);
-    for (const pf of processingFiles) {
-      if (path.basename(pf).startsWith(`${replyId}.json`)) {
-        processingFile = pf;
-        break;
-      }
-    }
-  } catch {}
-  
-  const sourceFile = processingFile || scheduledFile;
-  
-  // Move para sent
-  try {
-    await virtusDiskQueue.moveFile(sourceFile, sentFile);
-    
-    // Escreve item final
-    const sentItem = {
-      ...replyItem,
-      sentAt: Date.now(),
-      status: 'sent'
-    };
-    await virtusDiskQueue.writeJsonAtomic(sentFile, sentItem);
-    
-    // Remove arquivo de processing se existir
-    if (processingFile) {
-      try {
-        await fs.unlink(processingFile);
-      } catch {}
-    }
-  } catch (err) {
-    logger.warn(`[virtusSender][${perfil}] Erro ao mover para sent`, { replyId, err: String(err) });
-  }
+  await finalizeReplyFile({
+    perfil,
+    replyId,
+    targetDir: sentDir,
+    item: sentItem,
+    claimedFile
+  });
   
   // Append no ledger (idempotência)
   const ledgerFile = virtusV2Paths.sentLedgerFile(perfil);
@@ -377,98 +364,47 @@ async function moveToSent(perfil, replyItem) {
 /**
  * Move item para canceled
  */
-async function moveToCanceled(perfil, replyItem, reason) {
+async function moveToCanceled(perfil, replyItem, reason, claimedFile) {
   const replyId = replyItem.id;
-  const scheduledDir = virtusV2Paths.repliesScheduledDir(perfil);
-  const processingDir = virtusV2Paths.repliesProcessingDir(perfil);
   const canceledDir = virtusV2Paths.repliesCanceledDir(perfil);
   
-  await virtusDiskQueue.ensureDir(canceledDir);
+  const canceledItem = {
+    ...replyItem,
+    canceledAt: Date.now(),
+    canceledReason: reason,
+    status: 'canceled'
+  };
   
-  const scheduledFile = path.join(scheduledDir, `${replyId}.json`);
-  const canceledFile = path.join(canceledDir, `${replyId}.json`);
-  
-  // Verifica se está em processing
-  let processingFile = null;
-  try {
-    const processingFiles = await virtusDiskQueue.listJsonFiles(processingDir);
-    for (const pf of processingFiles) {
-      if (path.basename(pf).startsWith(`${replyId}.json`)) {
-        processingFile = pf;
-        break;
-      }
-    }
-  } catch {}
-  
-  const sourceFile = processingFile || scheduledFile;
-  
-  try {
-    await virtusDiskQueue.moveFile(sourceFile, canceledFile);
-    
-    const canceledItem = {
-      ...replyItem,
-      canceledAt: Date.now(),
-      canceledReason: reason,
-      status: 'canceled'
-    };
-    await virtusDiskQueue.writeJsonAtomic(canceledFile, canceledItem);
-    
-    if (processingFile) {
-      try {
-        await fs.unlink(processingFile);
-      } catch {}
-    }
-  } catch (err) {
-    logger.warn(`[virtusSender][${perfil}] Erro ao mover para canceled`, { replyId, err: String(err) });
-  }
+  await finalizeReplyFile({
+    perfil,
+    replyId,
+    targetDir: canceledDir,
+    item: canceledItem,
+    claimedFile
+  });
 }
 
 /**
  * Move item para dead (falha permanente)
  */
-async function moveToDead(perfil, replyItem, reason) {
+async function moveToDead(perfil, replyItem, reason, claimedFile) {
   const replyId = replyItem.id;
-  const scheduledDir = virtusV2Paths.repliesScheduledDir(perfil);
-  const processingDir = virtusV2Paths.repliesProcessingDir(perfil);
   const deadDir = virtusV2Paths.repliesDeadDir(perfil);
   
-  await virtusDiskQueue.ensureDir(deadDir);
+  const deadItem = {
+    ...replyItem,
+    deadAt: Date.now(),
+    deadReason: reason,
+    status: 'dead'
+  };
   
-  const scheduledFile = path.join(scheduledDir, `${replyId}.json`);
-  const deadFile = path.join(deadDir, `${replyId}.json`);
-  
-  let processingFile = null;
-  try {
-    const processingFiles = await virtusDiskQueue.listJsonFiles(processingDir);
-    for (const pf of processingFiles) {
-      if (path.basename(pf).startsWith(`${replyId}.json`)) {
-        processingFile = pf;
-        break;
-      }
-    }
-  } catch {}
-  
-  const sourceFile = processingFile || scheduledFile;
-  
-  try {
-    await virtusDiskQueue.moveFile(sourceFile, deadFile);
-    
-    const deadItem = {
-      ...replyItem,
-      deadAt: Date.now(),
-      deadReason: reason,
-      status: 'dead'
-    };
-    await virtusDiskQueue.writeJsonAtomic(deadFile, deadItem);
-    
-    if (processingFile) {
-      try {
-        await fs.unlink(processingFile);
-      } catch {}
-    }
-  } catch (err) {
-    logger.warn(`[virtusSender][${perfil}] Erro ao mover para dead`, { replyId, err: String(err) });
-  }
+  await finalizeReplyFile({
+    perfil,
+    replyId,
+    targetDir: deadDir,
+    item: deadItem,
+    claimedFile
+  });
 }
 
 /**
@@ -534,14 +470,25 @@ async function processScheduledReplies(browser, perfil) {
     return 0;
   }
   
+  // PATCH #6: Ordenação determinística por sendAt
+  const items = [];
   const now = Date.now();
-  let processed = 0;
-  
   for (const file of files) {
     try {
       const replyItem = await virtusDiskQueue.readJsonSafe(file, null);
-      if (!replyItem || !replyItem.id || !replyItem.sendAt) continue;
-      
+      if (replyItem && replyItem.id && replyItem.sendAt) {
+        items.push({ file, replyItem });
+      }
+    } catch {}
+  }
+  
+  // Ordena por sendAt asc (FIFO real)
+  items.sort((a, b) => (a.replyItem.sendAt || 0) - (b.replyItem.sendAt || 0));
+  
+  let processed = 0;
+  
+  for (const { file, replyItem } of items) {
+    try {
       // Se não está due ainda, skip
       if (replyItem.sendAt > now) continue;
       
@@ -550,8 +497,11 @@ async function processScheduledReplies(browser, perfil) {
       await virtusDiskQueue.ensureDir(processingDir);
       const claimedFile = await virtusDiskQueue.claimFile(file, processingDir);
       
+      // Releia o arquivo claimed (pode ter sido atualizado)
+      const claimedItem = await virtusDiskQueue.readJsonSafe(claimedFile, replyItem);
+      
       // Processa envio
-      await processScheduledReply(browser, perfil, replyItem);
+      await processScheduledReply(browser, perfil, claimedItem, { claimedFile });
       processed++;
     } catch (err) {
       logger.warn(`[virtusSender][${perfil}] Erro ao processar scheduled reply`, { file, err: String(err) });

@@ -24,6 +24,7 @@ const virtusMessenger = require('./virtusMessenger.js');
 const browserHelper = require('./browser.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
+const { withVirtusUiLock } = require('./virtusUiLock.js');
 
 // Constantes
 const AI_COLLECT_WINDOW_MS = parseInt(process.env.VIRTUS_AI_COLLECT_MS || '45000', 10); // 45s
@@ -105,6 +106,15 @@ async function updateCollectDue(perfil, chatId, { firstSeenAt, dueAt } = {}) {
   
   await virtusDiskQueue.writeJsonAtomic(file, record);
   
+  // Instrumentação: loga criação/atualização de collect_due
+  stepLog.appendJSONL(perfil, 'virtus_collector', {
+    step: existing ? 'collect_due_update' : 'collect_due_create',
+    chatId,
+    firstSeenAt: newFirstSeenAt,
+    dueAt: newDueAt,
+    source: source || 'poll'
+  });
+  
   return record;
 }
 
@@ -113,12 +123,15 @@ async function updateCollectDue(perfil, chatId, { firstSeenAt, dueAt } = {}) {
  */
 async function detectChatsPoll(page, perfil) {
   try {
-    await virtusMessenger.ensureMarketplace(page, { timeoutMs: 25000 }).catch(() => {});
-    const chats = await virtusMessenger.listRecentUnreadChats(page);
+    const chats = await withVirtusUiLock(perfil, 'collector_detect', null, async () => {
+      await virtusMessenger.ensureMarketplace(page, { timeoutMs: 25000 }).catch(() => {});
+      return await virtusMessenger.listRecentUnreadChats(page);
+    });
     
     const now = Date.now();
     for (const chat of chats) {
       if (!chat.id || chat.fromMine || !chat.recentEnough) continue;
+      if (chat.isUnread !== true) continue; // MILITAR: só agenda coleta para não-lidos
       
       // Calcula idade da mensagem
       const idadeMs = chat.idadeMs || 0;
@@ -176,7 +189,8 @@ async function processObserverEvents(perfil) {
         const now = Date.now();
         await updateCollectDue(perfil, chatId, {
           firstSeenAt: evt.ts || now,
-          dueAt: now + AI_COLLECT_WINDOW_MS
+          dueAt: now + AI_COLLECT_WINDOW_MS,
+          source: 'observer'
         });
         
         processed++;
@@ -195,37 +209,38 @@ async function processObserverEvents(perfil) {
 async function collectChatHistory(page, perfil, chatId) {
   const attemptId = stepLog.attemptId();
   
-  try {
-    stepLog.appendJSONL(perfil, 'virtus_collector', {
-      attempt: attemptId,
-      step: 'collect_begin',
-      chatId
-    });
-    
-    // Abre chat
-    const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
-    if (!opened) {
+  return await withVirtusUiLock(perfil, 'collector_collect', chatId, async () => {
+    try {
       stepLog.appendJSONL(perfil, 'virtus_collector', {
         attempt: attemptId,
-        step: 'collect_fail_open',
+        step: 'collect_begin',
         chatId
       });
-      return false;
-    }
-    
-    // Garante que conversa está pronta
-    const ready = await virtusMessenger.ensureConversationReady(page, chatId, { timeoutMs: 20000 });
-    if (!ready) {
-      stepLog.appendJSONL(perfil, 'virtus_collector', {
-        attempt: attemptId,
-        step: 'collect_fail_ready',
-        chatId
-      });
-      return false;
-    }
-    
-    // Coleta histórico
-    const history = await virtusMessenger.scrapeHistory(page);
+      
+      // Abre chat
+      const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
+      if (!opened) {
+        stepLog.appendJSONL(perfil, 'virtus_collector', {
+          attempt: attemptId,
+          step: 'collect_fail_open',
+          chatId
+        });
+        return false;
+      }
+      
+      // Garante que conversa está pronta
+      const ready = await virtusMessenger.ensureConversationReady(page, chatId, { timeoutMs: 20000 });
+      if (!ready) {
+        stepLog.appendJSONL(perfil, 'virtus_collector', {
+          attempt: attemptId,
+          step: 'collect_fail_ready',
+          chatId
+        });
+        return false;
+      }
+      
+      // Coleta histórico
+      const history = await virtusMessenger.scrapeHistory(page);
     if (!Array.isArray(history) || history.length === 0) {
       stepLog.appendJSONL(perfil, 'virtus_collector', {
         attempt: attemptId,
@@ -277,7 +292,10 @@ async function collectChatHistory(page, perfil, chatId) {
       // Arquivo não existe - prossegue
     }
     
-    // Cria record completo
+      // Lê collect_due para copiar firstSeenAt e dueAt
+      const collectDueRecord = await readCollectDue(perfil, chatId).catch(() => null);
+      
+      // Cria record completo
     const record = {
       id: eventId_val,
       perfil,
@@ -285,32 +303,35 @@ async function collectChatHistory(page, perfil, chatId) {
       histSig,
       history,
       collectedAt: Date.now(),
+      firstSeenAt: collectDueRecord?.firstSeenAt || Date.now(),
+      dueAt: collectDueRecord?.dueAt || Date.now(),
       attemptId
     };
     
     // Grava atomicamente
     await virtusDiskQueue.writeJsonAtomic(collectedFile, record);
     
-    stepLog.appendJSONL(perfil, 'virtus_collector', {
-      attempt: attemptId,
-      step: 'collect_success',
-      chatId,
-      eventId: eventId_val,
-      histSig,
-      historyLen: history.length
-    });
-    
-    return true;
-  } catch (err) {
-    stepLog.appendJSONL(perfil, 'virtus_collector', {
-      attempt: attemptId,
-      step: 'collect_error',
-      chatId,
-      error: String(err)
-    });
-    logger.error(`[virtusCollector][${perfil}] Erro ao coletar chat ${chatId}`, { err });
-    return false;
-  }
+      stepLog.appendJSONL(perfil, 'virtus_collector', {
+        attempt: attemptId,
+        step: 'collect_success',
+        chatId,
+        eventId: eventId_val,
+        histSig,
+        historyLen: history.length
+      });
+      
+      return true;
+    } catch (err) {
+      stepLog.appendJSONL(perfil, 'virtus_collector', {
+        attempt: attemptId,
+        step: 'collect_error',
+        chatId,
+        error: String(err)
+      });
+      logger.error(`[virtusCollector][${perfil}] Erro ao coletar chat ${chatId}`, { err });
+      return false;
+    }
+  });
 }
 
 /**
@@ -326,16 +347,39 @@ async function processDueCollects(browser, perfil) {
     return 0;
   }
   
-  const now = Date.now();
-  let processed = 0;
-  
+  // PATCH #6: Ordenação determinística por dueAt e firstSeenAt
+  const records = [];
   for (const file of files) {
     try {
       const record = await virtusDiskQueue.readJsonSafe(file, null);
-      if (!record || !record.chatId) continue;
-      
+      if (record && record.chatId) {
+        records.push({ file, record });
+      }
+    } catch {}
+  }
+  
+  // Ordena por dueAt asc, depois firstSeenAt asc (FIFO real)
+  records.sort((a, b) => {
+    const dueCmp = (a.record.dueAt || 0) - (b.record.dueAt || 0);
+    if (dueCmp !== 0) return dueCmp;
+    return (a.record.firstSeenAt || 0) - (b.record.firstSeenAt || 0);
+  });
+  
+  const now = Date.now();
+  let processed = 0;
+  
+  for (const { file, record } of records) {
+    try {
       // Se não está due ainda, skip
       if (record.dueAt && record.dueAt > now) continue;
+      
+      // Instrumentação: loga antes de coletar
+      stepLog.appendJSONL(perfil, 'virtus_collector', {
+        step: 'collect_due_due',
+        chatId: record.chatId,
+        firstSeenAt: record.firstSeenAt,
+        dueAt: record.dueAt
+      });
       
       // Garante página
       const page = await ensurePage(browser, perfil);
