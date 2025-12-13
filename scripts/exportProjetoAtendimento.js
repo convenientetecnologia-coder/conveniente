@@ -41,6 +41,7 @@ const ATENDIMENTO_FILES = [
   
   // Concorrência e locks
   "scripts/chatLock.js",
+  "scripts/virtusUiLock.js",
   
   // Logging e observabilidade
   "scripts/logger.js",

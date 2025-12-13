@@ -109,6 +109,16 @@ async function ensureMarketplace(page, { timeoutMs = 25000 } = {}) {
 async function listRecentUnreadChats(page) {
   try {
     const items = await page.$$eval('a[href^="/marketplace/t/"]', (els) => {
+      function _fnv1aHex(str) {
+        let h = 2166136261;
+        const s = String(str || '');
+        for (let i = 0; i < s.length; i++) {
+          h ^= s.charCodeAt(i);
+          h = (h * 16777619) >>> 0;
+        }
+        return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+      }
+      
       function _extraiId(href) {
         try {
           const s = String(href || '');
@@ -177,7 +187,30 @@ async function listRecentUnreadChats(page) {
         const ageMs = _parseMessageAgeMs(tempo);
         const recentEnough = tempo && ageMs !== Number.MAX_SAFE_INTEGER && ageMs <= 5 * 60 * 1000;
         const fromMine = isMineByPreview;
-        return { id, tempo, href, fromMine, isUnread: isUnreadLabel, recentEnough };
+
+        // previewSig: NÃO inclui tempo (pra não mudar a cada minuto)
+        let previewBase = '';
+        try {
+          const spans = Array.from((row || el).querySelectorAll('span'));
+          const texts = spans
+            .map(s => (s.innerText || s.textContent || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+            .filter(t => !/\b(agora|now)\b/i.test(t))
+            .filter(t => !/\b\d+\s*(s|min|m|seg|h|hora|hour|minute|minuto|dia|dias|d|sem|seman|week|w)\b/i.test(t))
+            .filter(t => !/mensagem n[aã]o lida/i.test(t));
+          previewBase = (texts.slice(-3).join(' ') || '').trim();
+        } catch {}
+        if (!previewBase) {
+          // fallback: usa o rowText com regex que remove tempo
+          previewBase = previewTxt
+            .replace(/\b(agora|now)\b/gi, '')
+            .replace(/\b\d+\s*(s|min|m|seg|h|hora|hour|minute|minuto|dia|dias|d|sem|seman|week|w)\b/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        }
+        const previewSig = _fnv1aHex(previewBase.toLowerCase());
+        
+        return { id, tempo, href, fromMine, isUnread: isUnreadLabel, recentEnough, ageMs, previewSig };
       }).filter((o) => o.id);
       
       // Deduplica por ID (mantém primeiro encontrado)
@@ -185,7 +218,11 @@ async function listRecentUnreadChats(page) {
       for (const it of arr) {
         if (!map.has(it.id)) map.set(it.id, it);
       }
-      return Array.from(map.values());
+      return Array.from(map.values()).map(it => ({
+        ...it,
+        idadeMs: (typeof it.ageMs === 'number' ? it.ageMs : undefined),
+        previewSig: it.previewSig || null
+      }));
     });
     
     return items;

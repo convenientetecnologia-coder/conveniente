@@ -189,6 +189,17 @@ async function requeueStale(processingDir, inboxDir, staleMs) {
   
   const now = Date.now();
   let moved = 0;
+
+  function pidAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      // EPERM: existe mas sem permissão -> trate como vivo para evitar duplicata
+      if (e && e.code === 'EPERM') return true;
+      return false;
+    }
+  }
   
   for (const ent of list) {
     if (!ent.isFile()) continue;
@@ -204,6 +215,15 @@ async function requeueStale(processingDir, inboxDir, staleMs) {
     
     // Se arquivo foi modificado recentemente, não é stale
     if ((now - st.mtimeMs) < staleMs) continue;
+
+    // NÃO requeue se o arquivo foi "claimed" por um PID que ainda está vivo.
+    const m = /\.claim-(\d+)-(\d+)$/.exec(ent.name);
+    if (m) {
+      const pid = parseInt(m[1], 10);
+      if (Number.isFinite(pid) && pid > 0 && pidAlive(pid)) {
+        continue;
+      }
+    }
     
     // Remove sufixo de claim e move de volta para inbox
     const orig = stripClaimSuffix(ent.name);

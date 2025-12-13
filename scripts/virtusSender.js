@@ -139,10 +139,6 @@ async function scheduleReply(perfil, replyItem) {
   const proposedSendAt = now + randomDelay;
   const sendAt = Math.max(proposedSendAt, sendState.nextSendSlotAt || now);
   
-  // Atualiza nextSendSlotAt (próximo envio deve ser após este + delay mínimo)
-  const newNextSendSlotAt = sendAt + MIN_SEND_DELAY_MS;
-  await updateSendState(perfil, { nextSendSlotAt: newNextSendSlotAt });
-  
   // Adiciona sendAt ao item (copia firstSeenAt)
   const scheduledItem = {
     ...replyItem,
@@ -156,11 +152,16 @@ async function scheduleReply(perfil, replyItem) {
   const scheduledFile = path.join(scheduledDir, `${replyId}.json`);
   
   try {
+    // NÃO avance sendState se o inboxFile nem existe.
     await fs.access(inboxFile);
+
+    // Move primeiro, escreve depois.
     await virtusDiskQueue.moveFile(inboxFile, scheduledFile);
-    
-    // Escreve item agendado
     await virtusDiskQueue.writeJsonAtomic(scheduledFile, scheduledItem);
+
+    // Agora sim: avance o sendState (somente após sucesso).
+    const newNextSendSlotAt = sendAt + MIN_SEND_DELAY_MS;
+    await updateSendState(perfil, { nextSendSlotAt: newNextSendSlotAt });
     
     stepLog.appendJSONL(perfil, 'virtus_sender', {
       step: 'reply_scheduled',
@@ -186,6 +187,39 @@ async function finalizeReplyFile({ perfil, replyId, targetDir, item, claimedFile
   await virtusDiskQueue.writeJsonAtomic(dest, item);
   if (claimedFile) await fs.unlink(claimedFile).catch(() => {});
   return dest;
+}
+
+/**
+ * Reagenda um reply que falhou (move de volta para scheduled)
+ */
+async function requeueClaimed(perfil, replyItem, claimedFile, attempts, delayMs = 30_000, reason = '') {
+  const replyId = replyItem.id;
+  const scheduledDir = virtusV2Paths.repliesScheduledDir(perfil);
+  await virtusDiskQueue.ensureDir(scheduledDir);
+  const scheduledFile = path.join(scheduledDir, `${replyId}.json`);
+
+  const now = Date.now();
+  const retrySendAt = now + Math.max(5000, delayMs);
+  const updatedItem = {
+    ...replyItem,
+    attempts,
+    sendAt: retrySendAt,
+    lastError: reason || replyItem.lastError || null,
+    lastErrorAt: now
+  };
+
+  await virtusDiskQueue.writeJsonAtomic(scheduledFile, updatedItem);
+  if (claimedFile) await fs.unlink(claimedFile).catch(() => {});
+
+  stepLog.appendJSONL(perfil, 'virtus_sender', {
+    step: 'send_requeued',
+    replyId,
+    chatId: replyItem.chatId,
+    attempts,
+    retrySendAt,
+    delayMs: retrySendAt - now,
+    reason: reason || null
+  });
 }
 
 /**
@@ -223,26 +257,14 @@ async function processScheduledReply(browser, perfil, replyItem, { claimedFile }
     // Garante página
     const page = await ensurePage(browser, perfil);
     if (!page) {
-      stepLog.appendJSONL(perfil, 'virtus_sender', {
-        attempt: attemptId,
-        step: 'send_fail_no_page',
-        replyId,
-        chatId
-      });
-      return false;
+      throw new Error('no_page');
     }
     
     return await withVirtusUiLock(perfil, 'sender_send', chatId, async () => {
       // Abre chat
       const opened = await virtusMessenger.openChat(page, chatId, { timeoutMs: 20000 });
       if (!opened) {
-        stepLog.appendJSONL(perfil, 'virtus_sender', {
-          attempt: attemptId,
-          step: 'send_fail_open',
-          replyId,
-          chatId
-        });
-        return false;
+        throw new Error('open_failed');
       }
       
       // Verifica histSig atual do chat (stale reply check)
@@ -261,7 +283,7 @@ async function processScheduledReply(browser, perfil, replyItem, { claimedFile }
         });
         
         await moveToCanceled(perfil, replyItem, 'histSig_changed', claimedFile);
-        return false;
+        return true; // finalizado (canceled)
       }
       
       // Barreira 3: verifica último outgoing no chat
@@ -282,13 +304,7 @@ async function processScheduledReply(browser, perfil, replyItem, { claimedFile }
       // Envia mensagem
       const sent = await virtusMessenger.sendText(page, chatId, replyText);
       if (!sent) {
-        stepLog.appendJSONL(perfil, 'virtus_sender', {
-          attempt: attemptId,
-          step: 'send_fail_ack',
-          replyId,
-          chatId
-        });
-        return false;
+        throw new Error('send_ack_failed');
       }
       
       // Move para sent e registra no ledger
@@ -313,14 +329,12 @@ async function processScheduledReply(browser, perfil, replyItem, { claimedFile }
     });
     logger.error(`[virtusSender][${perfil}] Erro ao enviar reply ${replyId}`, { err });
     
-    // Incrementa attempts
     const attempts = (replyItem.attempts || 0) + 1;
+    const reason = String((err && err.message) || err);
     if (attempts >= MAX_ATTEMPTS) {
-      // Manda para dead após N tentativas
-      await moveToDead(perfil, replyItem, `max_attempts_exceeded: ${attempts}`, claimedFile);
+      await moveToDead(perfil, replyItem, `max_attempts_exceeded: ${attempts} reason=${reason}`, claimedFile);
     } else {
-      // Volta para scheduled com novo sendAt (retry em 30s)
-      await requeueClaimed(perfil, replyItem, claimedFile, attempts, 30_000);
+      await requeueClaimed(perfil, replyItem, claimedFile, attempts, 30_000, reason);
     }
     
     return false;
@@ -441,17 +455,27 @@ async function processInboxReplies(perfil) {
     return 0;
   }
   
-  let processed = 0;
+  // FIFO real: ordenar por firstSeenAt/collectedAt/mtime
+  const items = [];
   for (const file of files) {
     try {
       const replyItem = await virtusDiskQueue.readJsonSafe(file, null);
       if (!replyItem || !replyItem.id) continue;
-      
-      await scheduleReply(perfil, replyItem);
-      processed++;
+      const st = await fs.stat(file).catch(() => ({ mtimeMs: 0 }));
+      const ts = Number(replyItem.firstSeenAt || replyItem.collectedAt || replyItem.llmAt || st.mtimeMs || 0);
+      items.push({ file, replyItem, ts });
     } catch (err) {
       logger.warn(`[virtusSender][${perfil}] Erro ao processar inbox reply`, { file, err: String(err) });
     }
+  }
+  items.sort((a, b) => a.ts - b.ts);
+
+  let processed = 0;
+  for (const it of items) {
+    try {
+      await scheduleReply(perfil, it.replyItem);
+      processed++;
+    } catch {}
   }
   
   return processed;

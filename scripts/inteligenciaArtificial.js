@@ -725,6 +725,20 @@ async function masterExtractAnswer({ perfil, chatId, mensagens, contexto, respon
       const out = await callOpenAI(messages, sysPrompt, respond, perfil, chatId);
       const result = parseResponse(out.content || '', lastClientMsg);
       
+      // Tokens reais do provider (não dependa do JSON do modelo)
+      try {
+        const u = out && out.usage ? out.usage : {};
+        const promptTokens = Number(u.prompt_tokens || 0);
+        const completionTokens = Number(u.completion_tokens || 0);
+        const totalTokens = Number(u.total_tokens || (promptTokens + completionTokens) || 0);
+        result.meta = result.meta || {};
+        result.meta.promptTokens = promptTokens;
+        result.meta.completionTokens = completionTokens;
+        if (!result.meta.tokensUsed || result.meta.tokensUsed === 0) {
+          result.meta.tokensUsed = totalTokens;
+        }
+      } catch {}
+      
       // Anti-saudação/disclaimer duplicado (aplica filtro pós-LLM) - APLICAR RIGOROSAMENTE
       result.answer = stripDuplicateGreetingAndDisclaimer(result.answer, historico);
       

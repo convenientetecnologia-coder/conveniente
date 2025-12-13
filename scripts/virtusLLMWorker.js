@@ -94,58 +94,131 @@ async function processCollectedItem(perfil, collectedFile) {
     const replyId = collectedItem.id;
     const chatId = collectedItem.chatId;
     const history = collectedItem.history || [];
+    const histSig = collectedItem.histSig || null;
+
+    const repliesInboxDir = virtusV2Paths.repliesInboxDir(perfil);
+    await virtusDiskQueue.ensureDir(repliesInboxDir);
+    const replyFile = path.join(repliesInboxDir, `${replyId}.json`);
     
     stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
       attempt: attemptId,
       step: 'llm_begin',
       replyId,
       chatId,
+      histSig,
       historyLen: history.length
     });
     
-    // Histórico já está no formato esperado por masterExtractAnswer
-    // masterExtractAnswer espera array de mensagens com { autor, texto }
-    const mensagens = history;
+    // ===== HARD DEDUPE (ANTES DE GASTAR TOKEN) =====
+    if (await replyExistsAnywhere(perfil, replyId)) {
+      stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
+        attempt: attemptId,
+        step: 'llm_skip_reply_exists_pre',
+        replyId,
+        chatId,
+        histSig
+      });
+      await moveCollectedToDone(perfil, collectedItem, collectedFile);
+      return true;
+    }
+
+    // ===== CACHE EM DISCO: se já temos resultado LLM neste item, NUNCA chamar LLM de novo =====
+    let llmCache = collectedItem.llm || null;
+    if (llmCache && llmCache.finishedAt && typeof llmCache.shouldReply === 'boolean') {
+      stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
+        attempt: attemptId,
+        step: 'llm_cache_hit',
+        replyId,
+        chatId,
+        histSig,
+        cachedShouldReply: llmCache.shouldReply,
+        cachedAt: llmCache.finishedAt
+      });
+    } else {
+      const mensagens = history;
+      const contexto = { perfil, chatId, histSig };
+
+      const startedAt = Date.now();
+      stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
+        attempt: attemptId,
+        step: 'llm_call_begin',
+        replyId,
+        chatId,
+        histSig
+      });
+
+      let result = null;
+      try {
+        result = await masterExtractAnswer({
+          perfil,
+          chatId,
+          mensagens,
+          contexto,
+          respond: true
+        });
+      } catch (e) {
+        result = {
+          extraction: {},
+          answer: 'Desculpa, tive um problema técnico aqui. Pode me enviar seu WhatsApp com DDD (apenas números), por favor?',
+          control: { shouldReply: true, askField: 'telefone', finalMessage: false },
+          meta: { confidence: 0.0, tokensUsed: 0, error: String((e && e.message) || e) }
+        };
+      }
+
+      const finishedAt = Date.now();
+      const replyText = (result && result.answer) ? String(result.answer).trim() : '';
+      const shouldReply = !!(result && result.control && result.control.shouldReply && replyText && replyText.length >= 2);
+
+      llmCache = {
+        startedAt,
+        finishedAt,
+        shouldReply,
+        replyText: shouldReply ? replyText : null,
+        extraction: result && result.extraction ? result.extraction : {},
+        control: result && result.control ? result.control : {},
+        meta: result && result.meta ? result.meta : {}
+      };
+
+      // Persistir cache no PRÓPRIO arquivo claimed (processing) -> retry nunca re-chama LLM
+      const updatedCollected = { ...collectedItem, llm: llmCache };
+      await virtusDiskQueue.writeJsonAtomic(collectedFile, updatedCollected);
+      Object.assign(collectedItem, updatedCollected);
+
+      stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
+        attempt: attemptId,
+        step: 'llm_call_done_cached',
+        replyId,
+        chatId,
+        histSig,
+        llmMs: finishedAt - startedAt,
+        tokensUsed: Number(llmCache.meta && llmCache.meta.tokensUsed) || 0,
+        shouldReply
+      });
+    }
     
-    // Prepara contexto
-    const contexto = {
-      perfil,
-      chatId,
-      histSig: collectedItem.histSig
-    };
-    
-    // Chama LLM
-    const result = await masterExtractAnswer({
-      perfil,
-      chatId,
-      mensagens,
-      contexto,
-      respond: true
-    });
-    
-    // Verifica se há resposta
-    if (!result || !result.answer || !result.control || !result.control.shouldReply) {
+    // ===== Sem reply: marcar DONE e encerrar (sem loop) =====
+    if (!llmCache || llmCache.shouldReply !== true || !llmCache.replyText) {
       stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
         attempt: attemptId,
         step: 'llm_no_reply',
         replyId,
         chatId,
-        reason: result?.control?.shouldReply === false ? 'shouldReply_false' : 'answer_empty'
+        histSig,
+        reason: (llmCache && llmCache.shouldReply === false) ? 'shouldReply_false' : 'answer_empty_or_uncached'
       });
       
-      // Move para done mesmo sem resposta (coleta válida, só não gerou reply)
       await moveCollectedToDone(perfil, collectedItem, collectedFile);
       return true;
     }
     
-    // Gera ID do reply (mesmo ID do collected, já que é determinístico)
-    const replyText = result.answer.trim();
+    const replyText = String(llmCache.replyText || '').trim();
     if (!replyText || replyText.length < 2) {
       stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
         attempt: attemptId,
         step: 'llm_no_reply',
         replyId,
         chatId,
+        histSig,
         reason: 'answer_too_short'
       });
       
@@ -153,13 +226,14 @@ async function processCollectedItem(perfil, collectedFile) {
       return true;
     }
     
-    // Verifica se reply já existe em qualquer lugar (dedup global)
+    // Dedupe FINAL antes de escrever reply (pode existir por replay/restart)
     if (await replyExistsAnywhere(perfil, replyId)) {
       stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
         attempt: attemptId,
         step: 'llm_skip_duplicate_anywhere',
         replyId,
-        chatId
+        chatId,
+        histSig
       });
       
       await moveCollectedToDone(perfil, collectedItem, collectedFile);
@@ -171,13 +245,15 @@ async function processCollectedItem(perfil, collectedFile) {
       id: replyId,
       perfil,
       chatId,
-      histSig: collectedItem.histSig,
+      histSig,
       replyText,
-      extraction: result.extraction || {},
-      control: result.control || {},
-      meta: result.meta || {},
+      extraction: llmCache.extraction || {},
+      control: llmCache.control || {},
+      meta: llmCache.meta || {},
       collectedAt: collectedItem.collectedAt,
-      llmAt: Date.now(),
+      firstSeenAt: collectedItem.firstSeenAt || null,
+      dueAt: collectedItem.dueAt || null,
+      llmAt: llmCache.finishedAt || Date.now(),
       attemptId
     };
     
@@ -190,11 +266,13 @@ async function processCollectedItem(perfil, collectedFile) {
       id: replyId,
       chatId,
       perfil,
-      histSig: collectedItem.histSig,
+      histSig,
       replyTextSha1: virtusIds.textSha1(replyText),
-      llmAt: Date.now(),
-      tokensUsed: result.meta?.tokensUsed || 0,
-      confidence: result.meta?.confidence || 0
+      llmAt: llmCache.finishedAt || Date.now(),
+      tokensUsed: llmCache.meta?.tokensUsed || 0,
+      promptTokens: llmCache.meta?.promptTokens || 0,
+      completionTokens: llmCache.meta?.completionTokens || 0,
+      confidence: llmCache.meta?.confidence || 0
     });
     
     stepLog.appendJSONL(perfil, 'virtus_llm_worker', {
@@ -202,8 +280,9 @@ async function processCollectedItem(perfil, collectedFile) {
       step: 'llm_success',
       replyId,
       chatId,
+      histSig,
       replyLen: replyText.length,
-      tokensUsed: result.meta?.tokensUsed || 0
+      tokensUsed: llmCache.meta?.tokensUsed || 0
     });
     
     // Move collected para done
