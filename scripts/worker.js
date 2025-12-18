@@ -1,16 +1,11 @@
 // scripts/worker.js
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
 const fs = require('fs');
 const logger = require('./logger.js');
-logger.info(`[WORKER][ENV] OPENAI_KEY_PREFIX=${(process.env.OPENAI_API_KEY || '').slice(0,8) || 'ABSENT'} model=${process.env.OPENAI_MODEL_MASTER || 'unset'} url=${process.env.OPENAI_API_URL || 'unset'}`);
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
 const browserHelper = require('./browser.js');
-// PATCH 12: Substituído virtus.js (monólito) por virtusCollector e virtusSender (V2)
-const virtusCollector = require('./virtusCollector.js');
-const virtusSender = require('./virtusSender.js');
+const virtusHelper = require('./virtus.js');
 const robeHelper   = require('./robe.js');
 const robeQueue    = require('./robeQueue.js');
 const utils        = require('./utils.js');
@@ -843,16 +838,13 @@ async function activateOnce(nome, source = '') {
                 allow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
-                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || c.trabalhando === true));
+                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true));
                 },
                 maxPagesWhenAllow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
-                  const vPages = parseInt(process.env.VIRTUS_UI_PAGES || '12', 10);
                   if (c && c.humanControl === true) return Number.MAX_SAFE_INTEGER;
-                  if (rm.emExecucao === true) return Math.max(3, vPages);
-                  if (c && c.trabalhando === true) return Math.max(3, vPages);
-                  return 10;
+                  return rm.emExecucao === true ? 3 : 10;
                 },
                 onNumPages: (n) => {
                   robeMeta[nome] = robeMeta[nome] || {};
@@ -1083,7 +1075,6 @@ async function closeExtraPages(browser, mainPage, nome) {
         try {
           if (mainPage && p === mainPage) continue;
           if (!mainPage && pages[0] && p === pages[0]) continue;
-          if (p && p._virtusKeep === true) continue; // MILITAR: não fecha página Virtus
           let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
             await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1098,7 +1089,6 @@ async function closeExtraPages(browser, mainPage, nome) {
       for (const p of again) {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && again[0] && p === again[0]) continue;
-        if (p && p._virtusKeep === true) continue; // MILITAR: não fecha página Virtus
         let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
         if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
@@ -1583,16 +1573,11 @@ async function robeTickGlobal() {
         }
         mainPage = ctrl.mainPage;
 
-        // PATCH 12: Para ambos workers V2 antes de iniciar Robe
-        virtusWasRunning = !!(ctrl.virtusCollector || ctrl.virtusSender);
-        if (ctrl.virtusCollector && typeof ctrl.virtusCollector.stop === 'function') {
-          try { await ctrl.virtusCollector.stop(); } catch {}
+        if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+          virtusWasRunning = true;
+          try { await ctrl.virtus.stop(); } catch {}
+          ctrl.virtus = null;
         }
-        if (ctrl.virtusSender && typeof ctrl.virtusSender.stop === 'function') {
-          try { await ctrl.virtusSender.stop(); } catch {}
-        }
-        ctrl.virtusCollector = null;
-        ctrl.virtusSender = null;
 
         try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
@@ -1660,16 +1645,13 @@ async function robeTickGlobal() {
           delete robeMeta[nome].limitPostingThisRun;
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
           robeUpdateMeta(nome, { emExecucao: false });
-          // PATCH 12: Reinicia ambos workers V2 após limit posting
           if (virtusWasRunning && automationAllowed(ctrl)) {
             try {
-              ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-              ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
               await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
             } catch {
-              ctrl.virtusCollector = null;
-              ctrl.virtusSender = null;
+              ctrl.virtus = null;
               ctrl.trabalhando = false;
             }
           }
@@ -1680,21 +1662,17 @@ async function robeTickGlobal() {
 
         robeUpdateMeta(nome, { emExecucao: false });
 
-        // PATCH 12: Reinicia ambos workers V2 após Robe
         if (virtusWasRunning) {
           if (automationAllowed(ctrl)) {
             try {
-              ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-              ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
               ctrl.trabalhando = true;
             } catch (e) {
-              ctrl.virtusCollector = null;
-              ctrl.virtusSender = null;
+              ctrl.virtus = null;
               ctrl.trabalhando = false;
             }
           } else {
-            ctrl.virtusCollector = null;
-            ctrl.virtusSender = null;
+            ctrl.virtus = null;
             ctrl.trabalhando = false;
           }
           await snapshotStatusAndWrite();
@@ -1742,17 +1720,12 @@ setTimeout(fotosGcTick, 8000);
 async function stopVirtus(nome) {
 const ctrl = controllers.get(nome);
 if (!ctrl) return;
-// PATCH 12: Para ambos workers V2
 try {
-  if (ctrl.virtusCollector && typeof ctrl.virtusCollector.stop === 'function') {
-    await ctrl.virtusCollector.stop().catch(()=>{});
-  }
-  if (ctrl.virtusSender && typeof ctrl.virtusSender.stop === 'function') {
-    await ctrl.virtusSender.stop().catch(()=>{});
+if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+await ctrl.virtus.stop().catch(()=>{});
 }
 } catch {}
-ctrl.virtusCollector = null;
-ctrl.virtusSender = null;
+ctrl.virtus = null;
 ctrl.trabalhando = false;
 ctrl.virtusEpoch = (ctrl.virtusEpoch || 0) + 1;
 if (ctrl.browser) {
@@ -1771,13 +1744,9 @@ try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 
 const ctrl = controllers.get(nome);
 if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
-// PATCH 12: Para ambos workers V2 quando browser desconecta
 try {
-  if (ctrl && ctrl.virtusCollector && typeof ctrl.virtusCollector.stop === 'function') {
-    await ctrl.virtusCollector.stop().catch(()=>{});
-  }
-  if (ctrl && ctrl.virtusSender && typeof ctrl.virtusSender.stop === 'function') {
-    await ctrl.virtusSender.stop().catch(()=>{});
+  if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+    await ctrl.virtus.stop().catch(()=>{});
   }
 } catch {}
 
@@ -1874,8 +1843,7 @@ async function start_work({ nome }) {
       logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
       return { ok: false, error: 'profile_in_human_or_config' };
     }
-    // PATCH 12: Verifica ambos workers V2
-    if (ctrl.trabalhando && (ctrl.virtusCollector || ctrl.virtusSender)) {
+    if (ctrl.trabalhando && ctrl.virtus) {
       logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
       return { ok: true };
     }
@@ -1893,25 +1861,19 @@ async function start_work({ nome }) {
       }
       ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
 
-      // MILITAR: limpa lixo ANTES de iniciar Virtus
-      await browserHelper.forceCloseExtras(ctrl.browser).catch(() => {});
-      
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
       ctrl.trabalhando = true;
-      
-      // PATCH 12: Inicia ambos workers V2
-      ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-      ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-      
-      // MILITAR: pool sobe depois dos workers
-      const virtusPagePool = require('./virtusPagePool.js');
-      await virtusPagePool.warmUp(ctrl.browser, nome).catch(() => {});
-      
       try {
+        await browserHelper.forceCloseExtras(ctrl.browser);
         const ps = await ctrl.browser.pages();
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].numPages = (ps && ps.length) || 0;
         await snapshotStatusAndWrite();
       } catch {}
+
+      if (ctrl.browser && typeof browserHelper.forceCloseExtras === 'function') {
+        await browserHelper.forceCloseExtras(ctrl.browser);
+      }
 
       try {
         await unfreezeCooldownIfWorking(nome);
@@ -2027,13 +1989,9 @@ const handlers = {
     logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
     return { ok: true };
   }
-  // PATCH 12: Para ambos workers V2
   try {
-    if (ctrl.virtusCollector && typeof ctrl.virtusCollector.stop === 'function') {
-      await ctrl.virtusCollector.stop().catch(()=>{});
-    }
-    if (ctrl.virtusSender && typeof ctrl.virtusSender.stop === 'function') {
-      await ctrl.virtusSender.stop().catch(()=>{});
+    if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+      await ctrl.virtus.stop();
     }
   } catch {}
   try {
@@ -2238,10 +2196,8 @@ const handlers = {
         } catch {}
       }
 
-      // PATCH 12: Inicia ambos workers V2 no human-resume
       if (automationAllowed(ctrl)) {
-        ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-        ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
+        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
         ctrl.trabalhando = true;
       }
 
@@ -2321,16 +2277,11 @@ const handlers = {
             }
             mainPage = ctrl.mainPage;
 
-            // PATCH 12: Para ambos workers V2
-            virtusWasRunning = !!(ctrl.virtusCollector || ctrl.virtusSender);
-            if (ctrl.virtusCollector && typeof ctrl.virtusCollector.stop === 'function') {
-              try { await ctrl.virtusCollector.stop(); } catch {}
+            if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+              virtusWasRunning = true;
+              try { await ctrl.virtus.stop(); } catch {}
+              ctrl.virtus = null;
             }
-            if (ctrl.virtusSender && typeof ctrl.virtusSender.stop === 'function') {
-              try { await ctrl.virtusSender.stop(); } catch {}
-            }
-            ctrl.virtusCollector = null;
-            ctrl.virtusSender = null;
 
             try { await closeExtraPages(ctrl.browser, mainPage, nome); } catch {}
 
@@ -2396,16 +2347,13 @@ const handlers = {
               delete robeMeta[nome].limitPostingThisRun;
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
               robeUpdateMeta(nome, { emExecucao: false });
-              // PATCH 12: Reinicia ambos workers V2 após limit posting
               if (virtusWasRunning && automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-                  ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                   await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
                 } catch {
-                  ctrl.virtusCollector = null;
-                  ctrl.virtusSender = null;
+                  ctrl.virtus = null;
                   ctrl.trabalhando = false;
                 }
               }
@@ -2416,21 +2364,17 @@ const handlers = {
 
             robeUpdateMeta(nome, { emExecucao: false });
 
-            // PATCH 12: Reinicia ambos workers V2 após Robe
             if (virtusWasRunning) {
               if (automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-                  ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
                   ctrl.trabalhando = true;
                 } catch (e) {
-                  ctrl.virtusCollector = null;
-                  ctrl.virtusSender = null;
+                  ctrl.virtus = null;
                   ctrl.trabalhando = false;
                 }
               } else {
-                ctrl.virtusCollector = null;
-                ctrl.virtusSender = null;
+                ctrl.virtus = null;
                 ctrl.trabalhando = false;
               }
               await snapshotStatusAndWrite();
@@ -3495,9 +3439,7 @@ async function nurseTick() {
       }
       if (want.virtus === 'on' && automationAllowed(ctrl)) {
         try { 
-          // PATCH 12: Inicia ambos workers V2 no nurseTick
-          ctrl.virtusCollector = virtusCollector.startVirtusCollector(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 });
-          ctrl.virtusSender = virtusSender.startVirtusSender(ctrl.browser, nome, { epoch: ctrl.virtusEpoch || 0 }); 
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 }); 
           ctrl.trabalhando = true; 
         } catch {}
       }
@@ -3839,7 +3781,6 @@ async function periodicAboutBlankCleanup() {
             // Nunca fecha a página principal
             if (p === mainPage) continue;
             if (!mainPage && p === pages[0]) continue;
-            if (p && p._virtusKeep === true) continue; // MILITAR: não fecha página Virtus
 
             // Verifica se é about:blank
             let url = '';
@@ -3903,12 +3844,8 @@ async function gracefulShutdown(reason) {
     try { robeQueue.clear(); } catch {}
     for (const [nome, ctrl] of controllers) {
       try {
-        // PATCH 12: Para ambos workers V2
-        if (ctrl && ctrl.virtusCollector && typeof ctrl.virtusCollector.stop === 'function') {
-          await ctrl.virtusCollector.stop().catch(()=>{});
-        }
-        if (ctrl && ctrl.virtusSender && typeof ctrl.virtusSender.stop === 'function') {
-          await ctrl.virtusSender.stop().catch(()=>{});
+        if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+          await ctrl.virtus.stop().catch(()=>{});
         }
       } catch {}
     }

@@ -69,10 +69,6 @@ async function processReload(nome, controllers, robeMeta) {
     if (ctrl.humanControl === true) return safeSkipReason(nome, 'modo humano');
     if (ctrl.configurando === true) return safeSkipReason(nome, 'configurando');
     if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) return safeSkipReason(nome, 'virtus sendLock ativo');
-    // PATCH RM-P1: Bloqueia ReloadManager durante UI crítica do Virtus
-    if (ctrl && ctrl.browser && ctrl.browser._virtusCritical && ctrl.browser._virtusCritical.active) {
-      return safeSkipReason(nome, 'virtus_critical');
-    }
     if (robeMeta && robeMeta[nome] && robeMeta[nome].emExecucao === true) {
       return safeSkipReason(nome, 'robe em execução');
     }

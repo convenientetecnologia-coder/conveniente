@@ -260,63 +260,6 @@ async function patchPage(nome, page, coords) {
   } catch {}
 }
 
-/**
- * Instala um MutationObserver no Messenger/Marketplace para notificar sempre que um novo chatId entrar no FEED.
- * Deve ser chamado após patchPage na primeira page do perfil prático/virtus.
- */
-async function installFeedObserver(page, nome) {
-  try {
-    // Sistema de eventos para novos chats detectados pelo MutationObserver
-    const virtusEvents = global.__virtusEventsMap || (global.__virtusEventsMap = new Map());
-    if (!virtusEvents.has(nome)) {
-      virtusEvents.set(nome, []);
-    }
-    const eventQueue = virtusEvents.get(nome);
-
-    await page.exposeFunction('__virtusNewChat', (info) => {
-      try {
-        const cid = info && info.chatId;
-        if (!cid) return;
-        // Empurra evento para fila do perfil (event-driven para Virtus)
-        const event = { chatId: String(cid), ts: info.ts || Date.now() };
-        eventQueue.push(event);
-        // Limita tamanho da fila (mantém últimos 100 eventos por perfil)
-        if (eventQueue.length > 100) {
-          eventQueue.shift();
-        }
-      } catch {}
-    });
-    await page.evaluateOnNewDocument(() => {
-      const normId = (href) => {
-        try {
-          const m = href.match(/\/marketplace\/t\/(\d+)/);
-          return m ? m[1] : null;
-        } catch { return null; }
-      };
-      const observer = new MutationObserver((muts) => {
-        for (const m of muts) {
-          const added = Array.from(m.addedNodes || []);
-          for (const n of added) {
-            try {
-              const link = n.querySelector ? n.querySelector('a[href*="/marketplace/t/"]') : null;
-              const id = link ? normId(link.getAttribute('href') || '') : null;
-              if (id && window.__virtusNewChat) {
-                window.__virtusNewChat({ chatId: id, ts: Date.now() });
-              }
-            } catch {}
-          }
-        }
-      });
-      window.addEventListener('DOMContentLoaded', () => {
-        try {
-          const tgt = document.querySelector('div[role="grid"],div[role="rowgroup"],div.x78zum5.xdt5ytf') || document.body;
-          observer.observe(tgt, { childList: true, subtree: true });
-        } catch {}
-      });
-    });
-  } catch {}
-}
-
 // Minimização suave
 async function ensureMinimizedWindowForPage(page) {
   // GUARDA: A função minimize é inerte para steady-state (só uso manual/debug)
@@ -941,7 +884,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
             let u = '';
             try { u = await p.url(); } catch {}
             if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
-            if (p && p._virtusKeep === true) continue; // <<< MILITAR: não fecha página Virtus
             if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
           }
         }
@@ -1464,7 +1406,14 @@ async function hardCleanProfileOnDisk(nome, opts = { keepCookies: true }) {
     ];
 
     let removed = 0;
+    for (const p of targets) {
+      try {
+        if (!fs.existsExists) {} // placeholder
+      } catch {}
+    }
+
     // Ajuste: checagem correta de existência e remoção
+    removed = 0;
     for (const p of targets) {
       try {
         if (!fs.existsSync(p)) continue;
@@ -2117,6 +2066,5 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended,
-  installFeedObserver
+  detectAccountSuspended
 };

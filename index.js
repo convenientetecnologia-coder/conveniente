@@ -1,5 +1,3 @@
-require('dotenv').config();
-
 // index.js (main do projeto, pasta principal)
 const express = require('express');
 const path = require('path');
@@ -9,7 +7,6 @@ const open = require('open'); // <-- adicione/mova isso aqui!
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
-logger.info(`[ENV][MAIN] OPENAI_KEY_PREFIX=${(process.env.OPENAI_API_KEY || '').slice(0,8) || 'ABSENT'} model=${process.env.OPENAI_MODEL_MASTER || 'unset'} url=${process.env.OPENAI_API_URL || 'unset'}`);
 
 // Helpers/pontes
 const fileStore = require('./scripts/fileStore.js');
@@ -98,43 +95,6 @@ require('./scripts/api_issues.js')(app, apiClient, fileStore);
 logger.info('[BOOT] Garantindo arquivos base...');
 fileStore.ensureDesired();
 fileStore.ensurePerfisJson();
-
-// ===================== PATCH 11: VIRTUS LLM WORKER =====================
-// Fork e respawn do processo LLM worker no boot (autonomia real)
-const { fork } = require('child_process');
-let llmProc = null;
-
-function startVirtusLLMWorker() {
-  if (llmProc) return;
-  
-  logger.info('[BOOT] Iniciando Virtus LLM Worker V2...');
-  
-  llmProc = fork(path.join(__dirname, 'scripts', 'virtusLLMWorker.js'), [], {
-    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-    env: { ...process.env } // aqui mantém OPENAI_API_KEY porque é o worker LLM
-  });
-  
-  llmProc.on('exit', (code, signal) => {
-    logger.warn('[virtusLLMWorker] Processo LLM worker encerrado', { code, signal });
-    llmProc = null;
-    
-    // Respawn em 2s (garante que o LLM worker sempre volta)
-    setTimeout(() => {
-      logger.info('[virtusLLMWorker] Respawning LLM worker...');
-      startVirtusLLMWorker();
-    }, 2000);
-  });
-  
-  llmProc.on('error', (err) => {
-    logger.error('[virtusLLMWorker] Erro no processo LLM worker', { err });
-  });
-  
-  logger.info('[BOOT] Virtus LLM Worker V2 iniciado');
-}
-
-// Inicia LLM worker após garantir arquivos base
-startVirtusLLMWorker();
-// ===================== FIM PATCH 11 =====================
 
 // Pausa automática de 24h em todos os perfis no boot, se ativado por env
 (async () => {

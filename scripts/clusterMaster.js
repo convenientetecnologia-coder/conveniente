@@ -70,19 +70,14 @@ function createCluster() {
   let perfisWatcher = null;
   // ================= END PATCH: perfisWatcher handle ======================
 
-  // PATCH 1 + PATCH 2: Função para spawnar worker com env sanitizado e suporte a respawn
-  function spawnWorker(idx, shardNames) {
+  for (let idx = 0; idx < blocks.length; idx++) {
+    const shardNames = blocks[idx] || [];
+    const shardSet = new Set(shardNames);
+    shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
     env.IS_WORKER_CHILD = '1';
     env.SHARD_PROFILES = JSON.stringify(shardNames);
     env.STATUS_FILE_NAME = `status_node_${idx + 1}.json`;
-
-    // >>>>> PATCH 1: OBRIGATÓRIO - Retirar credenciais LLM do processo de browser <<<<<
-    // Coletor e sender nunca rodam LLM porque nem chave têm. Fica blindado.
-    delete env.OPENAI_API_KEY;
-    delete env.OPENAI_API_URL;
-    delete env.OPENAI_MODEL_MASTER;
-    delete env.OPENAI_API_ORG; // se existir
 
     const execPath = process.env.npm_node_execpath || process.env.NODE || process.execPath;
 
@@ -92,26 +87,19 @@ function createCluster() {
       env
     });
 
-    return proc;
-  }
-
-  // PATCH 2: Função auxiliar para instalar handlers de um worker
-  function installWorkerHandlers(proc, idx, shardNames, isRespawn = false) {
-    // Error handler
+    // ================== BEGIN PATCH: worker error+close handlers ================
     proc.on('error', (err) => {
       try { logger.error('[WORKER] erro no fork', { error: err && err.message || err }, err); } catch {}
     });
-    
     proc.on('close', () => { /* noop para manter referência viva até exit resolver */ });
+    // ================== END PATCH: worker error+close handlers ==================
 
-    // Message handler
+    const pending = new Map();
+
     proc.on('message', (msg) => {
-      const child = children[idx];
-      if (!child) return;
-      
-      if (msg && msg.replyTo && child.pending.has(msg.replyTo)) {
-        const { resolve } = child.pending.get(msg.replyTo);
-        child.pending.delete(msg.replyTo);
+      if (msg && msg.replyTo && pending.has(msg.replyTo)) {
+        const { resolve } = pending.get(msg.replyTo);
+        pending.delete(msg.replyTo);
         return resolve(msg.data);
       }
       if (msg && msg.type === 'sup:reqOpen') {
@@ -130,60 +118,9 @@ function createCluster() {
       }
     });
 
-    // Exit handler (com respawn automático)
     proc.on('exit', (code, signal) => {
-      logger.warn('[CLUSTER] worker dropado' + (isRespawn ? ' (respawned)' : ''), { idx, code, signal });
-      
-      // Resolve pendências (limpa mapa de mensagens pendentes)
-      try {
-        const child = children[idx];
-        if (child && child.pending) {
-          for (const [msgId, { resolve }] of child.pending.entries()) {
-            try {
-              resolve({ ok: false, error: 'worker_died' });
-            } catch {}
-          }
-          child.pending.clear();
-        }
-      } catch {}
-      
-      // Respawn em 2s (não deixe worker morrer sem voltar)
-      setTimeout(() => {
-        try {
-          const child = children[idx];
-          if (!child || child.proc !== proc) return; // já respawned ou child removido
-          
-          logger.info('[CLUSTER] Respawning worker', { idx: idx + 1 });
-          
-          // Respawn worker
-          const newProc = spawnWorker(idx, shardNames);
-          
-          // Instala handlers recursivamente
-          installWorkerHandlers(newProc, idx, shardNames, true);
-          
-          // Atualiza child com novo proc
-          children[idx].proc = newProc;
-          
-          logger.info('[CLUSTER] Worker respawned', { idx: idx + 1, perfis: shardNames.length });
-        } catch (err) {
-          logger.error('[CLUSTER] Erro ao respawnar worker', { idx, err: String(err) });
-        }
-      }, 2000);
+      logger.warn('[CLUSTER] worker dropado', { idx, code, signal });
     });
-  }
-
-  for (let idx = 0; idx < blocks.length; idx++) {
-    const shardNames = blocks[idx] || [];
-    const shardSet = new Set(shardNames);
-    shardNames.forEach(n => (route[n] = idx));
-
-    // PATCH 2: Usar spawnWorker em vez de fork direto
-    const proc = spawnWorker(idx, shardNames);
-
-    const pending = new Map();
-
-    // PATCH 2: Instala handlers (inclui respawn automático)
-    installWorkerHandlers(proc, idx, shardNames, false);
 
     children.push({ id: idx, proc, pending, shard: new Set(shardNames) });
     logger.info('[CLUSTER] Worker iniciado', { idx: idx + 1, perfis: shardNames.length });
