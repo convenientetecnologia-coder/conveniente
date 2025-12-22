@@ -526,6 +526,91 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let filaChatTimer = null;
   let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
 
+  // ========================= CHAT CLEANER (ARQUIVAR CONVERSAS) =========================
+  // Regras:
+  // - 1 arquivamento por ciclo (timer random 5–15min)
+  // - Prioridade:
+  //    1) qualquer conversa com +8h (mesmo sem resposta)
+  //    2) conversas respondidas há pelo menos 15min (historico)
+  // - Nunca roda simultâneo ao envio/resposta (UI lock + sendLock)
+  // - Freio de emergência: 3 falhas seguidas => pausa 2h
+  const CLEANER_MIN_MS = 5 * 60 * 1000;
+  const CLEANER_MAX_MS = 15 * 60 * 1000;
+  const CLEANER_RESPONDED_GRACE_SEC = 15 * 60; // 15 min
+  const CLEANER_FAIL_MAX_STREAK = 3;
+  const CLEANER_FAIL_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2h
+  let cleanerNextAt = Date.now() + randomBetween(CLEANER_MIN_MS, CLEANER_MAX_MS);
+  let cleanerCooldownUntil = 0;
+  let cleanerFailStreak = 0;
+  let cleanerRunning = false;
+  // Marca quando o próximo responderChat está previsto para iniciar.
+  // (Evita iniciar cleaner na "beira" de uma resposta já agendada.)
+  let nextReplyAt = 0;
+  // Mutex de UI: garante que responderChat e cleaner nunca executem ao mesmo tempo.
+  let uiLockActive = false;
+  let uiLockOwner = null;
+  async function acquireUiLock(owner, timeoutMs = 30000) {
+    const t0 = Date.now();
+    while (uiLockActive && (Date.now() - t0) < timeoutMs) {
+      await sleep(80 + Math.floor(Math.random() * 80));
+    }
+    if (uiLockActive) return false;
+    uiLockActive = true;
+    uiLockOwner = owner || 'unknown';
+    return true;
+  }
+  function releaseUiLock(owner) {
+    if (!uiLockActive) return;
+    if (owner && uiLockOwner && owner !== uiLockOwner) return;
+    uiLockActive = false;
+    uiLockOwner = null;
+  }
+  function scheduleCleanerNext() {
+    cleanerNextAt = Date.now() + randomBetween(CLEANER_MIN_MS, CLEANER_MAX_MS);
+  }
+  // Guard para impedir PRUNER/scroll e outras automações concorrentes enquanto o cleaner atua
+  async function acquireCleanerGuard(p, ctx) {
+    try {
+      const b = getBrowserFromPage(p);
+      if (b) b._sendLock = { active: true, owner: 'virtus_cleaner', ctx: String(ctx || ''), since: Date.now() };
+    } catch {}
+  }
+  function releaseCleanerGuard(p) {
+    try {
+      const b = getBrowserFromPage(p);
+      if (b && b._sendLock && b._sendLock.owner === 'virtus_cleaner') {
+        b._sendLock.active = false;
+      }
+    } catch {}
+  }
+  async function safePressEscape(p, times = 2) {
+    for (let i = 0; i < times; i++) {
+      try { await p.keyboard.press('Escape'); } catch {}
+      await sleep(80 + Math.floor(Math.random() * 120));
+    }
+  }
+  // Detecta textos típicos de bloqueio/limite. Usado como gatilho do "freio de emergência" do cleaner.
+  async function detectTempBlockText(p) {
+    try {
+      return await p.evaluate(() => {
+        const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const nodes = Array.from(document.querySelectorAll('h1,h2,span,div,p'))
+          .slice(0, 1800)
+          .map(el => norm(el.innerText || el.textContent || ''))
+          .filter(Boolean);
+        return nodes.some(t =>
+          t.includes('bloqueado temporariamente') ||
+          t.includes('temporarily blocked') ||
+          t.includes('limite atingido') ||
+          t.includes('limit reached')
+        );
+      });
+    } catch {
+      return false;
+    }
+  }
+  // =================================================================================================
+
   let lastScrollToTop = 0;
 
   // trackers
@@ -954,8 +1039,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
     const next = fila[0];
     const delay = randomBetween(MIN_REPLY_DELAY_MS, MAX_REPLY_DELAY_MS);
+    nextReplyAt = Date.now() + delay;
     log(`[FILA] Atendendo chat ${next} em ${Math.round(delay/1000)}s`);
     filaChatTimer = setTimeout(async () => {
+      // resposta vai começar AGORA, então já não existe "próxima resposta agendada"
+      nextReplyAt = 0;
       if (!running || !epochOk()) return;
       stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'schedule_reply', chatId: next, in: delay });
       filaChatTimer = null;
@@ -983,7 +1071,25 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     // ========== FIM BLOCO FREEZER INSTRUÇÃO 2 ==========
 
     let _chatLockAcquired = false;
+    let _uiLockAcquired = false;
     try {
+      // Garante que o responderChat nunca roda simultaneamente com o cleaner
+      const okUi = await acquireUiLock('reply', 60000);
+      if (!okUi) {
+        try { await logIssue(nome, 'mil_action', `virtus_reply_ui_lock_timeout chatId=${chatId}`); } catch {}
+        // remove da fila para não travar em loop (o sistema volta a coletar depois naturalmente)
+        fila = fila.filter(id => id !== chatId);
+        chatAtivo = null;
+        return;
+      }
+      _uiLockAcquired = true;
+      // Se por qualquer motivo o cleaner estiver segurando guard de UI do browser, aguardamos ele liberar
+      try {
+        const b0 = getBrowserFromPage(await ensurePage());
+        if (b0 && b0._sendLock && b0._sendLock.active && b0._sendLock.owner === 'virtus_cleaner') {
+          await sleep(400 + Math.floor(Math.random() * 400));
+        }
+      } catch {}
       // === INÍCIO GUARD DE VIDA NO RESPONDERCHAT ===
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] Início responderChat: ${chatId}`); }
       if (!browser || browser.isConnected?.() === false) {
@@ -1225,6 +1331,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       chatAtivo = null;
       if (VIRTUS_DETAILED_DEBUG) { log(`[DETAILED] ChatId ${chatId} removido da fila e finalizado.`); }
     } finally {
+      if (_uiLockAcquired) releaseUiLock('reply');
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
@@ -1233,6 +1340,215 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { chatLock.release(nome, chatId); } catch {}
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
       }
+    }
+  }
+
+  async function archiveConversationById(p, chatId) {
+    const anchorSel = `a[href^="/marketplace/t/${chatId}"]`;
+    // 1) garante que o chat ainda está no feed
+    const exists = await p.$(anchorSel).catch(() => null);
+    if (!exists) return { ok: false, error: 'chat_anchor_not_found' };
+    // 2) abre menu de opções do row ("Mais opções")
+    const openRes = await p.evaluate((sel) => {
+      function norm(s) {
+        return (s || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .trim();
+      }
+      const a = document.querySelector(sel);
+      if (!a) return { ok: false, reason: 'anchor_missing' };
+      const row = a.closest('div[role="row"]') || a.parentElement;
+      if (!row) return { ok: false, reason: 'row_missing' };
+      try { row.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); } catch {}
+      const btnCandidates = Array.from(row.querySelectorAll('[role="button"],button,div[role="button"]'));
+      const btn = btnCandidates.find(el => {
+        const al = norm(el.getAttribute && el.getAttribute('aria-label') || '');
+        return al.includes('mais opcoes') || al.includes('mais opções') || al.includes('more options');
+      });
+      if (!btn) return { ok: false, reason: 'options_btn_missing' };
+      try { btn.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); } catch {}
+      try { btn.dispatchEvent(new MouseEvent('mousemove', { bubbles: true })); } catch {}
+      try { btn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true })); } catch {}
+      try { btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch {}
+      try { btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
+      try { btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); } catch {}
+      return { ok: true };
+    }, anchorSel).catch(() => null);
+    if (!openRes || openRes.ok !== true) {
+      return { ok: false, error: `open_menu_failed:${(openRes && openRes.reason) || 'unknown'}` };
+    }
+    // 3) aguarda menu estar presente e ter item "Arquivar"
+    const menuReady = await p.waitForFunction(() => {
+      const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const items = Array.from(document.querySelectorAll('div[role="menuitem"]'));
+      return items.some(el => {
+        const t = norm(el.innerText || el.textContent || '');
+        return t.includes('arquiv') || t.includes('archive') || t.includes('archiv');
+      });
+    }, { timeout: 5000, polling: 120 }).catch(() => false);
+    if (!menuReady) {
+      await safePressEscape(p, 2);
+      return { ok: false, error: 'menu_not_ready' };
+    }
+    // 4) clicar em "Arquivar..."
+    const clickArchive = await p.evaluate(() => {
+      function norm(s) {
+        return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      }
+      const items = Array.from(document.querySelectorAll('div[role="menuitem"]'));
+      let target =
+        items.find(el => norm(el.innerText || el.textContent || '').includes('arquivar conversa')) ||
+        items.find(el => norm(el.innerText || el.textContent || '').includes('arquivar')) ||
+        items.find(el => norm(el.innerText || el.textContent || '').includes('archive'));
+      if (!target) return false;
+      try { target.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); } catch {}
+      try { target.dispatchEvent(new MouseEvent('mousemove', { bubbles: true })); } catch {}
+      try { target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch {}
+      try { target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch {}
+      try { target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window })); } catch {}
+      return true;
+    }).catch(() => false);
+    if (!clickArchive) {
+      await safePressEscape(p, 2);
+      return { ok: false, error: 'archive_item_not_found_or_click_failed' };
+    }
+    // 5) confirmar resultado:
+    //    - ou o anchor some
+    //    - ou aparece toast/alert com "arquiv"
+    const confirmed = await Promise.race([
+      p.waitForFunction((sel) => !document.querySelector(sel), { timeout: 8000, polling: 120 }, anchorSel)
+        .then(() => ({ ok: true, evidence: 'anchor_removed' }))
+        .catch(() => null),
+      p.waitForFunction(() => {
+        const norm = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const els = Array.from(document.querySelectorAll('div[role="alert"],div[aria-live="polite"],span,div'))
+          .slice(0, 2000);
+        return els.some(el => norm(el.innerText || el.textContent || '').includes('arquiv'));
+      }, { timeout: 5000, polling: 120 })
+        .then(() => ({ ok: true, evidence: 'toast' }))
+        .catch(() => null)
+    ]);
+    if (!confirmed) {
+      return { ok: false, error: 'archive_no_confirmation' };
+    }
+    return { ok: true, evidence: confirmed.evidence };
+  }
+
+  async function runChatCleanerOnce(p) {
+    // garante marketplace
+    try {
+      await garantirMarketplace(p, { timeoutMs: 25000 });
+    } catch {
+      return { ok: false, error: 'marketplace_not_ready' };
+    }
+    const todos = await coletaChatsMarketplaceTodos(p);
+    if (!todos || !todos.length) {
+      return { ok: true, skipped: true, reason: 'no_threads_loaded' };
+    }
+    const nowSec = agoraEpoch();
+    const filaSet = new Set(Array.isArray(fila) ? fila : []);
+    if (chatAtivo) filaSet.add(chatAtivo);
+    let cand = null;
+    let reason = null;
+    // 1) prioridade: +8h
+    cand = todos.find(c => c && c.id && !filaSet.has(c.id) && isVelho8h(c.tempo));
+    if (cand) reason = 'old8h';
+    // 2) fallback: respondido há >=15min
+    if (!cand) {
+      cand = todos.find(c => {
+        if (!c || !c.id) return false;
+        if (filaSet.has(c.id)) return false;
+        const ts = Number(historico[c.id] || 0);
+        if (!ts) return false;
+        return (nowSec - ts) >= CLEANER_RESPONDED_GRACE_SEC;
+      });
+      if (cand) reason = 'responded_15min';
+    }
+    if (!cand) return { ok: true, skipped: true, reason: 'no_candidate' };
+    // Segurança extra: evita arquivar o chat que está aberto na URL atual
+    try {
+      const currentPath = await p.evaluate(() => location.pathname).catch(() => '');
+      if (currentPath && currentPath.includes(`/marketplace/t/${cand.id}`)) {
+        try { await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+      }
+    } catch {}
+    const ar = await archiveConversationById(p, cand.id);
+    if (!ar || !ar.ok) {
+      return {
+        ok: false,
+        error: (ar && ar.error) || 'archive_failed',
+        chatId: cand.id,
+        reason,
+        tempo: cand.tempo || ''
+      };
+    }
+    return {
+      ok: true,
+      archived: true,
+      chatId: cand.id,
+      reason,
+      tempo: cand.tempo || '',
+      evidence: ar.evidence || ''
+    };
+  }
+
+  async function maybeRunChatCleaner() {
+    if (!running || !epochOk()) return;
+    const now = Date.now();
+    if (cleanerRunning) return;
+    if (now < cleanerNextAt) return;
+    if (now < cleanerCooldownUntil) return;
+    // agenda o próximo ciclo imediatamente (anti-loop em caso de falha)
+    scheduleCleanerNext();
+    // nunca rodar no meio de uma resposta
+    if (chatAtivo) return;
+    // nunca rodar se muito perto de uma resposta já agendada
+    if (nextReplyAt && (nextReplyAt - now) <= 25000) return;
+    const p = await ensurePage();
+    if (!p) return;
+    // se está digitando ou se outra operação crítica está ativa, não roda
+    if (isVirtusLocked(nome)) return;
+    try {
+      const b = getBrowserFromPage(p);
+      if (b && b._sendLock && b._sendLock.active) return;
+    } catch {}
+    // tenta pegar o lock de UI rapidamente; se não conseguir, deixa para o próximo ciclo
+    const okUi = await acquireUiLock('cleaner', 2000);
+    if (!okUi) return;
+    cleanerRunning = true;
+    try {
+      await acquireCleanerGuard(p, 'thread_list');
+      await sleep(250 + Math.floor(Math.random() * 350));
+      // Se detectar textos de bloqueio/limite, ativa freio de emergência
+      const detBlock = await detectTempBlockText(p);
+      if (detBlock) {
+        cleanerCooldownUntil = Date.now() + CLEANER_FAIL_COOLDOWN_MS;
+        cleanerFailStreak = 0;
+        await logIssue(nome, 'mil_action', `chat_cleaner_paused_2h reason=blocked_text_detected until=${new Date(cleanerCooldownUntil).toISOString()}`);
+        return;
+      }
+      const res = await runChatCleanerOnce(p);
+      if (res && res.ok && res.archived) {
+        cleanerFailStreak = 0;
+        await logIssue(nome, 'mil_action', `chat_cleaner_archive_ok chatId=${res.chatId} reason=${res.reason} tempo="${res.tempo}" evidence=${res.evidence}`);
+        return;
+      }
+      // sem candidato não conta como falha
+      if (res && res.ok && res.skipped) return;
+      // falha real
+      cleanerFailStreak++;
+      await logIssue(nome, 'mil_action', `chat_cleaner_archive_fail streak=${cleanerFailStreak} err=${(res && res.error) || 'unknown'} chatId=${(res && res.chatId) || ''} reason=${(res && res.reason) || ''}`);
+      if (cleanerFailStreak >= CLEANER_FAIL_MAX_STREAK) {
+        cleanerFailStreak = 0;
+        cleanerCooldownUntil = Date.now() + CLEANER_FAIL_COOLDOWN_MS;
+        await logIssue(nome, 'mil_action', `chat_cleaner_cooldown_2h start until=${new Date(cleanerCooldownUntil).toISOString()}`);
+      }
+    } finally {
+      releaseCleanerGuard(p);
+      releaseUiLock('cleaner');
+      cleanerRunning = false;
     }
   }
 
@@ -1325,6 +1641,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       await atualizaFila();
       scheduleNextIfIdle();
       resetRecoverBackoff();
+      // Chat Cleaner: tenta arquivar 1 conversa no ciclo (conforme timer)
+      maybeRunChatCleaner().catch(()=>{});
 
       if (scrollInterval == null) {
         scrollInterval = setInterval(async () => {
@@ -1460,6 +1778,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
     stop: async () => {
       stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'stop' });
       running = false;
+      try { nextReplyAt = 0; } catch {}
+      try { cleanerRunning = false; } catch {}
       if (filaInterval) clearInterval(filaInterval), filaInterval = null;
       if (filaChatTimer) clearTimeout(filaChatTimer), filaChatTimer = null;
       if (scrollInterval) clearInterval(scrollInterval), scrollInterval = null;
