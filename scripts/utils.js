@@ -3,8 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-// Removido: execSync não é mais necessário (WMI removido)
-// const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const logger = require('./logger.js');
 
 function slugify(str) {
@@ -259,17 +258,73 @@ function getCoords(cidade) {
   } catch { return null; }
 }
 
+let _winMemCache = { ts: 0, data: null };
+const WIN_MEM_CACHE_TTL_MS = parseInt(process.env.WIN_MEM_CACHE_TTL_MS || '1500', 10);
+
+function getWinMemInfoCached() {
+  if (process.platform !== 'win32') return null;
+  const now = Date.now();
+  if (_winMemCache.data && (now - _winMemCache.ts) < WIN_MEM_CACHE_TTL_MS) {
+    return _winMemCache.data;
+  }
+  try {
+    const ps = `
+      $os = Get-CimInstance Win32_OperatingSystem;
+      $freePhysMB  = [math]::Round(($os.FreePhysicalMemory / 1024));
+      $totalPhysMB = [math]::Round(($os.TotalVisibleMemorySize / 1024));
+      $freeVirtMB  = [math]::Round(($os.FreeVirtualMemory / 1024));
+      $totalVirtMB = [math]::Round(($os.TotalVirtualMemorySize / 1024));
+      $commitUsedMB = $totalVirtMB - $freeVirtMB;
+      $pagefileMB = $totalVirtMB - $totalPhysMB;
+      $hasPagefile = ($pagefileMB -gt 256);
+      $o = [PSCustomObject]@{
+        freePhysMB = $freePhysMB;
+        totalPhysMB = $totalPhysMB;
+        freeVirtMB = $freeVirtMB;
+        totalVirtMB = $totalVirtMB;
+        commitUsedMB = $commitUsedMB;
+        commitLimitMB = $totalVirtMB;
+        pagefileMB = $pagefileMB;
+        hasPagefile = $hasPagefile
+      };
+      $o | ConvertTo-Json -Compress
+    `;
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps],
+      { encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }
+    ).trim();
+    const data = JSON.parse(out);
+    _winMemCache = { ts: now, data };
+    return data;
+  } catch {
+    _winMemCache = { ts: now, data: null };
+    return null;
+  }
+}
+
 /**
  * Retorna a quantidade de memória realmente disponível (MB) para novas aberturas/processos.
  *
  * Objetivo principal: ser LEVE e ESTÁVEL em todos os hosts.
  *
  * - Linux: usa MemAvailable em /proc/meminfo (sem WMI, custo muito baixo).
- * - Windows: usa diretamente os.freemem() (API nativa do kernel, sem WMI / PowerShell).
- * - REMOVIDO: WMI completamente (causava consumo de CPU desnecessário).
+ * - Windows: usa MIN(físico, virtual) para considerar COMMIT LIMIT (commit-aware).
+ * - Demais plataformas: usa os.freemem() como fallback.
  */
 function getAvailableMB() {
-  // Linux (via /proc/meminfo)
+  if (process.platform === 'win32') {
+    try {
+      const w = getWinMemInfoCached();
+      if (w && typeof w.freePhysMB === 'number' && typeof w.freeVirtMB === 'number') {
+        const eff = Math.min(w.freePhysMB, w.freeVirtMB);
+        if (Number.isFinite(eff) && eff > 0) return eff;
+      }
+    } catch {}
+    // fallback
+    try { return Math.round(os.freemem()/(1024*1024)); } catch { return 0; }
+  }
+
   if (process.platform === 'linux') {
     try {
       const txt = fs.readFileSync('/proc/meminfo','utf8');
@@ -278,13 +333,11 @@ function getAvailableMB() {
     } catch {}
   }
 
-  // Windows e demais plataformas: usa os.freemem() como fonte principal
   try {
     const mb = Math.round(os.freemem()/(1024*1024));
     if (mb > 0) return mb;
   } catch {}
 
-  // Fallback final extremamente defensivo
   try {
     return Math.round(os.freemem()/(1024*1024));
   } catch {
@@ -299,4 +352,5 @@ module.exports = {
   normalizeCookies,
   getCoords,
   getAvailableMB,
+  getWinMemInfoCached,
 };

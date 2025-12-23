@@ -1119,7 +1119,6 @@ function getWorkingProfileNames() {
 async function closeExtraPages(browser, mainPage, nome) {
   try {
     const issues = require('./issues.js');
-    const pages = await browser.pages();
     let closed = 0;
 
     const ctrl = controllers.get(nome);
@@ -1128,13 +1127,29 @@ async function closeExtraPages(browser, mainPage, nome) {
     const inConfig = ctrl && ctrl.configurando === true;
     const inHuman = ctrl && ctrl.humanControl === true;
 
-    if (!(sendLockActive || inRobe || inConfig || inHuman)) {
-      for (const p of pages) {
+    // ============================================================
+    // FASE A (P0): sempre (exceto modo humano) fechar about:blank extras
+    // Mesmo se em Robe/sendLock/config estiver true, about:blank NÃO pode acumular.
+    // Pequeno grace: só fecha about:blank se age > 12s OU se não conseguir determinar age.
+    // ============================================================
+    if (!inHuman) {
+      const pagesA = await browser.pages().catch(() => []);
+      const now = Date.now();
+      for (const p of pagesA) {
         try {
           if (mainPage && p === mainPage) continue;
-          if (!mainPage && pages[0] && p === pages[0]) continue;
-          let url = ''; try { url = typeof p.url === 'function' ? url = p.url() : ''; } catch {}
+          if (!mainPage && pagesA[0] && p === pagesA[0]) continue;
+          let url = '';
+          try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
           if (!url || url === 'about:blank') {
+            let age = null;
+            try {
+              const tid = p && p.target && typeof p.target === 'function' && p.target() && p.target()._targetId ? String(p.target()._targetId) : null;
+              if (tid && browser && browser._pageBirth && browser._pageBirth[tid]) {
+                age = now - Number(browser._pageBirth[tid] || 0);
+              }
+            } catch { age = null; }
+            if (age != null && age <= 12000) continue; // grace para aba recém criada
             await p.close({ runBeforeUnload: false }).catch(()=>{});
             closed++;
           }
@@ -1142,15 +1157,19 @@ async function closeExtraPages(browser, mainPage, nome) {
       }
     }
 
+    // ============================================================
+    // FASE B: somente quando NÃO busy (fora de Robe/sendLock/config/human)
+    // Fecha todas as páginas extras e mantém 1 aba por browser.
+    // ============================================================
     if (!(sendLockActive || inRobe || inConfig || inHuman)) {
-      const again = await browser.pages();
+      const again = await browser.pages().catch(() => []);
       for (const p of again) {
-        if (mainPage && p === mainPage) continue;
-        if (!mainPage && again[0] && p === again[0]) continue;
-        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-        if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
-        await p.close({ runBeforeUnload: false }).catch(()=>{});
-        closed++;
+        try {
+          if (mainPage && p === mainPage) continue;
+          if (!mainPage && again[0] && p === again[0]) continue;
+          await p.close({ runBeforeUnload: false }).catch(()=>{});
+          closed++;
+        } catch {}
       }
     }
 
@@ -1701,8 +1720,9 @@ async function robeTickGlobal() {
         if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
           await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
           delete robeMeta[nome].limitPostingThisRun;
+          // >>> P0: desligar emExecucao ANTES de tentar limpar abas
+          try { robeUpdateMeta(nome, { emExecucao: false, emFila: false }); } catch {}
           try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-          robeUpdateMeta(nome, { emExecucao: false });
           if (virtusWasRunning && automationAllowed(ctrl)) {
             try {
               ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
@@ -1716,9 +1736,9 @@ async function robeTickGlobal() {
           await snapshotStatusAndWrite();
           return;
         }
+        // >>> P0: desligar emExecucao ANTES de tentar limpar abas
+        try { robeUpdateMeta(nome, { emExecucao: false, emFila: false }); } catch {}
         try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-
-        robeUpdateMeta(nome, { emExecucao: false });
 
         if (virtusWasRunning) {
           if (automationAllowed(ctrl)) {
@@ -2026,6 +2046,25 @@ const handlers = {
   }
   const ctrl = controllers.get(nome);
   if (!ctrl) {
+    // P0: mesmo sem controller, tentar matar Chrome órfão por userDataDir
+    try {
+      let userDataDir = null;
+      try {
+        const man = await manifestStore.read(nome).catch(()=>null);
+        if (man && man.userDataDir) userDataDir = String(man.userDataDir);
+      } catch {}
+      if (!userDataDir) {
+        try {
+          const perfisArr = loadPerfisJson();
+          const perfil = (perfisArr || []).find(p => p && p.nome === nome);
+          if (perfil && perfil.userDataDir) userDataDir = String(perfil.userDataDir);
+        } catch {}
+      }
+      if (userDataDir) {
+        try { browserHelper.killChromeProfileProcesses(userDataDir); } catch {}
+        try { await issues.append(nome, 'mil_action', `deactivate_without_controller: orphan_kill_attempt userDataDir="${userDataDir}"`); } catch {}
+      }
+    } catch {}
     const d = readJsonFile(desiredPath, { perfis: {} });
     const isHold = d.perfis?.[nome]?.humanHold === true;
     if (preserve && !isFrozenNow(nome) && !isHold) {
@@ -2059,7 +2098,7 @@ const handlers = {
   try {
     await hardCloseController(nome, ctrl, {
       reason: reason || 'deactivate',
-      allowKillUserDataDir: !preserve
+      allowKillUserDataDir: true
     });
   } catch {}
   // cleanup pós-fechamento
@@ -2115,6 +2154,114 @@ const handlers = {
   return { ok: true };
   });
 },
+
+  async ['deactivate-all']({ reason } = {}) {
+    logger.info('[HANDLER] deactivate-all chamada', { reason: reason || '' });
+
+    // Concorrência limitada sem dependências externas
+    async function mapLimit(items, limit, fn) {
+      const arr = Array.isArray(items) ? items.slice() : [];
+      const results = [];
+      let idx = 0;
+      const workers = new Array(Math.max(1, Number(limit) || 1)).fill(0).map(async () => {
+        while (idx < arr.length) {
+          const cur = arr[idx++];
+          try { results.push(await fn(cur)); }
+          catch (e) { results.push({ ok: false, nome: cur, error: e && e.message || String(e) }); }
+        }
+      });
+      await Promise.all(workers);
+      return results;
+    }
+
+    const names = Array.from(controllers.keys());
+    const failed = [];
+    const results = [];
+    let closed = 0;
+
+    const perProfile = await mapLimit(names, 4, async (nome) => {
+      const ctrl = controllers.get(nome);
+      if (!ctrl) return { ok: true, nome, skipped: true, reason: 'no_controller' };
+
+      try {
+        try {
+          if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
+            await ctrl.virtus.stop();
+          }
+        } catch {}
+        ctrl.virtus = null;
+        ctrl.trabalhando = false;
+
+        await hardCloseController(nome, ctrl, { reason: reason || 'admin_close_all', allowKillUserDataDir: true });
+        closed++;
+        return { ok: true, nome, closed: true };
+      } catch (e) {
+        failed.push(nome);
+        return { ok: false, nome, error: e && e.message || String(e) };
+      } finally {
+        try { controllers.delete(nome); } catch {}
+        try { stopPruneLoop(nome); } catch {}
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          delete robeMeta[nome].rootPid;
+          delete robeMeta[nome].emExecucao;
+          delete robeMeta[nome].emFila;
+          delete robeMeta[nome].cpuHistory;
+          delete robeMeta[nome].ramHist;
+          delete robeMeta[nome].reloadAttemptsWindow;
+          delete robeMeta[nome].blockDetectWindow;
+        } catch {}
+      }
+    });
+    results.push(...perProfile);
+
+    // Sweep extra por segurança: mata órfãos por userDataDir mesmo sem controller
+    try {
+      const perfis = (loadPerfisJson() || []).filter(p => p && p.nome && inShard(p.nome));
+      for (const p of perfis) {
+        let userDataDir = null;
+        try {
+          const man = await manifestStore.read(p.nome).catch(()=>null);
+          if (man && man.userDataDir) userDataDir = String(man.userDataDir);
+        } catch {}
+        if (!userDataDir && p.userDataDir) userDataDir = String(p.userDataDir);
+        if (userDataDir) {
+          try { browserHelper.killChromeProfileProcesses(userDataDir); } catch {}
+        }
+      }
+    } catch {}
+
+    await snapshotStatusAndWrite();
+    return { ok: failed.length === 0, closed, failed, results };
+  },
+
+  async ['recycle']({ nome, reason } = {}) {
+    if (!nome) return { ok: false, error: 'nome_obrigatorio' };
+    const r = await performRecycle(nome, reason || 'manual');
+    return r;
+  },
+
+  async ['recycle-all']({ reason } = {}) {
+    const scheduled = [];
+    let desired = null;
+    try { desired = readJsonFile(desiredPath, { perfis: {} }); } catch { desired = { perfis: {} }; }
+
+    for (const [nome, ctrl] of controllers.entries()) {
+      try {
+        const want = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
+        if (want.humanHold === true) continue;
+        if (want.active !== true) continue;
+        if (isFrozenNow(nome)) continue;
+        if (ctrl && (ctrl.humanControl || ctrl.configurando)) continue;
+        if (ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) continue;
+        if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
+        if (enqueueRecycle(nome, reason || 'manual_all')) scheduled.push(nome);
+      } catch {}
+    }
+
+    try { await snapshotStatusAndWrite(); } catch {}
+    return { ok: true, scheduled: scheduled.length, names: scheduled.slice(0, 200) };
+  },
 
   async configure({ nome }) {
     return lockProfileAction(nome, async () => {
@@ -2406,8 +2553,9 @@ const handlers = {
             if (robeMeta[nome] && robeMeta[nome].limitPostingThisRun) {
               await issues.append(nome, 'mil_action', 'robe_end_limit_posting');
               delete robeMeta[nome].limitPostingThisRun;
+              // >>> P0: desligar emExecucao ANTES de tentar limpar abas
+              try { robeUpdateMeta(nome, { emExecucao: false, emFila: false }); } catch {}
               try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-              robeUpdateMeta(nome, { emExecucao: false });
               if (virtusWasRunning && automationAllowed(ctrl)) {
                 try {
                   ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
@@ -2421,9 +2569,9 @@ const handlers = {
               await snapshotStatusAndWrite();
               return;
             }
+            // >>> P0: desligar emExecucao ANTES de tentar limpar abas
+            try { robeUpdateMeta(nome, { emExecucao: false, emFila: false }); } catch {}
             try { await closeExtraPages(ctrl.browser, ctrl.mainPage, nome); } catch {}
-
-            robeUpdateMeta(nome, { emExecucao: false });
 
             if (virtusWasRunning) {
               if (automationAllowed(ctrl)) {
@@ -2924,6 +3072,57 @@ const ULTRA_RECOVERY = {
   FAIL_FREEZE_MS: 2*60*60*1000,
   REOPEN_DELAY_VIRTUS_BLOCK_MS: 2*60*60*1000
 };
+
+const RECYCLE_CFG = {
+  enabled: process.env.RECYCLE_ENABLED !== '0',
+  // reciclar por idade do browser (default 12h)
+  maxAgeMs: parseInt(process.env.RECYCLE_MAX_AGE_MS || String(12 * 60 * 60 * 1000), 10),
+  // reciclar por RAM alta sustentada
+  highRamMB: parseInt(process.env.RECYCLE_HIGH_RAM_MB || '900', 10),
+  highRamForMs: parseInt(process.env.RECYCLE_HIGH_RAM_FOR_MS || String(15 * 60 * 1000), 10),
+  // concorrência por worker
+  concurrency: parseInt(process.env.RECYCLE_CONCURRENCY || '1', 10),
+  // limpar cache do Chrome antes de reabrir (recomendado)
+  cleanCache: process.env.RECYCLE_CLEAN_CACHE === '1',
+  // intervalo de scan e process
+  scanEveryMs: parseInt(process.env.RECYCLE_SCAN_EVERY_MS || '60000', 10),
+  processEveryMs: parseInt(process.env.RECYCLE_PROCESS_EVERY_MS || '3000', 10),
+  // cooldown mínimo entre recycles do mesmo perfil (default 2h)
+  cooldownMs: parseInt(process.env.RECYCLE_COOLDOWN_MS || String(2 * 60 * 60 * 1000), 10),
+};
+
+const recycleQueue = [];
+const recycleInProgress = new Set();
+
+function getRecycleMeta(nome) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  robeMeta[nome]._recycle = robeMeta[nome]._recycle || {
+    scheduledAt: 0,
+    reason: null,
+    inProgress: false,
+    lastRecycleAt: 0,
+    lastReason: null,
+    ramHighSince: 0
+  };
+  return robeMeta[nome]._recycle;
+}
+
+function enqueueRecycle(nome, reason) {
+  if (!nome) return false;
+  const rm = getRecycleMeta(nome);
+  const now = Date.now();
+
+  if (rm.inProgress) return false;
+  if (rm.lastRecycleAt && (now - rm.lastRecycleAt) < RECYCLE_CFG.cooldownMs) return false;
+
+  rm.reason = String(reason || 'auto');
+  rm.scheduledAt = now;
+
+  if (!recycleQueue.includes(nome)) recycleQueue.push(nome);
+
+  try { issues.append(nome, 'mil_action', `recycle_scheduled reason=${rm.reason}`).catch(()=>{}); } catch {}
+  return true;
+}
 
 async function ensureFrozenShutdown(nome, origin = 'frozen') {
   const ctrl = controllers.get(nome);
@@ -3553,8 +3752,184 @@ async function trySwapOpen(target) {
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 
+// ========================= RECYCLE MANAGER =========================
+async function scanRecycleCandidates() {
+  if (!RECYCLE_CFG.enabled) return;
+
+  let desired = null;
+  try { desired = readJsonFile(desiredPath, { perfis: {} }); } catch { desired = { perfis: {} }; }
+
+  const now = Date.now();
+  for (const [nome, ctrl] of controllers.entries()) {
+    try {
+      if (!nome || !ctrl || !ctrl.browser) continue;
+
+      const want = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
+      if (want.humanHold === true) continue;
+      if (want.active !== true) continue;
+
+      if (isFrozenNow(nome)) continue;
+      if (killGuardActive(nome)) continue;
+
+      if (ctrl.humanControl === true || ctrl.configurando === true) continue;
+      if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) continue;
+      if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
+
+      const rm = getRecycleMeta(nome);
+
+      // idade
+      const activatedAt = (robeMeta[nome] && robeMeta[nome].activatedAt) ? robeMeta[nome].activatedAt : 0;
+      const ageMs = activatedAt ? (now - activatedAt) : 0;
+      if (activatedAt && ageMs >= RECYCLE_CFG.maxAgeMs) {
+        enqueueRecycle(nome, `age>${Math.round(RECYCLE_CFG.maxAgeMs/3600000)}h`);
+        continue;
+      }
+
+      // RAM alta sustentada
+      const ramMB = (robeMeta[nome] && typeof robeMeta[nome].ramMB === 'number') ? robeMeta[nome].ramMB : null;
+      if (typeof ramMB === 'number' && ramMB >= RECYCLE_CFG.highRamMB) {
+        if (!rm.ramHighSince) rm.ramHighSince = now;
+        if ((now - rm.ramHighSince) >= RECYCLE_CFG.highRamForMs) {
+          enqueueRecycle(nome, `ram>=${RECYCLE_CFG.highRamMB}MB_for_${Math.round(RECYCLE_CFG.highRamForMs/60000)}min`);
+          continue;
+        }
+      } else {
+        rm.ramHighSince = 0;
+      }
+
+      // multi-aba suspeita (sem robe)
+      const np = (robeMeta[nome] && typeof robeMeta[nome].numPages === 'number') ? robeMeta[nome].numPages : 1;
+      if (np >= 4) {
+        enqueueRecycle(nome, `multi_tabs>=${np}`);
+        continue;
+      }
+
+    } catch {}
+  }
+}
+
+async function performRecycle(nome, reason) {
+  return lockProfileAction(nome, async () => {
+    const now = Date.now();
+    const rm = getRecycleMeta(nome);
+    rm.inProgress = true;
+
+    try {
+      let desired = null;
+      try { desired = readJsonFile(desiredPath, { perfis: {} }); } catch { desired = { perfis: {} }; }
+      const want = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
+
+      // Guardas (não reciclar nessas condições)
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser) return { ok: false, error: 'no_controller' };
+      if (want.humanHold === true) return { ok: false, error: 'human_hold' };
+      if (isFrozenNow(nome)) return { ok: false, error: 'frozen' };
+      if (ctrl.humanControl === true || ctrl.configurando === true) return { ok: false, error: 'human_or_config' };
+      if (ctrl.browser._sendLock && ctrl.browser._sendLock.active) return { ok: false, error: 'send_lock' };
+      if (robeMeta[nome] && robeMeta[nome].emExecucao === true) return { ok: false, error: 'robe_running' };
+
+      // Bloquear nurse de interferir enquanto fechamos/abrimos
+      robeMeta[nome] = robeMeta[nome] || {};
+      robeMeta[nome].activationHeldUntil = now + 10 * 60 * 1000;
+
+      try { await issues.append(nome, 'mil_action', `recycle_begin reason=${reason || rm.reason || 'auto'}`); } catch {}
+
+      // Para Virtus se estiver ativo
+      try { await stopVirtus(nome); } catch {}
+
+      // Hard close do browser (mata órfãos pelo userDataDir)
+      try {
+        await hardCloseController(nome, ctrl, { reason: 'recycle', allowKillUserDataDir: true });
+      } catch {}
+
+      // Limpar controller e loops
+      try { controllers.delete(nome); } catch {}
+      try { stopPruneLoop(nome); } catch {}
+      try { healthState.delete(nome); } catch {}
+      try { profileFailures.delete(nome); } catch {}
+
+      // Limpeza de cache (opcional)
+      if (RECYCLE_CFG.cleanCache) {
+        try {
+          const r = await browserHelper.hardCleanProfileOnDisk(nome, { keepCookies: true });
+          try { await issues.append(nome, 'mil_action', `recycle_cache_clean ok=${!!(r && r.ok)} removed=${(r && r.removed) || 0}`); } catch {}
+        } catch (e) {
+          try { await issues.append(nome, 'mil_action', `recycle_cache_clean_error ${e && e.message || e}`); } catch {}
+        }
+      }
+
+      // Reabrir
+      const openRes = await activateOnce(nome, 'recycle_auto');
+      if (!openRes || openRes.ok !== true) {
+        try { await issues.append(nome, 'mil_action', `recycle_open_failed error=${(openRes && openRes.error) || 'unknown'}`); } catch {}
+        // libera para nurse tentar depois (mas mantém um backoff curto)
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].activationHeldUntil = Date.now() + 60 * 1000;
+        return { ok: false, error: (openRes && openRes.error) || 'open_failed' };
+      }
+
+      // Retomar Virtus/24h se desired manda virtus=on
+      if (want && want.virtus === 'on') {
+        try {
+          const r2 = await start_work({ nome });
+          try { await issues.append(nome, 'mil_action', `recycle_start_work ok=${!!(r2 && r2.ok)}`); } catch {}
+        } catch {}
+      }
+
+      rm.lastRecycleAt = Date.now();
+      rm.lastReason = String(reason || rm.reason || 'auto');
+      rm.scheduledAt = 0;
+      rm.reason = null;
+
+      // liberar hold
+      try { robeMeta[nome].activationHeldUntil = null; } catch {}
+
+      try { await issues.append(nome, 'mil_action', `recycle_end ok=true`); } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+
+      return { ok: true };
+
+    } finally {
+      rm.inProgress = false;
+    }
+  });
+}
+
+async function processRecycleQueueTick() {
+  if (!RECYCLE_CFG.enabled) return;
+  if (recycleQueue.length === 0) return;
+  if (recycleInProgress.size >= RECYCLE_CFG.concurrency) return;
+
+  while (recycleInProgress.size < RECYCLE_CFG.concurrency && recycleQueue.length) {
+    const nome = recycleQueue.shift();
+    if (!nome) continue;
+    if (recycleInProgress.has(nome)) continue;
+
+    recycleInProgress.add(nome);
+    const rm = getRecycleMeta(nome);
+    const reason = rm.reason || 'auto';
+
+    performRecycle(nome, reason)
+      .catch(async (e) => {
+        try { await issues.append(nome, 'mil_action', `recycle_error ${e && e.message || e}`); } catch {}
+      })
+      .finally(async () => {
+        recycleInProgress.delete(nome);
+        try { await snapshotStatusAndWrite(); } catch {}
+      });
+  }
+}
+
 // Inicializa reloadManager após todos os sistemas estarem prontos
 reloadManager.startReloadManager(controllers, robeMeta);
+
+// Inicializa Recycle Manager
+if (RECYCLE_CFG.enabled) {
+  setInterval(() => { scanRecycleCandidates().catch(()=>{}); }, RECYCLE_CFG.scanEveryMs);
+  setInterval(() => { processRecycleQueueTick().catch(()=>{}); }, RECYCLE_CFG.processEveryMs);
+  setTimeout(() => { scanRecycleCandidates().catch(()=>{}); }, 15000);
+  setTimeout(() => { processRecycleQueueTick().catch(()=>{}); }, 18000);
+}
 
 async function wirePageObservers(nome, page) {
   const st = getHealth(nome);

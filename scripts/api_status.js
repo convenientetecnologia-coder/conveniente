@@ -1,6 +1,8 @@
 // api_status
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
+const utils = require('./utils.js');
+
 module.exports = (app, workerClient, fileStore) => {
 // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
 // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
@@ -377,6 +379,19 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 
   // 3) Monte array final de perfis SEMPRE do baseline (com overlay) e retorne shape original
   const perfisFinalINST = Array.from(baseMap.values());
+  
+  // Check pagefile disabled warning
+  try {
+    const sysObj = (overlayINST && overlayINST.sys) 
+      ? overlayINST.sys 
+      : (fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null);
+
+    if (sysObj && sysObj.mem && sysObj.mem.pagefileDisabled === true) {
+      warningINST = (warningINST ? (warningINST + '; ') : '') +
+        'PAGEFILE DESATIVADO: habilite memória virtual (System Managed) para estabilidade do Chrome. Sem pagefile o Windows pode falhar em abrir abas/processos mesmo com RAM livre.';
+    }
+  } catch {}
+
   res.json({
     perfis: perfisFinalINST,
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
@@ -498,19 +513,9 @@ app.get('/api/sys', async (req, res) => {
       const toMB = (b) => Math.round(b / (1024*1024));
       const toGB = (b) => Math.round(b / (1024*1024*10)) / 100; // duas casas
 
-      const mem = {
-        totalBytes,
-        freeBytes,
-        usedBytes,
-        totalMB: toMB(totalBytes),
-        freeMB:  toMB(freeBytes),
-        usedMB:  toMB(usedBytes),
-        totalGB: toGB(totalBytes),
-        freeGB:  toGB(freeBytes),
-        usedGB:  toGB(usedBytes),
-        minFreeRequiredMB: parseInt(process.env.MIN_FREE_RAM_MB || '1536', 10)
-      };
-      return res.json({ ok: true, mem, cpu: { percent: cpuPercent }, ts: Date.now() });
+      // Use fileStore.getSysMetricsSnapshot() for commit-aware Windows memory
+      const snap = fileStore.getSysMetricsSnapshot();
+      return res.json({ ok: true, mem: snap.mem, cpu: { percent: cpuPercent }, ts: Date.now() });
     }
 
     // 3) Fallback: fileStore.getSysMetricsSnapshot() (mantém retrocompatibilidade)

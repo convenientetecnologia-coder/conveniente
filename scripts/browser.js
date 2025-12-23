@@ -240,10 +240,19 @@ async function patchPage(nome, page, coords) {
             return req.abort();
           }
           if (type === 'image') {
-            if (process.env.VIRTUS_BLOCK_IMAGES === '1') {
-              if (/favicon\.ico$/i.test(u)) return req.continue();
-              return req.abort();
-            }
+            const blockImages = process.env.VIRTUS_BLOCK_IMAGES === '1';
+            if (!blockImages) return req.continue();
+
+            // sempre permite favicon
+            if (/favicon\.ico$/i.test(u)) return req.continue();
+
+            // permite ícones/asset
+            if (/staticxx\.facebook\.com\/rsrc\.php/i.test(u)) return req.continue();
+
+            // bloqueia preview pesado
+            if (/scontent\.|lookaside\.|fbcdn\.|external\./i.test(u)) return req.abort();
+
+            // default: continua (mais conservador)
             return req.continue();
           }
           return req.continue();

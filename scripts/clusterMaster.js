@@ -366,10 +366,37 @@ function createCluster() {
       
       return out;
     }
-    if (type === 'unfreeze-all' || type === 'robes-release-all') {
-      const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, opts)));
-      const allOk = results.every(r => r && r.ok !== false);
-      return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
+    if (type === 'unfreeze-all' || type === 'robes-release-all' || type === 'deactivate-all' || type === 'recycle-all') {
+      const timeoutMs = (opts && opts.timeoutMs) ? opts.timeoutMs : (type === 'deactivate-all' ? 600000 : 20000);
+      const results = await Promise.all(children.map((_, i) => sendTo(i, type, payload, { timeoutMs })));
+      if (type !== 'deactivate-all') {
+        const allOk = results.every(r => r && r.ok !== false);
+        return allOk ? { ok: true } : { ok: false, error: 'partial_fail' };
+      }
+      // Aggregate deactivate-all
+      const agg = {
+        ok: true,
+        totalClosed: 0,
+        totalFailed: 0,
+        failed: [],
+        resultsByNode: results
+      };
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i] || {};
+        if (r && r.ok === false) agg.ok = false;
+        const c = Number(r.closed || 0);
+        if (Number.isFinite(c)) agg.totalClosed += c;
+        const f = Array.isArray(r.failed) ? r.failed : [];
+        if (f.length) {
+          agg.totalFailed += f.length;
+          agg.failed.push(...f.map(n => String(n)));
+        }
+      }
+      if (agg.failed.length) {
+        const seen = new Set();
+        agg.failed = agg.failed.filter(n => (seen.has(n) ? false : (seen.add(n), true)));
+      }
+      return agg;
     }
     // para comandos por perfil, assegura roteamento
     if (nome && route[nome] === undefined) {
