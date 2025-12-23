@@ -2047,7 +2047,6 @@ const handlers = {
     logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
     return { ok: true };
   }
-  const preserve = (policy === 'preserveDesired');
   // antes de mexer em browser:
   try {
     if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
