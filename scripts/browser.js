@@ -240,6 +240,10 @@ async function patchPage(nome, page, coords) {
             return req.abort();
           }
           if (type === 'image') {
+            if (process.env.VIRTUS_BLOCK_IMAGES === '1') {
+              if (/favicon\.ico$/i.test(u)) return req.continue();
+              return req.abort();
+            }
             return req.continue();
           }
           return req.continue();
@@ -573,7 +577,6 @@ function installOneTabGuard(browser, nome, {
       } catch {}
     }
     async function enforceHardCap() {
-      if (browser && browser._robeActiveFor === nome) return; // Nunca prune se Robe ativo para este perfil
       try {
         const pages = await browser.pages();
         let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
@@ -1948,6 +1951,9 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
   browser._aboutBlankKillerInstalled = true;
   const issues = require('./issues.js');
   const timers = new Map();
+  const ABOUTBLANK_MAX_AGE_MS = parseInt(process.env.ABOUTBLANK_MAX_AGE_MS || '45000', 10);
+  const ABOUTBLANK_RETRY_MS = parseInt(process.env.ABOUTBLANK_RETRY_MS || '2500', 10);
+  browser._pageBirth = browser._pageBirth || {};
 
   async function pageFromTarget(t) {
     try { return await t.page(); } catch { return null; }
@@ -1970,29 +1976,46 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
       if (!page) return;
       const key = keyFor(target);
       if (!key) return;
+      try { browser._pageBirth[key] = browser._pageBirth[key] || Date.now(); } catch {}
 
       // CANCELADORES - NÃO BUSQUE page.url()
       try {
-        page.once('domcontentloaded', async () => { try { clearTimer(key); } catch {} });
         page.once('close', () => clearTimer(key));
       } catch {}
 
-      const timer = setTimeout(async () => {
+      async function check() {
         try {
-          if (browser && browser._robeActiveFor === nome) return;
-          const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
-          if (sup > Date.now()) return;
           if (page.isClosed && page.isClosed()) return;
-          // AQUI pode acessar page.url() pois mainFrame já existe
           const u = page.url ? page.url() : '';
-          if (!u || u === 'about:blank') {
-            try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-            try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
+          if (u && u !== 'about:blank') return;
+
+          const now = Date.now();
+          const birth = (browser && browser._pageBirth && browser._pageBirth[key]) || 0;
+          const age = birth ? (now - birth) : null;
+          const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
+          const suppressed = (browser && browser._robeActiveFor === nome) || (sup > now);
+
+          if (suppressed) {
+            if (age != null && age >= ABOUTBLANK_MAX_AGE_MS) {
+              try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+              try { await issues.append(nome, 'mil_action', 'about_blank_killed_max_age'); } catch {}
+              return;
+            }
+            // Rearmável: tenta de novo depois
+            const t2 = setTimeout(() => { check().catch(()=>{}); }, ABOUTBLANK_RETRY_MS);
+            timers.set(key, t2);
+            return;
           }
+
+          // Fora de Robe e sem suppress => mata imediatamente
+          try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+          try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
         } finally {
           clearTimer(key);
         }
-      }, graceMs);
+      }
+
+      const timer = setTimeout(() => { check().catch(()=>{}); }, graceMs);
       timers.set(key, timer);
     } catch {}
   }
