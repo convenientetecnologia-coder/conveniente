@@ -174,12 +174,16 @@ function schedulePeriodic(controllers) {
   try {
     const now = Date.now();
     for (const [nome, ctrl] of controllers.entries()) {
-      // Somente perfis ativos
       if (!ctrl || !isBrowserConnected(ctrl)) continue;
-      const last = lastReloadTimes.get(nome) || now; // primeira rodada daqui a 2h
+      // FIX militar: se não existe entry, registra agora e não agenda ainda
+      const last = lastReloadTimes.get(nome);
+      if (!last) {
+        lastReloadTimes.set(nome, now);
+        continue;
+      }
       if (now - last >= RELOAD_INTERVAL_MS) {
         scheduleReload(nome);
-        lastReloadTimes.set(nome, now); // evita re-agendar repetidamente até processar
+        lastReloadTimes.set(nome, now); // marca o ciclo
       }
     }
   } catch {}

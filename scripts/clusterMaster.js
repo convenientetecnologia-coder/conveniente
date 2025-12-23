@@ -58,6 +58,7 @@ function createCluster() {
 
   const children = [];
   const route = {};
+  let isShuttingDown = false;
 
   // Rebuild route from a block array (idx->name list)
   function routeRebuildFromBlocks(blocksArr) {
@@ -70,9 +71,7 @@ function createCluster() {
   let perfisWatcher = null;
   // ================= END PATCH: perfisWatcher handle ======================
 
-  for (let idx = 0; idx < blocks.length; idx++) {
-    const shardNames = blocks[idx] || [];
-    const shardSet = new Set(shardNames);
+  function spawnWorker(idx, shardNames) {
     shardNames.forEach(n => (route[n] = idx));
     const env = { ...process.env };
     env.IS_WORKER_CHILD = '1';
@@ -120,8 +119,41 @@ function createCluster() {
 
     proc.on('exit', (code, signal) => {
       logger.warn('[CLUSTER] worker dropado', { idx, code, signal });
+      // Resolver pendências do pending com erro
+      for (const [msgId, { resolve }] of pending.entries()) {
+        try { resolve({ ok: false, error: 'worker_died' }); } catch {}
+      }
+      pending.clear();
+      // Respawn após 2000ms se não estiver em shutdown
+      if (!isShuttingDown) {
+        setTimeout(() => {
+          if (isShuttingDown) return;
+          try {
+            logger.info('[CLUSTER] respawnando worker', { idx: idx + 1 });
+            const child = children[idx];
+            if (child) {
+              const shardNames = Array.from(child.shard);
+              const newWorker = spawnWorker(idx, shardNames);
+              child.proc = newWorker.proc;
+              child.pending = newWorker.pending;
+            } else {
+              const shardNames = blocks[idx] || [];
+              const newWorker = spawnWorker(idx, shardNames);
+              children.push({ id: idx, proc: newWorker.proc, pending: newWorker.pending, shard: new Set(shardNames) });
+            }
+          } catch (e) {
+            logger.error('[CLUSTER] erro ao respawnar worker', { idx, error: e && e.message || e }, e);
+          }
+        }, 2000);
+      }
     });
 
+    return { proc, pending };
+  }
+
+  for (let idx = 0; idx < blocks.length; idx++) {
+    const shardNames = blocks[idx] || [];
+    const { proc, pending } = spawnWorker(idx, shardNames);
     children.push({ id: idx, proc, pending, shard: new Set(shardNames) });
     logger.info('[CLUSTER] Worker iniciado', { idx: idx + 1, perfis: shardNames.length });
   }
@@ -355,6 +387,7 @@ function createCluster() {
   }
 
   async function kill() {
+    isShuttingDown = true;
     // ============= BEGIN PATCH: close perfisWatcher before killing =============
     try { perfisWatcher && perfisWatcher.close && perfisWatcher.close(); } catch {}
     // ============= END PATCH: close perfisWatcher before killing ===============

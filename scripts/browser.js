@@ -4,6 +4,7 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execFileSync } = require('child_process');
 const utils = require('./utils.js');
 const logger = require('./logger.js');
 
@@ -310,16 +311,88 @@ function cleanupUserDataLocks(userDataDir) {
   } catch {}
 }
 
+function normalizePathForCompare(p) {
+  return String(p || '').replace(/\\/g, '/').toLowerCase();
+}
+
+function extractUserDataDirFromCmd(cmd) {
+  try {
+    const m = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))/i.exec(String(cmd || ''));
+    return m ? (m[1] || m[2] || m[3] || null) : null;
+  } catch {
+    return null;
+  }
+}
+
+function listChromeProcessesWin() {
+  try {
+    const ps = `
+      $procs = Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -eq 'chrome.exe' -or $_.Name -eq 'chromium.exe' } |
+        Select-Object ProcessId, Name, CommandLine;
+      $procs | ConvertTo-Json -Compress
+    `;
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps],
+      { encoding: 'utf8', windowsHide: true, maxBuffer: 20 * 1024 * 1024 }
+    ).trim();
+    if (!out) return [];
+    const json = JSON.parse(out);
+    const arr = Array.isArray(json) ? json : (json ? [json] : []);
+    return arr.map(p => ({
+      pid: Number(p.ProcessId),
+      name: String(p.Name || ''),
+      cmd: String(p.CommandLine || '')
+    })).filter(p => Number.isFinite(p.pid) && p.pid > 0);
+  } catch {
+    return [];
+  }
+}
+
+function taskkillTreeWin(pid) {
+  try {
+    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Mata processos do Chrome usando ESTE userDataDir (Windows).
- * REMOVIDO: WMI/PowerShell completamente (usa ps-list + taskkill, muito mais leve)
+ * Implementação real usando PowerShell + taskkill.
  */
 function killChromeProfileProcesses(userDataDir, openingMap) {
   if (process.platform !== 'win32') return;
   try {
-    // No-op deliberado: removemos ps-list e evitamos WMI/PowerShell.
-    // Mantemos apenas o cleanup de locks via cleanupUserDataLocks().
-    // O fechamento correto já é feito via taskkill pelo rootPid em deactivate.
+    const expected = normalizePathForCompare(userDataDir);
+    if (!expected) return;
+    const procs = listChromeProcessesWin();
+    const toKill = new Set();
+    for (const pr of procs) {
+      const ud = extractUserDataDirFromCmd(pr.cmd);
+      if (ud) {
+        if (normalizePathForCompare(ud) === expected) {
+          toKill.add(pr.pid);
+        }
+      } else {
+        // fallback: se não achou o param, mas cmd contém o path inteiro
+        if (pr.cmd && normalizePathForCompare(pr.cmd).includes(expected)) {
+          toKill.add(pr.pid);
+        }
+      }
+    }
+    if (!toKill.size) return;
+    let killed = 0;
+    for (const pid of toKill) {
+      if (taskkillTreeWin(pid)) killed++;
+    }
+    try {
+      if (killed > 0) {
+        logger.warn('[BROWSER][KILL][userDataDir] Chrome órfão removido', { userDataDir, killed });
+      }
+    } catch {}
   } catch {}
 }
 
@@ -2066,5 +2139,6 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
-  detectAccountSuspended
+  detectAccountSuspended,
+  killChromeProfileProcesses
 };

@@ -373,6 +373,7 @@ function getOpenMinFreeMB() {
   return baseMB + (activeNodes * perNodeMB);
 }
 const OPEN_MIN_FREE_MB_STATIC = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10); // Mantido para compatibilidade
+const BROWSER_CLOSE_TIMEOUT_MS = parseInt(process.env.BROWSER_CLOSE_TIMEOUT_MS || '15000', 10);
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
 
@@ -411,6 +412,65 @@ async function killProcessTreeByRootPid(pid) {
     } else {
       return;
     }
+  } catch {}
+}
+
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+function isPidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
+  const t0 = Date.now();
+  let rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
+  try {
+    if (!rootPid && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
+      const proc = ctrl.browser.process();
+      if (proc && proc.pid) rootPid = proc.pid;
+    }
+  } catch {}
+  let userDataDir = null;
+  try {
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (man && man.userDataDir) userDataDir = String(man.userDataDir);
+  } catch {}
+  let closeOutcome = { ok: false, timeout: false, err: null };
+  const closePromise = (async () => {
+    try {
+      if (ctrl && ctrl.browser && typeof ctrl.browser.close === 'function') {
+        await ctrl.browser.close().catch(()=>{});
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, err: e };
+    }
+  })();
+  const raced = await Promise.race([
+    closePromise,
+    sleep(BROWSER_CLOSE_TIMEOUT_MS).then(() => ({ ok: false, timeout: true }))
+  ]);
+  closeOutcome = raced || closeOutcome;
+  // Se fechou ou não, garantimos hard-kill se necessário
+  // Regra:
+  // - Se timeout OU pid ainda vivo => taskkill
+  // - Se allowKillUserDataDir => também kill por userDataDir (remove órfãos)
+  if (rootPid && (!closeOutcome.ok || closeOutcome.timeout || isPidAlive(rootPid))) {
+    try { await killProcessTreeByRootPid(rootPid); } catch {}
+  }
+  if (allowKillUserDataDir && userDataDir) {
+    try { browserHelper.killChromeProfileProcesses(userDataDir); } catch {}
+  }
+  const durMs = Date.now() - t0;
+  try {
+    await issues.append(
+      nome,
+      'mil_action',
+      `deactivate_hard reason=${reason} closeOk=${!!closeOutcome.ok} timeout=${!!closeOutcome.timeout} durMs=${durMs} rootPid=${rootPid || 0} userDataDir="${userDataDir || ''}"`
+    );
+  } catch {}
+  return { ok: true, durMs, rootPid: rootPid || null, userDataDir: userDataDir || null };
+}
   } catch {}
 }
 
@@ -1989,22 +2049,26 @@ const handlers = {
     logger.info('[HANDLER] deactivate concluído (controller ausente)', { nome });
     return { ok: true };
   }
+  const preserve = (policy === 'preserveDesired');
+  // antes de mexer em browser:
   try {
     if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
       await ctrl.virtus.stop();
     }
   } catch {}
+  ctrl.virtus = null;
+  ctrl.trabalhando = false;
+  // HARD CLOSE militar
   try {
-    if (ctrl.browser && ctrl.browser.close) {
-      await ctrl.browser.close();
-    }
+    await hardCloseController(nome, ctrl, {
+      reason: reason || 'deactivate',
+      allowKillUserDataDir: !preserve
+    });
   } catch {}
+  // cleanup pós-fechamento
   try {
     const root = robeMeta[nome]?.rootPid;
-    if (root) {
-      await killProcessTreeByRootPid(root);
-      robeMeta[nome].rootPid = null;
-    }
+    if (root) robeMeta[nome].rootPid = null;
   } catch {}
   try { freezeCooldownIfNotWorking(nome); } catch {}
   controllers.delete(nome);
