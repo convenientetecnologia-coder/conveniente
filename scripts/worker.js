@@ -471,8 +471,6 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
   } catch {}
   return { ok: true, durMs, rootPid: rootPid || null, userDataDir: userDataDir || null };
 }
-  } catch {}
-}
 
 async function killStrayChromes() {
   // Intencionalmente no-op: 110% sem WMI/PowerShell e sem ps-list
