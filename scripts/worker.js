@@ -807,6 +807,7 @@ async function activateOnce(nome, source = '') {
       robeMeta[nome] = robeMeta[nome] || {};
       // NOVO: Reduzido de 30s para 5s (supervisor já controla velocidade via cooldowns)
       robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+      try { ensureRobeMeta(nome).whyNotOpen = `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}`; } catch {}
       await reportAction(nome, 'mil_action', `activation_hold_by_supervisor reason=${(slotResp && slotResp.reason) || 'unknown'}`);
       return { ok:false, error: `supervisor_denied:${(slotResp && slotResp.reason) || 'unknown'}` };
     }
@@ -917,6 +918,12 @@ async function activateOnce(nome, source = '') {
           }
         } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
+        try {
+          const rm = ensureRobeMeta(nome);
+          rm.whyNotOpen = null;
+          rm.activationHeldUntil = null;
+          rm.openBackoffMs = null;
+        } catch {}
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].closingReason = null;
         logger.info('[WORKER][activateOnce] done nome=' + nome + ' source=' + source);
@@ -2744,6 +2751,11 @@ const handlers = {
         closingReason: robeMeta[nome]?.closingReason || null,
         openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
         lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
+        lastSwapPeer: robeMeta[nome]?.lastSwapPeer || null,
+        swapCooldown: (robeMeta[nome]?.swapCooldownUntil && typeof robeMeta[nome]?.swapCooldownUntil === 'number')
+          ? Math.max(0, robeMeta[nome].swapCooldownUntil - Date.now())
+          : null,
+        whyNotOpen: robeMeta[nome]?.whyNotOpen || null,
         loginRequired,
         loginReason,
         banned,
@@ -2956,6 +2968,11 @@ perfis.push({
   closingReason: robeMeta[nome]?.closingReason || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
+  lastSwapPeer: robeMeta[nome]?.lastSwapPeer || null,
+  swapCooldown: (robeMeta[nome]?.swapCooldownUntil && typeof robeMeta[nome]?.swapCooldownUntil === 'number')
+    ? Math.max(0, robeMeta[nome].swapCooldownUntil - Date.now())
+    : null,
+  whyNotOpen: robeMeta[nome]?.whyNotOpen || null,
   loginRequired,
   loginReason,
   banned,
@@ -3386,16 +3403,15 @@ async function nurseTick() {
               if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
 
-                const swapped = await trySwapOpen(nome);
+                const swapped = await trySwapOpen(nome, err);
 
                 if (!swapped) {
-                  robeMeta[nome] = robeMeta[nome] || {};
-                  // NOVO: Backoff fixo de 3s ao invés de escalonado (supervisor já controla velocidade)
-                  const curBackoff = 3000;
-                  robeMeta[nome].openBackoffMs = curBackoff;
-                  robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
-                  await issues.append(nome, 'mil_action', `open_backoff set to ${Math.floor(curBackoff/1000)}s (fixed)`);
-                  logger.warn('[SWAP] open_backoff set', { nome, backoffMs: curBackoff, reason: err });
+                  const rm = ensureRobeMeta(nome);
+                  rm.whyNotOpen = err;
+                  const backoffMs = nextOpenBackoffMs(nome, { baseMs: 5000, maxMs: 300000 });
+                  rm.activationHeldUntil = Date.now() + backoffMs;
+                  await issues.append(nome, 'open_backoff', `open_backoff backoffMs=${backoffMs} freeMB=${getAvailableMB()} err=${err}`);
+                  logger.warn('[OPEN] open_backoff set', { nome, backoffMs, reason: err });
                 } else {
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
@@ -3709,43 +3725,123 @@ async function nurseTick() {
   }
 }
 
-async function trySwapOpen(target) {
+function ensureRobeMeta(nome) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  return robeMeta[nome];
+}
+
+function nextOpenBackoffMs(nome, { baseMs = 5000, maxMs = 300000 } = {}) {
+  const rm = ensureRobeMeta(nome);
+  const prev = Number(rm.openBackoffMs || 0);
+  let next = prev > 0 ? Math.min(maxMs, Math.max(baseMs, prev * 2)) : baseMs;
+  next += Math.floor(Math.random() * 500); // jitter
+  rm.openBackoffMs = next;
+  return next;
+}
+
+function clearOpenBackoff(nome) {
+  const rm = ensureRobeMeta(nome);
+  rm.openBackoffMs = null;
+  rm.whyNotOpen = null;
+  rm.activationHeldUntil = null;
+}
+
+async function trySwapOpen(target, reason = '') {
+  const SWAP_COOLDOWN_MS = parseInt(process.env.SWAP_COOLDOWN_MS || String(10 * 60 * 1000), 10);
+  const SWAP_HOLD_MS = parseInt(process.env.SWAP_HOLD_MS || String(2 * 60 * 1000), 10);
+  const SWAP_KILL_GUARD_MS = parseInt(process.env.SWAP_KILL_GUARD_MS || '8000', 10);
+  const MIN_CAND_RAM_MB = parseInt(
+    process.env.SWAP_MIN_CAND_RAM_MB || (process.platform === 'win32' ? '700' : '600'),
+    10
+  );
+
+  const now = Date.now();
+  const rmT = ensureRobeMeta(target);
+
+  // Cooldown para evitar swap em loop (canibalismo)
+  if (typeof rmT.swapCooldownUntil === 'number' && rmT.swapCooldownUntil > now) {
+    return false;
+  }
+
   const aliveNames = Array.from(controllers.keys());
   if (aliveNames.length <= 1) return false;
 
   const candidates = aliveNames
     .filter(n => n !== target)
-    .map(n => ({
-      n,
-      mb: (typeof robeMeta[n]?.ramMB === 'number') ? robeMeta[n].ramMB : -1,
-      emExecucao: robeMeta[n]?.emExecucao,
-      configurando: controllers.get(n)?.configurando,
-      humanControl: controllers.get(n)?.humanControl
-    }))
-    .filter(c => !c.configurando && !c.emExecucao && !c.humanControl && c.mb >= (process.platform==='win32' ? 900 : 700))
+    .map(n => {
+      const ctrl = controllers.get(n);
+      return {
+        n,
+        mb: (typeof robeMeta[n]?.ramMB === 'number') ? robeMeta[n].ramMB : -1,
+        emExecucao: robeMeta[n]?.emExecucao === true,
+        configurando: !!(ctrl && ctrl.configurando),
+        humanControl: !!(ctrl && ctrl.humanControl),
+        sendLock: !!(ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active)
+      };
+    })
+    .filter(c =>
+      !c.configurando &&
+      !c.emExecucao &&
+      !c.humanControl &&
+      !c.sendLock &&
+      c.mb >= MIN_CAND_RAM_MB
+    )
     .sort((a, b) => b.mb - a.mb);
 
-  for (const cand of candidates) {
-    if (killGuardActive(cand.n)) continue;
-    await issues.append(cand.n, 'mil_action', `swap_kill fechamento para abrir ${target} RAM=${cand.mb}MB`);
-    logger.info('[SWAP] swap_kill', { fechar: cand.n, abrir: target, ramMB: cand.mb });
-    await handlers.deactivate({ nome: cand.n, reason: 'swap_for_open', policy: 'preserveDesired' });
-    setKillGuard(cand.n, 45000);
-    await new Promise(r=>setTimeout(r, 2000));
-    
-    const r = await activateOnce(target, 'nurse_swap');
-    if (r && r.ok) {
-      await issues.append(target, 'mil_action', `swap_open_success após fechar ${cand.n}`);
-      robeMeta[target] = robeMeta[target] || {};
-      robeMeta[target].lastSwapAt = Date.now();
-      logger.info('[SWAP] swap_open_success', { target, fechado: cand.n });
-      return true;
-    }
-    await issues.append(target, 'mil_action', `swap_open_failed após fechar ${cand.n}`);
-    logger.warn('[SWAP] swap_open_failed', { target, fechado: cand.n });
+  const cand = candidates[0]; // IMPORTANTE: 1 candidato por tentativa (evita queda em cascata)
+
+  rmT.swapCooldownUntil = now + SWAP_COOLDOWN_MS;
+
+  if (!cand) {
+    rmT.whyNotOpen = `swap_skip_no_candidate (${reason || 'no_reason'})`;
+    await issues.append(target, 'swap_open_failed_nenhum_sucesso', `no_candidate reason=${reason}`);
+    return false;
   }
-  await issues.append(target, 'mil_action', 'swap_open_failed_nenhum_sucesso');
-  logger.warn('[SWAP] swap_open_failed_nenhum_sucesso', { target });
+
+  if (killGuardActive(cand.n)) {
+    rmT.whyNotOpen = `swap_skip_candidate_killguard candidate=${cand.n}`;
+    await issues.append(target, 'swap_open_failed_nenhum_sucesso', `candidate_killguard candidate=${cand.n}`);
+    return false;
+  }
+
+  await issues.append(cand.n, 'swap_kill', `swap_kill candidate=${cand.n} mb=${cand.mb} target=${target} reason=${reason}`);
+  logger.warn('[SWAP] swap_kill', { fechar: cand.n, abrir: target, ramMB: cand.mb, reason });
+
+  // 1) Fecha candidato (preservando desired)
+  await handlers.deactivate({ nome: cand.n, reason: 'swap_for_open', policy: 'preserveDesired' });
+
+  // 2) Segura reabertura do candidato por um tempo curto (enquanto tenta abrir o target)
+  const rmC = ensureRobeMeta(cand.n);
+  rmC.activationHeldUntil = Date.now() + SWAP_HOLD_MS;
+  rmC.whyNotOpen = `swap_hold_for_open target=${target}`;
+  setKillGuard(cand.n, SWAP_KILL_GUARD_MS);
+  await sleep(1500);
+
+  // 3) Tenta abrir o target
+  const r = await activateOnce(target, 'swap_open').catch(() => null);
+  const rmT2 = ensureRobeMeta(target);
+  rmT2.lastSwapAt = Date.now();
+  rmT2.lastSwapPeer = cand.n;
+
+  if (r && r.ok) {
+    rmT2.whyNotOpen = null;
+    await issues.append(target, 'swap_open_success', `swap_open_success closed=${cand.n} mb=${cand.mb} reason=${reason}`);
+    return true;
+  }
+
+  // 4) Falhou: rollback (tenta reabrir candidato)
+  rmT2.whyNotOpen = `swap_open_failed err=${(r && r.error) || 'unknown'} candidate=${cand.n}`;
+  await issues.append(target, 'swap_open_failed', `swap_open_failed closed=${cand.n} mb=${cand.mb} err=${(r && r.error) || 'unknown'}`);
+
+  try {
+    // libera candidato mais cedo
+    rmC.activationHeldUntil = Date.now() + 3000;
+    rmC.whyNotOpen = null;
+    setKillGuard(cand.n, 3000);
+    await activateOnce(cand.n, 'swap_rollback').catch(()=>null);
+    await issues.append(cand.n, 'mil_action', `swap_rollback_attempt after target_fail target=${target}`);
+  } catch {}
+
   return false;
 }
 

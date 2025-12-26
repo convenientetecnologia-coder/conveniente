@@ -263,6 +263,7 @@
       <div class="metric"><span>Fila</span><b id="mFila">0</b></div>
       <div class="metric"><span>RAM</span><b id="mRam">--</b></div>
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
+      <div class="metric" id="metricPagefile"><span>Pagefile</span><b id="mPagefile">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric clickable" id="metricLogin" style="display:none"><span>Login requerido</span><b id="mLoginReq">0</b></div>
       <div class="metric clickable" id="metricBanned" style="display:none"><span>Banidas</span><b id="mBanidas">0</b></div>
@@ -1650,6 +1651,26 @@
           }
           const c = document.getElementById('mCpu');
           if (c) c.textContent = formatCPU(m.cpu && m.cpu.percent);
+
+          // Pagefile ON/OFF (muito importante em Windows)
+          try {
+            const pfCard = document.getElementById('metricPagefile');
+            const pfEl = document.getElementById('mPagefile');
+            if (pfCard && pfEl && m && m.mem) {
+              const disabled = (m.mem.pagefileDisabled === true) || (m.mem.hasPagefile === false);
+              pfEl.textContent = disabled ? 'OFF' : 'ON';
+              pfEl.style.color = disabled ? '#e35a5a' : '#17b67c';
+              const pfMb = (m.mem.pagefileMB !== undefined) ? m.mem.pagefileMB : '—';
+              const freeVirt = (m.mem.freeVirtMB !== undefined) ? m.mem.freeVirtMB : '—';
+              const freePhys = (m.mem.freePhysMB !== undefined) ? m.mem.freePhysMB : (m.mem.freeMB !== undefined ? m.mem.freeMB : '—');
+              pfCard.title =
+                `Pagefile: ${disabled ? 'OFF' : 'ON'}\n` +
+                `Commit livre (freeVirtMB): ${freeVirt}\n` +
+                `Físico livre (freePhysMB): ${freePhys}\n` +
+                `PagefileMB: ${pfMb}\n\n` +
+                `Observação: sem pagefile o Windows limita o Commit e o Chrome começa a falhar após horas com muitos perfis.`;
+            }
+          } catch {}
 
           // Apenas aviso visual; NUNCA desabilitar o botão
           try {

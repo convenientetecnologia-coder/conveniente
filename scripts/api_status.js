@@ -2,6 +2,7 @@
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
 const utils = require('./utils.js');
+const os = require('os');
 
 module.exports = (app, workerClient, fileStore) => {
 // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
@@ -380,15 +381,43 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // 3) Monte array final de perfis SEMPRE do baseline (com overlay) e retorne shape original
   const perfisFinalINST = Array.from(baseMap.values());
   
-  // Check pagefile disabled warning
+  // Check pagefile disabled warning and build sysFinal
+  let sysFinal = null;
   try {
-    const sysObj = (overlayINST && overlayINST.sys) 
-      ? overlayINST.sys 
-      : (fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null);
+    const sysOverlay = (overlayINST && overlayINST.sys && typeof overlayINST.sys === 'object') ? overlayINST.sys : null;
+    const sysSnap = (fileStore.getSysMetricsSnapshot && typeof fileStore.getSysMetricsSnapshot === 'function')
+      ? fileStore.getSysMetricsSnapshot()
+      : null;
 
-    if (sysObj && sysObj.mem && sysObj.mem.pagefileDisabled === true) {
+    // sysFinal precisa manter compatibilidade com o dashboard.js (que lê sys.freeMB)
+    sysFinal = {
+      ...(sysOverlay || {}),
+      ...(sysSnap || {})
+    };
+
+    // Garantir campos "antigos" (freeMB/totalMB/cores/cpuApprox) + campos novos (mem/cpu/pagefile)
+    if (sysSnap && sysSnap.mem) {
+      sysFinal.freeMB = sysSnap.mem.freeMB;
+      sysFinal.totalMB = sysSnap.mem.totalMB;
+      sysFinal.freePhysMB = sysSnap.mem.freePhysMB;
+      sysFinal.freeVirtMB = sysSnap.mem.freeVirtMB;
+      sysFinal.pagefileDisabled = sysSnap.mem.pagefileDisabled === true;
+    }
+
+    sysFinal.cores = (sysOverlay && typeof sysOverlay.cores === 'number')
+      ? sysOverlay.cores
+      : ((os.cpus() || []).length || 1);
+
+    // cpuApprox: tenta manter o do worker; se não tiver, cai no cpu.percent do sysSnap
+    if (sysOverlay && typeof sysOverlay.cpuApprox === 'number') {
+      sysFinal.cpuApprox = sysOverlay.cpuApprox;
+    } else if (sysSnap && sysSnap.cpu && typeof sysSnap.cpu.percent === 'number') {
+      sysFinal.cpuApprox = sysSnap.cpu.percent;
+    }
+
+    if (sysSnap && sysSnap.mem && sysSnap.mem.pagefileDisabled === true) {
       warningINST = (warningINST ? (warningINST + '; ') : '') +
-        'PAGEFILE DESATIVADO: habilite memória virtual (System Managed) para estabilidade do Chrome. Sem pagefile o Windows pode falhar em abrir abas/processos mesmo com RAM livre.';
+        'PAGEFILE DESATIVADO: habilite memória virtual (System Managed) para estabilidade do Chrome. Sem pagefile o Windows pode falhar em abrir processos mesmo com RAM física livre (limite de Commit).';
     }
   } catch {}
 
@@ -397,9 +426,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
     robeQueue: overlayINST && overlayINST.robeQueue ? overlayINST.robeQueue : [],
     autoMode: overlayINST && typeof overlayINST.autoMode !== 'undefined' ? overlayINST.autoMode : null,
-    sys: overlayINST && typeof overlayINST.sys !== 'undefined'
-      ? overlayINST.sys
-      : (fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null),
+    sys: sysFinal || (fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null),
     warning: warningINST,
     ts: Date.now()
   });
