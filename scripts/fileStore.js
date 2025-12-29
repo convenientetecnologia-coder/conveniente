@@ -452,22 +452,6 @@ function getSysMetricsSnapshot() {
   const toMB = (b) => Math.round(b / (1024*1024));
   const toGB = (b) => Math.round(b / (1024*1024*10)) / 100; // duas casas
 
-  let win = null;
-  try {
-    if (process.platform === 'win32' && utils.getWinMemInfoCached) {
-      win = utils.getWinMemInfoCached();
-    }
-  } catch {}
-
-  const freePhysMB = toMB(freeBytes);
-  const totalPhysMB = toMB(totalBytes);
-
-  // mem.freeMB será "efetivo" no Windows (min físico/virtual)
-  let effectiveFreeMB = freePhysMB;
-  if (win && typeof win.freeVirtMB === 'number' && typeof win.freePhysMB === 'number') {
-    effectiveFreeMB = Math.min(win.freeVirtMB, win.freePhysMB);
-  }
-
   const robeMetaStatus = (() => {
     try {
       const st = readJsonSafe(statusPath, null);
@@ -493,22 +477,11 @@ function getSysMetricsSnapshot() {
       freeBytes,
       usedBytes,
       totalMB: toMB(totalBytes),
-      freeMB:  effectiveFreeMB,
+      freeMB:  toMB(freeBytes),
       usedMB:  toMB(usedBytes),
       totalGB: toGB(totalBytes),
-      freeGB:  Math.round((effectiveFreeMB / 1024) * 100) / 100,
+      freeGB:  toGB(freeBytes),
       usedGB:  toGB(usedBytes),
-      freePhysMB,
-      totalPhysMB,
-      ...(win ? {
-        freeVirtMB: win.freeVirtMB,
-        totalVirtMB: win.totalVirtMB,
-        commitUsedMB: win.commitUsedMB,
-        commitLimitMB: win.commitLimitMB,
-        pagefileMB: win.pagefileMB,
-        hasPagefile: win.hasPagefile,
-        pagefileDisabled: win.hasPagefile === false
-      } : {}),
       minFreeRequiredMB: parseInt(process.env.MIN_FREE_RAM_MB || '1536', 10)
     },
     cpu: {

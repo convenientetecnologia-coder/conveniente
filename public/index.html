@@ -263,7 +263,6 @@
       <div class="metric"><span>Fila</span><b id="mFila">0</b></div>
       <div class="metric"><span>RAM</span><b id="mRam">--</b></div>
       <div class="metric"><span>CPU</span><b id="mCpu">--</b></div>
-      <div class="metric" id="metricPagefile"><span>Pagefile</span><b id="mPagefile">--</b></div>
       <div class="metric"><span>Fotos</span><b id="mFotos">0</b></div>
       <div class="metric clickable" id="metricLogin" style="display:none"><span>Login requerido</span><b id="mLoginReq">0</b></div>
       <div class="metric clickable" id="metricBanned" style="display:none"><span>Banidas</span><b id="mBanidas">0</b></div>
@@ -277,7 +276,6 @@
     <button class="btn" id="citiesCountBtn">Cidades</button>
     <button class="btn btn-roxo" id="startAllBtn">Abrir Todos 24h</button>
     <button class="btn btn-vermelho" id="stopAllBtn">Fechar Todos</button>
-    <button class="btn btn-cinza" id="recycleAllBtn">Reciclar Todos</button>
     <button class="btn btn-amarelo" id="invokeAllBtn">Invocar Tudo</button>
     <button class="btn btn-verde" id="resumeAllBtn">Retomar Tudo</button>
     <button class="btn btn-azul" id="robe24AllBtn">Robe 24h</button>
@@ -312,7 +310,7 @@
       alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
     }
     function setGlobalActionButtonsDisabled(disable, { exclude = [] } = {}) {
-      const ids = ['startAllBtn','stopAllBtn','recycleAllBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn'];
+      const ids = ['startAllBtn','stopAllBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn'];
       ids.forEach(id => {
         if (exclude.includes(id)) return;
         const el = document.getElementById(id);
@@ -1258,25 +1256,6 @@
         if (isFrozen) btnCookies.disabled = true;
         // ===================== ALTERAÇÃO SOLICITADA — FIM ======================
 
-        const btnRecycle = document.createElement('button');
-        btnRecycle.className = 'icon-btn btn-cinza';
-        btnRecycle.title = 'Reciclar navegador (fecha e abre novamente) — limpa vazamento de RAM';
-        btnRecycle.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5a5 5 0 0 1-9.9 1h-2.1A7 7 0 0 0 19 13c0-3.87-3.13-7-7-7z"/></svg><span>Reciclar</span>`;
-        btnRecycle.onclick = async () => {
-          try {
-            setBtnLoading(btnRecycle, true, 'Reciclando...');
-            const r = await window.electronAPI.recyclePerfil(p.nome);
-            if (!r || r.ok !== true) alert('Falha ao reciclar: ' + ((r && r.error) || ''));
-            await new Promise(r=>setTimeout(r, 800));
-            reloadPerfis();
-          } catch (e) {
-            alert('Falha ao reciclar: ' + (e && e.message || e));
-          } finally {
-            setBtnLoading(btnRecycle, false);
-          }
-        };
-        if (isFrozen) btnRecycle.disabled = true;
-
         const btnCfg = document.createElement('button');
         btnCfg.className='icon-btn';
         btnCfg.title='Configurações da Conta';
@@ -1310,7 +1289,7 @@
             finally{ btnResume.disabled=false; btnResume.innerHTML=`<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M13.41 7.41 12 6l-6 6 6 6 1.41-1.41L8.83 12z"/><path d="M18 6v12h-2V6h2z"/></svg><span>Retomar Trabalho</span>`; }
           };
           if (isFrozen) btnResume.disabled = true;
-          right.append(btnCookies, btnRecycle, btnResume, btnCfg, btnLog);
+          right.append(btnCookies, btnResume, btnCfg, btnLog);
         } else {
           // Botão “Invocar Humano” padrão
           const btnHuman = document.createElement('button');
@@ -1319,7 +1298,7 @@
           btnHuman.innerHTML = `<svg class="icon" viewBox="0 0 1024 1024" fill="currentColor"><circle cx="512" cy="352" r="216"/><ellipse cx="512" cy="800" rx="376" ry="184"/></svg><span>Invocar Humano</span>`;
           btnHuman.onclick = () => invocarHumanoUI(p, btnHuman);
           if (isFrozen) btnHuman.disabled = true;
-          right.append(btnCookies, btnRecycle, btnHuman, btnCfg, btnLog);
+          right.append(btnCookies, btnHuman, btnCfg, btnLog);
         }
         // ----------------------------------------------------------------------------------
 
@@ -1633,44 +1612,9 @@
         const m = await window.electronAPI.getSysMetrics().catch(()=>null);
         if (m && m.mem) {
           const r = document.getElementById('mRam');
-          if (r) {
-            r.textContent = formatGB(m.mem.freeGB);
-            // Update RAM tooltip with commit/pagefile info
-            if (m.mem.freeVirtMB !== undefined || m.mem.pagefileMB !== undefined) {
-              let tooltip = `RAM Efetivo: ${m.mem.freeMB || '--'} MB\n`;
-              tooltip += `Físico Livre: ${m.mem.freePhysMB || m.mem.freeMB || '--'} MB\n`;
-              if (m.mem.freeVirtMB !== undefined) {
-                tooltip += `Commit Livre: ${m.mem.freeVirtMB} MB\n`;
-              }
-              if (m.mem.pagefileMB !== undefined) {
-                tooltip += `Pagefile: ${m.mem.pagefileMB} MB (${m.mem.hasPagefile ? 'ON' : 'OFF'})\n`;
-              }
-              tooltip += `\nO sistema usa MIN(físico, commit) para decisões.`;
-              r.title = tooltip;
-            }
-          }
+          if (r) r.textContent = formatGB(m.mem.freeGB);
           const c = document.getElementById('mCpu');
           if (c) c.textContent = formatCPU(m.cpu && m.cpu.percent);
-
-          // Pagefile ON/OFF (muito importante em Windows)
-          try {
-            const pfCard = document.getElementById('metricPagefile');
-            const pfEl = document.getElementById('mPagefile');
-            if (pfCard && pfEl && m && m.mem) {
-              const disabled = (m.mem.pagefileDisabled === true) || (m.mem.hasPagefile === false);
-              pfEl.textContent = disabled ? 'OFF' : 'ON';
-              pfEl.style.color = disabled ? '#e35a5a' : '#17b67c';
-              const pfMb = (m.mem.pagefileMB !== undefined) ? m.mem.pagefileMB : '—';
-              const freeVirt = (m.mem.freeVirtMB !== undefined) ? m.mem.freeVirtMB : '—';
-              const freePhys = (m.mem.freePhysMB !== undefined) ? m.mem.freePhysMB : (m.mem.freeMB !== undefined ? m.mem.freeMB : '—');
-              pfCard.title =
-                `Pagefile: ${disabled ? 'OFF' : 'ON'}\n` +
-                `Commit livre (freeVirtMB): ${freeVirt}\n` +
-                `Físico livre (freePhysMB): ${freePhys}\n` +
-                `PagefileMB: ${pfMb}\n\n` +
-                `Observação: sem pagefile o Windows limita o Commit e o Chrome começa a falhar após horas com muitos perfis.`;
-            }
-          } catch {}
 
           // Apenas aviso visual; NUNCA desabilitar o botão
           try {
@@ -1925,23 +1869,77 @@
       const stopBtn = document.getElementById('stopAllBtn');
       if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
 
+      function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+      async function gatherActives() {
+        const st = await window.electronAPI.getStatus().catch(()=>null);
+        const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
+        return arr.filter(p => p && p.nome && p.active === true).map(p => ({ nome: p.nome }));
+      }
+
       try {
-        // Chamada enterprise server-side (não trava UI com loops)
-        const ac = new AbortController();
-        const t = setTimeout(() => { try { ac.abort(); } catch {} }, 10 * 60 * 1000); // 10 min
-        let r = null;
-        try {
-          r = await window.electronAPI.closeAll();
-        } finally {
-          clearTimeout(t);
+        // PASSO 1 — Coleta inicial de ativos (active: true)
+        let ativos = await gatherActives();
+        const totalInicial = ativos.length;
+        let closed = 0, failed = 0;
+
+        if (totalInicial === 0) {
+          if (stopBtn) stopBtn.textContent = 'Fechar Todos';
+          stopAllLock = false;
+          setGlobalActionButtonsDisabled(false);
+          return;
         }
-        if (!r || r.ok !== true) {
-          alert('Falha ao fechar todos: ' + ((r && (r.error || r.message)) || 'close_all_failed'));
+
+        // PASSO 2 — 1ª passada sequencial: fecha todos encontrados como ativos
+        for (const { nome } of ativos) {
+          try {
+            const r = await window.electronAPI.deactivate(nome);
+            if (!r || r.ok !== true) {
+              failed++;
+            } else {
+              closed++;
+            }
+          } catch (e) {
+            failed++;
+            console.warn('[Fechar todos] falha ao fechar', nome, e && e.message || e);
+          }
+          if (stopBtn) stopBtn.textContent = `Fechando... ${closed + failed}/${totalInicial}`;
+          await sleep(80);
+        }
+
+        // Pausa curta para estabilização de estados
+        await sleep(1200);
+
+        // PASSO 3 — 2ª passada (revarredura): fecha os que eventualmente permaneceram ativos
+        let rem = await gatherActives();
+        if (rem.length > 0) {
+          for (const { nome } of rem) {
+            try {
+              const r = await window.electronAPI.deactivate(nome);
+              if (!r || r.ok !== true) {
+                failed++;
+              } else {
+                closed++;
+              }
+            } catch (e) {
+              failed++;
+              console.warn('[Fechar todos][retry] falha ao fechar', nome, e && e.message || e);
+            }
+            if (stopBtn) stopBtn.textContent = `Fechando... ${closed + failed}/${totalInicial}`;
+            await sleep(100);
+          }
+        }
+
+        // PASSO 4 — Verificação final: quantos permanecem ativos?
+        const aindaAtivos = await gatherActives();
+        if (aindaAtivos.length > 0) {
+          console.warn('[Fechar todos] perfis ainda ativos após 2 passadas:', aindaAtivos.map(x => x.nome));
+          alert('Atenção: ' + aindaAtivos.length + ' perfil(is) ainda está(ão) ativo(s). Execute novamente para forçar o fechamento.');
         } else {
-          const closed = (r.totalClosed != null) ? r.totalClosed : (r.closed != null ? r.closed : 0);
-          const failedN = (r.totalFailed != null) ? r.totalFailed : (Array.isArray(r.failed) ? r.failed.length : 0);
-          alert(`Fechamento concluído: closed=${closed} failed=${failedN}`);
+          console.log('[Fechar todos] Concluído. Encerrados:', closed, 'Falhas:', failed);
         }
+
+        await sleep(600);
         reloadPerfis();
 
       } catch (e) {
@@ -1959,34 +1957,6 @@
       const btn = document.getElementById('stopAllBtn');
       if (!btn) return;
       btn.onclick = stopAllSequential;
-    })();
-
-    // Bind do botão "Reciclar Todos"
-    (function bindRecycleAllBtn(){
-      const btn = document.getElementById('recycleAllBtn');
-      if (!btn) return;
-      btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
-        if (!confirm('Reciclar TODOS os navegadores agora? (fecha e abre novamente em ondas, seguro)')) return;
-
-        massMiscLock = true;
-        const idle = btn.textContent;
-        btn.disabled = true; btn.style.opacity='0.7'; btn.textContent='Reciclando...';
-        setGlobalActionButtonsDisabled(true, { exclude: ['recycleAllBtn'] });
-
-        try {
-          const r = await window.electronAPI.recycleAll();
-          if (!r || r.ok !== true) alert('Recycle-all falhou: ' + ((r && r.error) || ''));
-          await new Promise(r=>setTimeout(r, 800));
-          reloadPerfis();
-        } catch (e) {
-          alert('Recycle-all erro: ' + (e && e.message || e));
-        } finally {
-          massMiscLock = false;
-          btn.disabled = false; btn.style.opacity=''; btn.textContent = idle;
-          setGlobalActionButtonsDisabled(false);
-        }
-      };
     })();
 
     // Bind do botão "Abrir Todos e Iniciar 24h"

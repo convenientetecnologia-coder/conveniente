@@ -200,60 +200,62 @@ async function patchPage(nome, page, coords) {
     });
   } catch {} // nunca deixa travar
 
-  // ==== BLOQUEIO DE RECURSOS PESADOS NO MESSENGER (sempre instalado) ====
-  // Motivo: patchPage pode rodar quando a aba ainda está about:blank.
-  // Se a interception só for ligada quando já está em messenger.com, perdemos o timing e carregamos mídia/font -> RAM explode.
-  try {
-    if (!page._virtusIntercepted) {
-      await page.setRequestInterception(true);
-      page.on('request', (req) => {
-        const u = req.url();
-        const type = req.resourceType();
-        // Sempre deixa passar URLs especiais
-        if (typeof u === 'string' && (u.startsWith('data:') || u.startsWith('blob:'))) {
+  // GUARDA: Virtus Messenger asset interception (apenas Messenger, nunca Marketplace Create)
+  const url = typeof page.url === "function" ? page.url() : "";
+  let interceptionConfigured = false;
+  const enableVirtusMessengerBlock =
+    (
+      typeof url === "string"
+      && /^https?:\/\/(www\.)?messenger\.com\/?/.test(url)
+    ) || (
+      page.target && typeof page.target === 'function' &&
+      (
+        (page.target()._targetInfo && /messenger\.com/.test(page.target()._targetInfo.url || ""))
+        || (typeof page.target().url === 'function' && /messenger\.com/.test(page.target().url() || ""))
+      )
+    );
+
+  // ==== PATCH APLICADO CONFORME INSTRUÇÃO (PATCH MILITAR) ====
+  if (enableVirtusMessengerBlock) {
+    try {
+      // EVITAR MÚLTIPLOS setRequestInterception/listeners:
+      if (!page._virtusIntercepted) {
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+          const u = req.url();
+          const type = req.resourceType();
+          const allowLoginFlow = (url) => /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(url);
+          const isLoggedArea = () => {
+            try { return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(page.url() || ''); }
+            catch { return false; }
+          };
+
+          if (allowLoginFlow(u)) return req.continue();
+          if (!isLoggedArea()) {
+            if (type === 'image' && /facebook\.com/i.test(u)) return req.continue();
+            if (/favicon\.ico$/i.test(u) && type === 'image') return req.continue();
+            return req.continue();
+          }
+          if (type === 'media' || type === 'font') {
+            return req.abort();
+          }
+          if (type === 'image') {
+            if (process.env.VIRTUS_BLOCK_IMAGES === '1') {
+              if (/favicon\.ico$/i.test(u)) return req.continue();
+              return req.abort();
+            }
+            return req.continue();
+          }
           return req.continue();
-        }
-        let host = '';
-        try { host = (new URL(u)).hostname || ''; } catch { host = ''; }
-        const isMessengerReq = (host === 'messenger.com' || host.endsWith('.messenger.com'));
-        // Só aplicamos bloqueios agressivos no Messenger.
-        if (!isMessengerReq) {
-          return req.continue();
-        }
-        const allowLoginFlow = (url) =>
-          /(?:messenger|facebook)\.com\/(?:(?:login|checkpoint|device|oauth|connect|security)[/?]|.*nonce)/i.test(url);
-        if (allowLoginFlow(u)) {
-          return req.continue();
-        }
-        // Só bloqueia pesado quando já estamos na área logada (evita quebrar login/checkpoint)
-        const isLoggedArea = () => {
-          try { return /messenger\.com\/(?:marketplace|t\/|inbox|compose)/i.test(page.url() || ''); }
-          catch { return false; }
-        };
-        if (!isLoggedArea()) {
-          return req.continue();
-        }
-        // Fonte e mídia são os grandes vilões de RAM/CPU no Messenger
-        if (type === 'media' || type === 'font') {
-          return req.abort();
-        }
-        // Imagens opcionais (use VIRTUS_BLOCK_IMAGES=1)
-        if (type === 'image') {
-          const blockImages = process.env.VIRTUS_BLOCK_IMAGES === '1';
-          if (!blockImages) return req.continue();
-          if (/favicon\.ico$/i.test(u)) return req.continue();
-          if (/staticxx\.facebook\.com\/rsrc\.php/i.test(u)) return req.continue();
-          if (/scontent\.|lookaside\.|fbcdn\.|external\./i.test(u)) return req.abort();
-          return req.continue();
-        }
-        return req.continue();
-      });
-      page._virtusIntercepted = true;
+        });
+        page._virtusIntercepted = true;
+        interceptionConfigured = true;
+      }
+    } catch (err) {
+      // log silencioso
     }
-  } catch (err) {
-    // nunca bloqueia abertura do browser por falha de interception
   }
-  // ==== FIM BLOQUEIO MESSENGER ====
+  // ==== FIM DO PATCH ====
 
   // PATCH: Hook redundante de beforeunload para toda nova page
   try {
