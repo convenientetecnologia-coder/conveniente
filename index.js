@@ -7,6 +7,10 @@ const open = require('open'); // <-- adicione/mova isso aqui!
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
+// Bootstrap opcional: instalar task/serviço no Windows (sem quebrar produção; só roda se CT_BOOTSTRAP_SERVICE=1)
+try {
+  require('./scripts/bootstrapService.js').boot().catch(()=>{});
+} catch {}
 
 // Helpers/pontes
 const fileStore = require('./scripts/fileStore.js');

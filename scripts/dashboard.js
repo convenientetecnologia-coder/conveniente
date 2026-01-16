@@ -278,11 +278,15 @@ async function tryAllEndpoints(payload) {
 
 // === Helpers/execução de comandos remotos (inserido acima de tick()) ===
 async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-async function httpJson(path, { method='GET', body=null } = {}) {
+async function httpJson(path, { method='GET', body=null, headers=null, rawBody=null } = {}) {
+  const hasBody = !(rawBody == null) || !(body == null);
+  const h = Object.assign({}, (headers && typeof headers === 'object') ? headers : {});
+  const sendBody = (rawBody != null) ? rawBody : (body != null ? JSON.stringify(body) : null);
+  if (hasBody && !h['Content-Type'] && !h['content-type']) h['Content-Type'] = 'application/json';
   const res = await fetch(`http://127.0.0.1:${httpPort}${path}`, {
     method,
-    headers: body ? { 'Content-Type':'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : null
+    headers: Object.keys(h).length ? h : undefined,
+    body: sendBody
   });
   return res.json();
 }
@@ -323,6 +327,78 @@ async function execRobeReleaseAll() {
   try { await httpJson('/api/robes/release-all', { method:'POST' }); } catch {}
 }
 
+function migrationsLogAppend(obj) {
+  try {
+    const p = path.join(__dirname, '..', 'dados', 'migrations.jsonl');
+    fsSync.appendFileSync(p, JSON.stringify({ ts: Date.now(), ...obj }) + '\n');
+  } catch {}
+}
+
+async function execMigrateProfiles(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const batchId = String(payload.batchId || '').trim();
+  const actions = Array.isArray(payload.actions) ? payload.actions : [];
+  if (!batchId) throw new Error('missing_batchId');
+  if (!actions.length) throw new Error('missing_actions');
+
+  // Idempotência: não repetir um batch já aplicado automaticamente
+  const appliedPath = path.join(__dirname, '..', 'dados', `.migrations_applied_${batchId}`);
+  if (fsSync.existsSync(appliedPath)) {
+    migrationsLogAppend({ event: 'migrate_skip_already_applied', batchId, cmdId: cmd && cmd.id });
+    return;
+  }
+
+  // Snapshot atual para validar fromCity exato
+  let st = null;
+  try { st = await httpJson('/api/status'); } catch {}
+  const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+  const byName = new Map(perfis.map(p => [String(p && p.nome || '').trim(), p]));
+
+  const results = [];
+  for (const a of actions) {
+    const nome = String(a && a.nome || '').trim();
+    const fromCity = String(a && a.fromCity || '').trim();
+    const toCity = String(a && a.toCity || '').trim();
+    if (!nome || !fromCity || !toCity) {
+      results.push({ nome, ok: false, error: 'missing_fields' });
+      continue;
+    }
+    const cur = byName.get(nome) || null;
+    const curCity = cur ? String(cur.cidade || '') : '';
+    if (!cur || !curCity) {
+      results.push({ nome, ok: false, error: 'profile_not_found' });
+      continue;
+    }
+    if (curCity !== fromCity) {
+      results.push({ nome, ok: false, error: 'from_mismatch', curCity, fromCity });
+      migrationsLogAppend({ event: 'migrate_action_skip', batchId, nome, error: 'from_mismatch', curCity, fromCity });
+      continue;
+    }
+    try {
+      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/cidade`, {
+        method: 'PATCH',
+        headers: { 'x-operator': 'contas-facebook-auto' },
+        body: { novaCidade: toCity }
+      });
+      if (!r || r.ok === false) throw new Error((r && r.error) || 'api_failed');
+      results.push({ nome, ok: true, fromCity, toCity });
+      migrationsLogAppend({ event: 'migrate_action_ok', batchId, nome, fromCity, toCity });
+    } catch (e) {
+      const msg = (e && e.message) ? e.message : String(e);
+      results.push({ nome, ok: false, error: msg, fromCity, toCity });
+      migrationsLogAppend({ event: 'migrate_action_fail', batchId, nome, fromCity, toCity, error: msg });
+    }
+  }
+
+  try { fsSync.writeFileSync(appliedPath, `${Date.now()}\n`, 'utf8'); } catch {}
+
+  const okCount = results.filter(r => r && r.ok).length;
+  const failCount = results.length - okCount;
+  migrationsLogAppend({ event: 'migrate_batch_done', batchId, cmdId: cmd && cmd.id, okCount, failCount });
+
+  if (failCount > 0) throw new Error(`partial_fail ok=${okCount} fail=${failCount}`);
+}
+
 // ===== ALTERAÇÃO INÍCIO: add notifierBaseFromEndpoints e ackCommand =====
 function notifierBaseFromEndpoints() {
   try {
@@ -348,6 +424,122 @@ async function ackCommand(cmdId, ok, errorMsg) {
 }
 // ===== ALTERAÇÃO FIM ===============================================
 
+// ===== Logs sob demanda (fetch_logs) =====
+function logsSecret() {
+  return String(process.env.LOG_INGEST_SECRET || '').trim();
+}
+function logsAllowlist() {
+  const base = path.join(__dirname, '..', 'dados');
+  return {
+    logger: path.join(base, 'logger.log'),
+    issues_fallback: path.join(base, 'issues_fallback.log'),
+    migrations: path.join(base, 'migrations.jsonl'),
+    updates: path.join(base, 'updates.jsonl')
+  };
+}
+function tailFileLines(filePath, maxLines = 2000, maxBytes = 1200_000) {
+  try {
+    if (!fsSync.existsSync(filePath)) return { ok:false, error:'not_found', filePath };
+    const st = fsSync.statSync(filePath);
+    const size = Number(st.size || 0) || 0;
+    const readBytes = Math.min(maxBytes, size);
+    const start = Math.max(0, size - readBytes);
+    const buf = Buffer.alloc(readBytes);
+    const fd = fsSync.openSync(filePath, 'r');
+    try { fsSync.readSync(fd, buf, 0, readBytes, start); }
+    finally { try { fsSync.closeSync(fd); } catch {} }
+    const txt = buf.toString('utf8');
+    const lines = txt.split(/\r?\n/);
+    const tail = lines.slice(Math.max(0, lines.length - maxLines));
+    const truncated = (start > 0) || (lines.length > maxLines);
+    return { ok:true, filePath, bytes: readBytes, lines: tail.length, truncated, text: tail.join('\n') };
+  } catch (e) {
+    return { ok:false, error: (e && e.message) || String(e), filePath };
+  }
+}
+async function postLogsToNotifier({ requestId, items }) {
+  const base = notifierBaseFromEndpoints();
+  if (!base) throw new Error('notifier_base_unavailable');
+  if (!hostIdCache) throw new Error('hostId_unavailable');
+  const sec = logsSecret();
+  const controller = new (global.AbortController || require('node-abort-controller'))();
+  const t = setTimeout(() => { try { controller.abort(); } catch {} }, 8000);
+  try {
+    await fetch(`${base}/api/logs/ingest`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sec ? { 'X-Log-Secret': sec } : {})
+      },
+      body: JSON.stringify({
+        hostId: hostIdCache,
+        hostname: (os && os.hostname) ? os.hostname() : '',
+        requestId,
+        sentAt: Date.now(),
+        items
+      }),
+      signal: controller.signal
+    }).catch(()=>{});
+  } finally {
+    clearTimeout(t);
+  }
+}
+async function execFetchLogs(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const requestId = String(payload.requestId || '').trim();
+  const keys = Array.isArray(payload.keys) ? payload.keys.map(x => String(x||'').trim()).filter(Boolean) : [];
+  const tailLines = Math.max(50, Math.min(8000, Number(payload.tailLines || 1200) || 1200));
+  if (!requestId) throw new Error('missing_requestId');
+  if (!keys.length) throw new Error('missing_keys');
+  const allow = logsAllowlist();
+  const items = [];
+  for (const key of keys.slice(0, 8)) {
+    const fp = allow[key];
+    if (!fp) { items.push({ key, ok:false, error:'not_allowed' }); continue; }
+    const r = tailFileLines(fp, tailLines);
+    items.push({ key, ...r });
+  }
+  await postLogsToNotifier({ requestId, items });
+}
+
+// ===== Update massivo (self_update = git pull) =====
+function updateLogAppend(obj) {
+  try {
+    const p = path.join(__dirname, '..', 'dados', 'updates.jsonl');
+    fsSync.appendFileSync(p, JSON.stringify({ ts: Date.now(), ...obj }) + '\n');
+  } catch {}
+}
+async function runGit(args, { cwd } = {}) {
+  const { execFile } = require('child_process');
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd: cwd || path.join(__dirname, '..') }, (err, stdout, stderr) => {
+      if (err) return resolve({ ok:false, error: (err && err.message) || String(err), stdout: String(stdout||''), stderr: String(stderr||'') });
+      return resolve({ ok:true, stdout: String(stdout||''), stderr: String(stderr||'') });
+    });
+  });
+}
+async function execSelfUpdate(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const requestId = String(payload.requestId || '').trim() || (cmd && cmd.id) || 'noid';
+  const branch = String(payload.branch || 'main').trim() || 'main';
+  const repoDir = path.join(__dirname, '..');
+
+  updateLogAppend({ event: 'self_update_start', requestId, branch });
+  const steps = [];
+  steps.push({ step: 'rev-parse', ...(await runGit(['rev-parse','--is-inside-work-tree'], { cwd: repoDir })) });
+  steps.push({ step: 'fetch', ...(await runGit(['fetch','--all','--prune'], { cwd: repoDir })) });
+  steps.push({ step: 'status_before', ...(await runGit(['status','--porcelain'], { cwd: repoDir })) });
+  steps.push({ step: 'pull', ...(await runGit(['pull','--ff-only','origin',branch], { cwd: repoDir })) });
+  steps.push({ step: 'rev', ...(await runGit(['rev-parse','HEAD'], { cwd: repoDir })) });
+
+  const ok = steps.every(s => s && s.ok);
+  updateLogAppend({ event: 'self_update_done', requestId, branch, ok, steps: steps.map(s => ({ step: s.step, ok: s.ok, error: s.error || null })) });
+  if (!ok) {
+    const err = steps.find(s => !s.ok);
+    throw new Error(`self_update_failed:${(err && err.step) || 'unknown'}:${(err && err.error) || 'error'}`);
+  }
+}
+
 // ===== ALTERAÇÃO INÍCIO: applyCommands para ACK após cada execução =====
 async function applyCommands(cmds = []) {
   for (const c of cmds) {
@@ -357,6 +549,9 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'open_all_24h')     { await execOpenAll24h(); }
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
+      else if (c.type === 'migrate_profiles') { await execMigrateProfiles(c); }
+      else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
+      else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       logger.info('[DASH][CMD] executado: ' + c.type);
       // ACK de sucesso
       try { await ackCommand(c.id, true, null); } catch {}
