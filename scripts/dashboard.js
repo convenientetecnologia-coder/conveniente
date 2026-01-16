@@ -392,6 +392,12 @@ async function tick() {
       hostname: quick.system.hostname,
       hostId,
       sentAt: now(),
+      host: {
+        // RAM total do servidor (para capacidade no notificador)
+        totalMemGB: (quick && quick.system && typeof quick.system.totalMB === 'number')
+          ? Math.max(1, Math.round(quick.system.totalMB / 1024))
+          : Math.max(1, Math.round(os.totalmem() / (1024 * 1024 * 1024)))
+      },
       status: {
         ...status,
         _dashboard: quick
