@@ -6,6 +6,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFile } = require("child_process");
 const logger = require("./logger.js");
+const https = require("https");
 
 function run(cmd, args, { cwd } = {}) {
   return new Promise((resolve) => {
@@ -81,6 +82,84 @@ async function nssmInstall({ nssmPath, serviceName, nodePath, workDir, scriptPat
   return { ok: true };
 }
 
+function toolsDir() {
+  return path.join(resolveRepoDir(), "dados", "tools");
+}
+function ensureDir(p) {
+  try { fs.mkdirSync(p, { recursive: true }); } catch {}
+}
+function downloadToFile(url, outFile) {
+  return new Promise((resolve) => {
+    const file = fs.createWriteStream(outFile);
+    const req = https.get(url, (res) => {
+      if (res.statusCode !== 200) {
+        try { file.close(); } catch {}
+        try { fs.unlinkSync(outFile); } catch {}
+        return resolve({ ok: false, error: `http_${res.statusCode}` });
+      }
+      res.pipe(file);
+      file.on("finish", () => file.close(() => resolve({ ok: true })));
+    });
+    req.on("error", (e) => {
+      try { file.close(); } catch {}
+      try { fs.unlinkSync(outFile); } catch {}
+      resolve({ ok: false, error: (e && e.message) || String(e) });
+    });
+  });
+}
+async function expandZip(zipPath, destDir) {
+  ensureDir(destDir);
+  // PowerShell Expand-Archive é nativo no Windows
+  const ps = [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-Command",
+    `Expand-Archive -LiteralPath "${zipPath}" -DestinationPath "${destDir}" -Force`
+  ];
+  return await run("powershell.exe", ps, { cwd: destDir });
+}
+function findNssmExe(extractDir) {
+  try {
+    const archFolder = (process.arch === "x64") ? "win64" : "win32";
+    // layout padrão do zip do NSSM: nssm-2.24/win64/nssm.exe
+    const rootItems = fs.readdirSync(extractDir, { withFileTypes: true }).filter(d => d.isDirectory());
+    for (const d of rootItems) {
+      const cand = path.join(extractDir, d.name, archFolder, "nssm.exe");
+      if (fs.existsSync(cand)) return cand;
+    }
+  } catch {}
+  return null;
+}
+async function ensureNssmAvailable() {
+  const existing = String(process.env.NSSM_PATH || "").trim();
+  if (existing && fs.existsSync(existing)) return { ok: true, nssmPath: existing, source: "env" };
+
+  // Só baixa se permitido explicitamente (segurança)
+  if (process.env.CT_ALLOW_DOWNLOAD_TOOLS !== "1") {
+    return { ok: false, error: "nssm_not_found", hint: "Defina NSSM_PATH ou use CT_ALLOW_DOWNLOAD_TOOLS=1 para baixar automaticamente." };
+  }
+  if (process.platform !== "win32") {
+    return { ok: false, error: "not_windows" };
+  }
+
+  const tdir = toolsDir();
+  ensureDir(tdir);
+  const zipUrl = String(process.env.CT_NSSM_ZIP_URL || "https://nssm.cc/release/nssm-2.24.zip").trim();
+  const zipPath = path.join(tdir, "nssm.zip");
+  const extractDir = path.join(tdir, "nssm");
+
+  logger.info("[BOOTSTRAP] baixando NSSM", { url: zipUrl });
+  const dl = await downloadToFile(zipUrl, zipPath);
+  if (!dl.ok) return { ok: false, error: "download_failed", details: dl.error };
+
+  const ex = await expandZip(zipPath, extractDir);
+  if (!ex.ok) return { ok: false, error: "extract_failed", details: ex.stderr || ex.stdout || ex.error };
+
+  const nssmPath = findNssmExe(extractDir);
+  if (!nssmPath) return { ok: false, error: "nssm_exe_not_found_after_extract" };
+  return { ok: true, nssmPath, source: "download" };
+}
+
 async function nssmStart({ nssmPath, serviceName, workDir }) {
   return await run(nssmPath, ["start", serviceName], { cwd: workDir });
 }
@@ -136,10 +215,9 @@ async function ensureServiceInstalled() {
 
   // 1) NSSM se solicitado explicitamente
   if (preferred === "nssm") {
-    const nssmPath = String(process.env.NSSM_PATH || "").trim();
-    if (!nssmPath || !fs.existsSync(nssmPath)) {
-      return { ok: false, error: "nssm_not_found", hint: "Defina NSSM_PATH com caminho completo do nssm.exe" };
-    }
+    const nssmEnsure = await ensureNssmAvailable();
+    if (!nssmEnsure.ok) return nssmEnsure;
+    const nssmPath = nssmEnsure.nssmPath;
     const isAdmin = await isAdminWindows();
     if (!isAdmin) {
       return { ok: false, error: "not_admin", hint: "Abra PowerShell como Administrador para instalar o serviço NSSM" };
