@@ -143,6 +143,17 @@ async function ensureNssmAvailable() {
   const existing = String(process.env.NSSM_PATH || "").trim();
   if (existing && fs.existsSync(existing)) return { ok: true, nssmPath: existing, source: "env" };
 
+  // 0) Se já existe NSSM baixado/extrado localmente, reutiliza (evita depender do site nssm.cc)
+  try {
+    if (process.platform === "win32") {
+      const extractDir = path.join(toolsDir(), "nssm");
+      if (fs.existsSync(extractDir)) {
+        const found = findNssmExe(extractDir);
+        if (found && fs.existsSync(found)) return { ok: true, nssmPath: found, source: "local" };
+      }
+    }
+  } catch {}
+
   // Só baixa se permitido explicitamente (segurança)
   if (process.env.CT_ALLOW_DOWNLOAD_TOOLS !== "1") {
     return { ok: false, error: "nssm_not_found", hint: "Defina NSSM_PATH ou use CT_ALLOW_DOWNLOAD_TOOLS=1 para baixar automaticamente." };
@@ -156,6 +167,14 @@ async function ensureNssmAvailable() {
   const zipUrl = String(process.env.CT_NSSM_ZIP_URL || "https://nssm.cc/release/nssm-2.24.zip").trim();
   const zipPath = path.join(tdir, "nssm.zip");
   const extractDir = path.join(tdir, "nssm");
+
+  // Se já existe extraído (por algum motivo), tenta achar e usar.
+  try {
+    if (fs.existsSync(extractDir)) {
+      const found = findNssmExe(extractDir);
+      if (found && fs.existsSync(found)) return { ok: true, nssmPath: found, source: "local" };
+    }
+  } catch {}
 
   logger.info("[BOOTSTRAP] baixando NSSM", { url: zipUrl });
   const dl = await downloadToFile(zipUrl, zipPath);
