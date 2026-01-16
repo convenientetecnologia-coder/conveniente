@@ -580,6 +580,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
+      else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
       // ACK de sucesso
       try { await ackCommand(c.id, true, null); } catch {}
