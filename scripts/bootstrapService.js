@@ -63,7 +63,12 @@ async function startScheduledTask(taskName) {
 async function nssmInstall({ nssmPath, serviceName, nodePath, workDir, scriptPath, envPairs = [], stdoutPath, stderrPath }) {
   // Instala o service
   let r = await run(nssmPath, ["install", serviceName, nodePath, scriptPath], { cwd: workDir });
-  if (!r.ok) return r;
+  // Se já existe, seguimos para reconfigurar (modo idempotente)
+  if (!r.ok) {
+    const msg = String(r.stderr || r.stdout || r.error || "");
+    if (!/already exists|j[aá] existe|1060|CreateService/i.test(msg)) return r;
+    logger.warn("[BOOTSTRAP] NSSM service já existe; reconfigurando", { serviceName });
+  }
   // Working dir
   await run(nssmPath, ["set", serviceName, "AppDirectory", workDir], { cwd: workDir });
   // Logs
