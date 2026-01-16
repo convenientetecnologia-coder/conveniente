@@ -66,7 +66,9 @@ async function nssmInstall({ nssmPath, serviceName, nodePath, workDir, scriptPat
   // Se já existe, seguimos para reconfigurar (modo idempotente)
   if (!r.ok) {
     const msg = String(r.stderr || r.stdout || r.error || "");
-    if (!/already exists|j[aá] existe|1060|CreateService/i.test(msg)) return r;
+    // Windows PT-BR pode vir com encoding quebrado (ex.: "j� existe"), então usamos heurística ampla.
+    // NSSM: "CreateService(): The specified service already exists." / "O servi�o especificado j� existe."
+    if (!(/already exists/i.test(msg) || /CreateService\(\)/i.test(msg) || /exist/i.test(msg))) return r;
     logger.warn("[BOOTSTRAP] NSSM service já existe; reconfigurando", { serviceName });
   }
   // Working dir
