@@ -434,7 +434,12 @@ function logsAllowlist() {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
     migrations: path.join(base, 'migrations.jsonl'),
-    updates: path.join(base, 'updates.jsonl')
+    updates: path.join(base, 'updates.jsonl'),
+    // útil para auditoria do canal de comandos
+    commands: path.join(base, 'commands.log'),
+    // logs do serviço (quando NSSM estiver configurado)
+    service_stdout: path.join(base, 'service_stdout.log'),
+    service_stderr: path.join(base, 'service_stderr.log')
   };
 }
 function tailFileLines(filePath, maxLines = 2000, maxBytes = 1200_000) {
@@ -502,6 +507,28 @@ async function execFetchLogs(cmd) {
   await postLogsToNotifier({ requestId, items });
 }
 
+async function execLogsManifest(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const requestId = String(payload.requestId || '').trim();
+  if (!requestId) throw new Error('missing_requestId');
+  const allow = logsAllowlist();
+  const items = [];
+  for (const key of Object.keys(allow)) {
+    const fp = allow[key];
+    try {
+      if (!fp || !fsSync.existsSync(fp)) {
+        items.push({ key, ok:false, error:'not_found', filePath: fp || null, bytes: 0, mtimeMs: null });
+        continue;
+      }
+      const st = fsSync.statSync(fp);
+      items.push({ key, ok:true, filePath: fp, bytes: Number(st.size || 0) || 0, mtimeMs: Number(st.mtimeMs || 0) || null });
+    } catch (e) {
+      items.push({ key, ok:false, error: (e && e.message) || String(e), filePath: fp || null, bytes: 0, mtimeMs: null });
+    }
+  }
+  await postLogsToNotifier({ requestId, items });
+}
+
 // ===== Update massivo (self_update = git pull) =====
 function updateLogAppend(obj) {
   try {
@@ -551,6 +578,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
       else if (c.type === 'migrate_profiles') { await execMigrateProfiles(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
+      else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       logger.info('[DASH][CMD] executado: ' + c.type);
       // ACK de sucesso
