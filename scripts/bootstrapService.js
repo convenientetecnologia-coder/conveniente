@@ -44,8 +44,9 @@ async function createScheduledTask({ taskName, workDir, nodePath, scriptPath, en
   const args = [
     "/Create",
     "/F",
-    "/SC", "ONSTART",
-    "/RL", "HIGHEST",
+    // ONSTART costuma exigir admin; sem admin usamos ONLOGON (vai subir quando o operador logar).
+    "/SC", "ONLOGON",
+    "/RL", "LIMITED",
     "/TN", taskName,
     "/TR", tr
   ];
@@ -114,7 +115,14 @@ function buildEnvPairs() {
 
 async function ensureServiceInstalled() {
   if (process.platform !== "win32") return { ok: true, skipped: true, reason: "not_windows" };
-  if (process.env.CT_BOOTSTRAP_SERVICE !== "1") return { ok: true, skipped: true, reason: "CT_BOOTSTRAP_SERVICE!=1" };
+  if (process.env.CT_BOOTSTRAP_SERVICE !== "1") {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "CT_BOOTSTRAP_SERVICE!=1",
+      hint: "Para auto-instalar runtime gerenciado: defina CT_BOOTSTRAP_SERVICE=1 (e opcionalmente CT_SERVICE_MODE=task|nssm)"
+    };
+  }
   if (process.env.IS_SERVICE === "1") return { ok: true, skipped: true, reason: "already_service" };
 
   const repoDir = resolveRepoDir();
@@ -145,9 +153,13 @@ async function ensureServiceInstalled() {
   }
 
   // 2) Default: Scheduled Task (mais fácil sem admin)
+  const isAdmin = await isAdminWindows();
   const exists = await scheduledTaskExists(taskName);
   if (!exists) {
-    const r = await createScheduledTask({ taskName, workDir: repoDir, nodePath, scriptPath, envPairs });
+    // Se for admin, ONSTART é o ideal
+    const r = isAdmin
+      ? await run("schtasks.exe", ["/Create","/F","/SC","ONSTART","/RL","HIGHEST","/TN",taskName,"/TR", `cmd.exe /c "${nodePath}" "${scriptPath}"`], { cwd: repoDir })
+      : await createScheduledTask({ taskName, workDir: repoDir, nodePath, scriptPath, envPairs });
     if (!r.ok) return { ok: false, error: "task_create_failed", details: r.stderr || r.stdout || r.error };
   }
   // tenta rodar agora (vai iniciar em background)
