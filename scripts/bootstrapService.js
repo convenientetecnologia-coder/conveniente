@@ -74,8 +74,10 @@ async function nssmInstall({ nssmPath, serviceName, nodePath, workDir, scriptPat
   await run(nssmPath, ["set", serviceName, "AppRotateBytes", "10485760"], { cwd: workDir }); // 10MB
   // Env vars
   if (envPairs.length) {
-    const envStr = envPairs.map(x => `${x.key}=${String(x.value ?? "")}`).join("\0");
-    await run(nssmPath, ["set", serviceName, "AppEnvironmentExtra", envStr], { cwd: workDir });
+    // IMPORTANTE: não usar null-bytes em argumentos (Node/Windows bloqueia).
+    // NSSM aceita múltiplos argumentos: AppEnvironmentExtra VAR=VAL VAR2=VAL2 ...
+    const envArgs = envPairs.map(x => `${x.key}=${String(x.value ?? "")}`);
+    await run(nssmPath, ["set", serviceName, "AppEnvironmentExtra", ...envArgs], { cwd: workDir });
   }
   // Auto start
   await run(nssmPath, ["set", serviceName, "Start", "SERVICE_AUTO_START"], { cwd: workDir });

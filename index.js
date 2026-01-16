@@ -7,10 +7,18 @@ const open = require('open'); // <-- adicione/mova isso aqui!
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
-// Bootstrap opcional: instalar task/serviço no Windows (sem quebrar produção; só roda se CT_BOOTSTRAP_SERVICE=1)
-try {
-  require('./scripts/bootstrapService.js').boot().catch(()=>{});
-} catch {}
+
+// Bootstrap opcional: instalar task/serviço no Windows
+// IMPORTANTE: se estiver em modo bootstrap e CT_BOOTSTRAP_EXIT=1, o bootstrap pode encerrar o processo.
+// Para não iniciar cluster/HTTP “à toa”, aguardamos o bootstrap antes do resto do boot.
+async function maybeBootstrapService() {
+  try {
+    const bs = require('./scripts/bootstrapService.js');
+    if (bs && typeof bs.boot === 'function') {
+      await bs.boot();
+    }
+  } catch {}
+}
 
 // Helpers/pontes
 const fileStore = require('./scripts/fileStore.js');
@@ -77,12 +85,12 @@ app.use('/', express.static(path.join(__dirname, 'public')));
 
 // ===================== CLUSTER MULTI-NODE =====================
 let clusterClient = null;
-(async () => {
+async function bootCluster() {
   const { createCluster } = require('./scripts/clusterMaster.js');
   logger.info('[BOOT] Construindo cluster multi-node (auto)...');
   clusterClient = createCluster(); // { plan, children, sendWorkerCommand, kill }
   logger.info('[BOOT] Cluster OK: nodes=' + clusterClient.plan.nodes + ' perNodeMax=' + clusterClient.plan.perNode.maxChromes);
-})();
+}
 // ===================== FIM CLUSTER MULTI-NODE =====================
 
 // API endpoints (militar por arquivo de rota, modular, fácil de achar)
@@ -131,21 +139,27 @@ fileStore.ensurePerfisJson();
 // Health check endpoint (opcional)
 app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// Start server — faça o binding em 127.0.0.1
-app.listen(PORT, '127.0.0.1', () => {
-  logger.info(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
-  logger.info('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
-  // Logging claro: status da proteção e do modo de abertura do painel
+// Boot sequencial: bootstrap -> cluster -> listen
+(async () => {
+  await maybeBootstrapService();
+  await bootCluster();
 
-  if (process.env.OPEN_CHROMIUM_ON_START == '1') {
-    logger.info('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
-  } else {
-    logger.info('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
-  }
+  // Start server — faça o binding em 127.0.0.1
+  app.listen(PORT, '127.0.0.1', () => {
+    logger.info(`[START] Painel admin disponível em http://localhost:${PORT}/index.html`);
+    logger.info('[SECURE] Servindo apenas arquivos de public/, backend protegido.');
+    // Logging claro: status da proteção e do modo de abertura do painel
 
-  // <<< INICIA O MONITOR DE TELEMETRIA, EXATAMENTE AQUI >>>
-  startDashboardMonitor();
-});
+    if (process.env.OPEN_CHROMIUM_ON_START == '1') {
+      logger.info('[INFO] Abertura automática do Chromium: ATIVA (OPEN_CHROMIUM_ON_START=1)');
+    } else {
+      logger.info('[INFO] Abrir painel Chromium automaticamente está desativado (defina OPEN_CHROMIUM_ON_START=1 para ativar, se desejar).');
+    }
+
+    // <<< INICIA O MONITOR DE TELEMETRIA, EXATAMENTE AQUI >>>
+    startDashboardMonitor();
+  });
+})();
 
 // Tenta abrir sempre o painel no Chromium azul (agora OPT-IN)
 if (process.env.OPEN_CHROMIUM_ON_START == '1') {
