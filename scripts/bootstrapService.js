@@ -56,6 +56,27 @@ async function createScheduledTask({ taskName, workDir, nodePath, scriptPath, en
   return r;
 }
 
+async function createScheduledTaskInteractive({ taskName, workDir, nodePath, scriptPath, envPairs = [] }) {
+  // Task interativa (visível): roda apenas quando o usuário estiver logado (token interativo).
+  // Observação: /IT pode falhar dependendo das políticas; nesse caso o bootstrap devolve hint.
+  const envPrefix = envPairs
+    .filter(x => x && x.key)
+    .map(x => `set "${x.key}=${String(x.value ?? "")}"`)
+    .join(" && ");
+  const cmdLine = (envPrefix ? (envPrefix + " && ") : "") + `"${nodePath}" "${scriptPath}"`;
+  const tr = `cmd.exe /c ${cmdLine}`;
+  const args = [
+    "/Create",
+    "/F",
+    "/SC", "ONLOGON",
+    "/RL", "HIGHEST",
+    "/IT",
+    "/TN", taskName,
+    "/TR", tr
+  ];
+  return await run("schtasks.exe", args, { cwd: workDir });
+}
+
 async function startScheduledTask(taskName) {
   return await run("schtasks.exe", ["/Run", "/TN", taskName], {});
 }
@@ -237,7 +258,7 @@ async function ensureServiceInstalled() {
   const scriptPath = path.join(repoDir, "index.js");
   const envPairs = buildEnvPairs();
 
-  const preferred = String(process.env.CT_SERVICE_MODE || "task").trim().toLowerCase(); // task|nssm
+  const preferred = String(process.env.CT_SERVICE_MODE || "task").trim().toLowerCase(); // task|task_ui|nssm
   const serviceName = String(process.env.CT_SERVICE_NAME || "Conveniente").trim() || "Conveniente";
   const taskName = String(process.env.CT_TASK_NAME || "Conveniente").trim() || "Conveniente";
 
@@ -258,7 +279,25 @@ async function ensureServiceInstalled() {
     return { ok: true, mode: "nssm", serviceName };
   }
 
-  // 2) Default: Scheduled Task (mais fácil sem admin)
+  // 2) Scheduled Task: modo UI (interativo/visível)
+  if (preferred === "task_ui") {
+    const exists = await scheduledTaskExists(taskName);
+    if (!exists) {
+      const r = await createScheduledTaskInteractive({ taskName, workDir: repoDir, nodePath, scriptPath, envPairs });
+      if (!r.ok) {
+        return {
+          ok: false,
+          error: "task_ui_create_failed",
+          details: r.stderr || r.stdout || r.error,
+          hint: "Tente rodar como Admin e/ou defina CT_SERVICE_MODE=task (sem /IT). Em alguns Windows, /IT exige /RU do usuário."
+        };
+      }
+    }
+    await startScheduledTask(taskName);
+    return { ok: true, mode: "task_ui", taskName, hint: "Visível apenas quando houver usuário logado no servidor (RDP/console)." };
+  }
+
+  // 3) Default: Scheduled Task (não necessariamente visível)
   const isAdmin = await isAdminWindows();
   const exists = await scheduledTaskExists(taskName);
   if (!exists) {
