@@ -3737,8 +3737,18 @@ async function nurseTick() {
         try { await closeExtraPages(ctrl.browser, p0, nome).catch(()=>{}); } catch {}
       }
       if (want.virtus === 'on' && automationAllowed(ctrl)) {
+        // Se o governor mudou de modo, reinicia o runner do Virtus para aplicar slowMode sem derrubar browser/sessão.
+        try {
+          const curMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
+          const prevMode = ctrl._virtusGovernorMode || null;
+          if (ctrl.virtus && prevMode && prevMode !== curMode) {
+            await appendIssueNurseDebounced(nome, 'mil_action', `virtus_restart_due_governor prev=${prevMode} cur=${curMode}`, 'virtus_restart_due_governor');
+            try { await stopVirtus(nome); } catch {}
+          }
+        } catch {}
         try { 
           ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' }); 
+          ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
           ctrl.trabalhando = true; 
         } catch {}
       }
