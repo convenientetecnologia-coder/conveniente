@@ -395,7 +395,6 @@ function _pruneWindow(arr, ms) {
   return arr.filter(ts => (now - ts) < ms);
 }
 
-const os = require('os');
 const AUTO_CFG = {
   MEM_ENTER_MB: 2048,
   MEM_EXIT_MB: 3072,
