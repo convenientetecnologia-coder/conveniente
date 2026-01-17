@@ -2102,7 +2102,8 @@ async function detectLoginRequired(page) {
     if ((hasPersonaText || hasCheckpointText) && (strongLoginPath || /checkpoint/i.test(title))) {
       return {
         loginRequired: true,
-        reason: 'checkpoint_captcha',
+        // Se a tela é explicitamente “Confirme que você é uma pessoa”, separa para diagnóstico humano
+        reason: hasPersonaText ? 'captcha_persona' : 'checkpoint_captcha',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
