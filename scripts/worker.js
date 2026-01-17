@@ -57,7 +57,9 @@ async function captureLoginRequiredEvidence(nome, page, lr) {
       const content = await page.content().catch(()=>null);
       if (content) fs.writeFileSync(html, String(content), 'utf8');
     } catch {}
+    return true;
   } catch {}
+  return false;
 }
 
 const _profileOpLocks = new Map();
@@ -3314,6 +3316,30 @@ async function nurseTick() {
 
       const p0 = pages[0];
       try {
+        // Se a flag LR já está setada (persistida), capture evidência do estado atual
+        // para provar se é falso positivo (ex.: já está logado mas flag ficou presa).
+        try {
+          const flags = await readAccountFlags(nome).catch(()=>({}));
+          if (flags && flags.loginRequired === true) {
+            const captured = await captureLoginRequiredEvidence(nome, p0, { reason: 'flag_snapshot' });
+            if (captured) {
+              let urlNow = null, titleNow = null;
+              try { urlNow = (typeof p0.url === 'function') ? (p0.url() || null) : null; } catch {}
+              try { titleNow = (typeof p0.title === 'function') ? (await p0.title().catch(()=>null)) : null; } catch {}
+              appendJsonl(LR_EVENTS_JSONL, {
+                ts: Date.now(),
+                host: os.hostname(),
+                perfil: nome,
+                event: 'lr_flag_snapshot',
+                storedReason: flags.loginReason || null,
+                storedSource: flags.loginSource || null,
+                url: urlNow,
+                title: titleNow
+              });
+            }
+          }
+        } catch {}
+
         const lr = await browserHelper.detectLoginRequired(p0);
         if (lr && lr.loginRequired) {
           try {
@@ -3324,12 +3350,13 @@ async function nurseTick() {
             const curReason = String(lr.reason || '');
             const curSource = String(lr.domain || '');
             const changed = !(prevLR && (String(prevReason) === curReason) && (String(prevSource) === curSource));
-            if (changed) {
-              await captureLoginRequiredEvidence(nome, p0, lr);
+            const captured = await captureLoginRequiredEvidence(nome, p0, lr);
+            if (captured || changed) {
               appendJsonl(LR_EVENTS_JSONL, {
                 ts: Date.now(),
                 host: os.hostname(),
                 perfil: nome,
+                event: 'lr_detected',
                 reason: curReason,
                 source: curSource,
                 url: lr.url || null,
