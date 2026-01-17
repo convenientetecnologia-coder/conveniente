@@ -2,6 +2,7 @@
 // Militar: responde autoMode/sys originais do worker/status.json. Nunca remova, nunca altere shape.
 
 module.exports = (app, workerClient, fileStore) => {
+const opsState = require('./opsState.js');
 // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
 // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
 app.get('/api/status', async (req, res) => {
@@ -385,6 +386,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     sys: overlayINST && typeof overlayINST.sys !== 'undefined'
       ? overlayINST.sys
       : (fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null),
+    ops: opsState.getOps(),
     warning: warningINST,
     ts: Date.now()
   });

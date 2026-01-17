@@ -31,6 +31,7 @@ const pLimit = pLimitImport.default || pLimitImport;
 
 // ===== IMPORTAÇÃO DO manifestStore (conforme PASSO 1) =====
 const manifestStore = require('./manifestStore.js');
+const opsState = require('./opsState.js');
 
 module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
@@ -806,6 +807,7 @@ module.exports = (app, workerClient, fileStore) => {
     const issues = require('./issues.js');
     try {
       const perfisArr = fileStore.loadPerfisJson() || [];
+      opsState.begin('close_all', { total: perfisArr.length, done: 0, ok: 0, fail: 0, current: null });
 
       // 1) PASSO ATÔMICO: seta active:false e virtus:'off' em todos
       await fileStore.withDesiredFileLockUpdate(desired => {
@@ -824,11 +826,14 @@ module.exports = (app, workerClient, fileStore) => {
 
       // 2) Loop de fechamento (sequencial + retry) para garantir 110%
       const results = [];
+      let okCount = 0;
+      let failCount = 0;
       for (const p of perfisArr) {
         const nome = p && p.nome;
         if (!nome) continue;
         let okDeactivate = false;
         let err = null;
+        opsState.update('close_all', { current: nome });
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
             const r = await workerClient.sendWorkerCommand('deactivate', { nome, reason: 'close_all' }, { timeoutMs: 90000 });
@@ -841,14 +846,18 @@ module.exports = (app, workerClient, fileStore) => {
           // pequeno respiro para não estressar o Chrome/FB
           await new Promise(r => setTimeout(r, 1200));
         }
+        if (okDeactivate) okCount++; else failCount++;
         results.push({ nome, deactivate: okDeactivate, error: err || null });
+        opsState.update('close_all', { done: results.length, ok: okCount, fail: failCount });
         // respiro (reduz flapping/CPU)
         await new Promise(r => setTimeout(r, 500));
       }
 
       try { await issues.append('system', 'mil_action', `bulk_close_all total=${perfisArr.length}`); } catch {}
+      opsState.finish('close_all', { total: perfisArr.length, done: results.length, ok: okCount, fail: failCount, current: null, success: true });
       return res.json({ ok: true, total: perfisArr.length, results });
     } catch (e) {
+      try { opsState.finish('close_all', { success: false, error: (e && e.message) || String(e), current: null }); } catch {}
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });

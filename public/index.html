@@ -304,6 +304,8 @@
     // Lock para impedir múltiplos comandos em massa simultâneos — fortalece UX com fluxo único!
     let startAllLock = false;
     let stopAllLock  = false;
+    // Quando um comando remoto (via notificador) dispara "close_all", o lock precisa refletir aqui também.
+    let stopAllRemoteLock = false;
     let massMiscLock = false; // Novo lock para ações de massa diversas (invoke/resume)
     function isMassActionRunning(){ return startAllLock || stopAllLock || massMiscLock; }
     function alertMassActionRunning(msg){
@@ -846,6 +848,38 @@
         window.electronAPI.getStatus().catch(() => null),
         window.electronAPI.listPerfis().catch(() => null)
       ]);
+
+      // ====== NOVO: sincronizar ações em massa vindas do backend (comandos remotos) ======
+      try {
+        const op = st && st.ops && st.ops.close_all ? st.ops.close_all : null;
+        const stopBtn = document.getElementById('stopAllBtn');
+        if (op && op.running) {
+          stopAllRemoteLock = true;
+          stopAllLock = true; // trava UX enquanto fecha
+          setGlobalActionButtonsDisabled(true);
+          if (stopBtn) {
+            const done = Number(op.done || 0) || 0;
+            const total = Number(op.total || 0) || 0;
+            stopBtn.disabled = true;
+            stopBtn.style.opacity = '0.7';
+            stopBtn.style.cursor = 'not-allowed';
+            stopBtn.textContent = total > 0 ? `Fechando... ${done}/${total}` : 'Fechando...';
+            stopBtn.title = op.current ? ('Agora: ' + String(op.current)) : '';
+          }
+        } else if (stopAllRemoteLock) {
+          // Só destrava automaticamente se este lock foi "remoto".
+          stopAllRemoteLock = false;
+          stopAllLock = false;
+          if (stopBtn) {
+            stopBtn.disabled = false;
+            stopBtn.style.opacity = '';
+            stopBtn.style.cursor = '';
+            stopBtn.textContent = 'Fechar Todos';
+            stopBtn.title = '';
+          }
+          setGlobalActionButtonsDisabled(false);
+        }
+      } catch {}
       const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
       const perfisMap = new Map(basePerfis.map(p => [p.nome, Object.assign({
         active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
