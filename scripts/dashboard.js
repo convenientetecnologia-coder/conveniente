@@ -299,11 +299,8 @@ async function ensureFreeMB(minMB = 3072) {
 }
 async function execCloseAll() {
   try {
-    const st = await httpJson('/api/status');
-    const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
-    for (const p of perfis) {
-      try { await httpJson(`/api/perfis/${encodeURIComponent(p.nome)}/deactivate`, { method:'POST' }); } catch {}
-    }
+    // Use endpoint canônico (robusto)
+    await httpJson('/api/perfis/close-all', { method: 'POST' });
   } catch {}
 }
 // ===== INÍCIO ALTERAÇÃO =====

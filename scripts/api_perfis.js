@@ -799,6 +799,60 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // ========== ENDPOINT CANÔNICO: fechar todos (robusto) ==========
+  // Fecha TODOS os navegadores (active=false) de forma sequencial, com retries leves.
+  // Importante: isso é usado tanto pelo painel quanto por comandos remotos (`close_all`).
+  app.post('/api/perfis/close-all', async (req, res) => {
+    const issues = require('./issues.js');
+    try {
+      const perfisArr = fileStore.loadPerfisJson() || [];
+
+      // 1) PASSO ATÔMICO: seta active:false e virtus:'off' em todos
+      await fileStore.withDesiredFileLockUpdate(desired => {
+        desired.perfis = desired.perfis || {};
+        for (const p of perfisArr) {
+          if (!p || !p.nome) continue;
+          const nome = p.nome;
+          desired.perfis[nome] = {
+            ...(desired.perfis[nome] || {}),
+            active: false,
+            virtus: 'off'
+          };
+        }
+        return desired;
+      });
+
+      // 2) Loop de fechamento (sequencial + retry) para garantir 110%
+      const results = [];
+      for (const p of perfisArr) {
+        const nome = p && p.nome;
+        if (!nome) continue;
+        let okDeactivate = false;
+        let err = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const r = await workerClient.sendWorkerCommand('deactivate', { nome, reason: 'close_all' }, { timeoutMs: 90000 });
+            okDeactivate = !!(r && r.ok);
+            if (okDeactivate) break;
+            err = (r && r.error) ? String(r.error) : 'deactivate_failed';
+          } catch (e) {
+            err = (e && e.message) || String(e);
+          }
+          // pequeno respiro para não estressar o Chrome/FB
+          await new Promise(r => setTimeout(r, 1200));
+        }
+        results.push({ nome, deactivate: okDeactivate, error: err || null });
+        // respiro (reduz flapping/CPU)
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      try { await issues.append('system', 'mil_action', `bulk_close_all total=${perfisArr.length}`); } catch {}
+      return res.json({ ok: true, total: perfisArr.length, results });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // ====== PATCH — trocar cidade do perfil (atômico + apply em runtime) ======
   app.patch('/api/perfis/:nome/cidade', async (req, res) => {
     const nome = req.params.nome;
