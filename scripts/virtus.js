@@ -467,6 +467,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   if (arguments.length >= 3 && arguments[2] && arguments[2].epoch != null) {
     requiredEpoch = arguments[2].epoch;
   }
+  const cfg = (arguments.length >= 3 && arguments[2] && typeof arguments[2] === 'object') ? arguments[2] : {};
+  const slowMode = !!cfg.slowMode;
   // Broker fence: sempre leia do browser._fenceEpochMap
   function epochOk() {
     try {
@@ -506,9 +508,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
-  const POLL_INTERVAL_MS = 30_000; // polling de novos chats
-  const MIN_REPLY_DELAY_MS = 60_000;
-  const MAX_REPLY_DELAY_MS = 120_000;
+  const POLL_INTERVAL_MS = slowMode ? 45_000 : 30_000; // menos carga no modo lento
+  const MIN_REPLY_DELAY_MS = slowMode ? 80_000 : 60_000;
+  const MAX_REPLY_DELAY_MS = slowMode ? 150_000 : 120_000;
+  const SCROLL_TOP_INTERVAL_MS = slowMode ? 60_000 : 30_000;
 
   // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
@@ -1345,7 +1348,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             } catch {}
             scrollChatsToTop(p, nome);
           }, 800);
-        }, 30000);
+        }, SCROLL_TOP_INTERVAL_MS);
       }
       try {
         const scrolled = await scrollChatsToTop(p, nome);

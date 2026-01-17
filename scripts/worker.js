@@ -2,6 +2,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
@@ -425,6 +426,15 @@ const BROWSER_CLOSE_TIMEOUT_MS = parseInt(process.env.BROWSER_CLOSE_TIMEOUT_MS |
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
 
+// Sinal de saturação SEM WMI: event-loop lag (ms)
+// - Quando o loop trava, o sistema “se perde” (timers atrasam, navegação falha, about:blank se acumula).
+// - Este é o gatilho enterprise para backpressure antes de quebrar.
+const LOOPLAG_ENTER_MS = parseInt(process.env.CT_LOOPLAG_ENTER_MS || '250', 10);
+const LOOPLAG_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_EXIT_MS  || '120', 10);
+const LOOPLAG_MAX_ENTER_MS = parseInt(process.env.CT_LOOPLAG_MAX_ENTER_MS || '1500', 10);
+const LOOPLAG_MAX_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_MAX_EXIT_MS  || '600', 10);
+const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '2000', 10);
+
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
@@ -433,6 +443,64 @@ const autoMode = {
 
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
 function _canSwitch() { return (Date.now() - autoMode.since) >= AUTO_CFG.MIN_HOLD_MS; }
+
+// Event loop delay monitor (ultra leve; sem WMI)
+const _loopDelay = monitorEventLoopDelay({ resolution: 20 });
+try { _loopDelay.enable(); } catch {}
+function readLoopLagMs() {
+  try {
+    const meanMs = Math.round(Number(_loopDelay.mean || 0) / 1e6);
+    const maxMs = Math.round(Number(_loopDelay.max || 0) / 1e6);
+    try { _loopDelay.reset(); } catch {}
+    return { meanMs, maxMs };
+  } catch {
+    return { meanMs: 0, maxMs: 0 };
+  }
+}
+
+async function governorTick() {
+  try {
+    const now = Date.now();
+    if (autoMode.lastEval && (now - autoMode.lastEval) < Math.max(500, GOVERNOR_TICK_MS - 200)) return;
+    autoMode.lastEval = now;
+
+    const freeMB = getAvailableMB();
+    const lag = readLoopLagMs();
+    autoMode.eventLoopLagMs = lag.meanMs;
+    autoMode.eventLoopLagMaxMs = lag.maxMs;
+    autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
+
+    const hotNow =
+      (freeMB > 0 && freeMB <= AUTO_CFG.MEM_ENTER_MB) ||
+      (lag.meanMs >= LOOPLAG_ENTER_MS) ||
+      (lag.maxMs >= LOOPLAG_MAX_ENTER_MS);
+    const coolNow =
+      (freeMB > 0 && freeMB >= AUTO_CFG.MEM_EXIT_MB) &&
+      (lag.meanMs <= LOOPLAG_EXIT_MS) &&
+      (lag.maxMs <= LOOPLAG_MAX_EXIT_MS);
+
+    if (hotNow) { autoMode.hot = Math.min(20, (autoMode.hot || 0) + 1); autoMode.cool = 0; }
+    else if (coolNow) { autoMode.cool = Math.min(20, (autoMode.cool || 0) + 1); autoMode.hot = 0; }
+
+    if (autoMode.mode === 'full') {
+      if (autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
+        autoMode.mode = 'light';
+        autoMode.since = now;
+        autoMode.reason = (freeMB > 0 && freeMB <= AUTO_CFG.MEM_ENTER_MB) ? 'mem_low' : 'loop_lag';
+        try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
+      }
+    } else {
+      if (autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
+        autoMode.mode = 'full';
+        autoMode.since = now;
+        autoMode.reason = 'recovered';
+        autoMode.hot = 0;
+        autoMode.cool = 0;
+        try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
+      }
+    }
+  } catch {}
+}
 
 let _statusLock = Promise.resolve();
 
@@ -716,6 +784,9 @@ function memorySweep() {
   } catch {}
 }
 setInterval(memorySweep, 10 * 60 * 1000);
+
+// Governor (NORMAL/SLOW) — roda sempre, ultra leve (sem WMI)
+setInterval(() => { governorTick().catch(()=>{}); }, GOVERNOR_TICK_MS);
 
 function killGuardActive(nome) {
   return robeMeta[nome]?.killGuardUntil && robeMeta[nome].killGuardUntil > Date.now();
@@ -1619,6 +1690,20 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
 }
 
 async function robeTickGlobal() {
+  // Virtus-first: em modo lento (CPU/loop lag), o Robe pode pausar para manter atendimento.
+  if (autoMode && autoMode.mode && autoMode.mode !== 'full') {
+    try {
+      autoMode.light = autoMode.light || {};
+      autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
+      const now = Date.now();
+      const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
+      if (!lastLog || (now - lastLog) > 60000) {
+        autoMode.light._lastRobeSkipLogAt = now;
+        await milLog('mil_action', `robeTickGlobal_skip_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''}`);
+      }
+    } catch {}
+    return;
+  }
 
   const perfisArr = loadPerfisJson();
   const nomesAll = perfisArr.map(p => p.nome);
@@ -1753,7 +1838,7 @@ async function robeTickGlobal() {
           robeUpdateMeta(nome, { emExecucao: false });
           if (virtusWasRunning && automationAllowed(ctrl)) {
             try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
               ctrl.trabalhando = true;
               await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
             } catch {
@@ -1771,7 +1856,7 @@ async function robeTickGlobal() {
         if (virtusWasRunning) {
           if (automationAllowed(ctrl)) {
             try {
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
               ctrl.trabalhando = true;
             } catch (e) {
               ctrl.virtus = null;
@@ -1967,7 +2052,7 @@ async function start_work({ nome }) {
       }
       ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
 
-      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch });
+      ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
       ctrl.trabalhando = true;
       try {
         await browserHelper.forceCloseExtras(ctrl.browser);
@@ -2306,7 +2391,7 @@ const handlers = {
       }
 
       if (automationAllowed(ctrl)) {
-        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
         ctrl.trabalhando = true;
       }
 
@@ -2458,7 +2543,7 @@ const handlers = {
               robeUpdateMeta(nome, { emExecucao: false });
               if (virtusWasRunning && automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
                   ctrl.trabalhando = true;
                   await issues.append(nome, 'mil_action', 'virtus_restarted_after_limit_posting');
                 } catch {
@@ -2476,7 +2561,7 @@ const handlers = {
             if (virtusWasRunning) {
               if (automationAllowed(ctrl)) {
                 try {
-                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 });
+                  ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
                   ctrl.trabalhando = true;
                 } catch (e) {
                   ctrl.virtus = null;
@@ -3653,7 +3738,7 @@ async function nurseTick() {
       }
       if (want.virtus === 'on' && automationAllowed(ctrl)) {
         try { 
-          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0 }); 
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' }); 
           ctrl.trabalhando = true; 
         } catch {}
       }
