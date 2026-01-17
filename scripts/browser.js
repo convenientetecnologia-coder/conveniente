@@ -2067,18 +2067,57 @@ async function detectLoginRequired(page) {
       // 1) Formulários de login canônicos
       const hasRoyal = !!document.querySelector('form[data-testid="royal_login_form"], form#login_form');
       const hasInputs = !!document.querySelector('input[name="email"], input#email') && !!document.querySelector('input[name="pass"], input#pass');
+      const href0 = String(location && location.href ? location.href : '');
+      const path0 = String(location && location.pathname ? location.pathname : '');
+      const title0 = String(document && document.title ? document.title : '');
       // 2) Checkpoint/captcha
       const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
       const hasPersonaText = h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person'));
-      return { hasRoyal, hasInputs, hasPersonaText };
+      const hasCheckpointText = h1.some(t => t.includes('checkpoint') || t.includes('verificacao') || t.includes('verificacao de seguranca') || t.includes('security check'));
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, href0, path0, title0 };
     });
 
-    if (v && (v.hasRoyal && v.hasInputs)) {
-      return { loginRequired: true, reason: 'login_form', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
+    const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
+    const path = (v && v.path0) ? String(v.path0) : '';
+    const strongLoginPath = /\/(login|checkpoint|recover|two_step_verification|security)/i.test(path);
+    const hasRoyal = !!(v && v.hasRoyal);
+    const hasInputs = !!(v && v.hasInputs);
+    const hasPersonaText = !!(v && v.hasPersonaText);
+    const hasCheckpointText = !!(v && v.hasCheckpointText);
+    const title = (v && v.title0) ? String(v.title0) : '';
+
+    // Detecção mais conservadora para evitar falso positivo:
+    // - login_form só é válido se a rota for claramente de login/checkpoint
+    // - checkpoint/captcha também exige rota/sinais de checkpoint
+    if (hasRoyal && hasInputs && strongLoginPath) {
+      return {
+        loginRequired: true,
+        reason: 'login_form',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, path }
+      };
     }
-    if (v && v.hasPersonaText) {
-      return { loginRequired: true, reason: 'checkpoint_captcha', domain: (/messenger\.com/i.test(href) ? 'messenger' : 'facebook') };
+    if ((hasPersonaText || hasCheckpointText) && (strongLoginPath || /checkpoint/i.test(title))) {
+      return {
+        loginRequired: true,
+        reason: 'checkpoint_captcha',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, path }
+      };
     }
+
+    return {
+      loginRequired: false,
+      reason: '',
+      domain,
+      url: (v && v.href0) ? String(v.href0) : href,
+      title,
+      evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, path }
+    };
   } catch {}
   return { loginRequired: false };
 }

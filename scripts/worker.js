@@ -1,6 +1,7 @@
 // scripts/worker.js
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
 
@@ -15,6 +16,49 @@ const reloadManager = require('./reloadManager.js');
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
+
+const DATA_DIR = path.join(__dirname, '..', 'dados');
+const DIAG_DIR = path.join(DATA_DIR, 'diag');
+const LR_EVENTS_JSONL = path.join(DATA_DIR, 'login_required_events.jsonl');
+
+function ensureDirSync(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
+function safeFilePart(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .slice(0, 60) || 'x';
+}
+function appendJsonl(fp, obj) {
+  try {
+    ensureDirSync(path.dirname(fp));
+    fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
+  } catch {}
+}
+async function captureLoginRequiredEvidence(nome, page, lr) {
+  try {
+    if (!nome || !page) return;
+    robeMeta[nome] = robeMeta[nome] || {};
+    const now = Date.now();
+    const last = Number(robeMeta[nome].lastLREvidenceAt || 0) || 0;
+    // Rate limit: no máximo 1 evidência a cada 30 minutos por perfil
+    if (last > 0 && (now - last) < (30 * 60 * 1000)) return;
+    robeMeta[nome].lastLREvidenceAt = now;
+
+    const dir = path.join(DIAG_DIR, 'login_required', safeFilePart(nome));
+    ensureDirSync(dir);
+    const reason = safeFilePart(lr && lr.reason);
+    const ts = now;
+    const base = `${ts}_${reason}`;
+    const png = path.join(dir, base + '.png');
+    const html = path.join(dir, base + '.html');
+
+    try { await page.screenshot({ path: png, fullPage: false }).catch(()=>{}); } catch {}
+    try {
+      const content = await page.content().catch(()=>null);
+      if (content) fs.writeFileSync(html, String(content), 'utf8');
+    } catch {}
+  } catch {}
+}
 
 const _profileOpLocks = new Map();
 async function lockProfileAction(nome, fn) {
@@ -62,6 +106,7 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].loginRequired = true;
     robeMeta[nome].loginReason = reason || '';
+    robeMeta[nome].loginSource = source || '';
   } catch {}
 }
 
@@ -125,6 +170,7 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('loginRequired')) {
       delete robeMeta[nome].loginRequired;
       delete robeMeta[nome].loginReason;
+      delete robeMeta[nome].loginSource;
     }
     if (which.includes('banned')) delete robeMeta[nome].banned;
     await snapshotStatusAndWrite();
@@ -2554,6 +2600,7 @@ const handlers = {
       const man = await manifestStore.read(nome).catch(()=>null);
       const loginRequired = man ? !!(man.accountFlags && man.accountFlags.loginRequired === true) : !!robeMeta[nome]?.loginRequired;
       const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) || null) : (robeMeta[nome]?.loginReason || null);
+      const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) || null) : (robeMeta[nome]?.loginSource || null);
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
@@ -2598,6 +2645,7 @@ const handlers = {
         lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
         loginRequired,
         loginReason,
+        loginSource,
         banned,
         bannedAt,
         bannedText,
@@ -2772,6 +2820,7 @@ let manifestStatus = await computeManifestStatus(nome);
 const man = await manifestStore.read(nome).catch(()=>null);
 const loginRequired = man ? !!(man.accountFlags && man.accountFlags.loginRequired === true) : !!robeMeta[nome]?.loginRequired;
 const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) || null) : (robeMeta[nome]?.loginReason || null);
+const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) || null) : (robeMeta[nome]?.loginSource || null);
 const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
 const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
 const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
@@ -2810,6 +2859,7 @@ perfis.push({
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
   loginRequired,
   loginReason,
+  loginSource,
   banned,
   bannedAt,
   bannedText,
@@ -3267,6 +3317,28 @@ async function nurseTick() {
       try {
         const lr = await browserHelper.detectLoginRequired(p0);
         if (lr && lr.loginRequired) {
+          try {
+            const prev = await readAccountFlags(nome).catch(()=>({}));
+            const prevLR = !!(prev && prev.loginRequired === true);
+            const prevReason = prev && typeof prev.loginReason === 'string' ? prev.loginReason : '';
+            const prevSource = prev && typeof prev.loginSource === 'string' ? prev.loginSource : '';
+            const curReason = String(lr.reason || '');
+            const curSource = String(lr.domain || '');
+            const changed = !(prevLR && (String(prevReason) === curReason) && (String(prevSource) === curSource));
+            if (changed) {
+              await captureLoginRequiredEvidence(nome, p0, lr);
+              appendJsonl(LR_EVENTS_JSONL, {
+                ts: Date.now(),
+                host: os.hostname(),
+                perfil: nome,
+                reason: curReason,
+                source: curSource,
+                url: lr.url || null,
+                title: lr.title || null,
+                evidence: lr.evidence || null
+              });
+            }
+          } catch {}
           await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
         }
       } catch {}

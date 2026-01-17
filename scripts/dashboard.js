@@ -395,8 +395,14 @@ async function execMigrateProfiles(cmd) {
   const okCount = results.filter(r => r && r.ok).length;
   const failCount = results.length - okCount;
   migrationsLogAppend({ event: 'migrate_batch_done', batchId, cmdId: cmd && cmd.id, okCount, failCount });
-
-  if (failCount > 0) throw new Error(`partial_fail ok=${okCount} fail=${failCount}`);
+  const out = {
+    ok: failCount === 0,
+    batchId,
+    okCount,
+    failCount,
+    results
+  };
+  return out;
 }
 
 // ===== ALTERAÇÃO INÍCIO: add notifierBaseFromEndpoints e ackCommand =====
@@ -407,7 +413,7 @@ function notifierBaseFromEndpoints() {
     return `${url.protocol}//${url.host}`;
   } catch { return null; }
 }
-async function ackCommand(cmdId, ok, errorMsg) {
+async function ackCommand(cmdId, ok, errorMsg, details) {
   try {
     const base = notifierBaseFromEndpoints();
     if (!base || !hostIdCache || !cmdId) return;
@@ -416,7 +422,13 @@ async function ackCommand(cmdId, ok, errorMsg) {
     await fetch(`${base}/api/commands/ack`, {
       method: 'POST',
       headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({ hostId: hostIdCache, id: cmdId, ok: !!ok, error: errorMsg ? String(errorMsg) : null }),
+      body: JSON.stringify({
+        hostId: hostIdCache,
+        id: cmdId,
+        ok: !!ok,
+        error: errorMsg ? String(errorMsg) : null,
+        details: (details && typeof details === 'object') ? details : null
+      }),
       signal: controller.signal
     }).catch(()=>{});
     clearTimeout(t);
@@ -433,6 +445,7 @@ function logsAllowlist() {
   return {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
+    login_required_events: path.join(base, 'login_required_events.jsonl'),
     migrations: path.join(base, 'migrations.jsonl'),
     updates: path.join(base, 'updates.jsonl'),
     // útil para auditoria do canal de comandos
@@ -572,22 +585,28 @@ async function applyCommands(cmds = []) {
   for (const c of cmds) {
     try {
       if (!c || !c.type) continue;
+      let ackDetails = null;
       if (c.type === 'close_all')             { await execCloseAll(); }
       else if (c.type === 'open_all_24h')     { await execOpenAll24h(); }
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
-      else if (c.type === 'migrate_profiles') { await execMigrateProfiles(c); }
+      else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
       // ACK de sucesso
-      try { await ackCommand(c.id, true, null); } catch {}
+      if (c.type === 'migrate_profiles' && ackDetails && ackDetails.ok === false) {
+        // Migração pode falhar parcialmente; ACK precisa carregar detalhes para auditoria.
+        try { await ackCommand(c.id, false, `partial_fail ok=${ackDetails.okCount} fail=${ackDetails.failCount}`, ackDetails); } catch {}
+      } else {
+        try { await ackCommand(c.id, true, null, ackDetails); } catch {}
+      }
     } catch (e) {
       logger.warn('[DASH][CMD] falha ao executar ' + (c && c.type), { error: e && e.message || e });
       // ACK de erro
-      try { await ackCommand(c && c.id, false, (e && e.message) || String(e)); } catch {}
+      try { await ackCommand(c && c.id, false, (e && e.message) || String(e), null); } catch {}
     }
   }
 }
