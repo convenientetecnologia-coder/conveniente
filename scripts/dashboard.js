@@ -14,12 +14,8 @@ const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); 
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 
-// Endpoint fixo do notificador na nuvem via ngrok
-function resolveEndpoints() {
-  return [
-    'https://c0nv3n13nt3t3cn0l0g14jesus.sa.ngrok.io/report'
-  ];
-}
+// Endpoint do notificador (centralizado)
+const { resolveEndpoints } = require('./notifierEndpoints');
 
 let timer = null;
 let inFlight = false;

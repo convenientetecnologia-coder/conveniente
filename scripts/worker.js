@@ -16,6 +16,7 @@ const reloadManager = require('./reloadManager.js');
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
+const gptFallback = require('./gptFallback.js');
 
 const DATA_DIR = path.join(__dirname, '..', 'dados');
 const DIAG_DIR = path.join(DATA_DIR, 'diag');
@@ -3390,6 +3391,34 @@ async function nurseTick() {
                 evidence: lr.evidence || null
               });
             }
+
+            // GPT fallback (central): envia evidência redacted para o sitechatbot classificar e registrar padrões.
+            // Guardrails:
+            // - só envia se LOG_INGEST_SECRET estiver configurado (segurança)
+            // - rate-limit 30min por perfil+reason (no cliente e também no servidor central)
+            try {
+              // Evita custo se não houver chance real de envio
+              if (String(process.env.LOG_INGEST_SECRET || '').trim()) {
+                robeMeta[nome] = robeMeta[nome] || {};
+                const now = Date.now();
+                const last = Number(robeMeta[nome].lastFbGptIngestAt || 0) || 0;
+                if (!last || (now - last) > (30 * 60 * 1000)) {
+                  // Para reduzir custo: envia só quando capturou evidência ou houve mudança no motivo
+                  if (captured || changed) {
+                    const html = await p0.content().catch(()=>null);
+                    await gptFallback.ingestFbGpt({
+                      perfil: nome,
+                      url: lr.url || null,
+                      title: lr.title || null,
+                      html: html || '',
+                      reason: curReason || null,
+                      source: `lr:${curSource || 'unknown'}`
+                    }).catch(()=>{});
+                    robeMeta[nome].lastFbGptIngestAt = now;
+                  }
+                }
+              }
+            } catch {}
           } catch {}
           await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
         }
