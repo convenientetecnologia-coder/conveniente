@@ -332,6 +332,45 @@
       return `${s}s`;
     }
 
+    // ====== ENTERPRISE: estado final único por conta (mutuamente exclusivo) ======
+    function classifyAccountFinal(p, robes) {
+      try {
+        p = (p && typeof p === 'object') ? p : {};
+        const r = (robes && p.nome && robes[p.nome]) ? robes[p.nome] : null;
+
+        // 1) Banida vence tudo
+        if (p.banned === true) {
+          return { kind: 'banned', label: 'Conta suspensa', cls: 'bad', title: (p.bannedText || 'Suspensão/désativação detectada') };
+        }
+
+        // 2) LoginRequired é guarda-chuva; loginReason define o subtipo final
+        if (p.loginRequired === true) {
+          const rr = String(p.loginReason || '').trim();
+          const x = rr.toLowerCase();
+          if (x.includes('captcha') || x.includes('checkpoint')) return { kind: 'captcha', label: 'Captcha/Checkpoint', cls: 'bad', title: rr || 'Confirme que é humano' };
+          if (x === 'login_form') return { kind: 'login', label: 'Login necessário', cls: 'warn', title: rr };
+          if (x.includes('session')) return { kind: 'session', label: 'Sessão expirada', cls: 'warn', title: rr };
+          if (x.includes('2fa') || x.includes('two_factor')) return { kind: 'two_factor', label: '2FA', cls: 'warn', title: rr };
+          if (x.includes('identity')) return { kind: 'identity', label: 'Identidade', cls: 'bad', title: rr };
+          if (x.includes('consent')) return { kind: 'consent', label: 'Consentimento', cls: 'warn', title: rr };
+          return { kind: 'unknown', label: 'Login requerido', cls: 'warn', title: rr || 'Sessão/Checkpoint/Captcha detectado' };
+        }
+
+        // 3) Limite excedido vem do Robe (pauseReason/estado)
+        const robeEstado = String((r && r.estado) || '').trim().toLowerCase();
+        const pauseReason = String((r && r.pauseReason) || '').trim().toLowerCase();
+        if (robeEstado === 'paused_limit' || pauseReason === 'limit_posting') {
+          const cd = Number(r && r.cooldownSec || 0) || 0;
+          const extra = cd > 0 ? ` (${tempoRestante(cd)})` : '';
+          return { kind: 'limit_exceeded', label: 'Limite excedido' + extra, cls: 'warn', title: 'Conta nova/limite de postagem. Aguarde ou use PLAY quando liberar.' };
+        }
+
+        return { kind: 'ok', label: 'OK', cls: 'good', title: '' };
+      } catch {
+        return { kind: 'unknown', label: 'Desconhecido', cls: 'warn', title: '' };
+      }
+    }
+
     // Tipos de ERRO considerados no log (Virtus/Robe)
     const ERROR_TYPES = new Set([
       // Robe/Virtus e falhas macro
@@ -974,8 +1013,14 @@
       document.getElementById('mFila').textContent = String(robeQueue.length);
 
       // Contagens agregadas
-      const loginCount  = perfis.filter(p => p.loginRequired === true).length;
-      const bannedCount = perfis.filter(p => p.banned === true).length;
+      // Login requerido (AGREGADO): soma de subtipos do guarda-chuva loginRequired (captcha/login/session/2fa/identity/consent/unknown)
+      let loginCount = 0;
+      let bannedCount = 0;
+      for (const p of perfis) {
+        const st = classifyAccountFinal(p, robes);
+        if (st.kind === 'banned') bannedCount++;
+        else if (['captcha','login','session','two_factor','identity','consent','unknown'].includes(st.kind)) loginCount++;
+      }
 
       // Atualiza cards do header
       const loginCard = document.getElementById('metricLogin');
@@ -1160,16 +1205,14 @@
         }
         // ===================== FIM NOVOS PILLS — STATUS MILITAR =====================
 
-        // ---- NOVOS PILLS LOGIN/BANNED ----
-        if (p.loginRequired === true) {
-          const lr = buildPill('Login requerido', 'warn');
-          lr.title = p.loginReason ? ('Motivo: ' + p.loginReason) : 'Sessão/Checkpoint/Captcha detectado';
-          titleRow.append(lr);
-        }
-        if (p.banned === true) {
-          const bn = buildPill('Conta suspensa', 'bad');
-          bn.title = p.bannedText ? p.bannedText : 'Suspensão/désativation detectada';
-          titleRow.append(bn);
+        // ---- ENTERPRISE: UMA ÚNICA PILL de estado final da conta ----
+        {
+          const stFinal = classifyAccountFinal(p, robes);
+          if (stFinal && stFinal.kind && stFinal.kind !== 'ok') {
+            const pill = buildPill(stFinal.label, stFinal.cls || 'warn');
+            if (stFinal.title) pill.title = stFinal.title;
+            titleRow.append(pill);
+          }
         }
 
         // -------- FROZEN pill explícito (primeiro) ---------
@@ -1202,19 +1245,7 @@
             titleRow.append(buildPill('Robe em pausa 24h (FB bloqueado)', 'bad'));
           }
         }
-        // Pill “Robe Limite atingido” (amarela) — aparece sempre que pauseReason === 'limit_posting'
-        {
-          const r = robes && robes[p.nome];
-          if (
-            !isFrozen &&
-            p.manifestStatus === 'ok' &&
-            r && r.pauseReason === 'limit_posting'
-          ) {
-            const pill = buildPill('Robe: Limite atingido', 'warn');
-            pill.title = "Foi detectado Limite atingido (overlay do Facebook). O Robe está pausado até que a limitação suma ou você dê PLAY.\nVirtus permanece online.";
-            titleRow.append(pill);
-          }
-        }
+        // REMOVIDO (enterprise): “Robe: Limite atingido” duplicava o estado final "Limite excedido".
 
         // ------- COOLDOWN (ADICIONAL) -------
         if (robeCooldownSec > 0) {
@@ -1477,19 +1508,24 @@
       });
       reloadPerfis();
     }
-    // NUNCA usar issuesCount para filtrar “Com problema”.
-    // Apenas loginRequired === true OU banned === true.
+    // Filtros enterprise: usar estado final (mutuamente exclusivo) para não confundir.
     function passFilter(p) {
       let ok = true;
 
       if (currentFilter === 'active')         ok = !!p.active;
       else if (currentFilter === 'inactive')  ok = !p.active;
 
-      // “Com problema” (filterIssues): SOMENTE loginRequired OU banned
-      else if (currentFilter === 'issues')    ok = (p.problem === true) || (p.loginRequired === true) || (p.banned === true);
+      // “Com problema”: qualquer estado final != ok
+      else if (currentFilter === 'issues') {
+        const st = classifyAccountFinal(p, lastRobesCache || {});
+        ok = !!st && st.kind !== 'ok';
+      }
 
-      // Clicks das métricas
-      else if (currentFilter === 'login')     ok = (p.loginRequired === true);
+      // Clicks das métricas: "Login requerido" (agregado)
+      else if (currentFilter === 'login') {
+        const st = classifyAccountFinal(p, lastRobesCache || {});
+        ok = !!st && ['captcha','login','session','two_factor','identity','consent','unknown'].includes(st.kind);
+      }
       else if (currentFilter === 'banned')    ok = (p.banned === true);
 
       if (!ok) return false;
