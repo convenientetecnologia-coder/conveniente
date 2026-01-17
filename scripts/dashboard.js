@@ -298,26 +298,24 @@ async function ensureFreeMB(minMB = 3072) {
   }
 }
 async function execCloseAll() {
-  try {
-    // Use endpoint canônico (robusto)
-    await httpJson('/api/perfis/close-all', { method: 'POST' });
-  } catch {}
+  // NÃO engolir erro: se o servidor estiver desatualizado (sem endpoint canônico),
+  // o ACK precisa refletir falha para o notificador mostrar claramente.
+  const r = await httpJson('/api/perfis/close-all', { method: 'POST' });
+  if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'close_all_failed');
 }
 // ===== INÍCIO ALTERAÇÃO =====
 async function execOpenAll24h() {
-  try {
-    // Agora chamamos o handler canônico do backend
-    await httpJson('/api/perfis/open-all-24h', { method: 'POST' });
-  } catch (e) {
-    // silencioso — o ACK/erro já será refletido no notificador
-  }
+  const r = await httpJson('/api/perfis/open-all-24h', { method: 'POST' });
+  if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'open_all_24h_failed');
 }
 // ===== FIM ALTERAÇÃO =====
 async function execRobePauseAll() {
-  try { await httpJson('/api/robes/pause-24h-all', { method:'POST' }); } catch {}
+  const r = await httpJson('/api/robes/pause-24h-all', { method:'POST' });
+  if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robes_pause_24h_all_failed');
 }
 async function execRobeReleaseAll() {
-  try { await httpJson('/api/robes/release-all', { method:'POST' }); } catch {}
+  const r = await httpJson('/api/robes/release-all', { method:'POST' });
+  if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robes_release_all_failed');
 }
 
 function migrationsLogAppend(obj) {
