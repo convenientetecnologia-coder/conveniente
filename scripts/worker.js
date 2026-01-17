@@ -3284,6 +3284,32 @@ async function nurseTick() {
           retryFailed = true;
         }
         if (retryFailed) {
+          // Mesmo sem páginas, registre um snapshot leve quando a flag LR já está setada.
+          // Isso cria o arquivo `login_required_events.jsonl` e prova "flag presa" sem depender do browser aberto.
+          try {
+            const flags = await readAccountFlags(nome).catch(()=>({}));
+            if (flags && flags.loginRequired === true) {
+              robeMeta[nome] = robeMeta[nome] || {};
+              const now = Date.now();
+              const last = Number(robeMeta[nome].lastLRFlagSnapshotNoPagesAt || 0) || 0;
+              if (!last || (now - last) > (30 * 60 * 1000)) {
+                robeMeta[nome].lastLRFlagSnapshotNoPagesAt = now;
+                appendJsonl(LR_EVENTS_JSONL, {
+                  ts: now,
+                  host: os.hostname(),
+                  perfil: nome,
+                  event: 'lr_flag_snapshot_no_pages',
+                  storedReason: flags.loginReason || null,
+                  storedSource: flags.loginSource || null,
+                  pagesCount: 0,
+                  evidenceCaptured: false,
+                  url: null,
+                  title: null
+                });
+              }
+            }
+          } catch {}
+
           robeMeta[nome].noPagesStrikes += 1;
           robeMeta[nome].lastNoPagesAt = Date.now();
           await appendIssueNurseDebounced(nome, `suspect_no_pages`, `strike=${robeMeta[nome].noPagesStrikes}`, 'suspect_no_pages');
