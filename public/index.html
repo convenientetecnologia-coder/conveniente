@@ -398,8 +398,12 @@
           <select id="cidadeSel"></select>
         </div>
         <div class="form-row">
-          <label>Cookies Originais</label>
-          <textarea id="cookiesCampo" placeholder="Cole aqui os cookies exportados da conta"></textarea>
+          <label>Conta do Estoque (CT)</label>
+          <select id="stockAccSel"></select>
+          <div class="pill info" style="margin-top:8px">
+            <span class="dot"></span>
+            <span>Criação manual agora é <b>somente via Estoque</b> (sem campo de cookies).</span>
+          </div>
         </div>
         <div id="criarContaMsg" style="display:none" class="pill"></div>
         <div class="modal-actions">
@@ -422,21 +426,46 @@
       const msgEl = box.querySelector('#criarContaMsg');
       const cancelarBtn = box.querySelector('#cancelarBtn');
       const confirmarBtn = box.querySelector('#confirmarBtn');
-      const cookiesEl = box.querySelector('#cookiesCampo');
+      const stockAccSel = box.querySelector('#stockAccSel');
 
       function setDisabled(dis) {
         cancelarBtn.disabled = dis;
         sel.disabled = dis;
-        cookiesEl.disabled = dis;
+        stockAccSel.disabled = dis;
       }
 
       cancelarBtn.onclick = () => overlay.remove();
 
+      // Carrega contas disponíveis do Estoque (via endpoint local que consulta o CT)
+      (async () => {
+        try {
+          stockAccSel.innerHTML = `<option value="">Carregando contas disponíveis...</option>`;
+          const r = await fetch('/api/stock/available?limit=400').then(r=>r.json()).catch(()=>null);
+          if (!r || r.ok !== true) {
+            stockAccSel.innerHTML = `<option value="">Falha ao carregar estoque: ${escapeHtml((r && r.error) ? r.error : 'erro')}</option>`;
+            return;
+          }
+          const accs = Array.isArray(r.accounts) ? r.accounts : [];
+          if (!accs.length) {
+            stockAccSel.innerHTML = `<option value="">Nenhuma conta disponível no estoque</option>`;
+            return;
+          }
+          stockAccSel.innerHTML = `<option value="">Selecione uma conta...</option>` + accs.map(a => {
+            const id = String(a.id || '');
+            const label = String(a.label || '—');
+            const login = String(a.login || '—');
+            return `<option value="${id}">#${escapeHtml(id)} • ${escapeHtml(label)} • ${escapeHtml(login)}</option>`;
+          }).join('');
+        } catch {
+          stockAccSel.innerHTML = `<option value="">Falha ao carregar contas</option>`;
+        }
+      })();
+
       confirmarBtn.onclick = async () => {
         const cidade = sel.value;
-        const cookies = cookiesEl.value.trim();
         if (!cidade) { alert('Selecione uma cidade.'); return; }
-        if (!cookies) { alert('Cole os cookies originais.'); return; }
+        const stockAccountId = Number(stockAccSel.value || 0) || 0;
+        if (!stockAccountId) { alert('Selecione uma conta do Estoque.'); return; }
 
         setBtnLoading(confirmarBtn, true, 'Criando...');
         setDisabled(true);
@@ -457,17 +486,21 @@
         // ========================== FIM ALTERAÇÃO RAM MILITAR ==========================
 
         try {
-          const res = await window.electronAPI.criarPerfil({ cidade, cookies });
+          const res = await fetch('/api/stock/provision_from_stock', {
+            method: 'POST',
+            headers: { 'Content-Type':'application/json' },
+            body: JSON.stringify({ city: cidade, category: 'fretes', stockAccountId })
+          }).then(r=>r.json()).catch(()=>null);
           if (!res || !res.ok) {
             msgEl.className = 'pill bad';
-            msgEl.textContent = 'Falha ao criar: ' + ((res && res.error) || 'erro desconhecido');
+            msgEl.textContent = 'Falha ao criar (Estoque): ' + ((res && res.error) || 'erro desconhecido');
             msgEl.style.display = 'inline-flex';
             setBtnLoading(confirmarBtn, false);
             setDisabled(false);
             return;
           }
           msgEl.className = 'pill good';
-          msgEl.textContent = 'Conta criada com sucesso.';
+          msgEl.textContent = `Provisionamento enviado. Job=${res.jobId || '—'} Cmd=${res.commandId || '—'}`;
           msgEl.style.display = 'inline-flex';
           setTimeout(() => {
             overlay.remove();

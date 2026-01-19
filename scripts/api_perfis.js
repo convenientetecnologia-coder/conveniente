@@ -65,6 +65,13 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis', async (req, res) => {
     logger.info('POST /api/perfis chamada', {});
     try {
+      // Segurança enterprise: criação local manual está desativada.
+      // Perfis só podem ser criados via Estoque (stock_provision), que chama esta rota com x-operator=stock_provision.
+      const op = String(req.headers['x-operator'] || '').trim();
+      if (op !== 'stock_provision') {
+        return res.json({ ok: false, error: 'criar_perfil_somente_estoque' });
+      }
+
       const { cidade, cookies } = req.body || {};
       if (!cidade || !cookies) {
         logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade });
@@ -282,6 +289,76 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       logger.error('Erro fatal na rota configurar perfil', { nome, rota: '/api/perfis/:nome/configure', error: e && e.message }, e);
       return res.json({ ok: false, error: (e && e.message) || 'configure_failed' });
+    }
+  });
+
+  // ===== NOVO: atualização vinda do Estoque (label/login/senha/cookies) =====
+  // Usado pelo comando remoto stock_push_account_update.
+  // Segurança: só aceita com header x-operator=stock_push (CT).
+  app.post('/api/perfis/:nome/stock-update', async (req, res) => {
+    const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || '').trim();
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    if (op !== 'stock_push') return res.json({ ok: false, error: 'stock_update_forbidden' });
+    try { assertPerfilExists(fileStore, nome); } catch(e) {
+      return res.json({ ok:false, error:e.message });
+    }
+    try {
+      const label = (req.body && req.body.label != null) ? String(req.body.label || '').trim() : null;
+      const login = (req.body && req.body.login != null) ? String(req.body.login || '').trim() : null;
+      const password = (req.body && req.body.password != null) ? String(req.body.password || '') : null;
+      const cookiesInput = (req.body && req.body.cookies != null) ? req.body.cookies : null;
+
+      // Atualiza label no perfis.json (UI)
+      if (label) {
+        try { fileStore.updatePerfilLabel(nome, label); } catch {}
+      }
+
+      // Atualiza manifest (fonte de verdade do perfil)
+      let cookiesUpdated = false;
+      if (cookiesInput) {
+        const cookiesArr = require('./utils').normalizeCookies(cookiesInput);
+        if (
+          !cookiesArr.length ||
+          !cookiesArr.find(c => c.name === 'c_user') ||
+          !cookiesArr.find(c => c.name === 'xs')
+        ) {
+          return res.json({ ok:false, error:'cookies_invalid' });
+        }
+        cookiesUpdated = true;
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          m.cookies = cookiesArr;
+          if (label) m.label = label;
+          if (login != null) m.login = login;
+          if (password != null) m.password = password;
+          return m;
+        });
+      } else {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          if (label) m.label = label;
+          if (login != null) m.login = login;
+          if (password != null) m.password = password;
+          return m;
+        });
+      }
+
+      // Se cookies mudaram, reinjeta via configure (worker)
+      if (cookiesUpdated) {
+        try {
+          const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
+          if (!resp || resp.ok !== true) {
+            return res.json({ ok:false, error:(resp && resp.error) ? String(resp.error) : 'configure_failed' });
+          }
+        } catch (e) {
+          return res.json({ ok:false, error:(e && e.message) || String(e) });
+        }
+      }
+
+      return res.json({ ok: true, cookiesUpdated: !!cookiesUpdated });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
 

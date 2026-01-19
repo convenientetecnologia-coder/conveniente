@@ -101,6 +101,7 @@ require('./scripts/api_robes.js')(app, apiClient, fileStore);
 require('./scripts/api_cidades.js')(app, apiClient, fileStore);
 require('./scripts/api_sys.js')(app, apiClient, fileStore);
 require('./scripts/api_issues.js')(app, apiClient, fileStore);
+require('./scripts/api_stock.js')(app);
 // Se usar api_static.js/adicional, inclua aqui: require('./scripts/api_static.js')(app);
 
 // Troque todos os console.log por logger.info conforme checklist

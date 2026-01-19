@@ -396,6 +396,85 @@ async function execMigrateProfiles(cmd) {
   return out;
 }
 
+async function execStockProvision(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const batchId = String(payload.batchId || '').trim() || String(cmd && cmd.id || '').trim();
+  const actions = Array.isArray(payload.actions) ? payload.actions : [];
+  if (!batchId) throw new Error('missing_batchId');
+  if (!actions.length) throw new Error('missing_actions');
+
+  // Serializa por ação (segurança) e retorna detalhes por etapa
+  const results = [];
+  for (const a of actions) {
+    const startedAt = Date.now();
+    const city = String(a && (a.city || a.cidade || a.toCity || a.city_uf) || '').trim();
+    const cookies = a && a.cookies;
+    const label = String(a && a.label || '').trim();
+    const stockAccountId = (a && (a.stockAccountId || a.stock_account_id)) ? Number(a.stockAccountId || a.stock_account_id) : null;
+    const category = String(a && a.category || '').trim().toLowerCase();
+    const robeMode = (category === 'veiculos') ? 'veiculos' : 'itens';
+
+    const out = { ok: false, batchId, stockAccountId, city, label, steps: [], profileName: null, robeMode };
+    try {
+      // 1) criar perfil
+      out.steps.push({ step: 'create_profile', at: Date.now() });
+      const created = await httpJson('/api/perfis', { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: { cidade: city, cookies } });
+      if (!created || created.ok === false) throw new Error((created && created.error) ? String(created.error) : 'create_profile_failed');
+      const nome = created?.perfil?.nome ? String(created.perfil.nome) : '';
+      if (!nome) throw new Error('create_profile_missing_name');
+      out.profileName = nome;
+
+      // 2) set label (interno)
+      if (label) {
+        out.steps.push({ step: 'set_label', at: Date.now() });
+        const r2 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/label`, { method:'PATCH', headers:{ 'x-operator':'stock_provision' }, body: { novoLabel: label } });
+        if (!r2 || r2.ok === false) throw new Error((r2 && r2.error) ? String(r2.error) : 'set_label_failed');
+      }
+
+      // 3) set robe mode (categoria)
+      out.steps.push({ step: 'set_robe_mode', at: Date.now() });
+      const r3 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/robe-mode`, { method:'POST', body: { mode: robeMode } });
+      if (!r3 || r3.ok === false) throw new Error((r3 && r3.error) ? String(r3.error) : 'set_robe_mode_failed');
+
+      // 4) activate
+      out.steps.push({ step: 'activate', at: Date.now() });
+      const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
+      if (!r4 || r4.ok === false) throw new Error((r4 && r4.error) ? String(r4.error) : 'activate_failed');
+
+      // 5) configure (inject cookies etc)
+      out.steps.push({ step: 'configure', at: Date.now() });
+      const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
+      if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
+
+      // 6) start work
+      out.steps.push({ step: 'start_work', at: Date.now() });
+      const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
+      if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'start_work_failed');
+
+      out.ok = true;
+      out.finishedAt = Date.now();
+      out.durationMs = out.finishedAt - startedAt;
+      results.push(out);
+    } catch (e) {
+      out.ok = false;
+      out.error = (e && e.message) ? e.message : String(e);
+      out.finishedAt = Date.now();
+      out.durationMs = out.finishedAt - startedAt;
+      results.push(out);
+    }
+  }
+
+  const okCount = results.filter(r => r && r.ok).length;
+  const failCount = results.length - okCount;
+  return {
+    ok: failCount === 0,
+    batchId,
+    okCount,
+    failCount,
+    results
+  };
+}
+
 // ===== ALTERAÇÃO INÍCIO: add notifierBaseFromEndpoints e ackCommand =====
 function notifierBaseFromEndpoints() {
   try {
@@ -571,6 +650,107 @@ async function execSelfUpdate(cmd) {
   }
 }
 
+// ===== NOVO: Exportar perfis para o estoque =====
+async function execStockExportProfiles(cmd) {
+  try {
+    const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+    const wantedNames = Array.isArray(payload.profileNames) ? payload.profileNames.map(x => String(x || '').trim()).filter(Boolean) : [];
+
+    // Busca lista de perfis do snapshot/status
+    let st = null;
+    try { st = await httpJson('/api/status'); } catch {}
+    let perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+    if (wantedNames.length) {
+      const want = new Set(wantedNames);
+      perfis = perfis.filter(p => p && want.has(String(p.nome || '').trim()));
+    }
+    
+    const results = [];
+    const BATCH_SIZE = 20; // Limite para não estourar payload
+    const batches = [];
+    for (let i = 0; i < perfis.length; i += BATCH_SIZE) {
+      batches.push(perfis.slice(i, i + BATCH_SIZE));
+    }
+
+    for (const batch of batches) {
+      for (const p of batch) {
+        const nome = String(p && p.nome || '').trim();
+        if (!nome) continue;
+
+        const result = {
+          profile_name: nome,
+          city: String(p.cidade || '').trim() || null,
+          label: String(p.label || '').trim() || null,
+          active: !!(p.active),
+          working: !!(p.trabalhando),
+          cookies: null,
+          cookie_fp: null
+        };
+
+        // Busca manifest (com cookies) se disponível
+        try {
+          const manifest = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/manifest`);
+          if (manifest && manifest.manifest && manifest.manifest.cookies) {
+            result.cookies = Array.isArray(manifest.manifest.cookies) ? manifest.manifest.cookies : [];
+            // Calcula fingerprint se cookies existirem
+            if (result.cookies.length) {
+              // Fingerprint padrão (mesmo critério do CT: c_user + xs + datr)
+              try {
+                const crypto = require('crypto');
+                const sha1 = (s) => crypto.createHash('sha1').update(String(s || '')).digest('hex');
+                const byName = new Map(result.cookies.map(c => [String(c?.name || '').trim(), String(c?.value || '')]));
+                const cUser = byName.get('c_user') || '';
+                const xs = byName.get('xs') || '';
+                const datr = byName.get('datr') || '';
+                if (cUser && xs) result.cookie_fp = sha1(`c_user=${cUser};xs=${xs};datr=${datr}`);
+              } catch {}
+            }
+          }
+        } catch (e) {
+          // Se não conseguir manifest, continua sem cookies
+        }
+
+        results.push(result);
+      }
+      // Pequeno delay entre batches para não estourar
+      if (batches.length > 1) await sleep(500);
+    }
+
+    return {
+      ok: true,
+      profilesCount: results.length,
+      results
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: (e && e.message) || String(e),
+      profilesCount: 0,
+      results: []
+    };
+  }
+}
+
+// ===== NOVO: Push de atualização do Estoque para um perfil existente =====
+async function execStockPushAccountUpdate(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const profileName = String(payload.profileName || '').trim();
+  if (!profileName) throw new Error('missing_profileName');
+  const body = {
+    label: payload.label ?? null,
+    login: payload.login ?? null,
+    password: payload.password ?? null,
+    cookies: Array.isArray(payload.cookies) ? payload.cookies : null
+  };
+  const r = await httpJson(`/api/perfis/${encodeURIComponent(profileName)}/stock-update`, {
+    method: 'POST',
+    headers: { 'x-operator': 'stock_push' },
+    body
+  });
+  if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'stock_update_failed');
+  return r;
+}
+
 // ===== ALTERAÇÃO INÍCIO: applyCommands para ACK após cada execução =====
 async function applyCommands(cmds = []) {
   for (const c of cmds) {
@@ -582,15 +762,23 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
       else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
+      else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }
+      else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
+      else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
       // ACK de sucesso
-      if (c.type === 'migrate_profiles' && ackDetails && ackDetails.ok === false) {
-        // Migração pode falhar parcialmente; ACK precisa carregar detalhes para auditoria.
-        try { await ackCommand(c.id, false, `partial_fail ok=${ackDetails.okCount} fail=${ackDetails.failCount}`, ackDetails); } catch {}
+      if ((c.type === 'migrate_profiles' || c.type === 'stock_provision' || c.type === 'stock_export_profiles') && ackDetails && ackDetails.ok === false) {
+        // Migração/export pode falhar parcialmente; ACK precisa carregar detalhes para auditoria.
+        try { 
+          const msg = ackDetails.profilesCount !== undefined 
+            ? `partial_fail profiles=${ackDetails.profilesCount}` 
+            : `partial_fail ok=${ackDetails.okCount} fail=${ackDetails.failCount}`;
+          await ackCommand(c.id, false, msg, ackDetails); 
+        } catch {}
       } else {
         try { await ackCommand(c.id, true, null, ackDetails); } catch {}
       }
