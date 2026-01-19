@@ -632,9 +632,10 @@ async function execSelfUpdate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const requestId = String(payload.requestId || '').trim() || (cmd && cmd.id) || 'noid';
   const branch = String(payload.branch || 'main').trim() || 'main';
+  const restart = (payload.restart === true || payload.restart === 1 || payload.restart === '1' || String(payload.restart || '').toLowerCase() === 'true');
   const repoDir = path.join(__dirname, '..');
 
-  updateLogAppend({ event: 'self_update_start', requestId, branch });
+  updateLogAppend({ event: 'self_update_start', requestId, branch, restart });
   const steps = [];
   steps.push({ step: 'rev-parse', ...(await runGit(['rev-parse','--is-inside-work-tree'], { cwd: repoDir })) });
   steps.push({ step: 'fetch', ...(await runGit(['fetch','--all','--prune'], { cwd: repoDir })) });
@@ -647,6 +648,16 @@ async function execSelfUpdate(cmd) {
   if (!ok) {
     const err = steps.find(s => !s.ok);
     throw new Error(`self_update_failed:${(err && err.step) || 'unknown'}:${(err && err.error) || 'error'}`);
+  }
+
+  // Reinício opcional (enterprise): necessário para carregar código novo (novos comandos/UI).
+  // Agendado após o retorno para não interromper o ACK em trânsito.
+  if (restart) {
+    try { updateLogAppend({ event: 'self_update_restart_scheduled', requestId, at: Date.now() }); } catch {}
+    setTimeout(() => {
+      try { logger.info('[DASH][SELF_UPDATE] restart=1 -> saindo do processo para o gerenciador reiniciar'); } catch {}
+      try { process.exit(0); } catch {}
+    }, 2500);
   }
 }
 
