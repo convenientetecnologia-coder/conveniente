@@ -78,6 +78,19 @@ app.use(express.urlencoded({ extended: true }));
 
 // Militar: Apenas arquivos públicos (UI) expostos. Backend nunca via HTTP!
 // SERVIÇO ESTÁTICO EXCLUSIVO DA PASTA /public/
+// Ultra-enterprise: desativa cache do painel para updates aparecerem imediatamente após self_update.
+app.use((req, res, next) => {
+  try {
+    const p = String(req.path || '');
+    if (p === '/' || p.endsWith('/index.html') || p.endsWith('.html') || p.endsWith('.js') || p.endsWith('.css')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('Surrogate-Control', 'no-store');
+    }
+  } catch {}
+  next();
+});
 app.use('/', express.static(path.join(__dirname, 'public')));
 // NUNCA PERMITIDO: exposição de scripts ou backend!
 // app.use('/', express.static(path.join(__dirname, 'scripts')));
