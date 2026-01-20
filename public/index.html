@@ -428,6 +428,16 @@
       const confirmarBtn = box.querySelector('#confirmarBtn');
       const stockAccSel = box.querySelector('#stockAccSel');
 
+      function escapeHtml(s) {
+        const str = String(s ?? '');
+        return str
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/\"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
       function setDisabled(dis) {
         cancelarBtn.disabled = dis;
         sel.disabled = dis;
@@ -497,12 +507,12 @@
             setTimeout(()=>{ try { msgEl.style.display='none'; } catch {} }, 2500);
             console.info('[stock][ui] /api/stock/available ok', { contas: accs.length, baseUsed: r.baseUsed || null });
           } catch { msgEl.style.display = 'none'; }
-        } catch {
+        } catch (e) {
           stockAccSel.innerHTML = `<option value="">Falha ao carregar contas</option>`;
           msgEl.className = 'pill bad';
           msgEl.textContent = 'Falha ao carregar contas do Estoque.';
           msgEl.style.display = 'inline-flex';
-          try { console.error('[stock][ui] Falha inesperada ao carregar contas do Estoque'); } catch {}
+          try { console.error('[stock][ui] Falha inesperada ao carregar contas do Estoque', e && (e.stack || e.message) ? (e.stack || e.message) : e); } catch {}
         }
       })();
 
