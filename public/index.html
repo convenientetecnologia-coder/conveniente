@@ -947,11 +947,37 @@
     }
     // ============================= FIM ALTERAÇÕES PEDIDAS – RESTO SÓ CHAMADA NOS LUGARES =============================
 
+    // ===== enterprise: compat browser (sem Electron) =====
+    // Alguns ambientes (browser puro) não têm preload com electronAPI. E mesmo no Electron,
+    // listPerfis pode não existir no momento em que o script chama reloadPerfis().
+    window.electronAPI = window.electronAPI || {};
+    if (typeof window.electronAPI.listPerfis !== 'function') {
+      window.electronAPI.listPerfis = () => fetch('/api/perfis').then(r => r.json()).catch(() => null);
+    }
+
+    async function safeGetStatus() {
+      try {
+        if (window.electronAPI && typeof window.electronAPI.getStatus === 'function') {
+          return await window.electronAPI.getStatus().catch(() => null);
+        }
+      } catch {}
+      // fallback mínimo para browser
+      return await fetch('/api/status').then(r => r.json()).catch(() => null);
+    }
+    async function safeListPerfis() {
+      try {
+        if (window.electronAPI && typeof window.electronAPI.listPerfis === 'function') {
+          return await window.electronAPI.listPerfis().catch(() => null);
+        }
+      } catch {}
+      return await fetch('/api/perfis').then(r => r.json()).catch(() => null);
+    }
+
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
       const [st, perfisResp] = await Promise.all([
-        window.electronAPI.getStatus().catch(() => null),
-        window.electronAPI.listPerfis().catch(() => null)
+        safeGetStatus(),
+        safeListPerfis()
       ]);
 
       // ====== NOVO: sincronizar ações em massa vindas do backend (comandos remotos) ======
@@ -1848,9 +1874,11 @@
     }
 
     // Wrapper para listar todos os perfis pela API dedicada (/api/perfis)
+    // (já definido acima como fallback enterprise; mantém idempotente)
     window.electronAPI = window.electronAPI || {};
-    window.electronAPI.listPerfis = () =>
-      fetch('/api/perfis').then(r => r.json()).catch(() => null);
+    if (typeof window.electronAPI.listPerfis !== 'function') {
+      window.electronAPI.listPerfis = () => fetch('/api/perfis').then(r => r.json()).catch(() => null);
+    }
 
     async function startAllSequential() {
       if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
