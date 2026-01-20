@@ -499,14 +499,9 @@
             const login = String(a.login || '—');
             return `<option value="${id}">#${escapeHtml(id)} • ${escapeHtml(label)} • ${escapeHtml(login)}</option>`;
           }).join('');
-          // Feedback enterprise (curto) para provar que conectou no CT
-          try {
-            msgEl.className = 'pill good';
-            msgEl.textContent = `Estoque OK • contas=${accs.length} • ct=${String(r.baseUsed || '—')}`;
-            msgEl.style.display = 'inline-flex';
-            setTimeout(()=>{ try { msgEl.style.display='none'; } catch {} }, 2500);
-            console.info('[stock][ui] /api/stock/available ok', { contas: accs.length, baseUsed: r.baseUsed || null });
-          } catch { msgEl.style.display = 'none'; }
+          // Não exibir “toast” de sucesso (poluição visual). Apenas log silencioso.
+          try { console.info('[stock][ui] /api/stock/available ok', { contas: accs.length, baseUsed: r.baseUsed || null }); } catch {}
+          msgEl.style.display = 'none';
         } catch (e) {
           stockAccSel.innerHTML = `<option value="">Falha ao carregar contas</option>`;
           msgEl.className = 'pill bad';
