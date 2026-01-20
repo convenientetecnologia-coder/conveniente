@@ -46,7 +46,17 @@ const allowedOrigins = [
 ];
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const isLocalReq = (req.ip === '127.0.0.1' || req.hostname === 'localhost');
+  // Express pode reportar IPv6/IPv4-mapped (ex.: ::ffff:127.0.0.1). Trate como local.
+  const ip = String(req.ip || '').toLowerCase();
+  const host = String(req.hostname || '').toLowerCase();
+  const isLocalIp =
+    ip === '127.0.0.1' ||
+    ip === '::1' ||
+    ip.startsWith('::ffff:127.0.0.1');
+  const isLocalHost =
+    host === 'localhost' ||
+    host === '127.0.0.1';
+  const isLocalReq = isLocalIp || isLocalHost;
   // Electron/file:// costuma enviar Origin: null. Trate como “sem origin” se for local.
   const originIsNull = (String(origin || '').trim().toLowerCase() === 'null');
   if (
