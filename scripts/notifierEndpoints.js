@@ -2,6 +2,7 @@
 
 // Centraliza a origem do endpoint do notificador (sitechatbot).
 // Importante: mantemos compatível com a versão atual que usa ngrok.
+const { readCtConfig } = require("./ctConfig");
 
 function resolveEndpoints() {
   // Preferência máxima: CT_BASE_URL/CT_URL (base do CT). Isso evita depender de ngrok hardcoded.
@@ -11,6 +12,12 @@ function resolveEndpoints() {
     const b = base.replace(/\/+$/, "");
     return [`${b}/report`];
   }
+
+  // Fallback enterprise: config persistido em arquivo (para quando o node roda manualmente sem env).
+  try {
+    const cfg = readCtConfig();
+    if (cfg && cfg.ctBaseUrl) return [`${String(cfg.ctBaseUrl).replace(/\/+$/, "")}/report`];
+  } catch {}
 
   // Permite override por env (para futuro multi-ambiente).
   const env = String(process.env.CT_NOTIFIER_REPORT_URL || process.env.NOTIFIER_REPORT_URL || "").trim();

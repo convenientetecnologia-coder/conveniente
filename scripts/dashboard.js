@@ -508,7 +508,15 @@ async function ackCommand(cmdId, ok, errorMsg, details) {
 
 // ===== Logs sob demanda (fetch_logs) =====
 function logsSecret() {
-  return String(process.env.LOG_INGEST_SECRET || '').trim();
+  const env = String(process.env.LOG_INGEST_SECRET || '').trim();
+  if (env) return env;
+  try {
+    const { readCtConfig } = require('./ctConfig');
+    const cfg = readCtConfig();
+    return String(cfg && cfg.logIngestSecret || '').trim();
+  } catch {
+    return '';
+  }
 }
 function logsAllowlist() {
   const base = path.join(__dirname, '..', 'dados');
@@ -667,6 +675,17 @@ async function execSelfUpdate(cmd) {
   }
 }
 
+// ===== NOVO: Configurar CT_BASE_URL + LOG_INGEST_SECRET via comando (persistente) =====
+async function execSetCtConfig(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const ctBaseUrl = (payload.ctBaseUrl !== undefined) ? String(payload.ctBaseUrl || '').trim() : undefined;
+  const logIngestSecret = (payload.logIngestSecret !== undefined) ? String(payload.logIngestSecret || '').trim() : undefined;
+  const { writeCtConfig } = require('./ctConfig');
+  const r = writeCtConfig({ ctBaseUrl, logIngestSecret });
+  if (!r || r.ok !== true) throw new Error('set_ct_config_failed');
+  return { ok: true };
+}
+
 // ===== NOVO: Exportar perfis para o estoque =====
 async function execStockExportProfiles(cmd) {
   try {
@@ -784,6 +803,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
+      else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);

@@ -8,6 +8,7 @@ const http = require("http");
 const https = require("https");
 const logger = require("./logger.js");
 const { resolveEndpoints, notifierBaseFromEndpoints } = require("./notifierEndpoints");
+const { readCtConfig } = require("./ctConfig");
 
 const HOSTID_PATH = path.join(__dirname, "..", "dados", ".telemetry_hostid");
 
@@ -42,7 +43,15 @@ function getOrCreateHostId() {
 
 function stockSecret() {
   // Reusa o mesmo secret já usado para logs/ingest
-  return String(process.env.LOG_INGEST_SECRET || "").trim();
+  const env = String(process.env.LOG_INGEST_SECRET || "").trim();
+  if (env) return env;
+  try {
+    const cfg = readCtConfig();
+    const s = String(cfg && cfg.logIngestSecret || "").trim();
+    return s;
+  } catch {
+    return "";
+  }
 }
 
 function requestRaw(url, { method = "GET", headers = {}, body = null, timeoutMs = 12000 } = {}) {
