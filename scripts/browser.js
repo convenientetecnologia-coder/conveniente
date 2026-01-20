@@ -7,6 +7,7 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 const utils = require('./utils.js');
 const logger = require('./logger.js');
+const gptFallback = require('./gptFallback.js');
 
 puppeteer.use(StealthPlugin());
 
@@ -1111,6 +1112,148 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
   return ok;
 }
 
+async function detectMessengerPinModal(page) {
+  try {
+    const url = page && page.url ? page.url() : '';
+    if (!/messenger\.com/i.test(String(url || ''))) return { present: false };
+    return await page.evaluate(() => {
+      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const txt = norm(document.body ? (document.body.innerText || '') : '');
+      const present =
+        txt.includes('crie um pin') ||
+        txt.includes('criar pin') ||
+        txt.includes('seu pin restaura') ||
+        txt.includes('sem um pin');
+      // sinal extra: botão “Criar PIN”
+      const hasCreateBtn =
+        !!document.querySelector('[role="button"][aria-label*="Criar PIN"], button[aria-label*="Criar PIN"]') ||
+        Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => norm(el.innerText || el.textContent || '').includes('criar pin'));
+      return { present: !!(present && hasCreateBtn), hasCreateBtn };
+    });
+  } catch {
+    return { present: false };
+  }
+}
+
+async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries = 2 } = {}) {
+  for (let attempt = 1; attempt <= Math.max(1, maxTries); attempt++) {
+    const det = await detectMessengerPinModal(page);
+    if (!det.present) return { ok: true, dismissed: false };
+
+    let clicked = false;
+    try {
+      clicked = await page.evaluate(() => {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const dialog = document.querySelector('div[role="dialog"]') || null;
+        const root = dialog || document;
+
+        const candidates = [
+          '[aria-label="Fechar"]',
+          '[aria-label*="Fechar"]',
+          '[aria-label*="Close"]',
+          'button[aria-label*="Fechar"]',
+          'div[role="button"][aria-label*="Fechar"]',
+        ];
+        for (const sel of candidates) {
+          const el = root.querySelector(sel);
+          if (el && typeof el.click === 'function') { el.click(); return true; }
+        }
+
+        // fallback: ícone X dentro de um botão (caso Messenger esconda aria-label)
+        const buttons = Array.from(root.querySelectorAll('button,[role="button"]'));
+        for (const b of buttons) {
+          const label = norm(b.getAttribute('aria-label') || '');
+          const t = norm(b.innerText || b.textContent || '');
+          if (label.includes('fechar') || t === 'x') { b.click(); return true; }
+          const i = b.querySelector('i');
+          if (i) {
+            const st = (i.getAttribute('style') || '').toLowerCase();
+            if (st.includes('background-image') && st.includes('.png') && (st.includes('width: 20px') || st.includes('width:20px'))) {
+              b.click(); return true;
+            }
+          }
+        }
+        return false;
+      });
+    } catch {}
+
+    try { if (process.env.BROWSER_DEBUG === '1') logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} clicked=${!!clicked}`); } catch {}
+    await sleep(700);
+
+    const det2 = await detectMessengerPinModal(page);
+    if (!det2.present) return { ok: true, dismissed: true };
+  }
+  return { ok: false, error: 'pin_modal_still_present' };
+}
+
+function _fbUiHistoryKey(nome, reason) { return `${String(nome||'').trim()}::${String(reason||'').trim()}`; }
+const _fbUiHistory = new Map(); // key -> [{...}]
+function _histGet(nome, reason) { return _fbUiHistory.get(_fbUiHistoryKey(nome, reason)) || []; }
+function _histPush(nome, reason, item) {
+  const key = _fbUiHistoryKey(nome, reason);
+  const arr = _fbUiHistory.get(key) || [];
+  arr.push(item);
+  _fbUiHistory.set(key, arr.slice(-12));
+}
+
+async function tryApplySelectorHints(page, selectorHints) {
+  const hints = Array.isArray(selectorHints) ? selectorHints : [];
+  for (const selRaw of hints) {
+    const sel = String(selRaw || '').trim();
+    if (!sel) continue;
+    // guardrails básicos (evita seletor “perigoso”)
+    if (sel.length > 220) continue;
+    if (/script|iframe|object|embed/i.test(sel)) continue;
+    try {
+      const clicked = await page.evaluate((selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return false;
+        // precisa estar dentro de um dialog/modal para evitar cliques destrutivos fora
+        const inDialog = !!(el.closest && el.closest('div[role="dialog"]'));
+        if (!inDialog) return false;
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (!r || r.width < 2 || r.height < 2) return false;
+        if (typeof el.click === 'function') { el.click(); return true; }
+        return false;
+      }, sel);
+      if (clicked) return { ok: true, clickedSelector: sel };
+    } catch {}
+  }
+  return { ok: false, error: 'no_selector_clicked' };
+}
+
+async function gptRemediateFbUi(page, nome, { reason, stage } = {}) {
+  const url = (() => { try { return page.url(); } catch { return ''; } })();
+  const title = await page.title().catch(()=> '');
+  const html = await page.content().catch(()=> '');
+  const screenshotBase64 = await page.screenshot({ type: 'jpeg', quality: 60, fullPage: false, encoding: 'base64' }).catch(()=> '');
+
+  const history = _histGet(nome, reason);
+  _histPush(nome, reason, { ts: Date.now(), stage: String(stage||''), url, title, note: 'snapshot' });
+
+  const out = await gptFallback.resolveFbGpt({
+    perfil: nome,
+    url,
+    title,
+    html,
+    screenshotBase64,
+    reason: String(reason || ''),
+    source: 'browser.js',
+    history
+  }).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
+
+  _histPush(nome, reason, { ts: Date.now(), stage: String(stage||''), gptOk: !!out.ok, fromCache: !!out.fromCache, diagId: out.diagId || null, kind: out?.result?.problemKind || null });
+
+  if (!out || out.ok !== true) return { ok: false, error: out && out.error || 'gpt_failed' };
+  const result = out.result || null;
+  if (!result) return { ok: false, error: 'gpt_missing_result' };
+
+  const applied = await tryApplySelectorHints(page, result.selectorHints);
+  _histPush(nome, reason, { ts: Date.now(), stage: String(stage||''), appliedOk: !!applied.ok, clickedSelector: applied.clickedSelector || null });
+  await sleep(800);
+  return { ok: true, result, applied };
+}
+
 // ===============
 // configureProfile USA A LEITURA correta do manifest
 // ===============
@@ -1314,6 +1457,26 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
         }
       }
       if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.3Z: Fluxo Messenger finalizado (robusto)');
+
+      // 7) Curador enterprise: modal do PIN (fecha determinístico; se falhar, GPT + re-tenta)
+      try {
+        const pin1 = await tryDismissMessengerPinModal(openedPages[3], { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 2 });
+        if (!pin1.ok) {
+          // fallback GPT com histórico (tenta 2 rodadas)
+          for (let k = 1; k <= 2; k++) {
+            await gptRemediateFbUi(openedPages[3], nome, { reason: 'messenger_pin_modal', stage: `configure_pin_try_${k}` }).catch(()=>null);
+            const pin2 = await tryDismissMessengerPinModal(openedPages[3], { logPrefix: '[CONFIG][Messenger][pin-postgpt]', maxTries: 1 });
+            if (pin2.ok) break;
+          }
+          const still = await detectMessengerPinModal(openedPages[3]);
+          if (still.present) {
+            throw new Error('messenger_pin_modal');
+          }
+        }
+      } catch (e) {
+        // deixe falhar o configure (isso vai virar job error e pedir humano, mas a conta fica assigned no CT)
+        throw e;
+      }
 
       await new Promise(r => setTimeout(r, 4000)); // settle curto
     } catch(e) {

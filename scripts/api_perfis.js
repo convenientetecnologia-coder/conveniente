@@ -283,7 +283,8 @@ module.exports = (app, workerClient, fileStore) => {
     await issues.append(nome, 'admin_configure_request', `by=${op}`);
     // Timeout aumentado para 180000ms (3min) para comando configure
     try {
-      const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
+      // Passa operador para o worker decidir se deixa em modo humano (admin) ou segue fluxo automático (stock_provision)
+      const resp = await workerClient.sendWorkerCommand('configure', { nome, operator: op }, { timeoutMs: 180000 });
       logger.info('Perfil configurado por API', { nome });
       return res.json(resp);
     } catch (e) {

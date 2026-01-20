@@ -2249,7 +2249,7 @@ const handlers = {
   });
 },
 
-  async configure({ nome }) {
+  async configure({ nome, operator } = {}) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
@@ -2279,6 +2279,8 @@ const handlers = {
         });
       } catch {}
 
+      const op = String(operator || '').trim();
+      const isStockProvision = (op === 'stock_provision');
       try {
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
         try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
@@ -2290,7 +2292,10 @@ const handlers = {
         return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
       } finally {
         ctrl.configurando = false;
-        ctrl.humanControl = true;
+        // Regra enterprise:
+        // - configure via UI/admin => entra em modo humano (para inspeção)
+        // - configure via stock_provision => NÃO entra em modo humano (para permitir start-work automático)
+        ctrl.humanControl = !isStockProvision;
         stopPruneLoop(nome);
         await snapshotStatusAndWrite();
       }

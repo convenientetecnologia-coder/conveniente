@@ -33,8 +33,8 @@ function redactHtml(html) {
   s = s.replace(/\b\d{7,}\b/g, "[#]");
   // tokens comuns em querystring
   s = s.replace(/(access_token|captcha_challenge_hash|captcha_challenge_code)=([^&\"']+)/gi, "$1=[redacted]");
-  // limita tamanho
-  if (s.length > 18000) s = s.slice(0, 18000);
+  // limita tamanho (mais alto para diagnósticos enterprise; ainda assim com cap)
+  if (s.length > 50000) s = s.slice(0, 50000);
   return s;
 }
 
@@ -89,5 +89,50 @@ async function ingestFbGpt({ perfil, url, title, html, reason, source } = {}) {
   }
 }
 
-module.exports = { ingestFbGpt };
+async function resolveFbGpt({ perfil, url, title, html, screenshotBase64, reason, source, history } = {}) {
+  const secret = String(process.env.LOG_INGEST_SECRET || "").trim();
+  if (!secret) return { ok: false, skipped: true, reason: "LOG_INGEST_SECRET_not_configured" };
+
+  const base = notifierBaseFromEndpoints();
+  if (!base) return { ok: false, skipped: true, reason: "notifier_base_unavailable" };
+
+  const hostId = readHostId();
+  const hostname = (() => { try { return require("os").hostname(); } catch { return ""; } })();
+  const p = String(perfil || "").trim();
+  if (!p) return { ok: false, skipped: true, reason: "missing_perfil" };
+
+  const body = {
+    hostId,
+    hostname,
+    perfil: p,
+    url: String(url || "").slice(0, 600),
+    title: String(title || "").slice(0, 200),
+    html: redactHtml(html),
+    screenshotBase64: (typeof screenshotBase64 === "string") ? screenshotBase64 : "",
+    reason: reason ? String(reason).slice(0, 120) : null,
+    source: source ? String(source).slice(0, 80) : "conveniente",
+    history: Array.isArray(history) ? history.slice(0, 12) : []
+  };
+
+  const ac = new (global.AbortController || require("node-abort-controller"))();
+  const t = setTimeout(() => { try { ac.abort(); } catch {} }, 15000);
+  try {
+    const r = await fetch(`${base}/api/fb_gpt/resolve_secret`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Log-Secret": secret
+      },
+      body: JSON.stringify(body),
+      signal: ac.signal
+    }).catch(() => null);
+    if (!r) return { ok: false, error: "network_failed" };
+    const j = await r.json().catch(() => null);
+    return j || { ok: false, error: `http_${r.status}` };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+module.exports = { ingestFbGpt, resolveFbGpt };
 

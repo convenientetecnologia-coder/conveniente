@@ -446,6 +446,13 @@ async function execStockProvision(cmd) {
       const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
       if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
 
+      // 5.5) Procedimento enterprise pós-injeção:
+      // fecha o navegador e reabre em modo trabalho (evita sessão “suja”/popups pós-config)
+      out.steps.push({ step: 'deactivate_after_configure', at: Date.now() });
+      const r55 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
+      if (!r55 || r55.ok === false) throw new Error((r55 && r55.error) ? String(r55.error) : 'deactivate_after_configure_failed');
+      try { await new Promise(r => setTimeout(r, 1200)); } catch {}
+
       // 6) start work
       out.steps.push({ step: 'start_work', at: Date.now() });
       const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
