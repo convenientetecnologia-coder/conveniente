@@ -632,7 +632,11 @@ async function execSelfUpdate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const requestId = String(payload.requestId || '').trim() || (cmd && cmd.id) || 'noid';
   const branch = String(payload.branch || 'main').trim() || 'main';
-  const restart = (payload.restart === true || payload.restart === 1 || payload.restart === '1' || String(payload.restart || '').toLowerCase() === 'true');
+  // Segurança enterprise: por padrão NÃO derruba o processo.
+  // Restart automático só é permitido se o operador habilitar explicitamente via env.
+  const restartRequested = (payload.restart === true || payload.restart === 1 || payload.restart === '1' || String(payload.restart || '').toLowerCase() === 'true');
+  const restartAllowed = String(process.env.ALLOW_SELF_UPDATE_RESTART || '').trim() === '1';
+  const restart = restartRequested && restartAllowed;
   const repoDir = path.join(__dirname, '..');
 
   updateLogAppend({ event: 'self_update_start', requestId, branch, restart });
@@ -650,7 +654,7 @@ async function execSelfUpdate(cmd) {
     throw new Error(`self_update_failed:${(err && err.step) || 'unknown'}:${(err && err.error) || 'error'}`);
   }
 
-  // Reinício opcional (enterprise): necessário para carregar código novo (novos comandos/UI).
+  // Reinício opcional: somente se explicitamente permitido.
   // Agendado após o retorno para não interromper o ACK em trânsito.
   if (restart) {
     try { updateLogAppend({ event: 'self_update_restart_scheduled', requestId, at: Date.now() }); } catch {}
@@ -658,6 +662,8 @@ async function execSelfUpdate(cmd) {
       try { logger.info('[DASH][SELF_UPDATE] restart=1 -> saindo do processo para o gerenciador reiniciar'); } catch {}
       try { process.exit(0); } catch {}
     }, 2500);
+  } else if (restartRequested && !restartAllowed) {
+    try { updateLogAppend({ event: 'self_update_restart_blocked', requestId, reason: 'ALLOW_SELF_UPDATE_RESTART!=1' }); } catch {}
   }
 }
 
