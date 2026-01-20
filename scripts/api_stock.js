@@ -4,8 +4,10 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const http = require("http");
+const https = require("https");
 const logger = require("./logger.js");
-const { notifierBaseFromEndpoints } = require("./notifierEndpoints");
+const { resolveEndpoints, notifierBaseFromEndpoints } = require("./notifierEndpoints");
 
 const HOSTID_PATH = path.join(__dirname, "..", "dados", ".telemetry_hostid");
 
@@ -43,51 +45,147 @@ function stockSecret() {
   return String(process.env.LOG_INGEST_SECRET || "").trim();
 }
 
-async function postJson(url, body, { timeoutMs = 12000, headers = {} } = {}) {
-  const ac = new (global.AbortController || require("node-abort-controller"))();
-  const t = setTimeout(() => { try { ac.abort(); } catch {} }, timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify(body || {}),
-      signal: ac.signal
+function requestRaw(url, { method = "GET", headers = {}, body = null, timeoutMs = 12000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(String(url || "")); } catch (e) { return reject(new Error("invalid_url")); }
+    const lib = u.protocol === "https:" ? https : http;
+
+    const req = lib.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === "https:" ? 443 : 80),
+      path: `${u.pathname || ""}${u.search || ""}`,
+      method,
+      headers
+    }, (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        resolve({
+          status: Number(res.statusCode || 0) || 0,
+          headers: res.headers || {},
+          body: data
+        });
+      });
     });
-    const j = await res.json().catch(() => null);
-    return j;
-  } finally {
-    clearTimeout(t);
-  }
+
+    req.on("error", (err) => reject(err));
+    req.setTimeout(timeoutMs, () => {
+      try { req.destroy(new Error("timeout")); } catch {}
+    });
+
+    if (body != null) req.write(body);
+    req.end();
+  });
 }
 
-async function getJson(url, { timeoutMs = 12000, headers = {} } = {}) {
-  const ac = new (global.AbortController || require("node-abort-controller"))();
-  const t = setTimeout(() => { try { ac.abort(); } catch {} }, timeoutMs);
-  try {
-    const res = await fetch(url, { headers, signal: ac.signal });
-    const j = await res.json().catch(() => null);
-    return j;
-  } finally {
-    clearTimeout(t);
+async function requestJson(url, { method = "GET", headers = {}, bodyObj = null, timeoutMs = 12000 } = {}) {
+  const hasBody = bodyObj != null && method !== "GET" && method !== "HEAD";
+  const body = hasBody ? JSON.stringify(bodyObj) : null;
+  const h = { ...headers };
+  if (hasBody && !h["Content-Type"] && !h["content-type"]) h["Content-Type"] = "application/json";
+
+  const raw = await requestRaw(url, { method, headers: h, body, timeoutMs });
+  let json = null;
+  try { json = JSON.parse(String(raw.body || "")); } catch {}
+  return { ...raw, json };
+}
+
+function unique(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const x of arr || []) {
+    const s = String(x || "").trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
   }
+  return out;
+}
+
+function candidateCtBases() {
+  const bases = [];
+  try {
+    const eps = resolveEndpoints();
+    for (const e of eps || []) {
+      try {
+        const u = new URL(String(e || ""));
+        bases.push(`${u.protocol}//${u.host}`);
+      } catch {}
+    }
+  } catch {}
+  // fallback: comportamento antigo
+  const base1 = notifierBaseFromEndpoints();
+  if (base1) bases.push(base1);
+  return unique(bases);
+}
+
+async function getAvailableFromCt({ limit, secret } = {}) {
+  const bases = candidateCtBases();
+  let last = null;
+  for (const base of bases) {
+    const url = `${base}/api/stock/available_secret?limit=${encodeURIComponent(String(limit))}`;
+    try {
+      const r = await requestJson(url, { method: "GET", timeoutMs: 15000, headers: { "X-Log-Secret": secret } });
+      if (!r.json) {
+        const preview = String(r.body || "").slice(0, 240);
+        last = { base, error: "ct_non_json", status: r.status, bodyPreview: preview };
+        continue;
+      }
+      if (r.json.ok !== true) {
+        last = { base, error: String(r.json.error || "ct_failed"), status: r.status, ct: r.json };
+        continue;
+      }
+      return { ok: true, baseUsed: base, accounts: Array.isArray(r.json.accounts) ? r.json.accounts : [] };
+    } catch (e) {
+      last = { base, error: (e && e.message) || String(e) };
+    }
+  }
+  return { ok: false, error: (last && last.error) ? last.error : "ct_failed", details: { triedBases: bases, last } };
 }
 
 module.exports = (app) => {
+  // Debug enterprise (não expõe secret): ajuda a diagnosticar “falha ao carregar contas”.
+  app.get("/api/stock/debug", async (req, res) => {
+    try {
+      const base = notifierBaseFromEndpoints();
+      const bases = candidateCtBases();
+      const sec = stockSecret();
+      return res.json({
+        ok: true,
+        ctBase: base || null,
+        ctBases: bases,
+        hasSecret: !!sec,
+        secretLen: sec ? String(sec).length : 0,
+        env: {
+          CT_BASE_URL: String(process.env.CT_BASE_URL || "").trim() ? "[set]" : "",
+          CT_URL: String(process.env.CT_URL || "").trim() ? "[set]" : "",
+          CT_NOTIFIER_REPORT_URL: String(process.env.CT_NOTIFIER_REPORT_URL || "").trim() ? "[set]" : "",
+          NOTIFIER_REPORT_URL: String(process.env.NOTIFIER_REPORT_URL || "").trim() ? "[set]" : ""
+        }
+      });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // Lista contas disponíveis do Estoque (via CT) para o operador escolher manualmente.
   app.get("/api/stock/available", async (req, res) => {
     try {
       const base = notifierBaseFromEndpoints();
-      if (!base) return res.json({ ok: false, error: "ct_base_unavailable" });
+      if (!base) return res.json({ ok: false, error: "ct_base_unavailable", details: { hint: "configure CT_BASE_URL/CT_URL ou CT_NOTIFIER_REPORT_URL", hasSecret: !!stockSecret(), triedBases: candidateCtBases() } });
       const sec = stockSecret();
-      if (!sec) return res.json({ ok: false, error: "stock_secret_not_configured" });
+      if (!sec) return res.json({ ok: false, error: "stock_secret_not_configured", details: { hint: "configure LOG_INGEST_SECRET no servidor (mesmo secret do CT)", base } });
       const limit = Math.max(20, Math.min(800, Number(req.query?.limit || 250) || 250));
-      const url = `${base}/api/stock/available_secret?limit=${encodeURIComponent(String(limit))}`;
-      const r = await getJson(url, { timeoutMs: 15000, headers: { "X-Log-Secret": sec } });
-      if (!r || r.ok !== true) return res.json({ ok: false, error: (r && r.error) ? String(r.error) : "ct_failed" });
-      return res.json({ ok: true, accounts: Array.isArray(r.accounts) ? r.accounts : [] });
+
+      const r = await getAvailableFromCt({ limit, secret: sec });
+      if (!r.ok) return res.json({ ok: false, error: r.error, details: r.details || null });
+      return res.json({ ok: true, accounts: r.accounts, baseUsed: r.baseUsed });
     } catch (e) {
       logger.warn("[api_stock] available falhou", { error: e && e.message || e });
-      return res.json({ ok: false, error: (e && e.message) || String(e) });
+      return res.json({ ok: false, error: (e && e.message) || String(e), details: { hint: "verifique CT_BASE_URL/CT_URL e conectividade", hasSecret: !!stockSecret() } });
     }
   });
 
@@ -103,22 +201,32 @@ module.exports = (app) => {
       if (cat !== "fretes" && cat !== "veiculos") return res.json({ ok: false, error: "invalid_category" });
 
       const base = notifierBaseFromEndpoints();
-      if (!base) return res.json({ ok: false, error: "ct_base_unavailable" });
+      if (!base) return res.json({ ok: false, error: "ct_base_unavailable", details: { hint: "configure CT_BASE_URL/CT_URL ou CT_NOTIFIER_REPORT_URL", hasSecret: !!stockSecret() } });
       const sec = stockSecret();
-      if (!sec) return res.json({ ok: false, error: "stock_secret_not_configured" });
+      if (!sec) return res.json({ ok: false, error: "stock_secret_not_configured", details: { hint: "configure LOG_INGEST_SECRET no servidor (mesmo secret do CT)", base } });
 
       const hostId = getOrCreateHostId();
-      const r = await postJson(`${base}/api/stock/provision/from_account_secret`, {
+      const url = `${base}/api/stock/provision/from_account_secret`;
+      const r = await requestJson(url, {
+        method: "POST",
+        timeoutMs: 20000,
+        headers: { "X-Log-Secret": sec },
+        bodyObj: {
         hostId,
         city: c,
         category: cat,
         stockAccountId: accId
-      }, { timeoutMs: 20000, headers: { "X-Log-Secret": sec } });
+        }
+      });
 
-      if (!r || r.ok !== true) {
-        return res.json({ ok: false, error: (r && r.error) ? String(r.error) : "ct_failed", details: r || null });
+      if (!r.json) {
+        const preview = String(r.body || "").slice(0, 240);
+        return res.json({ ok: false, error: "ct_non_json", details: { base, status: r.status, bodyPreview: preview } });
       }
-      return res.json(r);
+      if (r.json.ok !== true) {
+        return res.json({ ok: false, error: String(r.json.error || "ct_failed"), details: { base, status: r.status, ct: r.json } });
+      }
+      return res.json(r.json);
     } catch (e) {
       logger.warn("[api_stock] provision_from_stock falhou", { error: e && e.message || e });
       return res.json({ ok: false, error: (e && e.message) || String(e) });

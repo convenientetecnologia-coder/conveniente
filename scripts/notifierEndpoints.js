@@ -4,6 +4,14 @@
 // Importante: mantemos compatível com a versão atual que usa ngrok.
 
 function resolveEndpoints() {
+  // Preferência máxima: CT_BASE_URL/CT_URL (base do CT). Isso evita depender de ngrok hardcoded.
+  // Ex.: CT_BASE_URL=https://xxxx.ngrok-free.app  => endpoint report = {base}/report
+  const base = String(process.env.CT_BASE_URL || process.env.CT_URL || "").trim();
+  if (base) {
+    const b = base.replace(/\/+$/, "");
+    return [`${b}/report`];
+  }
+
   // Permite override por env (para futuro multi-ambiente).
   const env = String(process.env.CT_NOTIFIER_REPORT_URL || process.env.NOTIFIER_REPORT_URL || "").trim();
   if (env) return [env];

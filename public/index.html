@@ -440,14 +440,43 @@
       (async () => {
         try {
           stockAccSel.innerHTML = `<option value="">Carregando contas disponíveis...</option>`;
-          const r = await fetch('/api/stock/available?limit=400').then(r=>r.json()).catch(()=>null);
+          const resp = await fetch('/api/stock/available?limit=400').catch(() => null);
+          if (!resp) {
+            stockAccSel.innerHTML = `<option value="">Falha ao carregar estoque: sem resposta do servidor</option>`;
+            msgEl.className = 'pill bad';
+            msgEl.textContent = 'Falha ao carregar contas do Estoque: sem resposta do servidor';
+            msgEl.style.display = 'inline-flex';
+            return;
+          }
+          const raw = await resp.text().catch(() => '');
+          let r = null;
+          try { r = JSON.parse(raw || ''); } catch {
+            r = { ok: false, error: 'non_json_response', details: { status: resp.status, bodyPreview: String(raw || '').slice(0, 240) } };
+          }
           if (!r || r.ok !== true) {
-            stockAccSel.innerHTML = `<option value="">Falha ao carregar estoque: ${escapeHtml((r && r.error) ? r.error : 'erro')}</option>`;
+            const err = (r && r.error) ? String(r.error) : 'erro';
+            const det = (r && r.details) ? JSON.stringify(r.details) : '';
+            stockAccSel.innerHTML = `<option value="">Falha ao carregar estoque: ${escapeHtml(err)}${det ? ' • ' + escapeHtml(det) : ''}</option>`;
+            // Mostra também no banner (enterprise) com debug local
+            try {
+              const dbg = await fetch('/api/stock/debug').then(r=>r.json()).catch(()=>null);
+              const dbgTxt = dbg ? JSON.stringify(dbg) : '';
+              msgEl.className = 'pill bad';
+              msgEl.textContent = 'Falha ao carregar contas do Estoque: ' + err + (det ? ' • ' + det : '') + (dbgTxt ? ' • debug=' + dbgTxt : '');
+              msgEl.style.display = 'inline-flex';
+            } catch {
+              msgEl.className = 'pill bad';
+              msgEl.textContent = 'Falha ao carregar contas do Estoque: ' + err + (det ? ' • ' + det : '');
+              msgEl.style.display = 'inline-flex';
+            }
             return;
           }
           const accs = Array.isArray(r.accounts) ? r.accounts : [];
           if (!accs.length) {
             stockAccSel.innerHTML = `<option value="">Nenhuma conta disponível no estoque</option>`;
+            msgEl.className = 'pill';
+            msgEl.textContent = 'Nenhuma conta disponível no Estoque agora.';
+            msgEl.style.display = 'inline-flex';
             return;
           }
           stockAccSel.innerHTML = `<option value="">Selecione uma conta...</option>` + accs.map(a => {
@@ -456,8 +485,12 @@
             const login = String(a.login || '—');
             return `<option value="${id}">#${escapeHtml(id)} • ${escapeHtml(label)} • ${escapeHtml(login)}</option>`;
           }).join('');
+          msgEl.style.display = 'none';
         } catch {
           stockAccSel.innerHTML = `<option value="">Falha ao carregar contas</option>`;
+          msgEl.className = 'pill bad';
+          msgEl.textContent = 'Falha ao carregar contas do Estoque.';
+          msgEl.style.display = 'inline-flex';
         }
       })();
 
