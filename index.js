@@ -47,9 +47,11 @@ const allowedOrigins = [
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const isLocalReq = (req.ip === '127.0.0.1' || req.hostname === 'localhost');
+  // Electron/file:// costuma enviar Origin: null. Trate como “sem origin” se for local.
+  const originIsNull = (String(origin || '').trim().toLowerCase() === 'null');
   if (
     allowedOrigins.includes(origin) ||
-    (!origin && isLocalReq)
+    ((!origin || originIsNull) && isLocalReq)
   ) {
     // Libera CORS somente para as origens válidas e undefined
     res.header('Access-Control-Allow-Origin', origin || '*');
