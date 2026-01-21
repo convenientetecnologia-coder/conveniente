@@ -16,6 +16,7 @@ const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 
 // Endpoint do notificador (centralizado)
 const { resolveEndpoints } = require('./notifierEndpoints');
+const { readCtConfig } = require('./ctConfig');
 
 let timer = null;
 let inFlight = false;
@@ -698,6 +699,7 @@ async function execStockExportProfiles(cmd) {
   try {
     const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
     const wantedNames = Array.isArray(payload.profileNames) ? payload.profileNames.map(x => String(x || '').trim()).filter(Boolean) : [];
+    const includeCookies = payload.includeCookies === true || payload.includeCookies === 1 || String(payload.includeCookies || '').trim() === '1';
 
     // Busca lista de perfis do snapshot/status
     let st = null;
@@ -730,23 +732,27 @@ async function execStockExportProfiles(cmd) {
           cookie_fp: null
         };
 
-        // Busca manifest (com cookies) se disponível
+        // Busca manifest (com cookies) se disponível.
+        // Regra enterprise: por padrão NÃO envia cookies no export (payload grande).
+        // Quando includeCookies=1 (ação manual no CT), aí sim envia cookies.
         try {
           const manifest = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/manifest`);
           if (manifest && manifest.manifest && manifest.manifest.cookies) {
-            result.cookies = Array.isArray(manifest.manifest.cookies) ? manifest.manifest.cookies : [];
-            // Calcula fingerprint se cookies existirem
-            if (result.cookies.length) {
-              // Fingerprint padrão (mesmo critério do CT: c_user + xs + datr)
+            const cookiesArr = Array.isArray(manifest.manifest.cookies) ? manifest.manifest.cookies : [];
+            // Calcula fingerprint (sempre, se possível)
+            if (cookiesArr.length) {
               try {
                 const crypto = require('crypto');
                 const sha1 = (s) => crypto.createHash('sha1').update(String(s || '')).digest('hex');
-                const byName = new Map(result.cookies.map(c => [String(c?.name || '').trim(), String(c?.value || '')]));
+                const byName = new Map(cookiesArr.map(c => [String(c?.name || '').trim(), String(c?.value || '')]));
                 const cUser = byName.get('c_user') || '';
                 const xs = byName.get('xs') || '';
                 const datr = byName.get('datr') || '';
                 if (cUser && xs) result.cookie_fp = sha1(`c_user=${cUser};xs=${xs};datr=${datr}`);
               } catch {}
+            }
+            if (includeCookies) {
+              result.cookies = cookiesArr;
             }
           }
         } catch (e) {
@@ -854,10 +860,15 @@ async function tick() {
 
     const quick = buildQuickSnapshot(status);
 
+    // Verifica se precisa solicitar config (ctBaseUrl ou logIngestSecret ausentes)
+    const cfg = readCtConfig();
+    const needsConfig = !cfg.ctBaseUrl || !cfg.logIngestSecret;
+
     const payload = {
       hostname: quick.system.hostname,
       hostId,
       sentAt: now(),
+      needsConfig: needsConfig, // Flag para CT saber que precisa enviar set_ct_config
       host: {
         // RAM total do servidor (para capacidade no notificador)
         totalMemGB: (quick && quick.system && typeof quick.system.totalMB === 'number')

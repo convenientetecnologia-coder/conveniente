@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { notifierBaseFromEndpoints } = require("./notifierEndpoints");
+const { readCtConfig } = require("./ctConfig");
 
 const DATA_DIR = path.join(__dirname, "..", "dados");
 const HOSTID_PATH = path.join(DATA_DIR, ".telemetry_hostid");
@@ -18,6 +19,14 @@ function readHostId() {
     }
   } catch {}
   return null;
+}
+
+function getLogIngestSecret() {
+  // Prioridade 1: ct_config.json (configuração persistida via comando set_ct_config)
+  const cfg = readCtConfig();
+  if (cfg && cfg.logIngestSecret) return String(cfg.logIngestSecret).trim();
+  // Prioridade 2: env (para compatibilidade/fallback)
+  return String(process.env.LOG_INGEST_SECRET || "").trim();
 }
 
 function redactHtml(html) {
@@ -39,7 +48,7 @@ function redactHtml(html) {
 }
 
 async function ingestFbGpt({ perfil, url, title, html, reason, source } = {}) {
-  const secret = String(process.env.LOG_INGEST_SECRET || "").trim();
+  const secret = getLogIngestSecret();
   if (!secret) return { ok: false, skipped: true, reason: "LOG_INGEST_SECRET_not_configured" };
 
   const base = notifierBaseFromEndpoints();
@@ -90,7 +99,7 @@ async function ingestFbGpt({ perfil, url, title, html, reason, source } = {}) {
 }
 
 async function resolveFbGpt({ perfil, url, title, html, screenshotBase64, reason, source, history } = {}) {
-  const secret = String(process.env.LOG_INGEST_SECRET || "").trim();
+  const secret = getLogIngestSecret();
   if (!secret) return { ok: false, skipped: true, reason: "LOG_INGEST_SECRET_not_configured" };
 
   const base = notifierBaseFromEndpoints();
