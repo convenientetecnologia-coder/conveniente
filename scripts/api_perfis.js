@@ -378,6 +378,33 @@ module.exports = (app, workerClient, fileStore) => {
     }
     await issues.append(nome, 'admin_start_work_request', `by=${op}`);
 
+    // Enterprise (produção): perfil recém-provisionado via Estoque deve entrar com
+    // Robe pausado por 24h, mas Virtus ON imediatamente.
+    // Importante: isso NÃO deve "resetar" o cooldown se o operador chamar start-work depois.
+    if (op === 'stock_provision') {
+      try {
+        const manifestStore = require('./manifestStore.js');
+        const plus24 = 24 * 60 * 60 * 1000;
+        await manifestStore.update(nome, (m) => {
+          const now = Date.now();
+          m = m || {};
+          const hasPosted = !!(m.ultimaPostagemRobe && Number(m.ultimaPostagemRobe || 0) > 0);
+          const until = Number(m.robeCooldownUntil || 0) || 0;
+          const remaining = Number(m.robeCooldownRemainingMs || 0) || 0;
+          const cooldownActive = (until > now) || (remaining > 0);
+          // Só aplica se ainda não tiver cooldown e ainda não postou.
+          if (!hasPosted && !cooldownActive) {
+            m.robeCooldownUntil = now + plus24;
+            m.robeCooldownRemainingMs = 0;
+            m.robePauseReason = 'new_account';
+          }
+          return m;
+        });
+      } catch (e) {
+        try { await issues.append(nome, 'robe24h_failed', `auto_new_account:${(e && e.message) || String(e)}`); } catch {}
+      }
+    }
+
     // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
     {
       const freeMB = getAvailableMB();
