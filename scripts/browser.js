@@ -1119,16 +1119,55 @@ async function detectMessengerPinModal(page) {
     return await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const txt = norm(document.body ? (document.body.innerText || '') : '');
-      const present =
+      // Caso A (mais comum): “Insira seu PIN para restaurar seu histórico de conversa”
+      const pinText =
+        txt.includes('insira seu pin') ||
+        txt.includes('inserir seu pin') ||
+        (txt.includes('restaurar') && txt.includes('historico') && txt.includes('pin'));
+      const hasPinInput =
+        !!document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
+        !!document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
+        Array.from(document.querySelectorAll('input[type="text"][maxlength="6"]')).some(el => norm(el.getAttribute('aria-label')||'') === 'pin');
+
+      // Caso B (às vezes aparece após tentar fechar): “Continuar sem restaurar?”
+      const contText =
+        txt.includes('continuar sem restaurar') ||
+        (txt.includes('nao restaurar') && txt.includes('mensagens'));
+      const hasNaoRestaurarBtn =
+        Array.from(document.querySelectorAll('button,[role="button"]'))
+          .some(el => {
+            const t = norm(el.innerText || el.textContent || '');
+            const al = norm(el.getAttribute('aria-label') || '');
+            const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null);
+            if (disabled) return false;
+            return t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens');
+          });
+
+      // Legado: alguns fluxos mostram “Criar PIN” (mantemos também)
+      const createText =
         txt.includes('crie um pin') ||
         txt.includes('criar pin') ||
         txt.includes('seu pin restaura') ||
         txt.includes('sem um pin');
-      // sinal extra: botão “Criar PIN”
       const hasCreateBtn =
         !!document.querySelector('[role="button"][aria-label*="Criar PIN"], button[aria-label*="Criar PIN"]') ||
         Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => norm(el.innerText || el.textContent || '').includes('criar pin'));
-      return { present: !!(present && hasCreateBtn), hasCreateBtn };
+
+      const present =
+        (pinText && hasPinInput) ||
+        (contText && hasNaoRestaurarBtn) ||
+        (createText && hasCreateBtn);
+
+      return {
+        present: !!present,
+        kind: (pinText && hasPinInput) ? 'pin_input'
+          : (contText && hasNaoRestaurarBtn) ? 'continue_without_restore'
+          : (createText && hasCreateBtn) ? 'create_pin'
+          : null,
+        hasPinInput,
+        hasNaoRestaurarBtn,
+        hasCreateBtn
+      };
     });
   } catch {
     return { present: false };
@@ -1144,8 +1183,41 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     try {
       clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        const dialog = document.querySelector('div[role="dialog"]') || null;
-        const root = dialog || document;
+        // 1) Se aparecer o diálogo “Continuar sem restaurar?”, clique “Não restaurar mensagens”
+        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+        for (const d of dialogs) {
+          const dt = norm(d.innerText || d.textContent || '');
+          if (dt.includes('continuar sem restaurar') || (dt.includes('nao restaurar') && dt.includes('mensagens'))) {
+            const btns = Array.from(d.querySelectorAll('button,[role="button"]'));
+            // preferir o botão clicável (tabindex=0, não aria-disabled)
+            for (const b of btns) {
+              const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
+              if (disabled) continue;
+              const t = norm(b.innerText || b.textContent || '');
+              const al = norm(b.getAttribute('aria-label') || '');
+              if (t.includes('nao restaurar mensagens') || al.includes('nao restaurar mensagens')) {
+                b.click();
+                return true;
+              }
+            }
+            // Se não achou, tenta fechar o dialog
+            const close = d.querySelector('[aria-label="Fechar"],[aria-label*="Fechar"],[aria-label*="Close"]');
+            if (close && typeof close.click === 'function') { close.click(); return true; }
+          }
+        }
+
+        // 2) Caso do PIN (input 6 dígitos): tente clicar em “Fechar” (X) no topo (não necessariamente dentro de dialog)
+        const pinInput =
+          document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
+          document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
+          null;
+        if (pinInput) {
+          const closeAny = document.querySelector('[aria-label="Fechar"],[aria-label*="Fechar"],button[aria-label*="Fechar"],div[role="button"][aria-label*="Fechar"],[aria-label*="Close"]');
+          if (closeAny && typeof closeAny.click === 'function') { closeAny.click(); return true; }
+        }
+
+        // 3) Fallback genérico: procurar botões “Fechar/X”
+        const root = document;
 
         const candidates = [
           '[aria-label="Fechar"]',
@@ -1176,6 +1248,12 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         return false;
       });
     } catch {}
+
+    // fallback “fora do DOM”: ESC geralmente fecha o PIN e abre o confirm “Não restaurar”
+    if (!clicked) {
+      try { await page.keyboard.press('Escape').catch(()=>{}); } catch {}
+      await sleep(250);
+    }
 
     try { if (process.env.BROWSER_DEBUG === '1') logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} clicked=${!!clicked}`); } catch {}
     await sleep(700);
