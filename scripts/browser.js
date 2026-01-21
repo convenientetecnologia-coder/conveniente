@@ -1215,6 +1215,11 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     const det = await detectMessengerPinModal(page);
     if (!det.present) return { ok: true, dismissed: false };
 
+    // snapshot mínimo sempre que detecta (ajuda a comparar DOM real vs esperado)
+    try {
+      pinLog({ event: 'pin_present', attempt, kind: det.kind || null, hasPinInput: !!det.hasPinInput, hasNaoRestaurarBtn: !!det.hasNaoRestaurarBtn, hasCreateBtn: !!det.hasCreateBtn });
+    } catch {}
+
     let clickedTrusted = false;
     try {
       if (det.kind === 'continue_without_restore') {
@@ -2490,6 +2495,7 @@ module.exports = {
   // ==== Messenger PIN modal (exportado p/ worker curador)
   detectMessengerPinModal,
   tryDismissMessengerPinModal,
+  gptRemediateFbUi,
   installOneTabGuard,
   installAboutBlankKiller,
   // ==== NOVOS:

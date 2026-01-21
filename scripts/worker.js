@@ -3601,6 +3601,22 @@ async function nurseTick() {
               await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 6 }).catch(()=>null);
               const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
               if (still && still.present) {
+                // fallback GPT (central) para sugerir clique seguro dentro do modal (selectorHints)
+                try {
+                  if (browserHelper && typeof browserHelper.gptRemediateFbUi === 'function') {
+                    await browserHelper.gptRemediateFbUi(firstMatch.pg, nome, { reason: 'messenger_pin_modal', stage: 'nurse_pin_try_1' }).catch(()=>null);
+                    await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN][postgpt]', maxTries: 4 }).catch(()=>null);
+                  }
+                } catch {}
+                const still2 = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
+                if (still2 && still2.present) {
+                  try {
+                    const fsSync2 = require('fs');
+                    const path2 = require('path');
+                    const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                    fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'gpt_failed_or_insufficient', kind: still2.kind||null }) + '\n');
+                  } catch {}
+                }
                 await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
                 try {
                   const fsSync2 = require('fs');
