@@ -2368,7 +2368,16 @@ async function detectLoginRequired(page) {
       const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
       const hasPersonaText = h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person'));
       const hasCheckpointText = h1.some(t => t.includes('checkpoint') || t.includes('verificacao') || t.includes('verificacao de seguranca') || t.includes('security check'));
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, href0, path0, title0 };
+      // 3) Confirmação de identidade (ex.: selfie/vídeo) — NÃO é resolvível automaticamente, mas precisa ser “visto”.
+      const hasIdentityText = h1.some(t =>
+        t.includes('confirme sua identidade') ||
+        t.includes('confirm your identity') ||
+        t.includes('gravar uma selfie de video') ||
+        t.includes('grave uma selfie de video') ||
+        t.includes('video selfie') ||
+        (t.includes('selfie') && t.includes('video'))
+      );
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -2378,6 +2387,7 @@ async function detectLoginRequired(page) {
     const hasInputs = !!(v && v.hasInputs);
     const hasPersonaText = !!(v && v.hasPersonaText);
     const hasCheckpointText = !!(v && v.hasCheckpointText);
+    const hasIdentityText = !!(v && v.hasIdentityText);
     const title = (v && v.title0) ? String(v.title0) : '';
 
     // Detecção mais conservadora para evitar falso positivo:
@@ -2390,7 +2400,17 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+      };
+    }
+    if (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title))) {
+      return {
+        loginRequired: true,
+        reason: 'identity_confirm_selfie',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
       };
     }
     if ((hasPersonaText || hasCheckpointText) && (strongLoginPath || /checkpoint/i.test(title))) {
@@ -2401,7 +2421,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
       };
     }
 
@@ -2411,7 +2431,7 @@ async function detectLoginRequired(page) {
       domain,
       url: (v && v.href0) ? String(v.href0) : href,
       title,
-      evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, path }
+      evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
     };
   } catch {}
   return { loginRequired: false };
