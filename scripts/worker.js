@@ -3567,34 +3567,59 @@ async function nurseTick() {
 
       // Curador enterprise: PIN do Messenger / "Continuar sem restaurar?"
       try {
-        const urlNow = (typeof p0.url === 'function') ? (p0.url() || '') : '';
-        const isMessenger = /messenger\.com/i.test(urlNow);
         // Só tenta curar quando NÃO está configurando e não está com Robe executando (evita interferir no fluxo de postagem)
-        if (isMessenger && ctrl && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true)) {
-          const detPin = await browserHelper.detectMessengerPinModal(p0).catch(()=>({ present:false }));
-          if (detPin && detPin.present) {
-            try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${detPin.kind||''}`); } catch {}
-            // tenta cura determinística (trusted click + ESC)
-            await browserHelper.tryDismissMessengerPinModal(p0, { logPrefix: '[NURSE][PIN]', maxTries: 4 }).catch(()=>null);
-            const still = await browserHelper.detectMessengerPinModal(p0).catch(()=>({ present:false }));
-            if (still && still.present) {
-              await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
-              // escreve log global (para fetch_logs/messenger_pin)
-              try {
-                const fsSync2 = require('fs');
-                const path2 = require('path');
-                const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_still_present', kind: still.kind||null, url: urlNow }) + '\n');
-              } catch {}
-            } else {
-              // limpou: remove flag se tinha
+        if (ctrl && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true) && ctrl.browser && typeof ctrl.browser.pages === 'function') {
+          robeMeta[nome] = robeMeta[nome] || {};
+          const nowp = Date.now();
+          const lastScan = Number(robeMeta[nome].lastPinScanAt || 0) || 0;
+          if (!lastScan || (nowp - lastScan) > 8000) {
+            robeMeta[nome].lastPinScanAt = nowp;
+            let pagesAll = [];
+            try { pagesAll = await ctrl.browser.pages(); } catch { pagesAll = []; }
+
+            // log curto: sempre registra scan (cria messenger_pin.jsonl para auditoria via fetch_logs)
+            let scan = [];
+            let anyPresent = false;
+            let firstMatch = null;
+            for (const pg of pagesAll.slice(0, 8)) {
+              let urlNow = '';
+              try { urlNow = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+              const detPin = await browserHelper.detectMessengerPinModal(pg).catch(()=>({ present:false }));
+              scan.push({ u: String(urlNow || '').slice(0, 140), p: !!detPin.present, k: detPin.kind || null });
+              if (detPin && detPin.present && !firstMatch) firstMatch = { pg, det: detPin, urlNow };
+              if (detPin && detPin.present) anyPresent = true;
+            }
+            try {
+              const fsSync2 = require('fs');
+              const path2 = require('path');
+              const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+              fsSync2.appendFileSync(p, JSON.stringify({ ts: nowp, src:'worker.js', perfil:nome, event:'scan', pages: scan }) + '\n');
+            } catch {}
+
+            if (firstMatch) {
+              try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${firstMatch.det.kind||''}`); } catch {}
+              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 6 }).catch(()=>null);
+              const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
+              if (still && still.present) {
+                await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
+                try {
+                  const fsSync2 = require('fs');
+                  const path2 = require('path');
+                  const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                  fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_still_present', kind: still.kind||null, url: String(firstMatch.urlNow||'').slice(0, 220) }) + '\n');
+                } catch {}
+              } else {
+                await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
+                try {
+                  const fsSync2 = require('fs');
+                  const path2 = require('path');
+                  const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                  fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_cleared', url: String(firstMatch.urlNow||'').slice(0, 220) }) + '\n');
+                } catch {}
+              }
+            } else if (!anyPresent) {
+              // se não há PIN em nenhuma aba, limpa flag (se existir)
               await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
-              try {
-                const fsSync2 = require('fs');
-                const path2 = require('path');
-                const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_cleared', url: urlNow }) + '\n');
-              } catch {}
             }
           }
         }

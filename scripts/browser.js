@@ -1114,8 +1114,8 @@ async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', ti
 
 async function detectMessengerPinModal(page) {
   try {
-    const url = page && page.url ? page.url() : '';
-    if (!/messenger\.com/i.test(String(url || ''))) return { present: false };
+    // NÃO restringir por URL: em alguns fluxos o Messenger pode estar embutido/redirectado
+    // e ainda assim renderizar o modal do PIN. O detector já exige sinais fortes (texto + input/botão).
     return await page.evaluate(() => {
       const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
       const txt = norm(document.body ? (document.body.innerText || '') : '');
