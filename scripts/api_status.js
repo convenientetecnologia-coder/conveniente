@@ -82,6 +82,8 @@ async function montarPerfisBaseline() {
     banned: false,
     bannedAt: null,
     bannedText: null,
+    messengerPin: false,
+    messengerPinReason: null,
     problem: false // <<< ALTERAÇÃO AQUI
   }));
 }
@@ -150,6 +152,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     banned: false,
     bannedAt: null,
     bannedText: null,
+    messengerPin: false,
+    messengerPinReason: null,
     problem: false // <<< ALTERAÇÃO AQUI
   }));
 
@@ -332,6 +336,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     banned: false,
     bannedAt: null,
     bannedText: null,
+    messengerPin: false,
+    messengerPinReason: null,
     problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 1)
     // outros campos militares do shape retrocompatível
   }]));
@@ -451,6 +457,8 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       banned: false,
       bannedAt: null,
       bannedText: null,
+      messengerPin: false,
+      messengerPinReason: null,
       problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 2)
     }));
   } catch(e2) {

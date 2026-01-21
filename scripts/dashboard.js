@@ -558,6 +558,7 @@ function logsAllowlist() {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
+    messenger_pin: path.join(base, 'messenger_pin.jsonl'),
     migrations: path.join(base, 'migrations.jsonl'),
     updates: path.join(base, 'updates.jsonl'),
     // útil para auditoria do canal de comandos

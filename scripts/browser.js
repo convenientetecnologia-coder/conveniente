@@ -1175,9 +1175,54 @@ async function detectMessengerPinModal(page) {
 }
 
 async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries = 2 } = {}) {
+  const fs = require('fs');
+  const path = require('path');
+  const MSGPIN_LOG = path.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+  const pinLog = (obj) => { try { fs.appendFileSync(MSGPIN_LOG, JSON.stringify({ ts: Date.now(), src: 'browser.js', ...obj }) + '\n'); } catch {} };
+
+  async function clickCloseTrusted() {
+    try {
+      const h =
+        (await page.$('div[role="dialog"] [aria-label="Fechar"], div[role="dialog"] [aria-label*="Fechar"], div[role="dialog"] [aria-label*="Close"]')) ||
+        (await page.$('[aria-label="Fechar"], [aria-label*="Fechar"], [aria-label*="Close"]'));
+      if (!h) return false;
+      await h.click({ delay: 60 }).catch(()=>{});
+      return true;
+    } catch { return false; }
+  }
+
+  async function clickNaoRestaurarTrusted() {
+    try {
+      // variações PT-BR / sem acento
+      const xps = [
+        '//div[@role="dialog"]//button[contains(.,"Não restaurar mensagens")]',
+        '//div[@role="dialog"]//button[contains(.,"Nao restaurar mensagens")]',
+        '//div[@role="dialog"]//div[@role="button"][contains(.,"Não restaurar mensagens")]',
+        '//div[@role="dialog"]//div[@role="button"][contains(.,"Nao restaurar mensagens")]',
+      ];
+      for (const xp of xps) {
+        const els = await page.$x(xp).catch(()=>[]);
+        if (els && els[0]) {
+          await els[0].click({ delay: 60 }).catch(()=>{});
+          return true;
+        }
+      }
+      return false;
+    } catch { return false; }
+  }
+
   for (let attempt = 1; attempt <= Math.max(1, maxTries); attempt++) {
     const det = await detectMessengerPinModal(page);
     if (!det.present) return { ok: true, dismissed: false };
+
+    let clickedTrusted = false;
+    try {
+      if (det.kind === 'continue_without_restore') {
+        clickedTrusted = await clickNaoRestaurarTrusted();
+      } else {
+        clickedTrusted = await clickCloseTrusted();
+      }
+    } catch {}
 
     let clicked = false;
     try {
@@ -1255,7 +1300,10 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       await sleep(250);
     }
 
-    try { if (process.env.BROWSER_DEBUG === '1') logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} clicked=${!!clicked}`); } catch {}
+    try {
+      pinLog({ event:'pin_modal_dismiss_attempt', attempt, kind: det.kind || null, url: (()=>{try{return page.url();}catch{return ''}})(), clickedTrusted: !!clickedTrusted, clickedEval: !!clicked });
+      logger.info(`${logPrefix} pin_modal dismiss attempt=${attempt} kind=${det.kind||''} clickedTrusted=${!!clickedTrusted} clickedEval=${!!clicked}`);
+    } catch {}
     await sleep(700);
 
     const det2 = await detectMessengerPinModal(page);
@@ -1538,7 +1586,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
 
       // 7) Curador enterprise: modal do PIN (fecha determinístico; se falhar, GPT + re-tenta)
       try {
-        const pin1 = await tryDismissMessengerPinModal(openedPages[3], { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 2 });
+        const pin1 = await tryDismissMessengerPinModal(openedPages[3], { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 4 });
         if (!pin1.ok) {
           // fallback GPT com histórico (tenta 2 rodadas)
           for (let k = 1; k <= 2; k++) {
@@ -2439,6 +2487,9 @@ module.exports = {
   // ======= ADICIONE ESTES DOIS:
   resolveNonceIfPresent,
   clickContinuarComo,
+  // ==== Messenger PIN modal (exportado p/ worker curador)
+  detectMessengerPinModal,
+  tryDismissMessengerPinModal,
   installOneTabGuard,
   installAboutBlankKiller,
   // ==== NOVOS:

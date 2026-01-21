@@ -139,6 +139,28 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   } catch {}
 }
 
+async function setMessengerPinFlag(nome, { reason = 'messenger_pin_modal', source = 'messenger' } = {}) {
+  try {
+    const prev = await readAccountFlags(nome);
+    const already = prev && prev.messengerPin === true;
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.messengerPin = true;
+      man.accountFlags.messengerPinReason = String(reason || '');
+      man.accountFlags.messengerPinSource = String(source || '');
+      man.accountFlags.messengerPinAt = Date.now();
+      return man;
+    });
+    if (!already) {
+      await issues.append(nome, 'mil_action', `messenger_pin_detected reason=${reason||''} source=${source||''} at=${new Date().toISOString()}`);
+    }
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].messengerPin = true;
+    robeMeta[nome].whyNotOpen = 'messenger_pin_modal';
+  } catch {}
+}
+
 async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
   try {
     const prev = await readAccountFlags(nome);
@@ -161,6 +183,14 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.bannedText;
         }
       }
+      if (which.includes('messengerPin')) {
+        if (man.accountFlags.messengerPin || man.accountFlags.messengerPinReason || man.accountFlags.messengerPinSource || man.accountFlags.messengerPinAt) {
+          delete man.accountFlags.messengerPin;
+          delete man.accountFlags.messengerPinReason;
+          delete man.accountFlags.messengerPinSource;
+          delete man.accountFlags.messengerPinAt;
+        }
+      }
       if (Object.keys(man.accountFlags).length === 0) delete man.accountFlags;
       return man;
     });
@@ -170,6 +200,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('banned') && (prev && prev.banned)) {
       await issues.append(nome, 'account_banned_cleared', `at=${new Date().toISOString()}`);
     }
+    if (which.includes('messengerPin') && (prev && prev.messengerPin)) {
+      await issues.append(nome, 'mil_action', `messenger_pin_cleared at=${new Date().toISOString()}`);
+    }
     robeMeta[nome] = robeMeta[nome] || {};
     if (which.includes('loginRequired')) {
       delete robeMeta[nome].loginRequired;
@@ -177,6 +210,10 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
       delete robeMeta[nome].loginSource;
     }
     if (which.includes('banned')) delete robeMeta[nome].banned;
+    if (which.includes('messengerPin')) {
+      delete robeMeta[nome].messengerPin;
+      if (robeMeta[nome].whyNotOpen === 'messenger_pin_modal') delete robeMeta[nome].whyNotOpen;
+    }
     await snapshotStatusAndWrite();
   } catch {}
 }
@@ -2696,9 +2733,11 @@ const handlers = {
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+      const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
+      const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
       const problem = man
-        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
-        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
+        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.messengerPin === true))
+        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin);
       const man0 = await manifestStore.read(nome).catch(()=>null);
       const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
@@ -2741,6 +2780,8 @@ const handlers = {
         banned,
         bannedAt,
         bannedText,
+        messengerPin,
+        messengerPinReason,
         problem,
         robeMode
       });
@@ -2916,9 +2957,11 @@ const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) ||
 const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
 const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
 const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
+const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
 const problem = man
-  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true))
-  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned);
+  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.messengerPin === true))
+  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
@@ -2955,6 +2998,8 @@ perfis.push({
   banned,
   bannedAt,
   bannedText,
+  messengerPin,
+  messengerPinReason,
   problem,
   robeMode
 });
@@ -3517,6 +3562,41 @@ async function nurseTick() {
         const bd = await browserHelper.detectAccountSuspended(p0);
         if (bd && bd.banned) {
           await setBannedFlag(nome, { reason: bd.reason || '', snippet: bd.snippet || '' });
+        }
+      } catch {}
+
+      // Curador enterprise: PIN do Messenger / "Continuar sem restaurar?"
+      try {
+        const urlNow = (typeof p0.url === 'function') ? (p0.url() || '') : '';
+        const isMessenger = /messenger\.com/i.test(urlNow);
+        // Só tenta curar quando NÃO está configurando e não está com Robe executando (evita interferir no fluxo de postagem)
+        if (isMessenger && ctrl && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true)) {
+          const detPin = await browserHelper.detectMessengerPinModal(p0).catch(()=>({ present:false }));
+          if (detPin && detPin.present) {
+            try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${detPin.kind||''}`); } catch {}
+            // tenta cura determinística (trusted click + ESC)
+            await browserHelper.tryDismissMessengerPinModal(p0, { logPrefix: '[NURSE][PIN]', maxTries: 4 }).catch(()=>null);
+            const still = await browserHelper.detectMessengerPinModal(p0).catch(()=>({ present:false }));
+            if (still && still.present) {
+              await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
+              // escreve log global (para fetch_logs/messenger_pin)
+              try {
+                const fsSync2 = require('fs');
+                const path2 = require('path');
+                const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_still_present', kind: still.kind||null, url: urlNow }) + '\n');
+              } catch {}
+            } else {
+              // limpou: remove flag se tinha
+              await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
+              try {
+                const fsSync2 = require('fs');
+                const path2 = require('path');
+                const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
+                fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'pin_cleared', url: urlNow }) + '\n');
+              } catch {}
+            }
+          }
         }
       } catch {}
       let det = { blocked:false };
