@@ -763,9 +763,41 @@ module.exports = (app, workerClient, fileStore) => {
         logger.warn('Tentativa de delete perfil inexistente', { nome, error: e && e.message });
         return res.json({ ok:false, error:e.message });
       }
+      // Enterprise: delete deve ser robusto — se estiver ativo, fecha automaticamente (hard close) antes de excluir.
       if (fileStore.isPerfilAtivo(nome)) {
-        logger.warn('Tentativa de deletar perfil ativo', { nome });
-        return res.json({ ok: false, error: 'Feche o navegador antes de excluir esta conta.' });
+        logger.warn('Delete solicitado para perfil ativo — tentando fechar automaticamente', { nome });
+        // 1) marca desired inactive (melhora reconciliação e evita reabrir)
+        try {
+          await fileStore.withDesiredFileLockUpdate(desired => {
+            desired.perfis = desired.perfis || {};
+            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
+            return desired;
+          });
+        } catch (e) {
+          logger.warn('Falha ao patchDesired durante delete auto-close', { nome, error: e && e.message }, e);
+        }
+        // 2) chama worker deactivate (hard close) com retry
+        let okDeactivate = false;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const resp = await workerClient.sendWorkerCommand(
+              'deactivate',
+              { nome, reason: 'admin_delete', policy: null },
+              { timeoutMs: 90000 }
+            );
+            okDeactivate = !!(resp && resp.ok);
+            if (okDeactivate) break;
+            lastErr = (resp && resp.error) ? String(resp.error) : 'deactivate_failed';
+          } catch (e) {
+            lastErr = (e && e.message) || String(e);
+          }
+          await new Promise(r => setTimeout(r, 1200));
+        }
+        if (!okDeactivate) {
+          logger.error('Delete auto-close falhou — perfil continua ativo', { nome, error: lastErr || 'deactivate_failed' });
+          return res.json({ ok: false, error: `Falha ao fechar navegador automaticamente: ${lastErr || 'deactivate_failed'}` });
+        }
       }
       await issues.append(nome, 'admin_delete_perfil', `by=${op}`);
 

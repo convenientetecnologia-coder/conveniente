@@ -340,7 +340,9 @@ async function execDeletePerfis(cmd) {
       results.push({ nome, ok: false, error: (e && e.message) || String(e) });
     }
   }
-  return { ok: true, results };
+  const okCount = results.filter(x => x && x.ok).length;
+  const failCount = results.length - okCount;
+  return { ok: failCount === 0, okCount, failCount, results };
 }
 
 function migrationsLogAppend(obj) {
@@ -846,7 +848,7 @@ async function applyCommands(cmds = []) {
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
       // ACK de sucesso
-      if ((c.type === 'migrate_profiles' || c.type === 'stock_provision' || c.type === 'stock_export_profiles') && ackDetails && ackDetails.ok === false) {
+      if ((c.type === 'migrate_profiles' || c.type === 'stock_provision' || c.type === 'stock_export_profiles' || c.type === 'delete_perfis') && ackDetails && ackDetails.ok === false) {
         // Migração/export pode falhar parcialmente; ACK precisa carregar detalhes para auditoria.
         try { 
           const msg = ackDetails.profilesCount !== undefined 
