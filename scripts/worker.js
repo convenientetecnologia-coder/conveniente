@@ -3502,7 +3502,45 @@ async function nurseTick() {
           }
         } catch {}
 
-        const lr = await browserHelper.detectLoginRequired(p0);
+        // === Enterprise: detectar loginRequired em QUALQUER aba (não só pages[0]) ===
+        // Prioridade de motivos (mais grave primeiro)
+        const reasonPriority = (r) => {
+          const s = String(r || '').toLowerCase();
+          if (s.includes('identity')) return 5;
+          if (s.includes('captcha')) return 4;
+          if (s.includes('checkpoint')) return 3;
+          if (s.includes('login_form')) return 2;
+          return 1;
+        };
+        let lr = null;
+        let lrPage = p0;
+        try {
+          const scan = [];
+          for (const pg of (pages || []).slice(0, 8)) {
+            let u = '';
+            try { u = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+            // só avalia FB/Messenger
+            if (!/(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(String(u || ''))) continue;
+            const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
+            if (det && typeof det === 'object') {
+              scan.push({ u: String(u || '').slice(0, 120), lr: !!det.loginRequired, reason: det.reason || null, domain: det.domain || null });
+              if (det.loginRequired) {
+                if (!lr || reasonPriority(det.reason) > reasonPriority(lr.reason)) {
+                  lr = det;
+                  lrPage = pg;
+                }
+              }
+            }
+          }
+          // Log leve: scan (para auditoria e ajuste fino)
+          try {
+            const fs = require('fs');
+            const path = require('path');
+            const fp = path.join(__dirname, '..', 'dados', 'login_required_events.jsonl');
+            fs.appendFileSync(fp, JSON.stringify({ ts: Date.now(), host: os.hostname(), perfil: nome, event: 'lr_scan_tabs', pages: scan }) + '\n');
+          } catch {}
+        } catch {}
+
         if (lr && lr.loginRequired) {
           try {
             const prev = await readAccountFlags(nome).catch(()=>({}));
@@ -3512,7 +3550,7 @@ async function nurseTick() {
             const curReason = String(lr.reason || '');
             const curSource = String(lr.domain || '');
             const changed = !(prevLR && (String(prevReason) === curReason) && (String(prevSource) === curSource));
-            const captured = await captureLoginRequiredEvidence(nome, p0, lr);
+            const captured = await captureLoginRequiredEvidence(nome, lrPage || p0, lr);
             if (captured || changed) {
               appendJsonl(LR_EVENTS_JSONL, {
                 ts: Date.now(),
@@ -3540,7 +3578,7 @@ async function nurseTick() {
                 if (!last || (now - last) > (30 * 60 * 1000)) {
                   // Para reduzir custo: envia só quando capturou evidência ou houve mudança no motivo
                   if (captured || changed) {
-                    const html = await p0.content().catch(()=>null);
+                    const html = await (lrPage || p0).content().catch(()=>null);
                     await gptFallback.ingestFbGpt({
                       perfil: nome,
                       url: lr.url || null,
@@ -3552,6 +3590,23 @@ async function nurseTick() {
                     robeMeta[nome].lastFbGptIngestAt = now;
                   }
                 }
+              }
+            } catch {}
+
+            // Se for "Confirme sua identidade" (selfie/vídeo), NÃO tentar resolver automaticamente.
+            // Ação enterprise: travar automação e pedir humano (humanHold).
+            try {
+              if (String(curReason || '').toLowerCase().includes('identity')) {
+                try { await issues.append(nome, 'mil_action', `identity_required_hold reason=${curReason}`); } catch {}
+                try { ctrl.humanControl = true; ctrl.trabalhando = false; } catch {}
+                try { await stopVirtus(nome); } catch {}
+                try {
+                  await fileStore.withDesiredFileLockUpdate((desired) => {
+                    desired.perfis = desired.perfis || {};
+                    desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off', active: true };
+                    return desired;
+                  });
+                } catch {}
               }
             } catch {}
           } catch {}
