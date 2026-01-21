@@ -319,6 +319,30 @@ async function execRobeReleaseAll() {
   if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robes_release_all_failed');
 }
 
+// ===== NOVO: Deletar perfis remotamente (para limpeza de duplicados) =====
+async function execDeletePerfis(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const one = String(payload.profileName || payload.nome || '').trim();
+  const many = Array.isArray(payload.profileNames) ? payload.profileNames.map(x => String(x || '').trim()).filter(Boolean) : [];
+  const list = one ? [one] : many;
+  if (!list.length) throw new Error('missing_profileNames');
+
+  const results = [];
+  for (const nome of list) {
+    try {
+      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}`, { method: 'DELETE' });
+      if (!r || r.ok === false) {
+        results.push({ nome, ok: false, error: (r && r.error) ? String(r.error) : 'delete_failed' });
+      } else {
+        results.push({ nome, ok: true });
+      }
+    } catch (e) {
+      results.push({ nome, ok: false, error: (e && e.message) || String(e) });
+    }
+  }
+  return { ok: true, results };
+}
+
 function migrationsLogAppend(obj) {
   try {
     const p = path.join(__dirname, '..', 'dados', 'migrations.jsonl');
@@ -810,6 +834,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'open_all_24h')     { await execOpenAll24h(); }
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }
+      else if (c.type === 'delete_perfis')    { ackDetails = await execDeletePerfis(c); }
       else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
       else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
