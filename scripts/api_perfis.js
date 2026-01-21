@@ -309,6 +309,9 @@ module.exports = (app, workerClient, fileStore) => {
       const login = (req.body && req.body.login != null) ? String(req.body.login || '').trim() : null;
       const password = (req.body && req.body.password != null) ? String(req.body.password || '') : null;
       const cookiesInput = (req.body && req.body.cookies != null) ? req.body.cookies : null;
+      // Por padrão, NUNCA reinjetar cookies ao receber atualização do CT.
+      // Reinjeção só acontece quando explicitamente solicitado (ação manual/operacional).
+      const applyCookies = !!(req.body && (req.body.applyCookies === true || req.body.applyCookies === 1 || String(req.body.applyCookies || '').trim() === '1'));
 
       // Atualiza label no perfis.json (UI)
       if (label) {
@@ -345,8 +348,8 @@ module.exports = (app, workerClient, fileStore) => {
         });
       }
 
-      // Se cookies mudaram, reinjeta via configure (worker)
-      if (cookiesUpdated) {
+      // Se cookies mudaram, SOMENTE reinjeta via configure (worker) quando explicitamente solicitado.
+      if (cookiesUpdated && applyCookies) {
         try {
           const resp = await workerClient.sendWorkerCommand('configure', { nome }, { timeoutMs: 180000 });
           if (!resp || resp.ok !== true) {
@@ -357,7 +360,7 @@ module.exports = (app, workerClient, fileStore) => {
         }
       }
 
-      return res.json({ ok: true, cookiesUpdated: !!cookiesUpdated });
+      return res.json({ ok: true, cookiesUpdated: !!cookiesUpdated, applied: !!(cookiesUpdated && applyCookies) });
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
