@@ -398,6 +398,17 @@
           <select id="cidadeSel"></select>
         </div>
         <div class="form-row">
+          <label>Categoria</label>
+          <select id="categoriaSel">
+            <option value="fretes" selected>Fretes</option>
+            <option value="veiculos">Veículos</option>
+          </select>
+          <div class="pill" style="margin-top:8px; opacity:.9">
+            <span class="dot"></span>
+            <span>Define o modo do Robe (itens vs veículos) na criação.</span>
+          </div>
+        </div>
+        <div class="form-row">
           <label>Conta do Estoque (CT)</label>
           <select id="stockAccSel"></select>
           <div class="pill info" style="margin-top:8px">
@@ -415,6 +426,7 @@
       document.body.append(overlay);
 
       const sel = box.querySelector('#cidadeSel');
+      const catSel = box.querySelector('#categoriaSel');
       sel.innerHTML = `<option value="">Selecione uma cidade</option>`;
       (cidades||[]).forEach(c => {
         const opt = document.createElement('option');
@@ -422,6 +434,10 @@
         opt.textContent = typeof c === 'string' ? c : (c.nome || c.label || c.id || '');
         sel.append(opt);
       });
+      try {
+        const savedCat = String(localStorage.getItem('ct_stock_new_acc_category') || '').trim().toLowerCase();
+        if (savedCat === 'fretes' || savedCat === 'veiculos') catSel.value = savedCat;
+      } catch {}
 
       const msgEl = box.querySelector('#criarContaMsg');
       const cancelarBtn = box.querySelector('#cancelarBtn');
@@ -514,8 +530,11 @@
       confirmarBtn.onclick = async () => {
         const cidade = sel.value;
         if (!cidade) { alert('Selecione uma cidade.'); return; }
+        const category = String(catSel && catSel.value || 'fretes').trim().toLowerCase() || 'fretes';
+        if (category !== 'fretes' && category !== 'veiculos') { alert('Categoria inválida.'); return; }
         const stockAccountId = Number(stockAccSel.value || 0) || 0;
         if (!stockAccountId) { alert('Selecione uma conta do Estoque.'); return; }
+        try { localStorage.setItem('ct_stock_new_acc_category', category); } catch {}
 
         setBtnLoading(confirmarBtn, true, 'Criando...');
         setDisabled(true);
@@ -539,7 +558,7 @@
           const res = await fetch('/api/stock/provision_from_stock', {
             method: 'POST',
             headers: { 'Content-Type':'application/json' },
-            body: JSON.stringify({ city: cidade, category: 'fretes', stockAccountId })
+            body: JSON.stringify({ city: cidade, category, stockAccountId })
           }).then(r=>r.json()).catch(()=>null);
           if (!res || !res.ok) {
             msgEl.className = 'pill bad';
