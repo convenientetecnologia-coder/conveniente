@@ -2510,6 +2510,7 @@ const handlers = {
       const opts = (options && typeof options === 'object') ? options : {};
       const maxHardDeactivations = Math.max(0, Number(opts.maxHardDeactivations || 2) || 2);
       const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 120000) || 120000);
+      const overrideHumanHold = (opts.overrideHumanHold === true || opts.overrideHumanHold === 1 || String(opts.overrideHumanHold || '').toLowerCase() === 'true');
       const totalTimeoutMs = Math.max(60_000, Number(opts.totalTimeoutMs || 0) || (8 * 60 * 1000));
       const stageTimeoutMs = {
         activate: Math.max(20_000, Number(opts.activateTimeoutMs || 0) || 90_000),
@@ -2557,7 +2558,8 @@ const handlers = {
           maxHardDeactivations,
           waitBusyMs,
           totalTimeoutMs,
-          stageTimeoutMs
+          stageTimeoutMs,
+          overrideHumanHold
         });
       } catch {}
 
@@ -2584,6 +2586,19 @@ const handlers = {
         } catch {}
       };
       try {
+      // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execução.
+      if (overrideHumanHold) {
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), humanHold: false };
+            return d;
+          });
+          pushStep({ step: 'human_hold_cleared' });
+        } catch (e) {
+          pushStep({ step: 'human_hold_clear_failed', error: (e && e.message) || String(e) });
+        }
+      }
 
       // 1) garantir browser aberto
       let ctrl = controllers.get(nome);
