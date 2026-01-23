@@ -102,6 +102,7 @@ function sendWorkerCommand(type, payload = {}, opts = {}) {
     'activate',
     'deactivate',
     'configure',
+    'login_remediate',
     'start_work',
     'invoke_human',
     'human-resume',

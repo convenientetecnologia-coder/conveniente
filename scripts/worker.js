@@ -2461,6 +2461,291 @@ const handlers = {
     });
   },
 
+  // ===== NOVO: login_remediate (cookies -> login/senha -> humano) =====
+  async login_remediate({ nome, operator, options } = {}) {
+    return lockProfileAction(nome, async () => {
+      const startedAt = Date.now();
+      const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
+      const opts = (options && typeof options === 'object') ? options : {};
+      const maxHardDeactivations = Math.max(0, Number(opts.maxHardDeactivations || 2) || 2);
+      const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 120000) || 120000);
+
+      const snapPolicy = ramPolicy.snapshotPolicy();
+      const minFreeMB = snapPolicy.reserveProvisionMB;
+
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'login_remediate_begin',
+          nome: String(nome || ''),
+          operator: op,
+          minFreeMB,
+          maxHardDeactivations,
+          waitBusyMs
+        });
+      } catch {}
+
+      // 0) lock global (isola e pausa automações)
+      const lk = provisionLock.tryAcquire({
+        owner: op,
+        ttlMs: Math.max(9 * 60 * 1000, waitBusyMs + 7 * 60 * 1000),
+        meta: { nome: String(nome || ''), kind: 'login_remediate', startedAt }
+      });
+      if (!lk || !lk.ok) {
+        const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+        return { ok: false, error: `provision_lock_busy${curOwner ? ` owner=${curOwner}` : ''}`, lock: lk && lk.lock ? lk.lock : null };
+      }
+
+      const steps = [];
+      const pushStep = (s) => { try { steps.push(Object.assign({ ts: Date.now() }, s || {})); } catch {} };
+      try {
+
+      // 1) garantir browser aberto
+      let ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        pushStep({ step: 'activate_needed' });
+        const a = await activateOnce(nome, 'message', op);
+        if (!a || a.ok === false) {
+          try { provisionLock.release({ owner: op }); } catch {}
+          return { ok: false, error: (a && a.error) ? String(a.error) : 'activate_failed', steps };
+        }
+        ctrl = controllers.get(nome);
+      }
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        try { provisionLock.release({ owner: op }); } catch {}
+        return { ok: false, error: 'browser_not_connected', steps };
+      }
+
+      // 2) pausa Virtus em modo “inteligente” (não interrompe envio ativo)
+      const pausedVirtus = [];
+      try {
+        const t0 = Date.now();
+        while ((Date.now() - t0) < waitBusyMs) {
+          let anyBusy = false;
+          controllers.forEach((c, n) => {
+            try {
+              if (!c || !c.browser) return;
+              if (c.browser._sendLock && c.browser._sendLock.active) anyBusy = true;
+              if (robeMeta[n] && robeMeta[n].emExecucao === true) anyBusy = true;
+            } catch {}
+          });
+          if (!anyBusy) break;
+          await new Promise(r => setTimeout(r, 700));
+        }
+
+        controllers.forEach((c, n) => {
+          try {
+            if (!c || !c.virtus || typeof c.virtus.stop !== 'function') return;
+            if (c.browser && c.browser._sendLock && c.browser._sendLock.active) return;
+            c.virtus.stop().catch(()=>{});
+            c.virtus = null;
+            c.trabalhando = false;
+            pausedVirtus.push(String(n));
+          } catch {}
+        });
+        pushStep({ step: 'virtus_paused', count: pausedVirtus.length, names: pausedVirtus.slice(0, 30) });
+      } catch {
+        pushStep({ step: 'virtus_pause_failed' });
+      }
+
+      // 3) garantir headroom (fechar o mínimo necessário)
+      const closedForRam = [];
+      try {
+        let free = getAvailableMB();
+        pushStep({ step: 'headroom_check', freeMB: free, minFreeMB });
+        while (free < minFreeMB && closedForRam.length < maxHardDeactivations) {
+          // pick: não-human, não-config, não-robe ativo; preferir não trabalhando, maior RAM
+          const candidates = [];
+          controllers.forEach((c, n) => {
+            if (!n || String(n) === String(nome)) return;
+            if (!c || !c.browser) return;
+            if (c.humanControl === true || c.configurando === true) return;
+            if (c.browser._sendLock && c.browser._sendLock.active) return;
+            if (robeMeta[n] && robeMeta[n].emExecucao === true) return;
+            const ramMB = (robeMeta[n] && typeof robeMeta[n].ramMB === 'number') ? robeMeta[n].ramMB : (typeof c.ramMB === 'number' ? c.ramMB : 0);
+            candidates.push({ nome: String(n), trabalhando: !!c.trabalhando, ramMB: Number(ramMB || 0) || 0 });
+          });
+          candidates.sort((a, b) => {
+            if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
+            return (Number(b.ramMB) || 0) - (Number(a.ramMB) || 0);
+          });
+          const pick = candidates[0];
+          if (!pick || !pick.nome) break;
+          pushStep({ step: 'deactivate_for_ram', pick: pick.nome, freeMB_before: free });
+          try {
+            await handlers.deactivate({ nome: pick.nome, reason: 'ramKill', policy: 'preserveDesired' });
+            closedForRam.push(pick.nome);
+          } catch {}
+          await new Promise(r => setTimeout(r, 1800));
+          free = getAvailableMB();
+          pushStep({ step: 'headroom_after_deactivate', freeMB: free, minFreeMB });
+        }
+      } catch {
+        pushStep({ step: 'headroom_recover_failed' });
+      }
+
+      // 4) tentativa 1: reinjetar cookies (configureProfile)
+      ctrl.configurando = true;
+      try {
+        const man0 = await manifestStore.read(nome).catch(()=>null);
+        const cookies = (man0 && Array.isArray(man0.cookies)) ? man0.cookies : [];
+        if (!cookies.length) {
+          pushStep({ step: 'missing_cookies_in_manifest' });
+          return { ok: false, error: 'missing_cookies_in_manifest', steps };
+        }
+        pushStep({ step: 'attempt1_inject_cookies_begin' });
+        await browserHelper.configureProfile(ctrl.browser, nome, cookies);
+        pushStep({ step: 'attempt1_inject_cookies_done' });
+      } catch (e) {
+        pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
+      } finally {
+        ctrl.configurando = false;
+      }
+
+      // 5) validar loginRequired em Messenger/Facebook
+      let lrMessenger = null;
+      let lrFacebook = null;
+      try {
+        const pages = await ctrl.browser.pages().catch(()=>[]);
+        const p0 = pages && pages[0];
+        if (p0) {
+          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 1200));
+          lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          if (lrMessenger && lrMessenger.loginRequired) {
+            try { await captureLoginRequiredEvidence(nome, p0, lrMessenger); } catch {}
+          }
+        }
+        // usa a mesma aba para marketplace fb (mais leve)
+        if (p0) {
+          await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 1200));
+          lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          if (lrFacebook && lrFacebook.loginRequired) {
+            try { await captureLoginRequiredEvidence(nome, p0, lrFacebook); } catch {}
+          }
+        }
+      } catch {}
+      pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook });
+
+      const needsLogin =
+        (lrMessenger && lrMessenger.loginRequired) ||
+        (lrFacebook && lrFacebook.loginRequired);
+
+      const hardBlockReason = (lr) => {
+        const r = String(lr && lr.reason || '').toLowerCase();
+        return (r.includes('captcha') || r.includes('checkpoint') || r.includes('identity'));
+      };
+
+      // 6) tentativa 2: login+senha (apenas se for login_form; caso contrário invoca humano)
+      if (needsLogin) {
+        const bad = (hardBlockReason(lrMessenger) || hardBlockReason(lrFacebook));
+        if (bad) {
+          pushStep({ step: 'non_automatable_login_state', lrMessenger, lrFacebook });
+          try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate' }); } catch {}
+          try { await handlers.invoke_human({ nome }); } catch {}
+          return { ok: false, error: 'login_requires_human', steps, closedForRam, pausedVirtus };
+        }
+
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          const login = man && (man.login || man.email || man.user || man.username);
+          const password = man && (man.password || man.pass);
+          if (!login || !password) {
+            pushStep({ step: 'missing_credentials_in_manifest' });
+            try { await setLoginRequiredFlag(nome, { reason: 'missing_credentials', source: 'login_remediate' }); } catch {}
+            try { await handlers.invoke_human({ nome }); } catch {}
+            return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
+          }
+
+          const pages = await ctrl.browser.pages().catch(()=>[]);
+          const p0 = pages && pages[0];
+          if (!p0) throw new Error('no_page0');
+
+          // Facebook primeiro (tende a refletir no Messenger)
+          pushStep({ step: 'attempt2_login_fb_begin' });
+          await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 900));
+          const rfb = await browserHelper.tryLoginEmailPass(p0, { login, password });
+          pushStep({ step: 'attempt2_login_fb_done', result: rfb });
+
+          // Messenger depois (se necessário)
+          pushStep({ step: 'attempt2_login_msg_begin' });
+          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 900));
+          const rmsg = await browserHelper.tryLoginEmailPass(p0, { login, password });
+          pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
+
+          // revalidar
+          await new Promise(r => setTimeout(r, 1400));
+          lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 1200));
+          lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          pushStep({ step: 'post_login_check', lrMessenger, lrFacebook });
+
+        } catch (e) {
+          pushStep({ step: 'attempt2_login_fail', error: (e && e.message) || String(e) });
+        }
+      }
+
+      const success =
+        !(lrMessenger && lrMessenger.loginRequired) &&
+        !(lrFacebook && lrFacebook.loginRequired);
+
+      if (success) {
+        pushStep({ step: 'login_remediate_success' });
+        // Atualiza cookies frescos no manifest (pipeline imediato)
+        try {
+          const fresh = await browserHelper.collectFreshCookies(ctrl.browser);
+          pushStep({ step: 'collect_fresh_cookies', ok: !!fresh.ok, count: fresh && fresh.cookies ? fresh.cookies.length : 0, error: fresh && fresh.error });
+          if (fresh && fresh.ok && Array.isArray(fresh.cookies) && fresh.cookies.length) {
+            await manifestStore.update(nome, (m) => {
+              m = m || {};
+              m.cookies = fresh.cookies;
+              m.cookiesUpdatedAt = Date.now();
+              return m;
+            });
+            pushStep({ step: 'manifest_cookies_updated' });
+          }
+        } catch {}
+        try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+      } else {
+        pushStep({ step: 'login_remediate_failed', lrMessenger, lrFacebook });
+        try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate' }); } catch {}
+        try { await handlers.invoke_human({ nome }); } catch {}
+      }
+
+      const out = {
+        ok: !!success,
+        nome: String(nome || ''),
+        success: !!success,
+        durationMs: Date.now() - startedAt,
+        steps,
+        closedForRam,
+        pausedVirtus
+      };
+
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'login_remediate_done',
+          nome: String(nome || ''),
+          operator: op,
+          ok: !!success,
+          durationMs: out.durationMs
+        });
+      } catch {}
+
+      return out;
+      } finally {
+        // 7) libera lock global sempre (mesmo com returns/erros)
+        try { provisionLock.release({ owner: op }); } catch {}
+      }
+    });
+  },
+
   start_work,
 
   async invoke_human({ nome }) {

@@ -11,6 +11,7 @@ const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
 const provisionAudit = require('./provisionAudit.js');
+const workerClient = require('./workerClient.js');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -341,6 +342,60 @@ async function execRobePauseAll() {
 async function execRobeReleaseAll() {
   const r = await httpJson('/api/robes/release-all', { method:'POST' });
   if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robes_release_all_failed');
+}
+
+// ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
+async function execLoginRemediate(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const nome = String(payload.profileName || payload.nome || '').trim();
+  if (!nome) throw new Error('missing_profileName');
+  const operator = `login_remediate:${String(cmd && cmd.id || '').trim() || Date.now()}`;
+  const timeoutMs = Math.max(30_000, Number(payload.timeoutMs || 0) || (8 * 60 * 1000));
+
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'login_remediate_cmd_begin',
+      cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+      nome,
+      operator,
+      timeoutMs
+    });
+  } catch {}
+
+  const r = await workerClient.sendWorkerCommand(
+    'login_remediate',
+    { nome, operator, options: payload && payload.options ? payload.options : {} },
+    { timeoutMs }
+  );
+  if (!r || r.ok === false) {
+    const err = (r && r.error) ? String(r.error) : 'login_remediate_failed';
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'login_remediate_cmd_fail',
+        cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+        nome,
+        operator,
+        error: err,
+        details: (r && typeof r === 'object') ? r : null
+      });
+    } catch {}
+    return { ok: false, nome, error: err, details: r || null };
+  }
+
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'login_remediate_cmd_done',
+      cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+      nome,
+      operator,
+      result: r
+    });
+  } catch {}
+
+  return Object.assign({ ok: true, nome }, r);
 }
 
 // ===== NOVO: Deletar perfis remotamente (para limpeza de duplicados) =====
@@ -1135,6 +1190,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'delete_perfis')    { ackDetails = await execDeletePerfis(c); }
       else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
       else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }
+      else if (c.type === 'login_remediate') { ackDetails = await execLoginRemediate(c); }
       else if (c.type === 'provision_unlock') { ackDetails = await execProvisionUnlock(c); }
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }

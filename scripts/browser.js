@@ -2572,6 +2572,119 @@ async function detectLoginRequired(page) {
   return { loginRequired: false };
 }
 
+// ========= LOGIN (email/senha) =========
+async function _maybeClickKeepConnected(page) {
+  try {
+    await page.evaluate(() => {
+      const cb =
+        document.querySelector('input[name="persistent"][type="checkbox"]') ||
+        document.querySelector('input#default_persistent') ||
+        document.querySelector('input[type="checkbox"][name="persistent"]');
+      if (!cb) return false;
+      if (cb.checked) return true;
+      cb.click();
+      return true;
+    });
+  } catch {}
+}
+
+async function _maybeClickUseAnotherProfile(page) {
+  try {
+    const did = await page.evaluate(() => {
+      const norm = (s) => (s || '').toLowerCase();
+      const a = Array.from(document.querySelectorAll('a,div[role="button"],span[role="button"]')).find(el => {
+        const t = norm(el.innerText || el.textContent || '');
+        return t.includes('usar outro perfil') || t.includes('use another profile');
+      });
+      if (!a) return false;
+      if (typeof a.click === 'function') { a.click(); return true; }
+      return false;
+    });
+    if (did) await sleep(800);
+    return !!did;
+  } catch {}
+  return false;
+}
+
+async function _maybeClickCloseX(page) {
+  try {
+    const did = await page.evaluate(() => {
+      const btn = document.querySelector('[aria-label="Fechar"][role="button"], [aria-label="Close"][role="button"]');
+      if (!btn) return false;
+      const r = btn.getBoundingClientRect ? btn.getBoundingClientRect() : null;
+      if (!r || r.width < 2 || r.height < 2) return false;
+      btn.click();
+      return true;
+    });
+    if (did) await sleep(800);
+    return !!did;
+  } catch {}
+  return false;
+}
+
+async function tryLoginEmailPass(page, { login, password } = {}) {
+  const email = String(login || '').trim();
+  const pass = String(password || '').trim();
+  if (!email || !pass) return { ok: false, error: 'missing_credentials' };
+
+  // 1) tentar “destravar” telas comuns (continuar como / modal) para cair no formulário
+  await _maybeClickCloseX(page);
+  await _maybeClickUseAnotherProfile(page);
+
+  // 2) preencher formulário (FB / Messenger)
+  try {
+    await page.waitForTimeout(400);
+  } catch {}
+
+  try {
+    await page.type('input[name="email"], input#email', email, { delay: 20 }).catch(()=>{});
+    await page.type('input[name="pass"], input#pass', pass, { delay: 20 }).catch(()=>{});
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || 'type_failed' };
+  }
+
+  // 3) marcar "manter-me conectado" se existir
+  await _maybeClickKeepConnected(page);
+
+  // 4) submit
+  try {
+    const clicked = await page.evaluate(() => {
+      const btn =
+        document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
+        document.querySelector('form#login_form button[type="submit"]') ||
+        document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    });
+    if (!clicked) return { ok: false, error: 'login_button_not_found' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || 'click_failed' };
+  }
+
+  // 5) aguardar navegação estabilizar
+  try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+  try { await sleep(1500); } catch {}
+  return { ok: true };
+}
+
+async function collectFreshCookies(browser) {
+  try {
+    const pages = await browser.pages();
+    const p0 = pages && pages[0];
+    if (!p0) return { ok: false, error: 'no_pages' };
+    // garantir que os domínios relevantes foram tocados (para preencher jar)
+    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await sleep(1200);
+    const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
+    const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);
+    const all = utils.normalizeCookies([...(cookiesMsg||[]), ...(cookiesFb||[])]);
+    return { ok: true, cookies: all };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 /**
  * Detecta se a conta foi bloqueada de modo permanente/banida/suspensa.
  * Retorna { banned: true/false, reason, snippet }
@@ -2655,6 +2768,8 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
+  tryLoginEmailPass,
+  collectFreshCookies,
   detectAccountSuspended,
   killChromeProfileProcesses
 };
