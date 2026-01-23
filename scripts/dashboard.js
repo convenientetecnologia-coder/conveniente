@@ -742,6 +742,8 @@ function logsAllowlist() {
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
     migrations: path.join(base, 'migrations.jsonl'),
     updates: path.join(base, 'updates.jsonl'),
+    // Auditoria enterprise: lock de provisão (para diagnosticar maintenance_provision/locks presos)
+    provision_lock: path.join(base, 'provision_lock.json'),
     // útil para auditoria do canal de comandos
     commands: path.join(base, 'commands.log'),
     // logs do serviço (quando NSSM estiver configurado)
@@ -1010,6 +1012,24 @@ async function execStockPushAccountUpdate(cmd) {
   return r;
 }
 
+// ===== NOVO: Unlock do lock global de provisão (safe recovery) =====
+async function execProvisionUnlock(cmd) {
+  const before = (() => {
+    try { return provisionLock.get(); } catch { return null; }
+  })();
+  const wasActive = !!(before && before.active);
+  const lock = before && before.lock ? before.lock : null;
+  const released = (() => {
+    try { return provisionLock.release({ force: true }); } catch { return { ok: false, released: false }; }
+  })();
+  return {
+    ok: true,
+    wasActive,
+    lock,
+    released: !!(released && released.ok && released.released)
+  };
+}
+
 // ===== ALTERAÇÃO INÍCIO: applyCommands para ACK após cada execução =====
 async function applyCommands(cmds = []) {
   for (const c of cmds) {
@@ -1023,6 +1043,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'delete_perfis')    { ackDetails = await execDeletePerfis(c); }
       else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
       else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }
+      else if (c.type === 'provision_unlock') { ackDetails = await execProvisionUnlock(c); }
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
