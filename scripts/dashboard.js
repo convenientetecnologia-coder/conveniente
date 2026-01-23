@@ -1064,6 +1064,12 @@ async function applyCommands(cmds = []) {
       if (!c || !c.type) continue;
       let ackDetails = null;
       if (c.type === 'close_all')             {
+        // Ultra enterprise: close_all só pode ser executado quando explicitamente humano (UI / operador).
+        // Qualquer close_all “automático” (deploy/script) é bloqueado para evitar side-effects e instabilidade.
+        if (!isHumanCloseAll(c)) {
+          try { await ackCommand(c.id, false, 'close_all_blocked_not_human', { blocked: true }); } catch {}
+          continue;
+        }
         // Guardrail: nunca executar close_all automaticamente no meio de provisão.
         if (provisionLock.isActive()) {
           if (isHumanCloseAll(c)) {
