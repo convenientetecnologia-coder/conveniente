@@ -9,6 +9,7 @@ const os = require('os');
 const logger = require('./logger.js');
 const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
+const ramPolicy = require('./ramPolicy.js');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -26,6 +27,27 @@ let lastWarnAt = 0;
 // ===== ALTERAÇÃO INÍCIO: adicionado hostIdCache ===========
 let hostIdCache = null;
 // ===== ALTERAÇÃO FIM =====================================
+
+// ===== Guardrail: close_all durante provision =====
+// Regras:
+// - Se provision_lock ativo:
+//   - close_all humano (UI): DEFERIR (não ACK até terminar a provisão; executa depois)
+//   - close_all não-humano (deploy/script): BLOQUEAR (ACK erro imediato)
+let deferredCloseAllCmdId = null;
+let deferredCloseAllPayload = null;
+let deferredCloseAllEnqueuedAt = 0;
+function isHumanCloseAll(cmd) {
+  const p = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : null;
+  if (p && String(p.origin || '').toLowerCase() === 'ui') return true;
+  if (p && String(p.origin || '').trim() && String(p.origin || '').toLowerCase() !== 'ui') return false;
+  if (p && (p.human === true || p.manual === true)) return true;
+  const reqId = p ? String(p.requestId || '') : '';
+  if (/^(deploy_|deployall_|deploy_close_all_|deploy_all_close_|close_before_restart_|stabilize_)/i.test(reqId)) return false;
+  // Compatibilidade: payload ausente normalmente é UI antiga → tratar como humano
+  if (!p) return true;
+  // Sem evidência de automação → tratar como humano (mais seguro: deferir do que executar no meio da provisão)
+  return true;
+}
 
 function now() { return Date.now(); }
 function debounceWarn(msg, ms = 60000) {
@@ -446,7 +468,12 @@ async function execStockProvision(cmd) {
   }
 
   const tBatch0 = Date.now();
-  const minFreeMB = Math.max(0, Number(process.env.STOCK_PROVISION_MIN_FREE_MB || 3072) || 3072);
+  // Política ultra enterprise:
+  // - durante provisão, o 1GB/node é "emprestável" (Robe/Virtus ficam controlados)
+  // - então o headroom mínimo vira: 2GB (host) + pico de cookies (~1.5GB)
+  const snapPolicy = ramPolicy.snapshotPolicy();
+  const minFreeEnv = Math.max(0, Number(process.env.STOCK_PROVISION_MIN_FREE_MB || 0) || 0);
+  const minFreeMB = minFreeEnv > 0 ? minFreeEnv : snapPolicy.reserveProvisionMB;
   const maxHardDeactivations = Math.max(0, Number(process.env.STOCK_PROVISION_MAX_HARD_DEACTIVATIONS || 4) || 4);
 
   const budgetLeftMs = () => Math.max(0, budgetMs - (Date.now() - tBatch0));
@@ -1036,7 +1063,33 @@ async function applyCommands(cmds = []) {
     try {
       if (!c || !c.type) continue;
       let ackDetails = null;
-      if (c.type === 'close_all')             { await execCloseAll(); }
+      if (c.type === 'close_all')             {
+        // Guardrail: nunca executar close_all automaticamente no meio de provisão.
+        if (provisionLock.isActive()) {
+          if (isHumanCloseAll(c)) {
+            // Deferir: não ACK agora (mantém pendente no CT); executa automaticamente após provisão.
+            if (!deferredCloseAllCmdId) {
+              deferredCloseAllCmdId = String(c.id || '').trim() || null;
+              deferredCloseAllPayload = (c && c.payload && typeof c.payload === 'object') ? c.payload : null;
+              deferredCloseAllEnqueuedAt = Date.now();
+              logger.warn('[DASH][CMD] close_all deferido (provision_lock ativo)', { cmdId: deferredCloseAllCmdId });
+            } else {
+              // Já existe um deferido; para evitar “fila infinita” de close_all durante provisão.
+              try { await ackCommand(c.id, false, 'close_all_deferred_already_exists', { deferredExistingCmdId: deferredCloseAllCmdId }); } catch {}
+            }
+            continue;
+          }
+          // Não-humano: bloqueia e ACK erro imediato (não pode existir close_all “surpresa”)
+          try { await ackCommand(c.id, false, 'close_all_blocked_due_provision', { blocked: true, reason: 'provision_lock' }); } catch {}
+          continue;
+        }
+        await execCloseAll(c);
+        if (deferredCloseAllCmdId && String(c.id || '').trim() === deferredCloseAllCmdId) {
+          deferredCloseAllCmdId = null;
+          deferredCloseAllPayload = null;
+          deferredCloseAllEnqueuedAt = 0;
+        }
+      }
       else if (c.type === 'open_all_24h')     { await execOpenAll24h(); }
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); }

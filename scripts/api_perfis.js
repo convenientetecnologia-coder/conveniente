@@ -80,20 +80,6 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
       }
 
-      // BLOQUEIO DE CADASTRO (militar): bloqueia cadastro se RAM <= 3GB
-      {
-        const freeMB = getAvailableMB();
-        const MIN_CREATE_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
-        if (freeMB <= MIN_CREATE_MB) {
-          logger.warn('Cadastro bloqueado por RAM', { cidade, freeMB, minRequiredMB: MIN_CREATE_MB });
-          try { require('./issues.js').append('system', 'mem_block_signup', `Cadastro bloqueado: RAM livre=${freeMB}MB <= ${MIN_CREATE_MB}MB`); } catch {}
-          return res.json({
-            ok: false,
-            error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_CREATE_MB} MB)`
-          });
-        }
-      }
-
       // Memória livre (warning only)
       /*
       try {
@@ -199,17 +185,6 @@ module.exports = (app, workerClient, fileStore) => {
       desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false };
       return desired;
     });
-
-    // BLOQUEIO DE ATIVAÇÃO (militar): bloqueia ativação se RAM <= 3GB
-    {
-      const freeMB = getAvailableMB();
-      const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
-      if (freeMB <= MIN_OPEN_MB) {
-        logger.warn('Ativação bloqueada por RAM', { nome, freeMB, minRequiredMB: MIN_OPEN_MB });
-        try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
-        return res.json({ ok: false, error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_OPEN_MB} MB)` });
-      }
-    }
 
     // BLOQUEIO de ativação por limit_posting
     // --- PATCH CIRÚRGICO: BLOCO REMOVIDO CONFORME INSTRUÇÃO ---
@@ -454,17 +429,6 @@ module.exports = (app, workerClient, fileStore) => {
         });
       } catch (e) {
         try { await issues.append(nome, 'robe24h_failed', `auto_new_account:${(e && e.message) || String(e)}`); } catch {}
-      }
-    }
-
-    // BLOQUEIO DE START-WORK (militar): bloqueia start-work se RAM <= 3GB
-    {
-      const freeMB = getAvailableMB();
-      const MIN_OPEN_MB = parseInt(process.env.MIN_OPEN_REG_MB || '3072', 10);
-      if (freeMB <= MIN_OPEN_MB) {
-        logger.warn('Start work bloqueado por RAM', { nome, freeMB, minRequiredMB: MIN_OPEN_MB });
-        try { require('./issues.js').append(nome, 'mem_block_activate', `Ativação bloqueada: RAM livre=${freeMB}MB <= ${MIN_OPEN_MB}MB`); } catch {}
-        return res.json({ ok: false, error: `Impossível abrir nova conta por falta de RAM (livre ${freeMB} MB, mínimo ${MIN_OPEN_MB} MB)` });
       }
     }
 

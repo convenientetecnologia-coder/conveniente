@@ -14,6 +14,7 @@ const fs = require("fs");
 const path = require("path");
 const { getAvailableMB } = require('./utils.js'); // ADICIONADO CONFORME INSTRUÇÃO
 const provisionLock = require('./provisionLock.js');
+const ramPolicy = require('./ramPolicy.js');
 
 const pathStatusJson = path.join(__dirname, '..', 'dados', 'status.json');
 
@@ -37,10 +38,32 @@ function killGuardActiveForPerfil(perfil) {
 
 // Configs
 const PORT = parseInt(process.env.SUPERVISOR_PORT || '9800', 10);
-// Quantidade reserva de RAM a manter livre (em MB, padrão: 2048)
-const MIN_FREE_RAM_MB = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '2048', 10);
+// Quantidade reserva de RAM a manter livre (em MB).
+// Regra ultra enterprise:
+// - Operação normal: 2GB + 1GB por node
+// - Durante provision (somente dono do lock): 2GB + pico de cookies (~1.5GB)
+const MIN_FREE_RAM_MB_STATIC = parseInt(process.env.SUP_MIN_FREE_RAM_MB || '0', 10);
 // Ciclo de auto-tune em ms
 const CYCLE_MS = parseInt(process.env.SUP_CYCLE_MS || '1600', 10);
+
+function getMinFreeRamMBFor({ operator } = {}) {
+  const snap = ramPolicy.snapshotPolicy();
+  const op = String(operator || '').trim();
+
+  // Override explícito por env (compatibilidade / emergência)
+  if (Number.isFinite(MIN_FREE_RAM_MB_STATIC) && MIN_FREE_RAM_MB_STATIC > 0) return MIN_FREE_RAM_MB_STATIC;
+
+  // Durante provisionamento: se o operador é o dono do lock, empresta 1GB/node.
+  try {
+    const lk = provisionLock.get();
+    if (lk && lk.active && provisionLock.ownerMatchesOperator(lk.lock, op)) {
+      return snap.reserveProvisionMB;
+    }
+  } catch {}
+
+  // Operação normal: 2GB + 1GB por node
+  return snap.reserveNormalMB;
+}
 
 // EXPRESS REMOVIDO
 // const app = express();
@@ -128,8 +151,9 @@ function getFreeMB() {
 }
 function canProbe() {
   const now = Date.now();
+  const minFree = getMinFreeRamMBFor({});
   return state.maxSlots && state.slotsAbertos >= state.maxSlots &&
-    getFreeMB() >= (MIN_FREE_RAM_MB + 1024) &&
+    getFreeMB() >= (minFree + 1024) &&
     now >= state.nextProbeAt;
 }
 
@@ -148,8 +172,10 @@ function podeAbrirNovoSlot(perfil, opts = {}) {
     }
   } catch {}
   // Checagem de RAM
-  if (freeMB <= MIN_FREE_RAM_MB) {
-    pushEvent({type: "denied", reason: "ram_low", freeMB, perfil});
+  const operator = String(opts && opts.operator || '').trim();
+  const minFree = getMinFreeRamMBFor({ operator });
+  if (freeMB <= minFree) {
+    pushEvent({type: "denied", reason: "ram_low", freeMB, minFree, perfil});
     return {ok: false, reason: "ram_low", freeMB};
   }
   // Cooldown PER-PERFIL (novo)
@@ -260,7 +286,7 @@ function getStatus() {
       maxSlots: state.maxSlots,
       maxEver: state.maxEver,
       ramLivre: getFreeMB(),
-      ramMin: MIN_FREE_RAM_MB,
+      ramMin: getMinFreeRamMBFor({}),
       ativosSize: ativos.size,
       tempoAbertura: state.tempoAbertura.slice(-20),
       openBlockedUntil: state.openBlockedUntil,
@@ -277,7 +303,7 @@ function getStatus() {
 /** Consulta de RAM livre */
 // Era GET /ram
 function getRam() {
-  return { livre: getFreeMB(), min: MIN_FREE_RAM_MB };
+  return { livre: getFreeMB(), min: getMinFreeRamMBFor({}) };
 }
 
 /** Limpar histórico de eventos */

@@ -452,14 +452,25 @@ const AUTO_CFG = {
   RAM_WARN_MB: 700
 };
 
-// NOVO: RAM mínima dinâmica - 2GB base + 500MB por node ativo (garante que robes possam trabalhar simultaneamente)
-function getOpenMinFreeMB() {
-  const baseMB = 2048; // 2GB base
-  const activeNodes = robeQueue.activeCount(); // 0 ou 1 atualmente (pode aumentar no futuro)
-  const perNodeMB = 500; // 500MB por node ativo
-  return baseMB + (activeNodes * perNodeMB);
+const ramPolicy = require('./ramPolicy.js');
+
+// RAM mínima dinâmica (ultra enterprise):
+// - Operação normal: 2GB + 1GB por node (nós = ceil(totalGB/16))
+// - Durante provision (somente dono do lock): 2GB + pico cookies (~1.5GB)
+function getOpenMinFreeMB(operator = '') {
+  const staticOverride = parseInt(process.env.OPEN_MIN_FREE_MB || '0', 10);
+  if (Number.isFinite(staticOverride) && staticOverride > 0) return staticOverride;
+
+  const snap = ramPolicy.snapshotPolicy();
+  const op = String(operator || '').trim();
+  try {
+    const lk = provisionLock.get();
+    if (lk && lk.active && provisionLock.ownerMatchesOperator(lk.lock, op)) {
+      return snap.reserveProvisionMB;
+    }
+  } catch {}
+  return snap.reserveNormalMB;
 }
-const OPEN_MIN_FREE_MB_STATIC = parseInt(process.env.OPEN_MIN_FREE_MB || '2048', 10); // Mantido para compatibilidade
 const BROWSER_CLOSE_TIMEOUT_MS = parseInt(process.env.BROWSER_CLOSE_TIMEOUT_MS || '15000', 10);
 const HEADROOM_AFTER_OPEN_MB = parseInt(process.env.HEADROOM_AFTER_OPEN_MB || '0', 10);
 const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
@@ -1008,7 +1019,7 @@ async function activateOnce(nome, source = '', operator = '') {
 
         {
           const freeMB = getAvailableMB();
-          const minFreeMB = getOpenMinFreeMB(); // NOVO: RAM mínima dinâmica
+          const minFreeMB = getOpenMinFreeMB(operator); // RAM mínima dinâmica (considera provision lock)
           if (freeMB <= minFreeMB) {
             await reportAction(nome, 'mem_block_activate', `RAM livre=${freeMB}MB <= ${minFreeMB}MB (gate, activeNodes=${robeQueue.activeCount()})`);
             throw new Error('ram_insuficiente_para_ativar');
