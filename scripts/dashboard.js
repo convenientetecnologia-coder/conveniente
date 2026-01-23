@@ -720,15 +720,18 @@ async function ackCommand(cmdId, ok, errorMsg, details) {
 
 // ===== Logs sob demanda (fetch_logs) =====
 function logsSecret() {
-  const env = String(process.env.LOG_INGEST_SECRET || '').trim();
-  if (env) return env;
   try {
     const { readCtConfig } = require('./ctConfig');
     const cfg = readCtConfig();
-    return String(cfg && cfg.logIngestSecret || '').trim();
+    const fromCfg = String(cfg && cfg.logIngestSecret || '').trim();
+    if (fromCfg) return fromCfg;
   } catch {
-    return '';
+    // ignore
   }
+  // Fallback: permite env var, mas ct_config tem prioridade (permite correção remota via set_ct_config)
+  const env = String(process.env.LOG_INGEST_SECRET || '').trim();
+  if (env) return env;
+  return '';
 }
 function logsAllowlist() {
   const base = path.join(__dirname, '..', 'dados');
