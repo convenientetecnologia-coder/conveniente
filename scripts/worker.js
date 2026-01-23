@@ -2469,9 +2469,42 @@ const handlers = {
       const opts = (options && typeof options === 'object') ? options : {};
       const maxHardDeactivations = Math.max(0, Number(opts.maxHardDeactivations || 2) || 2);
       const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 120000) || 120000);
+      const totalTimeoutMs = Math.max(60_000, Number(opts.totalTimeoutMs || 0) || (8 * 60 * 1000));
+      const stageTimeoutMs = {
+        activate: Math.max(20_000, Number(opts.activateTimeoutMs || 0) || 90_000),
+        injectCookies: Math.max(30_000, Number(opts.injectCookiesTimeoutMs || 0) || (4 * 60 * 1000)),
+        loginFb: Math.max(20_000, Number(opts.loginFbTimeoutMs || 0) || 120_000),
+        loginMsg: Math.max(20_000, Number(opts.loginMsgTimeoutMs || 0) || 120_000),
+        collectCookies: Math.max(20_000, Number(opts.collectCookiesTimeoutMs || 0) || 90_000)
+      };
 
       const snapPolicy = ramPolicy.snapshotPolicy();
       const minFreeMB = snapPolicy.reserveProvisionMB;
+
+      const deadlineAt = startedAt + totalTimeoutMs;
+      const timeLeftMs = () => Math.max(0, deadlineAt - Date.now());
+      const withTimeout = async (label, p, ms) => {
+        const t = Math.max(1000, Math.min(ms, timeLeftMs()));
+        let id;
+        const to = new Promise((_, rej) => { id = setTimeout(() => rej(new Error(`timeout:${label}`)), t); });
+        try { return await Promise.race([p, to]); }
+        finally { try { clearTimeout(id); } catch {} }
+      };
+      const failFastToHuman = async (reason) => {
+        const why = String(reason || 'login_remediate_failed');
+        try {
+          await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
+        } catch {}
+        // Hard safety: humanHold no desired (suprime reopen) mesmo se browser estiver travado
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), humanHold: true, virtus: 'off' };
+            return d;
+          });
+        } catch {}
+        try { await handlers.deactivate({ nome, reason: why, policy: 'preserveDesired' }); } catch {}
+      };
 
       try {
         provisionAudit.append({
@@ -2481,7 +2514,9 @@ const handlers = {
           operator: op,
           minFreeMB,
           maxHardDeactivations,
-          waitBusyMs
+          waitBusyMs,
+          totalTimeoutMs,
+          stageTimeoutMs
         });
       } catch {}
 
@@ -2497,7 +2532,16 @@ const handlers = {
       }
 
       const steps = [];
-      const pushStep = (s) => { try { steps.push(Object.assign({ ts: Date.now() }, s || {})); } catch {} };
+      const pushStep = (s) => {
+        try {
+          const ev = Object.assign({ ts: Date.now() }, s || {});
+          steps.push(ev);
+          // Log incremental: mesmo se travar, fica evidência no provision_audit.jsonl
+          try {
+            provisionAudit.append({ ts: ev.ts, event: 'login_remediate_step', nome: String(nome || ''), operator: op, step: ev.step || null, data: ev });
+          } catch {}
+        } catch {}
+      };
       try {
 
       // 1) garantir browser aberto
@@ -2506,7 +2550,7 @@ const handlers = {
       const targetWasWorking = !!(ctrl && ctrl.trabalhando);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         pushStep({ step: 'activate_needed' });
-        const a = await activateOnce(nome, 'message', op);
+        const a = await withTimeout('activate', activateOnce(nome, 'message', op), stageTimeoutMs.activate);
         if (!a || a.ok === false) {
           try { provisionLock.release({ owner: op }); } catch {}
           return { ok: false, error: (a && a.error) ? String(a.error) : 'activate_failed', steps };
@@ -2594,10 +2638,11 @@ const handlers = {
         const cookies = (man0 && Array.isArray(man0.cookies)) ? man0.cookies : [];
         if (!cookies.length) {
           pushStep({ step: 'missing_cookies_in_manifest' });
+          await failFastToHuman('missing_cookies_in_manifest');
           return { ok: false, error: 'missing_cookies_in_manifest', steps };
         }
         pushStep({ step: 'attempt1_inject_cookies_begin' });
-        await browserHelper.configureProfile(ctrl.browser, nome, cookies);
+        await withTimeout('injectCookies', browserHelper.configureProfile(ctrl.browser, nome, cookies), stageTimeoutMs.injectCookies);
         pushStep({ step: 'attempt1_inject_cookies_done' });
       } catch (e) {
         pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
@@ -2646,7 +2691,7 @@ const handlers = {
         if (bad) {
           pushStep({ step: 'non_automatable_login_state', lrMessenger, lrFacebook });
           try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate' }); } catch {}
-          try { await handlers.invoke_human({ nome }); } catch {}
+          await failFastToHuman('login_requires_human');
           return { ok: false, error: 'login_requires_human', steps, closedForRam, pausedVirtus };
         }
 
@@ -2656,8 +2701,7 @@ const handlers = {
           const password = man && (man.password || man.pass);
           if (!login || !password) {
             pushStep({ step: 'missing_credentials_in_manifest' });
-            try { await setLoginRequiredFlag(nome, { reason: 'missing_credentials', source: 'login_remediate' }); } catch {}
-            try { await handlers.invoke_human({ nome }); } catch {}
+            await failFastToHuman('missing_credentials');
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
 
@@ -2669,14 +2713,14 @@ const handlers = {
           pushStep({ step: 'attempt2_login_fb_begin' });
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 900));
-          const rfb = await browserHelper.tryLoginEmailPass(p0, { login, password });
+          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { login, password }), stageTimeoutMs.loginFb);
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
           await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 900));
-          const rmsg = await browserHelper.tryLoginEmailPass(p0, { login, password });
+          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { login, password }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
 
           // revalidar
@@ -2700,7 +2744,7 @@ const handlers = {
         pushStep({ step: 'login_remediate_success' });
         // Atualiza cookies frescos no manifest (pipeline imediato)
         try {
-          const fresh = await browserHelper.collectFreshCookies(ctrl.browser);
+          const fresh = await withTimeout('collectCookies', browserHelper.collectFreshCookies(ctrl.browser), stageTimeoutMs.collectCookies);
           pushStep({ step: 'collect_fresh_cookies', ok: !!fresh.ok, count: fresh && fresh.cookies ? fresh.cookies.length : 0, error: fresh && fresh.error });
           if (fresh && fresh.ok && Array.isArray(fresh.cookies) && fresh.cookies.length) {
             await manifestStore.update(nome, (m) => {
@@ -2717,7 +2761,7 @@ const handlers = {
       } else {
         pushStep({ step: 'login_remediate_failed', lrMessenger, lrFacebook });
         try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate' }); } catch {}
-        try { await handlers.invoke_human({ nome }); } catch {}
+        await failFastToHuman('login_remediate_failed');
       }
 
       const out = {
