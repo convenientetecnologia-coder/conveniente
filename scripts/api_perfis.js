@@ -32,6 +32,7 @@ const pLimit = pLimitImport.default || pLimitImport;
 // ===== IMPORTAÇÃO DO manifestStore (conforme PASSO 1) =====
 const manifestStore = require('./manifestStore.js');
 const opsState = require('./opsState.js');
+const provisionLock = require('./provisionLock.js');
 
 module.exports = (app, workerClient, fileStore) => {
   // Listar todas as contas (útil para debug/testing)
@@ -958,7 +959,20 @@ module.exports = (app, workerClient, fileStore) => {
   // Importante: isso é usado tanto pelo painel quanto por comandos remotos (`close_all`).
   app.post('/api/perfis/close-all', async (req, res) => {
     const issues = require('./issues.js');
+    const lockOwner = `close_all:${Date.now()}`;
     try {
+      // Enterprise: durante close_all, bloquear reaberturas automáticas (nurseTick) e qualquer activate concorrente.
+      // Reusa o provisionLock (cross-process) para garantir isolamento real.
+      try {
+        const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 12 * 60 * 1000, meta: { op: 'close_all' } });
+        if (!lk || !lk.ok) {
+          const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+          return res.json({ ok: false, error: `close_all_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
+        }
+      } catch (e) {
+        return res.json({ ok: false, error: `close_all_lock_error ${(e && e.message) || String(e)}` });
+      }
+
       const perfisArr = fileStore.loadPerfisJson() || [];
       opsState.begin('close_all', { total: perfisArr.length, done: 0, ok: 0, fail: 0, current: null });
 
@@ -1006,12 +1020,14 @@ module.exports = (app, workerClient, fileStore) => {
         await new Promise(r => setTimeout(r, 500));
       }
 
-      try { await issues.append('system', 'mil_action', `bulk_close_all total=${perfisArr.length}`); } catch {}
-      opsState.finish('close_all', { total: perfisArr.length, done: results.length, ok: okCount, fail: failCount, current: null, success: true });
-      return res.json({ ok: true, total: perfisArr.length, results });
+      try { await issues.append('system', 'mil_action', `bulk_close_all total=${perfisArr.length} ok=${okCount} fail=${failCount}`); } catch {}
+      opsState.finish('close_all', { total: perfisArr.length, done: results.length, ok: okCount, fail: failCount, current: null, success: failCount === 0 });
+      return res.json({ ok: failCount === 0, total: perfisArr.length, okCount, failCount, results });
     } catch (e) {
       try { opsState.finish('close_all', { success: false, error: (e && e.message) || String(e), current: null }); } catch {}
       return res.json({ ok: false, error: (e && e.message) || String(e) });
+    } finally {
+      try { provisionLock.release({ owner: lockOwner }); } catch {}
     }
   });
 
