@@ -1520,6 +1520,145 @@ async function gptRemediateFbUi(page, nome, { reason, stage } = {}) {
   return { ok: true, result, applied };
 }
 
+function _normUiText(s) {
+  try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+  catch { return String(s || '').toLowerCase(); }
+}
+
+async function _detectFbConsentOrBlockingPage(page) {
+  try {
+    const url = (() => { try { return page.url(); } catch { return ''; } })();
+    const title = await page.title().catch(()=> '');
+    const u = String(url || '');
+    const t = _normUiText(title);
+    const isFb = /facebook\.com/i.test(u);
+    if (!isFb) return { present: false };
+    // LGPD/Consent flow (ex.: /privacy/consent/lgpd_migrated/)
+    if (/\/privacy\/consent\//i.test(u) || /lgpd_migrated/i.test(u) || t.includes('consent') || t.includes('privacidade')) {
+      return { present: true, kind: 'consent', url: u, title };
+    }
+    return { present: false };
+  } catch {}
+  return { present: false };
+}
+
+async function _tryDismissFbConsent(page) {
+  // Somente ações “não destrutivas” (aceitar/continuar) e sem depender de seletor frágil.
+  try {
+    const did = await page.evaluate(() => {
+      const norm = (s) => {
+        try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+        catch { return String(s||'').toLowerCase(); }
+      };
+      const okWords = ['continuar', 'concordo', 'aceitar', 'permitir', 'entendi', 'ok'];
+      const candidates = Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"], a[role="button"]'))
+        .filter(el => {
+          const txt = norm(el.innerText || el.value || el.textContent || '');
+          if (!txt) return false;
+          return okWords.some(w => txt.includes(w));
+        })
+        .slice(0, 30);
+      for (const el of candidates) {
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (!r || r.width < 2 || r.height < 2) continue;
+        try { el.click(); return true; } catch {}
+      }
+      return false;
+    });
+    if (did) {
+      await sleep(1200);
+      return { ok: true, clicked: true };
+    }
+  } catch {}
+  return { ok: false, error: 'no_consent_button_clicked' };
+}
+
+async function _detectGenericBlockingDialog(page) {
+  try {
+    const v = await page.evaluate(() => {
+      const dlg = document.querySelector('div[role="dialog"]');
+      if (!dlg) return { present: false };
+      const txt = (dlg.innerText || dlg.textContent || '').slice(0, 1800);
+      const aria = (dlg.getAttribute && (dlg.getAttribute('aria-label') || '')) || '';
+      return { present: true, dialogText: txt, ariaLabel: aria };
+    });
+    if (!v || !v.present) return { present: false };
+    return { present: true, kind: 'dialog', dialogText: v.dialogText || '', ariaLabel: v.ariaLabel || '' };
+  } catch {}
+  return { present: false };
+}
+
+async function _tryDismissGenericDialogDeterministic(page) {
+  // Fecha/OK/Continuar dentro de dialog (seguro).
+  try {
+    const did = await page.evaluate(() => {
+      const dlg = document.querySelector('div[role="dialog"]');
+      if (!dlg) return false;
+      const norm = (s) => {
+        try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+        catch { return String(s||'').toLowerCase(); }
+      };
+      const btns = Array.from(dlg.querySelectorAll('button, div[role="button"], a[role="button"], input[type="submit"]')).slice(0, 80);
+      const close = btns.find(el => {
+        const al = norm(el.getAttribute ? (el.getAttribute('aria-label') || '') : '');
+        const t = norm(el.innerText || el.value || el.textContent || '');
+        return al.includes('fechar') || al.includes('close') || t === 'x';
+      });
+      if (close) { try { close.click(); return true; } catch {} }
+      const okWords = ['continuar', 'aceitar', 'ok', 'entendi', 'confirmar', 'fechar'];
+      const okBtn = btns.find(el => okWords.some(w => norm(el.innerText || el.value || el.textContent || '').includes(w)));
+      if (okBtn) { try { okBtn.click(); return true; } catch {} }
+      return false;
+    });
+    if (did) {
+      await sleep(900);
+      return { ok: true, dismissed: true };
+    }
+  } catch {}
+  return { ok: false, error: 'no_dialog_button_clicked' };
+}
+
+/**
+ * “Olhos enterprise”: garante que a página não está presa em consent/popup/novidades.
+ * - Determinístico primeiro.
+ * - Se não resolver e allowGpt=true, chama GPT (selectorHints) para fechar modal.
+ */
+async function ensureFbUiUnblocked(page, nome, { reasonBase = 'fb_ui_unblock', allowGpt = true, maxRounds = 3 } = {}) {
+  const rounds = Math.max(1, Math.min(5, Number(maxRounds) || 3));
+  for (let i = 1; i <= rounds; i++) {
+    const consent = await _detectFbConsentOrBlockingPage(page);
+    if (consent && consent.present && consent.kind === 'consent') {
+      const det = await _tryDismissFbConsent(page);
+      if (det && det.ok) continue;
+      // Consent às vezes é “full page” sem dialog; se falhar, chama GPT para diagnóstico/evidência.
+      if (allowGpt && nome) {
+        await gptRemediateFbUi(page, nome, { reason: `${reasonBase}_consent`, stage: `round_${i}` }).catch(()=>null);
+        await sleep(900);
+        const det2 = await _tryDismissFbConsent(page);
+        if (det2 && det2.ok) continue;
+      }
+      return { ok: false, blocked: true, kind: 'consent', round: i };
+    }
+
+    const dlg = await _detectGenericBlockingDialog(page);
+    if (dlg && dlg.present) {
+      const det = await _tryDismissGenericDialogDeterministic(page);
+      if (det && det.ok) continue;
+      if (allowGpt && nome) {
+        await gptRemediateFbUi(page, nome, { reason: `${reasonBase}_dialog`, stage: `round_${i}` }).catch(()=>null);
+        await sleep(900);
+        const det2 = await _tryDismissGenericDialogDeterministic(page);
+        if (det2 && det2.ok) continue;
+      }
+      return { ok: false, blocked: true, kind: 'dialog', round: i, dialogPreview: String(dlg.dialogText || '').slice(0, 220) };
+    }
+
+    // Sem sinal de bloqueio.
+    return { ok: true, blocked: false, round: i };
+  }
+  return { ok: false, blocked: true, kind: 'unknown', round: rounds };
+}
+
 // ===============
 // configureProfile USA A LEITURA correta do manifest
 // ===============
@@ -2821,6 +2960,7 @@ module.exports = {
   detectMessengerPinModal,
   tryDismissMessengerPinModal,
   gptRemediateFbUi,
+  ensureFbUiUnblocked,
   installOneTabGuard,
   installAboutBlankKiller,
   // ==== NOVOS:

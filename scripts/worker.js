@@ -2734,6 +2734,8 @@ const handlers = {
       // 5) validar loginRequired em Messenger/Facebook
       let lrMessenger = null;
       let lrFacebook = null;
+      let uiMessenger = null;
+      let uiFacebook = null;
       try {
         const pages = await ctrl.browser.pages().catch(()=>[]);
         const p0 = pages && pages[0];
@@ -2741,6 +2743,9 @@ const handlers = {
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'pre_check_msg', page: p0, note: 'before messenger check' });
           await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 1200));
+          // “olhos”: resolve popups/consent antes de validar login
+          uiMessenger = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_post_inject', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+          pushStep({ step: 'ui_unblock_msg', ui: uiMessenger });
           lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           if (lrMessenger && lrMessenger.loginRequired) {
             try { await captureLoginRequiredEvidence(nome, p0, lrMessenger); } catch {}
@@ -2752,6 +2757,8 @@ const handlers = {
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'pre_check_fb', page: p0, note: 'before facebook check' });
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 1200));
+          uiFacebook = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_post_inject', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+          pushStep({ step: 'ui_unblock_fb', ui: uiFacebook });
           lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           if (lrFacebook && lrFacebook.loginRequired) {
             try { await captureLoginRequiredEvidence(nome, p0, lrFacebook); } catch {}
@@ -2759,7 +2766,7 @@ const handlers = {
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'post_check_fb', page: p0, note: lrFacebook && lrFacebook.loginRequired ? 'loginRequired=true' : 'loginRequired=false' });
         }
       } catch {}
-      pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook });
+      pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook, uiMessenger, uiFacebook });
 
       const needsLogin =
         (lrMessenger && lrMessenger.loginRequired) ||
@@ -2843,8 +2850,10 @@ const handlers = {
           lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 1200));
+          uiFacebook = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_post_login', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+          pushStep({ step: 'ui_unblock_fb_after_login', ui: uiFacebook });
           lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-          pushStep({ step: 'post_login_check', lrMessenger, lrFacebook });
+          pushStep({ step: 'post_login_check', lrMessenger, lrFacebook, uiFacebook });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)}` });
 
         } catch (e) {
@@ -2852,9 +2861,14 @@ const handlers = {
         }
       }
 
+      const uiOk =
+        (!uiMessenger || uiMessenger.ok === true) &&
+        (!uiFacebook || uiFacebook.ok === true);
+
       const success =
         !(lrMessenger && lrMessenger.loginRequired) &&
-        !(lrFacebook && lrFacebook.loginRequired);
+        !(lrFacebook && lrFacebook.loginRequired) &&
+        !!uiOk;
 
       // Hard rule: se cair em captcha/checkpoint/identity, NÃO é sucesso e deve invocar humano.
       const nonAutomatableReason = (lr) => {
@@ -2871,6 +2885,15 @@ const handlers = {
         try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate' }); } catch {}
         await failFastToHuman(na);
         return { ok: false, error: na, steps, closedForRam, pausedVirtus };
+      }
+
+      // Se não é loginRequired, mas a UI está bloqueada (consent/popup não resolvido), NÃO marque sucesso.
+      if (!uiOk) {
+        const kind = (uiFacebook && uiFacebook.kind) || (uiMessenger && uiMessenger.kind) || 'ui_blocked';
+        pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
+        try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate' }); } catch {}
+        await failFastToHuman(`ui_blocked:${kind}`);
+        return { ok: false, error: `ui_blocked:${kind}`, steps, closedForRam, pausedVirtus };
       }
 
       if (success) {
