@@ -2517,7 +2517,7 @@ const handlers = {
       }
 
       // 2) pausa Virtus em modo “inteligente” (não interrompe envio ativo)
-      const pausedVirtus = [];
+      const pausedVirtus = []; // [{ nome, wasWorking }]
       try {
         const t0 = Date.now();
         while ((Date.now() - t0) < waitBusyMs) {
@@ -2537,13 +2537,14 @@ const handlers = {
           try {
             if (!c || !c.virtus || typeof c.virtus.stop !== 'function') return;
             if (c.browser && c.browser._sendLock && c.browser._sendLock.active) return;
+            const wasWorking = !!c.trabalhando;
             c.virtus.stop().catch(()=>{});
             c.virtus = null;
             c.trabalhando = false;
-            pausedVirtus.push(String(n));
+            pausedVirtus.push({ nome: String(n), wasWorking });
           } catch {}
         });
-        pushStep({ step: 'virtus_paused', count: pausedVirtus.length, names: pausedVirtus.slice(0, 30) });
+        pushStep({ step: 'virtus_paused', count: pausedVirtus.length, names: pausedVirtus.map(x => x.nome).slice(0, 30) });
       } catch {
         pushStep({ step: 'virtus_pause_failed' });
       }
@@ -2742,6 +2743,51 @@ const handlers = {
       } finally {
         // 7) libera lock global sempre (mesmo com returns/erros)
         try { provisionLock.release({ owner: op }); } catch {}
+
+        // 8) retomar Virtus para perfis que estavam trabalhando antes (e para o perfil alvo em caso de sucesso)
+        try {
+          const resumed = [];
+          const tryResume = (n) => {
+            try {
+              const ctrlR = controllers.get(n);
+              if (!ctrlR || !ctrlR.browser || !ctrlR.browser.isConnected?.()) return false;
+              if (ctrlR.humanControl === true || ctrlR.configurando === true) return false;
+              if (!automationAllowed(ctrlR)) return false;
+              ctrlR.virtus = virtusHelper.startVirtus(ctrlR.browser, n, {
+                restrictTab: 0,
+                epoch: ctrlR.virtusEpoch || 0,
+                slowMode: (autoMode && autoMode.mode !== 'full'),
+                governorMode: (autoMode && autoMode.mode) || 'full'
+              });
+              ctrlR.trabalhando = true;
+              resumed.push(n);
+              return true;
+            } catch { return false; }
+          };
+
+          // retomar os que estavam trabalhando
+          for (const it of pausedVirtus) {
+            if (!it || !it.nome) continue;
+            if (it.wasWorking === true) tryResume(it.nome);
+          }
+
+          // retomar o perfil alvo se sucesso e não estiver em modo humano
+          try {
+            const ctrlT = controllers.get(nome);
+            const isHuman = !!(ctrlT && ctrlT.humanControl === true);
+            const okStep = steps && steps.some ? steps.some(s => s && s.step === 'login_remediate_success') : false;
+            if (okStep && !isHuman) {
+              tryResume(String(nome));
+            }
+          } catch {}
+
+          if (resumed.length) {
+            pushStep({ step: 'virtus_resumed', count: resumed.length, names: resumed.slice(0, 30) });
+          } else {
+            pushStep({ step: 'virtus_resumed', count: 0 });
+          }
+          try { await snapshotStatusAndWrite(); } catch {}
+        } catch {}
       }
     });
   },
