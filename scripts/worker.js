@@ -2502,6 +2502,8 @@ const handlers = {
 
       // 1) garantir browser aberto
       let ctrl = controllers.get(nome);
+      const targetWasActive = !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.());
+      const targetWasWorking = !!(ctrl && ctrl.trabalhando);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         pushStep({ step: 'activate_needed' });
         const a = await activateOnce(nome, 'message', op);
@@ -2728,6 +2730,40 @@ const handlers = {
         pausedVirtus
       };
 
+      // 7) restaurar estado (mínimo impacto):
+      // - perfis que estavam trabalhando antes: retomar Virtus
+      // - perfil alvo: só retomar se ele estava trabalhando antes E a remediação deu sucesso
+      try {
+        const resumed = [];
+        const tryResume = (n) => {
+          try {
+            const ctrlR = controllers.get(n);
+            if (!ctrlR || !ctrlR.browser || !ctrlR.browser.isConnected?.()) return false;
+            if (ctrlR.humanControl === true || ctrlR.configurando === true) return false;
+            if (!automationAllowed(ctrlR)) return false;
+            ctrlR.virtus = virtusHelper.startVirtus(ctrlR.browser, n, {
+              restrictTab: 0,
+              epoch: ctrlR.virtusEpoch || 0,
+              slowMode: (autoMode && autoMode.mode !== 'full'),
+              governorMode: (autoMode && autoMode.mode) || 'full'
+            });
+            ctrlR.trabalhando = true;
+            resumed.push(n);
+            return true;
+          } catch { return false; }
+        };
+
+        for (const it of pausedVirtus) {
+          if (!it || !it.nome) continue;
+          if (it.wasWorking === true) tryResume(it.nome);
+        }
+        if (success && targetWasWorking === true) {
+          tryResume(String(nome));
+        }
+        pushStep({ step: 'virtus_resumed', count: resumed.length, names: resumed.slice(0, 30), targetWasActive, targetWasWorking });
+        try { await snapshotStatusAndWrite(); } catch {}
+      } catch {}
+
       try {
         provisionAudit.append({
           ts: Date.now(),
@@ -2743,51 +2779,6 @@ const handlers = {
       } finally {
         // 7) libera lock global sempre (mesmo com returns/erros)
         try { provisionLock.release({ owner: op }); } catch {}
-
-        // 8) retomar Virtus para perfis que estavam trabalhando antes (e para o perfil alvo em caso de sucesso)
-        try {
-          const resumed = [];
-          const tryResume = (n) => {
-            try {
-              const ctrlR = controllers.get(n);
-              if (!ctrlR || !ctrlR.browser || !ctrlR.browser.isConnected?.()) return false;
-              if (ctrlR.humanControl === true || ctrlR.configurando === true) return false;
-              if (!automationAllowed(ctrlR)) return false;
-              ctrlR.virtus = virtusHelper.startVirtus(ctrlR.browser, n, {
-                restrictTab: 0,
-                epoch: ctrlR.virtusEpoch || 0,
-                slowMode: (autoMode && autoMode.mode !== 'full'),
-                governorMode: (autoMode && autoMode.mode) || 'full'
-              });
-              ctrlR.trabalhando = true;
-              resumed.push(n);
-              return true;
-            } catch { return false; }
-          };
-
-          // retomar os que estavam trabalhando
-          for (const it of pausedVirtus) {
-            if (!it || !it.nome) continue;
-            if (it.wasWorking === true) tryResume(it.nome);
-          }
-
-          // retomar o perfil alvo se sucesso e não estiver em modo humano
-          try {
-            const ctrlT = controllers.get(nome);
-            const isHuman = !!(ctrlT && ctrlT.humanControl === true);
-            const okStep = steps && steps.some ? steps.some(s => s && s.step === 'login_remediate_success') : false;
-            if (okStep && !isHuman) {
-              tryResume(String(nome));
-            }
-          } catch {}
-
-          if (resumed.length) {
-            pushStep({ step: 'virtus_resumed', count: resumed.length, names: resumed.slice(0, 30) });
-          } else {
-            pushStep({ step: 'virtus_resumed', count: 0 });
-          }
-          try { await snapshotStatusAndWrite(); } catch {}
-        } catch {}
       }
     });
   },

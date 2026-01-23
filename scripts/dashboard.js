@@ -363,11 +363,26 @@ async function execLoginRemediate(cmd) {
     });
   } catch {}
 
-  const r = await workerClient.sendWorkerCommand(
-    'login_remediate',
-    { nome, operator, options: payload && payload.options ? payload.options : {} },
-    { timeoutMs }
-  );
+  // Enterprise: após restart, pode haver race onde o worker ainda está subindo.
+  // Retry curto e controlado (sem loop infinito) para evitar "falso fail".
+  const isTransient = (err) => {
+    const m = String(err || '').toLowerCase();
+    return m.includes('worker off') || m.includes('queue_timeout') || m.includes('timeout');
+  };
+  let r = null;
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    r = await workerClient.sendWorkerCommand(
+      'login_remediate',
+      { nome, operator, options: payload && payload.options ? payload.options : {} },
+      { timeoutMs }
+    );
+    if (r && r.ok !== false) break;
+    const err = (r && r.error) ? String(r.error) : 'login_remediate_failed';
+    if (!isTransient(err) || attempt >= maxAttempts) break;
+    try { provisionAudit.append({ ts: Date.now(), event: 'login_remediate_retry', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, nome, operator, attempt, error: err }); } catch {}
+    await sleep(2500);
+  }
   if (!r || r.ok === false) {
     const err = (r && r.error) ? String(r.error) : 'login_remediate_failed';
     try {
@@ -1200,14 +1215,16 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
-      // ACK de sucesso
-      if ((c.type === 'migrate_profiles' || c.type === 'stock_provision' || c.type === 'stock_export_profiles' || c.type === 'delete_perfis') && ackDetails && ackDetails.ok === false) {
-        // Migração/export pode falhar parcialmente; ACK precisa carregar detalhes para auditoria.
-        try { 
-          const msg = ackDetails.profilesCount !== undefined 
-            ? `partial_fail profiles=${ackDetails.profilesCount}` 
-            : `partial_fail ok=${ackDetails.okCount} fail=${ackDetails.failCount}`;
-          await ackCommand(c.id, false, msg, ackDetails); 
+      // ACK enterprise: se o handler retornou {ok:false}, refletir falha no CT + carregar detalhes.
+      if (ackDetails && ackDetails.ok === false) {
+        try {
+          const msg =
+            ackDetails.profilesCount !== undefined
+              ? `fail profiles=${ackDetails.profilesCount}`
+              : (ackDetails.okCount !== undefined || ackDetails.failCount !== undefined)
+              ? `fail ok=${ackDetails.okCount} fail=${ackDetails.failCount}`
+              : (ackDetails.error ? String(ackDetails.error) : 'fail');
+          await ackCommand(c.id, false, msg, ackDetails);
         } catch {}
       } else {
         try { await ackCommand(c.id, true, null, ackDetails); } catch {}
