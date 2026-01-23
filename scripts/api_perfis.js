@@ -246,18 +246,30 @@ module.exports = (app, workerClient, fileStore) => {
     }
     await issues.append(nome, 'admin_deactivate_request', `by=${op}`);
 
-    try { 
-      await fileStore.withDesiredFileLockUpdate(desired => {
-        desired.perfis = desired.perfis || {};
-        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
-        return desired;
-      });
-    } catch (e) {
-      logger.error('Erro ao patchDesired durante desativação', { nome, rota: '/api/perfis/:nome/deactivate', error: e && e.message }, e);
+    // Hardening: permitir "preserveDesired" para o fluxo stock_provision (sem desligar desired.active),
+    // para que o servidor possa liberar RAM temporariamente sem alterar o estado declarativo do usuário.
+    const reqPolicy = String(req?.body?.policy || '').trim() || null; // ex.: 'preserveDesired'
+    const reqReason = String(req?.body?.reason || '').trim() || null;
+    const allowPolicy = (op && String(op).toLowerCase().startsWith('stock_provision'));
+    const policy = (allowPolicy && reqPolicy) ? reqPolicy : null;
+    const reason = (allowPolicy && reqReason) ? reqReason : 'admin';
+
+    // Default (admin): desativa declarativo (active:false, virtus:off).
+    // preserveDesired (stock_provision): NÃO altera desired; apenas fecha runtime via worker.
+    if (policy !== 'preserveDesired') {
+      try {
+        await fileStore.withDesiredFileLockUpdate(desired => {
+          desired.perfis = desired.perfis || {};
+          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
+          return desired;
+        });
+      } catch (e) {
+        logger.error('Erro ao patchDesired durante desativação', { nome, rota: '/api/perfis/:nome/deactivate', error: e && e.message }, e);
+      }
     }
     // Chama worker para desativar imediatamente e propaga resultado real para o frontend
     try {
-      const resp = await workerClient.sendWorkerCommand('deactivate', { nome, reason: 'admin', policy: null }, { timeoutMs: 60000 });
+      const resp = await workerClient.sendWorkerCommand('deactivate', { nome, reason, policy }, { timeoutMs: 60000 });
       if (!resp || resp.ok !== true) {
         logger.error('Falha ao desativar perfil (worker respondeu NOK)', { nome, resp });
         return res.json({ ok: false, error: (resp && resp.error) || 'deactivate_failed' });

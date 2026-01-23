@@ -262,6 +262,7 @@ const psList = null;
 const { execFile } = require('child_process');
 
 const supervisorClient = require('./supervisorClient.js');
+const provisionLock = require('./provisionLock.js');
 const { getAvailableMB } = utils;
 
 const HEALTH_CFG = {
@@ -949,6 +950,17 @@ async function activateOnce(nome, source = '') {
       await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
       return { ok:false, error:"kill_guard_until" };
     }
+
+    // Hardening: durante stock_provision (maintenance lock), não permitir novas aberturas.
+    // O supervisor também bloqueia, mas isso evita trabalho inútil quando o worker está isolado.
+    try {
+      if (provisionLock.isActive()) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+        await reportAction(nome, 'mil_action', 'activation_hold_by_provision_lock');
+        return { ok: false, error: 'maintenance_provision' };
+      }
+    } catch {}
 
     try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
@@ -1727,6 +1739,21 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
 }
 
 async function robeTickGlobal() {
+  // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
+  try {
+    if (provisionLock.isActive()) {
+      try {
+        robeTickGlobal._lastProvisionLockLogAt = robeTickGlobal._lastProvisionLockLogAt || 0;
+        const now = Date.now();
+        const last = Number(robeTickGlobal._lastProvisionLockLogAt || 0) || 0;
+        if (!last || (now - last) > 60000) {
+          robeTickGlobal._lastProvisionLockLogAt = now;
+          await milLog('mil_action', 'robeTickGlobal_skip_due_provision_lock');
+        }
+      } catch {}
+      return;
+    }
+  } catch {}
   // Virtus-first: em modo lento (CPU/loop lag), o Robe pode pausar para manter atendimento.
   if (autoMode && autoMode.mode && autoMode.mode !== 'full') {
     try {
@@ -2055,6 +2082,7 @@ function resolveChromeUserDataRoot() {
 }
 
 function automationAllowed(ctrl) {
+  try { if (provisionLock.isActive()) return false; } catch {}
   return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && !ctrl.trabalhando);
 }
 

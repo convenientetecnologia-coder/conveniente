@@ -13,6 +13,7 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const { getAvailableMB } = require('./utils.js'); // ADICIONADO CONFORME INSTRUÇÃO
+const provisionLock = require('./provisionLock.js');
 
 const pathStatusJson = path.join(__dirname, '..', 'dados', 'status.json');
 
@@ -136,6 +137,15 @@ function canProbe() {
 function podeAbrirNovoSlot(perfil) {
   const now = Date.now();
   const freeMB = getFreeMB();
+  // Hardening: durante stock_provision (maintenance lock), NÃO permitir novas aberturas.
+  // Isso evita "explosão" de reaberturas e concorrência no meio do cadastro.
+  try {
+    const lk = provisionLock.get();
+    if (lk && lk.active) {
+      pushEvent({ type: "denied", reason: "maintenance_provision", perfil, owner: lk.lock && lk.lock.owner, untilMs: lk.lock && lk.lock.untilMs });
+      return { ok: false, reason: "maintenance_provision", msg: "Abertura bloqueada: provisionamento em andamento" };
+    }
+  } catch {}
   // Checagem de RAM
   if (freeMB <= MIN_FREE_RAM_MB) {
     pushEvent({type: "denied", reason: "ram_low", freeMB, perfil});

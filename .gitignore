@@ -25,6 +25,11 @@ dados/status_node_*.json.tmp
 dados/desired.json
 dados/desired.json.lock
 dados/perfis/
+dados/perfis.json
+dados/supervisor_state.json
+dados/fotos_postadas.json
+dados/ct_config.json
+_backup_local_before_reset_*/
 
 # Arquivos temporários gerados pelo cluster/sistema
 dados/**/*.tmp

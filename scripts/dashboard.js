@@ -8,6 +8,7 @@ const path = require('path');
 const os = require('os');
 const logger = require('./logger.js');
 const fotos = require('./fotos.js'); // ADICIONADO
+const provisionLock = require('./provisionLock.js');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -430,72 +431,249 @@ async function execStockProvision(cmd) {
   if (!batchId) throw new Error('missing_batchId');
   if (!actions.length) throw new Error('missing_actions');
 
+  // Hardening: lock global com TTL para isolamento total durante provisão.
+  // Evita concorrência (already_opening / slot storms) e permite hard-recovery com segurança.
+  const budgetMs = Math.max(30_000, Number(process.env.STOCK_PROVISION_BUDGET_MS || (8 * 60 * 1000)) || (8 * 60 * 1000));
+  const lockOwner = `stock_provision:${batchId}`;
+  const lk = provisionLock.tryAcquire({
+    owner: lockOwner,
+    ttlMs: Math.max(9 * 60 * 1000, budgetMs + (2 * 60 * 1000)),
+    meta: { batchId, cmdId: String(cmd && cmd.id || '') || null }
+  });
+  if (!lk || !lk.ok) {
+    const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+    throw new Error(`provision_lock_busy${curOwner ? ` owner=${curOwner}` : ''}`);
+  }
+
+  const tBatch0 = Date.now();
+  const minFreeMB = Math.max(0, Number(process.env.STOCK_PROVISION_MIN_FREE_MB || 3072) || 3072);
+  const maxHardDeactivations = Math.max(0, Number(process.env.STOCK_PROVISION_MAX_HARD_DEACTIVATIONS || 4) || 4);
+
+  const budgetLeftMs = () => Math.max(0, budgetMs - (Date.now() - tBatch0));
+  const jitter = (n) => Math.floor(Math.random() * Math.max(1, n));
+  const backoffMs = (attempt) => {
+    const base = [2000, 5000, 10000, 15000, 20000][Math.min(4, Math.max(0, attempt - 1))];
+    return base + jitter(700);
+  };
+
+  const normalizeErr = (e) => {
+    const msg = (e && e.message) ? String(e.message) : String(e || '');
+    return msg.trim().slice(0, 500);
+  };
+  const isTransient = (msg) => {
+    const m = String(msg || '').toLowerCase();
+    return (
+      m.includes('timeout') ||
+      m.includes('already_opening') ||
+      m.includes('supervisor_denied:slots') ||
+      m.includes('supervisor_denied:ram_low') ||
+      m.includes('supervisor_denied:maintenance_provision') ||
+      m.includes('maintenance_provision') ||
+      m.includes('ram_insuficiente_para_ativar') ||
+      m.includes('impossível abrir nova conta por falta de ram') ||
+      m.includes('supervisor_unreachable')
+    );
+  };
+
+  async function getSysSnapshot() {
+    try { return await httpJson('/api/sys'); } catch { return null; }
+  }
+  async function getFreeMB() {
+    const s = await getSysSnapshot();
+    return Number(s && s.mem && s.mem.freeMB || 0) || 0;
+  }
+  async function ensureFreeMBWithin(minMB, maxWaitMs) {
+    const t0 = Date.now();
+    let last = 0;
+    while ((Date.now() - t0) < Math.max(0, Number(maxWaitMs) || 0)) {
+      try { last = await getFreeMB(); } catch { last = 0; }
+      if (last >= minMB) return { ok: true, freeMB: last, waitedMs: Date.now() - t0 };
+      await sleep(1200);
+    }
+    try { last = await getFreeMB(); } catch {}
+    return { ok: false, freeMB: last, waitedMs: Date.now() - t0 };
+  }
+  async function hardRecoverRam({ out, minMB }) {
+    const hard = { ok: true, attempts: 0, deactivated: 0, names: [] };
+    while (hard.deactivated < maxHardDeactivations && budgetLeftMs() > 5000) {
+      const free0 = await getFreeMB().catch(()=>0);
+      if (free0 >= minMB) break;
+      hard.attempts++;
+      out.steps.push({ step: 'hard_ram_recover_check', at: Date.now(), freeMB: free0, minFreeMB: minMB });
+      let st = null;
+      try { st = await httpJson('/api/status'); } catch {}
+      const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+      const actives = perfis
+        .filter(p => p && p.nome && p.active === true && p.humanControl !== true && p.configurando !== true)
+        .map(p => ({ nome: String(p.nome), ramMB: (typeof p.ramMB === 'number' ? p.ramMB : 0), trabalhando: !!p.trabalhando }))
+        // preferir liberar o que está "menos crítico" primeiro: não trabalhando, depois maior RAM
+        .sort((a, b) => {
+          if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
+          return (Number(b.ramMB || 0) || 0) - (Number(a.ramMB || 0) || 0);
+        });
+      const pick = actives[0];
+      if (!pick || !pick.nome) break;
+      const nome = pick.nome;
+      out.steps.push({ step: 'hard_ram_recover_deactivate', at: Date.now(), nome });
+      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
+        method: 'POST',
+        headers: { 'x-operator': 'stock_provision' },
+        body: { policy: 'preserveDesired', reason: 'ramKill' }
+      });
+      if (!r || r.ok === false) {
+        out.steps.push({ step: 'hard_ram_recover_deactivate_fail', at: Date.now(), nome, error: (r && r.error) ? String(r.error) : 'deactivate_failed' });
+        break;
+      }
+      hard.deactivated++;
+      hard.names.push(nome);
+      // aguarda o SO liberar RAM
+      await sleep(2000 + jitter(800));
+    }
+    return hard;
+  }
+
   // Serializa por ação (segurança) e retorna detalhes por etapa
   const results = [];
-  for (const a of actions) {
-    const startedAt = Date.now();
-    const city = String(a && (a.city || a.cidade || a.toCity || a.city_uf) || '').trim();
-    const cookies = a && a.cookies;
-    const label = String(a && a.label || '').trim();
-    const stockAccountId = (a && (a.stockAccountId || a.stock_account_id)) ? Number(a.stockAccountId || a.stock_account_id) : null;
-    const category = String(a && a.category || '').trim().toLowerCase();
-    const robeMode = (category === 'veiculos') ? 'veiculos' : 'itens';
+  try {
+    for (const a of actions) {
+      const startedAt = Date.now();
+      const city = String(a && (a.city || a.cidade || a.toCity || a.city_uf) || '').trim();
+      const cookies = a && a.cookies;
+      const label = String(a && a.label || '').trim();
+      const stockAccountId = (a && (a.stockAccountId || a.stock_account_id)) ? Number(a.stockAccountId || a.stock_account_id) : null;
+      const category = String(a && a.category || '').trim().toLowerCase();
+      const robeMode = (category === 'veiculos') ? 'veiculos' : 'itens';
 
-    const out = { ok: false, batchId, stockAccountId, city, label, steps: [], profileName: null, robeMode };
-    try {
-      // 1) criar perfil
-      out.steps.push({ step: 'create_profile', at: Date.now() });
-      const created = await httpJson('/api/perfis', { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: { cidade: city, cookies } });
-      if (!created || created.ok === false) throw new Error((created && created.error) ? String(created.error) : 'create_profile_failed');
-      const nome = created?.perfil?.nome ? String(created.perfil.nome) : '';
-      if (!nome) throw new Error('create_profile_missing_name');
-      out.profileName = nome;
+      const out = {
+        ok: false,
+        batchId,
+        stockAccountId,
+        city,
+        label,
+        steps: [],
+        profileName: null,
+        robeMode,
+        maintenanceMode: true,
+        lockOwner,
+        lockUntilMs: lk && lk.lock && lk.lock.untilMs || null,
+        budgetMs,
+        minFreeMB,
+        retries: []
+      };
 
-      // 2) set label (interno)
-      if (label) {
-        out.steps.push({ step: 'set_label', at: Date.now() });
-        const r2 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/label`, { method:'PATCH', headers:{ 'x-operator':'stock_provision' }, body: { novoLabel: label } });
-        if (!r2 || r2.ok === false) throw new Error((r2 && r2.error) ? String(r2.error) : 'set_label_failed');
+      const runStep = async (step, fn) => {
+        const maxAttempts = 20;
+        let attempt = 0;
+        while (true) {
+          attempt++;
+          const freeBefore = await getFreeMB().catch(()=>0);
+          out.steps.push({ step, at: Date.now(), attempt, freeMB_before: freeBefore });
+          try {
+            const r = await fn();
+            const freeAfter = await getFreeMB().catch(()=>0);
+            out.steps.push({ step: `${step}_ok`, at: Date.now(), attempt, freeMB_after: freeAfter });
+            return r;
+          } catch (e) {
+            const msg = normalizeErr(e);
+            out.retries.push({ step, attempt, at: Date.now(), error: msg, budgetLeftMs: budgetLeftMs() });
+            out.steps.push({ step: `${step}_fail`, at: Date.now(), attempt, error: msg });
+            if (!isTransient(msg) || attempt >= maxAttempts || budgetLeftMs() <= 0) {
+              throw new Error(msg || `${step}_failed`);
+            }
+            const waitMs = Math.min(backoffMs(attempt), Math.max(1000, budgetLeftMs() - 500));
+            await sleep(waitMs);
+            continue;
+          }
+        }
+      };
+
+      try {
+        // 0) baseline telemetria
+        out.steps.push({ step: 'lock_acquired', at: Date.now(), lockOwner, lockUntilMs: out.lockUntilMs });
+
+        // 1) criar perfil
+        const created = await runStep('create_profile', async () => {
+          const r = await httpJson('/api/perfis', { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: { cidade: city, cookies } });
+          if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'create_profile_failed');
+          return r;
+        });
+        const nome = created?.perfil?.nome ? String(created.perfil.nome) : '';
+        if (!nome) throw new Error('create_profile_missing_name');
+        out.profileName = nome;
+
+        // 2) set label (interno)
+        if (label) {
+          await runStep('set_label', async () => {
+            const r2 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/label`, { method: 'PATCH', headers: { 'x-operator': 'stock_provision' }, body: { novoLabel: label } });
+            if (!r2 || r2.ok === false) throw new Error((r2 && r2.error) ? String(r2.error) : 'set_label_failed');
+            return r2;
+          });
+        }
+
+        // 3) set robe mode (categoria)
+        await runStep('set_robe_mode', async () => {
+          const r3 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/robe-mode`, { method: 'POST', body: { mode: robeMode } });
+          if (!r3 || r3.ok === false) throw new Error((r3 && r3.error) ? String(r3.error) : 'set_robe_mode_failed');
+          return r3;
+        });
+
+        // 3.5) garantir headroom antes de abrir browser
+        const free0 = await getFreeMB().catch(()=>0);
+        out.steps.push({ step: 'pre_activate_headroom', at: Date.now(), freeMB: free0, minFreeMB });
+        if (free0 < minFreeMB) {
+          const hard = await hardRecoverRam({ out, minMB: minFreeMB });
+          out.steps.push({ step: 'hard_ram_recover_done', at: Date.now(), ...hard });
+          const remain = Math.min(budgetLeftMs(), 90_000);
+          const ensured = await ensureFreeMBWithin(minFreeMB, remain);
+          out.steps.push({ step: 'ensure_free_mb', at: Date.now(), ...ensured, minFreeMB });
+          if (!ensured.ok) throw new Error(`ram_low_wait_timeout freeMB=${ensured.freeMB} min=${minFreeMB}`);
+        }
+
+        // 4) activate
+        await runStep('activate', async () => {
+          const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          if (!r4 || r4.ok === false) throw new Error((r4 && r4.error) ? String(r4.error) : 'activate_failed');
+          return r4;
+        });
+
+        // 5) configure (inject cookies etc)
+        await runStep('configure', async () => {
+          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
+          return r5;
+        });
+
+        // 5.5) Procedimento enterprise pós-injeção:
+        // fecha o navegador e reabre em modo trabalho (evita sessão “suja”/popups pós-config)
+        await runStep('deactivate_after_configure', async () => {
+          const r55 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          if (!r55 || r55.ok === false) throw new Error((r55 && r55.error) ? String(r55.error) : 'deactivate_after_configure_failed');
+          return r55;
+        });
+        await sleep(1200);
+
+        // 6) start work
+        await runStep('start_work', async () => {
+          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'start_work_failed');
+          return r6;
+        });
+
+        out.ok = true;
+        out.finishedAt = Date.now();
+        out.durationMs = out.finishedAt - startedAt;
+        results.push(out);
+      } catch (e) {
+        out.ok = false;
+        out.error = normalizeErr(e);
+        out.finishedAt = Date.now();
+        out.durationMs = out.finishedAt - startedAt;
+        results.push(out);
       }
-
-      // 3) set robe mode (categoria)
-      out.steps.push({ step: 'set_robe_mode', at: Date.now() });
-      const r3 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/robe-mode`, { method:'POST', body: { mode: robeMode } });
-      if (!r3 || r3.ok === false) throw new Error((r3 && r3.error) ? String(r3.error) : 'set_robe_mode_failed');
-
-      // 4) activate
-      out.steps.push({ step: 'activate', at: Date.now() });
-      const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
-      if (!r4 || r4.ok === false) throw new Error((r4 && r4.error) ? String(r4.error) : 'activate_failed');
-
-      // 5) configure (inject cookies etc)
-      out.steps.push({ step: 'configure', at: Date.now() });
-      const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
-      if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
-
-      // 5.5) Procedimento enterprise pós-injeção:
-      // fecha o navegador e reabre em modo trabalho (evita sessão “suja”/popups pós-config)
-      out.steps.push({ step: 'deactivate_after_configure', at: Date.now() });
-      const r55 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
-      if (!r55 || r55.ok === false) throw new Error((r55 && r55.error) ? String(r55.error) : 'deactivate_after_configure_failed');
-      try { await new Promise(r => setTimeout(r, 1200)); } catch {}
-
-      // 6) start work
-      out.steps.push({ step: 'start_work', at: Date.now() });
-      const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method:'POST', headers:{ 'x-operator':'stock_provision' }, body: {} });
-      if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'start_work_failed');
-
-      out.ok = true;
-      out.finishedAt = Date.now();
-      out.durationMs = out.finishedAt - startedAt;
-      results.push(out);
-    } catch (e) {
-      out.ok = false;
-      out.error = (e && e.message) ? e.message : String(e);
-      out.finishedAt = Date.now();
-      out.durationMs = out.finishedAt - startedAt;
-      results.push(out);
     }
+  } finally {
+    // Sempre libera lock global.
+    try { provisionLock.release({ owner: lockOwner }); } catch {}
   }
 
   const okCount = results.filter(r => r && r.ok).length;
