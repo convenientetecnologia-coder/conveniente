@@ -762,6 +762,7 @@ function logsSecret() {
 }
 function logsAllowlist() {
   const base = path.join(__dirname, '..', 'dados');
+  const repo = path.join(__dirname, '..');
   return {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
@@ -769,6 +770,9 @@ function logsAllowlist() {
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
     migrations: path.join(base, 'migrations.jsonl'),
     updates: path.join(base, 'updates.jsonl'),
+    // Evidência de versão (para auditoria E2E): prova qual commit está no disco
+    git_head: path.join(repo, '.git', 'HEAD'),
+    git_main_ref: path.join(repo, '.git', 'refs', 'heads', 'main'),
     // Auditoria enterprise: lock de provisão (para diagnosticar maintenance_provision/locks presos)
     provision_lock: path.join(base, 'provision_lock.json'),
     // útil para auditoria do canal de comandos
