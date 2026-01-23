@@ -2570,7 +2570,8 @@ const handlers = {
             return d;
           });
         } catch {}
-        try { await handlers.deactivate({ nome, reason: why, policy: 'preserveDesired' }); } catch {}
+        // CRÍTICO: nunca pode travar aqui. Deactivate pode pendurar ao fechar browser.
+        try { await withTimeout('failfast_deactivate', handlers.deactivate({ nome, reason: why, policy: 'preserveDesired' }), 45_000); } catch {}
       };
 
       try {
