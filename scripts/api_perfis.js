@@ -297,13 +297,51 @@ module.exports = (app, workerClient, fileStore) => {
     await issues.append(nome, 'admin_configure_request', `by=${op}`);
     // Timeout aumentado para 180000ms (3min) para comando configure
     try {
+      // Enterprise hardening (sem achismo):
+      // Quando o configure é manual (UI/admin), isole o servidor para evitar:
+      // - nurseTick reabrir perfis (desired.active) no meio da injeção
+      // - swap_open (fechar outros perfis) causado por tentativa de abrir perfis enquanto RAM oscila
+      // - Robe iniciar execução no meio do configure
+      //
+      // Obs: stock_provision já possui lock global próprio em scripts/dashboard.js.
+      const opTrim = String(op || '').trim();
+      const isStockProvision = opTrim.toLowerCase().startsWith('stock_provision');
+      const lockOwner = `admin_configure:${nome}:${Date.now()}`;
+      let gotLock = false;
+      if (!isStockProvision) {
+        try {
+          const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 4 * 60 * 1000, meta: { op: 'admin_configure', nome, by: opTrim || null } });
+          if (!lk || !lk.ok) {
+            const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+            return res.json({ ok: false, error: `configure_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
+          }
+          gotLock = true;
+        } catch (e) {
+          return res.json({ ok: false, error: `configure_lock_error ${(e && e.message) || String(e)}` });
+        }
+      }
       // Passa operador para o worker decidir se deixa em modo humano (admin) ou segue fluxo automático (stock_provision)
-      const resp = await workerClient.sendWorkerCommand('configure', { nome, operator: op }, { timeoutMs: 180000 });
+      const resp = await workerClient.sendWorkerCommand('configure', { nome, operator: (isStockProvision ? opTrim : lockOwner) }, { timeoutMs: 180000 });
       logger.info('Perfil configurado por API', { nome });
       return res.json(resp);
     } catch (e) {
       logger.error('Erro fatal na rota configurar perfil', { nome, rota: '/api/perfis/:nome/configure', error: e && e.message }, e);
       return res.json({ ok: false, error: (e && e.message) || 'configure_failed' });
+    } finally {
+      try {
+        // best-effort: libera lock manual (se adquirido)
+        const opTrim = String(op || '').trim();
+        const isStockProvision = opTrim.toLowerCase().startsWith('stock_provision');
+        if (!isStockProvision) {
+          // lockOwner foi gerado acima; recomputa com mesmo formato usando "nome" + janela curta
+          // Para robustez, só force release se o lock atual for admin_configure:<nome>:*
+          const cur = provisionLock.get();
+          const curOwner = String(cur && cur.lock && cur.lock.owner || '').trim();
+          if (cur && cur.active && curOwner.startsWith(`admin_configure:${nome}:`)) {
+            provisionLock.release({ owner: curOwner, force: true });
+          }
+        }
+      } catch {}
     }
   });
 
