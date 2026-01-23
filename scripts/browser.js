@@ -1521,8 +1521,9 @@ function _histPush(nome, reason, item) {
   _fbUiHistory.set(key, arr.slice(-12));
 }
 
-async function tryApplySelectorHints(page, selectorHints) {
+async function tryApplySelectorHints(page, selectorHints, opts = {}) {
   const hints = Array.isArray(selectorHints) ? selectorHints : [];
+  const requireDialog = (opts && typeof opts.requireDialog === 'boolean') ? opts.requireDialog : true;
   for (const selRaw of hints) {
     const sel = String(selRaw || '').trim();
     if (!sel) continue;
@@ -1533,14 +1534,29 @@ async function tryApplySelectorHints(page, selectorHints) {
       const clicked = await page.evaluate((selector) => {
         const el = document.querySelector(selector);
         if (!el) return false;
-        // precisa estar dentro de um dialog/modal para evitar cliques destrutivos fora
+        // por padrão, exige dialog/modal para evitar cliques destrutivos fora
         const inDialog = !!(el.closest && el.closest('div[role="dialog"]'));
-        if (!inDialog) return false;
+        if (!inDialog && window.__CT_REQUIRE_DIALOG_FOR_HINTS === true) return false;
         const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
         if (!r || r.width < 2 || r.height < 2) return false;
+        // se não for dialog, só aceita clique em elementos "seguros" (consent/continuar/aceitar)
+        if (!inDialog) {
+          const norm = (s) => {
+            try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+            catch { return String(s||'').toLowerCase(); }
+          };
+          const t = norm(el.innerText || el.value || el.textContent || '');
+          const al = norm(el.getAttribute ? (el.getAttribute('aria-label') || '') : '');
+          const safeWords = ['continuar','aceitar','concordo','permitir','entendi','ok','confirmar'];
+          const okTxt = safeWords.some(w => t.includes(w) || al.includes(w));
+          const tag = String(el.tagName || '').toLowerCase();
+          const role = String(el.getAttribute ? (el.getAttribute('role') || '') : '').toLowerCase();
+          const isButtonLike = tag === 'button' || tag === 'a' || tag === 'input' || role === 'button';
+          if (!isButtonLike || !okTxt) return false;
+        }
         if (typeof el.click === 'function') { el.click(); return true; }
         return false;
-      }, sel);
+      }, sel, requireDialog);
       if (clicked) return { ok: true, clickedSelector: sel };
     } catch {}
   }
@@ -1573,7 +1589,10 @@ async function gptRemediateFbUi(page, nome, { reason, stage } = {}) {
   const result = out.result || null;
   if (!result) return { ok: false, error: 'gpt_missing_result' };
 
-  const applied = await tryApplySelectorHints(page, result.selectorHints);
+  // Para consent (full-page), permitimos hints fora de dialog, mas com guardrails (texto/aria + button-like).
+  const allowNonDialog = String(reason || '').toLowerCase().includes('consent');
+  try { await page.evaluate((v) => { window.__CT_REQUIRE_DIALOG_FOR_HINTS = v; }, allowNonDialog ? false : true).catch(()=>{}); } catch {}
+  const applied = await tryApplySelectorHints(page, result.selectorHints, { requireDialog: !allowNonDialog });
   _histPush(nome, reason, { ts: Date.now(), stage: String(stage||''), appliedOk: !!applied.ok, clickedSelector: applied.clickedSelector || null });
   await sleep(800);
   return { ok: true, result, applied };
@@ -1705,6 +1724,9 @@ async function ensureFbUiUnblocked(page, nome, { reasonBase = 'fb_ui_unblock', a
       if (allowGpt && nome) {
         await gptRemediateFbUi(page, nome, { reason: `${reasonBase}_consent`, stage: `round_${i}` }).catch(()=>null);
         await sleep(900);
+        // Se o GPT clicou e saiu do consent (ex.: foi para checkpoint/captcha), NÃO marque como blocked: reavalia.
+        const consentAfter = await _detectFbConsentOrBlockingPage(page).catch(()=>({ present:false }));
+        if (!consentAfter || !consentAfter.present) continue;
         const det2 = await _tryDismissFbConsent(page);
         if (det2 && det2.ok) continue;
       }
