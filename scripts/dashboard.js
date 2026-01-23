@@ -652,6 +652,9 @@ async function execStockProvision(cmd) {
         const nome = created?.perfil?.nome ? String(created.perfil.nome) : '';
         if (!nome) throw new Error('create_profile_missing_name');
         out.profileName = nome;
+        try {
+          provisionAudit.append({ event: 'stock_provision_profile_created', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, profileName: nome });
+        } catch {}
 
         // 2) set label (interno)
         if (label) {
