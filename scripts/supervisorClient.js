@@ -33,14 +33,14 @@ function localKillGuardActive(perfil) {
 
 function newMsgId(){ return Math.random().toString(36).slice(2); }
 
-async function requestOpen(perfil, url) {
+async function requestOpen(perfil, url, opts = {}) {
   if (localKillGuardActive(perfil)) {
     return { ok: false, error: 'kill_guard_until', msg: 'Abertura de slot negada por kill_guard_until' };
   }
   if (!isChild) {
     try {
       const supervisor = require('./supervisor.js');
-      return supervisor.requestOpen(perfil);
+      return supervisor.requestOpen(perfil, opts);
     } catch (e) {
       logger.warn('[supervisorClient] requestOpen erro:', { error: e && e.message || e });
       return { ok: false, error: e && e.message || e };
@@ -56,7 +56,7 @@ async function requestOpen(perfil, url) {
       }
     };
     try { process.on('message', onMsg); } catch {}
-    try { process.send({ type: 'sup:reqOpen', perfil, msgId }); } catch(e) {
+    try { process.send({ type: 'sup:reqOpen', perfil, msgId, opts }); } catch(e) {
       try { process.off('message', onMsg); } catch {}
       resolve({ ok:false, error:'ipc_send_failed' });
     }

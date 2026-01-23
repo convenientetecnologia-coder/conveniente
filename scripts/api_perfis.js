@@ -66,9 +66,10 @@ module.exports = (app, workerClient, fileStore) => {
     logger.info('POST /api/perfis chamada', {});
     try {
       // Segurança enterprise: criação local manual está desativada.
-      // Perfis só podem ser criados via Estoque (stock_provision), que chama esta rota com x-operator=stock_provision.
+      // Perfis só podem ser criados via Estoque (stock_provision).
+      // Enterprise: permite operador com batchId (ex.: stock_provision:<uuid>) para integrar com lock owner.
       const op = String(req.headers['x-operator'] || '').trim();
-      if (op !== 'stock_provision') {
+      if (!op || !op.toLowerCase().startsWith('stock_provision')) {
         return res.json({ ok: false, error: 'criar_perfil_somente_estoque' });
       }
 
@@ -222,7 +223,7 @@ module.exports = (app, workerClient, fileStore) => {
       logger.error('Erro ao patchDesired para ativação', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);
     }
     // Chama worker para ativar imediatamente:
-    const r = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 }).catch(e => {
+    const r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
       logger.error('Erro ao enviar comando activate para worker', { nome, rota: '/api/perfis/:nome/activate', error: e && e.message }, e);
       return null;
     });
@@ -393,7 +394,7 @@ module.exports = (app, workerClient, fileStore) => {
     // Enterprise (produção): perfil recém-provisionado via Estoque deve entrar com
     // Robe pausado por 24h, mas Virtus ON imediatamente.
     // Importante: isso NÃO deve "resetar" o cooldown se o operador chamar start-work depois.
-    if (op === 'stock_provision') {
+    if (op && String(op).toLowerCase().startsWith('stock_provision')) {
       try {
         const manifestStore = require('./manifestStore.js');
         const plus24 = 24 * 60 * 60 * 1000;
@@ -438,7 +439,7 @@ module.exports = (app, workerClient, fileStore) => {
       logger.error('Erro ao patchDesired para start_work', { nome, error: e && e.message }, e);
     }
     // Garante ativação do browser e início do Virtus imediatamente
-    const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 }).catch(e => {
+    const r1 = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
       logger.error('Erro ao enviar activate p/ worker em start_work', { nome, error: e && e.message }, e);
       return null;
     });

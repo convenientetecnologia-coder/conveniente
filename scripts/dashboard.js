@@ -517,7 +517,7 @@ async function execStockProvision(cmd) {
       out.steps.push({ step: 'hard_ram_recover_deactivate', at: Date.now(), nome });
       const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
         method: 'POST',
-        headers: { 'x-operator': 'stock_provision' },
+        headers: { 'x-operator': lockOwner },
         body: { policy: 'preserveDesired', reason: 'ramKill' }
       });
       if (!r || r.ok === false) {
@@ -593,7 +593,7 @@ async function execStockProvision(cmd) {
 
         // 1) criar perfil
         const created = await runStep('create_profile', async () => {
-          const r = await httpJson('/api/perfis', { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: { cidade: city, cookies } });
+          const r = await httpJson('/api/perfis', { method: 'POST', headers: { 'x-operator': lockOwner }, body: { cidade: city, cookies } });
           if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'create_profile_failed');
           return r;
         });
@@ -604,7 +604,7 @@ async function execStockProvision(cmd) {
         // 2) set label (interno)
         if (label) {
           await runStep('set_label', async () => {
-            const r2 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/label`, { method: 'PATCH', headers: { 'x-operator': 'stock_provision' }, body: { novoLabel: label } });
+            const r2 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/label`, { method: 'PATCH', headers: { 'x-operator': lockOwner }, body: { novoLabel: label } });
             if (!r2 || r2.ok === false) throw new Error((r2 && r2.error) ? String(r2.error) : 'set_label_failed');
             return r2;
           });
@@ -631,14 +631,14 @@ async function execStockProvision(cmd) {
 
         // 4) activate
         await runStep('activate', async () => {
-          const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
           if (!r4 || r4.ok === false) throw new Error((r4 && r4.error) ? String(r4.error) : 'activate_failed');
           return r4;
         });
 
         // 5) configure (inject cookies etc)
         await runStep('configure', async () => {
-          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
           if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
           return r5;
         });
@@ -646,7 +646,7 @@ async function execStockProvision(cmd) {
         // 5.5) Procedimento enterprise pós-injeção:
         // fecha o navegador e reabre em modo trabalho (evita sessão “suja”/popups pós-config)
         await runStep('deactivate_after_configure', async () => {
-          const r55 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          const r55 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
           if (!r55 || r55.ok === false) throw new Error((r55 && r55.error) ? String(r55.error) : 'deactivate_after_configure_failed');
           return r55;
         });
@@ -654,7 +654,7 @@ async function execStockProvision(cmd) {
 
         // 6) start work
         await runStep('start_work', async () => {
-          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method: 'POST', headers: { 'x-operator': 'stock_provision' }, body: {} });
+          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
           if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'start_work_failed');
           return r6;
         });

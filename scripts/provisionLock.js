@@ -46,6 +46,24 @@ function isActive() {
   return get().active;
 }
 
+function ownerMatchesOperator(lock, operator) {
+  try {
+    const op = String(operator || '').trim();
+    if (!op) return false;
+    const owner = String(lock && lock.owner || '').trim();
+    if (!owner) return false;
+    return owner === op;
+  } catch { return false; }
+}
+
+// Regra enterprise: somente o DONO do lock passa. Todo o resto recebe maintenance_provision.
+function shouldBlock(operator) {
+  const cur = get();
+  if (!cur || !cur.active) return { block: false, lock: null };
+  if (ownerMatchesOperator(cur.lock, operator)) return { block: false, lock: cur.lock };
+  return { block: true, lock: cur.lock };
+}
+
 function tryAcquire({ owner, ttlMs = 9 * 60 * 1000, meta } = {}) {
   const o = String(owner || "").trim();
   if (!o) return { ok: false, error: "missing_owner" };
@@ -81,6 +99,8 @@ module.exports = {
   LOCK_PATH,
   get,
   isActive,
+  ownerMatchesOperator,
+  shouldBlock,
   tryAcquire,
   release
 };

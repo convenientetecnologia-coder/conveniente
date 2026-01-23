@@ -103,7 +103,7 @@ function createCluster() {
       }
       if (msg && msg.type === 'sup:reqOpen') {
         const { perfil } = msg;
-        const r = supervisor.requestOpen(perfil);
+        const r = supervisor.requestOpen(perfil, (msg && msg.opts) || {});
         return proc.send({ replyTo: msg.msgId, data: r });
       }
       if (msg && msg.type === 'sup:notifyOpened') {

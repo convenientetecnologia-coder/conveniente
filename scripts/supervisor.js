@@ -134,15 +134,16 @@ function canProbe() {
 }
 
 /** Decide se pode abrir um novo slot agora */
-function podeAbrirNovoSlot(perfil) {
+function podeAbrirNovoSlot(perfil, opts = {}) {
   const now = Date.now();
   const freeMB = getFreeMB();
   // Hardening: durante stock_provision (maintenance lock), NÃO permitir novas aberturas.
   // Isso evita "explosão" de reaberturas e concorrência no meio do cadastro.
   try {
+    const operator = String(opts && opts.operator || '').trim();
     const lk = provisionLock.get();
-    if (lk && lk.active) {
-      pushEvent({ type: "denied", reason: "maintenance_provision", perfil, owner: lk.lock && lk.lock.owner, untilMs: lk.lock && lk.lock.untilMs });
+    if (lk && lk.active && !provisionLock.ownerMatchesOperator(lk.lock, operator)) {
+      pushEvent({ type: "denied", reason: "maintenance_provision", perfil, owner: lk.lock && lk.lock.owner, operator, untilMs: lk.lock && lk.lock.untilMs });
       return { ok: false, reason: "maintenance_provision", msg: "Abertura bloqueada: provisionamento em andamento" };
     }
   } catch {}
@@ -178,7 +179,8 @@ function requestOpen(perfil) {
     pushEvent({type:"denied", reason:"kill_guard_until", perfil});
     return { ok: false, reason: "kill_guard_until", msg: "Slot bloqueado por kill_guard_until (bloqueio anti-flapback)" };
   }
-  const resp = podeAbrirNovoSlot(perfil);
+  const opts = arguments && arguments.length > 1 ? arguments[1] : {};
+  const resp = podeAbrirNovoSlot(perfil, opts);
   // Logic for probe (como antes)
   if (!resp.ok && resp.reason === 'slots' && canProbe()) {
     state.maxSlots = Math.max(1, state.maxSlots);

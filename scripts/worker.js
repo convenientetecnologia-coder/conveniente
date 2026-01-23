@@ -921,7 +921,7 @@ function isFrozenNow(nome) {
 
 const activationLocks = new Map();
 
-async function activateOnce(nome, source = '') {
+async function activateOnce(nome, source = '', operator = '') {
   if (opening[nome]) return { ok: false, error: 'already_opening' };
 
   if (controllers.has(nome)) {
@@ -951,10 +951,12 @@ async function activateOnce(nome, source = '') {
       return { ok:false, error:"kill_guard_until" };
     }
 
-    // Hardening: durante stock_provision (maintenance lock), não permitir novas aberturas.
-    // O supervisor também bloqueia, mas isso evita trabalho inútil quando o worker está isolado.
+    // Hardening: durante stock_provision (maintenance lock), bloquear novas aberturas,
+    // EXCETO se o operador for o dono do lock (stock_provision:<batchId>).
     try {
-      if (provisionLock.isActive()) {
+      const op = String(operator || '').trim();
+      const lk = provisionLock.shouldBlock(op);
+      if (lk && lk.block) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activationHeldUntil = Date.now() + 5000;
         await reportAction(nome, 'mil_action', 'activation_hold_by_provision_lock');
@@ -970,7 +972,8 @@ async function activateOnce(nome, source = '') {
       }
     } catch {}
 
-    const slotResp = await supervisorClient.requestOpen(nome).catch(()=>({ok:false, error:'supervisor_unreachable'}));
+    const slotResp = await supervisorClient.requestOpen(nome, null, { operator: String(operator || '').trim() })
+      .catch(()=>({ok:false, error:'supervisor_unreachable'}));
     if (!slotResp || !slotResp.ok) {
       robeMeta[nome] = robeMeta[nome] || {};
       // NOVO: Reduzido de 30s para 5s (supervisor já controla velocidade via cooldowns)
@@ -2231,10 +2234,10 @@ const handlers = {
     return { ok: true, perfil: perfilObj };
   },
 
-  async activate({ nome }) {
+  async activate({ nome, operator }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] activate chamada', { nome });
-      const r = await activateOnce(nome, 'message');
+      const r = await activateOnce(nome, 'message', operator);
       logger.info('[HANDLER] activate resultado', { nome, ok: !!(r && r.ok), error: r && r.error });
       return r;
     });
@@ -2378,7 +2381,7 @@ const handlers = {
       } catch {}
 
       const op = String(operator || '').trim();
-      const isStockProvision = (op === 'stock_provision');
+      const isStockProvision = (op && op.toLowerCase().startsWith('stock_provision'));
       try {
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
         try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
