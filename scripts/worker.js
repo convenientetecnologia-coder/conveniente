@@ -19,10 +19,12 @@ const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
+const { readCtConfig } = require('./ctConfig.js');
 
 const DATA_DIR = path.join(__dirname, '..', 'dados');
 const DIAG_DIR = path.join(DATA_DIR, 'diag');
 const LR_EVENTS_JSONL = path.join(DATA_DIR, 'login_required_events.jsonl');
+const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
 
 function ensureDirSync(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
 function safeFilePart(s) {
@@ -86,6 +88,45 @@ async function readAccountFlags(nome) {
     const m = await manifestStore.read(nome).catch(()=>null);
     return (m && m.accountFlags) ? m.accountFlags : {};
   } catch { return {}; }
+}
+
+function readHostIdSync() {
+  try {
+    if (fs.existsSync(HOSTID_PATH)) {
+      const v = fs.readFileSync(HOSTID_PATH, 'utf8').trim();
+      return v || '';
+    }
+  } catch {}
+  return '';
+}
+
+async function fetchCredentialsFromCT({ profileName } = {}) {
+  const cfg = readCtConfig();
+  const base = String(cfg && cfg.ctBaseUrl || '').trim();
+  const secret = String(cfg && cfg.logIngestSecret || '').trim();
+  const hostId = readHostIdSync();
+  const p = String(profileName || '').trim();
+  if (!base || !secret || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
+  try {
+    const Aborter = global.AbortController || require('node-abort-controller');
+    const ac = new Aborter();
+    const t = setTimeout(() => { try { ac.abort(); } catch {} }, 8000);
+    const resp = await fetch(`${base}/api/stock/profile_credentials_secret`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      body: JSON.stringify({ hostId, profileName: p }),
+      signal: ac.signal
+    });
+    clearTimeout(t);
+    const j = await resp.json().catch(()=>null);
+    if (!j || j.ok !== true) return { ok: false, error: (j && j.error) ? String(j.error) : `http_${resp.status}` };
+    const login = String(j.login || '').trim();
+    const password = String(j.password || '').trim();
+    if (!login || !password) return { ok: false, error: 'missing_credentials' };
+    return { ok: true, login, password, stockAccountId: j.stockAccountId || null };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
 }
 
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
@@ -2701,26 +2742,52 @@ const handlers = {
           const password = man && (man.password || man.pass);
           if (!login || !password) {
             pushStep({ step: 'missing_credentials_in_manifest' });
-            await failFastToHuman('missing_credentials');
-            return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
+            // Fallback enterprise: tenta buscar do CT/Estoque (hostId+profileName) e persistir no manifest.
+            const fb = await fetchCredentialsFromCT({ profileName: nome });
+            pushStep({ step: 'ct_credentials_fetch', ok: !!fb.ok, error: fb && fb.error, stockAccountId: fb && fb.stockAccountId || null });
+            if (fb && fb.ok) {
+              try {
+                await manifestStore.update(nome, (m) => {
+                  m = m || {};
+                  m.login = String(fb.login);
+                  m.password = String(fb.password);
+                  m.credentialsUpdatedAt = Date.now();
+                  return m;
+                });
+                pushStep({ step: 'manifest_credentials_updated' });
+              } catch {}
+              // Recarrega credenciais e segue pro login+senha
+            } else {
+              await failFastToHuman('missing_credentials');
+              return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
+            }
           }
 
           const pages = await ctrl.browser.pages().catch(()=>[]);
           const p0 = pages && pages[0];
           if (!p0) throw new Error('no_page0');
 
+          const man2 = await manifestStore.read(nome).catch(()=>null);
+          const login2 = man2 && (man2.login || man2.email || man2.user || man2.username);
+          const password2 = man2 && (man2.password || man2.pass);
+          if (!login2 || !password2) {
+            pushStep({ step: 'missing_credentials_after_ct_fetch' });
+            await failFastToHuman('missing_credentials');
+            return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
+          }
+
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 900));
-          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { login, password }), stageTimeoutMs.loginFb);
+          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { login: login2, password: password2 }), stageTimeoutMs.loginFb);
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
           await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 900));
-          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { login, password }), stageTimeoutMs.loginMsg);
+          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { login: login2, password: password2 }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
 
           // revalidar
