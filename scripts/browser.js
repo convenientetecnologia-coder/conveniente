@@ -2524,11 +2524,32 @@ async function detectLoginRequired(page) {
     const hasCheckpointText = !!(v && v.hasCheckpointText);
     const hasIdentityText = !!(v && v.hasIdentityText);
     const title = (v && v.title0) ? String(v.title0) : '';
+    const titleNorm = (() => {
+      try {
+        return (title || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      } catch { return String(title || '').toLowerCase(); }
+    })();
+    const hrefNorm = (() => { try { return String((v && v.href0) ? v.href0 : href); } catch { return String(href||''); } })();
+    const looksLikeLoggedOutTitle =
+      titleNorm.includes('entre ou cadastre') ||
+      titleNorm.includes('entre ou cadastrar') ||
+      titleNorm.includes('entre no facebook') ||
+      titleNorm.includes('facebook – entre') ||
+      titleNorm.includes('facebook - entre') ||
+      titleNorm.includes('log in') ||
+      titleNorm.includes('sign up');
+    const looksLikeLoginUrl =
+      /\/login\.php/i.test(hrefNorm) ||
+      /\/login\//i.test(hrefNorm) ||
+      /\/checkpoint\//i.test(hrefNorm) ||
+      /\/recover\//i.test(hrefNorm);
 
     // Detecção mais conservadora para evitar falso positivo:
     // - login_form só é válido se a rota for claramente de login/checkpoint
     // - checkpoint/captcha também exige rota/sinais de checkpoint
-    if (hasRoyal && hasInputs && strongLoginPath) {
+    // IMPORTANT: em algumas telas, o form aparece em rotas como /marketplace ou /index.php (logged-out),
+    // então não podemos depender apenas do path.
+    if (hasRoyal && hasInputs && (strongLoginPath || looksLikeLoginUrl || looksLikeLoggedOutTitle)) {
       return {
         loginRequired: true,
         reason: 'login_form',
@@ -2622,7 +2643,7 @@ async function _maybeClickCloseX(page) {
   return false;
 }
 
-async function tryLoginEmailPass(page, { login, password } = {}) {
+async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true } = {}) {
   const email = String(login || '').trim();
   const pass = String(password || '').trim();
   if (!email || !pass) return { ok: false, error: 'missing_credentials' };
@@ -2657,7 +2678,26 @@ async function tryLoginEmailPass(page, { login, password } = {}) {
       btn.click();
       return true;
     });
-    if (!clicked) return { ok: false, error: 'login_button_not_found' };
+    if (!clicked) {
+      // Fallback GPT (opcional): tenta remover modal/selector e depois tenta novamente 1x
+      if (allowGpt && nome) {
+        try { await gptRemediateFbUi(page, nome, { reason: 'login_button_not_found', stage: 'login_submit' }); } catch {}
+        try {
+          const clicked2 = await page.evaluate(() => {
+            const btn =
+              document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
+              document.querySelector('form#login_form button[type="submit"]') ||
+              document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]');
+            if (!btn) return false;
+            btn.click();
+            return true;
+          });
+          if (!clicked2) return { ok: false, error: 'login_button_not_found' };
+        } catch {}
+      } else {
+        return { ok: false, error: 'login_button_not_found' };
+      }
+    }
   } catch (e) {
     return { ok: false, error: (e && e.message) || 'click_failed' };
   }
@@ -2665,6 +2705,11 @@ async function tryLoginEmailPass(page, { login, password } = {}) {
   // 5) aguardar navegação estabilizar
   try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(1500); } catch {}
+  // Validação “com olhos” (sem falso positivo): se ainda estiver em login_form, falha
+  try {
+    const lr = await detectLoginRequired(page).catch(()=>({ loginRequired:false }));
+    if (lr && lr.loginRequired) return { ok: false, error: `still_login_required:${lr.reason||'login'}` };
+  } catch {}
   return { ok: true };
 }
 

@@ -866,6 +866,7 @@ function logsAllowlist() {
     issues_fallback: path.join(base, 'issues_fallback.log'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
+    login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
     migrations: path.join(base, 'migrations.jsonl'),
     updates: path.join(base, 'updates.jsonl'),

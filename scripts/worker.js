@@ -24,6 +24,7 @@ const { readCtConfig } = require('./ctConfig.js');
 const DATA_DIR = path.join(__dirname, '..', 'dados');
 const DIAG_DIR = path.join(DATA_DIR, 'diag');
 const LR_EVENTS_JSONL = path.join(DATA_DIR, 'login_required_events.jsonl');
+const LR_EVIDENCE_JSONL = path.join(DATA_DIR, 'login_remediate_evidence.jsonl');
 const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
 
 function ensureDirSync(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
@@ -37,6 +38,30 @@ function appendJsonl(fp, obj) {
   try {
     ensureDirSync(path.dirname(fp));
     fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
+  } catch {}
+}
+
+async function appendLoginRemediateEvidence({ nome, operator, step, page, note } = {}) {
+  try {
+    if (!nome || !page) return;
+    const url = (() => { try { return page.url ? String(page.url() || '') : ''; } catch { return ''; } })();
+    const title = await page.title().catch(()=> '');
+    const lr = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:false }));
+    const html = await page.content().catch(()=> '');
+    const htmlSnippet = String(html || '').slice(0, 4000);
+    const screenshotBase64 = await page.screenshot({ type: 'jpeg', quality: 45, fullPage: false, encoding: 'base64' }).catch(()=> '');
+    appendJsonl(LR_EVIDENCE_JSONL, {
+      ts: Date.now(),
+      perfil: String(nome),
+      operator: String(operator || ''),
+      step: String(step || ''),
+      note: note ? String(note).slice(0, 300) : null,
+      url,
+      title,
+      lr,
+      htmlSnippet,
+      screenshotBase64: screenshotBase64 ? String(screenshotBase64).slice(0, 220000) : '' // hard cap
+    });
   } catch {}
 }
 async function captureLoginRequiredEvidence(nome, page, lr) {
@@ -2713,21 +2738,25 @@ const handlers = {
         const pages = await ctrl.browser.pages().catch(()=>[]);
         const p0 = pages && pages[0];
         if (p0) {
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'pre_check_msg', page: p0, note: 'before messenger check' });
           await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 1200));
           lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           if (lrMessenger && lrMessenger.loginRequired) {
             try { await captureLoginRequiredEvidence(nome, p0, lrMessenger); } catch {}
           }
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'post_check_msg', page: p0, note: lrMessenger && lrMessenger.loginRequired ? 'loginRequired=true' : 'loginRequired=false' });
         }
         // usa a mesma aba para marketplace fb (mais leve)
         if (p0) {
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'pre_check_fb', page: p0, note: 'before facebook check' });
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 1200));
           lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           if (lrFacebook && lrFacebook.loginRequired) {
             try { await captureLoginRequiredEvidence(nome, p0, lrFacebook); } catch {}
           }
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'post_check_fb', page: p0, note: lrFacebook && lrFacebook.loginRequired ? 'loginRequired=true' : 'loginRequired=false' });
         }
       } catch {}
       pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook });
@@ -2795,15 +2824,19 @@ const handlers = {
           pushStep({ step: 'attempt2_login_fb_begin' });
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 900));
-          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { login: login2, password: password2 }), stageTimeoutMs.loginFb);
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
+          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
           await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 900));
-          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { login: login2, password: password2 }), stageTimeoutMs.loginMsg);
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
+          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
 
           // revalidar
           await new Promise(r => setTimeout(r, 1400));
@@ -2812,6 +2845,7 @@ const handlers = {
           await new Promise(r => setTimeout(r, 1200));
           lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           pushStep({ step: 'post_login_check', lrMessenger, lrFacebook });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)}` });
 
         } catch (e) {
           pushStep({ step: 'attempt2_login_fail', error: (e && e.message) || String(e) });
