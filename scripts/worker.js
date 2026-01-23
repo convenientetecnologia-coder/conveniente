@@ -3405,6 +3405,20 @@ async function nurseTick() {
   _nurseTickRunning = true;
   if (controllers.size === 0) { _nurseTickRunning = false; return; }
   try {
+    // Ultra enterprise: durante provisionamento, pausar Virtus de forma controlada
+    // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
+    try {
+      if (provisionLock.isActive()) {
+        for (const [n, c] of controllers.entries()) {
+          if (!c || !c.virtus) continue;
+          if (c.humanControl === true || c.configurando === true) continue;
+          if (robeMeta[n] && robeMeta[n].emExecucao === true) continue;
+          if (c.browser && c.browser._sendLock && c.browser._sendLock.active) continue;
+          try { await stopVirtus(n); } catch {}
+        }
+      }
+    } catch {}
+
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
     for (const nome of Object.keys(desired.perfis || {})) {
@@ -4032,8 +4046,24 @@ async function nurseTick() {
 }
 
 async function trySwapOpen(target) {
+  // Ultra enterprise: nunca executar swap agressivo durante provisionamento.
+  // O provisionamento tem seu próprio fluxo de liberação mínima de RAM (dashboard hardRecoverRam)
+  // e o supervisor já bloqueia aberturas de terceiros via maintenance_provision.
+  try { if (provisionLock.isActive()) return false; } catch {}
+
   const aliveNames = Array.from(controllers.keys());
   if (aliveNames.length <= 1) return false;
+
+  const free0 = getAvailableMB();
+  const minNeed = getOpenMinFreeMB(''); // operação normal (sem owner do lock)
+  const deficit = Math.max(0, (Number(minNeed || 0) || 0) - (Number(free0 || 0) || 0));
+  // Se não há déficit de RAM, não fazer swap. (Evita fechar dezenas por erro de slots/transiente)
+  if (deficit <= 0) return false;
+
+  // Cap militar: nunca fechar muitos perfis numa única tentativa.
+  const MAX_SWAP_KILLS = Math.max(0, parseInt(process.env.SWAP_OPEN_MAX_KILLS || '2', 10) || 2);
+  let closed = 0;
+  let freedEstimate = 0;
 
   const candidates = aliveNames
     .filter(n => n !== target)
@@ -4048,26 +4078,31 @@ async function trySwapOpen(target) {
     .sort((a, b) => b.mb - a.mb);
 
   for (const cand of candidates) {
+    if (closed >= MAX_SWAP_KILLS) break;
+    if (freedEstimate >= (deficit + 128)) break; // margem pequena p/ evitar “apertado”
     if (killGuardActive(cand.n)) continue;
     await issues.append(cand.n, 'mil_action', `swap_kill fechamento para abrir ${target} RAM=${cand.mb}MB`);
     logger.info('[SWAP] swap_kill', { fechar: cand.n, abrir: target, ramMB: cand.mb });
     await handlers.deactivate({ nome: cand.n, reason: 'swap_for_open', policy: 'preserveDesired' });
     setKillGuard(cand.n, 45000);
     await new Promise(r=>setTimeout(r, 2000));
-    
-    const r = await activateOnce(target, 'nurse_swap');
-    if (r && r.ok) {
-      await issues.append(target, 'mil_action', `swap_open_success após fechar ${cand.n}`);
-      robeMeta[target] = robeMeta[target] || {};
-      robeMeta[target].lastSwapAt = Date.now();
-      logger.info('[SWAP] swap_open_success', { target, fechado: cand.n });
-      return true;
-    }
-    await issues.append(target, 'mil_action', `swap_open_failed após fechar ${cand.n}`);
-    logger.warn('[SWAP] swap_open_failed', { target, fechado: cand.n });
+    closed++;
+    freedEstimate += Math.max(0, Number(cand.mb || 0) || 0);
   }
-  await issues.append(target, 'mil_action', 'swap_open_failed_nenhum_sucesso');
-  logger.warn('[SWAP] swap_open_failed_nenhum_sucesso', { target });
+
+  if (closed <= 0) return false;
+
+  // Tenta abrir uma única vez após liberar o mínimo necessário.
+  const r = await activateOnce(target, 'nurse_swap');
+  if (r && r.ok) {
+    await issues.append(target, 'mil_action', `swap_open_success closed=${closed} deficit=${deficit}MB`);
+    robeMeta[target] = robeMeta[target] || {};
+    robeMeta[target].lastSwapAt = Date.now();
+    logger.info('[SWAP] swap_open_success', { target, closed, deficitMB: deficit });
+    return true;
+  }
+  await issues.append(target, 'mil_action', `swap_open_failed closed=${closed} deficit=${deficit}MB err=${(r && r.error) || ''}`);
+  logger.warn('[SWAP] swap_open_failed', { target, closed, deficitMB: deficit, err: (r && r.error) || '' });
   return false;
 }
 
