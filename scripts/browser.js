@@ -2569,11 +2569,23 @@ async function detectLoginRequired(page) {
         evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
       };
     }
-    if ((hasPersonaText || hasCheckpointText) && (strongLoginPath || /checkpoint/i.test(title))) {
+    // Captcha/persona e checkpoint podem aparecer fora de /checkpoint (ex.: /index.php, m.facebook.com/error, etc).
+    // Se há texto explícito de "confirme que você é uma pessoa", trate como NÃO automatizável sempre.
+    if (hasPersonaText) {
+      return {
+        loginRequired: true,
+        reason: 'captcha_persona',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+      };
+    }
+    if (hasCheckpointText && (strongLoginPath || /checkpoint/i.test(title))) {
       return {
         loginRequired: true,
         // Se a tela é explicitamente “Confirme que você é uma pessoa”, separa para diagnóstico humano
-        reason: hasPersonaText ? 'captcha_persona' : 'checkpoint_captcha',
+        reason: 'checkpoint_captcha',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,

@@ -2856,6 +2856,23 @@ const handlers = {
         !(lrMessenger && lrMessenger.loginRequired) &&
         !(lrFacebook && lrFacebook.loginRequired);
 
+      // Hard rule: se cair em captcha/checkpoint/identity, NÃO é sucesso e deve invocar humano.
+      const nonAutomatableReason = (lr) => {
+        const r = String(lr && lr.reason || '').toLowerCase();
+        if (!r) return '';
+        if (r.includes('captcha')) return r;
+        if (r.includes('checkpoint')) return r;
+        if (r.includes('identity')) return r;
+        return '';
+      };
+      const na = nonAutomatableReason(lrMessenger) || nonAutomatableReason(lrFacebook);
+      if (na) {
+        pushStep({ step: 'non_automatable_after_login', reason: na, lrMessenger, lrFacebook });
+        try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate' }); } catch {}
+        await failFastToHuman(na);
+        return { ok: false, error: na, steps, closedForRam, pausedVirtus };
+      }
+
       if (success) {
         pushStep({ step: 'login_remediate_success' });
         // Atualiza cookies frescos no manifest (pipeline imediato)
