@@ -4,9 +4,145 @@ const path = require('path');
 const cors = require('cors');
 // const bodyParser = require('body-parser'); // Não é necessário, pois estamos usando express.json/express.urlencoded
 const open = require('open'); // <-- adicione/mova isso aqui!
+const fs = require('fs');
 
 // Inclua o logger imediatamente após os requires principais
 const logger = require('./scripts/logger.js');
+
+/**
+ * =========================
+ * BACKUP AUTO (enterprise)
+ * =========================
+ * Snapshot local e leve para rollback rápido (sem depender só de Git/Timeline).
+ * - Default: habilitado
+ * - Intervalo: CONVENIENTE_AUTO_BACKUP_INTERVAL_MIN (default 30)
+ * - Retenção:  CONVENIENTE_AUTO_BACKUP_KEEP (default 96)
+ */
+function startAutoBackupConveniente() {
+  try {
+    if (String(process.env.CONVENIENTE_AUTO_BACKUP_DISABLE || '').trim() === '1') return;
+    const intervalMin = Math.max(5, Math.min(720, Number(process.env.CONVENIENTE_AUTO_BACKUP_INTERVAL_MIN || 30) || 30));
+    const keep = Math.max(10, Math.min(500, Number(process.env.CONVENIENTE_AUTO_BACKUP_KEEP || 96) || 96));
+
+    const ROOT = __dirname;
+    const baseDir = path.join(ROOT, '_backup_auto');
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const tsTag = () => {
+      const d = new Date();
+      return `${d.getFullYear()}${pad2(d.getMonth()+1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+    };
+    const ensureDir = (p) => { try { fs.mkdirSync(p, { recursive: true }); } catch {} };
+    const sleepSync = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {} };
+    const safeStat = (p) => { try { return fs.statSync(p); } catch { return null; } };
+    const copyFileRetry = (src, dst) => {
+      try {
+        ensureDir(path.dirname(dst));
+        for (let i = 0; i < 8; i++) {
+          try { fs.copyFileSync(src, dst); return true; } catch (e) {
+            const code = String(e && e.code || '');
+            if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') { sleepSync(30 + i * 50); continue; }
+            return false;
+          }
+        }
+        return false;
+      } catch { return false; }
+    };
+
+    const copyDirFlat = (relDir, { exts = ['.js'], maxFiles = 400 } = {}) => {
+      try {
+        const srcDir = path.join(ROOT, relDir);
+        const st = safeStat(srcDir);
+        if (!st || !st.isDirectory()) return 0;
+        const files = fs.readdirSync(srcDir).slice(0, maxFiles);
+        let c = 0;
+        for (const name of files) {
+          const low = String(name).toLowerCase();
+          if (exts && exts.length) {
+            const ok = exts.some(e => low.endsWith(String(e).toLowerCase()));
+            if (!ok) continue;
+          }
+          const fp = path.join(srcDir, name);
+          const fst = safeStat(fp);
+          if (!fst || !fst.isFile()) continue;
+          const dst = path.join(curOutDir, relDir, name);
+          if (copyFileRetry(fp, dst)) c++;
+        }
+        return c;
+      } catch { return 0; }
+    };
+
+    let curOutDir = null;
+    const doSnapshot = () => {
+      const tag = tsTag();
+      curOutDir = path.join(baseDir, tag);
+      ensureDir(curOutDir);
+
+      // Arquivos raiz importantes
+      const files = [
+        'index.js',
+        'package.json',
+        'package-lock.json',
+        'instalar_conveniente.ps1',
+        'PainelConta.bat'
+      ];
+      let copied = 0;
+      for (const rel of files) {
+        const src = path.join(ROOT, rel);
+        if (!safeStat(src)) continue;
+        if (copyFileRetry(src, path.join(curOutDir, rel))) copied++;
+      }
+
+      // Código (sem node_modules)
+      copied += copyDirFlat('scripts', { exts: ['.js'], maxFiles: 600 });
+      copied += copyDirFlat('public', { exts: ['.html', '.js', '.css'], maxFiles: 120 });
+
+      // Config/estado crítico (pequeno)
+      const dadosFiles = [
+        path.join('dados', 'desired.json'),
+        path.join('dados', 'perfis.json'),
+        path.join('dados', 'status.json'),
+        path.join('dados', 'supervisor_state.json'),
+        path.join('dados', 'ct_config.json'),
+        path.join('dados', 'cidades.json'),
+        path.join('dados', 'cidades_coords.json'),
+        path.join('dados', 'ua_presets.json'),
+        path.join('dados', 'localizacoes.json'),
+        path.join('dados', 'atendimento.json')
+      ];
+      for (const rel of dadosFiles) {
+        const src = path.join(ROOT, rel);
+        if (!safeStat(src)) continue;
+        if (copyFileRetry(src, path.join(curOutDir, rel))) copied++;
+      }
+
+      // Issues do sistema (se existir)
+      try {
+        const iss = path.join(ROOT, 'dados', 'perfis', 'system', 'issues.json');
+        if (safeStat(iss) && copyFileRetry(iss, path.join(curOutDir, 'dados', 'perfis', 'system', 'issues.json'))) copied++;
+      } catch {}
+
+      // Retenção (mantém os mais recentes)
+      try {
+        ensureDir(baseDir);
+        const dirs = fs.readdirSync(baseDir)
+          .map(n => ({ n, p: path.join(baseDir, n) }))
+          .filter(x => safeStat(x.p) && safeStat(x.p).isDirectory())
+          .sort((a, b) => String(b.n).localeCompare(String(a.n)));
+        for (const d of dirs.slice(keep)) {
+          try { fs.rmSync(d.p, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 }); } catch {}
+        }
+      } catch {}
+
+      try {
+        fs.appendFileSync(path.join(baseDir, '_snapshots.log'),
+          JSON.stringify({ ts: Date.now(), tag, copied }) + '\n');
+      } catch {}
+    };
+
+    setTimeout(() => { try { doSnapshot(); } catch {} }, 2500);
+    setInterval(() => { try { doSnapshot(); } catch {} }, intervalMin * 60 * 1000).unref?.();
+  } catch {}
+}
 
 // Bootstrap opcional: instalar task/serviço no Windows
 // IMPORTANTE: se estiver em modo bootstrap e CT_BOOTSTRAP_EXIT=1, o bootstrap pode encerrar o processo.
@@ -32,6 +168,9 @@ const { startDashboardMonitor } = require('./scripts/dashboard.js');
 // Inicialização
 const app = express();
 const PORT = parseInt(process.env.PORT || '8088', 10);
+
+// Inicia backup automático (rollback rápido do conveniente)
+startAutoBackupConveniente();
 
 // ===================== CORS restrito =====================
 /**
