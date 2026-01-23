@@ -213,11 +213,70 @@ function createCluster() {
 
   // Garante rebalanceamento justo (diferença <= 1) sob evento ou demanda
   async function rebalance(reason = 'watcher') {
+    // Ultra enterprise / mínimo impacto:
+    // NÃO mover perfis já atribuídos entre workers (isso causa "storm" de shard_moved e fecha dezenas).
+    // Em vez disso:
+    // - Remove perfis deletados
+    // - Atribui apenas perfis NOVOS ao worker com menor shard atual
     const perfis = fileStore.loadPerfisJson() || [];
-    const namesNow = perfis.map(p => p.nome);
-    const k = children.length;
-    const fairBlocks = splitRoundRobinFair(namesNow, k);
-    await applyShardsToWorkers(fairBlocks, reason);
+    const namesNow = perfis.map(p => p && p.nome).filter(Boolean);
+    const nowSet = new Set(namesNow);
+
+    // Conjunto atual atribuído
+    const assignedSet = new Set();
+    for (const ch of children) {
+      for (const n of (ch && ch.shard) ? ch.shard : []) assignedSet.add(n);
+    }
+
+    // Remover nomes que não existem mais
+    const removed = [];
+    for (const n of assignedSet) {
+      if (!nowSet.has(n)) removed.push(n);
+    }
+    if (removed.length) {
+      for (const n of removed) {
+        try {
+          const idx = route[n];
+          if (typeof idx === 'number' && children[idx] && children[idx].shard) {
+            children[idx].shard.delete(n);
+          } else {
+            // fallback: remove de qualquer shard set
+            for (const ch of children) {
+              try { ch && ch.shard && ch.shard.delete(n); } catch {}
+            }
+          }
+        } catch {}
+        try { delete route[n]; } catch {}
+      }
+      logger.info('[CLUSTER][REB] removed profiles from shards (sticky)', { reason, removed: removed.length });
+    }
+
+    // Adicionar nomes novos (não atribuídos ainda)
+    const added = [];
+    for (const n of nowSet) {
+      if (!assignedSet.has(n)) added.push(n);
+    }
+    if (added.length) {
+      // ordem determinística para estabilidade
+      added.sort((a, b) => String(a).localeCompare(String(b), 'pt-BR', { sensitivity: 'base' }));
+      for (const n of added) {
+        // escolher o worker com menos nomes
+        let bestIdx = 0;
+        let bestSize = Infinity;
+        for (let i = 0; i < children.length; i++) {
+          const sz = children[i] && children[i].shard ? children[i].shard.size : 0;
+          if (sz < bestSize) { bestSize = sz; bestIdx = i; }
+        }
+        if (!children[bestIdx].shard) children[bestIdx].shard = new Set();
+        children[bestIdx].shard.add(n);
+        route[n] = bestIdx;
+      }
+      logger.info('[CLUSTER][REB] assigned new profiles to shards (sticky)', { reason, added: added.length });
+    }
+
+    // Aplicar shards atuais (sem reshuffle) para os workers
+    const blocksArr = children.map(ch => Array.from((ch && ch.shard) ? ch.shard : []));
+    await applyShardsToWorkers(blocksArr, reason + ':sticky');
   }
 
   // Fallback para caso especial: novo perfil não roteado ainda

@@ -2997,6 +2997,10 @@ const handlers = {
       }
       SHARD_SET = newSet;
 
+      // Airbag enterprise: nunca derrubar dezenas por "shard move"
+      const MAX_SHARD_MOVE_DEACTIVATIONS = Math.max(0, parseInt(process.env.MAX_SHARD_MOVE_DEACTIVATIONS || '2', 10) || 2);
+      let deactivatedCount = 0;
+
       for (const nome of removed) {
         const ctrl = controllers.get(nome);
         const rm = robeMeta[nome] || {};
@@ -3011,10 +3015,20 @@ const handlers = {
           continue;
         }
 
+        // Se passar do limite, adiar o resto (evita storm)
+        if (deactivatedCount >= MAX_SHARD_MOVE_DEACTIVATIONS) {
+          robeMeta[nome] = rm;
+          rm.pendingShardMove = true;
+          rm.deferShardMoveUntil = Date.now() + 15*60*1000;
+          await issues.append(nome, 'mil_action', `shard_move_deferred (cap max=${MAX_SHARD_MOVE_DEACTIVATIONS})`);
+          continue;
+        }
+
         try { robeQueue.skip && robeQueue.skip(nome); } catch {}
         try {
           if (ctrl && ctrl.browser) {
             await handlers.deactivate({ nome, reason: 'shard_moved', policy: 'preserveDesired' });
+            deactivatedCount++;
           }
         } catch {}
         controllers.delete(nome);
@@ -3030,7 +3044,7 @@ const handlers = {
         }
       }
       await snapshotStatusAndWrite();
-      return { ok: true, size: SHARD_SET.size, removed };
+      return { ok: true, size: SHARD_SET.size, removed, deactivatedCount, maxDeactivations: MAX_SHARD_MOVE_DEACTIVATIONS };
 
     } catch (e) {
       return { ok: false, error: e && e.message || String(e) };
