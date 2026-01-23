@@ -2121,7 +2121,9 @@ async function start_work({ nome, operator }) {
 
     try {
       ctrl._virtusStarting = true;
-      if (!automationAllowed(ctrl)) {
+      // Hardening: respeitar lock de provisionamento (maintenance_provision),
+      // mas permitir o fluxo do dono do lock via operator (stock_provision:<batchId>).
+      if (!automationAllowed(ctrl, { operator })) {
         await issues.append(nome, 'mil_action', 'automation_not_allowed');
         logger.warn('[HANDLER] automation_not_allowed em start_work', { nome });
         return { ok: false, error: 'automation_not_allowed' };
