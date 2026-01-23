@@ -18,6 +18,7 @@ const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
 const gptFallback = require('./gptFallback.js');
+const provisionAudit = require('./provisionAudit.js');
 
 const DATA_DIR = path.join(__dirname, '..', 'dados');
 const DIAG_DIR = path.join(DATA_DIR, 'diag');
@@ -588,6 +589,15 @@ function isPidAlive(pid) {
 
 async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
   const t0 = Date.now();
+  try {
+    provisionAudit.append({
+      event: 'worker_hard_close_begin',
+      nome: String(nome || ''),
+      reason: String(reason || ''),
+      freeMB: getAvailableMB(),
+      allowKillUserDataDir: !!allowKillUserDataDir
+    });
+  } catch {}
   let rootPid = (robeMeta[nome] && robeMeta[nome].rootPid) || null;
   try {
     if (!rootPid && ctrl && ctrl.browser && typeof ctrl.browser.process === 'function') {
@@ -633,6 +643,17 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
       'mil_action',
       `deactivate_hard reason=${reason} closeOk=${!!closeOutcome.ok} timeout=${!!closeOutcome.timeout} durMs=${durMs} rootPid=${rootPid || 0} userDataDir="${userDataDir || ''}"`
     );
+  } catch {}
+  try {
+    provisionAudit.append({
+      event: 'worker_hard_close_done',
+      nome: String(nome || ''),
+      reason: String(reason || ''),
+      freeMB: getAvailableMB(),
+      durMs,
+      rootPid: rootPid || null,
+      userDataDir: userDataDir || null
+    });
   } catch {}
   return { ok: true, durMs, rootPid: rootPid || null, userDataDir: userDataDir || null };
 }
@@ -2274,6 +2295,15 @@ const handlers = {
   async deactivate({ nome, reason, policy }) {
   return lockProfileAction(nome, async () => {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
+  try {
+    provisionAudit.append({
+      event: 'worker_deactivate_handler_called',
+      nome: String(nome || ''),
+      reason: String(reason || ''),
+      policy: policy == null ? null : String(policy),
+      freeMB: getAvailableMB()
+    });
+  } catch {}
   const preserve = (policy === 'preserveDesired');
   let reopenDelayMs = 0;
   if (preserve) {
