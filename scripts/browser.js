@@ -1531,12 +1531,12 @@ async function tryApplySelectorHints(page, selectorHints, opts = {}) {
     if (sel.length > 220) continue;
     if (/script|iframe|object|embed/i.test(sel)) continue;
     try {
-      const clicked = await page.evaluate((selector) => {
+      const clicked = await page.evaluate((selector, requireDlg) => {
         const el = document.querySelector(selector);
         if (!el) return false;
         // por padrão, exige dialog/modal para evitar cliques destrutivos fora
         const inDialog = !!(el.closest && el.closest('div[role="dialog"]'));
-        if (!inDialog && window.__CT_REQUIRE_DIALOG_FOR_HINTS === true) return false;
+        if (!inDialog && requireDlg === true) return false;
         const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
         if (!r || r.width < 2 || r.height < 2) return false;
         // se não for dialog, só aceita clique em elementos "seguros" (consent/continuar/aceitar)
@@ -1547,7 +1547,7 @@ async function tryApplySelectorHints(page, selectorHints, opts = {}) {
           };
           const t = norm(el.innerText || el.value || el.textContent || '');
           const al = norm(el.getAttribute ? (el.getAttribute('aria-label') || '') : '');
-          const safeWords = ['continuar','aceitar','concordo','permitir','entendi','ok','confirmar'];
+          const safeWords = ['continuar','aceitar','concordo','permitir','entendi','ok','confirmar','comecar','começar','iniciar','prosseguir','avancar','avançar'];
           const okTxt = safeWords.some(w => t.includes(w) || al.includes(w));
           const tag = String(el.tagName || '').toLowerCase();
           const role = String(el.getAttribute ? (el.getAttribute('role') || '') : '').toLowerCase();
@@ -1591,7 +1591,6 @@ async function gptRemediateFbUi(page, nome, { reason, stage } = {}) {
 
   // Para consent (full-page), permitimos hints fora de dialog, mas com guardrails (texto/aria + button-like).
   const allowNonDialog = String(reason || '').toLowerCase().includes('consent');
-  try { await page.evaluate((v) => { window.__CT_REQUIRE_DIALOG_FOR_HINTS = v; }, allowNonDialog ? false : true).catch(()=>{}); } catch {}
   const applied = await tryApplySelectorHints(page, result.selectorHints, { requireDialog: !allowNonDialog });
   _histPush(nome, reason, { ts: Date.now(), stage: String(stage||''), appliedOk: !!applied.ok, clickedSelector: applied.clickedSelector || null });
   await sleep(800);
@@ -1628,7 +1627,8 @@ async function _tryDismissFbConsent(page) {
         try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
         catch { return String(s||'').toLowerCase(); }
       };
-      const okWords = ['continuar', 'concordo', 'aceitar', 'permitir', 'entendi', 'ok'];
+      // LGPD/consent costuma ser multi-step: “Começar” -> “Confirmar” -> ...
+      const okWords = ['comecar','começar','iniciar','continuar','prosseguir','avancar','avançar','concordo','aceitar','permitir','entendi','ok','confirmar'];
       const candidates = Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"], a[role="button"]'))
         .filter(el => {
           const txt = norm(el.innerText || el.value || el.textContent || '');
@@ -1683,7 +1683,7 @@ async function _tryDismissGenericDialogDeterministic(page) {
         return al.includes('fechar') || al.includes('close') || t === 'x';
       });
       if (close) { try { close.click(); return true; } catch {} }
-      const okWords = ['continuar', 'aceitar', 'ok', 'entendi', 'confirmar', 'fechar'];
+      const okWords = ['continuar', 'aceitar', 'ok', 'entendi', 'confirmar', 'comecar', 'começar', 'iniciar', 'prosseguir', 'avancar', 'avançar', 'fechar'];
       const okBtn = btns.find(el => okWords.some(w => norm(el.innerText || el.value || el.textContent || '').includes(w)));
       if (okBtn) { try { okBtn.click(); return true; } catch {} }
       return false;
