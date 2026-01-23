@@ -1151,7 +1151,12 @@ async function detectMessengerPinModal(page) {
         txt.includes('sem um pin');
       const hasCreateBtn =
         !!document.querySelector('[role="button"][aria-label*="Criar PIN"], button[aria-label*="Criar PIN"]') ||
-        Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => norm(el.innerText || el.textContent || '').includes('criar pin'));
+        Array.from(document.querySelectorAll('button,div[role="button"]')).some(el => {
+          const t = norm(el.innerText || el.textContent || '');
+          const al = norm(el.getAttribute('aria-label') || '');
+          // pode vir como "Criar PIN" ou "Mais opções" (fluxo alternativo)
+          return t.includes('criar pin') || al.includes('criar pin') || t.includes('mais opcoes') || t.includes('mais opções') || al.includes('mais opcoes') || al.includes('mais opções');
+        });
 
       const present =
         (pinText && hasPinInput) ||
@@ -1236,6 +1241,54 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     } catch { return false; }
   }
 
+  async function clickMoreOptionsThenSkip() {
+    // Alguns modais de “Crie um PIN…” não mostram “Criar PIN” e sim “Mais opções”.
+    // Estratégia: clicar "Mais opções" e depois "Agora não"/"Pular"/"No momento não".
+    try {
+      const didMore = await page.evaluate(() => {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+        const scope = dialogs[0] || document;
+        const btns = Array.from(scope.querySelectorAll('button,[role="button"]')).slice(0, 120);
+        for (const b of btns) {
+          const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
+          if (disabled) continue;
+          const t = norm(b.innerText || b.textContent || '');
+          const al = norm(b.getAttribute('aria-label') || '');
+          if (t.includes('mais opcoes') || t.includes('mais opções') || al.includes('mais opcoes') || al.includes('mais opções')) {
+            b.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!didMore) return { ok: false, error: 'more_options_not_found' };
+      await sleep(900);
+      const didSkip = await page.evaluate(() => {
+        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const dlg = document.querySelector('div[role="dialog"]') || document;
+        const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 160);
+        const words = ['agora nao', 'agora não', 'pular', 'no momento nao', 'no momento não', 'mais tarde', 'continuar sem'];
+        for (const b of btns) {
+          const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
+          if (disabled) continue;
+          const t = norm(b.innerText || b.value || b.textContent || '');
+          const al = norm(b.getAttribute('aria-label') || '');
+          if (words.some(w => t.includes(w) || al.includes(w))) {
+            b.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!didSkip) return { ok: false, error: 'skip_button_not_found' };
+      await sleep(1200);
+      return { ok: true, skipped: true };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || 'more_options_exception' };
+    }
+  }
+
   async function tryEnterPin(pinValue = DEFAULT_PIN) {
     try {
       // Encontra o input de PIN e digita o valor
@@ -1315,7 +1368,12 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     if (det.kind === 'create_pin' && det.hasCreateBtn) {
       try {
         pinLog({ event: 'pin_create_click_attempt', attempt });
+        // tenta "Criar PIN"; se não existir, tenta "Mais opções" e pular
         const createClicked = await clickCreatePinButton();
+        if (!createClicked) {
+          const more = await clickMoreOptionsThenSkip();
+          pinLog({ event: 'pin_more_options_try', attempt, ok: !!(more && more.ok), error: more && more.error });
+        }
         await sleep(1000);
         if (createClicked) {
           pinLog({ event: 'pin_create_clicked', attempt });
