@@ -10,6 +10,7 @@ const logger = require('./logger.js');
 const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
+const provisionAudit = require('./provisionAudit.js');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -475,6 +476,18 @@ async function execStockProvision(cmd) {
   const minFreeEnv = Math.max(0, Number(process.env.STOCK_PROVISION_MIN_FREE_MB || 0) || 0);
   const minFreeMB = minFreeEnv > 0 ? minFreeEnv : snapPolicy.reserveProvisionMB;
   const maxHardDeactivations = Math.max(0, Number(process.env.STOCK_PROVISION_MAX_HARD_DEACTIVATIONS || 4) || 4);
+  try {
+    provisionAudit.append({
+      event: 'stock_provision_begin',
+      cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+      batchId,
+      actionsCount: actions.length,
+      minFreeMB,
+      maxHardDeactivations,
+      lockOwner,
+      lockUntilMs: (lk && lk.lock && lk.lock.untilMs) ? lk.lock.untilMs : null
+    });
+  } catch {}
 
   const budgetLeftMs = () => Math.max(0, budgetMs - (Date.now() - tBatch0));
   const jitter = (n) => Math.floor(Math.random() * Math.max(1, n));
@@ -527,6 +540,9 @@ async function execStockProvision(cmd) {
       if (free0 >= minMB) break;
       hard.attempts++;
       out.steps.push({ step: 'hard_ram_recover_check', at: Date.now(), freeMB: free0, minFreeMB: minMB });
+      try {
+        provisionAudit.append({ event: 'hard_ram_recover_check', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, attempt: hard.attempts, freeMB: free0, minFreeMB: minMB });
+      } catch {}
       let st = null;
       try { st = await httpJson('/api/status'); } catch {}
       const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
@@ -542,6 +558,9 @@ async function execStockProvision(cmd) {
       if (!pick || !pick.nome) break;
       const nome = pick.nome;
       out.steps.push({ step: 'hard_ram_recover_deactivate', at: Date.now(), nome });
+      try {
+        provisionAudit.append({ event: 'hard_ram_recover_deactivate', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, nome, freeMB_before: free0 });
+      } catch {}
       const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
         method: 'POST',
         headers: { 'x-operator': lockOwner },
@@ -549,6 +568,9 @@ async function execStockProvision(cmd) {
       });
       if (!r || r.ok === false) {
         out.steps.push({ step: 'hard_ram_recover_deactivate_fail', at: Date.now(), nome, error: (r && r.error) ? String(r.error) : 'deactivate_failed' });
+        try {
+          provisionAudit.append({ event: 'hard_ram_recover_deactivate_fail', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, nome, error: (r && r.error) ? String(r.error) : 'deactivate_failed' });
+        } catch {}
         break;
       }
       hard.deactivated++;
@@ -556,6 +578,9 @@ async function execStockProvision(cmd) {
       // aguarda o SO liberar RAM
       await sleep(2000 + jitter(800));
     }
+    try {
+      provisionAudit.append({ event: 'hard_ram_recover_done', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, deactivated: hard.deactivated, names: hard.names.slice(0, 200) });
+    } catch {}
     return hard;
   }
 
@@ -766,6 +791,7 @@ function logsAllowlist() {
   return {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
+    provision_audit: path.join(base, 'provision_audit.jsonl'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
     migrations: path.join(base, 'migrations.jsonl'),

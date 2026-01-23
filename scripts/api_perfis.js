@@ -5,6 +5,7 @@ const os = require('os');
 const issues = require('./issues.js');
 const { getAvailableMB } = require('./utils.js'); // <<< ADICIONADO CONFORME INSTRUÇÃO
 const logger = require('./logger.js');
+const provisionAudit = require('./provisionAudit.js');
 
 // --- HELPERS DE VALIDAÇÃO (conforme instrução) ---
 const isValidSlug = s => typeof s === 'string' && /^[a-z0-9_-]+$/.test(s);
@@ -963,6 +964,15 @@ module.exports = (app, workerClient, fileStore) => {
     const issues = require('./issues.js');
     const lockOwner = `close_all:${Date.now()}`;
     try {
+      const by = String(req.headers && (req.headers['x-operator'] || req.headers['X-Operator']) || 'unknown');
+      try {
+        provisionAudit.append({
+          event: 'close_all_api_called',
+          by,
+          lockOwner,
+          ip: (req && (req.ip || (req.socket && req.socket.remoteAddress))) ? String(req.ip || req.socket.remoteAddress) : null
+        });
+      } catch {}
       // Enterprise: durante close_all, bloquear reaberturas automáticas (nurseTick) e qualquer activate concorrente.
       // Reusa o provisionLock (cross-process) para garantir isolamento real.
       try {
@@ -976,6 +986,9 @@ module.exports = (app, workerClient, fileStore) => {
       }
 
       const perfisArr = fileStore.loadPerfisJson() || [];
+      try {
+        provisionAudit.append({ event: 'close_all_targets', by, lockOwner, total: perfisArr.length, names: perfisArr.map(p => p && p.nome).filter(Boolean).slice(0, 300) });
+      } catch {}
       opsState.begin('close_all', { total: perfisArr.length, done: 0, ok: 0, fail: 0, current: null });
 
       // 1) PASSO ATÔMICO: seta active:false e virtus:'off' em todos
