@@ -459,7 +459,7 @@ module.exports = (app, workerClient, fileStore) => {
       }
       return res.json({ ok: false, error: (r1 && r1.error) || 'activate_failed' });
     }
-    const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 }).catch(e => {
+    const r2 = await workerClient.sendWorkerCommand('start_work', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
       logger.error('Erro ao enviar start_work p/ worker', { nome, error: e && e.message }, e);
       return null;
     });
@@ -933,7 +933,7 @@ module.exports = (app, workerClient, fileStore) => {
 
         if (okActivate) {
           try {
-            const r2 = await workerClient.sendWorkerCommand('start_work', { nome }, { timeoutMs: 60000 });
+            const r2 = await workerClient.sendWorkerCommand('start_work', { nome, operator: op }, { timeoutMs: 60000 });
             okStart = !!(r2 && r2.ok);
           } catch (e) {
             err = (e && e.message) || String(e);

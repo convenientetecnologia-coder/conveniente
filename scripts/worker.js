@@ -2084,12 +2084,20 @@ function resolveChromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
-function automationAllowed(ctrl) {
-  try { if (provisionLock.isActive()) return false; } catch {}
+function automationAllowed(ctrl, { operator } = {}) {
+  // Hardening: durante stock_provision, bloquear automação (Robe/Virtus),
+  // mas permitir o fluxo do PRÓPRIO provisionamento quando o operador é o dono do lock.
+  try {
+    const op = String(operator || '').trim();
+    const lk = provisionLock.shouldBlock(op);
+    if (lk && lk.block) return false;
+  } catch {
+    try { if (provisionLock.isActive()) return false; } catch {}
+  }
   return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && !ctrl.trabalhando);
 }
 
-async function start_work({ nome }) {
+async function start_work({ nome, operator }) {
   return lockProfileAction(nome, async () => {
     logger.info('[HANDLER] start_work chamada', { nome });
 
@@ -2154,7 +2162,14 @@ async function start_work({ nome }) {
       } catch {}
 
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
-      ctrl.trabalhando = true;
+    // Para o fluxo stock_provision:<batchId>, liberar automação apenas se ele for o dono do lock.
+    if (!automationAllowed(ctrl, { operator })) {
+      await issues.append(nome, 'mil_action', 'start_work_denied (automation_not_allowed)');
+      logger.warn('[HANDLER] start_work denied (automation_not_allowed)', { nome, operator: String(operator || '').trim() });
+      return { ok: false, error: 'automation_not_allowed' };
+    }
+
+    ctrl.trabalhando = true;
       try {
         await browserHelper.forceCloseExtras(ctrl.browser);
         const ps = await ctrl.browser.pages();
