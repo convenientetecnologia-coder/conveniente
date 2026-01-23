@@ -1180,8 +1180,9 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   const MSGPIN_LOG = path.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
   const pinLog = (obj) => { try { fs.appendFileSync(MSGPIN_LOG, JSON.stringify({ ts: Date.now(), src: 'browser.js', ...obj }) + '\n'); } catch {} };
 
-  // PIN padrão do sistema (configurável via env no futuro)
-  const DEFAULT_PIN = '882584';
+  // PIN padrão do sistema (enterprise): configurável via env.
+  // Default: 882584 (padrão operacional)
+  const DEFAULT_PIN = String(process.env.MESSENGER_PIN || '882584').trim() || '882584';
 
   async function clickCloseTrusted() {
     try {
