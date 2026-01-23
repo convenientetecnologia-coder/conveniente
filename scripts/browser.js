@@ -1627,6 +1627,18 @@ async function _tryDismissGenericDialogDeterministic(page) {
 async function ensureFbUiUnblocked(page, nome, { reasonBase = 'fb_ui_unblock', allowGpt = true, maxRounds = 3 } = {}) {
   const rounds = Math.max(1, Math.min(5, Number(maxRounds) || 3));
   for (let i = 1; i <= rounds; i++) {
+    // 0) Caso especial: Messenger PIN modal (não é “popup genérico” — a solução é determinística)
+    try {
+      const pin = await detectMessengerPinModal(page).catch(()=>({ present:false }));
+      if (pin && pin.present) {
+        const r = await tryDismissMessengerPinModal(page, { logPrefix: `[UNBLOCK][PIN]`, maxTries: 2 }).catch(()=>null);
+        // após tentar, re-rodar loop (ou sair se já desbloqueou)
+        const pin2 = await detectMessengerPinModal(page).catch(()=>({ present:false }));
+        if (!pin2 || !pin2.present) return { ok: true, blocked: false, round: i, pinDismissed: true, pinResult: r || null };
+        // se ainda está presente, deixa cair para GPT/flow genérico como fallback
+      }
+    } catch {}
+
     const consent = await _detectFbConsentOrBlockingPage(page);
     if (consent && consent.present && consent.kind === 'consent') {
       const det = await _tryDismissFbConsent(page);
@@ -2641,8 +2653,17 @@ async function detectLoginRequired(page) {
       const title0 = String(document && document.title ? document.title : '');
       // 2) Checkpoint/captcha
       const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
-      const hasPersonaText = h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person'));
-      const hasCheckpointText = h1.some(t => t.includes('checkpoint') || t.includes('verificacao') || t.includes('verificacao de seguranca') || t.includes('security check'));
+      // HARDEN: também usa body.innerText, porque às vezes o texto está fora do recorte inicial
+      const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+      const hasPersonaText =
+        h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person')) ||
+        bodyTxt.includes('confirme que voce e uma pessoa') ||
+        bodyTxt.includes('confirm that you are a person');
+      const hasCheckpointText =
+        h1.some(t => t.includes('checkpoint') || t.includes('verificacao') || t.includes('verificacao de seguranca') || t.includes('security check')) ||
+        bodyTxt.includes('checkpoint') ||
+        bodyTxt.includes('verificacao de seguranca') ||
+        bodyTxt.includes('security check');
       // 3) Confirmação de identidade (ex.: selfie/vídeo) — NÃO é resolvível automaticamente, mas precisa ser “visto”.
       const hasIdentityText = h1.some(t =>
         t.includes('confirme sua identidade') ||
