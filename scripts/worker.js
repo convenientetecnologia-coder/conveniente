@@ -4606,6 +4606,10 @@ async function autoLoginRemediateTick() {
 }
 
 let _nurseTickRunning = false;
+// Throttle: evidência enterprise de pausa durante provisionamento (evita spam a cada 5s)
+let _provisionPauseLastLogAt = 0;
+let _provisionPauseLastOwner = null;
+let _provisionPauseLastUntilMs = 0;
 
 async function nurseTick() {
   if (_nurseTickRunning) return;
@@ -4615,14 +4619,53 @@ async function nurseTick() {
     // Ultra enterprise: durante provisionamento, pausar Virtus de forma controlada
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
     try {
-      if (provisionLock.isActive()) {
+      const lk = provisionLock.get ? provisionLock.get() : (provisionLock.isActive() ? { active: true, lock: null } : { active: false, lock: null });
+      if (lk && lk.active) {
+        const owner = lk.lock && lk.lock.owner ? String(lk.lock.owner) : null;
+        const untilMs = lk.lock && lk.lock.untilMs ? Number(lk.lock.untilMs) : 0;
+        const paused = [];
+        const skipped = { noVirtus: 0, human: 0, configurando: 0, robeExec: 0, sendLock: 0, other: 0 };
+
         for (const [n, c] of controllers.entries()) {
-          if (!c || !c.virtus) continue;
-          if (c.humanControl === true || c.configurando === true) continue;
-          if (robeMeta[n] && robeMeta[n].emExecucao === true) continue;
-          if (c.browser && c.browser._sendLock && c.browser._sendLock.active) continue;
-          try { await stopVirtus(n); } catch {}
+          try {
+            if (!c || !c.virtus) { skipped.noVirtus++; continue; }
+            if (c.humanControl === true) { skipped.human++; continue; }
+            if (c.configurando === true) { skipped.configurando++; continue; }
+            if (robeMeta[n] && robeMeta[n].emExecucao === true) { skipped.robeExec++; continue; }
+            if (c.browser && c.browser._sendLock && c.browser._sendLock.active) { skipped.sendLock++; continue; }
+            try { await stopVirtus(n); paused.push(String(n)); } catch { skipped.other++; }
+          } catch { skipped.other++; }
         }
+
+        // Evidência enterprise: loga no início do lock (ou mudança de owner) e depois a cada ~30s.
+        const now = Date.now();
+        const shouldLog =
+          (owner && owner !== _provisionPauseLastOwner) ||
+          (untilMs && untilMs !== _provisionPauseLastUntilMs) ||
+          (now - _provisionPauseLastLogAt) > 30_000 ||
+          paused.length > 0;
+
+        if (shouldLog) {
+          _provisionPauseLastLogAt = now;
+          _provisionPauseLastOwner = owner;
+          _provisionPauseLastUntilMs = untilMs;
+          try {
+            provisionAudit.append({
+              ts: now,
+              event: 'provision_lock_virtus_pause_tick',
+              owner,
+              untilMs,
+              controllers: controllers.size,
+              pausedCount: paused.length,
+              pausedNames: paused.slice(0, 40),
+              skipped
+            });
+          } catch {}
+        }
+      } else {
+        // lock acabou: reseta para o próximo provisionamento
+        _provisionPauseLastOwner = null;
+        _provisionPauseLastUntilMs = 0;
       }
     } catch {}
 
