@@ -1547,7 +1547,7 @@ async function tryApplySelectorHints(page, selectorHints, opts = {}) {
           };
           const t = norm(el.innerText || el.value || el.textContent || '');
           const al = norm(el.getAttribute ? (el.getAttribute('aria-label') || '') : '');
-          const safeWords = ['continuar','aceitar','concordo','permitir','entendi','ok','confirmar','comecar','começar','iniciar','prosseguir','avancar','avançar'];
+          const safeWords = ['continuar','aceitar','concordo','permitir','entendi','ok','confirmar','comecar','começar','iniciar','prosseguir','avancar','avançar','fechar','close'];
           const okTxt = safeWords.some(w => t.includes(w) || al.includes(w));
           const tag = String(el.tagName || '').toLowerCase();
           const role = String(el.getAttribute ? (el.getAttribute('role') || '') : '').toLowerCase();
@@ -1628,7 +1628,17 @@ async function _tryDismissFbConsent(page) {
         catch { return String(s||'').toLowerCase(); }
       };
       // LGPD/consent costuma ser multi-step: “Começar” -> “Confirmar” -> ...
-      const okWords = ['comecar','começar','iniciar','continuar','prosseguir','avancar','avançar','concordo','aceitar','permitir','entendi','ok','confirmar'];
+      const okWords = ['comecar','começar','iniciar','continuar','prosseguir','avancar','avançar','concordo','aceitar','permitir','entendi','ok','confirmar','fechar','close'];
+      // 0) Se existir botão/ícone de fechar (X) com aria-label, tente primeiro.
+      const closeBtn =
+        document.querySelector('[aria-label="Fechar"][role="button"]') ||
+        document.querySelector('[aria-label="Fechar"]') ||
+        document.querySelector('[aria-label="Close"][role="button"]') ||
+        document.querySelector('[aria-label="Close"]');
+      if (closeBtn) {
+        const r = closeBtn.getBoundingClientRect ? closeBtn.getBoundingClientRect() : null;
+        if (r && r.width >= 2 && r.height >= 2) { try { closeBtn.click(); return true; } catch {} }
+      }
       const candidates = Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"], a[role="button"]'))
         .filter(el => {
           const txt = norm(el.innerText || el.value || el.textContent || '');
