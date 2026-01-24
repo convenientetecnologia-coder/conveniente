@@ -3018,8 +3018,11 @@ const handlers = {
 
         if (success && startAfterSuccess) {
           // NÃO usar handlers.activate/start_work aqui (reentrância de lockProfileAction).
-          // Faz activateOnce + start Virtus direto (equivalente a start_work, sem lock).
-          // CRÍTICO: atualizar desired para não “derrubar” o perfil em seguida (desired pode estar active:false/virtus:off).
+          // Estratégia enterprise determinística:
+          // 1) patch desired (fonte de verdade) -> active=true, virtus=on, humanHold=false
+          // 2) fechar browser temporário (já feito acima, se closeAfterSuccess)
+          // 3) tentar ativar + iniciar Virtus com retries curtos
+          //    - se falhar, NÃO travar/loop infinito: deixa nurse/desired completar.
           try {
             await fileStore.withDesiredFileLockUpdate((d) => {
               d.perfis = d.perfis || {};
@@ -3031,13 +3034,37 @@ const handlers = {
             pushStep({ step: 'post_success_desired_update_fail', error: (e && e.message) || String(e) });
           }
 
-          pushStep({ step: 'post_success_activate_once_begin' });
-          let act = null;
-          try { act = await withTimeout('post_success_activate_once', activateOnce(nome, 'login_remediate_post_success', op), stageTimeoutMs.activate); } catch (e) {
-            pushStep({ step: 'post_success_activate_once_fail', error: (e && e.message) || String(e) });
-          }
-          pushStep({ step: 'post_success_activate_once_done', ok: !!(act && act.ok) });
+          // Nudge: se estiver fechado agora, acelera nurse para reabrir.
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            const when = Date.now() + 900;
+            if (!robeMeta[nome].reopenAt || robeMeta[nome].reopenAt > when) robeMeta[nome].reopenAt = when;
+          } catch {}
 
+          // Tentativas curtas de ativação; se falhar, nurse/desired completa sem bloquear o fluxo.
+          pushStep({ step: 'post_success_activate_once_begin' });
+          let actOk = false;
+          let lastActErr = null;
+          const maxActAttempts = Math.max(1, Math.min(4, Number(opts2.maxPostSuccessActivateAttempts || 3) || 3));
+          for (let attempt = 1; attempt <= maxActAttempts; attempt++) {
+            pushStep({ step: 'post_success_activate_once_attempt', attempt });
+            let act = null;
+            try {
+              act = await withTimeout('post_success_activate_once', activateOnce(nome, 'login_remediate_post_success', op), Math.min(90_000, stageTimeoutMs.activate || 90_000));
+            } catch (e) {
+              lastActErr = (e && e.message) || String(e);
+              pushStep({ step: 'post_success_activate_once_attempt_fail', attempt, error: lastActErr });
+            }
+            if (act && act.ok) {
+              actOk = true;
+              break;
+            }
+            if (act && act.error) lastActErr = String(act.error);
+            await sleep(900 + (attempt * 600));
+          }
+          pushStep({ step: 'post_success_activate_once_done', ok: actOk, error: lastActErr });
+
+          // Só inicia Virtus se tiver controller+browser (evita "no_browser" enganoso).
           pushStep({ step: 'post_success_start_virtus_begin' });
           try {
             const ctrlNow = controllers.get(nome);
@@ -3058,7 +3085,7 @@ const handlers = {
                 pushStep({ step: 'post_success_start_virtus_ok' });
               }
             } else {
-              pushStep({ step: 'post_success_start_virtus_no_browser' });
+              pushStep({ step: 'post_success_deferred_to_nurse', reason: 'no_controller_or_browser' });
             }
           } catch (e) {
             pushStep({ step: 'post_success_start_virtus_fail', error: (e && e.message) || String(e) });
