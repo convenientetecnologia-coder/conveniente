@@ -3019,6 +3019,18 @@ const handlers = {
         if (success && startAfterSuccess) {
           // NÃO usar handlers.activate/start_work aqui (reentrância de lockProfileAction).
           // Faz activateOnce + start Virtus direto (equivalente a start_work, sem lock).
+          // CRÍTICO: atualizar desired para não “derrubar” o perfil em seguida (desired pode estar active:false/virtus:off).
+          try {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d.perfis = d.perfis || {};
+              d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'on', humanHold: false };
+              return d;
+            });
+            pushStep({ step: 'post_success_desired_updated', active: true, virtus: 'on' });
+          } catch (e) {
+            pushStep({ step: 'post_success_desired_update_fail', error: (e && e.message) || String(e) });
+          }
+
           pushStep({ step: 'post_success_activate_once_begin' });
           let act = null;
           try { act = await withTimeout('post_success_activate_once', activateOnce(nome, 'login_remediate_post_success', op), stageTimeoutMs.activate); } catch (e) {
