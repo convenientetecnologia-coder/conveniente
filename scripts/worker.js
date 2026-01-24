@@ -3590,7 +3590,14 @@ const handlers = {
       robes,
       robeQueue: robeQueueList,
       autoMode,
-      sys
+      sys,
+      // Diagnóstico enterprise: ajuda a provar quando o dashboard está “cego” porque não há controllers vivos.
+      _debug: {
+        pid: process && process.pid ? process.pid : null,
+        shardSize: SHARD_SET ? SHARD_SET.size : null,
+        controllersCount: controllers ? controllers.size : null,
+        ts: Date.now()
+      }
     };
   },
 

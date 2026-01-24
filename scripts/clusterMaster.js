@@ -322,6 +322,7 @@ function createCluster() {
       let autoModePick = null;
       let sysPick = null;
       // FIM DECLARAÇÕES INICIAIS
+      const nodesDebug = [];
 
       let combinedRobes = {};
       let combinedQueue = [];
@@ -336,14 +337,35 @@ function createCluster() {
 
         if (r.status === 'fulfilled' && r.value && Array.isArray(r.value.perfis)) {
           payload = r.value;
+          try {
+            nodesDebug.push({
+              node: i + 1,
+              source,
+              ok: true,
+              pid: payload && payload._debug ? payload._debug.pid : null,
+              controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
+              shardSize: payload && payload._debug ? payload._debug.shardSize : null
+            });
+          } catch {}
         } else {
           const fb = readNodeStatusFile(i);
           if (fb && fb.json && Array.isArray(fb.json.perfis) && fb.ageMs <= MAX_FILE_AGE_MS) {
             payload = fb.json;
             source = `file(${Math.round(fb.ageMs / 1000)}s)`;
             warningParts.push(`node${i + 1}: rpc_fail -> file_ok(${Math.round(fb.ageMs / 1000)}s)`);
+            try {
+              nodesDebug.push({
+                node: i + 1,
+                source,
+                ok: true,
+                pid: payload && payload._debug ? payload._debug.pid : null,
+                controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
+                shardSize: payload && payload._debug ? payload._debug.shardSize : null
+              });
+            } catch {}
           } else {
             warningParts.push(`node${i + 1}: no_reply`);
+            try { nodesDebug.push({ node: i + 1, source, ok: false }); } catch {}
           }
         }
         if (!payload) continue;
@@ -413,7 +435,8 @@ function createCluster() {
         robeQueue: combinedQueue,
         autoMode: autoModePick || null,
         sys: sysPick || null,
-        ts: Date.now()
+        ts: Date.now(),
+        _debug: { nodes: nodesDebug }
       };
       if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
       
