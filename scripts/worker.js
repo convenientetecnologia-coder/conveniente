@@ -1204,6 +1204,28 @@ async function activateOnce(nome, source = '', operator = '') {
             try { await stopVirtus(nome); } catch {}
             await reportAction(nome, 'mil_action', 'opened_in_human_mode (humanHold=true)');
             try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_human_hold'); } catch {}
+            // Anti-tela-preta: garanta uma aba navegada para o humano (não depende de retomar trabalho)
+            try {
+              const pages = await ctrl.browser.pages().catch(()=>[]);
+              let p0 = pages && pages[0];
+              const u0 = (() => { try { return p0 && typeof p0.url === 'function' ? String(p0.url() || '') : ''; } catch { return ''; } })();
+              if (!p0 || !u0 || u0 === 'about:blank') {
+                p0 = await ctrl.browser.newPage().catch(()=>null);
+                if (p0) {
+                  try {
+                    const man = await manifestStore.read(nome).catch(()=>null);
+                    await browserHelper.patchPage(nome, p0, utils.getCoords(man && man.cidade || '')).catch(()=>{});
+                  } catch {}
+                }
+              }
+              if (p0) {
+                await p0.bringToFront?.().catch(()=>{});
+                await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+                await new Promise(r => setTimeout(r, 1400));
+                await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'human_mode_entry_on_open', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+                ctrl.mainPage = p0;
+              }
+            } catch {}
           }
         }
 
@@ -1219,6 +1241,28 @@ async function activateOnce(nome, source = '', operator = '') {
               try { await stopVirtus(nome); } catch {}
               await reportAction(nome, 'mil_action', 'opened_in_human_mode (loginRemediateFailed=true)');
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_login_failed'); } catch {}
+              // Anti-tela-preta: garanta uma aba navegada para o humano (não depende de retomar trabalho)
+              try {
+                const pages = await ctrl.browser.pages().catch(()=>[]);
+                let p0 = pages && pages[0];
+                const u0 = (() => { try { return p0 && typeof p0.url === 'function' ? String(p0.url() || '') : ''; } catch { return ''; } })();
+                if (!p0 || !u0 || u0 === 'about:blank') {
+                  p0 = await ctrl.browser.newPage().catch(()=>null);
+                  if (p0) {
+                    try {
+                      const man = await manifestStore.read(nome).catch(()=>null);
+                      await browserHelper.patchPage(nome, p0, utils.getCoords(man && man.cidade || '')).catch(()=>{});
+                    } catch {}
+                  }
+                }
+                if (p0) {
+                  await p0.bringToFront?.().catch(()=>{});
+                  await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+                  await new Promise(r => setTimeout(r, 1400));
+                  await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'human_mode_entry_on_open', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+                  ctrl.mainPage = p0;
+                }
+              } catch {}
             }
           }
         } catch {}

@@ -2838,6 +2838,30 @@ async function detectLoginRequired(page) {
       };
     }
 
+    // Blindagem por URL/path (sem depender de texto):
+    // - FB 2FA costuma cair em /two_step_verification/two_factor/ (flow=two_factor_login)
+    // - Messenger pode cair em /login/checkpoint_interstitial/ quando a conta exige checkpoint/2FA
+    if (/\/two_step_verification\/two_factor\//i.test(path) || /flow=two_factor/i.test(hrefNorm)) {
+      return {
+        loginRequired: true,
+        reason: 'two_factor',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+      };
+    }
+    if (/checkpoint_interstitial/i.test(path) || /checkpoint_interstitial/i.test(hrefNorm)) {
+      return {
+        loginRequired: true,
+        reason: 'checkpoint_interstitial',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+      };
+    }
+
     // Messenger é especial:
     // muitas vezes a tela de login (form#login_form) aparece na rota "/" (marketing page),
     // então não dá para exigir strongLoginPath/title como no Facebook.
