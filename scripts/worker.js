@@ -318,7 +318,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('loginRemediateFailed')) {
       delete robeMeta[nome].loginRemediateFailed;
       delete robeMeta[nome].loginRemediateFailedReason;
-      if (robeMeta[nome].whyNotOpen === 'login_remediate_failed') delete robeMeta[nome].whyNotOpen;
+      // Durante failFast, whyNotOpen pode ser um motivo específico (two_factor, ui_blocked:..., etc).
+      // Ao "Retomar trabalho", sempre limpa.
+      if (typeof robeMeta[nome].whyNotOpen === 'string') delete robeMeta[nome].whyNotOpen;
     }
     if (which.includes('banned')) delete robeMeta[nome].banned;
     if (which.includes('messengerPin')) {
@@ -1224,6 +1226,18 @@ async function activateOnce(nome, source = '', operator = '') {
                 await new Promise(r => setTimeout(r, 1400));
                 await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'human_mode_entry_on_open', allowGpt: true, maxRounds: 2 }).catch(()=>null);
                 ctrl.mainPage = p0;
+
+                // Remover abas about:blank sobrando (economia de RAM / "Abas: 2" indevido)
+                try {
+                  const ps = await ctrl.browser.pages().catch(()=>[]);
+                  for (const pg of (ps || [])) {
+                    if (!pg || pg === p0) continue;
+                    const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
+                    if (!uu || uu === 'about:blank') {
+                      try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+                    }
+                  }
+                } catch {}
               }
             } catch {}
           }
@@ -1261,6 +1275,18 @@ async function activateOnce(nome, source = '', operator = '') {
                   await new Promise(r => setTimeout(r, 1400));
                   await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'human_mode_entry_on_open', allowGpt: true, maxRounds: 2 }).catch(()=>null);
                   ctrl.mainPage = p0;
+
+                  // Remover abas about:blank sobrando (economia de RAM / "Abas: 2" indevido)
+                  try {
+                    const ps = await ctrl.browser.pages().catch(()=>[]);
+                    for (const pg of (ps || [])) {
+                      if (!pg || pg === p0) continue;
+                      const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
+                      if (!uu || uu === 'about:blank') {
+                        try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+                      }
+                    }
+                  } catch {}
                 }
               } catch {}
             }
@@ -2903,6 +2929,11 @@ const handlers = {
           await failFastToHuman('missing_cookies_in_manifest');
           return { ok: false, error: 'missing_cookies_in_manifest', steps };
         }
+        // Blindagem: durante configureProfile (abre várias abas), não deixar aboutBlankKiller matar as abas ainda em load.
+        try {
+          const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
+          guard[nome] = Date.now() + (6 * 60 * 1000);
+        } catch {}
         pushStep({ step: 'attempt1_inject_cookies_begin' });
         await withTimeout('injectCookies', browserHelper.configureProfile(ctrl.browser, nome, cookies), stageTimeoutMs.injectCookies);
         pushStep({ step: 'attempt1_inject_cookies_done' });
@@ -2910,6 +2941,7 @@ const handlers = {
         pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
       } finally {
         ctrl.configurando = false;
+        // Não remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos após configure.
       }
 
       // 5) validar loginRequired em TODAS as abas reais (sem “puxar” tudo para /marketplace)
@@ -3421,7 +3453,8 @@ const handlers = {
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
       ctrl.humanControl = false;
-      try { await clearAccountFlags(nome, ['loginRequired','banned']); } catch {}
+      // Enterprise: "Retomar trabalho" deve limpar TODO estado de falha/hold para voltar ao normal.
+      try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
       try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
 
       let pages2 = [];
