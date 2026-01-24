@@ -1693,7 +1693,14 @@ async function _tryDismissGenericDialogDeterministic(page) {
         return al.includes('fechar') || al.includes('close') || t === 'x';
       });
       if (close) { try { close.click(); return true; } catch {} }
-      const okWords = ['continuar', 'aceitar', 'ok', 'entendi', 'confirmar', 'comecar', 'começar', 'iniciar', 'prosseguir', 'avancar', 'avançar', 'fechar'];
+      const okWords = [
+        'continuar','aceitar','ok','entendi','confirmar',
+        'comecar','começar','iniciar','prosseguir','avancar','avançar',
+        // onboarding/notificações
+        'marcar como lido','mark as read',
+        'ver tudo','see all',
+        'fechar','close'
+      ];
       const okBtn = btns.find(el => okWords.some(w => norm(el.innerText || el.value || el.textContent || '').includes(w)));
       if (okBtn) { try { okBtn.click(); return true; } catch {} }
       return false;
@@ -1854,13 +1861,14 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10A: Antes de abrir abas auxiliares ===');
     openedPages[0] = pages[0];
 
-    // Aba 1 — criar item
+    // Aba 1 — criar item (ROBE)
     try {
       if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.1A: Antes de newPage (marketplace)');
       openedPages[1] = await browser.newPage();
       await patchPage(nome, openedPages[1], coords);
       await new Promise(r => setTimeout(r, 1000));
-      await openedPages[1].goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded' }).catch((e) => {
+      // IMPORTANT: o Robe usa a rota de criação. O feed (/marketplace) pode parecer “ok” mas não prova que dá pra postar.
+      await openedPages[1].goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded' }).catch((e) => {
         if (process.env.CONFIGURE_DEBUG === '1') {
           logger.debug('[CONFIG][ERRO][CHECKPOINT 10.1][goto marketplace.catch]: ' + ((e && e.stack) ? e.stack : e));
         }

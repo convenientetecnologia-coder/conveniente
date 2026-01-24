@@ -2732,40 +2732,44 @@ const handlers = {
         ctrl.configurando = false;
       }
 
-      // 5) validar loginRequired em Messenger/Facebook
+      // 5) validar loginRequired em TODAS as abas reais (sem “puxar” tudo para /marketplace)
       let lrMessenger = null;
       let lrFacebook = null;
       let uiMessenger = null;
       let uiFacebook = null;
       try {
         const pages = await ctrl.browser.pages().catch(()=>[]);
-        const p0 = pages && pages[0];
-        if (p0) {
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'pre_check_msg', page: p0, note: 'before messenger check' });
-          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          await new Promise(r => setTimeout(r, 1200));
+        const pMain = pages && pages[0]; // facebook.com (base)
+        const pCreate = pages && pages[1]; // marketplace/create/item (ROBE)
+        const pLang = pages && pages[2]; // settings/language
+        const pMsg = pages && pages[3]; // messenger
+
+        const checkOne = async (page, label) => {
+          if (!page) return null;
+          await appendLoginRemediateEvidence({ nome, operator: op, step: `pre_check_${label}`, page, note: `before check ${label}` });
           // “olhos”: resolve popups/consent antes de validar login
-          uiMessenger = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_post_inject', allowGpt: true, maxRounds: 3 }).catch(()=>null);
-          pushStep({ step: 'ui_unblock_msg', ui: uiMessenger });
-          lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-          if (lrMessenger && lrMessenger.loginRequired) {
-            try { await captureLoginRequiredEvidence(nome, p0, lrMessenger); } catch {}
+          const ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: 3 }).catch(()=>null);
+          pushStep({ step: `ui_unblock_${label}`, ui });
+          const lr = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:false }));
+          if (lr && lr.loginRequired) {
+            try { await captureLoginRequiredEvidence(nome, page, lr); } catch {}
           }
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'post_check_msg', page: p0, note: lrMessenger && lrMessenger.loginRequired ? 'loginRequired=true' : 'loginRequired=false' });
-        }
-        // usa a mesma aba para marketplace fb (mais leve)
-        if (p0) {
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'pre_check_fb', page: p0, note: 'before facebook check' });
-          await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          await new Promise(r => setTimeout(r, 1200));
-          uiFacebook = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_post_inject', allowGpt: true, maxRounds: 3 }).catch(()=>null);
-          pushStep({ step: 'ui_unblock_fb', ui: uiFacebook });
-          lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-          if (lrFacebook && lrFacebook.loginRequired) {
-            try { await captureLoginRequiredEvidence(nome, p0, lrFacebook); } catch {}
-          }
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'post_check_fb', page: p0, note: lrFacebook && lrFacebook.loginRequired ? 'loginRequired=true' : 'loginRequired=false' });
-        }
+          await appendLoginRemediateEvidence({ nome, operator: op, step: `post_check_${label}`, page, note: lr && lr.loginRequired ? 'loginRequired=true' : 'loginRequired=false' });
+          return { ui, lr };
+        };
+
+        // A ordem importa: primeiro Messenger (Virtus), depois Robe create, depois main/lang (só sanity)
+        const rMsg = await checkOne(pMsg, 'msg');
+        uiMessenger = rMsg && rMsg.ui;
+        lrMessenger = rMsg && rMsg.lr;
+
+        const rCreate = await checkOne(pCreate, 'fb_create');
+        uiFacebook = rCreate && rCreate.ui;
+        lrFacebook = rCreate && rCreate.lr;
+
+        // sanity checks (não afetam decisão principal, mas deixam evidência)
+        await checkOne(pMain, 'fb_main');
+        await checkOne(pLang, 'fb_lang');
       } catch {}
       pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook, uiMessenger, uiFacebook });
 
