@@ -321,6 +321,34 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // ===== NOVO: login_remediate via API (cluster-safe) =====
+  // Motivação enterprise: evitar "dois workers" (workerClient.js) abrindo Chrome fora do cluster,
+  // o que faz o dashboard mostrar active=0 mesmo com navegador aberto.
+  //
+  // POST /api/perfis/:nome/login-remediate
+  // Body: { options?, timeoutMs? }
+  app.post('/api/perfis/:nome/login-remediate', async (req, res) => {
+    const nome = req.params.nome;
+    const op = String(req.headers['x-operator'] || '').trim() || `api_login_remediate:${nome}:${Date.now()}`;
+    if (!nome) return res.json({ ok: false, error: 'nome ausente' });
+    try { assertPerfilExists(fileStore, nome); } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+    const timeoutMs = Math.max(60_000, Number(req?.body?.timeoutMs || 0) || (6 * 60 * 1000));
+    const options = (req && req.body && typeof req.body.options === 'object' && req.body.options) ? req.body.options : {};
+    try { await issues.append(nome, 'mil_action', `login_remediate_api_request by=${op}`); } catch {}
+    try {
+      const resp = await workerClient.sendWorkerCommand(
+        'login_remediate',
+        { nome, operator: op, options },
+        { timeoutMs }
+      );
+      return res.json(resp || { ok: false, error: 'login_remediate_no_response' });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // ===== NOVO: atualização vinda do Estoque (label/login/senha/cookies) =====
   // Usado pelo comando remoto stock_push_account_update.
   // Segurança: só aceita com header x-operator=stock_push (CT).

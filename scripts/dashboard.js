@@ -11,7 +11,6 @@ const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
 const provisionAudit = require('./provisionAudit.js');
-const workerClient = require('./workerClient.js');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -367,16 +366,20 @@ async function execLoginRemediate(cmd) {
   // Retry curto e controlado (sem loop infinito) para evitar "falso fail".
   const isTransient = (err) => {
     const m = String(err || '').toLowerCase();
-    return m.includes('worker off') || m.includes('queue_timeout') || m.includes('timeout');
+    return m.includes('worker off') || m.includes('queue_timeout') || m.includes('timeout') || m.includes('supervisor_unreachable');
   };
   let r = null;
   const maxAttempts = 4;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    r = await workerClient.sendWorkerCommand(
-      'login_remediate',
-      { nome, operator, options: payload && payload.options ? payload.options : {} },
-      { timeoutMs }
-    );
+    // IMPORTANT: cluster-safe path (single source of truth):
+    // chama endpoint local, que por sua vez chama workerClient do CLUSTER (clusterMaster),
+    // evitando abrir browsers em um "worker paralelo" fora do cluster.
+    r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
+      method: 'POST',
+      headers: { 'x-operator': operator },
+      body: { options: (payload && payload.options ? payload.options : {}), timeoutMs }
+    }).catch(() => null);
+
     if (r && r.ok !== false) break;
     const err = (r && r.error) ? String(r.error) : 'login_remediate_failed';
     if (!isTransient(err) || attempt >= maxAttempts) break;
