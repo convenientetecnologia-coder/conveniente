@@ -343,6 +343,44 @@ async function execRobeReleaseAll() {
   if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'robes_release_all_failed');
 }
 
+// ===== NOVO: profiles_cleanup (limpeza cirúrgica enterprise) =====
+// Objetivo: desfazer “lixo de testes” sem close_all.
+// - Desativa uma lista de perfis via /api/perfis/:nome/deactivate (isso também zera desired.active por padrão).
+// - Sem loops infinitos: limites e small-jitter.
+async function execProfilesCleanup(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const names = Array.isArray(payload.profileNames)
+    ? payload.profileNames
+    : (Array.isArray(payload.names) ? payload.names : []);
+  const list = names.map(x => String(x || '').trim()).filter(Boolean);
+  const limit = Math.max(1, Math.min(30, Number(payload.limit || 30) || 30));
+  const targets = list.slice(0, limit);
+  if (!targets.length) return { ok: false, error: 'missing_profileNames' };
+
+  const operator = `profiles_cleanup:${String(cmd && cmd.id || '').trim() || Date.now()}`;
+  const results = [];
+  for (const nome of targets) {
+    try {
+      const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
+        method: 'POST',
+        headers: { 'x-operator': operator },
+        body: {}
+      });
+      if (!r || r.ok === false) {
+        results.push({ nome, ok: false, error: (r && r.error) ? String(r.error) : 'deactivate_failed' });
+      } else {
+        results.push({ nome, ok: true });
+      }
+    } catch (e) {
+      results.push({ nome, ok: false, error: (e && e.message) || String(e) });
+    }
+    await sleep(250);
+  }
+  const okCount = results.filter(x => x && x.ok).length;
+  const failCount = results.length - okCount;
+  return { ok: failCount === 0, okCount, failCount, results };
+}
+
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
 async function execLoginRemediate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -867,6 +905,16 @@ function logsAllowlist() {
   return {
     logger: path.join(base, 'logger.log'),
     issues_fallback: path.join(base, 'issues_fallback.log'),
+    // Auditoria de estado (enterprise): permite verificar “sobras” de desired/perfis/status
+    desired: path.join(base, 'desired.json'),
+    perfis: path.join(base, 'perfis.json'),
+    status: path.join(base, 'status.json'),
+    status_node_1: path.join(base, 'status_node_1.json'),
+    status_node_2: path.join(base, 'status_node_2.json'),
+    status_node_3: path.join(base, 'status_node_3.json'),
+    status_node_4: path.join(base, 'status_node_4.json'),
+    status_node_5: path.join(base, 'status_node_5.json'),
+    status_node_6: path.join(base, 'status_node_6.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
@@ -1210,6 +1258,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'migrate_profiles') { ackDetails = await execMigrateProfiles(c); }
       else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }
       else if (c.type === 'login_remediate') { ackDetails = await execLoginRemediate(c); }
+      else if (c.type === 'profiles_cleanup') { ackDetails = await execProfilesCleanup(c); }
       else if (c.type === 'provision_unlock') { ackDetails = await execProvisionUnlock(c); }
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
