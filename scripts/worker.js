@@ -4084,6 +4084,10 @@ perfis.push({
   uaPresetId: p.uaPresetId,
   active: controllers.has(nome),
   trabalhando: !!(controllers.get(nome)?.trabalhando),
+  // Observabilidade enterprise (p/ pausas determinísticas durante provisionamento)
+  virtusOnline: !!(controllers.get(nome)?.virtus),
+  sendLockActive: !!(controllers.get(nome)?.browser && controllers.get(nome).browser._sendLock && controllers.get(nome).browser._sendLock.active),
+  robeEmExecucao: !!(robeMeta[nome]?.emExecucao),
   configurando: !!(controllers.get(nome)?.configurando),
   humanControl: !!(controllers.get(nome)?.humanControl),
   humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),

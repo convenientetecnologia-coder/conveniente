@@ -633,6 +633,80 @@ async function execStockProvision(cmd) {
     const s = await getSysSnapshot();
     return Number(s && s.mem && s.mem.freeMB || 0) || 0;
   }
+  async function getStatusSnapshot() {
+    try { return await httpJson('/api/status'); } catch { return null; }
+  }
+
+  function computeQuiesceSnapshot(st) {
+    const perfis = Array.isArray(st && st.perfis) ? st.perfis : [];
+    const active = perfis.filter(p => p && p.nome && p.active === true);
+    const busy = active.filter(p => (p.sendLockActive === true) || (p.robeEmExecucao === true));
+    const pauseableVirtus = active.filter(p =>
+      p.virtusOnline === true &&
+      p.humanControl !== true &&
+      p.configurando !== true &&
+      p.sendLockActive !== true &&
+      p.robeEmExecucao !== true
+    );
+    const virtusOnline = active.filter(p => p.virtusOnline === true);
+    return {
+      activeCount: active.length,
+      busyCount: busy.length,
+      busyNames: busy.map(p => String(p.nome)).slice(0, 40),
+      pauseableVirtusCount: pauseableVirtus.length,
+      pauseableVirtusNames: pauseableVirtus.map(p => String(p.nome)).slice(0, 40),
+      virtusOnlineCount: virtusOnline.length
+    };
+  }
+
+  async function waitForQuiesce({ out, phaseBudgetMs, waitBusyMs, waitPauseMs }) {
+    const startedAt = Date.now();
+    const maxTotal = Math.max(0, Number(phaseBudgetMs) || 0);
+    const maxBusy = Math.max(0, Number(waitBusyMs) || 0);
+    const maxPause = Math.max(0, Number(waitPauseMs) || 0);
+
+    const push = (obj) => { try { out.steps.push({ ...obj, at: Date.now() }); } catch {} };
+    const audit = (obj) => { try { provisionAudit.append({ ts: Date.now(), cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, ...obj }); } catch {} };
+
+    push({ step: 'quiesce_begin', waitBusyMs: maxBusy, waitPauseMs: maxPause });
+    audit({ event: 'stock_provision_quiesce_begin', waitBusyMs: maxBusy, waitPauseMs: maxPause });
+
+    // (A) Espera busy finalizar (respostas/postagens em andamento)
+    if (maxBusy > 0) {
+      const t0 = Date.now();
+      let last = null;
+      while ((Date.now() - t0) < maxBusy && (Date.now() - startedAt) < maxTotal) {
+        const st = await getStatusSnapshot();
+        const snap = computeQuiesceSnapshot(st);
+        last = snap;
+        if (snap.busyCount <= 0) break;
+        await sleep(1200);
+      }
+      const st2 = await getStatusSnapshot();
+      const snap2 = computeQuiesceSnapshot(st2);
+      push({ step: 'quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames });
+      audit({ event: 'stock_provision_quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames });
+    }
+
+    // (B) Espera Virtus pausado (exceto humano/config/ocupado)
+    if (maxPause > 0) {
+      const t1 = Date.now();
+      while ((Date.now() - t1) < maxPause && (Date.now() - startedAt) < maxTotal) {
+        const st = await getStatusSnapshot();
+        const snap = computeQuiesceSnapshot(st);
+        if (snap.pauseableVirtusCount <= 0) break;
+        await sleep(900);
+      }
+      const st3 = await getStatusSnapshot();
+      const snap3 = computeQuiesceSnapshot(st3);
+      push({ step: 'quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, virtusOnlineCount: snap3.virtusOnlineCount });
+      audit({ event: 'stock_provision_quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, virtusOnlineCount: snap3.virtusOnlineCount });
+    }
+
+    push({ step: 'quiesce_done', elapsedMs: Date.now() - startedAt });
+    audit({ event: 'stock_provision_quiesce_done', elapsedMs: Date.now() - startedAt });
+    return { ok: true, elapsedMs: Date.now() - startedAt };
+  }
   async function ensureFreeMBWithin(minMB, maxWaitMs) {
     const t0 = Date.now();
     let last = 0;
@@ -753,6 +827,20 @@ async function execStockProvision(cmd) {
       try {
         // 0) baseline telemetria
         out.steps.push({ step: 'lock_acquired', at: Date.now(), lockOwner, lockUntilMs: out.lockUntilMs });
+
+        // 0.5) Ultra enterprise: quiescência determinística antes de mexer em cookies/config
+        // - espera envios/postagens ativos terminarem
+        // - garante Virtus pausado para os demais perfis (mínimo impacto)
+        {
+          const waitBusyMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_BUSY_MS || 120000) || 120000);
+          const waitPauseMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_PAUSE_MS || 45000) || 45000);
+          const phaseBudgetMs = Math.min(budgetLeftMs(), Math.max(20_000, waitBusyMs + waitPauseMs + 10_000));
+          await waitForQuiesce({ out, phaseBudgetMs, waitBusyMs, waitPauseMs }).catch(e => {
+            const msg = normalizeErr(e);
+            out.steps.push({ step: 'quiesce_error', at: Date.now(), error: msg });
+            try { provisionAudit.append({ ts: Date.now(), event: 'stock_provision_quiesce_error', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, error: msg }); } catch {}
+          });
+        }
 
         // 1) criar perfil
         const created = await runStep('create_profile', async () => {
