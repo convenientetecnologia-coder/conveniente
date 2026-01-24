@@ -2668,6 +2668,39 @@ const handlers = {
           }
         } catch {}
 
+        // Blindagem UX: se o navegador está “preto”/blank, garante ao menos uma aba navegada/visível para o humano.
+        try {
+          const ctrl = controllers.get(nome);
+          if (ctrl && ctrl.browser && typeof ctrl.browser.pages === 'function' && ctrl.browser.isConnected?.()) {
+            const pages = await ctrl.browser.pages().catch(()=>[]);
+            const p0 = pages && pages[0];
+            const u0 = (() => { try { return p0 && typeof p0.url === 'function' ? String(p0.url() || '') : ''; } catch { return ''; } })();
+            const needsNewPage = (!p0 || !u0 || u0 === 'about:blank');
+            const ensurePage = async (page) => {
+              try { await page.bringToFront?.().catch(()=>{}); } catch {}
+              // navega para uma tela “humana” padrão (Messenger Marketplace) para inspeção imediata
+              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await new Promise(r => setTimeout(r, 1600));
+              await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: 'human_mode_entry', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+            };
+            if (needsNewPage) {
+              const np = await ctrl.browser.newPage().catch(()=>null);
+              if (np) {
+                try {
+                  const man = await manifestStore.read(nome).catch(()=>null);
+                  await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || '')).catch(()=>{});
+                } catch {}
+                await ensurePage(np);
+                ctrl.mainPage = np;
+                try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
+              }
+            } else {
+              await ensurePage(p0);
+              ctrl.mainPage = p0;
+            }
+          }
+        } catch {}
+
         // UX/telemetria: expõe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnóstico)
         try {
           robeMeta[nome] = robeMeta[nome] || {};
@@ -2918,7 +2951,7 @@ const handlers = {
 
       const hardBlockReason = (lr) => {
         const r = String(lr && lr.reason || '').toLowerCase();
-        return (r.includes('captcha') || r.includes('checkpoint') || r.includes('identity'));
+        return (r.includes('captcha') || r.includes('checkpoint') || r.includes('identity') || r.includes('two_factor') || r.includes('2fa') || r.includes('two factor'));
       };
 
       // 6) tentativa 2: login+senha (apenas se for login_form; caso contrário invoca humano)
@@ -2981,6 +3014,16 @@ const handlers = {
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
 
+          // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir para Messenger.
+          try {
+            const lrAfterFb = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+            if (lrAfterFb && lrAfterFb.loginRequired && hardBlockReason(lrAfterFb)) {
+              pushStep({ step: 'non_automatable_after_login_fb', lr: lrAfterFb });
+              await failFastToHuman(String(lrAfterFb.reason || 'login_requires_human'));
+              return { ok: false, error: String(lrAfterFb.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
+            }
+          } catch {}
+
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
           await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
@@ -2990,6 +3033,16 @@ const handlers = {
           const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
+
+          // Se Messenger cair em estado não automatizável, também fail-fast.
+          try {
+            const lrAfterMsg = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+            if (lrAfterMsg && lrAfterMsg.loginRequired && hardBlockReason(lrAfterMsg)) {
+              pushStep({ step: 'non_automatable_after_login_msg', lr: lrAfterMsg });
+              await failFastToHuman(String(lrAfterMsg.reason || 'login_requires_human'));
+              return { ok: false, error: String(lrAfterMsg.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
+            }
+          } catch {}
 
           // revalidar
           await new Promise(r => setTimeout(r, 1400));
@@ -3023,6 +3076,7 @@ const handlers = {
         if (r.includes('captcha')) return r;
         if (r.includes('checkpoint')) return r;
         if (r.includes('identity')) return r;
+        if (r.includes('two_factor') || r.includes('2fa') || r.includes('two factor')) return 'two_factor';
         return '';
       };
       const na = nonAutomatableReason(lrMessenger) || nonAutomatableReason(lrFacebook);

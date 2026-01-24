@@ -2771,7 +2771,29 @@ async function detectLoginRequired(page) {
         t.includes('video selfie') ||
         (t.includes('selfie') && t.includes('video'))
       );
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, href0, path0, title0 };
+
+      // 4) 2FA / autenticação de dois fatores (NÃO automatizável)
+      const hasTwoFactorText =
+        h1.some(t =>
+          t.includes('autenticacao de dois fatores') ||
+          t.includes('dois fatores') ||
+          t.includes('two-factor') ||
+          t.includes('two factor') ||
+          t.includes('authentication code') ||
+          t.includes('codigo de autenticacao') ||
+          t.includes('codigo de login') ||
+          t.includes('gerador de codigo') ||
+          t.includes('approvals needed') ||
+          t.includes('aprovacoes de login')
+        ) ||
+        bodyTxt.includes('autenticacao de dois fatores') ||
+        bodyTxt.includes('dois fatores') ||
+        bodyTxt.includes('two-factor') ||
+        bodyTxt.includes('approvals needed') ||
+        bodyTxt.includes('codigo de autenticacao') ||
+        bodyTxt.includes('codigo de login');
+
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -2782,6 +2804,7 @@ async function detectLoginRequired(page) {
     const hasPersonaText = !!(v && v.hasPersonaText);
     const hasCheckpointText = !!(v && v.hasCheckpointText);
     const hasIdentityText = !!(v && v.hasIdentityText);
+    const hasTwoFactorText = !!(v && v.hasTwoFactorText);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
@@ -2803,6 +2826,18 @@ async function detectLoginRequired(page) {
       /\/checkpoint\//i.test(hrefNorm) ||
       /\/recover\//i.test(hrefNorm);
 
+    // 2FA sempre vence (não dá para “contornar” em outra aba)
+    if (hasTwoFactorText) {
+      return {
+        loginRequired: true,
+        reason: 'two_factor',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+      };
+    }
+
     // Messenger é especial:
     // muitas vezes a tela de login (form#login_form) aparece na rota "/" (marketing page),
     // então não dá para exigir strongLoginPath/title como no Facebook.
@@ -2813,7 +2848,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
       };
     }
 
@@ -2829,7 +2864,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
       };
     }
     if (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title))) {
@@ -2839,7 +2874,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
       };
     }
     // Captcha/persona e checkpoint podem aparecer fora de /checkpoint (ex.: /index.php, m.facebook.com/error, etc).
@@ -2851,7 +2886,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
       };
     }
     if (hasCheckpointText && (strongLoginPath || /checkpoint/i.test(title))) {
@@ -2862,7 +2897,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
       };
     }
 
@@ -2872,7 +2907,7 @@ async function detectLoginRequired(page) {
       domain,
       url: (v && v.href0) ? String(v.href0) : href,
       title,
-      evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+      evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
     };
   } catch {}
   return { loginRequired: false };
