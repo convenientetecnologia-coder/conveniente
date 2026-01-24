@@ -2255,6 +2255,107 @@ try { freezeCooldownIfNotWorking(nome); } catch {}
 await snapshotStatusAndWrite();
 }
 
+// ===== Ultra enterprise: quiescência determinística para operações críticas (inject cookies / provision) =====
+function _quiesceSnapshot({ excludeNome } = {}) {
+  const snap = {
+    controllers: controllers.size,
+    busyNames: [],
+    busyDetails: [],
+    virtusOnlineNames: [],
+    pauseableVirtusNames: [],
+    pauseableVirtusDetails: []
+  };
+  for (const [n, c] of controllers.entries()) {
+    if (!c) continue;
+    const nome = String(n);
+    if (excludeNome && nome === String(excludeNome)) continue;
+    const sendLockActive = !!(c.browser && c.browser._sendLock && c.browser._sendLock.active);
+    const robeEmExecucao = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+    const inConfig = (c.configurando === true);
+    const inHuman = (c.humanControl === true);
+    const virtusOnline = !!c.virtus;
+    if (virtusOnline) snap.virtusOnlineNames.push(nome);
+    if (sendLockActive || robeEmExecucao) {
+      snap.busyNames.push(nome);
+      snap.busyDetails.push({ nome, sendLockActive, robeEmExecucao, inConfig, inHuman, virtusOnline, trabalhando: !!c.trabalhando });
+    }
+    // "pausável": virtus online e não está ocupado/humano/config
+    if (virtusOnline && !sendLockActive && !robeEmExecucao && !inConfig && !inHuman) {
+      snap.pauseableVirtusNames.push(nome);
+      snap.pauseableVirtusDetails.push({ nome, virtusOnline, trabalhando: !!c.trabalhando });
+    }
+  }
+  return snap;
+}
+
+async function waitGlobalQuiesce({ opKind, operator, targetNome, waitBusyMs, waitPauseMs, require = true } = {}) {
+  const op = String(operator || '').trim() || null;
+  const kind = String(opKind || 'unknown');
+  const target = targetNome ? String(targetNome) : null;
+  const busyMax = Math.max(0, Number(waitBusyMs || 0) || 0);
+  const pauseMax = Math.max(0, Number(waitPauseMs || 0) || 0);
+  const startedAt = Date.now();
+
+  const audit = (obj) => {
+    try {
+      provisionAudit.append({ ts: Date.now(), event: 'quiesce', kind, operator: op, target, ...obj });
+    } catch {}
+  };
+
+  audit({ phase: 'begin', busyMax, pauseMax, snap: _quiesceSnapshot({ excludeNome: target }) });
+
+  // (1) Espera busy (send/post) finalizar
+  if (busyMax > 0) {
+    const t0 = Date.now();
+    while ((Date.now() - t0) < busyMax) {
+      const s = _quiesceSnapshot({ excludeNome: target });
+      if (s.busyNames.length === 0) break;
+      await sleep(900);
+    }
+    const s2 = _quiesceSnapshot({ excludeNome: target });
+    const okBusy = (s2.busyNames.length === 0);
+    audit({ phase: 'busy_done', ok: okBusy, busyNames: s2.busyNames.slice(0, 50), busyDetails: s2.busyDetails.slice(0, 50) });
+    if (require && !okBusy) {
+      const err = `busy_timeout count=${s2.busyNames.length}`;
+      audit({ phase: 'fail', error: err });
+      throw new Error(err);
+    }
+  }
+
+  // (2) Pausa Virtus para todos que são pausáveis
+  const paused = [];
+  const s3 = _quiesceSnapshot({ excludeNome: target });
+  for (const nome of s3.pauseableVirtusNames) {
+    try {
+      const wasWorking = !!(controllers.get(nome)?.trabalhando);
+      await stopVirtus(nome);
+      paused.push({ nome, wasWorking });
+    } catch {}
+  }
+  audit({ phase: 'pause_sent', pausedCount: paused.length, pausedNames: paused.map(x => x.nome).slice(0, 50) });
+
+  // (3) Espera nenhum Virtus "pausável" permanecer online
+  if (pauseMax > 0) {
+    const t1 = Date.now();
+    while ((Date.now() - t1) < pauseMax) {
+      const s = _quiesceSnapshot({ excludeNome: target });
+      if (s.pauseableVirtusNames.length === 0) break;
+      await sleep(600);
+    }
+    const s4 = _quiesceSnapshot({ excludeNome: target });
+    const okPause = (s4.pauseableVirtusNames.length === 0);
+    audit({ phase: 'pause_done', ok: okPause, pauseableVirtusNames: s4.pauseableVirtusNames.slice(0, 50), virtusOnlineNames: s4.virtusOnlineNames.slice(0, 50) });
+    if (require && !okPause) {
+      const err = `pause_timeout count=${s4.pauseableVirtusNames.length}`;
+      audit({ phase: 'fail', error: err });
+      throw new Error(err);
+    }
+  }
+
+  audit({ phase: 'done', elapsedMs: Date.now() - startedAt, pausedCount: paused.length });
+  return { ok: true, elapsedMs: Date.now() - startedAt, paused };
+}
+
 function attachBrowserLifecycle(nome, browser) {
 browser.once('disconnected', async () => {
 try {
@@ -2657,6 +2758,18 @@ const handlers = {
       }
       ctrl.configurando = true;
 
+      // Ultra enterprise: antes de injetar cookies, garantir quiescência global (Virtus/Robe pausados)
+      try {
+        const require = String(process.env.CONFIGURE_REQUIRE_QUIESCE || '1').trim() === '1';
+        const waitBusyMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_BUSY_MS || 120000) || 120000);
+        const waitPauseMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_PAUSE_MS || 45000) || 45000);
+        await waitGlobalQuiesce({ opKind: 'configure', operator: String(operator || '').trim(), targetNome: nome, waitBusyMs, waitPauseMs, require });
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        try { await issues.append(nome, 'mil_action', `configure_quiesce_failed ${msg}`); } catch {}
+        return { ok: false, error: `quiesce_failed:${msg}` };
+      }
+
       try { await stopVirtus(nome); } catch {}
 
       try {
@@ -2862,37 +2975,24 @@ const handlers = {
         return { ok: false, error: 'browser_not_connected', steps };
       }
 
-      // 2) pausa Virtus em modo “inteligente” (não interrompe envio ativo)
+      // 2) Ultra enterprise: quiescência determinística antes de injetar cookies
+      // - espera envios/postagens ativos terminarem (busy)
+      // - pausa Virtus de todos os perfis "pausáveis"
+      // Se não conseguir quiescer dentro do timeout: aborta (sem falso positivo).
       const pausedVirtus = []; // [{ nome, wasWorking }]
       try {
-        const t0 = Date.now();
-        while ((Date.now() - t0) < waitBusyMs) {
-          let anyBusy = false;
-          controllers.forEach((c, n) => {
-            try {
-              if (!c || !c.browser) return;
-              if (c.browser._sendLock && c.browser._sendLock.active) anyBusy = true;
-              if (robeMeta[n] && robeMeta[n].emExecucao === true) anyBusy = true;
-            } catch {}
-          });
-          if (!anyBusy) break;
-          await new Promise(r => setTimeout(r, 700));
-        }
-
-        controllers.forEach((c, n) => {
-          try {
-            if (!c || !c.virtus || typeof c.virtus.stop !== 'function') return;
-            if (c.browser && c.browser._sendLock && c.browser._sendLock.active) return;
-            const wasWorking = !!c.trabalhando;
-            c.virtus.stop().catch(()=>{});
-            c.virtus = null;
-            c.trabalhando = false;
-            pausedVirtus.push({ nome: String(n), wasWorking });
-          } catch {}
-        });
+        const require = true;
+        const waitPauseMs = Math.max(0, Number(opts.waitPauseMs || 45_000) || 45_000);
+        const q = await waitGlobalQuiesce({ opKind: 'login_remediate', operator: op, targetNome: nome, waitBusyMs, waitPauseMs, require });
+        for (const it of (q && q.paused) ? q.paused : []) pausedVirtus.push(it);
         pushStep({ step: 'virtus_paused', count: pausedVirtus.length, names: pausedVirtus.map(x => x.nome).slice(0, 30) });
-      } catch {
-        pushStep({ step: 'virtus_pause_failed' });
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        pushStep({ step: 'quiesce_failed', error: msg });
+        try { provisionLock.release({ owner: op }); } catch {}
+        // Fail fast: não injeta cookies se não conseguiu pausar/esperar busy.
+        await failFastToHuman(msg);
+        return { ok: false, error: `quiesce_failed:${msg}`, steps, pausedVirtus };
       }
 
       // 3) garantir headroom (fechar o mínimo necessário)
