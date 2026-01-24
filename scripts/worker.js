@@ -2805,13 +2805,41 @@ const handlers = {
       let uiFacebook = null;
       try {
         const pages = await ctrl.browser.pages().catch(()=>[]);
-        const pMain = pages && pages[0]; // facebook.com (base)
-        const pCreate = pages && pages[1]; // marketplace/create/item (ROBE)
-        const pLang = pages && pages[2]; // settings/language
-        const pMsg = pages && pages[3]; // messenger
+        const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+        const pick = (pred) => {
+          for (const pg of (pages || [])) {
+            const u = safeUrl(pg);
+            if (!u) continue;
+            try { if (pred(u, pg)) return pg; } catch {}
+          }
+          return null;
+        };
+
+        // Seleção robusta por URL (evita falso positivo por ordem de abas variar)
+        const pMsg = pick((u) => /messenger\.com/i.test(u)); // Messenger (Virtus)
+        const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/item/i.test(u)); // Robe create (FB)
+        const pFb = pick((u) => /facebook\.com\/marketplace/i.test(u)); // Marketplace (FB) fallback
+        const pLang = pick((u) => /facebook\.com\/settings\/language/i.test(u)); // sanity
+        const pAny = (pages && pages[0]) || pMsg || pCreate || pFb || null;
 
         const checkOne = async (page, label) => {
           if (!page) return null;
+          // Blindagem: garanta que estamos checando o domínio correto
+          try {
+            const u0 = safeUrl(page);
+            if (label === 'msg' && !/messenger\.com/i.test(u0)) {
+              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await new Promise(r => setTimeout(r, 700));
+            }
+            if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
+              // Para validar Robe/Marketplace, sempre navega para a rota que importa
+              const targetUrl = (label === 'fb_create')
+                ? 'https://www.facebook.com/marketplace/create/item'
+                : 'https://www.facebook.com/marketplace';
+              await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await new Promise(r => setTimeout(r, 700));
+            }
+          } catch {}
           await appendLoginRemediateEvidence({ nome, operator: op, step: `pre_check_${label}`, page, note: `before check ${label}` });
           // “olhos”: resolve popups/consent antes de validar login
           const ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: 3 }).catch(()=>null);
@@ -2824,20 +2852,28 @@ const handlers = {
           return { ui, lr };
         };
 
-        // A ordem importa: primeiro Messenger (Virtus), depois Robe create, depois main/lang (só sanity)
-        const rMsg = await checkOne(pMsg, 'msg');
+        // A ordem importa: primeiro Messenger (Virtus), depois Facebook create/feed.
+        // Importante: para declarar sucesso, é obrigatório ter validado Messenger + Facebook.
+        const rMsg = await checkOne(pMsg || pAny, 'msg');
         uiMessenger = rMsg && rMsg.ui;
         lrMessenger = rMsg && rMsg.lr;
 
-        const rCreate = await checkOne(pCreate, 'fb_create');
+        const rCreate = await checkOne(pCreate || pFb || pAny, 'fb_create');
         uiFacebook = rCreate && rCreate.ui;
         lrFacebook = rCreate && rCreate.lr;
 
         // sanity checks (não afetam decisão principal, mas deixam evidência)
-        await checkOne(pMain, 'fb_main');
+        await checkOne(pFb || pAny, 'fb_main');
         await checkOne(pLang, 'fb_lang');
       } catch {}
       pushStep({ step: 'post_inject_login_check', lrMessenger, lrFacebook, uiMessenger, uiFacebook });
+
+      // Blindagem: se não conseguimos validar os 2 lados (Messenger + Facebook), NÃO pode dar sucesso.
+      if (!lrMessenger || !lrFacebook) {
+        pushStep({ step: 'missing_required_tabs_for_validation', hasMsg: !!lrMessenger, hasFb: !!lrFacebook });
+        await failFastToHuman('validation_incomplete_missing_tabs');
+        return { ok: false, error: 'validation_incomplete_missing_tabs', steps, closedForRam, pausedVirtus };
+      }
 
       const needsLogin =
         (lrMessenger && lrMessenger.loginRequired) ||
@@ -2853,9 +2889,9 @@ const handlers = {
         const bad = (hardBlockReason(lrMessenger) || hardBlockReason(lrFacebook));
         if (bad) {
           pushStep({ step: 'non_automatable_login_state', lrMessenger, lrFacebook });
-          try { await setLoginRequiredFlag(nome, { reason: (lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_required', source: 'login_remediate' }); } catch {}
-          await failFastToHuman('login_requires_human');
-          return { ok: false, error: 'login_requires_human', steps, closedForRam, pausedVirtus };
+          const why = String((lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_requires_human');
+          await failFastToHuman(why);
+          return { ok: false, error: why, steps, closedForRam, pausedVirtus };
         }
 
         try {
