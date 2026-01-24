@@ -4101,6 +4101,178 @@ async function detectMessengerTempBlock(page) {
   } catch { return { blocked: false }; }
 }
 
+// =========================================================
+// AUTO LOGIN-REMEDIATE (enterprise autopilot)
+// - Objetivo: ao detectar loginRequired (login_form) em qualquer perfil aberto,
+//   disparar automaticamente o fluxo robusto `login_remediate` com mínimo impacto.
+// - Guardrails:
+//   - 1 por vez por worker/host (evita storm ao "abrir todos")
+//   - backoff por perfil + limite por janela
+//   - NUNCA tenta para captcha/checkpoint/identity (vira humanHold)
+// =========================================================
+const AUTO_LR_CFG = {
+  enabled: !(String(process.env.AUTO_LOGIN_REMEDIATE || '').trim() === '0'),
+  tickMs: Math.max(2000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 5000) || 5000),
+  immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
+  minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
+  maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
+  backoffFailMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_FAIL_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)), // 45min
+  totalTimeoutMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TOTAL_TIMEOUT_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)),
+  stageTimeoutMs: {
+    activate: Math.max(10_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_ACTIVATE_MS || 90_000) || 90_000),
+    injectCookies: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_INJECT_MS || 240_000) || 240_000),
+    loginFb: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_LOGIN_FB_MS || 120_000) || 120_000),
+    loginMsg: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_LOGIN_MSG_MS || 120_000) || 120_000),
+    collectCookies: Math.max(10_000, Number(process.env.AUTO_LOGIN_REMEDIATE_STAGE_COLLECT_MS || 90_000) || 90_000),
+  }
+};
+
+let _autoLoginRemediateRunning = false;
+let _autoLoginRemediateRunningNome = null;
+
+function _pruneWindow(arr, winMs) {
+  const now = Date.now();
+  const a = Array.isArray(arr) ? arr : [];
+  return a.filter(ts => ts && (now - ts) <= winMs);
+}
+
+function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false } = {}) {
+  try {
+    if (!AUTO_LR_CFG.enabled) return false;
+    if (!nome) return false;
+    robeMeta[nome] = robeMeta[nome] || {};
+    const st = robeMeta[nome].autoLoginRemediate = (robeMeta[nome].autoLoginRemediate || {});
+    const now = Date.now();
+
+    st.attempts24h = _pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
+    if ((st.attempts24h || []).length >= AUTO_LR_CFG.maxAttemptsPerProfile24h) {
+      st.queued = false;
+      st.nextAt = Math.max(st.nextAt || 0, now + (3 * 60 * 60 * 1000));
+      try { issues.append(nome, 'mil_action', `auto_login_remediate_suppressed: max_attempts_24h=${AUTO_LR_CFG.maxAttemptsPerProfile24h}`).catch(()=>{}); } catch {}
+      return false;
+    }
+
+    const last = Number(st.lastStartAt || 0) || 0;
+    const earliest = last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0;
+    const when = Math.max(
+      now + (immediate ? AUTO_LR_CFG.immediateDelayMs : 2500),
+      earliest,
+      Number(st.nextAt || 0) || 0
+    );
+    st.queued = true;
+    st.nextAt = when;
+    st.reason = String(reason || '').slice(0, 80);
+    st.source = String(source || '').slice(0, 80);
+    st.enqueuedAt = now;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function autoLoginRemediateTick() {
+  if (!AUTO_LR_CFG.enabled) return;
+  if (_autoLoginRemediateRunning) return;
+  // Não competir com provisionamento/manual configure em andamento: evita alternância de lock
+  try { if (provisionLock.isActive()) return; } catch {}
+
+  const desired = readJsonFile(desiredPath, { perfis: {} });
+  const now = Date.now();
+
+  let best = null;
+  for (const [nome, ctrl] of controllers.entries()) {
+    if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
+    if (ctrl.humanControl === true || ctrl.configurando === true) continue;
+    if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) continue;
+    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
+
+    const want = desired && desired.perfis ? desired.perfis[nome] : null;
+    if (want && want.humanHold === true) continue;
+
+    const flags = await readAccountFlags(nome).catch(()=>({}));
+    const lrFlag = !!(flags && flags.loginRequired === true);
+    const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
+    const queued = !!(st && st.queued);
+    const nextAt = st ? (Number(st.nextAt || 0) || 0) : 0;
+
+    // Só tenta se o perfil está marcado como loginRequired (persistido) e está enfileirado (evento detectado).
+    if (!lrFlag || !queued) continue;
+    if (nextAt && nextAt > now) continue;
+
+    if (!best || nextAt < best.nextAt) best = { nome, nextAt: nextAt || now };
+  }
+
+  if (!best) return;
+
+  const nome = best.nome;
+  robeMeta[nome] = robeMeta[nome] || {};
+  const st = robeMeta[nome].autoLoginRemediate = (robeMeta[nome].autoLoginRemediate || {});
+
+  _autoLoginRemediateRunning = true;
+  _autoLoginRemediateRunningNome = nome;
+  st.queued = false;
+  st.inFlight = true;
+  st.lastStartAt = Date.now();
+  st.attempts24h = _pruneWindow(st.attempts24h, 24 * 60 * 60 * 1000);
+  st.attempts24h.push(st.lastStartAt);
+
+  const operator = `auto_login_remediate:${nome}:${st.lastStartAt}`;
+  try {
+    try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_begin', nome, operator, reason: st.reason || null, source: st.source || null }); } catch {}
+    try { await issues.append(nome, 'mil_action', `auto_login_remediate_begin reason=${st.reason||''} source=${st.source||''}`); } catch {}
+
+    const resp = await handlers.login_remediate({
+      nome,
+      operator,
+      options: {
+        // Autopilot nunca quebra "humanHold" automaticamente.
+        overrideHumanHold: false,
+        // Pós-sucesso enterprise: fecha, reabre mínimos e inicia Virtus.
+        closeAfterSuccess: true,
+        startAfterSuccess: true,
+        reopenClosedForRam: true,
+        // Guardrails (não fechar muito)
+        maxHardDeactivations: 2,
+        // Timeouts duros
+        totalTimeoutMs: AUTO_LR_CFG.totalTimeoutMs,
+        stageTimeoutMs: AUTO_LR_CFG.stageTimeoutMs,
+        // Espera um pouco mais se estiver ocupado (robe/postagem/enviando)
+        waitBusyMs: 120_000
+      }
+    });
+
+    st.lastDoneAt = Date.now();
+    st.lastOk = !!(resp && resp.ok);
+    st.lastError = resp && resp.error ? String(resp.error).slice(0, 160) : null;
+    try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_done', nome, operator, ok: st.lastOk, error: st.lastError || null }); } catch {}
+
+    if (!st.lastOk) {
+      // Backoff em falha: evita loop no mesmo perfil.
+      st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
+      try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
+    } else {
+      // Sucesso: limpa fila.
+      st.nextAt = 0;
+      st.reason = null;
+      st.source = null;
+    }
+  } catch (e) {
+    st.lastDoneAt = Date.now();
+    st.lastOk = false;
+    st.lastError = (e && e.message) ? String(e.message).slice(0, 160) : String(e).slice(0, 160);
+    st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
+    try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_exception', nome, operator, error: st.lastError }); } catch {}
+    try { await issues.append(nome, 'mil_action', `auto_login_remediate_exception err=${st.lastError}`); } catch {}
+  } finally {
+    try {
+      st.inFlight = false;
+      robeMeta[nome].autoLoginRemediate = st;
+    } catch {}
+    _autoLoginRemediateRunning = false;
+    _autoLoginRemediateRunningNome = null;
+  }
+}
+
 let _nurseTickRunning = false;
 
 async function nurseTick() {
@@ -4420,6 +4592,30 @@ async function nurseTick() {
             } catch {}
           } catch {}
           await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
+
+          // Enterprise autopilot:
+          // - login_form => tentar auto-remediação (cookies -> login/senha) com mínimo impacto (1 por vez)
+          // - captcha/checkpoint => segurar em humanHold (não existe automação confiável)
+          try {
+            const rr = String(lr && lr.reason || '').toLowerCase();
+            if (rr.includes('captcha') || rr.includes('checkpoint')) {
+              try { await issues.append(nome, 'mil_action', `login_requires_human_hold reason=${rr}`); } catch {}
+              try { ctrl.humanControl = true; ctrl.trabalhando = false; } catch {}
+              try { await stopVirtus(nome); } catch {}
+              try {
+                await fileStore.withDesiredFileLockUpdate((desired) => {
+                  desired.perfis = desired.perfis || {};
+                  desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off', active: true };
+                  return desired;
+                });
+              } catch {}
+            } else if (rr.includes('login_form')) {
+              const okQueue = queueAutoLoginRemediate(nome, { reason: lr.reason || '', source: lr.domain || '', immediate: true });
+              if (okQueue) {
+                try { await issues.append(nome, 'mil_action', `auto_login_remediate_queued reason=${String(lr.reason||'').slice(0,80)}`); } catch {}
+              }
+            }
+          } catch {}
         }
       } catch {}
       try {
@@ -4811,6 +5007,9 @@ async function trySwapOpen(target) {
 
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
+// Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
+setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickMs);
+setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
 
 // Inicializa reloadManager após todos os sistemas estarem prontos
 reloadManager.startReloadManager(controllers, robeMeta);
