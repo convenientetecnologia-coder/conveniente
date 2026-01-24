@@ -79,6 +79,9 @@ async function montarPerfisBaseline() {
     // === CAMPOS ADICIONADOS PARA BLINDAGEM DE SHAPE:
     loginRequired: false,
     loginReason: null,
+    loginRemediateFailed: false,
+    loginRemediateFailedAt: null,
+    loginRemediateFailedReason: null,
     banned: false,
     bannedAt: null,
     bannedText: null,
@@ -149,6 +152,9 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     // === CAMPOS ADICIONADOS PARA BLINDAGEM DE SHAPE:
     loginRequired: false,
     loginReason: null,
+    loginRemediateFailed: false,
+    loginRemediateFailedAt: null,
+    loginRemediateFailedReason: null,
     banned: false,
     bannedAt: null,
     bannedText: null,

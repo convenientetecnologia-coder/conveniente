@@ -925,11 +925,28 @@ module.exports = (app, workerClient, fileStore) => {
 // ========== ENDPOINT CANÔNICO: abrir todos 24h (identico ao local) ==========
   app.post('/api/perfis/open-all-24h', async (req, res) => {
     const issues = require('./issues.js');
+    const op = String(req.headers['x-operator'] || 'bulk_open_all');
 
     try {
       const perfisArr = fileStore.loadPerfisJson() || [];
+      const loginFailedSet = new Set();
 
-      // 1) PASSO ATÔMICO: zera humanHold, e já seta virtus:on + active:true em todos
+      // 0) Pré-scan enterprise: identifica perfis que devem abrir em modo humano (login falhou).
+      // Regra: se loginRemediateFailed=true no manifest, não inicia trabalho automaticamente.
+      for (const p of perfisArr) {
+        try {
+          const nome = p && p.nome;
+          if (!nome) continue;
+          const man = await manifestStore.read(nome).catch(()=>null);
+          if (man && man.accountFlags && man.accountFlags.loginRemediateFailed === true) {
+            loginFailedSet.add(nome);
+          }
+        } catch {}
+      }
+
+      // 1) PASSO ATÔMICO: desired.active=true para todos.
+      // Para perfis com login falho: virtus OFF (abre para humano).
+      // Importante: NÃO usa humanHold como gate (humanHold impede abrir).
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
         for (const p of perfisArr) {
@@ -937,20 +954,26 @@ module.exports = (app, workerClient, fileStore) => {
           const nome = p.nome;
           desired.perfis[nome] = {
             ...(desired.perfis[nome] || {}),
-            humanHold: false,
             active: true,
-            virtus: 'on'
+            virtus: loginFailedSet.has(nome) ? 'off' : 'on'
           };
         }
         return desired;
       });
 
-      // LOG por perfil: hold reset
+      // LOG por perfil: bulk open
       for (const p of perfisArr) {
-        try { await issues.append(p.nome, 'mil_action', 'human_hold=false (bulk_open_all)'); } catch {}
+        try {
+          if (loginFailedSet.has(p.nome)) {
+            await issues.append(p.nome, 'mil_action', 'bulk_open_all: loginRemediateFailed=true -> open_human_only');
+          } else {
+            await issues.append(p.nome, 'mil_action', 'bulk_open_all');
+          }
+        } catch {}
       }
 
-      // 2) Loop de abertura + start-work (sequencial)
+      // 2) Loop de abertura (sequencial).
+      // Perfis com login falho: abre (activate), mas NÃO dá start_work.
       const results = [];
       for (const p of perfisArr) {
         const nome = p.nome;
@@ -963,7 +986,8 @@ module.exports = (app, workerClient, fileStore) => {
           err = (e && e.message) || String(e);
         }
 
-        if (okActivate) {
+        const isLoginFailed = loginFailedSet.has(nome);
+        if (okActivate && !isLoginFailed) {
           try {
             const r2 = await workerClient.sendWorkerCommand('start_work', { nome, operator: op }, { timeoutMs: 60000 });
             okStart = !!(r2 && r2.ok);
@@ -972,7 +996,7 @@ module.exports = (app, workerClient, fileStore) => {
           }
         }
 
-        results.push({ nome, activate: okActivate, start: okStart, error: err || null });
+        results.push({ nome, activate: okActivate, start: isLoginFailed ? null : okStart, humanOnly: isLoginFailed, error: err || null });
 
         // pequeno respiro (igual ao front local)
         await new Promise(r => setTimeout(r, 800));

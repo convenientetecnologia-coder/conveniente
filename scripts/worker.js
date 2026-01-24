@@ -181,6 +181,28 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
   } catch {}
 }
 
+// Quando o fluxo automático tentou (cookies + login/senha) e falhou, marca persistente.
+// Regra enterprise: NÃO re-tentar automaticamente em loop; só "Retomar trabalho" libera nova tentativa.
+async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', stage = '' } = {}) {
+  try {
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.loginRemediateFailed = true;
+      man.accountFlags.loginRemediateFailedAt = Date.now();
+      man.accountFlags.loginRemediateFailedReason = String(reason || '').slice(0, 220);
+      man.accountFlags.loginRemediateFailedSource = String(source || '').slice(0, 120);
+      if (stage) man.accountFlags.loginRemediateFailedStage = String(stage || '').slice(0, 80);
+      man.accountFlags.loginRemediateFailedCount = Number(man.accountFlags.loginRemediateFailedCount || 0) + 1;
+      return man;
+    });
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].loginRemediateFailed = true;
+    robeMeta[nome].loginRemediateFailedReason = String(reason || '').slice(0, 220);
+    robeMeta[nome].whyNotOpen = 'login_remediate_failed';
+  } catch {}
+}
+
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   try {
     const prev = await readAccountFlags(nome);
@@ -242,6 +264,23 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.lastLoginRequiredAt;
         }
       }
+      if (which.includes('loginRemediateFailed')) {
+        if (
+          man.accountFlags.loginRemediateFailed ||
+          man.accountFlags.loginRemediateFailedAt ||
+          man.accountFlags.loginRemediateFailedReason ||
+          man.accountFlags.loginRemediateFailedSource ||
+          man.accountFlags.loginRemediateFailedStage ||
+          man.accountFlags.loginRemediateFailedCount
+        ) {
+          delete man.accountFlags.loginRemediateFailed;
+          delete man.accountFlags.loginRemediateFailedAt;
+          delete man.accountFlags.loginRemediateFailedReason;
+          delete man.accountFlags.loginRemediateFailedSource;
+          delete man.accountFlags.loginRemediateFailedStage;
+          delete man.accountFlags.loginRemediateFailedCount;
+        }
+      }
       if (which.includes('banned')) {
         if (man.accountFlags.banned || man.accountFlags.bannedAt || man.accountFlags.bannedReason || man.accountFlags.bannedText) {
           delete man.accountFlags.banned;
@@ -275,6 +314,11 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
       delete robeMeta[nome].loginRequired;
       delete robeMeta[nome].loginReason;
       delete robeMeta[nome].loginSource;
+    }
+    if (which.includes('loginRemediateFailed')) {
+      delete robeMeta[nome].loginRemediateFailed;
+      delete robeMeta[nome].loginRemediateFailedReason;
+      if (robeMeta[nome].whyNotOpen === 'login_remediate_failed') delete robeMeta[nome].whyNotOpen;
     }
     if (which.includes('banned')) delete robeMeta[nome].banned;
     if (which.includes('messengerPin')) {
@@ -1141,6 +1185,22 @@ async function activateOnce(nome, source = '', operator = '') {
           }, 2000);
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+
+        // Enterprise: se este perfil está marcado como "loginRemediateFailed",
+        // abrir já em modo humano (sem automação) ao invés de tentar loops automáticos.
+        try {
+          const flags = await readAccountFlags(nome).catch(()=>({}));
+          if (flags && flags.loginRemediateFailed === true) {
+            const ctrl = controllers.get(nome);
+            if (ctrl) {
+              ctrl.humanControl = true;
+              ctrl.trabalhando = false;
+              try { await stopVirtus(nome); } catch {}
+              await reportAction(nome, 'mil_action', 'opened_in_human_mode (loginRemediateFailed=true)');
+              try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_login_failed'); } catch {}
+            }
+          }
+        } catch {}
 
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activatedAt = Date.now();
@@ -2562,11 +2622,17 @@ const handlers = {
         try {
           await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
         } catch {}
+        try {
+          await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
+        } catch {}
         // Hard safety: humanHold no desired (suprime reopen) mesmo se browser estiver travado
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), humanHold: true, virtus: 'off' };
+            // Regra enterprise: NÃO usar humanHold como "gate" que impede abrir.
+            // A conta deve abrir em modo humano quando o usuário pedir (Abrir/Abrir todos),
+            // mas a automação deve ficar OFF até o usuário "Retomar trabalho".
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), virtus: 'off' };
             return d;
           });
         } catch {}
@@ -2917,7 +2983,7 @@ const handlers = {
             pushStep({ step: 'manifest_cookies_updated' });
           }
         } catch {}
-        try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
+        try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
       } else {
         pushStep({ step: 'login_remediate_failed', lrMessenger, lrFacebook });
@@ -3504,6 +3570,9 @@ const handlers = {
       const loginRequired = man ? !!(man.accountFlags && man.accountFlags.loginRequired === true) : !!robeMeta[nome]?.loginRequired;
       const loginReason = man ? ((man.accountFlags && man.accountFlags.loginReason) || null) : (robeMeta[nome]?.loginReason || null);
       const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) || null) : (robeMeta[nome]?.loginSource || null);
+      const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
+      const loginRemediateFailedAt = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedAt) || null) : null;
+      const loginRemediateFailedReason = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedReason) || null) : (robeMeta[nome]?.loginRemediateFailedReason || null);
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
@@ -3551,6 +3620,9 @@ const handlers = {
         loginRequired,
         loginReason,
         loginSource,
+        loginRemediateFailed,
+        loginRemediateFailedAt,
+        loginRemediateFailedReason,
         banned,
         bannedAt,
         bannedText,
@@ -4191,12 +4263,24 @@ async function autoLoginRemediateTick() {
 
     const flags = await readAccountFlags(nome).catch(()=>({}));
     const lrFlag = !!(flags && flags.loginRequired === true);
+    const lrFailed = !!(flags && flags.loginRemediateFailed === true);
     const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
     const queued = !!(st && st.queued);
     const nextAt = st ? (Number(st.nextAt || 0) || 0) : 0;
 
     // Só tenta se o perfil está marcado como loginRequired (persistido) e está enfileirado (evento detectado).
     if (!lrFlag || !queued) continue;
+    // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
+    if (lrFailed) {
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].autoLoginRemediate = robeMeta[nome].autoLoginRemediate || {};
+        robeMeta[nome].autoLoginRemediate.queued = false;
+        robeMeta[nome].autoLoginRemediate.nextAt = Math.max(robeMeta[nome].autoLoginRemediate.nextAt || 0, Date.now() + (6 * 60 * 60 * 1000));
+      } catch {}
+      try { issues.append(nome, 'mil_action', 'auto_login_remediate_skip(loginRemediateFailed=true)').catch(()=>{}); } catch {}
+      continue;
+    }
     if (nextAt && nextAt > now) continue;
 
     if (!best || nextAt < best.nextAt) best = { nome, nextAt: nextAt || now };
@@ -4247,6 +4331,8 @@ async function autoLoginRemediateTick() {
     try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_done', nome, operator, ok: st.lastOk, error: st.lastError || null }); } catch {}
 
     if (!st.lastOk) {
+      // Persistir estado de falha (para abrir em modo humano e impedir loops automáticos)
+      try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
       // Backoff em falha: evita loop no mesmo perfil.
       st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
       try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
@@ -4255,6 +4341,7 @@ async function autoLoginRemediateTick() {
       st.nextAt = 0;
       st.reason = null;
       st.source = null;
+      try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
     }
   } catch (e) {
     st.lastDoneAt = Date.now();
@@ -4610,10 +4697,18 @@ async function nurseTick() {
                 });
               } catch {}
             } else if (rr.includes('login_form')) {
-              const okQueue = queueAutoLoginRemediate(nome, { reason: lr.reason || '', source: lr.domain || '', immediate: true });
-              if (okQueue) {
-                try { await issues.append(nome, 'mil_action', `auto_login_remediate_queued reason=${String(lr.reason||'').slice(0,80)}`); } catch {}
-              }
+              // Blindagem anti-loop: se já falhou e foi marcado, não re-tenta automaticamente.
+              try {
+                const flags = await readAccountFlags(nome).catch(()=>({}));
+                if (flags && flags.loginRemediateFailed === true) {
+                  try { await issues.append(nome, 'mil_action', 'auto_login_remediate_skip(loginRemediateFailed=true)'); } catch {}
+                } else {
+                  const okQueue = queueAutoLoginRemediate(nome, { reason: lr.reason || '', source: lr.domain || '', immediate: true });
+                  if (okQueue) {
+                    try { await issues.append(nome, 'mil_action', `auto_login_remediate_queued reason=${String(lr.reason||'').slice(0,80)}`); } catch {}
+                  }
+                }
+              } catch {}
             }
           } catch {}
         }
