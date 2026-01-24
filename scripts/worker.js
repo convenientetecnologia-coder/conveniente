@@ -2981,37 +2981,77 @@ const handlers = {
 
         if (success && closeAfterSuccess) {
           pushStep({ step: 'post_success_close_target_begin' });
-          try { await withTimeout('post_success_close_target', handlers.deactivate({ nome, reason: 'login_remediate_post_success', policy: 'noReopen' }), 60_000); } catch {}
+          // NÃO usar handlers.deactivate aqui (ele reentra em lockProfileAction e pode deadlockar).
+          try {
+            const ctrlClose = controllers.get(nome);
+            if (ctrlClose && ctrlClose.browser && ctrlClose.browser.isConnected?.()) {
+              try { if (ctrlClose.virtus && typeof ctrlClose.virtus.stop === 'function') await ctrlClose.virtus.stop(); } catch {}
+              ctrlClose.virtus = null;
+              ctrlClose.trabalhando = false;
+              await withTimeout('post_success_hard_close', hardCloseController(nome, ctrlClose, { reason: 'login_remediate_post_success', allowKillUserDataDir: false }), 60_000).catch(()=>null);
+              try { controllers.delete(nome); } catch {}
+              try { stopPruneLoop(nome); } catch {}
+              try { freezeCooldownIfNotWorking(nome); } catch {}
+              try { await snapshotStatusAndWrite(); } catch {}
+            }
+          } catch {}
           pushStep({ step: 'post_success_close_target_done' });
         }
 
         if (success && reopenClosedForRam && Array.isArray(closedForRam) && closedForRam.length) {
-          const snapPol = ramPolicy.snapshotPolicy();
-          const reopened = [];
-          for (const n of closedForRam) {
-            const free = getAvailableMB();
-            // guardrail: só reabre se tiver RAM mínima de operação normal
-            if (free < (snapPol && snapPol.reserveNormalMB || 0)) {
-              pushStep({ step: 'reopen_closed_for_ram_stopped_low_ram', freeMB: free, needMB: snapPol && snapPol.reserveNormalMB || null, reopened: reopened.slice(0, 30) });
-              break;
-            }
-            pushStep({ step: 'reopen_closed_for_ram_try', nome: String(n), freeMB: free });
-            try { await withTimeout(`reopen_${String(n)}`, handlers.activate({ nome: String(n), operator: op }), stageTimeoutMs.activate); reopened.push(String(n)); } catch {}
-            await new Promise(r => setTimeout(r, 1200)); // gradual
+          // Já foram fechados com policy=preserveDesired; o worker agenda reopenAt.
+          // Aqui apenas “dá um empurrão” para reabrir mais cedo de forma gradual, sem reentrar em locks.
+          const nudged = [];
+          const now = Date.now();
+          for (let i = 0; i < closedForRam.length; i++) {
+            const n = String(closedForRam[i] || '').trim();
+            if (!n) continue;
+            try {
+              robeMeta[n] = robeMeta[n] || {};
+              const when = now + 1500 + (i * 1200);
+              if (!robeMeta[n].reopenAt || robeMeta[n].reopenAt > when) robeMeta[n].reopenAt = when;
+              nudged.push(n);
+            } catch {}
           }
-          pushStep({ step: 'reopen_closed_for_ram_done', count: reopened.length, names: reopened.slice(0, 30) });
+          pushStep({ step: 'reopen_closed_for_ram_nudged', count: nudged.length, names: nudged.slice(0, 30) });
         }
 
         if (success && startAfterSuccess) {
-          pushStep({ step: 'post_success_activate_target_begin' });
-          try { await withTimeout('post_success_activate_target', handlers.activate({ nome, operator: op }), stageTimeoutMs.activate); } catch (e) {
-            pushStep({ step: 'post_success_activate_target_fail', error: (e && e.message) || String(e) });
+          // NÃO usar handlers.activate/start_work aqui (reentrância de lockProfileAction).
+          // Faz activateOnce + start Virtus direto (equivalente a start_work, sem lock).
+          pushStep({ step: 'post_success_activate_once_begin' });
+          let act = null;
+          try { act = await withTimeout('post_success_activate_once', activateOnce(nome, 'login_remediate_post_success', op), stageTimeoutMs.activate); } catch (e) {
+            pushStep({ step: 'post_success_activate_once_fail', error: (e && e.message) || String(e) });
           }
-          pushStep({ step: 'post_success_start_work_begin' });
-          try { await withTimeout('post_success_start_work', start_work({ nome, operator: op }), 120_000); } catch (e) {
-            pushStep({ step: 'post_success_start_work_fail', error: (e && e.message) || String(e) });
+          pushStep({ step: 'post_success_activate_once_done', ok: !!(act && act.ok) });
+
+          pushStep({ step: 'post_success_start_virtus_begin' });
+          try {
+            const ctrlNow = controllers.get(nome);
+            if (ctrlNow && ctrlNow.browser && ctrlNow.browser.isConnected?.()) {
+              if (!automationAllowed(ctrlNow, { operator: op })) {
+                pushStep({ step: 'post_success_start_virtus_denied', error: 'automation_not_allowed' });
+              } else {
+                ctrlNow.virtusEpoch = (ctrlNow.virtusEpoch || 0);
+                ctrlNow.virtus = virtusHelper.startVirtus(ctrlNow.browser, nome, {
+                  restrictTab: 0,
+                  epoch: ctrlNow.virtusEpoch,
+                  slowMode: (autoMode && autoMode.mode !== 'full'),
+                  governorMode: (autoMode && autoMode.mode) || 'full'
+                });
+                ctrlNow.trabalhando = true;
+                try { await browserHelper.forceCloseExtras(ctrlNow.browser); } catch {}
+                try { await snapshotStatusAndWrite(); } catch {}
+                pushStep({ step: 'post_success_start_virtus_ok' });
+              }
+            } else {
+              pushStep({ step: 'post_success_start_virtus_no_browser' });
+            }
+          } catch (e) {
+            pushStep({ step: 'post_success_start_virtus_fail', error: (e && e.message) || String(e) });
           }
-          pushStep({ step: 'post_success_start_work_done' });
+          pushStep({ step: 'post_success_start_virtus_done' });
         }
       } catch {}
 
