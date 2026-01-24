@@ -2758,31 +2758,32 @@ const handlers = {
       }
       ctrl.configurando = true;
 
-      // Ultra enterprise: antes de injetar cookies, garantir quiescência global (Virtus/Robe pausados)
-      try {
-        const require = String(process.env.CONFIGURE_REQUIRE_QUIESCE || '1').trim() === '1';
-        const waitBusyMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_BUSY_MS || 120000) || 120000);
-        const waitPauseMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_PAUSE_MS || 45000) || 45000);
-        await waitGlobalQuiesce({ opKind: 'configure', operator: String(operator || '').trim(), targetNome: nome, waitBusyMs, waitPauseMs, require });
-      } catch (e) {
-        const msg = (e && e.message) ? String(e.message) : String(e);
-        try { await issues.append(nome, 'mil_action', `configure_quiesce_failed ${msg}`); } catch {}
-        return { ok: false, error: `quiesce_failed:${msg}` };
-      }
-
-      try { await stopVirtus(nome); } catch {}
-
-      try {
-        await fileStore.withDesiredFileLockUpdate((desired) => {
-          desired.perfis = desired.perfis || {};
-          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
-          return desired;
-        });
-      } catch {}
-
       const op = String(operator || '').trim();
       const isStockProvision = (op && op.toLowerCase().startsWith('stock_provision'));
+      const pausedGlobal = [];
       try {
+        // Ultra enterprise: antes de injetar cookies, garantir quiescência global (Virtus/Robe pausados)
+        // Importante: se pausarmos Virtus de outros perfis, precisamos retomar ao final.
+        {
+          const require = String(process.env.CONFIGURE_REQUIRE_QUIESCE || '1').trim() === '1';
+          const waitBusyMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_BUSY_MS || 120000) || 120000);
+          const waitPauseMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_PAUSE_MS || 45000) || 45000);
+          const q = await waitGlobalQuiesce({ opKind: 'configure', operator: op, targetNome: nome, waitBusyMs, waitPauseMs, require });
+          for (const it of (q && q.paused) ? q.paused : []) pausedGlobal.push(it);
+        }
+
+        // Sempre pausar Virtus do próprio alvo antes de reinjetar cookies
+        try { await stopVirtus(nome); } catch {}
+
+        // Operação de configuração é crítica: mantém Virtus OFF enquanto configura
+        try {
+          await fileStore.withDesiredFileLockUpdate((desired) => {
+            desired.perfis = desired.perfis || {};
+            desired.perfis[nome] = { ...(desired.perfis[nome] || {}), virtus: 'off' };
+            return desired;
+          });
+        } catch {}
+
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
         try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
         logger.info('[HANDLER] configure ok', { nome });
@@ -2798,6 +2799,29 @@ const handlers = {
         // - configure via stock_provision => NÃO entra em modo humano (para permitir start-work automático)
         ctrl.humanControl = !isStockProvision;
         stopPruneLoop(nome);
+        // Retoma Virtus dos perfis que estavam trabalhando e foram pausados para quiescência.
+        try {
+          const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
+          const resumed = [];
+          for (const it of pausedGlobal) {
+            try {
+              if (!it || !it.nome) continue;
+              const n = String(it.nome);
+              if (n === String(nome)) continue;
+              const want = desiredSnap && desiredSnap.perfis ? (desiredSnap.perfis[n] || {}) : {};
+              if (!(it.wasWorking === true)) continue;
+              if (want && want.virtus === 'off') continue; // respeita desired
+              const c = controllers.get(n);
+              if (!c || !c.browser || !c.browser.isConnected?.()) continue;
+              if (!automationAllowed(c)) continue;
+              c.virtusEpoch = (c.virtusEpoch || 0);
+              c.virtus = virtusHelper.startVirtus(c.browser, n, { restrictTab: 0, epoch: c.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+              c.trabalhando = true;
+              resumed.push(n);
+            } catch {}
+          }
+          try { provisionAudit.append({ ts: Date.now(), event: 'configure_quiesce_resumed', nome: String(nome||''), operator: op, resumedCount: resumed.length, resumed: resumed.slice(0, 40) }); } catch {}
+        } catch {}
         await snapshotStatusAndWrite();
       }
     });
@@ -3630,7 +3654,7 @@ const handlers = {
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
           desired.perfis = desired.perfis || {};
-          if (desired.perfis[nome]) desired.perfis[nome].humanHold = false;
+          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
           return desired;
         });
       } catch {}
