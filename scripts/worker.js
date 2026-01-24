@@ -2969,6 +2969,52 @@ const handlers = {
         try { await snapshotStatusAndWrite(); } catch {}
       } catch {}
 
+      // 8) Pós-sucesso enterprise:
+      // - fechar o navegador do perfil (remove aba create/item, libera RAM)
+      // - reabrir perfis fechados por RAM (mínimo impacto, gradual)
+      // - reabrir e iniciar trabalho do perfil alvo (se solicitado)
+      try {
+        const opts2 = (options && typeof options === 'object') ? options : {};
+        const closeAfterSuccess = !(opts2.closeAfterSuccess === false || opts2.closeAfterSuccess === 0 || String(opts2.closeAfterSuccess||'').toLowerCase()==='false');
+        const startAfterSuccess = !(opts2.startAfterSuccess === false || opts2.startAfterSuccess === 0 || String(opts2.startAfterSuccess||'').toLowerCase()==='false');
+        const reopenClosedForRam = !(opts2.reopenClosedForRam === false || opts2.reopenClosedForRam === 0 || String(opts2.reopenClosedForRam||'').toLowerCase()==='false');
+
+        if (success && closeAfterSuccess) {
+          pushStep({ step: 'post_success_close_target_begin' });
+          try { await withTimeout('post_success_close_target', handlers.deactivate({ nome, reason: 'login_remediate_post_success', policy: 'noReopen' }), 60_000); } catch {}
+          pushStep({ step: 'post_success_close_target_done' });
+        }
+
+        if (success && reopenClosedForRam && Array.isArray(closedForRam) && closedForRam.length) {
+          const snapPol = ramPolicy.snapshotPolicy();
+          const reopened = [];
+          for (const n of closedForRam) {
+            const free = getAvailableMB();
+            // guardrail: só reabre se tiver RAM mínima de operação normal
+            if (free < (snapPol && snapPol.reserveNormalMB || 0)) {
+              pushStep({ step: 'reopen_closed_for_ram_stopped_low_ram', freeMB: free, needMB: snapPol && snapPol.reserveNormalMB || null, reopened: reopened.slice(0, 30) });
+              break;
+            }
+            pushStep({ step: 'reopen_closed_for_ram_try', nome: String(n), freeMB: free });
+            try { await withTimeout(`reopen_${String(n)}`, handlers.activate({ nome: String(n), operator: op }), stageTimeoutMs.activate); reopened.push(String(n)); } catch {}
+            await new Promise(r => setTimeout(r, 1200)); // gradual
+          }
+          pushStep({ step: 'reopen_closed_for_ram_done', count: reopened.length, names: reopened.slice(0, 30) });
+        }
+
+        if (success && startAfterSuccess) {
+          pushStep({ step: 'post_success_activate_target_begin' });
+          try { await withTimeout('post_success_activate_target', handlers.activate({ nome, operator: op }), stageTimeoutMs.activate); } catch (e) {
+            pushStep({ step: 'post_success_activate_target_fail', error: (e && e.message) || String(e) });
+          }
+          pushStep({ step: 'post_success_start_work_begin' });
+          try { await withTimeout('post_success_start_work', start_work({ nome, operator: op }), 120_000); } catch (e) {
+            pushStep({ step: 'post_success_start_work_fail', error: (e && e.message) || String(e) });
+          }
+          pushStep({ step: 'post_success_start_work_done' });
+        }
+      } catch {}
+
       try {
         provisionAudit.append({
           ts: Date.now(),
