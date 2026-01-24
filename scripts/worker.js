@@ -178,6 +178,18 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     robeMeta[nome].loginRequired = true;
     robeMeta[nome].loginReason = reason || '';
     robeMeta[nome].loginSource = source || '';
+
+    // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃO pode ficar "Online".
+    // Isso evita telemetria falsa (trabalhando=true) e evita loops de automação em tela de login.
+    try {
+      const ctrl = controllers.get(nome);
+      if (ctrl) {
+        ctrl.trabalhando = false;
+        try { await stopVirtus(nome); } catch {}
+      }
+    } catch {}
+
+    try { await snapshotStatusAndWrite(); } catch {}
   } catch {}
 }
 
@@ -3123,13 +3135,40 @@ const handlers = {
           // revalidar
           await new Promise(r => setTimeout(r, 1400));
           lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+
+          // Facebook: validar primeiro marketplace, depois create/item (Robe real)
+          const uiRetryUnblock = async (label, rounds = 4) => {
+            // Espera extra para evitar "unknown" por race de navegação/contexto
+            await new Promise(r => setTimeout(r, 1600));
+            let ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
+            if (ui && ui.ok === false && ui.kind === 'unknown') {
+              // Retry com reload: muitos "unknown" são contexto destruído durante redirect
+              try { await p0.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+              await new Promise(r => setTimeout(r, 1800));
+              ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
+            }
+            return ui;
+          };
+
+          // 1) Marketplace (sanity)
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          await new Promise(r => setTimeout(r, 1200));
-          uiFacebook = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_post_login', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+          uiFacebook = await uiRetryUnblock('post_login_marketplace', 4);
           pushStep({ step: 'ui_unblock_fb_after_login', ui: uiFacebook });
           lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           pushStep({ step: 'post_login_check', lrMessenger, lrFacebook, uiFacebook });
-          await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)}` });
+
+          // 2) Create item (Robe real)
+          let uiCreate = null;
+          let lrCreate = null;
+          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          uiCreate = await uiRetryUnblock('post_login_create_item', 4);
+          lrCreate = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          pushStep({ step: 'post_login_check_create_item', lrCreate, uiCreate });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
+
+          // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
+          if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
+          if (lrCreate && lrCreate.loginRequired) lrFacebook = lrCreate;
 
         } catch (e) {
           pushStep({ step: 'attempt2_login_fail', error: (e && e.message) || String(e) });

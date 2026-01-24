@@ -341,9 +341,12 @@
         // 0) Falha de login_remediate (blindagem anti-loop): precisa aparecer MUITO claro no painel
         if (p.loginRemediateFailed === true) {
           const rr = String(p.loginRemediateFailedReason || 'login_remediate_failed').trim();
+          const x = rr.toLowerCase();
+          const isUi = x.startsWith('ui_blocked:');
+          const is2fa = (x.includes('two_factor') || x.includes('2fa') || x.includes('two factor'));
           return {
             kind: 'login_failed',
-            label: 'Login/Cookies falhou (Humano)',
+            label: isUi ? 'UI bloqueada (Humano)' : (is2fa ? '2FA (Humano)' : 'Login/Cookies falhou (Humano)'),
             cls: 'bad',
             title: rr ? `Falha automática (anti-loop). Motivo: ${rr}.` : 'Falha automática (anti-loop).'
           };
