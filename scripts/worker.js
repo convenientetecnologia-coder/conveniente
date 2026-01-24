@@ -3829,6 +3829,12 @@ const handlers = {
       const man0 = await manifestStore.read(nome).catch(()=>null);
       const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
+      // Observabilidade enterprise: flags runtime (usadas para pausa/quiescência determinística)
+      const ctrl = controllers.get(nome);
+      const virtusOnline = !!(ctrl && ctrl.virtus);
+      const sendLockActive = !!(ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active);
+      const robeEmExecucao = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
+
       perfis.push({
         nome,
         label: p.label || null,
@@ -3836,6 +3842,9 @@ const handlers = {
         uaPresetId: p.uaPresetId,
         active: controllers.has(nome),
         trabalhando: !!(controllers.get(nome)?.trabalhando),
+        virtusOnline,
+        sendLockActive,
+        robeEmExecucao,
         configurando: !!(controllers.get(nome)?.configurando),
         humanControl: !!(controllers.get(nome)?.humanControl),
         humanHold: !!(desiredSnap.perfis && desiredSnap.perfis[nome] && desiredSnap.perfis[nome].humanHold === true),
