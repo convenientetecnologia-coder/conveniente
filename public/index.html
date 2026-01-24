@@ -338,6 +338,17 @@
         p = (p && typeof p === 'object') ? p : {};
         const r = (robes && p.nome && robes[p.nome]) ? robes[p.nome] : null;
 
+        // 0) Falha de login_remediate (blindagem anti-loop): precisa aparecer MUITO claro no painel
+        if (p.loginRemediateFailed === true) {
+          const rr = String(p.loginRemediateFailedReason || 'login_remediate_failed').trim();
+          return {
+            kind: 'login_failed',
+            label: 'Login/Cookies falhou (Humano)',
+            cls: 'bad',
+            title: rr ? `Falha automática (anti-loop). Motivo: ${rr}.` : 'Falha automática (anti-loop).'
+          };
+        }
+
         // 1) Banida vence tudo
         if (p.banned === true) {
           return { kind: 'banned', label: 'Conta suspensa', cls: 'bad', title: (p.bannedText || 'Suspensão/désativação detectada') };

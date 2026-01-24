@@ -2803,6 +2803,20 @@ async function detectLoginRequired(page) {
       /\/checkpoint\//i.test(hrefNorm) ||
       /\/recover\//i.test(hrefNorm);
 
+    // Messenger é especial:
+    // muitas vezes a tela de login (form#login_form) aparece na rota "/" (marketing page),
+    // então não dá para exigir strongLoginPath/title como no Facebook.
+    if (domain === 'messenger' && hasRoyal && hasInputs) {
+      return {
+        loginRequired: true,
+        reason: 'login_form',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, path }
+      };
+    }
+
     // Detecção mais conservadora para evitar falso positivo:
     // - login_form só é válido se a rota for claramente de login/checkpoint
     // - checkpoint/captcha também exige rota/sinais de checkpoint
@@ -2925,12 +2939,23 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
 
   // 2) preencher formulário (FB / Messenger)
   try {
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(600);
   } catch {}
 
   try {
-    await page.type('input[name="email"], input#email', email, { delay: 20 }).catch(()=>{});
-    await page.type('input[name="pass"], input#pass', pass, { delay: 20 }).catch(()=>{});
+    // aguarda inputs aparecerem (evita “atropelo” de render)
+    await page.waitForSelector('input[name="email"], input#email', { timeout: 12000 }).catch(()=>{});
+    await page.waitForSelector('input[name="pass"], input#pass', { timeout: 12000 }).catch(()=>{});
+
+    // limpa e digita com pequeno delay humano
+    await page.evaluate(() => {
+      const e = document.querySelector('input[name="email"], input#email');
+      const p = document.querySelector('input[name="pass"], input#pass');
+      if (e) e.value = '';
+      if (p) p.value = '';
+    }).catch(()=>{});
+    await page.type('input[name="email"], input#email', email, { delay: 28 }).catch(()=>{});
+    await page.type('input[name="pass"], input#pass', pass, { delay: 28 }).catch(()=>{});
   } catch (e) {
     return { ok: false, error: (e && e.message) || 'type_failed' };
   }
@@ -2938,8 +2963,10 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
   // 3) marcar "manter-me conectado" se existir
   await _maybeClickKeepConnected(page);
 
-  // 4) submit
+  // 4) submit (enterprise): click -> Enter -> form.submit -> GPT -> click (2a)
   try {
+    // dá um respiro pra UI renderizar botões/handlers após preencher inputs
+    await sleep(600);
     const clicked = await page.evaluate(() => {
       const btn =
         document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
@@ -2949,24 +2976,49 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
       btn.click();
       return true;
     });
+
     if (!clicked) {
-      // Fallback GPT (opcional): tenta remover modal/selector e depois tenta novamente 1x
+      // fallback 1: Enter no campo senha
+      try {
+        await page.focus('input[name="pass"], input#pass').catch(()=>{});
+        await page.keyboard.press('Enter').catch(()=>{});
+        await sleep(450);
+      } catch {}
+
+      // fallback 2: form.submit()
+      try {
+        const submitted = await page.evaluate(() => {
+          const form =
+            document.querySelector('form#login_form') ||
+            document.querySelector('form[data-testid="royal_login_form"]') ||
+            document.querySelector('form[action*="/login/password/"]');
+          if (!form) return false;
+          try { form.submit(); return true; } catch { return false; }
+        });
+        if (submitted) await sleep(450);
+      } catch {}
+
+      // fallback 3: GPT (opcional) e tenta clique novamente 1x
       if (allowGpt && nome) {
-        try { await gptRemediateFbUi(page, nome, { reason: 'login_button_not_found', stage: 'login_submit' }); } catch {}
-        try {
-          const clicked2 = await page.evaluate(() => {
-            const btn =
-              document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
-              document.querySelector('form#login_form button[type="submit"]') ||
-              document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]');
-            if (!btn) return false;
-            btn.click();
-            return true;
-          });
-          if (!clicked2) return { ok: false, error: 'login_button_not_found' };
-        } catch {}
+        try { await gptRemediateFbUi(page, nome, { reason: 'login_submit_fallback', stage: 'login_submit' }); } catch {}
+        await sleep(900);
+        const clicked2 = await page.evaluate(() => {
+          // inclui botões que não são submit mas funcionam como CTA
+          const norm = (s) => (s || '').toLowerCase();
+          const btn =
+            document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
+            document.querySelector('form#login_form button[type="submit"]') ||
+            document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]') ||
+            Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]')).find(el => {
+              const t = norm(el.innerText || el.textContent || '');
+              return t === 'entrar' || t === 'continuar' || t.includes('continuar') || t.includes('entrar') || t.includes('log in') || t.includes('sign in');
+            });
+          if (!btn) return false;
+          try { btn.click(); return true; } catch { return false; }
+        }).catch(()=>false);
+        if (!clicked2) return { ok: false, error: 'login_submit_failed' };
       } else {
-        return { ok: false, error: 'login_button_not_found' };
+        return { ok: false, error: 'login_submit_failed' };
       }
     }
   } catch (e) {
@@ -2975,7 +3027,8 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
 
   // 5) aguardar navegação estabilizar
   try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-  try { await sleep(1500); } catch {}
+  // “anti-atropelo”: alguns popups/redirects vêm 1-3s depois
+  try { await sleep(2600); } catch {}
   // Validação “com olhos” (sem falso positivo): se ainda estiver em login_form, falha
   try {
     const lr = await detectLoginRequired(page).catch(()=>({ loginRequired:false }));

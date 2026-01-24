@@ -1080,6 +1080,8 @@ async function activateOnce(nome, source = '', operator = '') {
 
   opening[nome] = true;
   let _supervisorSlotGranted = false;
+  let _humanHoldAtStart = false;
+  let _humanHoldAllowOpen = false;
   try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
@@ -1108,9 +1110,16 @@ async function activateOnce(nome, source = '', operator = '') {
 
     try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
-      if (desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true) {
-        await reportAction(nome, 'mil_action', 'activate_skip_human_hold');
-        return { ok: false, error: 'human_hold' };
+      _humanHoldAtStart = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
+      if (_humanHoldAtStart) {
+        const op = String(operator || '').trim();
+        const isHumanOp = /(^admin|^ui|manual|user|humano|human)/i.test(op);
+        // Regra enterprise: humanHold deve bloquear automação, mas NÃO deve impedir o humano de abrir o navegador.
+        _humanHoldAllowOpen = !!isHumanOp;
+        if (!_humanHoldAllowOpen) {
+          await reportAction(nome, 'mil_action', 'activate_skip_human_hold');
+          return { ok: false, error: 'human_hold' };
+        }
       }
     } catch {}
 
@@ -1185,6 +1194,18 @@ async function activateOnce(nome, source = '', operator = '') {
           }, 2000);
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+
+        // Enterprise: se está em humanHold e o operador é humano, abre em modo humano (sem automação).
+        if (_humanHoldAtStart && _humanHoldAllowOpen) {
+          const ctrl = controllers.get(nome);
+          if (ctrl) {
+            ctrl.humanControl = true;
+            ctrl.trabalhando = false;
+            try { await stopVirtus(nome); } catch {}
+            await reportAction(nome, 'mil_action', 'opened_in_human_mode (humanHold=true)');
+            try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_human_hold'); } catch {}
+          }
+        }
 
         // Enterprise: se este perfil está marcado como "loginRemediateFailed",
         // abrir já em modo humano (sem automação) ao invés de tentar loops automáticos.
@@ -2625,19 +2646,35 @@ const handlers = {
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        // Hard safety: humanHold no desired (suprime reopen) mesmo se browser estiver travado
+        // Hard safety: travar automação + deixar evidência visível
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            // Regra enterprise: NÃO usar humanHold como "gate" que impede abrir.
-            // A conta deve abrir em modo humano quando o usuário pedir (Abrir/Abrir todos),
-            // mas a automação deve ficar OFF até o usuário "Retomar trabalho".
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), virtus: 'off' };
+            // Regra enterprise:
+            // - manter o navegador ABERTO para inspeção humana (invocar humano real)
+            // - automação OFF até o usuário "Retomar trabalho"
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
             return d;
           });
         } catch {}
-        // CRÍTICO: nunca pode travar aqui. Deactivate pode pendurar ao fechar browser.
-        try { await withTimeout('failfast_deactivate', handlers.deactivate({ nome, reason: why, policy: 'preserveDesired' }), 45_000); } catch {}
+
+        // Mantém o browser aberto e entra em modo humano (se estiver conectado)
+        try {
+          const ctrl = controllers.get(nome);
+          if (ctrl) {
+            ctrl.humanControl = true;
+            ctrl.trabalhando = false;
+            try { await stopVirtus(nome); } catch {}
+          }
+        } catch {}
+
+        // UX/telemetria: expõe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnóstico)
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].whyNotOpen = why;
+        } catch {}
+
+        try { await snapshotStatusAndWrite(); } catch {}
       };
 
       try {
@@ -2829,7 +2866,7 @@ const handlers = {
             const u0 = safeUrl(page);
             if (label === 'msg' && !/messenger\.com/i.test(u0)) {
               await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-              await new Promise(r => setTimeout(r, 700));
+              await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
               // Para validar Robe/Marketplace, sempre navega para a rota que importa
@@ -2837,7 +2874,7 @@ const handlers = {
                 ? 'https://www.facebook.com/marketplace/create/item'
                 : 'https://www.facebook.com/marketplace';
               await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-              await new Promise(r => setTimeout(r, 700));
+              await new Promise(r => setTimeout(r, 2200));
             }
           } catch {}
           await appendLoginRemediateEvidence({ nome, operator: op, step: `pre_check_${label}`, page, note: `before check ${label}` });
@@ -2937,7 +2974,8 @@ const handlers = {
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          await new Promise(r => setTimeout(r, 900));
+          await new Promise(r => setTimeout(r, 2600));
+          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
           const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
@@ -2946,7 +2984,8 @@ const handlers = {
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
           await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          await new Promise(r => setTimeout(r, 900));
+          await new Promise(r => setTimeout(r, 2600));
+          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
           const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
