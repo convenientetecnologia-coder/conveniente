@@ -2930,9 +2930,24 @@ const handlers = {
 
       const op = String(operator || '').trim();
       const isStockProvision = (op && op.toLowerCase().startsWith('stock_provision'));
+      const mustHaveProvisionLock = String(process.env.CONFIGURE_REQUIRE_PROVISION_LOCK || '1').trim() === '1';
+      if (mustHaveProvisionLock) {
+        try {
+          if (!provisionLock.isActive()) {
+            // Contrato enterprise: configure deve rodar sob provisionLock para bloquear Robe/nurse e evitar flapping.
+            // (A rota API já adquire lock; stock_provision e login_remediate também usam lock global próprio.)
+            return { ok: false, error: 'configure_requires_provision_lock' };
+          }
+        } catch {
+          return { ok: false, error: 'configure_requires_provision_lock' };
+        }
+      }
       const pausedGlobal = [];
       const closedForRam = [];
       let enteredHuman = false;
+      const targetWasWorking = !!ctrl.trabalhando;
+      const desiredBefore = readJsonFile(desiredPath, { perfis: {} });
+      const targetDesiredBefore = (desiredBefore && desiredBefore.perfis && desiredBefore.perfis[nome]) ? { ...(desiredBefore.perfis[nome] || {}) } : {};
 
       const invokeHumanForConfigure = async (reason) => {
         const why = String(reason || 'configure_failed');
@@ -3106,9 +3121,10 @@ const handlers = {
       } finally {
         ctrl.configurando = false;
         // Regra enterprise:
-        // - configure via UI/admin => entra em modo humano (para inspeção)
-        // - configure via stock_provision => NÃO entra em modo humano (para permitir start-work automático)
-        ctrl.humanControl = enteredHuman ? true : !isStockProvision;
+        // - configure (falha) => entra em modo humano (para inspeção/resolução)
+        // - configure (sucesso) => NÃO força modo humano; restaura estado desejado e retoma automação
+        // - stock_provision ainda controla "start_work" no pipeline (dashboard.js)
+        ctrl.humanControl = enteredHuman ? true : false;
         stopPruneLoop(nome);
         // Retoma Virtus dos perfis que estavam trabalhando e foram pausados para quiescência.
         try {
@@ -3128,10 +3144,37 @@ const handlers = {
               c.virtusEpoch = (c.virtusEpoch || 0);
               c.virtus = virtusHelper.startVirtus(c.browser, n, { restrictTab: 0, epoch: c.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
               c.trabalhando = true;
+              try { unfreezeCooldownIfWorking(n); } catch {}
               resumed.push(n);
             } catch {}
           }
           try { provisionAudit.append({ ts: Date.now(), event: 'configure_quiesce_resumed', nome: String(nome||''), operator: op, resumedCount: resumed.length, resumed: resumed.slice(0, 40) }); } catch {}
+        } catch {}
+
+        // Restaura desired do alvo (manual) e retoma Virtus do alvo (best-effort) se estava trabalhando.
+        try {
+          if (!enteredHuman && !isStockProvision) {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d.perfis = d.perfis || {};
+              const cur = d.perfis[nome] || {};
+              // Mantém active como está (evita desligar por engano), mas restaura virtus ao que era antes.
+              const wantVirtus = (targetDesiredBefore && typeof targetDesiredBefore.virtus === 'string') ? targetDesiredBefore.virtus : cur.virtus;
+              d.perfis[nome] = { ...cur, virtus: wantVirtus };
+              return d;
+            });
+          }
+        } catch {}
+        try {
+          if (!enteredHuman && !isStockProvision && targetWasWorking) {
+            const d2 = readJsonFile(desiredPath, { perfis: {} });
+            const want = d2 && d2.perfis ? (d2.perfis[nome] || {}) : {};
+            if (want && want.virtus !== 'off' && ctrl && ctrl.browser && ctrl.browser.isConnected?.() && automationAllowed(ctrl)) {
+              ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+              ctrl.trabalhando = true;
+              try { unfreezeCooldownIfWorking(nome); } catch {}
+            }
+          }
         } catch {}
         await snapshotStatusAndWrite();
       }
