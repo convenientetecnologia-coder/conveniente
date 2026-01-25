@@ -237,6 +237,17 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
       man.accountFlags.appealLastReason = 'appeal_submitted';
       return man;
     });
+    // Evidência enterprise: provision_audit é allowlisted via fetch_logs.
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'appeal_detected',
+        nome: String(nome || ''),
+        source: String(source || '').slice(0, 80),
+        url: String(url || '').slice(0, 220),
+        title: String(title || '').slice(0, 120)
+      });
+    } catch {}
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].appealSubmitted = true;
     robeMeta[nome].whyNotOpen = 'appeal_submitted';
@@ -271,6 +282,15 @@ async function armAppealMonitor(nome, { delayMs = APPEAL_CFG.firstDelayMs } = {}
       man.accountFlags.appealNextCheckAt = next;
       return man;
     });
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'appeal_monitor_armed',
+        nome: String(nome || ''),
+        nextAt: next,
+        delayMs: Math.max(0, next - Date.now())
+      });
+    } catch {}
   } catch {}
 }
 
@@ -313,6 +333,15 @@ async function appealMonitorCheckNow(nome, ctrl) {
     const pg = pickFb();
     if (!pg) return { ok: false, error: 'no_pages' };
 
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'appeal_monitor_check_begin',
+        nome: String(nome || ''),
+        url: String(safeUrl(pg) || '').slice(0, 220)
+      });
+    } catch {}
+
     // Refresh leve + detecção
     try { await pg.bringToFront?.().catch(()=>{}); } catch {}
     await pg.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
@@ -351,6 +380,13 @@ async function appealMonitorCheckNow(nome, ctrl) {
         try { unfreezeCooldownIfWorking(nome); } catch {}
       } catch {}
       try { await issues.append(nome, 'mil_action', 'appeal_monitor_resolved_active'); } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'appeal_monitor_resolved_active',
+          nome: String(nome || '')
+        });
+      } catch {}
       return { ok: true, resolved: true };
     }
 
@@ -358,12 +394,30 @@ async function appealMonitorCheckNow(nome, ctrl) {
     const rr = String(lr.reason || '').toLowerCase();
     if (rr.includes('appeal_submitted')) {
       try { await issues.append(nome, 'mil_action', 'appeal_monitor_still_pending'); } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'appeal_monitor_still_pending',
+          nome: String(nome || ''),
+          reason: String(lr.reason || '').slice(0, 200),
+          nextAt: now + APPEAL_CFG.intervalMs
+        });
+      } catch {}
       return { ok: true, pending: true };
     }
 
     // Mudou para outro bloqueio (login/checkpoint/captcha etc): delega para pipeline existente.
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
     try { await issues.append(nome, 'mil_action', `appeal_monitor_transition reason=${rr}`); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'appeal_monitor_transition',
+        nome: String(nome || ''),
+        reason: String(lr.reason || '').slice(0, 220),
+        nextAt: now + APPEAL_CFG.intervalMs
+      });
+    } catch {}
     return { ok: true, transitioned: true, reason: rr };
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
@@ -376,6 +430,15 @@ async function appealMonitorCheckNow(nome, ctrl) {
         man.accountFlags.appealLastReason = `error:${msg}`.slice(0, 120);
         man.accountFlags.appealNextCheckAt = now + APPEAL_CFG.intervalMs;
         return man;
+      });
+    } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'appeal_monitor_error',
+        nome: String(nome || ''),
+        error: String(msg || '').slice(0, 220),
+        nextAt: now + APPEAL_CFG.intervalMs
       });
     } catch {}
     return { ok: false, error: msg };
@@ -4815,11 +4878,16 @@ const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) ||
 const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
 const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
 const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
+const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
+const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
+const appealLastCheckAt = man ? ((man.accountFlags && man.accountFlags.appealLastCheckAt) || null) : null;
+const appealLastReason = man ? ((man.accountFlags && man.accountFlags.appealLastReason) || null) : null;
 const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
 const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
 const problem = man
-  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.messengerPin === true))
-  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin);
+  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.messengerPin === true) || (man.accountFlags && man.accountFlags.appealSubmitted === true))
+  : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
@@ -4860,6 +4928,11 @@ perfis.push({
   banned,
   bannedAt,
   bannedText,
+  appealSubmitted,
+  appealSubmittedAt,
+  appealNextCheckAt,
+  appealLastCheckAt,
+  appealLastReason,
   messengerPin,
   messengerPinReason,
   problem,
