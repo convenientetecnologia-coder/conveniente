@@ -218,7 +218,7 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
 // ===== Recurso/Apelação (monitoramento) =====
 const APPEAL_CFG = {
   intervalMs: 60 * 60 * 1000,      // 1h
-  firstDelayMs: 2 * 60 * 1000,     // 2min (logo após "Retomar trabalho")
+  firstDelayMs: 60 * 60 * 1000,    // 1h (timer inicial após "Retomar trabalho")
   maxPagesScan: 8
 };
 
@@ -4548,6 +4548,11 @@ const handlers = {
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+      const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
+      const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
+      const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
+      const appealLastCheckAt = man ? ((man.accountFlags && man.accountFlags.appealLastCheckAt) || null) : null;
+      const appealLastReason = man ? ((man.accountFlags && man.accountFlags.appealLastReason) || null) : null;
       const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
       const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
       const problem = man
@@ -4607,6 +4612,11 @@ const handlers = {
         banned,
         bannedAt,
         bannedText,
+        appealSubmitted,
+        appealSubmittedAt,
+        appealNextCheckAt,
+        appealLastCheckAt,
+        appealLastReason,
         messengerPin,
         messengerPinReason,
         problem,
@@ -5421,11 +5431,6 @@ async function nurseTick() {
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
 
-      if (want.humanHold === true) {
-        await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
-        continue;
-      }
-
       // Monitoramento: recurso/apelação submetida (após "Retomar trabalho")
       try {
         const flags = await readAccountFlags(nome).catch(()=>({}));
@@ -5445,6 +5450,11 @@ async function nurseTick() {
           continue;
         }
       } catch {}
+
+      if (want.humanHold === true) {
+        await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
+        continue;
+      }
 
       {
         const rm = robeMeta[nome] || {};

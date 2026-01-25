@@ -357,6 +357,20 @@
           return { kind: 'banned', label: 'Conta suspensa', cls: 'bad', title: (p.bannedText || 'Suspensão/désativação detectada') };
         }
 
+        // 1.5) Recurso/Apelação submetida (monitoramento a cada 1h)
+        if (p.appealSubmitted === true) {
+          const nextAt = Number(p.appealNextCheckAt || 0) || 0;
+          const remainSec = nextAt ? Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)) : 0;
+          const extra = nextAt ? ` (${tempoRestante(remainSec)})` : ' (aguardando)';
+          const lr = String(p.appealLastReason || '').trim();
+          return {
+            kind: 'appeal_pending',
+            label: 'Recurso em análise' + extra,
+            cls: 'warn',
+            title: lr ? `Último status detectado: ${lr}.` : 'Recurso em análise. O sistema fará reload e recheck quando o timer zerar.'
+          };
+        }
+
         // 2) LoginRequired é guarda-chuva; loginReason define o subtipo final
         if (p.loginRequired === true) {
           const rr = String(p.loginReason || '').trim();
