@@ -393,6 +393,13 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       man.accountFlags.bannedAt = Date.now();
       man.accountFlags.bannedReason = String(reason||'');
       man.accountFlags.bannedText = String(snippet||'').slice(0, 400);
+      // Enterprise: se chegou ao ban, não faz sentido manter "loginRemediateFailed" mascarando o estado.
+      delete man.accountFlags.loginRemediateFailed;
+      delete man.accountFlags.loginRemediateFailedAt;
+      delete man.accountFlags.loginRemediateFailedReason;
+      delete man.accountFlags.loginRemediateFailedSource;
+      delete man.accountFlags.loginRemediateFailedStage;
+      delete man.accountFlags.loginRemediateFailedCount;
       return man;
     });
     if (!already) {
@@ -404,6 +411,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     }
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].banned = true;
+    // Mantém coerência no runtime store também.
+    delete robeMeta[nome].loginRemediateFailed;
+    delete robeMeta[nome].loginRemediateFailedReason;
   } catch {}
 }
 

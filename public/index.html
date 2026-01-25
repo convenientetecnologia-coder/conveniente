@@ -339,7 +339,7 @@
         const r = (robes && p.nome && robes[p.nome]) ? robes[p.nome] : null;
 
         // 0) Falha de login_remediate (blindagem anti-loop): precisa aparecer MUITO claro no painel
-        if (p.loginRemediateFailed === true) {
+        if (p.loginRemediateFailed === true && p.banned !== true) {
           const rr = String(p.loginRemediateFailedReason || 'login_remediate_failed').trim();
           const x = rr.toLowerCase();
           const isUi = x.startsWith('ui_blocked:');
