@@ -215,6 +215,315 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
   } catch {}
 }
 
+// ===== Human Overlay (HUD) =====
+// Objetivo: quando entrar em modo humano, mostrar painel fixo no navegador com nome/motivo/login/senha e botões (copiar/retomar).
+const HUMAN_OVERLAY_CFG = {
+  enabled: String(process.env.HUMAN_OVERLAY || '').trim() !== '0',
+  maxPagesScan: 8
+};
+
+function _overlayReasonFromFlags(flags) {
+  try {
+    flags = (flags && typeof flags === 'object') ? flags : {};
+    if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
+    if (flags.appealSubmitted === true) return 'appeal_submitted';
+    if (flags.messengerPin === true) return `messenger_pin:${flags.messengerPinReason || ''}`.trim();
+    if (flags.loginRemediateFailed === true) return `login_remediate_failed:${flags.loginRemediateFailedReason || ''}`.trim();
+    if (flags.loginRequired === true) return String(flags.loginReason || 'login_required');
+    return 'human_mode';
+  } catch { return 'human_mode'; }
+}
+
+async function _buildHumanOverlayData(nome) {
+  try {
+    const perfisArr = loadPerfisJson();
+    const p = Array.isArray(perfisArr) ? perfisArr.find(x => x && x.nome === nome) : null;
+    const man = await manifestStore.read(nome).catch(()=>null);
+    const flags = (man && man.accountFlags) ? man.accountFlags : (await readAccountFlags(nome).catch(()=>({})));
+
+    const desired = readJsonFile(desiredPath, { perfis: {} });
+    const want = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
+
+    const login = man && (man.login || man.email || man.user || man.username) ? String(man.login || man.email || man.user || man.username) : '';
+    const password = man && (man.password || man.pass) ? String(man.password || man.pass) : '';
+
+    const data = {
+      enabled: true,
+      nome: String(nome || ''),
+      label: p && p.label ? String(p.label) : '',
+      cidade: p && p.cidade ? String(p.cidade) : '',
+      uaPresetId: p && p.uaPresetId ? String(p.uaPresetId) : '',
+      login,
+      password,
+      reason: _overlayReasonFromFlags(flags),
+      flags: {
+        loginRequired: flags && flags.loginRequired === true,
+        loginReason: flags ? (flags.loginReason || '') : '',
+        banned: flags && flags.banned === true,
+        appealSubmitted: flags && flags.appealSubmitted === true,
+        messengerPin: flags && flags.messengerPin === true,
+        loginRemediateFailed: flags && flags.loginRemediateFailed === true
+      },
+      desired: {
+        active: want && want.active === true,
+        virtus: want && want.virtus ? String(want.virtus) : '',
+        humanHold: want && want.humanHold === true
+      },
+      ts: Date.now()
+    };
+    return data;
+  } catch {
+    return { enabled: true, nome: String(nome || ''), label: '', cidade: '', login: '', password: '', reason: 'human_mode', ts: Date.now() };
+  }
+}
+
+async function _setOverlayDataOnPage(page, data) {
+  try {
+    await page.evaluate((d) => {
+      try {
+        window.__ctHumanOverlaySetData && window.__ctHumanOverlaySetData(d);
+      } catch {}
+    }, data).catch(()=>{});
+  } catch {}
+}
+
+async function _installOverlayOnPage(nome, page) {
+  if (!page) return;
+  try {
+    // Expor callback de "Retomar trabalho" (executa no Node, sem depender de HTTP/CORS).
+    try {
+      await page.exposeFunction('__ctHumanOverlayResume', async () => {
+        try {
+          // Evidência enterprise (sem credenciais)
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_resume_clicked', nome: String(nome || '') }); } catch {}
+        } catch {}
+        try { await handlers['human-resume']({ nome }); } catch {}
+        try { await syncHumanOverlay(nome); } catch {}
+        return true;
+      });
+    } catch {}
+
+    // Injeção persistente (recria em toda navegação).
+    try {
+      await page.evaluateOnNewDocument(() => {
+        try {
+          if (window.__ctHumanOverlayInstalled) return;
+          window.__ctHumanOverlayInstalled = true;
+
+          const HOST_ID = 'ct-human-overlay-host';
+          const nowIso = () => { try { return new Date().toISOString(); } catch { return ''; } };
+
+          function ensureHost() {
+            let host = document.getElementById(HOST_ID);
+            if (host) return host;
+            host = document.createElement('div');
+            host.id = HOST_ID;
+            host.style.position = 'fixed';
+            host.style.top = '12px';
+            host.style.right = '12px';
+            host.style.zIndex = '2147483647';
+            host.style.pointerEvents = 'auto';
+            host.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif';
+            document.documentElement.appendChild(host);
+
+            const shadow = host.attachShadow({ mode: 'open' });
+            shadow.innerHTML = `
+              <style>
+                .wrap{ width: 360px; background:#0b1220; color:#e6e9ef; border:1px solid rgba(255,255,255,.18); border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,.45); overflow:hidden; }
+                .hdr{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:rgba(255,255,255,.06); }
+                .ttl{ font-weight:700; font-size:13px; letter-spacing:.2px; }
+                .tag{ font-size:11px; opacity:.9; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.14); }
+                .body{ padding:10px 12px; display:flex; flex-direction:column; gap:10px; }
+                .row{ display:flex; gap:8px; align-items:flex-start; }
+                .k{ width:90px; font-size:11px; opacity:.8; padding-top:2px; }
+                .v{ flex:1; font-size:12px; word-break:break-word; }
+                .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+                .btns{ display:flex; gap:8px; flex-wrap:wrap; }
+                button{ cursor:pointer; border-radius:10px; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.08); color:#e6e9ef; padding:8px 10px; font-size:12px; }
+                button:hover{ background:rgba(255,255,255,.12); }
+                button.primary{ background:#2563eb; border-color:rgba(255,255,255,.18); }
+                button.primary:hover{ background:#1d4ed8; }
+                button.danger{ background:rgba(239,68,68,.18); border-color:rgba(239,68,68,.35); }
+                .hint{ font-size:11px; opacity:.75; line-height:1.25; }
+                .ok{ color:#86efac; }
+                .bad{ color:#fca5a5; }
+                .warn{ color:#fde68a; }
+              </style>
+              <div class="wrap" id="wrap">
+                <div class="hdr">
+                  <div>
+                    <div class="ttl">Modo Humano — Conveniente</div>
+                    <div class="hint" id="sub"></div>
+                  </div>
+                  <div class="tag" id="tag">HUMANO</div>
+                </div>
+                <div class="body">
+                  <div class="row"><div class="k">Conta</div><div class="v" id="nome"></div></div>
+                  <div class="row"><div class="k">Motivo</div><div class="v mono" id="reason"></div></div>
+                  <div class="row"><div class="k">Login</div><div class="v mono" id="login"></div></div>
+                  <div class="row"><div class="k">Senha</div><div class="v mono" id="pass"></div></div>
+                  <div class="btns">
+                    <button id="copyLogin">Copiar login</button>
+                    <button id="copyPass">Copiar senha</button>
+                    <button class="primary" id="resume">Retomar trabalho</button>
+                    <button class="danger" id="hide">Fechar</button>
+                  </div>
+                  <div class="hint" id="hint"></div>
+                </div>
+              </div>
+            `;
+
+            const $ = (id) => shadow.getElementById(id);
+            const copyText = async (txt) => {
+              const s = String(txt || '');
+              if (!s) return false;
+              try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                  await navigator.clipboard.writeText(s);
+                  return true;
+                }
+              } catch {}
+              try {
+                const ta = document.createElement('textarea');
+                ta.value = s;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                return !!ok;
+              } catch {}
+              return false;
+            };
+
+            $('copyLogin')?.addEventListener('click', async () => {
+              const d = window.__ctHumanOverlayData || {};
+              await copyText(d.login || '');
+            });
+            $('copyPass')?.addEventListener('click', async () => {
+              const d = window.__ctHumanOverlayData || {};
+              await copyText(d.password || '');
+            });
+            $('hide')?.addEventListener('click', () => {
+              try { host.style.display = 'none'; } catch {}
+            });
+            $('resume')?.addEventListener('click', async () => {
+              try {
+                if (!confirm('Retomar trabalho nesta conta?')) return;
+              } catch {}
+              try { host.style.display = 'none'; } catch {}
+              try {
+                if (window.__ctHumanOverlayResume) {
+                  await window.__ctHumanOverlayResume();
+                }
+              } catch {}
+            });
+
+            return host;
+          }
+
+          function render() {
+            const d = window.__ctHumanOverlayData || null;
+            const enabled = !!(d && d.enabled === true);
+            const host = document.getElementById(HOST_ID);
+            if (!enabled) {
+              if (host) host.style.display = 'none';
+              return;
+            }
+            const h = ensureHost();
+            try { h.style.display = 'block'; } catch {}
+            const shadow = h.shadowRoot;
+            if (!shadow) return;
+            const $ = (id) => shadow.getElementById(id);
+            const nome = [d.nome, d.label ? `— ${d.label}` : '', d.cidade ? `(${d.cidade})` : ''].filter(Boolean).join(' ');
+            $('nome').textContent = nome;
+            $('reason').textContent = String(d.reason || '');
+            $('login').textContent = String(d.login || '');
+            $('pass').textContent = String(d.password || '');
+            $('sub').textContent = `Atualizado: ${nowIso()}`;
+
+            const f = d.flags || {};
+            let statusTxt = '';
+            if (f.banned) statusTxt = 'Conta suspensa/banida';
+            else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
+            else if (f.loginRemediateFailed) statusTxt = 'Login/Cookies falhou (humano)';
+            else if (f.loginRequired) statusTxt = 'Login requerido';
+            else statusTxt = 'Modo humano ativo';
+            $('hint').textContent = statusTxt;
+          }
+
+          window.__ctHumanOverlaySetData = (d) => {
+            try { window.__ctHumanOverlayData = d || {}; } catch {}
+            try { render(); } catch {}
+          };
+          window.__ctHumanOverlayHide = () => {
+            try {
+              const h = document.getElementById(HOST_ID);
+              if (h) h.style.display = 'none';
+            } catch {}
+          };
+
+          window.addEventListener('DOMContentLoaded', () => { try { render(); } catch {} }, { once: true });
+          // Resiliência: se SPA mexer no DOM e remover, recria.
+          setInterval(() => { try { render(); } catch {} }, 5000);
+        } catch {}
+      });
+    } catch {}
+  } catch {}
+}
+
+async function syncHumanOverlay(nome) {
+  try {
+    if (!HUMAN_OVERLAY_CFG.enabled) return;
+    const ctrl = controllers.get(nome);
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return;
+
+    const desired = readJsonFile(desiredPath, { perfis: {} });
+    const wantHold = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
+    const want = wantHold || (ctrl.humanControl === true);
+
+    const pages = await ctrl.browser.pages().catch(()=>[]);
+    const data = want ? await _buildHumanOverlayData(nome) : { enabled: false, nome: String(nome || ''), ts: Date.now() };
+
+    for (const pg of (pages || []).slice(0, HUMAN_OVERLAY_CFG.maxPagesScan)) {
+      if (!pg) continue;
+      if (want) {
+        await _installOverlayOnPage(nome, pg);
+      }
+      await _setOverlayDataOnPage(pg, data);
+    }
+  } catch {}
+}
+
+async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
+  try {
+    if (!HUMAN_OVERLAY_CFG.enabled) return;
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return;
+    // Evidência enterprise (sem credenciais)
+    try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_installed', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
+
+    // Instala nos pages atuais + sincroniza data.
+    await syncHumanOverlay(nome);
+
+    // Hook para novas abas (1x por perfil).
+    robeMeta[nome] = robeMeta[nome] || {};
+    if (robeMeta[nome].humanOverlayHooked === true) return;
+    robeMeta[nome].humanOverlayHooked = true;
+    try {
+      ctrl.browser.on('targetcreated', async (t) => {
+        try {
+          if (!t || typeof t.type !== 'function') return;
+          if (t.type() !== 'page') return;
+          const pg = await t.page().catch(()=>null);
+          if (!pg) return;
+          await syncHumanOverlay(nome);
+        } catch {}
+      });
+    } catch {}
+  } catch {}
+}
+
 // ===== Recurso/Apelação (monitoramento) =====
 const APPEAL_CFG = {
   intervalMs: 60 * 60 * 1000,      // 1h
@@ -268,6 +577,10 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
       ctrl.trabalhando = false;
       try { await stopVirtus(nome); } catch {}
     }
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) await ensureHumanOverlay(nome, ctrl, { reason: 'appeal_submitted' });
   } catch {}
 }
 
@@ -1458,6 +1771,7 @@ async function activateOnce(nome, source = '', operator = '') {
             try { await stopVirtus(nome); } catch {}
             await reportAction(nome, 'mil_action', 'opened_in_human_mode (humanHold=true)');
             try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_human_hold'); } catch {}
+            try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_human_hold' }); } catch {}
             // Anti-tela-preta: garanta uma aba navegada para o humano (não depende de retomar trabalho)
             try {
               const pages = await ctrl.browser.pages().catch(()=>[]);
@@ -1507,6 +1821,7 @@ async function activateOnce(nome, source = '', operator = '') {
               try { await stopVirtus(nome); } catch {}
               await reportAction(nome, 'mil_action', 'opened_in_human_mode (loginRemediateFailed=true)');
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_login_failed'); } catch {}
+              try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_login_failed' }); } catch {}
               // Anti-tela-preta: garanta uma aba navegada para o humano (não depende de retomar trabalho)
               try {
                 const pages = await ctrl.browser.pages().catch(()=>[]);
@@ -4116,6 +4431,7 @@ const handlers = {
       await browserHelper.invocarHumano(ctrl.browser, nome);
 
       try { freezeCooldownIfNotWorking(nome); } catch {}
+      try { await ensureHumanOverlay(nome, ctrl, { reason: 'invoke_human' }); } catch {}
 
       await snapshotStatusAndWrite();
 
@@ -4135,6 +4451,8 @@ const handlers = {
       const hasAppeal = !!(flagsBefore && flagsBefore.appealSubmitted === true);
 
       ctrl.humanControl = false;
+      // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
+      try { await syncHumanOverlay(nome); } catch {}
       // Enterprise: "Retomar trabalho" deve limpar TODO estado de falha/hold para voltar ao normal.
       try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
       try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
@@ -4189,6 +4507,7 @@ const handlers = {
               try { await stopVirtus(nome); } catch {}
               await browserHelper.invocarHumano(ctrl.browser, nome);
               try { freezeCooldownIfNotWorking(nome); } catch {}
+              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_banned' }); } catch {}
               await snapshotStatusAndWrite();
             } catch {}
             logger.info('[HANDLER] human-resume preflight -> banned', { nome, reason: preflight.reason });
@@ -4210,6 +4529,7 @@ const handlers = {
               try { await stopVirtus(nome); } catch {}
               try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
               await snapshotStatusAndWrite();
+              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_appeal_submitted' }); } catch {}
               logger.info('[HANDLER] human-resume preflight -> appeal_submitted', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
@@ -4236,6 +4556,7 @@ const handlers = {
                 try { await stopVirtus(nome); } catch {}
                 await browserHelper.invocarHumano(ctrl.browser, nome);
                 try { freezeCooldownIfNotWorking(nome); } catch {}
+                try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_needs_human' }); } catch {}
               } catch {}
               await snapshotStatusAndWrite();
               logger.info('[HANDLER] human-resume preflight -> needs_human', { nome, reason: lr.reason || '' });
