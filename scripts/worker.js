@@ -3587,6 +3587,21 @@ const handlers = {
         return (r.includes('captcha') || r.includes('checkpoint') || r.includes('identity') || r.includes('two_factor') || r.includes('2fa') || r.includes('two factor'));
       };
 
+      // 5.5) Blindagem enterprise: se a conta estiver desabilitada/banida em qualquer ponto,
+      // marca ban e aborta imediatamente (sem "falso positivo" de login/cookies falhou).
+      const checkAndAbortIfBanned = async (page, stage) => {
+        try {
+          const bd = await browserHelper.detectAccountSuspended(page).catch(()=>({ banned:false }));
+          if (bd && bd.banned) {
+            pushStep({ step: 'banned_detected', stage: String(stage||''), reason: bd.reason || '', snippet: (bd.snippet || '').slice(0, 420) });
+            try { await setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }); } catch {}
+            await failFastToHuman(`banned:${bd.reason || 'banned'}`);
+            return true;
+          }
+        } catch {}
+        return false;
+      };
+
       // 6) tentativa 2: login+senha (apenas se for login_form; caso contrário invoca humano)
       if (needsLogin) {
         const bad = (hardBlockReason(lrMessenger) || hardBlockReason(lrFacebook));
@@ -3643,9 +3658,11 @@ const handlers = {
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
+          if (await checkAndAbortIfBanned(p0, 'before_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
           const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
           pushStep({ step: 'attempt2_login_fb_done', result: rfb });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
+          if (await checkAndAbortIfBanned(p0, 'after_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
           // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir para Messenger.
           try {
@@ -3663,9 +3680,11 @@ const handlers = {
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
+          if (await checkAndAbortIfBanned(p0, 'before_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
           const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
+          if (await checkAndAbortIfBanned(p0, 'after_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
           // Se Messenger cair em estado não automatizável, também fail-fast.
           try {
@@ -3699,6 +3718,7 @@ const handlers = {
           await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           uiFacebook = await uiRetryUnblock('post_login_marketplace', 4);
           pushStep({ step: 'ui_unblock_fb_after_login', ui: uiFacebook });
+          if (await checkAndAbortIfBanned(p0, 'post_login_marketplace')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
           lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           pushStep({ step: 'post_login_check', lrMessenger, lrFacebook, uiFacebook });
 
@@ -3707,9 +3727,11 @@ const handlers = {
           let lrCreate = null;
           await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           uiCreate = await uiRetryUnblock('post_login_create_item', 4);
+          if (await checkAndAbortIfBanned(p0, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
           lrCreate = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           pushStep({ step: 'post_login_check_create_item', lrCreate, uiCreate });
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
+          if (await checkAndAbortIfBanned(p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
           // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
           if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;

@@ -3147,6 +3147,8 @@ async function detectAccountSuspended(page) {
 
     const v = await page.evaluate(() => {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+      const href = String(location && location.href || '');
+      const path = String(location && location.pathname || '');
       const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2500);
       const texts = nodes.map(el => (el.innerText || el.textContent || '')).filter(Boolean);
       const tnorm = texts.map(norm);
@@ -3155,8 +3157,14 @@ async function detectAccountSuspended(page) {
       const hit = tnorm.some(t =>
         t.includes('sua conta foi suspensa') ||
         t.includes('sua conta esta suspensa') ||
+        t.includes('desabilitamos sua conta') ||
+        t.includes('desativamos sua conta') ||
+        t.includes('conta desabilitada') ||
+        t.includes('conta desativada') ||
         t.includes('your account was suspended') ||
         t.includes('your account is suspended') ||
+        t.includes('we disabled your account') ||
+        t.includes('your account has been disabled') ||
         t.includes('tu cuenta ha sido suspendida') ||
         t.includes('tu cuenta esta suspendida')
       );
@@ -3167,18 +3175,33 @@ async function detectAccountSuspended(page) {
         t.includes('you cannot use it right now') ||
         t.includes('no puedes usarla ahora') ||
         t.includes('sera desabilitada permanentemente') ||
-        t.includes('will be permanently disabled')
+        t.includes('will be permanently disabled') ||
+        t.includes('voce nao pode solicitar outra analise') ||
+        t.includes('you cannot request another review') ||
+        t.includes('analisamos sua conta e constatamos') ||
+        t.includes('we reviewed your account')
       );
 
       let snippet = '';
-      if (hit) {
-        snippet = texts.find(s => /[Ss]uspens[oa]/.test(s)) || texts.slice(0,20).join(' | ').slice(0,300);
+      // Alguns bans vêm como "disabled checkpoint" sem conter "suspensa" no texto (ex.: "Desabilitamos sua conta")
+      const disabledCheckpoint =
+        href.includes('disabled_checkpoint') ||
+        path.includes('/checkpoint/dyi') ||
+        path.includes('/checkpoint/disabled') ||
+        path.includes('/checkpoint') && tnorm.some(t => t.includes('desabilitamos sua conta') || t.includes('we disabled your account'));
+
+      const any = !!hit || !!disabledCheckpoint;
+      if (any) {
+        snippet =
+          texts.find(s => /desabilitamos sua conta|desativamos sua conta|suspens/i.test(String(s||''))) ||
+          texts.slice(0, 30).join(' | ').slice(0, 420);
       }
-      return { hit, more, snippet };
+      return { hit: any, more, disabledCheckpoint, snippet };
     });
 
     if (v && v.hit) {
-      return { banned: true, reason: 'suspended_ui', snippet: v.snippet || '' };
+      const reason = v && v.disabledCheckpoint ? 'disabled_checkpoint' : 'suspended_ui';
+      return { banned: true, reason, snippet: v.snippet || '' };
     }
   } catch {}
   return { banned: false };
