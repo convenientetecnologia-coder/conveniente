@@ -154,6 +154,39 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
   }
 }
 
+async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detected', evidenceB64 = '', evidenceUrl = '' } = {}) {
+  const cfg = readCtConfig();
+  const base = String(cfg && cfg.ctBaseUrl || '').trim();
+  const secret = String(cfg && cfg.logIngestSecret || '').trim();
+  const hostId = readHostIdSync();
+  const p = String(profileName || '').trim();
+  if (!base || !secret || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
+  try {
+    const Aborter = global.AbortController || require('node-abort-controller');
+    const ac = new Aborter();
+    const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
+    const resp = await fetch(`${base}/api/stock/assigned/archive_with_evidence_secret`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      body: JSON.stringify({
+        hostId,
+        profileName: p,
+        reason: String(reason || 'banned_detected').slice(0, 120),
+        by: 'auto',
+        evidenceB64: String(evidenceB64 || '').trim(),
+        evidenceUrl: String(evidenceUrl || '').trim()
+      }),
+      signal: ac.signal
+    });
+    clearTimeout(t);
+    const j = await resp.json().catch(()=>null);
+    if (!j || j.ok !== true) return { ok: false, error: (j && j.error) ? String(j.error) : `http_${resp.status}` };
+    return { ok: true, archived: true, stockAccountId: j.id || null };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
   try {
     const prev = await readAccountFlags(nome);
@@ -762,6 +795,80 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.banned === true;
+    // Evidence + auto-delete (ultra enterprise):
+    // - arquiva no CT (Excluídas) com print
+    // - deleta o perfil local para liberar slot
+    // Guardrails:
+    // - não logar credenciais
+    // - best-effort (não pode travar o worker)
+    // - nunca para estados não-banned (appeal/captcha/identity não passam aqui)
+    try {
+      // 1) Captura screenshot (se o browser estiver aberto)
+      let b64 = '';
+      let url = '';
+      try {
+        const ctrl = controllers.get(nome);
+        const pages = ctrl && ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+        const p0 = pages && pages[0];
+        if (p0) {
+          try { url = (typeof p0.url === 'function') ? (p0.url() || '') : ''; } catch {}
+          try {
+            const buf = await p0.screenshot({ type: 'jpeg', quality: 75, fullPage: true }).catch(()=>null);
+            if (buf && buf.length) b64 = Buffer.from(buf).toString('base64');
+          } catch {}
+        }
+      } catch {}
+
+      // 2) Arquiva no CT com evidence (se CT configurado)
+      try {
+        const rr = await archiveBanWithEvidenceToCT({
+          profileName: nome,
+          reason: `banned:${String(reason||'banned').slice(0,80)}`,
+          evidenceB64: b64,
+          evidenceUrl: url
+        });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'auto_archive_banned_ct',
+            nome: String(nome||''),
+            ok: !!(rr && rr.ok),
+            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
+            stockAccountId: rr && rr.stockAccountId || null
+          });
+        } catch {}
+      } catch {}
+
+      // 3) Deleta o perfil local (best-effort)
+      try {
+        const rr = await (async () => {
+          try {
+            // Reusar API interna de delete (robusto: fecha se ativo, remove perfis.json/desired/userDataDir)
+            const baseUrl = `http://127.0.0.1:${Number(process.env.PORT || 3000) || 3000}`;
+            const resp = await fetch(`${baseUrl}/api/perfis/${encodeURIComponent(String(nome))}`, {
+              method: 'DELETE',
+              headers: { 'x-operator': 'auto_banned_delete' }
+            }).catch(()=>null);
+            const j = resp ? await resp.json().catch(()=>null) : null;
+            if (!resp || !j || j.ok !== true) {
+              return { ok: false, error: (j && j.error) ? String(j.error) : (!resp ? 'no_resp' : `http_${resp.status}`) };
+            }
+            return { ok: true };
+          } catch (e) {
+            return { ok: false, error: (e && e.message) || String(e) };
+          }
+        })();
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'auto_delete_banned_profile',
+            nome: String(nome||''),
+            ok: !!(rr && rr.ok),
+            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
+          });
+        } catch {}
+      } catch {}
+    } catch {}
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
@@ -3066,11 +3173,11 @@ async function start_work({ nome, operator }) {
               await pages0[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
             }
           } catch {}
-          // 1) abre aba 1, vai no Marketplace (Facebook) só para confirmar sessão
+          // 1) abre aba 1, vai na rota REAL do Robe (Facebook create/item) só para confirmar sessão
           try {
             const p = await ctrl.browser.newPage().catch(()=>null);
             if (p) {
-              await p.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               let u = ''; let t = '';
               try { u = (typeof p.url === 'function') ? (p.url() || '') : ''; } catch {}
               try { t = (typeof p.title === 'function') ? (await p.title().catch(()=>'')) : ''; } catch {}
@@ -3923,10 +4030,9 @@ const handlers = {
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
-              // Para validar Robe/Marketplace, sempre navega para a rota que importa
-              const targetUrl = (label === 'fb_create')
-                ? 'https://www.facebook.com/marketplace/create/item'
-                : 'https://www.facebook.com/marketplace';
+              // Regra 110% enterprise: para validar Facebook/Marketplace para Robe, a rota REAL é create/item.
+              // Evita falso "ok" do feed (/marketplace) e também evita a aba 0 ficar navegando para o lugar errado.
+              const targetUrl = 'https://www.facebook.com/marketplace/create/item';
               await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
@@ -4042,7 +4148,8 @@ const handlers = {
 
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
-          await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
+          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
@@ -4088,7 +4195,7 @@ const handlers = {
           await new Promise(r => setTimeout(r, 1400));
           lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
 
-          // Facebook: validar primeiro marketplace, depois create/item (Robe real)
+          // Facebook: validar create/item (Robe real) — sem navegar para o feed.
           const uiRetryUnblock = async (label, rounds = 4) => {
             // Espera extra para evitar "unknown" por race de navegação/contexto
             await new Promise(r => setTimeout(r, 1600));
@@ -4102,15 +4209,7 @@ const handlers = {
             return ui;
           };
 
-          // 1) Marketplace (sanity)
-          await p0.goto('https://www.facebook.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-          uiFacebook = await uiRetryUnblock('post_login_marketplace', 4);
-          pushStep({ step: 'ui_unblock_fb_after_login', ui: uiFacebook });
-          if (await checkAndAbortIfBanned(p0, 'post_login_marketplace')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-          lrFacebook = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
-          pushStep({ step: 'post_login_check', lrMessenger, lrFacebook, uiFacebook });
-
-          // 2) Create item (Robe real)
+          // Create item (Robe real)
           let uiCreate = null;
           let lrCreate = null;
           await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});

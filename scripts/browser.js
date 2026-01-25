@@ -1845,6 +1845,12 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     throw e;
   }
 
+  // ===== ENTERPRISE: prova real do Robe na aba 0 (evita feed /marketplace) =====
+  try {
+    await pages[0].goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await new Promise(r => setTimeout(r, 1800));
+  } catch {}
+
   try {
     if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 9A: Antes do delay após logar/principal (6s) ===');
     await new Promise(r => setTimeout(r, 6000));
