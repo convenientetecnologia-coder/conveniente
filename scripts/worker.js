@@ -2931,6 +2931,40 @@ const handlers = {
       const op = String(operator || '').trim();
       const isStockProvision = (op && op.toLowerCase().startsWith('stock_provision'));
       const pausedGlobal = [];
+      const closedForRam = [];
+      let enteredHuman = false;
+
+      const invokeHumanForConfigure = async (reason) => {
+        const why = String(reason || 'configure_failed');
+        enteredHuman = true;
+        try { await setLoginRequiredFlag(nome, { reason: why, source: 'configure' }); } catch {}
+        try { await setLoginRemediateFailedFlag(nome, { reason: why, source: 'configure', stage: 'configure' }); } catch {}
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d.perfis = d.perfis || {};
+            // Regra enterprise: manter browser aberto para inspeção humana
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            return d;
+          });
+        } catch {}
+        try {
+          ctrl.humanControl = true;
+          ctrl.trabalhando = false;
+          try { await stopVirtus(nome); } catch {}
+        } catch {}
+      };
+
+      const reasonPriority = (r) => {
+        const s = String(r || '').toLowerCase();
+        if (s.includes('two_factor') || s.includes('2fa')) return 6;
+        if (s.includes('identity')) return 5;
+        if (s.includes('captcha')) return 4;
+        if (s.includes('checkpoint')) return 3;
+        if (s.includes('appeal')) return 2;
+        if (s.includes('login_form')) return 1;
+        return 0;
+      };
+
       try {
         // Ultra enterprise: antes de injetar cookies, garantir quiescência global (Virtus/Robe pausados)
         // Importante: se pausarmos Virtus de outros perfis, precisamos retomar ao final.
@@ -2941,6 +2975,41 @@ const handlers = {
           const q = await waitGlobalQuiesce({ opKind: 'configure', operator: op, targetNome: nome, waitBusyMs, waitPauseMs, require });
           for (const it of (q && q.paused) ? q.paused : []) pausedGlobal.push(it);
         }
+
+        // Headroom (enterprise): se necessário, fecha o mínimo possível (preserveDesired) e o nurse reabre depois.
+        try {
+          const snapPolicy = ramPolicy.snapshotPolicy();
+          const minFreeMB = snapPolicy.reserveProvisionMB;
+          const maxHardDeactivations = Math.max(0, Number(process.env.CONFIGURE_MAX_HARD_DEACTIVATIONS || 2) || 2);
+          let free = getAvailableMB();
+          if (free < minFreeMB) {
+            try { provisionAudit.append({ ts: Date.now(), event: 'configure_headroom_check', nome, operator: op, freeMB: free, minFreeMB }); } catch {}
+          }
+          while (free < minFreeMB && closedForRam.length < maxHardDeactivations) {
+            const candidates = [];
+            controllers.forEach((c, n) => {
+              if (!n || String(n) === String(nome)) return;
+              if (!c || !c.browser) return;
+              if (c.humanControl === true || c.configurando === true) return;
+              if (c.browser._sendLock && c.browser._sendLock.active) return;
+              if (robeMeta[n] && robeMeta[n].emExecucao === true) return;
+              const ramMB = (robeMeta[n] && typeof robeMeta[n].ramMB === 'number') ? robeMeta[n].ramMB : (typeof c.ramMB === 'number' ? c.ramMB : 0);
+              candidates.push({ nome: String(n), trabalhando: !!c.trabalhando, ramMB: Number(ramMB || 0) || 0 });
+            });
+            candidates.sort((a, b) => {
+              if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
+              return (Number(b.ramMB) || 0) - (Number(a.ramMB) || 0);
+            });
+            const pick = candidates[0];
+            if (!pick || !pick.nome) break;
+            try {
+              await handlers.deactivate({ nome: pick.nome, reason: 'ramKill', policy: 'preserveDesired' });
+              closedForRam.push(pick.nome);
+            } catch {}
+            await sleep(1600);
+            free = getAvailableMB();
+          }
+        } catch {}
 
         // Sempre pausar Virtus do próprio alvo antes de reinjetar cookies
         try { await stopVirtus(nome); } catch {}
@@ -2955,19 +3024,91 @@ const handlers = {
         } catch {}
 
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
-        try { await clearAccountFlags(nome, ['loginRequired']); } catch {}
-        logger.info('[HANDLER] configure ok', { nome });
-        return { ok: true };
+
+        // Pós-injeção: validar estado real (login_required / appeal_submitted / etc)
+        let best = null;
+        let bestPage = null;
+        try {
+          const pages = await ctrl.browser.pages().catch(()=>[]);
+          for (const pg of (pages || []).slice(0, 8)) {
+            const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
+            if (det && det.loginRequired) {
+              if (!best || reasonPriority(det.reason) > reasonPriority(best.reason)) {
+                best = det;
+                bestPage = pg;
+              }
+            }
+          }
+        } catch {}
+
+        if (best && best.loginRequired) {
+          const rr = String(best.reason || '').toLowerCase();
+          if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
+            await setAppealSubmittedFlag(nome, { source: best.domain || 'facebook', url: best.url || '', title: best.title || '' });
+            return { ok: false, error: 'appeal_submitted' };
+          }
+
+          // Fallback: tentar login/senha (mesmo padrão do login_remediate)
+          let login2 = null, password2 = null;
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            const login = man && (man.login || man.email || man.user || man.username);
+            const password = man && (man.password || man.pass);
+            if (login && password) { login2 = String(login).trim(); password2 = String(password); }
+          } catch {}
+          if (!login2 || !password2) {
+            const fb = await fetchCredentialsFromCT({ profileName: nome });
+            if (fb && fb.ok) { login2 = fb.login; password2 = fb.password; }
+          }
+          if (!login2 || !password2) {
+            await invokeHumanForConfigure('missing_credentials');
+            return { ok: false, error: 'missing_credentials' };
+          }
+
+          try {
+            if (bestPage) {
+              await browserHelper.ensureFbUiUnblocked(bestPage, nome, { reasonBase: 'configure_login', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+              await browserHelper.tryLoginEmailPass(bestPage, { nome, login: login2, password: password2, allowGpt: true }).catch(()=>null);
+              await sleep(900);
+            }
+          } catch {}
+
+          const after = await (bestPage ? browserHelper.detectLoginRequired(bestPage).catch(()=>({ loginRequired:false })) : ({ loginRequired:false }));
+          if (after && after.loginRequired) {
+            await invokeHumanForConfigure(`still_login_required:${String(after.reason||'login')}`);
+            return { ok: false, error: `still_login_required:${String(after.reason||'login')}` };
+          }
+
+          // Atualiza cookies frescos (best-effort)
+          try {
+            const fresh = await browserHelper.collectFreshCookies(bestPage || (await ctrl.browser.pages().then(ps=>ps[0]).catch(()=>null)));
+            if (fresh && fresh.ok && Array.isArray(fresh.cookies) && fresh.cookies.length) {
+              await manifestStore.update(nome, (m) => {
+                m = m || {};
+                m.cookies = fresh.cookies;
+                m.cookiesUpdatedAt = Date.now();
+                return m;
+              });
+            }
+          } catch {}
+        }
+
+        // Sucesso: limpa flags e segue.
+        try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
+        logger.info('[HANDLER] configure ok', { nome, closedForRamCount: closedForRam.length });
+        return { ok: true, closedForRam };
       } catch (e) {
         try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
         logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
+        // Se falhou tecnicamente, entra em humano (padrão enterprise) para evitar ficar preso sem ação.
+        try { await invokeHumanForConfigure((e && e.message) || String(e)); } catch {}
         return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
       } finally {
         ctrl.configurando = false;
         // Regra enterprise:
         // - configure via UI/admin => entra em modo humano (para inspeção)
         // - configure via stock_provision => NÃO entra em modo humano (para permitir start-work automático)
-        ctrl.humanControl = !isStockProvision;
+        ctrl.humanControl = enteredHuman ? true : !isStockProvision;
         stopPruneLoop(nome);
         // Retoma Virtus dos perfis que estavam trabalhando e foram pausados para quiescência.
         try {
