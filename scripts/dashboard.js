@@ -686,6 +686,10 @@ async function execStockProvision(cmd) {
       const snap2 = computeQuiesceSnapshot(st2);
       push({ step: 'quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames });
       audit({ event: 'stock_provision_quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames });
+      if (snap2.busyCount > 0) {
+        // Regra enterprise: NÃO prosseguir se não conseguiu garantir quiescência.
+        throw new Error(`busy_timeout count=${snap2.busyCount}`);
+      }
     }
 
     // (B) Espera Virtus pausado (exceto humano/config/ocupado)
@@ -701,6 +705,10 @@ async function execStockProvision(cmd) {
       const snap3 = computeQuiesceSnapshot(st3);
       push({ step: 'quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, virtusOnlineCount: snap3.virtusOnlineCount });
       audit({ event: 'stock_provision_quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, virtusOnlineCount: snap3.virtusOnlineCount });
+      if (snap3.pauseableVirtusCount > 0) {
+        // Regra enterprise: NÃO prosseguir se não conseguiu pausar Virtus "pausáveis".
+        throw new Error(`pause_timeout count=${snap3.pauseableVirtusCount}`);
+      }
     }
 
     push({ step: 'quiesce_done', elapsedMs: Date.now() - startedAt });
@@ -835,11 +843,7 @@ async function execStockProvision(cmd) {
           const waitBusyMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_BUSY_MS || 120000) || 120000);
           const waitPauseMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_PAUSE_MS || 45000) || 45000);
           const phaseBudgetMs = Math.min(budgetLeftMs(), Math.max(20_000, waitBusyMs + waitPauseMs + 10_000));
-          await waitForQuiesce({ out, phaseBudgetMs, waitBusyMs, waitPauseMs }).catch(e => {
-            const msg = normalizeErr(e);
-            out.steps.push({ step: 'quiesce_error', at: Date.now(), error: msg });
-            try { provisionAudit.append({ ts: Date.now(), event: 'stock_provision_quiesce_error', cmdId: (cmd && cmd.id) ? String(cmd.id) : null, batchId, error: msg }); } catch {}
-          });
+          await waitForQuiesce({ out, phaseBudgetMs, waitBusyMs, waitPauseMs });
         }
 
         // 1) criar perfil
@@ -923,6 +927,18 @@ async function execStockProvision(cmd) {
         out.finishedAt = Date.now();
         out.durationMs = out.finishedAt - startedAt;
         results.push(out);
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'stock_provision_action_fail',
+            cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+            batchId,
+            profileName: out.profileName || null,
+            city,
+            label: label || null,
+            error: out.error
+          });
+        } catch {}
       }
     }
   } finally {

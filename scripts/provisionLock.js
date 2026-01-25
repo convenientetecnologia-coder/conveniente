@@ -8,6 +8,9 @@ const fs = require("fs");
 const path = require("path");
 
 const LOCK_PATH = path.join(__dirname, "..", "dados", "provision_lock.json");
+// Hard safety: mesmo que alguém grave um lock inválido (sem untilMs),
+// não pode virar "lock infinito" e bloquear Robe/Virtus por horas.
+const HARD_MAX_TTL_MS = 60 * 60 * 1000; // 60min
 
 function now() { return Date.now(); }
 
@@ -33,12 +36,25 @@ function _writeJsonAtomic(p, obj) {
 function get() {
   const cur = _readJsonSafe(LOCK_PATH);
   if (!cur) return { active: false, lock: null };
+  const n = now();
+  const owner = String(cur.owner || '').trim();
+  const since = Number(cur.sinceMs || 0) || 0;
   const until = Number(cur.untilMs || 0) || 0;
-  if (until > 0 && until <= now()) {
-    // expirado: limpa
+
+  // Se o arquivo existe, mas está inválido/corrompido (ex.: sem untilMs),
+  // trate como expirado e limpe imediatamente.
+  const invalid =
+    !owner ||
+    since <= 0 ||
+    until <= 0 ||
+    until <= since ||
+    (until - since) > HARD_MAX_TTL_MS;
+
+  if (invalid || until <= n) {
     try { fs.unlinkSync(LOCK_PATH); } catch {}
     return { active: false, lock: null };
   }
+
   return { active: true, lock: cur };
 }
 

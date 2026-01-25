@@ -2793,7 +2793,16 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('codigo de autenticacao') ||
         bodyTxt.includes('codigo de login');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, href0, path0, title0 };
+      // 5) Recurso/Apelação submetida (“você apresentou um recurso…”)
+      // Estado: conta não utilizável, mas não é “login_form” — precisa de monitoramento.
+      const hasAppealSubmitted =
+        h1.some(t => t.includes('voce apresentou um recurso')) ||
+        bodyTxt.includes('voce apresentou um recurso') ||
+        bodyTxt.includes('sua conta nao esta visivel no facebook') ||
+        bodyTxt.includes('voce nao pode usa-la') ||
+        bodyTxt.includes('confira aqui novamente para ver o resultado');
+
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -2805,6 +2814,7 @@ async function detectLoginRequired(page) {
     const hasCheckpointText = !!(v && v.hasCheckpointText);
     const hasIdentityText = !!(v && v.hasIdentityText);
     const hasTwoFactorText = !!(v && v.hasTwoFactorText);
+    const hasAppealSubmitted = !!(v && v.hasAppealSubmitted);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
@@ -2834,7 +2844,19 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
+      };
+    }
+
+    // Recurso submetido: não é “login_form”, mas bloqueia conta (precisa monitorar).
+    if (hasAppealSubmitted) {
+      return {
+        loginRequired: true,
+        reason: 'appeal_submitted',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
 
@@ -2848,7 +2870,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
     if (/checkpoint_interstitial/i.test(path) || /checkpoint_interstitial/i.test(hrefNorm)) {
@@ -2858,7 +2880,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
 
@@ -2872,7 +2894,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
 
@@ -2888,7 +2910,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
     if (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title))) {
@@ -2898,7 +2920,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
     // Captcha/persona e checkpoint podem aparecer fora de /checkpoint (ex.: /index.php, m.facebook.com/error, etc).
@@ -2910,7 +2932,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
     if (hasCheckpointText && (strongLoginPath || /checkpoint/i.test(title))) {
@@ -2921,7 +2943,7 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
 
@@ -2931,7 +2953,7 @@ async function detectLoginRequired(page) {
       domain,
       url: (v && v.href0) ? String(v.href0) : href,
       title,
-      evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, path }
+      evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
     };
   } catch {}
   return { loginRequired: false };

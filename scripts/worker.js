@@ -215,6 +215,173 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
   } catch {}
 }
 
+// ===== Recurso/Apelação (monitoramento) =====
+const APPEAL_CFG = {
+  intervalMs: 60 * 60 * 1000,      // 1h
+  firstDelayMs: 2 * 60 * 1000,     // 2min (logo após "Retomar trabalho")
+  maxPagesScan: 8
+};
+
+async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' } = {}) {
+  try {
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.appealSubmitted = true;
+      man.accountFlags.appealSubmittedAt = Number(man.accountFlags.appealSubmittedAt || 0) || Date.now();
+      man.accountFlags.appealSource = String(source || '').slice(0, 80);
+      man.accountFlags.appealUrl = String(url || '').slice(0, 300);
+      man.accountFlags.appealTitle = String(title || '').slice(0, 200);
+      // Por padrão, não começa a monitorar imediatamente: "Retomar trabalho" arma o monitor.
+      if (!man.accountFlags.appealNextCheckAt) man.accountFlags.appealNextCheckAt = 0;
+      man.accountFlags.appealLastReason = 'appeal_submitted';
+      return man;
+    });
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].appealSubmitted = true;
+    robeMeta[nome].whyNotOpen = 'appeal_submitted';
+  } catch {}
+
+  // Modo seguro: automação OFF e browser disponível para inspeção.
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      return d;
+    });
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.humanControl = true;
+      ctrl.trabalhando = false;
+      try { await stopVirtus(nome); } catch {}
+    }
+  } catch {}
+}
+
+async function armAppealMonitor(nome, { delayMs = APPEAL_CFG.firstDelayMs } = {}) {
+  try {
+    const next = Date.now() + Math.max(60_000, Number(delayMs || 0) || 0);
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      if (man.accountFlags.appealSubmitted !== true) return man;
+      man.accountFlags.appealLastArmedAt = Date.now();
+      man.accountFlags.appealNextCheckAt = next;
+      return man;
+    });
+  } catch {}
+}
+
+async function clearAppealSubmittedFlag(nome) {
+  try {
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      delete man.accountFlags.appealSubmitted;
+      delete man.accountFlags.appealSubmittedAt;
+      delete man.accountFlags.appealSource;
+      delete man.accountFlags.appealUrl;
+      delete man.accountFlags.appealTitle;
+      delete man.accountFlags.appealNextCheckAt;
+      delete man.accountFlags.appealLastCheckAt;
+      delete man.accountFlags.appealLastReason;
+      delete man.accountFlags.appealLastArmedAt;
+      return man;
+    });
+    if (robeMeta[nome]) {
+      delete robeMeta[nome].appealSubmitted;
+      if (robeMeta[nome].whyNotOpen === 'appeal_submitted') delete robeMeta[nome].whyNotOpen;
+    }
+  } catch {}
+}
+
+async function appealMonitorCheckNow(nome, ctrl) {
+  const now = Date.now();
+  try {
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
+    const pages = await ctrl.browser.pages().catch(()=>[]);
+    const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+    const pickFb = () => {
+      for (const pg of (pages || []).slice(0, APPEAL_CFG.maxPagesScan)) {
+        const u = safeUrl(pg);
+        if (/facebook\.com/i.test(u)) return pg;
+      }
+      return (pages && pages[0]) || null;
+    };
+    const pg = pickFb();
+    if (!pg) return { ok: false, error: 'no_pages' };
+
+    // Refresh leve + detecção
+    try { await pg.bringToFront?.().catch(()=>{}); } catch {}
+    await pg.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await sleep(900);
+    const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+
+    // Atualiza telemetria do monitor
+    try {
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.accountFlags = man.accountFlags || {};
+        if (man.accountFlags.appealSubmitted !== true) return man;
+        man.accountFlags.appealLastCheckAt = now;
+        man.accountFlags.appealLastReason = lr && lr.loginRequired ? String(lr.reason || '') : '';
+        man.accountFlags.appealNextCheckAt = now + APPEAL_CFG.intervalMs;
+        return man;
+      });
+    } catch {}
+
+    if (!lr || lr.loginRequired !== true) {
+      // Liberou: limpa flags e retoma trabalho normal
+      await clearAppealSubmittedFlag(nome);
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+          return d;
+        });
+      } catch {}
+      try {
+        ctrl.humanControl = false;
+        if (automationAllowed(ctrl)) {
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+          ctrl.trabalhando = true;
+        }
+        try { unfreezeCooldownIfWorking(nome); } catch {}
+      } catch {}
+      try { await issues.append(nome, 'mil_action', 'appeal_monitor_resolved_active'); } catch {}
+      return { ok: true, resolved: true };
+    }
+
+    // Ainda bloqueado.
+    const rr = String(lr.reason || '').toLowerCase();
+    if (rr.includes('appeal_submitted')) {
+      try { await issues.append(nome, 'mil_action', 'appeal_monitor_still_pending'); } catch {}
+      return { ok: true, pending: true };
+    }
+
+    // Mudou para outro bloqueio (login/checkpoint/captcha etc): delega para pipeline existente.
+    try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
+    try { await issues.append(nome, 'mil_action', `appeal_monitor_transition reason=${rr}`); } catch {}
+    return { ok: true, transitioned: true, reason: rr };
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try {
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.accountFlags = man.accountFlags || {};
+        if (man.accountFlags.appealSubmitted !== true) return man;
+        man.accountFlags.appealLastCheckAt = now;
+        man.accountFlags.appealLastReason = `error:${msg}`.slice(0, 120);
+        man.accountFlags.appealNextCheckAt = now + APPEAL_CFG.intervalMs;
+        return man;
+      });
+    } catch {}
+    return { ok: false, error: msg };
+  }
+}
+
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   try {
     const prev = await readAccountFlags(nome);
@@ -2042,6 +2209,9 @@ async function robeTickGlobal() {
     }
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.trabalhando || ctrl.configurando || ctrl.humanControl) return null;
+    // Self-heal: se cooldown foi "congelado" (robeCooldownRemainingMs) enquanto o perfil voltou a trabalhar,
+    // garanta a retomada do countdown. Isso elimina o bug de cooldown travado pós-remediação/pausas.
+    try { await unfreezeCooldownIfWorking(nome); } catch {}
     const cooldown = await normalizeCooldown(nome);
     const inFila = robeQueue.inQueue(nome);
     const exec = robeQueue.isActive(nome);
@@ -3615,6 +3785,9 @@ const handlers = {
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
+      const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
+      const hasAppeal = !!(flagsBefore && flagsBefore.appealSubmitted === true);
+
       ctrl.humanControl = false;
       // Enterprise: "Retomar trabalho" deve limpar TODO estado de falha/hold para voltar ao normal.
       try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
@@ -3641,12 +3814,18 @@ const handlers = {
         } catch {}
       }
 
-      if (automationAllowed(ctrl)) {
-        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
-        ctrl.trabalhando = true;
+      if (!hasAppeal) {
+        if (automationAllowed(ctrl)) {
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+          ctrl.trabalhando = true;
+        }
+        try { unfreezeCooldownIfWorking(nome); } catch {}
+      } else {
+        // Estado "recurso_apresentado": não retoma automação; arma monitoramento (1h) e mantém Virtus OFF.
+        ctrl.trabalhando = false;
+        try { await stopVirtus(nome); } catch {}
+        try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       }
-
-      try { unfreezeCooldownIfWorking(nome); } catch {}
 
       await snapshotStatusAndWrite();
       logger.info('[HANDLER] human-resume ok', { nome });
@@ -3654,7 +3833,12 @@ const handlers = {
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
           desired.perfis = desired.perfis || {};
-          desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+          desired.perfis[nome] = {
+            ...(desired.perfis[nome] || {}),
+            active: true,
+            humanHold: false,
+            virtus: hasAppeal ? 'off' : 'on'
+          };
           return desired;
         });
       } catch {}
@@ -4823,6 +5007,26 @@ async function nurseTick() {
         continue;
       }
 
+      // Monitoramento: recurso/apelação submetida (após "Retomar trabalho")
+      try {
+        const flags = await readAccountFlags(nome).catch(()=>({}));
+        if (flags && flags.appealSubmitted === true) {
+          const nextAt = Number(flags.appealNextCheckAt || 0) || 0;
+          if (!nextAt || nextAt <= now) {
+            // Só monitora se o navegador está aberto; senão, o nurse seguirá a regra normal de desired.active.
+            if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+              await appendIssueNurseDebounced(nome, 'mil_action', 'appeal_monitor_check', 'appeal_monitor_check');
+              await appealMonitorCheckNow(nome, ctrl).catch(()=>null);
+              await snapshotStatusAndWrite().catch(()=>{});
+            }
+          } else {
+            await appendIssueNurseDebounced(nome, 'mil_action', 'appeal_monitor_waiting', 'appeal_monitor_waiting');
+          }
+          // Enquanto estiver em appealSubmitted, NÃO rodar automação normal (Robe/Virtus).
+          continue;
+        }
+      } catch {}
+
       {
         const rm = robeMeta[nome] || {};
         if (rm.emExecucao === true) {
@@ -5110,7 +5314,16 @@ async function nurseTick() {
           // - captcha/checkpoint => segurar em humanHold (não existe automação confiável)
           try {
             const rr = String(lr && lr.reason || '').toLowerCase();
-            if (rr.includes('captcha') || rr.includes('checkpoint')) {
+            if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
+              try { await issues.append(nome, 'mil_action', `appeal_submitted_hold reason=${rr}`); } catch {}
+              try {
+                await setAppealSubmittedFlag(nome, {
+                  source: lr.domain || '',
+                  url: lr.url || '',
+                  title: lr.title || ''
+                });
+              } catch {}
+            } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
               try { await issues.append(nome, 'mil_action', `login_requires_human_hold reason=${rr}`); } catch {}
               try { ctrl.humanControl = true; ctrl.trabalhando = false; } catch {}
               try { await stopVirtus(nome); } catch {}
