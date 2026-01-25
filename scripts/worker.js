@@ -4065,6 +4065,142 @@ const handlers = {
         } catch {}
       }
 
+      // ===== Enterprise HARDENING: diagnóstico imediato do estado real antes de "voltar a trabalhar" =====
+      // Regras:
+      // - Se estiver suspensa/banida: marca e invoca humano (não tenta automação).
+      // - Se estiver em captcha/identity/checkpoint/2FA: invoca humano (não tenta automação).
+      // - Se estiver em login/senha (login_form): agenda login_remediate (cookies -> login -> humano) sob provisionLock/quiesce.
+      // - Se estiver em appeal_submitted: não retoma automação; arma monitoramento (1h).
+      let scheduledLoginRemediate = false;
+      let preflight = { ok: true, state: 'unknown', reason: '' };
+      try {
+        const p0 = (pages && pages[0]) ? pages[0] : null;
+        if (p0) {
+          // 0) Suspensa/banida (UI de suspensão)
+          const bd = await browserHelper.detectAccountSuspended(p0).catch(()=>({ banned:false }));
+          if (bd && bd.banned) {
+            preflight = { ok: true, state: 'banned', reason: String(bd.reason || 'suspended_ui') };
+            try { await setBannedFlag(nome, { reason: String(bd.reason || 'suspended_ui'), snippet: String(bd.snippet || '') }); } catch {}
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                return d;
+              });
+            } catch {}
+            try {
+              ctrl.humanControl = true;
+              ctrl.trabalhando = false;
+              try { await stopVirtus(nome); } catch {}
+              await browserHelper.invocarHumano(ctrl.browser, nome);
+              try { freezeCooldownIfNotWorking(nome); } catch {}
+              await snapshotStatusAndWrite();
+            } catch {}
+            logger.info('[HANDLER] human-resume preflight -> banned', { nome, reason: preflight.reason });
+            return { ok: true, preflight };
+          }
+
+          // 1) Login required / captcha / identity / appeal_submitted etc.
+          const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          if (lr && lr.loginRequired) {
+            const rr = String(lr.reason || '').toLowerCase();
+            preflight = { ok: true, state: 'login_required', reason: String(lr.reason || '') };
+            try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || 'human_resume' }); } catch {}
+
+            // appeal_submitted: não retoma automação; arma monitoramento (1h) e mantém Virtus OFF.
+            if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
+              preflight.state = 'appeal_submitted';
+              try { await setAppealSubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
+              ctrl.trabalhando = false;
+              try { await stopVirtus(nome); } catch {}
+              try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
+              await snapshotStatusAndWrite();
+              logger.info('[HANDLER] human-resume preflight -> appeal_submitted', { nome, reason: lr.reason || '' });
+              return { ok: true, preflight };
+            }
+
+            // Non-automatable: captcha/identity/checkpoint/2FA => humano direto.
+            const needsHuman =
+              rr.includes('captcha') ||
+              rr.includes('identity') ||
+              rr.includes('two_factor') ||
+              rr.includes('checkpoint');
+            if (needsHuman) {
+              preflight.state = 'needs_human';
+              try { await setLoginRemediateFailedFlag(nome, { reason: lr.reason || 'login_requires_human', source: 'human_resume', stage: 'human_resume_preflight' }); } catch {}
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d.perfis = d.perfis || {};
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                  return d;
+                });
+              } catch {}
+              try {
+                ctrl.humanControl = true;
+                ctrl.trabalhando = false;
+                try { await stopVirtus(nome); } catch {}
+                await browserHelper.invocarHumano(ctrl.browser, nome);
+                try { freezeCooldownIfNotWorking(nome); } catch {}
+              } catch {}
+              await snapshotStatusAndWrite();
+              logger.info('[HANDLER] human-resume preflight -> needs_human', { nome, reason: lr.reason || '' });
+              return { ok: true, preflight };
+            }
+
+            // login_form (ou outros loginRequired "automatable"): agenda login_remediate imediatamente.
+            // Requisito do lead: após sucesso, conta nova/retomada deve iniciar com Robe em 24h (igual conta nova).
+            try {
+              const plus24 = 24 * 60 * 60 * 1000;
+              const now = Date.now();
+              await manifestStore.update(nome, (m) => {
+                m = m || {};
+                const curLeft = m.robeCooldownUntil ? (Number(m.robeCooldownUntil || 0) - now) : 0;
+                const desiredLeft = plus24;
+                const use = Math.max(0, curLeft, desiredLeft);
+                m.robeCooldownUntil = now + use;
+                m.robePauseReason = 'new_account';
+                return m;
+              });
+              robeUpdateMeta(nome, { pauseReason: 'new_account' });
+            } catch {}
+
+            // Evita que Virtus reinicie antes do login_remediate pegar o provisionLock/quiesce.
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'off' };
+                return d;
+              });
+            } catch {}
+            try { ctrl.trabalhando = false; } catch {}
+            try { await stopVirtus(nome); } catch {}
+
+            scheduledLoginRemediate = true;
+            const op2 = `human_resume:${String(nome || '').trim()}:${Date.now()}`;
+            setTimeout(() => {
+              try {
+                handlers.login_remediate({
+                  nome,
+                  operator: op2,
+                  options: { overrideHumanHold: true }
+                }).catch(()=>null);
+              } catch {}
+            }, 0);
+            logger.info('[HANDLER] human-resume preflight -> scheduled login_remediate', { nome, reason: lr.reason || '' });
+          }
+        }
+      } catch (e) {
+        preflight = { ok: false, state: 'error', reason: (e && e.message) ? String(e.message) : String(e) };
+      }
+
+      if (scheduledLoginRemediate) {
+        await snapshotStatusAndWrite();
+        // desired é setado para virtus=off acima; login_remediate vai resolver e reativar se der certo.
+        logger.info('[HANDLER] human-resume ok (login_remediate scheduled)', { nome, preflight });
+        return { ok: true, scheduledLoginRemediate: true, preflight };
+      }
+
+      // ===== Fluxo original: se não caiu em nenhum estado "especial", retoma automação normal =====
       if (!hasAppeal) {
         if (automationAllowed(ctrl)) {
           ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
