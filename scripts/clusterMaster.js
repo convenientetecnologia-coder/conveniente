@@ -343,6 +343,7 @@ function createCluster() {
               source,
               ok: true,
               pid: payload && payload._debug ? payload._debug.pid : null,
+              buildTag: payload && payload._debug ? (payload._debug.buildTag || null) : null,
               controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
               shardSize: payload && payload._debug ? payload._debug.shardSize : null
             });
@@ -359,6 +360,7 @@ function createCluster() {
                 source,
                 ok: true,
                 pid: payload && payload._debug ? payload._debug.pid : null,
+                buildTag: payload && payload._debug ? (payload._debug.buildTag || null) : null,
                 controllersCount: payload && payload._debug ? payload._debug.controllersCount : null,
                 shardSize: payload && payload._debug ? payload._debug.shardSize : null
               });

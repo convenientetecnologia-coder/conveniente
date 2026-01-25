@@ -21,6 +21,27 @@ const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
 
+// =========================
+// BUILD/BOOT EVIDENCE (ultra enterprise)
+// =========================
+// Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
+const WORKER_BUILD_TAG = '2026-01-25_ultra_enterprise_diag_v1';
+try {
+  provisionAudit.append({
+    ts: Date.now(),
+    event: 'worker_boot',
+    buildTag: WORKER_BUILD_TAG,
+    pid: process.pid,
+    node: process.version,
+    cwd: process.cwd(),
+    humanOverlayEnv: String(process.env.HUMAN_OVERLAY || '').trim(),
+    portEnv: String(process.env.PORT || '').trim(),
+    shardEnv: String(process.env.SHARD || process.env.SHARDS || '').trim(),
+    ctBaseUrlConfigured: (() => { try { const c = readCtConfig(); return !!(c && c.ctBaseUrl); } catch { return false; } })(),
+    logIngestSecretConfigured: (() => { try { const c = readCtConfig(); return !!(c && c.logIngestSecret); } catch { return false; } })()
+  });
+} catch {}
+
 const DATA_DIR = path.join(__dirname, '..', 'dados');
 const DIAG_DIR = path.join(DATA_DIR, 'diag');
 const LR_EVENTS_JSONL = path.join(DATA_DIR, 'login_required_events.jsonl');
@@ -277,8 +298,29 @@ async function _buildHumanOverlayData(nome) {
     const desired = readJsonFile(desiredPath, { perfis: {} });
     const want = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
 
-    const login = man && (man.login || man.email || man.user || man.username) ? String(man.login || man.email || man.user || man.username) : '';
-    const password = man && (man.password || man.pass) ? String(man.password || man.pass) : '';
+    let login = man && (man.login || man.email || man.user || man.username) ? String(man.login || man.email || man.user || man.username) : '';
+    let password = man && (man.password || man.pass) ? String(man.password || man.pass) : '';
+
+    // Enterprise: se manifest não tem credenciais, tenta buscar do CT (assigned->stock).
+    // Cache curto em memória para não spammar CT.
+    try {
+      if (!String(login || '').trim() || !String(password || '').trim()) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        const cache = robeMeta[nome].overlayCredCache || null;
+        const now = Date.now();
+        if (cache && cache.ts && (now - Number(cache.ts || 0)) < 5 * 60 * 1000 && cache.login && cache.password) {
+          login = String(cache.login || '');
+          password = String(cache.password || '');
+        } else {
+          const rr = await fetchCredentialsFromCT({ profileName: nome }).catch(()=>null);
+          if (rr && rr.ok) {
+            login = String(rr.login || '');
+            password = String(rr.password || '');
+            robeMeta[nome].overlayCredCache = { ts: now, login, password, stockAccountId: rr.stockAccountId || null };
+          }
+        }
+      }
+    } catch {}
 
     const data = {
       enabled: true,
@@ -286,6 +328,7 @@ async function _buildHumanOverlayData(nome) {
       label: p && p.label ? String(p.label) : '',
       cidade: p && p.cidade ? String(p.cidade) : '',
       uaPresetId: p && p.uaPresetId ? String(p.uaPresetId) : '',
+      stockAccountId: (robeMeta[nome] && robeMeta[nome].overlayCredCache && robeMeta[nome].overlayCredCache.stockAccountId) ? robeMeta[nome].overlayCredCache.stockAccountId : null,
       login,
       password,
       reason: _overlayReasonFromFlags(flags),
@@ -336,9 +379,9 @@ async function _installOverlayOnPage(nome, page) {
       });
     } catch {}
 
-    // Injeção persistente (recria em toda navegação).
+    // Injeção persistente (recria em toda navegação) + injeção imediata no documento atual.
     try {
-      await page.evaluateOnNewDocument(() => {
+      const overlayInstall = () => {
         try {
           if (window.__ctHumanOverlayInstalled) return;
           window.__ctHumanOverlayInstalled = true;
@@ -501,14 +544,21 @@ async function _installOverlayOnPage(nome, page) {
           // Resiliência: se SPA mexer no DOM e remover, recria.
           setInterval(() => { try { render(); } catch {} }, 5000);
         } catch {}
-      });
+      };
+      // 1) Para futuras navegações
+      await page.evaluateOnNewDocument(overlayInstall);
+      // 2) Para a página atual (senão o overlay só aparece após navegar/recarregar)
+      await page.evaluate(overlayInstall).catch(()=>{});
     } catch {}
   } catch {}
 }
 
 async function syncHumanOverlay(nome) {
   try {
-    if (!HUMAN_OVERLAY_CFG.enabled) return;
+    if (!HUMAN_OVERLAY_CFG.enabled) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_disabled', nome: String(nome || ''), env: String(process.env.HUMAN_OVERLAY || '').trim() }); } catch {}
+      return;
+    }
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return;
 
@@ -519,19 +569,64 @@ async function syncHumanOverlay(nome) {
     const pages = await ctrl.browser.pages().catch(()=>[]);
     const data = want ? await _buildHumanOverlayData(nome) : { enabled: false, nome: String(nome || ''), ts: Date.now() };
 
-    for (const pg of (pages || []).slice(0, HUMAN_OVERLAY_CFG.maxPagesScan)) {
+    const diag = [];
+    const scanned = (pages || []).slice(0, HUMAN_OVERLAY_CFG.maxPagesScan);
+    for (const pg of scanned) {
       if (!pg) continue;
       if (want) {
         await _installOverlayOnPage(nome, pg);
       }
       await _setOverlayDataOnPage(pg, data);
+      // Diagnóstico enterprise: prova irrefutável de que o overlay foi instalado/atualizado nesta aba.
+      try {
+        const d = await pg.evaluate(() => {
+          try {
+            const hostId = 'ct-human-overlay-host';
+            return {
+              url: (typeof location !== 'undefined' && location && location.href) ? String(location.href) : '',
+              installed: !!window.__ctHumanOverlayInstalled,
+              hasSetData: typeof window.__ctHumanOverlaySetData === 'function',
+              hasResume: typeof window.__ctHumanOverlayResume === 'function',
+              hasHost: !!document.getElementById(hostId),
+              hostVisible: (() => {
+                try {
+                  const h = document.getElementById(hostId);
+                  if (!h) return false;
+                  const ds = String((h.style && h.style.display) || '');
+                  return ds !== 'none';
+                } catch { return false; }
+              })()
+            };
+          } catch (e) {
+            return { url: '', installed: false, hasSetData: false, hasResume: false, hasHost: false, hostVisible: false, error: String(e && e.message || e) };
+          }
+        }).catch((e) => ({ url: '', installed: false, hasSetData: false, hasResume: false, hasHost: false, hostVisible: false, error: String(e && e.message || e) }));
+        diag.push(d);
+      } catch (e) {
+        diag.push({ url: '', installed: false, hasSetData: false, hasResume: false, hasHost: false, hostVisible: false, error: String(e && e.message || e) });
+      }
     }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'human_overlay_sync',
+        nome: String(nome || ''),
+        wantHold: !!wantHold,
+        want: !!want,
+        pagesCount: Array.isArray(pages) ? pages.length : 0,
+        scanned: scanned.length,
+        diag: diag.slice(0, 4) // evita log gigante
+      });
+    } catch {}
   } catch {}
 }
 
 async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
   try {
-    if (!HUMAN_OVERLAY_CFG.enabled) return;
+    if (!HUMAN_OVERLAY_CFG.enabled) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_ensure_skipped_disabled', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
+      return;
+    }
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return;
     // Evidência enterprise (sem credenciais)
     try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_installed', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
@@ -843,16 +938,61 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       try {
         const rr = await (async () => {
           try {
-            // Reusar API interna de delete (robusto: fecha se ativo, remove perfis.json/desired/userDataDir)
-            const baseUrl = `http://127.0.0.1:${Number(process.env.PORT || 3000) || 3000}`;
-            const resp = await fetch(`${baseUrl}/api/perfis/${encodeURIComponent(String(nome))}`, {
-              method: 'DELETE',
-              headers: { 'x-operator': 'auto_banned_delete' }
-            }).catch(()=>null);
-            const j = resp ? await resp.json().catch(()=>null) : null;
-            if (!resp || !j || j.ok !== true) {
-              return { ok: false, error: (j && j.error) ? String(j.error) : (!resp ? 'no_resp' : `http_${resp.status}`) };
-            }
+            // IMPORTANTE (enterprise):
+            // Não chamar o endpoint HTTP DELETE /api/perfis/:nome daqui.
+            // setBannedFlag pode rodar dentro de lockProfileAction; o endpoint DELETE chama worker.deactivate e pode deadlockar.
+
+            // 3.1) desired OFF (evita reabrir)
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+                return d;
+              });
+            } catch {}
+
+            // 3.2) hard close do controller (se ativo)
+            try {
+              const ctrl = controllers.get(nome);
+              if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+                try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
+                ctrl.virtus = null;
+                ctrl.trabalhando = false;
+                try { await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_delete', allowKillUserDataDir: false }), 75_000).catch(()=>null); } catch {}
+              }
+            } catch {}
+            try { controllers.delete(nome); } catch {}
+            try { stopPruneLoop(nome); } catch {}
+
+            // 3.3) remover userDataDir externo (se houver) e remover do perfis.json
+            try {
+              const perfisArr = loadPerfisJson();
+              const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+              const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+              if (udir) {
+                try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
+              }
+              const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+              try { savePerfisJson(arr2); } catch {}
+            } catch {}
+
+            // 3.4) remover desired entry e diretório do perfil (manifest/meta)
+            try { await fileStore.removeDesired(nome); } catch {}
+            try {
+              const dir = path.join(fileStore.perfisDir, nome);
+              try { fileStore.rimrafSync(dir); } catch {}
+            } catch {}
+
+            // 3.5) limpeza cosmética do status.json
+            try {
+              const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+              if (st && Array.isArray(st.perfis)) {
+                st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+                fileStore.writeJsonAtomic(fileStore.statusPath, st);
+              }
+            } catch {}
+
+            try { await snapshotStatusAndWrite(); } catch {}
             return { ok: true };
           } catch (e) {
             return { ok: false, error: (e && e.message) || String(e) };
@@ -1789,7 +1929,9 @@ async function activateOnce(nome, source = '', operator = '') {
         const op = String(operator || '').trim();
         const isHumanOp = /(^admin|^ui|manual|user|humano|human)/i.test(op);
         // Regra enterprise: humanHold deve bloquear automação, mas NÃO deve impedir o humano de abrir o navegador.
-        _humanHoldAllowOpen = !!isHumanOp;
+        // Também permite bulk open (abrir tudo) reabrir navegadores em modo humano após restart.
+        const isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(op);
+        _humanHoldAllowOpen = !!(isHumanOp || isBulkOpen);
         if (!_humanHoldAllowOpen) {
           await reportAction(nome, 'mil_action', 'activate_skip_human_hold');
           return { ok: false, error: 'human_hold' };
@@ -1963,6 +2105,33 @@ async function activateOnce(nome, source = '', operator = '') {
                   } catch {}
                 }
               } catch {}
+            }
+          }
+        } catch {}
+
+        // Enterprise: se está em "Recurso em análise" (appealSubmitted),
+        // abrir já em modo humano (sem automação) e manter Virtus OFF.
+        try {
+          const flags2 = await readAccountFlags(nome).catch(()=>({}));
+          if (flags2 && flags2.appealSubmitted === true) {
+            const ctrl = controllers.get(nome);
+            if (ctrl) {
+              ctrl.humanControl = true;
+              ctrl.trabalhando = false;
+              try { await stopVirtus(nome); } catch {}
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d.perfis = d.perfis || {};
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                  return d;
+                });
+              } catch {}
+              await reportAction(nome, 'mil_action', 'opened_in_human_mode (appealSubmitted=true)');
+              try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_appeal_submitted'); } catch {}
+              try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+              try { freezeCooldownIfNotWorking(nome); } catch {}
+              try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_appeal_submitted' }); } catch {}
+              try { await snapshotStatusAndWrite(); } catch {}
             }
           }
         } catch {}
@@ -3137,6 +3306,35 @@ async function start_work({ nome, operator }) {
       logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
       return { ok: false, error: 'profile_in_human_or_config' };
     }
+
+    // Guardrail enterprise: se flags persistentes indicam PIL, bloquear automação SEMPRE.
+    // Isso garante que "Recurso em análise" (appealSubmitted) e "Conta suspensa" não voltem a ficar Virtus Online após restart/open-all.
+    try {
+      const flags = await readAccountFlags(nome).catch(()=>({}));
+      if (flags && flags.banned === true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'banned', reason: String(flags.bannedReason||flags.reason||'').slice(0,120) }); } catch {}
+        try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
+        return { ok: false, error: 'banned' };
+      }
+      if (flags && flags.appealSubmitted === true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'appeal_submitted', nextAt: Number(flags.appealNextCheckAt||0)||0 }); } catch {}
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            return d;
+          });
+        } catch {}
+        try {
+          ctrl.humanControl = true;
+          ctrl.trabalhando = false;
+          await stopVirtus(nome).catch(()=>{});
+        } catch {}
+        try { await ensureHumanOverlay(nome, ctrl, { reason: 'start_work_blocked_appeal_submitted' }); } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        return { ok: false, error: 'appeal_submitted' };
+      }
+    } catch {}
     if (ctrl.trabalhando && ctrl.virtus) {
       logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
       return { ok: true };
@@ -3156,6 +3354,40 @@ async function start_work({ nome, operator }) {
         return { ok: false, error: 'automation_not_allowed' };
       }
       ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+
+      // Enterprise: preflight rápido ANTES de iniciar Virtus:
+      // - se detectou banned/suspended/disabled -> auto arquivar+deletar (libera slot)
+      // - se detectou appeal_submitted -> manter humano + armar monitor (1h)
+      try {
+        const pages = await ctrl.browser.pages().catch(()=>[]);
+        const p0 = pages && pages[0];
+        if (p0) {
+          const bd = await browserHelper.detectBannedUi(p0).catch(()=>null);
+          if (bd && bd.banned) {
+            try { await setBannedFlag(nome, { reason: bd.reason || 'suspended_ui', snippet: bd.snippet || '' }); } catch {}
+            try { await issues.append(nome, 'mil_action', `start_work_preflight_banned reason=${String(bd.reason||'').slice(0,80)}`); } catch {}
+            return { ok: false, error: 'banned' };
+          }
+          const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          if (lr && lr.loginRequired && String(lr.reason || '').toLowerCase().includes('appeal')) {
+            try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
+            ctrl.humanControl = true;
+            ctrl.trabalhando = false;
+            try { await stopVirtus(nome); } catch {}
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                return d;
+              });
+            } catch {}
+            try { await ensureHumanOverlay(nome, ctrl, { reason: 'start_work_preflight_appeal_submitted' }); } catch {}
+            try { await snapshotStatusAndWrite(); } catch {}
+            try { await issues.append(nome, 'mil_action', `start_work_preflight_appeal_submitted reason=${String(lr.reason||'').slice(0,80)}`); } catch {}
+            return { ok: false, error: 'appeal_submitted' };
+          }
+        }
+      } catch {}
 
       // Enterprise: pós-provision (new_account) faz um check rápido do Marketplace
       // em uma segunda aba e fecha logo em seguida. Mantém a aba 0 (Messenger/Virtus) como principal.
@@ -5167,6 +5399,8 @@ const handlers = {
       // Diagnóstico enterprise: ajuda a provar quando o dashboard está “cego” porque não há controllers vivos.
       _debug: {
         pid: process && process.pid ? process.pid : null,
+        buildTag: (typeof WORKER_BUILD_TAG === 'string' ? WORKER_BUILD_TAG : null),
+        humanOverlayEnabled: (typeof HUMAN_OVERLAY_CFG === 'object' ? !!HUMAN_OVERLAY_CFG.enabled : null),
         shardSize: SHARD_SET ? SHARD_SET.size : null,
         controllersCount: controllers ? controllers.size : null,
         ts: Date.now()
@@ -5924,10 +6158,44 @@ async function nurseTick() {
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
 
+      // Auto-exclusão enterprise: se já está marcado como banned/suspended, arquiva no CT e deleta o perfil local.
+      // Isso cobre casos pós-restart onde a flag já estava setada e não vai passar novamente pelos fluxos de detecção.
+      try {
+        const flagsB = await readAccountFlags(nome).catch(()=>({}));
+        if (flagsB && flagsB.banned === true) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          const last = Number(robeMeta[nome].banSweepLastAt || 0) || 0;
+          if (!last || (now - last) > (2 * 60 * 1000)) { // no máximo 1 tentativa a cada 2min por perfil
+            robeMeta[nome].banSweepLastAt = now;
+            try {
+              provisionAudit.append({
+                ts: now,
+                event: 'ban_sweep_attempt',
+                nome: String(nome || ''),
+                reason: String(flagsB.bannedReason || flagsB.reason || '').slice(0, 160)
+              });
+            } catch {}
+            try { await setBannedFlag(nome, { reason: String(flagsB.bannedReason || 'banned'), snippet: String(flagsB.bannedText || '') }); } catch {}
+          }
+          continue;
+        }
+      } catch {}
+
       // Monitoramento: recurso/apelação submetida (após "Retomar trabalho")
       try {
         const flags = await readAccountFlags(nome).catch(()=>({}));
         if (flags && flags.appealSubmitted === true) {
+          // Garantia ultra enterprise: nunca manter Virtus rodando em appealSubmitted.
+          try {
+            if (ctrl) {
+              ctrl.humanControl = true;
+              ctrl.trabalhando = false;
+              await stopVirtus(nome).catch(()=>{});
+              // overlay é o “painel de comando” do humano
+              await ensureHumanOverlay(nome, ctrl, { reason: 'nurse_appeal_submitted_guard' }).catch(()=>{});
+              await snapshotStatusAndWrite().catch(()=>{});
+            }
+          } catch {}
           const nextAt = Number(flags.appealNextCheckAt || 0) || 0;
           if (!nextAt || nextAt <= now) {
             // Só monitora se o navegador está aberto; senão, o nurse seguirá a regra normal de desired.active.
@@ -5945,6 +6213,17 @@ async function nurseTick() {
       } catch {}
 
       if (want.humanHold === true) {
+        // Overlay deve aparecer e se manter (retry periódico com debounce).
+        try {
+          if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            const last = Number(robeMeta[nome].overlayNurseLastAt || 0) || 0;
+            if (!last || (now - last) > 45_000) {
+              robeMeta[nome].overlayNurseLastAt = now;
+              await syncHumanOverlay(nome).catch(()=>{});
+            }
+          }
+        } catch {}
         await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
         continue;
       }
