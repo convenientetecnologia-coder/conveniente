@@ -2942,6 +2942,16 @@ const handlers = {
           return { ok: false, error: 'configure_requires_provision_lock' };
         }
       }
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'configure_begin',
+          nome: String(nome || ''),
+          operator: op || null,
+          isStockProvision: !!isStockProvision,
+          mustHaveProvisionLock: !!mustHaveProvisionLock
+        });
+      } catch {}
       const pausedGlobal = [];
       const closedForRam = [];
       let enteredHuman = false;
@@ -2952,6 +2962,9 @@ const handlers = {
       const invokeHumanForConfigure = async (reason) => {
         const why = String(reason || 'configure_failed');
         enteredHuman = true;
+        try {
+          provisionAudit.append({ ts: Date.now(), event: 'configure_human_hold', nome: String(nome || ''), operator: op || null, reason: why });
+        } catch {}
         try { await setLoginRequiredFlag(nome, { reason: why, source: 'configure' }); } catch {}
         try { await setLoginRemediateFailedFlag(nome, { reason: why, source: 'configure', stage: 'configure' }); } catch {}
         try {
@@ -2987,8 +3000,19 @@ const handlers = {
           const require = String(process.env.CONFIGURE_REQUIRE_QUIESCE || '1').trim() === '1';
           const waitBusyMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_BUSY_MS || 120000) || 120000);
           const waitPauseMs = Math.max(0, Number(process.env.CONFIGURE_WAIT_PAUSE_MS || 45000) || 45000);
+          try { provisionAudit.append({ ts: Date.now(), event: 'configure_quiesce_begin', nome: String(nome||''), operator: op || null, require, waitBusyMs, waitPauseMs }); } catch {}
           const q = await waitGlobalQuiesce({ opKind: 'configure', operator: op, targetNome: nome, waitBusyMs, waitPauseMs, require });
           for (const it of (q && q.paused) ? q.paused : []) pausedGlobal.push(it);
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'configure_quiesce_done',
+              nome: String(nome || ''),
+              operator: op || null,
+              pausedCount: pausedGlobal.length,
+              pausedNames: pausedGlobal.map(x => x && x.nome).filter(Boolean).slice(0, 60)
+            });
+          } catch {}
         }
 
         // Headroom (enterprise): se necessário, fecha o mínimo possível (preserveDesired) e o nurse reabre depois.
@@ -3020,6 +3044,7 @@ const handlers = {
             try {
               await handlers.deactivate({ nome: pick.nome, reason: 'ramKill', policy: 'preserveDesired' });
               closedForRam.push(pick.nome);
+              try { provisionAudit.append({ ts: Date.now(), event: 'configure_headroom_closed', nome: String(nome||''), operator: op || null, closedNome: pick.nome, closedSoFar: closedForRam.length }); } catch {}
             } catch {}
             await sleep(1600);
             free = getAvailableMB();
@@ -3027,6 +3052,7 @@ const handlers = {
         } catch {}
 
         // Sempre pausar Virtus do próprio alvo antes de reinjetar cookies
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_stop_virtus', nome: String(nome||''), operator: op || null }); } catch {}
         try { await stopVirtus(nome); } catch {}
 
         // Operação de configuração é crítica: mantém Virtus OFF enquanto configura
@@ -3038,7 +3064,9 @@ const handlers = {
           });
         } catch {}
 
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_begin', nome: String(nome||''), operator: op || null }); } catch {}
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_done', nome: String(nome||''), operator: op || null }); } catch {}
 
         // Pós-injeção: validar estado real (login_required / appeal_submitted / etc)
         let best = null;
@@ -3055,11 +3083,25 @@ const handlers = {
             }
           }
         } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'configure_post_inject_login_check',
+            nome: String(nome || ''),
+            operator: op || null,
+            loginRequired: !!(best && best.loginRequired),
+            reason: best ? String(best.reason || '') : '',
+            domain: best ? String(best.domain || '') : '',
+            url: best ? String(best.url || '').slice(0, 220) : '',
+            title: best ? String(best.title || '').slice(0, 180) : ''
+          });
+        } catch {}
 
         if (best && best.loginRequired) {
           const rr = String(best.reason || '').toLowerCase();
           if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
             await setAppealSubmittedFlag(nome, { source: best.domain || 'facebook', url: best.url || '', title: best.title || '' });
+            try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_appeal_submitted', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
             return { ok: false, error: 'appeal_submitted' };
           }
 
@@ -3082,6 +3124,7 @@ const handlers = {
 
           try {
             if (bestPage) {
+              try { provisionAudit.append({ ts: Date.now(), event: 'configure_login_fallback_begin', nome: String(nome||''), operator: op || null }); } catch {}
               await browserHelper.ensureFbUiUnblocked(bestPage, nome, { reasonBase: 'configure_login', allowGpt: true, maxRounds: 2 }).catch(()=>null);
               await browserHelper.tryLoginEmailPass(bestPage, { nome, login: login2, password: password2, allowGpt: true }).catch(()=>null);
               await sleep(900);
@@ -3089,6 +3132,17 @@ const handlers = {
           } catch {}
 
           const after = await (bestPage ? browserHelper.detectLoginRequired(bestPage).catch(()=>({ loginRequired:false })) : ({ loginRequired:false }));
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'configure_login_fallback_done',
+              nome: String(nome || ''),
+              operator: op || null,
+              stillLoginRequired: !!(after && after.loginRequired),
+              reason: after ? String(after.reason || '') : '',
+              url: after ? String(after.url || '').slice(0, 220) : ''
+            });
+          } catch {}
           if (after && after.loginRequired) {
             await invokeHumanForConfigure(`still_login_required:${String(after.reason||'login')}`);
             return { ok: false, error: `still_login_required:${String(after.reason||'login')}` };
@@ -3110,11 +3164,13 @@ const handlers = {
 
         // Sucesso: limpa flags e segue.
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length }); } catch {}
         logger.info('[HANDLER] configure ok', { nome, closedForRamCount: closedForRam.length });
         return { ok: true, closedForRam };
       } catch (e) {
         try { await issues.append(nome, 'cookie_inject_failed', e && e.message || e); } catch {}
         logger.error('[HANDLER] configure erro', { nome, error: e && e.message || e }, e);
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_exception', nome: String(nome||''), operator: op || null, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
         // Se falhou tecnicamente, entra em humano (padrão enterprise) para evitar ficar preso sem ação.
         try { await invokeHumanForConfigure((e && e.message) || String(e)); } catch {}
         return { ok: false, error: e && e.message || 'falha_injetar_cookies' };
@@ -3175,6 +3231,17 @@ const handlers = {
               try { unfreezeCooldownIfWorking(nome); } catch {}
             }
           }
+        } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'configure_finalize',
+            nome: String(nome || ''),
+            operator: op || null,
+            enteredHuman: !!enteredHuman,
+            closedForRamCount: closedForRam.length,
+            closedForRam: closedForRam.slice(0, 60)
+          });
         } catch {}
         await snapshotStatusAndWrite();
       }
