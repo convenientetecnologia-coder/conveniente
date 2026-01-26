@@ -11,10 +11,11 @@ const LOCK_PATH = path.join(__dirname, "..", "dados", "provision_lock.json");
 // Hard safety: mesmo que alguém grave um lock inválido (sem untilMs),
 // não pode virar "lock infinito" e bloquear Robe/Virtus por horas.
 const HARD_MAX_TTL_MS = 60 * 60 * 1000; // 60min
-// Hardening: a partir de 2026-01, lock sempre inclui pid (auto-recover pós-crash).
-// Para compat com lock antigo (sem pid), é possível desligar:
-//   PROVISION_LOCK_REQUIRE_PID=0
-const REQUIRE_PID = String(process.env.PROVISION_LOCK_REQUIRE_PID || '1').trim() !== '0';
+// Hardening: lock pode incluir pid (auto-recover pós-crash).
+// IMPORTANTE: compat com lock antigo (sem pid) DEVE ser mantida para evitar "desencontro" entre versões
+// (um lado cria lock sem pid e o outro invalidaria e liberaria no meio do provision).
+// Portanto, por padrão NÃO exigimos pid; apenas usamos pid quando existir.
+const REQUIRE_PID = String(process.env.PROVISION_LOCK_REQUIRE_PID || '0').trim() !== '0';
 
 function now() { return Date.now(); }
 
@@ -68,6 +69,7 @@ function get() {
     (REQUIRE_PID && (!pid || pid <= 0));
 
   // Auto-recover: se tem pid mas o processo morreu (crash), não pode bloquear o sistema.
+  // Se não há pid, NUNCA faça auto-unlock por esse critério (compat entre versões).
   if (!invalid && pid > 0 && !_isPidAlive(pid)) {
     try { fs.unlinkSync(LOCK_PATH); } catch {}
     return { active: false, lock: null };
