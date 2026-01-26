@@ -2,6 +2,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const logger = require('./logger.js');
 const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
@@ -47,6 +48,10 @@ const DIAG_DIR = path.join(DATA_DIR, 'diag');
 const LR_EVENTS_JSONL = path.join(DATA_DIR, 'login_required_events.jsonl');
 const LR_EVIDENCE_JSONL = path.join(DATA_DIR, 'login_remediate_evidence.jsonl');
 const HOSTID_PATH = path.join(DATA_DIR, '.telemetry_hostid');
+const CT_ARCHIVE_QUEUE_DIR = path.join(DATA_DIR, 'ct_archive_queue');
+const CT_ARCHIVE_QUEUE_PENDING_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'pending');
+const CT_ARCHIVE_QUEUE_DONE_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'done');
+const CT_ARCHIVE_EVID_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'evidence');
 
 function ensureDirSync(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
 function safeFilePart(s) {
@@ -60,6 +65,127 @@ function appendJsonl(fp, obj) {
     ensureDirSync(path.dirname(fp));
     fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
   } catch {}
+}
+
+function newFlowId(prefix = 'flow') {
+  try { return `${String(prefix)}_${Date.now()}_${crypto.randomUUID()}`; } catch {}
+  try { return `${String(prefix)}_${Date.now()}_${crypto.randomBytes(12).toString('hex')}`; } catch {}
+  return `${String(prefix)}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function writeJsonAtomicSimple(fp, obj) {
+  try {
+    ensureDirSync(path.dirname(fp));
+    const tmp = `${fp}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+    try { fs.renameSync(tmp, fp); } catch { fs.copyFileSync(tmp, fp); try { fs.unlinkSync(tmp); } catch {} }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+function saveCtEvidenceJpeg({ stockAccountId = null, profileName = '', flowId = '', jpegBuf = null, url = '', reason = '' } = {}) {
+  try {
+    const sid = Number(stockAccountId || 0) || 0;
+    const key = sid ? `id_${sid}` : `profile_${safeFilePart(profileName)}`;
+    const dir = path.join(CT_ARCHIVE_EVID_DIR, key);
+    ensureDirSync(dir);
+    const fn = `${safeFilePart(flowId || newFlowId('ban'))}.jpg`;
+    const abs = path.join(dir, fn);
+    if (jpegBuf && jpegBuf.length) fs.writeFileSync(abs, jpegBuf);
+    const meta = { ts: Date.now(), stockAccountId: sid || null, profileName: String(profileName||''), flowId: String(flowId||''), url: String(url||'').slice(0, 600), reason: String(reason||'').slice(0, 160), bytes: jpegBuf ? jpegBuf.length : 0 };
+    try { fs.writeFileSync(abs + '.meta.json', JSON.stringify(meta, null, 2), 'utf8'); } catch {}
+    return { ok: true, path: abs, meta };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+function queueCtArchive({ stockAccountId = null, profileName = '', reason = '', evidencePath = '', evidenceUrl = '', flowId = '' } = {}) {
+  try {
+    ensureDirSync(CT_ARCHIVE_QUEUE_PENDING_DIR);
+    ensureDirSync(CT_ARCHIVE_QUEUE_DONE_DIR);
+    const sid = Number(stockAccountId || 0) || 0;
+    const idPart = sid ? `id_${sid}` : `profile_${safeFilePart(profileName)}`;
+    const fn = `${Date.now()}_${safeFilePart(flowId || newFlowId('ctq'))}_${idPart}.json`;
+    const fp = path.join(CT_ARCHIVE_QUEUE_PENDING_DIR, fn);
+    const obj = {
+      createdAt: Date.now(),
+      nextAttemptAt: 0,
+      attempts: 0,
+      stockAccountId: sid || null,
+      profileName: String(profileName || ''),
+      reason: String(reason || '').slice(0, 160),
+      evidencePath: String(evidencePath || ''),
+      evidenceUrl: String(evidenceUrl || '').slice(0, 800),
+      flowId: String(flowId || '')
+    };
+    const w = writeJsonAtomicSimple(fp, obj);
+    return { ok: !!w.ok, file: fp, queued: true, error: w.ok ? null : w.error };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+async function processCtArchiveQueue({ limit = 3 } = {}) {
+  const now = Date.now();
+  try { ensureDirSync(CT_ARCHIVE_QUEUE_PENDING_DIR); ensureDirSync(CT_ARCHIVE_QUEUE_DONE_DIR); } catch {}
+  let files = [];
+  try { files = fs.readdirSync(CT_ARCHIVE_QUEUE_PENDING_DIR).filter(f => f && f.endsWith('.json')).slice(0, 1000); } catch { files = []; }
+  let processed = 0;
+  for (const f of files) {
+    if (processed >= limit) break;
+    const fp = path.join(CT_ARCHIVE_QUEUE_PENDING_DIR, f);
+    let job = null;
+    try { job = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { job = null; }
+    if (!job || typeof job !== 'object') continue;
+    const nextAt = Number(job.nextAttemptAt || 0) || 0;
+    if (nextAt && nextAt > now) continue;
+    const sid = Number(job.stockAccountId || 0) || 0;
+    const profileName = String(job.profileName || '').trim();
+    const reason = String(job.reason || 'banned_detected').trim();
+    const evidPath = String(job.evidencePath || '').trim();
+    const evidUrl = String(job.evidenceUrl || '').trim();
+    const flowId = String(job.flowId || '').trim();
+
+    let b64 = '';
+    if (evidPath && fs.existsSync(evidPath)) {
+      try { b64 = fs.readFileSync(evidPath).toString('base64'); } catch { b64 = ''; }
+    }
+    try {
+      provisionAudit.append({ ts: Date.now(), event: 'ct_archive_retry_begin', flowId: flowId || null, profileName, stockAccountId: sid || null, attempts: Number(job.attempts || 0) || 0 });
+    } catch {}
+
+    const rr = await archiveBanWithEvidenceToCT({ profileName, stockAccountId: sid || null, reason, evidenceB64: b64, evidenceUrl: evidUrl }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+    const ok = !!(rr && rr.ok);
+    try {
+      provisionAudit.append({ ts: Date.now(), event: 'ct_archive_retry_done', flowId: flowId || null, profileName, stockAccountId: sid || null, ok, error: ok ? null : String(rr && rr.error || 'error').slice(0, 220) });
+    } catch {}
+    if (ok) {
+      processed++;
+      try {
+        const doneFp = path.join(CT_ARCHIVE_QUEUE_DONE_DIR, f);
+        try { fs.renameSync(fp, doneFp); } catch { try { fs.copyFileSync(fp, doneFp); } catch {} try { fs.unlinkSync(fp); } catch {} }
+      } catch {}
+      // Limpeza best-effort de evidence
+      try { if (evidPath && fs.existsSync(evidPath)) fs.unlinkSync(evidPath); } catch {}
+      try { if (evidPath && fs.existsSync(evidPath + '.meta.json')) fs.unlinkSync(evidPath + '.meta.json'); } catch {}
+      continue;
+    }
+    // Reagendar com backoff
+    try {
+      const attempts = (Number(job.attempts || 0) || 0) + 1;
+      const backoffMs = Math.min(30 * 60 * 1000, Math.max(60_000, attempts * 60_000)); // 1m, 2m, 3m..., max 30m
+      job.attempts = attempts;
+      job.lastError = String(rr && rr.error || 'error').slice(0, 220);
+      job.lastAttemptAt = Date.now();
+      job.nextAttemptAt = Date.now() + backoffMs;
+      writeJsonAtomicSimple(fp, job);
+      processed++;
+    } catch {}
+  }
+  return { ok: true, processed };
 }
 
 async function appendLoginRemediateEvidence({ nome, operator, step, page, note } = {}) {
@@ -194,7 +320,7 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
   }
 }
 
-async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detected', evidenceB64 = '', evidenceUrl = '' } = {}) {
+async function archiveBanWithEvidenceToCT({ profileName, stockAccountId = null, reason = 'banned_detected', evidenceB64 = '', evidenceUrl = '' } = {}) {
   const cfg = readCtConfig();
   let base = String(cfg && cfg.ctBaseUrl || '').trim();
   if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
@@ -210,15 +336,19 @@ async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detect
   const p = String(profileName || '').trim();
   if (!base || !secret || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
   try {
-    let stockAccountId = null;
-    try {
-      const man = await manifestStore.read(p).catch(()=>null);
-      if (man && (man.stockAccountId || man.stock_account_id)) stockAccountId = Number(man.stockAccountId || man.stock_account_id) || null;
-    } catch {}
-    try {
-      const cached = robeMeta[p] && robeMeta[p].overlayCredCache;
-      if (!stockAccountId && cached && cached.stockAccountId) stockAccountId = cached.stockAccountId;
-    } catch {}
+    let sid = Number(stockAccountId || 0) || 0;
+    if (!sid) {
+      try {
+        const man = await manifestStore.read(p).catch(()=>null);
+        if (man && (man.stockAccountId || man.stock_account_id)) sid = Number(man.stockAccountId || man.stock_account_id) || 0;
+      } catch {}
+    }
+    if (!sid) {
+      try {
+        const cached = robeMeta[p] && robeMeta[p].overlayCredCache;
+        if (cached && cached.stockAccountId) sid = Number(cached.stockAccountId) || 0;
+      } catch {}
+    }
     const Aborter = global.AbortController || require('node-abort-controller');
     const ac = new Aborter();
     const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
@@ -228,7 +358,7 @@ async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detect
       body: JSON.stringify({
         hostId,
         profileName: p,
-        stockAccountId: stockAccountId || null,
+        stockAccountId: sid || null,
         reason: String(reason || 'banned_detected').slice(0, 120),
         by: 'auto',
         evidenceB64: String(evidenceB64 || '').trim(),
@@ -237,9 +367,15 @@ async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detect
       signal: ac.signal
     });
     clearTimeout(t);
-    const j = await resp.json().catch(()=>null);
-    if (!j || j.ok !== true) return { ok: false, error: (j && j.error) ? String(j.error) : `http_${resp.status}` };
-    return { ok: true, archived: true, stockAccountId: j.id || null };
+    const txt = await resp.text().catch(()=> '');
+    let j = null;
+    try { j = JSON.parse(txt); } catch { j = null; }
+    if (!j || j.ok !== true) {
+      const bodySnippet = String(txt || '').slice(0, 220);
+      const err = (j && j.error) ? String(j.error) : `http_${resp.status}`;
+      return { ok: false, error: err, details: { httpStatus: resp.status, base, bodySnippet, stockAccountId: sid || null } };
+    }
+    return { ok: true, archived: true, stockAccountId: Number(j.id || sid || 0) || null };
   } catch (e) {
     return { ok: false, error: (e && e.message) || String(e) };
   }
@@ -1567,8 +1703,17 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     // - best-effort (não pode travar o worker)
     // - nunca para estados não-banned (appeal/captcha/identity não passam aqui)
     try {
+      const flowId = newFlowId('ban');
+      // Captura stockAccountId logo no começo (antes de qualquer delete), para nunca “sumir” no CT.
+      let stockAccountId = null;
+      try {
+        const m0 = await manifestStore.read(nome).catch(()=>null);
+        if (m0 && (m0.stockAccountId || m0.stock_account_id)) stockAccountId = Number(m0.stockAccountId || m0.stock_account_id) || null;
+      } catch {}
+
       // 0) Captura evidence (antes de fechar)
       let b64 = '';
+      let evBuf = null;
       let url = '';
       try {
         const ctrl = controllers.get(nome);
@@ -1578,9 +1723,31 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           try { url = (typeof p0.url === 'function') ? (p0.url() || '') : ''; } catch {}
           try {
             const buf = await p0.screenshot({ type: 'jpeg', quality: 75, fullPage: true }).catch(()=>null);
-            if (buf && buf.length) b64 = Buffer.from(buf).toString('base64');
+            if (buf && buf.length) { evBuf = buf; b64 = Buffer.from(buf).toString('base64'); }
           } catch {}
         }
+      } catch {}
+
+      // Evidência local (para retry se CT estiver fora)
+      let evidencePath = '';
+      try {
+        const ev = saveCtEvidenceJpeg({ stockAccountId, profileName: nome, flowId, jpegBuf: evBuf, url, reason: `banned:${String(reason||'').slice(0,80)}` });
+        if (ev && ev.ok) evidencePath = String(ev.path || '');
+      } catch {}
+
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'banflow_begin',
+          flowId,
+          nome: String(nome||''),
+          stockAccountId: stockAccountId || null,
+          reason: String(reason||'').slice(0, 180),
+          hasEvidence: !!(b64 && b64.length),
+          evidencePath: evidencePath ? String(evidencePath).slice(0, 260) : null,
+          url: url ? String(url).slice(0, 260) : null,
+          controllersHas: controllers.has(nome)
+        });
       } catch {}
 
       // 0.9) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
@@ -1598,7 +1765,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       // 1) FECHA o navegador (não excluir com navegador aberto)
       try {
         try {
-          provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', nome: String(nome||'') });
+          provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null });
         } catch {}
         const ctrl = controllers.get(nome);
         // Capturar userDataDir para validação hard (anti-janela zumbi)
@@ -1640,6 +1807,19 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           } catch {}
           let closeR = null;
           try { closeR = await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'banflow_close_controller_result',
+              flowId,
+              nome: String(nome||''),
+              stockAccountId: stockAccountId || null,
+              pidBefore: pidBefore || null,
+              closeR: closeR || null,
+              udirForCheck: udirForCheck ? String(udirForCheck).slice(0, 260) : null,
+              udirSource: udirSource || null
+            });
+          } catch {}
           // Enterprise: preferir fechamento graceful; só usar taskkill/PID-kill como fallback
           // quando ainda existirem processos para o userDataDir (garantia de 110% sem matar à toa).
           try {
@@ -1710,7 +1890,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
             }
           } catch {}
         }
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', nome: String(nome||''), udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
 
         // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
         // (Caso contrário, o Windows deixa janela "quebrada" aberta, mesmo após apagar diretório.)
@@ -1797,6 +1977,8 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
 
           // Marca no manifest: browser fechado (pré-condição para delete/arquive).
           try {
+            const before = await manifestStore.read(nome).catch(()=>null);
+            const prevClosedAt = before && before.accountFlags ? Number(before.accountFlags.browserClosedAt || 0) || 0 : 0;
             await manifestStore.update(nome, (man) => {
               man = man || {};
               man.accountFlags = man.accountFlags || {};
@@ -1811,6 +1993,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               delete man.accountFlags.bannedPendingClosePids;
               return man;
             });
+            const after = await manifestStore.read(nome).catch(()=>null);
+            const nextClosedAt = after && after.accountFlags ? Number(after.accountFlags.browserClosedAt || 0) || 0 : 0;
+            try { provisionAudit.append({ ts: Date.now(), event: 'banflow_browserClosedAt_set', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, prevClosedAt: prevClosedAt || null, nextClosedAt: nextClosedAt || null }); } catch {}
           } catch {}
         } catch {}
 
@@ -1914,7 +2099,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           provisionAudit.append({
             ts: Date.now(),
             event: 'auto_delete_banned_profile',
+            flowId,
             nome: String(nome||''),
+            stockAccountId: stockAccountId || null,
             ok: !!(rr && rr.ok),
             error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
           });
@@ -1925,6 +2112,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       try {
         const rr = await archiveBanWithEvidenceToCT({
           profileName: nome,
+          stockAccountId: stockAccountId || null,
           reason: `banned:${String(reason||'banned').slice(0,80)}`,
           evidenceB64: b64,
           evidenceUrl: url
@@ -1933,12 +2121,19 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           provisionAudit.append({
             ts: Date.now(),
             event: 'auto_archive_banned_ct',
+            flowId,
             nome: String(nome||''),
             ok: !!(rr && rr.ok),
             error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-            stockAccountId: rr && rr.stockAccountId || null
+            stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
+            details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
           });
         } catch {}
+        if (!rr || rr.ok !== true) {
+          // CT fora/arq falhou: NÃO pode “sumir”. Enfileira retry.
+          const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `banned:${String(reason||'banned').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
+          try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
+        }
       } catch {}
     } catch {}
     await manifestStore.update(nome, (man) => {
@@ -1989,8 +2184,17 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
     // 2) exclui a conta do servidor (perfil local/desired/perfis.json)
     // 3) envia pro estoque Excluídas (CT) com evidence
     try {
+      const flowId = newFlowId('two_factor');
+      // Captura stockAccountId cedo (antes de delete), para nunca “sumir” no CT.
+      let stockAccountId = null;
+      try {
+        const m0 = await manifestStore.read(nome).catch(()=>null);
+        if (m0 && (m0.stockAccountId || m0.stock_account_id)) stockAccountId = Number(m0.stockAccountId || m0.stock_account_id) || null;
+      } catch {}
+
       // 0) Captura evidence (antes de fechar)
       let b64 = '';
+      let evBuf = null;
       let url = '';
       try {
         const ctrl = controllers.get(nome);
@@ -2000,9 +2204,29 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           try { url = (typeof p0.url === 'function') ? (p0.url() || '') : ''; } catch {}
           try {
             const buf = await p0.screenshot({ type: 'jpeg', quality: 75, fullPage: true }).catch(()=>null);
-            if (buf && buf.length) b64 = Buffer.from(buf).toString('base64');
+            if (buf && buf.length) { evBuf = buf; b64 = Buffer.from(buf).toString('base64'); }
           } catch {}
         }
+      } catch {}
+
+      // Evidência local (para retry se CT estiver fora)
+      let evidencePath = '';
+      try {
+        const ev = saveCtEvidenceJpeg({ stockAccountId, profileName: nome, flowId, jpegBuf: evBuf, url, reason: `two_factor:${String(reason||'').slice(0,80)}` });
+        if (ev && ev.ok) evidencePath = String(ev.path || '');
+      } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'twofactorflow_begin',
+          flowId,
+          nome: String(nome||''),
+          stockAccountId: stockAccountId || null,
+          reason: String(reason||'').slice(0, 180),
+          hasEvidence: !!(b64 && b64.length),
+          evidencePath: evidencePath ? String(evidencePath).slice(0, 260) : null,
+          url: url ? String(url).slice(0, 260) : null
+        });
       } catch {}
 
       // 0.9) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
@@ -2020,7 +2244,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
       // 1) FECHA o navegador (não excluir com navegador aberto)
       try {
         try {
-          provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_begin', nome: String(nome||'') });
+          provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null });
         } catch {}
         const ctrl = controllers.get(nome);
         // Capturar userDataDir para validação hard (anti-janela zumbi)
@@ -2058,6 +2282,19 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           } catch {}
           let closeR = null;
           try { closeR = await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'twofactorflow_close_controller_result',
+              flowId,
+              nome: String(nome||''),
+              stockAccountId: stockAccountId || null,
+              pidBefore: pidBefore || null,
+              closeR: closeR || null,
+              udirForCheck: udirForCheck ? String(udirForCheck).slice(0, 260) : null,
+              udirSource: udirSource || null
+            });
+          } catch {}
           // Enterprise: preferir fechamento graceful; só usar taskkill/PID-kill como fallback
           // quando ainda existirem processos para o userDataDir (garantia sem matar à toa).
           try {
@@ -2124,7 +2361,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             }
           } catch {}
         }
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', nome: String(nome||''), udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
 
         // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
         try {
@@ -2206,6 +2443,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
 
           // Marca no manifest: browser fechado (pré-condição para delete/arquive).
           try {
+            const before = await manifestStore.read(nome).catch(()=>null);
+            const prevClosedAt = before && before.accountFlags ? Number(before.accountFlags.browserClosedAt || 0) || 0 : 0;
             await manifestStore.update(nome, (man) => {
               man = man || {};
               man.accountFlags = man.accountFlags || {};
@@ -2219,6 +2458,9 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               delete man.accountFlags.twoFactorPendingClosePids;
               return man;
             });
+            const after = await manifestStore.read(nome).catch(()=>null);
+            const nextClosedAt = after && after.accountFlags ? Number(after.accountFlags.browserClosedAt || 0) || 0 : 0;
+            try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_browserClosedAt_set', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, prevClosedAt: prevClosedAt || null, nextClosedAt: nextClosedAt || null }); } catch {}
           } catch {}
         } catch {}
 
@@ -2319,6 +2561,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             ts: Date.now(),
             event: 'auto_delete_two_factor_profile',
             nome: String(nome||''),
+            flowId,
+            stockAccountId: stockAccountId || null,
             ok: !!(rr && rr.ok),
             error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
           });
@@ -2330,6 +2574,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
     try {
       const rr = await archiveBanWithEvidenceToCT({
         profileName: nome,
+        stockAccountId: stockAccountId || null,
         reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`,
         evidenceB64: b64,
         evidenceUrl: url
@@ -2339,11 +2584,17 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           ts: Date.now(),
           event: 'auto_archive_two_factor_ct',
           nome: String(nome||''),
+          flowId,
           ok: !!(rr && rr.ok),
           error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-          stockAccountId: rr && rr.stockAccountId || null
+          stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
+          details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
         });
       } catch {}
+      if (!rr || rr.ok !== true) {
+        const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
+        try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
+      }
     } catch {}
 
     await manifestStore.update(nome, (man) => {
@@ -2909,11 +3160,14 @@ function isPidAlive(pid) {
 
 async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
   const t0 = Date.now();
+  const flowId = newFlowId('hard_close');
   try {
     provisionAudit.append({
+      ts: Date.now(),
       event: 'worker_hard_close_begin',
       nome: String(nome || ''),
       reason: String(reason || ''),
+      flowId,
       freeMB: getAvailableMB(),
       allowKillUserDataDir: !!allowKillUserDataDir
     });
@@ -2931,6 +3185,7 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
     if (man && man.userDataDir) userDataDir = String(man.userDataDir);
   } catch {}
   let closeOutcome = { ok: false, timeout: false, err: null };
+  const rootPidAliveBefore = rootPid ? isPidAlive(rootPid) : null;
   const closePromise = (async () => {
     try {
       if (ctrl && ctrl.browser && typeof ctrl.browser.close === 'function') {
@@ -2956,6 +3211,18 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
   if (allowKillUserDataDir && userDataDir) {
     try { browserHelper.killChromeProfileProcesses(userDataDir); } catch {}
   }
+  const rootPidAliveAfter = rootPid ? isPidAlive(rootPid) : null;
+  let udirPidsAfter = null;
+  let udirPidsMetaOk = null;
+  let udirPidsMetaErr = null;
+  try {
+    if (userDataDir && browserHelper.getChromeProfilePidsMeta) {
+      const chk = browserHelper.getChromeProfilePidsMeta(userDataDir);
+      udirPidsMetaOk = chk ? !!chk.ok : null;
+      udirPidsMetaErr = chk && chk.error ? String(chk.error).slice(0, 180) : null;
+      udirPidsAfter = (chk && chk.pids) ? chk.pids.slice(0, 24) : [];
+    }
+  } catch {}
   const durMs = Date.now() - t0;
   try {
     await issues.append(
@@ -2966,16 +3233,28 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
   } catch {}
   try {
     provisionAudit.append({
+      ts: Date.now(),
       event: 'worker_hard_close_done',
       nome: String(nome || ''),
       reason: String(reason || ''),
+      flowId,
       freeMB: getAvailableMB(),
       durMs,
       rootPid: rootPid || null,
-      userDataDir: userDataDir || null
+      userDataDir: userDataDir || null,
+      closeOutcome: {
+        ok: !!closeOutcome.ok,
+        timeout: !!closeOutcome.timeout,
+        err: closeOutcome && closeOutcome.err ? String(closeOutcome.err && closeOutcome.err.message || closeOutcome.err).slice(0, 180) : null
+      },
+      rootPidAliveBefore,
+      rootPidAliveAfter,
+      udirPidsMetaOk,
+      udirPidsMetaErr,
+      udirPidsAfter
     });
   } catch {}
-  return { ok: true, durMs, rootPid: rootPid || null, userDataDir: userDataDir || null };
+  return { ok: true, flowId, durMs, rootPid: rootPid || null, userDataDir: userDataDir || null, closeOutcome, rootPidAliveBefore, rootPidAliveAfter, udirPidsMetaOk, udirPidsMetaErr, udirPidsAfter };
 }
 
 async function killStrayChromes() {
@@ -7732,6 +8011,18 @@ async function nurseTick() {
     // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
     // Mas ainda precisamos de um sweep leve para exclusões retroativas (ban/2FA) já marcadas em flags.
     const now0 = Date.now();
+
+    // Enterprise: retry de arquivamento no CT (quando CT estava 503/offline).
+    // Isso evita “contas sumirem” (ficam assigned no CT mas perfil local já foi deletado).
+    try {
+      robeMeta.system = robeMeta.system || {};
+      const lastQ = Number(robeMeta.system.ctArchiveQueueLastAt || 0) || 0;
+      if (!lastQ || (now0 - lastQ) > 60_000) {
+        robeMeta.system.ctArchiveQueueLastAt = now0;
+        const qr = await processCtArchiveQueue({ limit: 4 }).catch(()=>null);
+        try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queue_tick', ok: !!(qr && qr.ok), processed: (qr && qr.processed !== undefined) ? qr.processed : null }); } catch {}
+      }
+    } catch {}
     if (controllers.size === 0) {
       try {
         robeMeta.system = robeMeta.system || {};
