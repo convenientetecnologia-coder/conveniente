@@ -157,8 +157,18 @@ function readHostIdSync() {
 
 async function fetchCredentialsFromCT({ profileName } = {}) {
   const cfg = readCtConfig();
-  const base = String(cfg && cfg.ctBaseUrl || '').trim();
-  const secret = String(cfg && cfg.logIngestSecret || '').trim();
+  // Fallback enterprise: se ct_config.json não tiver dados, usar env/notifierEndpoints
+  // (evita “funciona tudo, mas não arquiva no CT” quando só LOG_INGEST_SECRET está setado via env).
+  let base = String(cfg && cfg.ctBaseUrl || '').trim();
+  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  if (!base) {
+    try {
+      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
+      base = String(notifierBaseFromEndpoints() || '').trim();
+    } catch {}
+  }
+  base = base.replace(/\/+$/, '');
+  const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
   const p = String(profileName || '').trim();
   if (!base || !secret || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
@@ -186,12 +196,29 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
 
 async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detected', evidenceB64 = '', evidenceUrl = '' } = {}) {
   const cfg = readCtConfig();
-  const base = String(cfg && cfg.ctBaseUrl || '').trim();
-  const secret = String(cfg && cfg.logIngestSecret || '').trim();
+  let base = String(cfg && cfg.ctBaseUrl || '').trim();
+  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  if (!base) {
+    try {
+      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
+      base = String(notifierBaseFromEndpoints() || '').trim();
+    } catch {}
+  }
+  base = base.replace(/\/+$/, '');
+  const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
   const hostId = readHostIdSync();
   const p = String(profileName || '').trim();
   if (!base || !secret || !hostId || !p) return { ok: false, error: 'ct_config_missing' };
   try {
+    let stockAccountId = null;
+    try {
+      const man = await manifestStore.read(p).catch(()=>null);
+      if (man && (man.stockAccountId || man.stock_account_id)) stockAccountId = Number(man.stockAccountId || man.stock_account_id) || null;
+    } catch {}
+    try {
+      const cached = robeMeta[p] && robeMeta[p].overlayCredCache;
+      if (!stockAccountId && cached && cached.stockAccountId) stockAccountId = cached.stockAccountId;
+    } catch {}
     const Aborter = global.AbortController || require('node-abort-controller');
     const ac = new Aborter();
     const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
@@ -201,6 +228,7 @@ async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detect
       body: JSON.stringify({
         hostId,
         profileName: p,
+        stockAccountId: stockAccountId || null,
         reason: String(reason || 'banned_detected').slice(0, 120),
         by: 'auto',
         evidenceB64: String(evidenceB64 || '').trim(),

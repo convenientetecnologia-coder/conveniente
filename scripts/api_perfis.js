@@ -101,7 +101,7 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: 'criar_perfil_somente_estoque' });
       }
 
-      const { cidade, cookies, login, password } = req.body || {};
+      const { cidade, cookies, login, password, stockAccountId } = req.body || {};
       if (!cidade || !cookies) {
         logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade });
         return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
@@ -184,6 +184,8 @@ module.exports = (app, workerClient, fileStore) => {
         const p = String(password || '').trim();
         if (l) manifestObj.login = l;
         if (p) manifestObj.password = p;
+        const sid = Number(stockAccountId || 0) || 0;
+        if (sid) manifestObj.stockAccountId = sid;
       } catch {}
       fs.writeFileSync(path.join(userDataDir, 'manifest.json'), JSON.stringify(manifestObj, null, 2), 'utf8');
 

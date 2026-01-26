@@ -856,7 +856,7 @@ async function execStockProvision(cmd) {
             headers: { 'x-operator': lockOwner },
             // Ultra enterprise: persiste login/senha no manifest já na criação, para permitir fluxo
             // automático "cookies -> login+senha" sem depender de clique em "retomar trabalho".
-            body: { cidade: city, cookies, login, password }
+            body: { cidade: city, cookies, login, password, stockAccountId }
           });
           if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'create_profile_failed');
           return r;
