@@ -831,6 +831,19 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
       delete man.accountFlags.loginReason;
       delete man.accountFlags.loginSource;
       delete man.accountFlags.lastLoginRequiredAt;
+      // Mutual exclusivity (ultra enterprise):
+      // Recurso em análise NÃO é "identidade em análise". Se detectamos appeal_submitted,
+      // precisamos remover flags de identidade para o painel não ficar engessado em "identitySubmitted".
+      delete man.accountFlags.identityRequired;
+      delete man.accountFlags.identityRequiredAt;
+      delete man.accountFlags.identitySubmitted;
+      delete man.accountFlags.identitySubmittedAt;
+      delete man.accountFlags.identitySource;
+      delete man.accountFlags.identityUrl;
+      delete man.accountFlags.identityTitle;
+      delete man.accountFlags.identityNextCheckAt;
+      delete man.accountFlags.identityLastCheckAt;
+      delete man.accountFlags.identityLastReason;
       return man;
     });
     // Evidência enterprise: provision_audit é allowlisted via fetch_logs.
@@ -847,6 +860,10 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].appealSubmitted = true;
     robeMeta[nome].whyNotOpen = 'appeal_submitted';
+    // Mutual exclusivity: não deixar runtime preso em identity_* quando já é appeal_submitted.
+    try {
+      if (robeMeta[nome].whyNotOpen && String(robeMeta[nome].whyNotOpen).startsWith('identity')) delete robeMeta[nome].whyNotOpen;
+    } catch {}
     delete robeMeta[nome].loginRemediateFailed;
     delete robeMeta[nome].loginRemediateFailedReason;
     delete robeMeta[nome].loginRequired;
@@ -1545,11 +1562,19 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         } catch {}
         const ctrl = controllers.get(nome);
         // Capturar userDataDir para validação hard (anti-janela zumbi)
+        // IMPORTANT (ultra enterprise):
+        // - Mesmo que o manifest/perfis.json esteja inconsistente (ex.: perfil já removido do perfis.json),
+        //   ainda precisamos impedir delete enquanto existir Chrome vivo.
+        // - Fallback: usar um "hint" por substring do path, que ainda aparece no CommandLine do Chrome:
+        //   \\Conveniente\\<nome>
         let udirForCheck = '';
         try {
           const man0 = await manifestStore.read(nome).catch(()=>null);
           if (man0 && man0.userDataDir) udirForCheck = String(man0.userDataDir);
         } catch {}
+        if (!udirForCheck) {
+          try { udirForCheck = `\\\\Conveniente\\\\${String(nome || '').trim()}`; } catch { udirForCheck = ''; }
+        }
         if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
           // Fecha via Puppeteer (graceful) e só força se necessário (hardCloseController encapsula isso)
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
@@ -1807,11 +1832,18 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         } catch {}
         const ctrl = controllers.get(nome);
         // Capturar userDataDir para validação hard (anti-janela zumbi)
+        // IMPORTANT (ultra enterprise):
+        // - Mesmo com inconsistência (perfil removido do perfis.json antes do fechamento),
+        //   precisamos impedir delete enquanto existir Chrome vivo.
+        // - Fallback por substring: \\Conveniente\\<nome>
         let udirForCheck = '';
         try {
           const man0 = await manifestStore.read(nome).catch(()=>null);
           if (man0 && man0.userDataDir) udirForCheck = String(man0.userDataDir);
         } catch {}
+        if (!udirForCheck) {
+          try { udirForCheck = `\\\\Conveniente\\\\${String(nome || '').trim()}`; } catch { udirForCheck = ''; }
+        }
         if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
           ctrl.virtus = null;

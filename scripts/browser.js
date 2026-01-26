@@ -2916,15 +2916,28 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('confira aqui novamente para ver o resultado');
 
       // 6) Confirmação de identidade em andamento (pós upload / aguardando análise)
-      // IMPORTANT: não confundir com "appeal" genérico. Exigimos sinais de identidade/selfie/vídeo.
-      const hasIdentitySubmitted =
-        bodyTxt.includes('confirmacao de identidade em andamento') ||
-        (bodyTxt.includes('confirmacao de identidade') && bodyTxt.includes('em andamento')) ||
-        bodyTxt.includes('normalmente, levamos cerca de uma hora para analisar') ||
-        bodyTxt.includes('normalmente analisamos suas informacoes em ate') ||
-        bodyTxt.includes('selfie de video finalizada') ||
+      // IMPORTANT (ultra enterprise):
+      // - NÃO confundir "Recurso em análise" (appeal_submitted) com "Identidade em análise".
+      // - A frase "normalmente, levamos cerca de uma hora para analisar" aparece em ambos os contextos,
+      //   então ela NÃO pode ser sinal suficiente sozinha.
+      // Critério: exigir sinais fortes e específicos de identidade/selfie/vídeo.
+      const identityStrongHints =
+        bodyTxt.includes('selfie de video') ||
+        bodyTxt.includes('video selfie') ||
+        bodyTxt.includes('selfie') && bodyTxt.includes('video') ||
         (bodyTxt.includes('carregamento desse video') && bodyTxt.includes('confirmar sua identidade')) ||
-        (bodyTxt.includes('grave') && bodyTxt.includes('selfie') && bodyTxt.includes('video'));
+        (bodyTxt.includes('grave') && bodyTxt.includes('selfie') && bodyTxt.includes('video')) ||
+        (bodyTxt.includes('gravar') && bodyTxt.includes('selfie') && bodyTxt.includes('video'));
+
+      const hasIdentitySubmitted =
+        // textos explícitos de identidade "em andamento"
+        (identityStrongHints && (
+          bodyTxt.includes('confirmacao de identidade em andamento') ||
+          (bodyTxt.includes('confirmacao de identidade') && bodyTxt.includes('em andamento')) ||
+          bodyTxt.includes('selfie de video finalizada') ||
+          bodyTxt.includes('analisaremos suas informacoes') ||
+          bodyTxt.includes('analisamos suas informacoes em ate')
+        ));
 
       // 7) Sinais de identidade no body (fallback quando o recorte de h1 não contém)
       const bodyHasIdentityHints =
