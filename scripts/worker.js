@@ -1634,6 +1634,21 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           const t0 = Date.now();
           const deadlineMs = 30_000;
           let last = [];
+          if (!udirForCheck) {
+            // Enterprise HARD: não conseguimos provar que fechou (sem userDataDir => sem PID check).
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_missing_userDataDir_block_delete', nome: String(nome||'') }); } catch {}
+            try {
+              await manifestStore.update(nome, (man) => {
+                man = man || {};
+                man.accountFlags = man.accountFlags || {};
+                man.accountFlags.bannedPendingClose = true;
+                man.accountFlags.bannedPendingCloseAt = Date.now();
+                man.accountFlags.bannedPendingCloseReason = 'missing_userDataDir';
+                return man;
+              });
+            } catch {}
+            return { ok: false, error: 'banned_close_missing_userDataDir' };
+          }
           while (udirForCheck && (Date.now() - t0) < deadlineMs) {
             const chk = (browserHelper.getChromeProfilePidsMeta
               ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
@@ -1695,6 +1710,24 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               return { ok: false, error: 'banned_close_incomplete' };
             }
           }
+
+          // Marca no manifest: browser fechado (pré-condição para delete/arquive).
+          try {
+            await manifestStore.update(nome, (man) => {
+              man = man || {};
+              man.accountFlags = man.accountFlags || {};
+              man.accountFlags.browserClosedAt = Date.now();
+              man.accountFlags.browserClosedReason = 'auto_banned_close';
+              man.accountFlags.browserClosedUdirSource = udirSource || null;
+              man.accountFlags.browserClosedUdir = udirForCheck ? String(udirForCheck).slice(0, 260) : null;
+              // Se chegamos aqui, o PID check terminou com "zero PIDs" e ok=true.
+              delete man.accountFlags.bannedPendingClose;
+              delete man.accountFlags.bannedPendingCloseAt;
+              delete man.accountFlags.bannedPendingCloseReason;
+              delete man.accountFlags.bannedPendingClosePids;
+              return man;
+            });
+          } catch {}
         } catch {}
 
         // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
@@ -1713,6 +1746,25 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
 
       // 2) EXCLUI a conta do servidor (perfil local) — best-effort
       try {
+        // Enterprise HARD: só deletar se o manifest afirmar que o browser foi fechado
+        try {
+          const mPre = await manifestStore.read(nome).catch(()=>null);
+          const closedAt = mPre && mPre.accountFlags ? Number(mPre.accountFlags.browserClosedAt || 0) || 0 : 0;
+          if (!closedAt) {
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_browser_not_closed', nome: String(nome||'') }); } catch {}
+            try {
+              await manifestStore.update(nome, (man) => {
+                man = man || {};
+                man.accountFlags = man.accountFlags || {};
+                man.accountFlags.bannedPendingClose = true;
+                man.accountFlags.bannedPendingCloseAt = Date.now();
+                man.accountFlags.bannedPendingCloseReason = 'browser_not_closed';
+                return man;
+              });
+            } catch {}
+            return { ok: false, error: 'banned_delete_blocked_browser_not_closed' };
+          }
+        } catch {}
         const rr = await (async () => {
           try {
             // IMPORTANTE (enterprise):
@@ -1939,6 +1991,20 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         try {
           const t0 = Date.now();
           const deadlineMs = 30_000;
+          if (!udirForCheck) {
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_missing_userDataDir_block_delete', nome: String(nome||'') }); } catch {}
+            try {
+              await manifestStore.update(nome, (man) => {
+                man = man || {};
+                man.accountFlags = man.accountFlags || {};
+                man.accountFlags.twoFactorPendingClose = true;
+                man.accountFlags.twoFactorPendingCloseAt = Date.now();
+                man.accountFlags.twoFactorPendingCloseReason = 'missing_userDataDir';
+                return man;
+              });
+            } catch {}
+            return { ok: false, error: 'two_factor_close_missing_userDataDir' };
+          }
           while (udirForCheck && (Date.now() - t0) < deadlineMs) {
             const chk = (browserHelper.getChromeProfilePidsMeta
               ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
@@ -1998,6 +2064,23 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               return { ok: false, error: 'two_factor_close_incomplete' };
             }
           }
+
+          // Marca no manifest: browser fechado (pré-condição para delete/arquive).
+          try {
+            await manifestStore.update(nome, (man) => {
+              man = man || {};
+              man.accountFlags = man.accountFlags || {};
+              man.accountFlags.browserClosedAt = Date.now();
+              man.accountFlags.browserClosedReason = 'auto_two_factor_close';
+              man.accountFlags.browserClosedUdirSource = udirSource || null;
+              man.accountFlags.browserClosedUdir = udirForCheck ? String(udirForCheck).slice(0, 260) : null;
+              delete man.accountFlags.twoFactorPendingClose;
+              delete man.accountFlags.twoFactorPendingCloseAt;
+              delete man.accountFlags.twoFactorPendingCloseReason;
+              delete man.accountFlags.twoFactorPendingClosePids;
+              return man;
+            });
+          } catch {}
         } catch {}
 
         // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
@@ -2016,6 +2099,25 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
 
       // 2) EXCLUI a conta do servidor (perfil local) — best-effort
       try {
+        // Enterprise HARD: só deletar se o manifest afirmar que o browser foi fechado
+        try {
+          const mPre = await manifestStore.read(nome).catch(()=>null);
+          const closedAt = mPre && mPre.accountFlags ? Number(mPre.accountFlags.browserClosedAt || 0) || 0 : 0;
+          if (!closedAt) {
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_blocked_browser_not_closed', nome: String(nome||'') }); } catch {}
+            try {
+              await manifestStore.update(nome, (man) => {
+                man = man || {};
+                man.accountFlags = man.accountFlags || {};
+                man.accountFlags.twoFactorPendingClose = true;
+                man.accountFlags.twoFactorPendingCloseAt = Date.now();
+                man.accountFlags.twoFactorPendingCloseReason = 'browser_not_closed';
+                return man;
+              });
+            } catch {}
+            return { ok: false, error: 'two_factor_delete_blocked_browser_not_closed' };
+          }
+        } catch {}
         const rr = await (async () => {
           try {
             // desired OFF
