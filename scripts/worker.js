@@ -6965,6 +6965,21 @@ async function nurseTick() {
                           } catch {}
                           await sleep(1200);
                         }
+                      } else {
+                        // Logs ultra enterprise: deixa claro por que não clicou (context/button/timeout).
+                        try {
+                          let u3 = '';
+                          try { u3 = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+                          provisionAudit.append({
+                            ts: Date.now(),
+                            event: 'identity_assist_no_click',
+                            nome: String(nome||''),
+                            url: String(u3||'').slice(0, 220),
+                            error: assist && assist.error ? String(assist.error).slice(0, 160) : 'no_result',
+                            waitedMs: assist && typeof assist.waitedMs === 'number' ? assist.waitedMs : null,
+                            attempts: assist && typeof assist.attempts === 'number' ? assist.attempts : null
+                          });
+                        } catch {}
                       }
                       // Se o humano concluiu/uploadou e agora virou "identity_submitted", promove o estado automaticamente.
                       const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);

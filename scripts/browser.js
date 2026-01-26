@@ -3009,7 +3009,10 @@ async function detectLoginRequired(page) {
 async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) {
   const start = Date.now();
   const budget = Math.max(2_000, Number(maxWaitMs || 0) || 0);
-  const maxTries = Math.max(1, Number(tries || 0) || 0);
+  // IMPORTANT:
+  // No fluxo real, o botão "Carregar" pode demorar 20–120s para habilitar.
+  // Portanto, "tries" não pode limitar a espera; ele é apenas um mínimo de tentativas.
+  const minTries = Math.max(1, Number(tries || 0) || 0);
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
     const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
@@ -3065,14 +3068,18 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
     }
   };
 
-  for (let attempt = 1; attempt <= maxTries; attempt++) {
+  let attempt = 0;
+  let lastErr = '';
+  while (true) {
+    attempt += 1;
     const r = await pickAndClick();
     if (r && r.ok) return { ok: true, attempt, clicked: r.clicked, meta: { text: r.text || '', label: r.label || '' } };
+    lastErr = (r && r.error) ? String(r.error) : 'no_click';
     const elapsed = Date.now() - start;
-    if (elapsed >= budget) break;
+    if (elapsed >= budget && attempt >= minTries) break;
     await sleep(1200);
   }
-  return { ok: false, error: 'no_step_clicked', waitedMs: Date.now() - start };
+  return { ok: false, error: `no_step_clicked:${lastErr}`.slice(0, 120), waitedMs: Date.now() - start, attempts: attempt };
 }
 
 // ========= LOGIN (email/senha) =========
