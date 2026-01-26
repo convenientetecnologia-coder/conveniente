@@ -370,6 +370,16 @@ function taskkillTreeWin(pid) {
   }
 }
 
+function taskkillTreeWinGraceful(pid) {
+  // Sem /F: tenta fechar "normalmente" (WM_CLOSE). Pode falhar silenciosamente — caller decide se forçará.
+  try {
+    execFileSync('taskkill', ['/PID', String(pid), '/T'], { windowsHide: true, timeout: 8000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function listProfilePidsWin(userDataDir) {
   try {
     const expected = String(userDataDir || '').trim();
@@ -466,6 +476,25 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
       }
     } catch {}
   } catch {}
+}
+
+function closeChromeProfileProcessesGraceful(userDataDir) {
+  // Fecha (sem /F) processos do Chrome ligados ao userDataDir; não garante fechamento.
+  if (process.platform !== 'win32') return { ok: false, skipped: 'non_win32' };
+  try {
+    const expectedRaw = String(userDataDir || '').trim();
+    if (!expectedRaw) return { ok: false, skipped: 'no_userDataDir' };
+    const pids = listProfilePidsWin(expectedRaw);
+    if (!pids || !pids.length) return { ok: true, closed: 0, pids: [] };
+    let closed = 0;
+    for (const pid of pids) {
+      if (taskkillTreeWinGraceful(pid)) closed++;
+    }
+    try { if (closed > 0) logger.warn('[BROWSER][CLOSE][userDataDir] tentativa de fechar Chrome (sem /F)', { userDataDir: expectedRaw, closed, pids: pids.slice(0, 12) }); } catch {}
+    return { ok: true, closed, pids };
+  } catch {
+    return { ok: false, error: 'close_failed' };
+  }
 }
 
 /**

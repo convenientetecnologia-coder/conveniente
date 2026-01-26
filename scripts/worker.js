@@ -1503,14 +1503,16 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.banned === true;
     // Evidence + auto-delete (ultra enterprise):
-    // - arquiva no CT (Excluídas) com print
-    // - deleta o perfil local para liberar slot
+    // REGRA (ultra enterprise, ordem determinística):
+    // 1) fecha o navegador (graceful -> force)
+    // 2) exclui a conta do servidor (perfil local/desired/perfis.json)
+    // 3) envia pro estoque Excluídas (CT) com evidence
     // Guardrails:
     // - não logar credenciais
     // - best-effort (não pode travar o worker)
     // - nunca para estados não-banned (appeal/captcha/identity não passam aqui)
     try {
-      // 1) Captura screenshot (se o browser estiver aberto)
+      // 0) Captura evidence (antes de fechar)
       let b64 = '';
       let url = '';
       try {
@@ -1526,27 +1528,56 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         }
       } catch {}
 
-      // 2) Arquiva no CT com evidence (se CT configurado)
+      // 1) FECHA o navegador (não excluir com navegador aberto)
       try {
-        const rr = await archiveBanWithEvidenceToCT({
-          profileName: nome,
-          reason: `banned:${String(reason||'banned').slice(0,80)}`,
-          evidenceB64: b64,
-          evidenceUrl: url
-        });
         try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'auto_archive_banned_ct',
-            nome: String(nome||''),
-            ok: !!(rr && rr.ok),
-            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-            stockAccountId: rr && rr.stockAccountId || null
-          });
+          provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', nome: String(nome||'') });
         } catch {}
+        const ctrl = controllers.get(nome);
+        if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+          // Fecha via Puppeteer (graceful) e só força se necessário (hardCloseController encapsula isso)
+          try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
+          ctrl.virtus = null;
+          ctrl.trabalhando = false;
+          try { await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+        } else {
+          // Sem controller: tentar fechar por PID (sem /F) e por userDataDir (sem /F); se não fechar, força no final.
+          let man = null;
+          try { man = await manifestStore.read(nome).catch(()=>null); } catch {}
+          const pid = man && Number(man.lastRootPid || 0) || 0;
+          const udir = man && man.userDataDir ? String(man.userDataDir) : '';
+          try {
+            if (pid) {
+              await withTimeout('auto_banned_close_rootpid', closeProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              await sleep(900);
+            }
+          } catch {}
+          try {
+            if (udir) {
+              browserHelper.closeChromeProfileProcessesGraceful(udir);
+              await sleep(900);
+            }
+          } catch {}
+          // Fallback final (force) apenas se ainda existir PID vivo ou processos por userDataDir
+          try {
+            if (pid && isPidAlive(pid)) {
+              await withTimeout('auto_banned_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid }); } catch {}
+              await sleep(800);
+            }
+          } catch {}
+          try {
+            if (udir) {
+              browserHelper.killChromeProfileProcesses(udir);
+              await sleep(600);
+              browserHelper.killChromeProfileProcesses(udir);
+            }
+          } catch {}
+        }
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', nome: String(nome||'') }); } catch {}
       } catch {}
 
-      // 3) Deleta o perfil local (best-effort)
+      // 2) EXCLUI a conta do servidor (perfil local) — best-effort
       try {
         const rr = await (async () => {
           try {
@@ -1554,7 +1585,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
             // Não chamar o endpoint HTTP DELETE /api/perfis/:nome daqui.
             // setBannedFlag pode rodar dentro de lockProfileAction; o endpoint DELETE chama worker.deactivate e pode deadlockar.
 
-            // 3.1) desired OFF (evita reabrir)
+            // 2.1) desired OFF (evita reabrir)
             try {
               await fileStore.withDesiredFileLockUpdate((d) => {
                 d.perfis = d.perfis || {};
@@ -1563,22 +1594,11 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               });
             } catch {}
 
-            // 3.2) hard close do controller (se ativo)
-            try {
-              const ctrl = controllers.get(nome);
-              if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-                try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
-                ctrl.virtus = null;
-                ctrl.trabalhando = false;
-                // allowKillUserDataDir=true aqui é para matar processos órfãos do perfil (via userDataDir).
-                // NÃO deleta diretório; a remoção do userDataDir acontece em outro bloco (rimrafSync).
-                try { await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_delete', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
-              }
-            } catch {}
+            // 2.2) remover controller do runtime (browser já foi fechado acima)
             try { controllers.delete(nome); } catch {}
             try { stopPruneLoop(nome); } catch {}
 
-            // 3.3) remover userDataDir externo (se houver) e remover do perfis.json
+            // 2.3) remover userDataDir externo (se houver) e remover do perfis.json
             try {
               // Fonte primária: manifestStore (mais confiável que perfis.json)
               let udirFromManifest = '';
@@ -1590,25 +1610,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
               const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
-                // GARANTIA 110%: se temos lastRootPid no manifest, matar a árvore inteira por PID primeiro.
-                // Isso cobre o caso em que WMI/CommandLine não está acessível e o kill por userDataDir falha.
-                try {
-                  const man = await manifestStore.read(nome).catch(()=>null);
-                  const pid = man && Number(man.lastRootPid || 0) || 0;
-                  if (pid && isPidAlive(pid)) {
-                    await withTimeout('auto_banned_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-                    provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid });
-                    await sleep(800);
-                  }
-                } catch {}
-                // CRÍTICO (anti-orphan): matar processos do Chrome ligados a esse userDataDir,
-                // mesmo se não havia controller conectado (caso de browser órfão).
-                try {
-                  browserHelper.killChromeProfileProcesses(udir);
-                  provisionAudit.append({ ts: Date.now(), event: 'auto_banned_kill_by_userDataDir', nome: String(nome||''), userDataDir: String(udir).slice(0, 260) });
-                } catch {}
-                // Retry curto: alguns Chromes ficam “meio mortos” após o 1º taskkill.
-                try { await sleep(600); } catch {}
+                // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
                 try { browserHelper.killChromeProfileProcesses(udir); } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
@@ -1616,14 +1618,14 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               try { savePerfisJson(arr2); } catch {}
             } catch {}
 
-            // 3.4) remover desired entry e diretório do perfil (manifest/meta)
+            // 2.4) remover desired entry e diretório do perfil (manifest/meta)
             try { await fileStore.removeDesired(nome); } catch {}
             try {
               const dir = path.join(fileStore.perfisDir, nome);
               try { fileStore.rimrafSync(dir); } catch {}
             } catch {}
 
-            // 3.5) limpeza cosmética do status.json
+            // 2.5) limpeza cosmética do status.json
             try {
               const st = fileStore.readJsonSafe(fileStore.statusPath, null);
               if (st && Array.isArray(st.perfis)) {
@@ -1645,6 +1647,26 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
             nome: String(nome||''),
             ok: !!(rr && rr.ok),
             error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
+          });
+        } catch {}
+      } catch {}
+
+      // 3) ENVIA pro estoque Excluídas (CT) com evidence (último passo)
+      try {
+        const rr = await archiveBanWithEvidenceToCT({
+          profileName: nome,
+          reason: `banned:${String(reason||'banned').slice(0,80)}`,
+          evidenceB64: b64,
+          evidenceUrl: url
+        });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'auto_archive_banned_ct',
+            nome: String(nome||''),
+            ok: !!(rr && rr.ok),
+            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
+            stockAccountId: rr && rr.stockAccountId || null
           });
         } catch {}
       } catch {}
@@ -1688,10 +1710,12 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
     const already = prev && prev.twoFactor === true;
 
     // Evidence + auto-delete:
-    // - arquiva no CT (Excluídas) com print
-    // - deleta o perfil local para liberar slot
+    // REGRA (ultra enterprise, ordem determinística):
+    // 1) fecha o navegador (graceful -> force)
+    // 2) exclui a conta do servidor (perfil local/desired/perfis.json)
+    // 3) envia pro estoque Excluídas (CT) com evidence
     try {
-      // 1) Captura screenshot (se o browser estiver aberto)
+      // 0) Captura evidence (antes de fechar)
       let b64 = '';
       let url = '';
       try {
@@ -1707,27 +1731,53 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         }
       } catch {}
 
-      // 2) Arquiva no CT com evidence (se CT configurado)
+      // 1) FECHA o navegador (não excluir com navegador aberto)
       try {
-        const rr = await archiveBanWithEvidenceToCT({
-          profileName: nome,
-          reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`,
-          evidenceB64: b64,
-          evidenceUrl: url
-        });
         try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'auto_archive_two_factor_ct',
-            nome: String(nome||''),
-            ok: !!(rr && rr.ok),
-            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
-            stockAccountId: rr && rr.stockAccountId || null
-          });
+          provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_begin', nome: String(nome||'') });
         } catch {}
+        const ctrl = controllers.get(nome);
+        if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+          try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
+          ctrl.virtus = null;
+          ctrl.trabalhando = false;
+          try { await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+        } else {
+          let man = null;
+          try { man = await manifestStore.read(nome).catch(()=>null); } catch {}
+          const pid = man && Number(man.lastRootPid || 0) || 0;
+          const udir = man && man.userDataDir ? String(man.userDataDir) : '';
+          try {
+            if (pid) {
+              await withTimeout('auto_two_factor_close_rootpid', closeProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              await sleep(900);
+            }
+          } catch {}
+          try {
+            if (udir) {
+              browserHelper.closeChromeProfileProcessesGraceful(udir);
+              await sleep(900);
+            }
+          } catch {}
+          try {
+            if (pid && isPidAlive(pid)) {
+              await withTimeout('auto_two_factor_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid }); } catch {}
+              await sleep(800);
+            }
+          } catch {}
+          try {
+            if (udir) {
+              browserHelper.killChromeProfileProcesses(udir);
+              await sleep(600);
+              browserHelper.killChromeProfileProcesses(udir);
+            }
+          } catch {}
+        }
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', nome: String(nome||'') }); } catch {}
       } catch {}
 
-      // 3) Deleta o perfil local (best-effort) — mesmo mecanismo do ban (sem HTTP, evita deadlock)
+      // 2) EXCLUI a conta do servidor (perfil local) — best-effort
       try {
         const rr = await (async () => {
           try {
@@ -1740,16 +1790,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               });
             } catch {}
 
-            // hard close do controller (se ativo)
-            try {
-              const ctrl = controllers.get(nome);
-              if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-                try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
-                ctrl.virtus = null;
-                ctrl.trabalhando = false;
-                try { await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_delete', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
-              }
-            } catch {}
+            // browser já foi fechado acima
             try { controllers.delete(nome); } catch {}
             try { stopPruneLoop(nome); } catch {}
 
@@ -1765,23 +1806,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
               const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
-                // GARANTIA 110%: se temos lastRootPid no manifest, matar a árvore inteira por PID primeiro.
-                try {
-                  const man = await manifestStore.read(nome).catch(()=>null);
-                  const pid = man && Number(man.lastRootPid || 0) || 0;
-                  if (pid && isPidAlive(pid)) {
-                    await withTimeout('auto_two_factor_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-                    provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid });
-                    await sleep(800);
-                  }
-                } catch {}
-                // CRÍTICO (anti-orphan): matar processos do Chrome ligados a esse userDataDir,
-                // mesmo se não havia controller conectado (caso de browser órfão).
-                try {
-                  browserHelper.killChromeProfileProcesses(udir);
-                  provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_kill_by_userDataDir', nome: String(nome||''), userDataDir: String(udir).slice(0, 260) });
-                } catch {}
-                try { await sleep(600); } catch {}
+                // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
                 try { browserHelper.killChromeProfileProcesses(udir); } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
@@ -1820,6 +1845,26 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
           });
         } catch {}
+      } catch {}
+    } catch {}
+
+    // 3) ENVIA pro estoque Excluídas (CT) com evidence (último passo)
+    try {
+      const rr = await archiveBanWithEvidenceToCT({
+        profileName: nome,
+        reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`,
+        evidenceB64: b64,
+        evidenceUrl: url
+      });
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'auto_archive_two_factor_ct',
+          nome: String(nome||''),
+          ok: !!(rr && rr.ok),
+          error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
+          stockAccountId: rr && rr.stockAccountId || null
+        });
       } catch {}
     } catch {}
 
@@ -2344,6 +2389,21 @@ async function killProcessTreeByRootPid(pid) {
       // Versão sem WMI: usa taskkill para matar o processo raiz e toda a árvore.
       await new Promise((res) => {
         execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }, () => res());
+      });
+    } else {
+      return;
+    }
+  } catch {}
+}
+
+async function closeProcessTreeByRootPid(pid) {
+  // Tentativa "graciosa" (sem /F): fecha janela/processo se possível. Se não fechar, o caller decide forçar.
+  if (!pid) return;
+  try {
+    if (process.platform === 'win32') {
+      const { execFile } = require('child_process');
+      await new Promise((res) => {
+        execFile('taskkill', ['/PID', String(pid), '/T'], { stdio: 'ignore' }, () => res());
       });
     } else {
       return;
