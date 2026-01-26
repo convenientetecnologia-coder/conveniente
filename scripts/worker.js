@@ -1693,15 +1693,19 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.banned === true;
-    // Evidence + auto-delete (ultra enterprise):
-    // REGRA (ultra enterprise, ordem determinística):
-    // 1) fecha o navegador (graceful -> force)
-    // 2) exclui a conta do servidor (perfil local/desired/perfis.json)
-    // 3) envia pro estoque Excluídas (CT) com evidence
+
+    // Evidence + auto-delete (ultra enterprise, mas sem “mágica por trás dos panos”):
+    // REGRA (ordem determinística):
+    // 1) DESLIGA desired imediatamente (impede reabertura)
+    // 2) FECHA o navegador usando o MESMO motor do sistema (handlers.deactivate)
+    // 3) EXCLUI o perfil usando o MESMO fluxo do DELETE /api/perfis/:nome (sem HTTP, para evitar deadlock)
+    // 4) ENVIA pro estoque Excluídas (CT) com evidence (ou enfileira retry)
+    //
     // Guardrails:
+    // - nunca deletar perfil se o navegador ainda estiver vivo (anti-janela fantasma)
     // - não logar credenciais
     // - best-effort (não pode travar o worker)
-    // - nunca para estados não-banned (appeal/captcha/identity não passam aqui)
+    // - se a pré-condição de close falhar, NÃO deletar (marca pendente e sai)
     try {
       const flowId = newFlowId('ban');
       // Captura stockAccountId logo no começo (antes de qualquer delete), para nunca “sumir” no CT.
@@ -1750,8 +1754,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         });
       } catch {}
 
-      // 0.9) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
-      // entre close->delete (isso causa exatamente o “fechou e depois abriu de novo”).
+      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {};
@@ -1762,341 +1765,34 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_desired_disabled', nome: String(nome||'') }); } catch {}
       } catch {}
 
-      // 1) FECHA o navegador (não excluir com navegador aberto)
+      // 2) FECHA o navegador via fluxo oficial (deactivate)
       try {
-        try {
-          provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null });
-        } catch {}
-        const ctrl = controllers.get(nome);
-        // Capturar userDataDir para validação hard (anti-janela zumbi)
-        // IMPORTANT (ultra enterprise):
-        // - Mesmo que o manifest/perfis.json esteja inconsistente (ex.: perfil já removido do perfis.json),
-        //   ainda precisamos impedir delete enquanto existir Chrome vivo.
-        // - Fallback: usar um "hint" por substring do path, que ainda aparece no CommandLine do Chrome:
-        //   \\Conveniente\\<nome>
-        let udirForCheck = '';
-        let udirSource = '';
-        try {
-          const man0 = await manifestStore.read(nome).catch(()=>null);
-          if (man0 && man0.userDataDir) { udirForCheck = String(man0.userDataDir); udirSource = 'manifest'; }
-        } catch {}
-        // Fallback robusto: perfis.json (não depende de manifestStore resolver caminho)
-        if (!udirForCheck) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
+        // Usa o mesmo handler (deactivate) que a API usa para fechar navegador.
+        // policy=null => fechamento completo (sem preservar desired) e sem reabertura automática.
+        const dr = await handlers.deactivate({ nome, reason: 'auto_banned', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(dr && dr.ok), error: dr && dr.ok ? null : String(dr && dr.error || 'deactivate_failed').slice(0,180) }); } catch {}
+        if (!dr || dr.ok !== true) {
+          // Se não fechou, não pode deletar (evita janela fantasma).
           try {
-            const perfisArr = loadPerfisJson();
-            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-            if (perfil && perfil.userDataDir) { udirForCheck = String(perfil.userDataDir); udirSource = 'perfis_json'; }
-          } catch {}
-        }
-        // Último recurso: substring curta (ajuda quando CommandLine é truncado)
-        if (!udirForCheck) {
-          try { udirForCheck = `\\Conveniente\\${String(nome || '').trim()}`; udirSource = 'hint_substring'; } catch { udirForCheck = ''; udirSource = ''; }
-        }
-        if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-          // Fecha via Puppeteer (graceful) e só força se necessário (hardCloseController encapsula isso)
-          try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
-          ctrl.virtus = null;
-          ctrl.trabalhando = false;
-          // Captura PID antes de fechar (rootPid mais confiável quando lastRootPid ainda não foi persistido)
-          let pidBefore = 0;
-          try {
-            if (ctrl.browser && typeof ctrl.browser.process === 'function') {
-              const proc0 = ctrl.browser.process();
-              if (proc0 && proc0.pid) pidBefore = Number(proc0.pid) || 0;
-            }
-          } catch {}
-          let closeR = null;
-          try { closeR = await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
-          try {
-            provisionAudit.append({
-              ts: Date.now(),
-              event: 'banflow_close_controller_result',
-              flowId,
-              nome: String(nome||''),
-              stockAccountId: stockAccountId || null,
-              pidBefore: pidBefore || null,
-              closeR: closeR || null,
-              udirForCheck: udirForCheck ? String(udirForCheck).slice(0, 260) : null,
-              udirSource: udirSource || null
-            });
-          } catch {}
-          // Ban/Desativada (ultra enterprise):
-          // Aqui NÃO inventamos moda: detectou ban => sempre GARANTIR fechamento real.
-          // Motivo: o check por PIDs pode dar falso-negativo (cmdline truncada/WMI instável) e deixar janela viva.
-          // Regra: após o close via Puppeteer, força kill por rootPid + userDataDir (idempotente).
-          try {
-            const man = await manifestStore.read(nome).catch(()=>null);
-            const pid =
-              (closeR && Number(closeR.rootPid || 0) || 0) ||
-              (man && Number(man.lastRootPid || 0) || 0) ||
-              (pidBefore || 0);
-            const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_force_kill_begin', nome: String(nome||''), rootPid: pid || null, udirSource: udirSource || null, udirForCheck: udir ? String(udir).slice(0,260) : null }); } catch {}
-            if (pid) {
-              await withTimeout('auto_banned_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              await sleep(700);
-            }
-            if (udir) {
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-              await sleep(500);
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-            }
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_force_kill_done', nome: String(nome||''), rootPid: pid || null }); } catch {}
-          } catch {}
-        } else {
-          // Sem controller: tentar fechar por PID (sem /F) e por userDataDir (sem /F); se não fechar, força no final.
-          let man = null;
-          try { man = await manifestStore.read(nome).catch(()=>null); } catch {}
-          const pid = man && Number(man.lastRootPid || 0) || 0;
-          const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-          try {
-            if (pid) {
-              await withTimeout('auto_banned_close_rootpid', closeProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              await sleep(900);
-            }
-          } catch {}
-          try {
-            if (udir) {
-              browserHelper.closeChromeProfileProcessesGraceful(udir);
-              await sleep(900);
-            }
-          } catch {}
-          // Fallback final (force) se não fechou: tentar taskkill por PID e depois por userDataDir.
-          // Importante: não depender só de isPidAlive, pois EPERM pode mascarar processo vivo.
-          try {
-            if (pid) {
-              await withTimeout('auto_banned_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid }); } catch {}
-              await sleep(800);
-            }
-          } catch {}
-          try {
-            if (udir) {
-              browserHelper.killChromeProfileProcesses(udir);
-              await sleep(600);
-              browserHelper.killChromeProfileProcesses(udir);
-            }
-          } catch {}
-        }
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
-
-        // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
-        // (Caso contrário, o Windows deixa janela "quebrada" aberta, mesmo após apagar diretório.)
-        try {
-          const t0 = Date.now();
-          const deadlineMs = 30_000;
-          let last = [];
-          if (!udirForCheck) {
-            // Enterprise HARD: não conseguimos provar que fechou (sem userDataDir => sem PID check).
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_missing_userDataDir_block_delete', nome: String(nome||'') }); } catch {}
-            try {
-              await manifestStore.update(nome, (man) => {
-                man = man || {};
-                man.accountFlags = man.accountFlags || {};
-                man.accountFlags.bannedPendingClose = true;
-                man.accountFlags.bannedPendingCloseAt = Date.now();
-                man.accountFlags.bannedPendingCloseReason = 'missing_userDataDir';
-                return man;
-              });
-            } catch {}
-            return { ok: false, error: 'banned_close_missing_userDataDir' };
-          }
-          while (udirForCheck && (Date.now() - t0) < deadlineMs) {
-            const chk = (browserHelper.getChromeProfilePidsMeta
-              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
-              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
-            if (!chk || chk.ok === false) {
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk && chk.error ? String(chk.error).slice(0,180) : 'pid_check_failed' }); } catch {}
-              try {
-                await manifestStore.update(nome, (man) => {
-                  man = man || {};
-                  man.accountFlags = man.accountFlags || {};
-                  man.accountFlags.bannedPendingClose = true;
-                  man.accountFlags.bannedPendingCloseAt = Date.now();
-                  man.accountFlags.bannedPendingCloseReason = 'pid_check_failed';
-                  return man;
-                });
-              } catch {}
-              return { ok: false, error: 'banned_close_unknown_pids' };
-            }
-            last = chk.pids || [];
-            if (!last.length) break;
-            // força kill e revalida
-            try { browserHelper.killChromeProfileProcesses(udirForCheck); } catch {}
-            await sleep(800);
-          }
-          if (udirForCheck) {
-            const chk2 = (browserHelper.getChromeProfilePidsMeta
-              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
-              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
-            if (!chk2 || chk2.ok === false) {
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk2 && chk2.error ? String(chk2.error).slice(0,180) : 'pid_check_failed' }); } catch {}
-              try {
-                await manifestStore.update(nome, (man) => {
-                  man = man || {};
-                  man.accountFlags = man.accountFlags || {};
-                  man.accountFlags.bannedPendingClose = true;
-                  man.accountFlags.bannedPendingCloseAt = Date.now();
-                  man.accountFlags.bannedPendingCloseReason = 'pid_check_failed';
-                  return man;
-                });
-              } catch {}
-              return { ok: false, error: 'banned_close_unknown_pids' };
-            }
-            const still = chk2.pids || [];
-            if (still.length) {
-              try {
-                provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_incomplete_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), pids: still.slice(0, 24) });
-              } catch {}
-              // Não deletar: marca pendente e sai (nurse tentará novamente em próxima detecção).
-              try {
-                await manifestStore.update(nome, (man) => {
-                  man = man || {};
-                  man.accountFlags = man.accountFlags || {};
-                  man.accountFlags.bannedPendingClose = true;
-                  man.accountFlags.bannedPendingCloseAt = Date.now();
-                  man.accountFlags.bannedPendingClosePids = still.slice(0, 24);
-                  return man;
-                });
-              } catch {}
-              return { ok: false, error: 'banned_close_incomplete' };
-            }
-          }
-
-          // Marca no manifest: browser fechado (pré-condição para delete/arquive).
-          try {
-            const before = await manifestStore.read(nome).catch(()=>null);
-            const prevClosedAt = before && before.accountFlags ? Number(before.accountFlags.browserClosedAt || 0) || 0 : 0;
             await manifestStore.update(nome, (man) => {
               man = man || {};
               man.accountFlags = man.accountFlags || {};
-              man.accountFlags.browserClosedAt = Date.now();
-              man.accountFlags.browserClosedReason = 'auto_banned_close';
-              man.accountFlags.browserClosedUdirSource = udirSource || null;
-              man.accountFlags.browserClosedUdir = udirForCheck ? String(udirForCheck).slice(0, 260) : null;
-              // Se chegamos aqui, o PID check terminou com "zero PIDs" e ok=true.
-              delete man.accountFlags.bannedPendingClose;
-              delete man.accountFlags.bannedPendingCloseAt;
-              delete man.accountFlags.bannedPendingCloseReason;
-              delete man.accountFlags.bannedPendingClosePids;
+              man.accountFlags.bannedPendingClose = true;
+              man.accountFlags.bannedPendingCloseAt = Date.now();
+              man.accountFlags.bannedPendingCloseReason = 'deactivate_failed';
               return man;
             });
-            const after = await manifestStore.read(nome).catch(()=>null);
-            const nextClosedAt = after && after.accountFlags ? Number(after.accountFlags.browserClosedAt || 0) || 0 : 0;
-            try { provisionAudit.append({ ts: Date.now(), event: 'banflow_browserClosedAt_set', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, prevClosedAt: prevClosedAt || null, nextClosedAt: nextClosedAt || null }); } catch {}
           } catch {}
-        } catch {}
-
-        // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
-        try {
-          if (robeMeta[nome]) robeMeta[nome].rootPid = null;
-        } catch {}
-        try {
-          await manifestStore.update(nome, (man) => {
-            man = man || {};
-            delete man.lastRootPid;
-            delete man.lastRootPidAt;
-            return man;
-          });
-        } catch {}
+          return { ok: false, error: 'banned_close_failed' };
+        }
       } catch {}
 
-      // 2) EXCLUI a conta do servidor (perfil local) — best-effort
-      try {
-        // Enterprise HARD: só deletar se o manifest afirmar que o browser foi fechado
-        try {
-          const mPre = await manifestStore.read(nome).catch(()=>null);
-          const closedAt = mPre && mPre.accountFlags ? Number(mPre.accountFlags.browserClosedAt || 0) || 0 : 0;
-          if (!closedAt) {
-            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_browser_not_closed', nome: String(nome||'') }); } catch {}
-            try {
-              await manifestStore.update(nome, (man) => {
-                man = man || {};
-                man.accountFlags = man.accountFlags || {};
-                man.accountFlags.bannedPendingClose = true;
-                man.accountFlags.bannedPendingCloseAt = Date.now();
-                man.accountFlags.bannedPendingCloseReason = 'browser_not_closed';
-                return man;
-              });
-            } catch {}
-            return { ok: false, error: 'banned_delete_blocked_browser_not_closed' };
-          }
-        } catch {}
-        const rr = await (async () => {
-          try {
-            // IMPORTANTE (enterprise):
-            // Não chamar o endpoint HTTP DELETE /api/perfis/:nome daqui.
-            // setBannedFlag pode rodar dentro de lockProfileAction; o endpoint DELETE chama worker.deactivate e pode deadlockar.
-
-            // 2.1) desired OFF (evita reabrir)
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-                return d;
-              });
-            } catch {}
-
-            // 2.2) remover controller do runtime (browser já foi fechado acima)
-            try { controllers.delete(nome); } catch {}
-            try { stopPruneLoop(nome); } catch {}
-
-            // 2.3) remover userDataDir externo (se houver) e remover do perfis.json
-            try {
-              // Fonte primária: manifestStore (mais confiável que perfis.json)
-              let udirFromManifest = '';
-              try {
-                const man = await manifestStore.read(nome).catch(()=>null);
-                if (man && man.userDataDir) udirFromManifest = String(man.userDataDir);
-              } catch {}
-              const perfisArr = loadPerfisJson();
-              const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-              const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
-              if (udir) {
-                // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
-                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-                try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
-              }
-              const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-              try { savePerfisJson(arr2); } catch {}
-            } catch {}
-
-            // 2.4) remover desired entry e diretório do perfil (manifest/meta)
-            try { await fileStore.removeDesired(nome); } catch {}
-            try {
-              const dir = path.join(fileStore.perfisDir, nome);
-              try { fileStore.rimrafSync(dir); } catch {}
-            } catch {}
-
-            // 2.5) limpeza cosmética do status.json
-            try {
-              const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-              if (st && Array.isArray(st.perfis)) {
-                st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-                fileStore.writeJsonAtomic(fileStore.statusPath, st);
-              }
-            } catch {}
-
-            try { await snapshotStatusAndWrite(); } catch {}
-            return { ok: true };
-          } catch (e) {
-            return { ok: false, error: (e && e.message) || String(e) };
-          }
-        })();
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'auto_delete_banned_profile',
-            flowId,
-            nome: String(nome||''),
-            stockAccountId: stockAccountId || null,
-            ok: !!(rr && rr.ok),
-            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
-          });
-        } catch {}
-      } catch {}
-
-      // 3) ENVIA pro estoque Excluídas (CT) com evidence (último passo)
+      // 2.5) ANTES de deletar o perfil local: garantir que a conta foi enviada ao CT (Excluídas).
+      // Motivo enterprise: se stockAccountId estiver ausente e o perfil for deletado, o CT pode não conseguir mapear
+      // hostId+profileName => conta some (não aparece em Excluídas).
+      let ctArchiveOk = false;
+      let ctArchiveResp = null;
       try {
         const rr = await archiveBanWithEvidenceToCT({
           profileName: nome,
@@ -2105,10 +1801,13 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           evidenceB64: b64,
           evidenceUrl: url
         });
+        ctArchiveResp = rr || null;
+        ctArchiveOk = !!(rr && rr.ok);
+        if (rr && rr.stockAccountId && !stockAccountId) stockAccountId = Number(rr.stockAccountId) || stockAccountId;
         try {
           provisionAudit.append({
             ts: Date.now(),
-            event: 'auto_archive_banned_ct',
+            event: 'auto_archive_banned_ct_predelete',
             flowId,
             nome: String(nome||''),
             ok: !!(rr && rr.ok),
@@ -2118,11 +1817,82 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           });
         } catch {}
         if (!rr || rr.ok !== true) {
-          // CT fora/arq falhou: NÃO pode “sumir”. Enfileira retry.
+          // CT fora/arq falhou: NÃO deletar se não temos stockAccountId, para não perder o vínculo por profileName.
           const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `banned:${String(reason||'banned').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
           try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
+          if (!stockAccountId) {
+            // sem ID => bloquear delete e sair (garante que não some do CT)
+            return { ok: false, error: 'ct_archive_failed_predelete' };
+          }
         }
       } catch {}
+
+      // 3) EXCLUI a conta do servidor usando o mesmo fluxo do DELETE /api/perfis/:nome (sem HTTP).
+      // Regras:
+      // - deve estar inativo aqui; se ainda estiver ativo, bloqueia (anti-fantasma).
+      // - remoção de userDataDir externo é best-effort.
+      try {
+        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
+        if (isActive) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
+          return { ok: false, error: 'banned_delete_blocked_still_active' };
+        }
+        // Remove userDataDir externo, perfis.json, desired e dir do perfil
+        try {
+          const perfisArr = loadPerfisJson();
+          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+          if (udir && fs.existsSync(udir)) {
+            // Aqui NÃO fazemos “kill por raiva”: se o navegador ficou vivo, o deactivate acima deveria ter falhado.
+            // Mesmo assim, remoção é best-effort e pode falhar em Windows (arquivo bloqueado).
+            try { fileStore.rimrafSync(udir); } catch {}
+          }
+          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+          try { savePerfisJson(arr2); } catch {}
+        } catch {}
+        try { await fileStore.removeDesired(nome); } catch {}
+        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
+        try {
+          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+          if (st && Array.isArray(st.perfis)) {
+            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+            fileStore.writeJsonAtomic(fileStore.statusPath, st);
+          }
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: true }); } catch {}
+      } catch (e) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
+      }
+
+      // 4) (compat) Se por algum motivo não conseguimos arquivar antes, tenta depois também.
+      if (!ctArchiveOk) {
+        try {
+          const rr = ctArchiveResp || await archiveBanWithEvidenceToCT({
+            profileName: nome,
+            stockAccountId: stockAccountId || null,
+            reason: `banned:${String(reason||'banned').slice(0,80)}`,
+            evidenceB64: b64,
+            evidenceUrl: url
+          });
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'auto_archive_banned_ct_postdelete',
+              flowId,
+              nome: String(nome||''),
+              ok: !!(rr && rr.ok),
+              error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
+              stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
+              details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
+            });
+          } catch {}
+          if (!rr || rr.ok !== true) {
+            const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `banned:${String(reason||'banned').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
+            try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
+          }
+        } catch {}
+      }
     } catch {}
     await manifestStore.update(nome, (man) => {
       man = man || {};
@@ -2217,8 +1987,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         });
       } catch {}
 
-      // 0.9) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
-      // entre close->delete (isso causa “fechou e abriu de novo”).
+      // 1) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática.
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {};
@@ -2227,6 +1996,124 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           return d;
         });
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_desired_disabled', nome: String(nome||'') }); } catch {}
+      } catch {}
+
+      // ===== NOVO: fluxo oficial (close -> CT archive -> delete) =====
+      // Mantém abaixo o código legado (hard close/kill/pid), mas este fluxo dá return e não deixa rodar.
+      try {
+        try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_official_begin', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
+
+        // 2) fecha via handler oficial
+        const dr = await handlers.deactivate({ nome, reason: 'auto_two_factor', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(dr && dr.ok), error: dr && dr.ok ? null : String(dr && dr.error || 'deactivate_failed').slice(0,180) }); } catch {}
+        if (!dr || dr.ok !== true) {
+          try {
+            await manifestStore.update(nome, (man) => {
+              man = man || {};
+              man.accountFlags = man.accountFlags || {};
+              man.accountFlags.twoFactorPendingClose = true;
+              man.accountFlags.twoFactorPendingCloseAt = Date.now();
+              man.accountFlags.twoFactorPendingCloseReason = 'deactivate_failed';
+              return man;
+            });
+          } catch {}
+          return { ok: false, error: 'two_factor_close_failed' };
+        }
+
+        // 3) arquiva no CT antes de deletar (garante que não some de Excluídas)
+        let ctOk = false;
+        let rr = null;
+        try {
+          rr = await archiveBanWithEvidenceToCT({
+            profileName: nome,
+            stockAccountId: stockAccountId || null,
+            reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`,
+            evidenceB64: b64,
+            evidenceUrl: url
+          });
+          ctOk = !!(rr && rr.ok);
+          if (rr && rr.stockAccountId && !stockAccountId) stockAccountId = Number(rr.stockAccountId) || stockAccountId;
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'auto_archive_two_factor_ct_predelete',
+              nome: String(nome||''),
+              flowId,
+              ok: !!(rr && rr.ok),
+              error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
+              stockAccountId: rr && rr.stockAccountId || stockAccountId || null,
+              details: rr && rr.ok ? null : (rr && rr.details ? rr.details : null)
+            });
+          } catch {}
+        } catch {}
+        if (!ctOk) {
+          const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
+          try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
+          if (!stockAccountId) {
+            // Sem ID: bloqueia delete para não perder vínculo.
+            return { ok: false, error: 'ct_archive_failed_predelete' };
+          }
+        }
+
+        // 4) delete local (mesmo fluxo do DELETE /api/perfis/:nome, sem HTTP)
+        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
+        if (isActive) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
+          return { ok: false, error: 'two_factor_delete_blocked_still_active' };
+        }
+        try {
+          const perfisArr = loadPerfisJson();
+          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+          if (udir && fs.existsSync(udir)) {
+            try { fileStore.rimrafSync(udir); } catch {}
+          }
+          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+          try { savePerfisJson(arr2); } catch {}
+        } catch {}
+        try { await fileStore.removeDesired(nome); } catch {}
+        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
+        try {
+          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+          if (st && Array.isArray(st.perfis)) {
+            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+            fileStore.writeJsonAtomic(fileStore.statusPath, st);
+          }
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_two_factor_profile', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: true }); } catch {}
+
+        // flags/issue: mantém comportamento anterior
+        try {
+          await manifestStore.update(nome, (man) => {
+            man = man || {};
+            man.accountFlags = man.accountFlags || {};
+            man.accountFlags.twoFactor = true;
+            man.accountFlags.twoFactorAt = Date.now();
+            man.accountFlags.twoFactorReason = String(reason||'');
+            man.accountFlags.twoFactorText = String(snippet||'').slice(0, 400);
+            delete man.accountFlags.loginRemediateFailed;
+            delete man.accountFlags.loginRemediateFailedAt;
+            delete man.accountFlags.loginRemediateFailedReason;
+            delete man.accountFlags.loginRemediateFailedSource;
+            delete man.accountFlags.loginRemediateFailedStage;
+            delete man.accountFlags.loginRemediateFailedCount;
+            return man;
+          });
+        } catch {}
+        if (!already) {
+          try {
+            await issues.append(
+              nome,
+              'account_two_factor_detected',
+              `reason=${reason||''} snippet="${(snippet||'').slice(0,120)}" at=${new Date().toISOString()}`
+            );
+          } catch {}
+        }
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].twoFactor = true;
+        try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_official_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
+        return { ok: true };
       } catch {}
 
       // 1) FECHA o navegador (não excluir com navegador aberto)
@@ -7314,6 +7201,14 @@ const problem = man
   : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
+// Estoque (CT): vínculo determinístico do perfil do servidor com a conta do estoque.
+// Importante: NÃO expõe cookies/senha — só o ID (para o CT conseguir mapear mesmo quando cookie_fp ainda não foi calculado).
+const stockAccountId = (() => {
+  try {
+    const sid = Number((man0 && (man0.stockAccountId || man0.stock_account_id)) ? (man0.stockAccountId || man0.stock_account_id) : 0) || 0;
+    return sid > 0 ? sid : null;
+  } catch { return null; }
+})();
 
 perfis.push({
   nome,
@@ -7363,7 +7258,8 @@ perfis.push({
   messengerPin,
   messengerPinReason,
   problem,
-  robeMode
+  robeMode,
+  stockAccountId
 });
 }
 const robes = {};

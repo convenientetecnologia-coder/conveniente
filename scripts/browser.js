@@ -380,45 +380,52 @@ function taskkillTreeWinGraceful(pid) {
   }
 }
 
+function _listProfilePidsWinOrThrow(userDataDir) {
+  const expected = String(userDataDir || '').trim();
+  if (!expected) return [];
+  // Retorna só PIDs (compacto) para evitar JSON gigantes e reduzir chance de falha.
+  const ps = `
+    $expected = $args[0];
+    if (-not $expected) { "[]" ; exit 0 }
+    $esc = [Regex]::Escape($expected);
+    $names = @('chrome.exe','chromium.exe');
+    $pids = @();
+    foreach ($n in $names) {
+      try {
+        $procs = Get-CimInstance Win32_Process -Filter ("Name='" + $n + "'") |
+          Where-Object { $_.CommandLine -and ($_.CommandLine -match $esc) } |
+          Select-Object -ExpandProperty ProcessId;
+        if ($procs) { $pids += $procs; }
+      } catch {}
+    }
+    ($pids | Sort-Object -Unique) | ConvertTo-Json -Compress
+  `;
+  const out = execFileSync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps, expected],
+    { encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024, timeout: 8000 }
+  ).trim();
+  if (!out) return [];
+  const json = JSON.parse(out);
+  const arr = Array.isArray(json) ? json : (json ? [json] : []);
+  return arr.map(x => Number(x)).filter(n => Number.isFinite(n) && n > 0);
+}
+
 function listProfilePidsWin(userDataDir) {
+  // Mantém API legada (nunca lança): em falha retorna [].
   try {
-    const expected = String(userDataDir || '').trim();
-    if (!expected) return [];
-    // Retorna só PIDs (compacto) para evitar JSON gigantes e reduzir chance de falha.
-    const ps = `
-      $expected = $args[0];
-      if (-not $expected) { "[]" ; exit 0 }
-      $esc = [Regex]::Escape($expected);
-      $names = @('chrome.exe','chromium.exe');
-      $pids = @();
-      foreach ($n in $names) {
-        try {
-          $procs = Get-CimInstance Win32_Process -Filter ("Name='" + $n + "'") |
-            Where-Object { $_.CommandLine -and ($_.CommandLine -match $esc) } |
-            Select-Object -ExpandProperty ProcessId;
-          if ($procs) { $pids += $procs; }
-        } catch {}
-      }
-      ($pids | Sort-Object -Unique) | ConvertTo-Json -Compress
-    `;
-    const out = execFileSync(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps, expected],
-      { encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024, timeout: 8000 }
-    ).trim();
-    if (!out) return [];
-    const json = JSON.parse(out);
-    const arr = Array.isArray(json) ? json : (json ? [json] : []);
-    return arr.map(x => Number(x)).filter(n => Number.isFinite(n) && n > 0);
+    return _listProfilePidsWinOrThrow(userDataDir);
   } catch {
     return [];
   }
 }
 
 function listProfilePidsWinMeta(userDataDir) {
-  // Mesmo comportamento do listProfilePidsWin, mas preserva sinal de falha (ok=false).
+  // Enterprise: preservar sinal de falha real.
+  // Bug antigo: listProfilePidsWin engolia exceções e retornava [], mascarando WMI/Powershell quebrado,
+  // o que podia levar a delete de userDataDir com Chrome ainda vivo ("janela quebrada").
   try {
-    const pids = listProfilePidsWin(userDataDir);
+    const pids = _listProfilePidsWinOrThrow(userDataDir);
     return { ok: true, pids: Array.isArray(pids) ? pids : [] };
   } catch (e) {
     return { ok: false, pids: [], error: (e && e.message) ? String(e.message).slice(0, 180) : 'wmi_failed' };
