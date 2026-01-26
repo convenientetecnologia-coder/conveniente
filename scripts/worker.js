@@ -1568,12 +1568,22 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         // - Fallback: usar um "hint" por substring do path, que ainda aparece no CommandLine do Chrome:
         //   \\Conveniente\\<nome>
         let udirForCheck = '';
+        let udirSource = '';
         try {
           const man0 = await manifestStore.read(nome).catch(()=>null);
-          if (man0 && man0.userDataDir) udirForCheck = String(man0.userDataDir);
+          if (man0 && man0.userDataDir) { udirForCheck = String(man0.userDataDir); udirSource = 'manifest'; }
         } catch {}
+        // Fallback robusto: perfis.json (não depende de manifestStore resolver caminho)
         if (!udirForCheck) {
-          try { udirForCheck = `\\\\Conveniente\\\\${String(nome || '').trim()}`; } catch { udirForCheck = ''; }
+          try {
+            const perfisArr = loadPerfisJson();
+            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+            if (perfil && perfil.userDataDir) { udirForCheck = String(perfil.userDataDir); udirSource = 'perfis_json'; }
+          } catch {}
+        }
+        // Último recurso: substring curta (ajuda quando CommandLine é truncado)
+        if (!udirForCheck) {
+          try { udirForCheck = `\\Conveniente\\${String(nome || '').trim()}`; udirSource = 'hint_substring'; } catch { udirForCheck = ''; udirSource = ''; }
         }
         if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
           // Fecha via Puppeteer (graceful) e só força se necessário (hardCloseController encapsula isso)
@@ -1586,7 +1596,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           let man = null;
           try { man = await manifestStore.read(nome).catch(()=>null); } catch {}
           const pid = man && Number(man.lastRootPid || 0) || 0;
-          const udir = man && man.userDataDir ? String(man.userDataDir) : '';
+          const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
           try {
             if (pid) {
               await withTimeout('auto_banned_close_rootpid', closeProcessTreeByRootPid(pid), 12_000).catch(()=>null);
@@ -1616,7 +1626,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
             }
           } catch {}
         }
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', nome: String(nome||'') }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', nome: String(nome||''), udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
 
         // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
         // (Caso contrário, o Windows deixa janela "quebrada" aberta, mesmo após apagar diretório.)
@@ -1837,12 +1847,20 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         //   precisamos impedir delete enquanto existir Chrome vivo.
         // - Fallback por substring: \\Conveniente\\<nome>
         let udirForCheck = '';
+        let udirSource = '';
         try {
           const man0 = await manifestStore.read(nome).catch(()=>null);
-          if (man0 && man0.userDataDir) udirForCheck = String(man0.userDataDir);
+          if (man0 && man0.userDataDir) { udirForCheck = String(man0.userDataDir); udirSource = 'manifest'; }
         } catch {}
         if (!udirForCheck) {
-          try { udirForCheck = `\\\\Conveniente\\\\${String(nome || '').trim()}`; } catch { udirForCheck = ''; }
+          try {
+            const perfisArr = loadPerfisJson();
+            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+            if (perfil && perfil.userDataDir) { udirForCheck = String(perfil.userDataDir); udirSource = 'perfis_json'; }
+          } catch {}
+        }
+        if (!udirForCheck) {
+          try { udirForCheck = `\\Conveniente\\${String(nome || '').trim()}`; udirSource = 'hint_substring'; } catch { udirForCheck = ''; udirSource = ''; }
         }
         if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
@@ -1853,7 +1871,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           let man = null;
           try { man = await manifestStore.read(nome).catch(()=>null); } catch {}
           const pid = man && Number(man.lastRootPid || 0) || 0;
-          const udir = man && man.userDataDir ? String(man.userDataDir) : '';
+          const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
           try {
             if (pid) {
               await withTimeout('auto_two_factor_close_rootpid', closeProcessTreeByRootPid(pid), 12_000).catch(()=>null);
@@ -1881,7 +1899,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             }
           } catch {}
         }
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', nome: String(nome||'') }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', nome: String(nome||''), udirSource: udirSource || null, udirForCheck: udirForCheck ? String(udirForCheck).slice(0,260) : null }); } catch {}
 
         // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
         try {

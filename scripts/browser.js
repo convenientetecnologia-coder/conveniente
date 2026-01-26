@@ -453,6 +453,25 @@ function killChromeProfileProcesses(userDataDir, openingMap) {
       } catch {}
     }
 
+    // PASSO B2 (ultra enterprise): fallback curto por slug
+    // Motivo: em alguns hosts, o CommandLine pode ser truncado/instável; a substring "\\Conveniente\\<slug>"
+    // é curta e costuma sobreviver. Isso evita falso-negativo que leva a "janela quebrada" após delete.
+    if (!toKill.size) {
+      try {
+        const slug = (() => {
+          try {
+            const s = String(expectedRaw || '').trim().replace(/[\\\/]+$/g, '');
+            return s ? path.basename(s) : '';
+          } catch { return ''; }
+        })();
+        if (slug) {
+          const hint = `\\Conveniente\\${slug}`;
+          const pids2 = listProfilePidsWin(hint);
+          for (const pid of pids2) toKill.add(pid);
+        }
+      } catch {}
+    }
+
     if (!toKill.size) return;
 
     let killed = 0;
@@ -502,7 +521,16 @@ function getChromeProfilePids(userDataDir) {
   // Uso: validação "antes de deletar" (anti-janela zumbi).
   if (process.platform !== 'win32') return [];
   try {
-    return listProfilePidsWin(String(userDataDir || '').trim());
+    const raw = String(userDataDir || '').trim();
+    const p0 = listProfilePidsWin(raw);
+    if (p0 && p0.length) return p0;
+    // Fallback curto por slug (mesma lógica do kill): \\Conveniente\\<slug>
+    try {
+      const s = raw.replace(/[\\\/]+$/g, '');
+      const slug = s ? path.basename(s) : '';
+      if (slug) return listProfilePidsWin(`\\Conveniente\\${slug}`) || [];
+    } catch {}
+    return [];
   } catch {
     return [];
   }
