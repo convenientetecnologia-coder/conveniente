@@ -1143,7 +1143,16 @@ function updateLogAppend(obj) {
 async function runGit(args, { cwd } = {}) {
   const { execFile } = require('child_process');
   return new Promise((resolve) => {
-    execFile('git', args, { cwd: cwd || path.join(__dirname, '..') }, (err, stdout, stderr) => {
+    // Ultra enterprise: nunca permitir prompt interativo (evita self_update travar em inflight).
+    // - GIT_TERMINAL_PROMPT=0: desabilita prompts
+    // - GCM_INTERACTIVE=Never: bloqueia Git Credential Manager UI
+    // - timeout: evita pendurar indefinidamente em fetch/pull (rede/credencial)
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' };
+    execFile('git', args, {
+      cwd: cwd || path.join(__dirname, '..'),
+      env,
+      timeout: Math.max(15_000, Number(process.env.SELF_UPDATE_GIT_TIMEOUT_MS || 120_000) || 120_000)
+    }, (err, stdout, stderr) => {
       if (err) return resolve({ ok:false, error: (err && err.message) || String(err), stdout: String(stdout||''), stderr: String(stderr||'') });
       return resolve({ ok:true, stdout: String(stdout||''), stderr: String(stderr||'') });
     });
