@@ -1820,8 +1820,10 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               udirSource: udirSource || null
             });
           } catch {}
-          // Enterprise: preferir fechamento graceful; só usar taskkill/PID-kill como fallback
-          // quando ainda existirem processos para o userDataDir (garantia de 110% sem matar à toa).
+          // Ban/Desativada (ultra enterprise):
+          // Aqui NÃO inventamos moda: detectou ban => sempre GARANTIR fechamento real.
+          // Motivo: o check por PIDs pode dar falso-negativo (cmdline truncada/WMI instável) e deixar janela viva.
+          // Regra: após o close via Puppeteer, força kill por rootPid + userDataDir (idempotente).
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
             const pid =
@@ -1829,31 +1831,17 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               (man && Number(man.lastRootPid || 0) || 0) ||
               (pidBefore || 0);
             const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-            let needsKill = false;
-            if (udir && browserHelper.getChromeProfilePidsMeta) {
-              const chk = browserHelper.getChromeProfilePidsMeta(udir);
-              needsKill = !chk || chk.ok === false || ((chk.pids || []).length > 0);
-            } else if (udir && browserHelper.getChromeProfilePids) {
-              const pids = browserHelper.getChromeProfilePids(udir) || [];
-              needsKill = (pids.length > 0);
-            } else {
-              // Sem userDataDir/PID check confiável => fallback conservador (mata) para não deixar órfão.
-              needsKill = true;
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_force_kill_begin', nome: String(nome||''), rootPid: pid || null, udirSource: udirSource || null, udirForCheck: udir ? String(udir).slice(0,260) : null }); } catch {}
+            if (pid) {
+              await withTimeout('auto_banned_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              await sleep(700);
             }
-            if (!needsKill) {
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_skipped_no_pids', nome: String(nome||''), rootPid: pid || null }); } catch {}
-            } else {
-              if (pid) {
-                await withTimeout('auto_banned_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-                try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
-                await sleep(800);
-              }
-              if (udir) {
-                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-                await sleep(600);
-                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-              }
+            if (udir) {
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+              await sleep(500);
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
             }
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_force_kill_done', nome: String(nome||''), rootPid: pid || null }); } catch {}
           } catch {}
         } else {
           // Sem controller: tentar fechar por PID (sem /F) e por userDataDir (sem /F); se não fechar, força no final.
@@ -2295,8 +2283,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               udirSource: udirSource || null
             });
           } catch {}
-          // Enterprise: preferir fechamento graceful; só usar taskkill/PID-kill como fallback
-          // quando ainda existirem processos para o userDataDir (garantia sem matar à toa).
+          // 2FA (ultra enterprise):
+          // Mesma regra do ban: detectou 2FA => sempre GARANTIR fechamento real (sem "skip").
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
             const pid =
@@ -2304,30 +2292,17 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               (man && Number(man.lastRootPid || 0) || 0) ||
               (pidBefore || 0);
             const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-            let needsKill = false;
-            if (udir && browserHelper.getChromeProfilePidsMeta) {
-              const chk = browserHelper.getChromeProfilePidsMeta(udir);
-              needsKill = !chk || chk.ok === false || ((chk.pids || []).length > 0);
-            } else if (udir && browserHelper.getChromeProfilePids) {
-              const pids = browserHelper.getChromeProfilePids(udir) || [];
-              needsKill = (pids.length > 0);
-            } else {
-              needsKill = true;
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_force_kill_begin', nome: String(nome||''), rootPid: pid || null, udirSource: udirSource || null, udirForCheck: udir ? String(udir).slice(0,260) : null }); } catch {}
+            if (pid) {
+              await withTimeout('auto_two_factor_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              await sleep(700);
             }
-            if (!needsKill) {
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_skipped_no_pids', nome: String(nome||''), rootPid: pid || null }); } catch {}
-            } else {
-              if (pid) {
-                await withTimeout('auto_two_factor_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-                try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
-                await sleep(800);
-              }
-              if (udir) {
-                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-                await sleep(600);
-                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-              }
+            if (udir) {
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+              await sleep(500);
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
             }
+            try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_force_kill_done', nome: String(nome||''), rootPid: pid || null }); } catch {}
           } catch {}
         } else {
           let man = null;
