@@ -2808,7 +2808,26 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('voce nao pode usa-la') ||
         bodyTxt.includes('confira aqui novamente para ver o resultado');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, href0, path0, title0 };
+      // 6) Confirmação de identidade em andamento (pós upload / aguardando análise)
+      // IMPORTANT: não confundir com "appeal" genérico. Exigimos sinais de identidade/selfie/vídeo.
+      const hasIdentitySubmitted =
+        bodyTxt.includes('confirmacao de identidade em andamento') ||
+        (bodyTxt.includes('confirmacao de identidade') && bodyTxt.includes('em andamento')) ||
+        bodyTxt.includes('normalmente, levamos cerca de uma hora para analisar') ||
+        bodyTxt.includes('normalmente analisamos suas informacoes em ate') ||
+        bodyTxt.includes('selfie de video finalizada') ||
+        (bodyTxt.includes('carregamento desse video') && bodyTxt.includes('confirmar sua identidade')) ||
+        (bodyTxt.includes('grave') && bodyTxt.includes('selfie') && bodyTxt.includes('video'));
+
+      // 7) Sinais de identidade no body (fallback quando o recorte de h1 não contém)
+      const bodyHasIdentityHints =
+        bodyTxt.includes('confirme sua identidade') ||
+        bodyTxt.includes('confirm your identity') ||
+        bodyTxt.includes('selfie') ||
+        bodyTxt.includes('identidade') ||
+        bodyTxt.includes('video selfie');
+
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, bodyHasIdentityHints, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -2819,6 +2838,8 @@ async function detectLoginRequired(page) {
     const hasPersonaText = !!(v && v.hasPersonaText);
     const hasCheckpointText = !!(v && v.hasCheckpointText);
     const hasIdentityText = !!(v && v.hasIdentityText);
+    const hasIdentitySubmitted = !!(v && v.hasIdentitySubmitted);
+    const bodyHasIdentityHints = !!(v && v.bodyHasIdentityHints);
     const hasTwoFactorText = !!(v && v.hasTwoFactorText);
     const hasAppealSubmitted = !!(v && v.hasAppealSubmitted);
     const title = (v && v.title0) ? String(v.title0) : '';
@@ -2856,13 +2877,24 @@ async function detectLoginRequired(page) {
 
     // Recurso submetido: não é “login_form”, mas bloqueia conta (precisa monitorar).
     if (hasAppealSubmitted) {
+      // Se há sinais de identidade (selfie/vídeo), classifica como identity_submitted (monitor 1h).
+      if (hasIdentitySubmitted || hasIdentityText || bodyHasIdentityHints) {
+        return {
+          loginRequired: true,
+          reason: 'identity_submitted',
+          domain,
+          url: (v && v.href0) ? String(v.href0) : href,
+          title,
+          evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasIdentitySubmitted, bodyHasIdentityHints, hasTwoFactorText, hasAppealSubmitted, path }
+        };
+      }
       return {
         loginRequired: true,
         reason: 'appeal_submitted',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasIdentitySubmitted, bodyHasIdentityHints, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
 
@@ -2963,6 +2995,84 @@ async function detectLoginRequired(page) {
     };
   } catch {}
   return { loginRequired: false };
+}
+
+/**
+ * Assistente safe para fluxo de identidade (selfie/vídeo).
+ * Clica apenas quando um botão "aparece" e está habilitado, sem depender de classes:
+ * prioridade: Concluir > Carregar > Avançar > Continuar.
+ *
+ * IMPORTANT:
+ * - Não grava vídeo nem interage com câmera.
+ * - Só atua quando o texto do body indica claramente o fluxo de identidade.
+ */
+async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) {
+  const start = Date.now();
+  const budget = Math.max(2_000, Number(maxWaitMs || 0) || 0);
+  const maxTries = Math.max(1, Number(tries || 0) || 0);
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    if (!isFbOrMsg) return { ok: false, error: 'not_fb_or_msg' };
+  } catch {}
+
+  const pickAndClick = async () => {
+    try {
+      return await page.evaluate(() => {
+        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+        const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+        const looksIdentity =
+          bodyTxt.includes('confirme sua identidade') ||
+          bodyTxt.includes('confirm your identity') ||
+          bodyTxt.includes('selfie') ||
+          bodyTxt.includes('identidade') ||
+          bodyTxt.includes('carregamento desse video') ||
+          bodyTxt.includes('selfie de video finalizada') ||
+          bodyTxt.includes('confirmacao de identidade');
+        if (!looksIdentity) return { ok: false, error: 'not_identity_context' };
+
+        const scope = document.querySelector('div[role="dialog"]') || document;
+        const btns = Array.from(scope.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 240);
+        const priority = [
+          { key: 'concluir', words: ['concluir', 'finish', 'done'] },
+          { key: 'carregar', words: ['carregar', 'upload'] },
+          { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+          { key: 'continuar', words: ['continuar', 'continue'] },
+        ];
+        const isDisabled = (el) => {
+          try {
+            return (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
+          } catch { return true; }
+        };
+        const textOf = (el) => norm(el.innerText || el.value || el.textContent || '');
+        const aria = (el) => norm(el.getAttribute('aria-label') || '');
+
+        for (const p of priority) {
+          for (const b of btns) {
+            if (!b) continue;
+            const t = textOf(b);
+            const al = aria(b);
+            if (!p.words.some(w => t.includes(w) || al.includes(w))) continue;
+            if (isDisabled(b)) continue;
+            try { b.click(); } catch {}
+            return { ok: true, clicked: p.key, label: (b.getAttribute('aria-label') || '').slice(0, 80), text: (b.innerText || b.textContent || '').slice(0, 80) };
+          }
+        }
+        return { ok: false, error: 'no_clickable_button' };
+      });
+    } catch (e) {
+      return { ok: false, error: (e && e.message) ? String(e.message) : 'evaluate_failed' };
+    }
+  };
+
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    const r = await pickAndClick();
+    if (r && r.ok) return { ok: true, attempt, clicked: r.clicked, meta: { text: r.text || '', label: r.label || '' } };
+    const elapsed = Date.now() - start;
+    if (elapsed >= budget) break;
+    await sleep(1200);
+  }
+  return { ok: false, error: 'no_step_clicked', waitedMs: Date.now() - start };
 }
 
 // ========= LOGIN (email/senha) =========
@@ -3248,6 +3358,7 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
+  identityAssistStep,
   tryLoginEmailPass,
   collectFreshCookies,
   detectAccountSuspended,

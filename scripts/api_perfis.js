@@ -944,6 +944,8 @@ module.exports = (app, workerClient, fileStore) => {
             f.loginRemediateFailed === true ||
             f.loginRequired === true ||
             f.messengerPin === true ||
+            f.identityRequired === true ||
+            f.identitySubmitted === true ||
             f.appealSubmitted === true ||
             f.banned === true;
           if (shouldHumanOnly) humanOnlySet.add(nome);

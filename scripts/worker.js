@@ -209,6 +209,19 @@ async function archiveBanWithEvidenceToCT({ profileName, reason = 'banned_detect
 }
 
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
+  // Guardrail enterprise: identidade (selfie/vídeo) não deve virar "loginRequired" genérico.
+  // Ela tem semântica própria (humano + monitor 1h quando submetido).
+  try {
+    const rr = String(reason || '').toLowerCase();
+    if (rr.includes('identity_submitted')) {
+      await setIdentitySubmittedFlag(nome, { source: source || '', url: '', title: '' });
+      return;
+    }
+    if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_')) {
+      await setIdentityRequiredFlag(nome, { source: source || '', url: '', title: '' });
+      return;
+    }
+  } catch {}
   try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.loginRequired === true;
@@ -281,6 +294,8 @@ function _overlayReasonFromFlags(flags) {
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
     if (flags.twoFactor === true) return `two_factor:${flags.twoFactorReason || ''}`.trim();
+    if (flags.identitySubmitted === true) return 'identity_submitted';
+    if (flags.identityRequired === true) return 'identity_required';
     if (flags.appealSubmitted === true) return 'appeal_submitted';
     if (flags.messengerPin === true) return `messenger_pin:${flags.messengerPinReason || ''}`.trim();
     if (flags.loginRemediateFailed === true) return `login_remediate_failed:${flags.loginRemediateFailedReason || ''}`.trim();
@@ -337,6 +352,9 @@ async function _buildHumanOverlayData(nome) {
         loginRequired: flags && flags.loginRequired === true,
         loginReason: flags ? (flags.loginReason || '') : '',
         banned: flags && flags.banned === true,
+        identityRequired: flags && flags.identityRequired === true,
+        identitySubmitted: flags && flags.identitySubmitted === true,
+        identityNextCheckAt: flags ? (flags.identityNextCheckAt || null) : null,
         appealSubmitted: flags && flags.appealSubmitted === true,
         messengerPin: flags && flags.messengerPin === true,
         loginRemediateFailed: flags && flags.loginRemediateFailed === true
@@ -524,6 +542,8 @@ async function _installOverlayOnPage(nome, page) {
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida';
             else if (f.twoFactor) statusTxt = '2FA requerido (excluída)';
+            else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
+            else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
             else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
             else if (f.loginRemediateFailed) statusTxt = 'Login/Cookies falhou (humano)';
             else if (f.loginRequired) statusTxt = 'Login requerido';
@@ -884,6 +904,242 @@ async function appealMonitorCheckNow(nome, ctrl) {
         nextAt: now + APPEAL_CFG.intervalMs
       });
     } catch {}
+    return { ok: false, error: msg };
+  }
+}
+
+// ===== Identidade (selfie/vídeo) — monitoramento 1h =====
+const IDENTITY_CFG = {
+  intervalMs: 60 * 60 * 1000,      // 1h
+  firstDelayMs: 60 * 60 * 1000,    // 1h (timer inicial após "identity_submitted")
+  maxPagesScan: 8
+};
+
+async function setIdentityRequiredFlag(nome, { source = '', url = '', title = '' } = {}) {
+  try {
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.identityRequired = true;
+      man.accountFlags.identityRequiredAt = Number(man.accountFlags.identityRequiredAt || 0) || Date.now();
+      man.accountFlags.identitySource = String(source || '').slice(0, 80);
+      man.accountFlags.identityUrl = String(url || '').slice(0, 300);
+      man.accountFlags.identityTitle = String(title || '').slice(0, 200);
+      man.accountFlags.identityLastReason = 'identity_required';
+      return man;
+    });
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'identity_required_detected',
+        nome: String(nome || ''),
+        source: String(source || '').slice(0, 80),
+        url: String(url || '').slice(0, 220),
+        title: String(title || '').slice(0, 120)
+      });
+    } catch {}
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].whyNotOpen = 'identity_required';
+  } catch {}
+
+  // Sempre humano (não é automatizável)
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      return d;
+    });
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.humanControl = true;
+      ctrl.trabalhando = false;
+      try { await stopVirtus(nome); } catch {}
+      await ensureHumanOverlay(nome, ctrl, { reason: 'identity_required' }).catch(()=>{});
+    }
+  } catch {}
+}
+
+async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '' } = {}) {
+  const now = Date.now();
+  try {
+    const next = now + IDENTITY_CFG.firstDelayMs;
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.identitySubmitted = true;
+      man.accountFlags.identitySubmittedAt = Number(man.accountFlags.identitySubmittedAt || 0) || now;
+      man.accountFlags.identitySource = String(source || '').slice(0, 80);
+      man.accountFlags.identityUrl = String(url || '').slice(0, 300);
+      man.accountFlags.identityTitle = String(title || '').slice(0, 200);
+      man.accountFlags.identityLastReason = 'identity_submitted';
+      man.accountFlags.identityNextCheckAt = next;
+      // Se chegou aqui, não faz sentido manter identityRequired “acima” do estado submitted.
+      delete man.accountFlags.identityRequired;
+      delete man.accountFlags.identityRequiredAt;
+      return man;
+    });
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'identity_submitted_detected',
+        nome: String(nome || ''),
+        nextAt: now + IDENTITY_CFG.firstDelayMs,
+        source: String(source || '').slice(0, 80),
+        url: String(url || '').slice(0, 220)
+      });
+    } catch {}
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].whyNotOpen = 'identity_submitted';
+  } catch {}
+
+  // Modo seguro: automação OFF e browser disponível para inspeção.
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      return d;
+    });
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.humanControl = true;
+      ctrl.trabalhando = false;
+      try { await stopVirtus(nome); } catch {}
+      await ensureHumanOverlay(nome, ctrl, { reason: 'identity_submitted' }).catch(()=>{});
+    }
+  } catch {}
+}
+
+async function clearIdentityFlags(nome) {
+  try {
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      delete man.accountFlags.identityRequired;
+      delete man.accountFlags.identityRequiredAt;
+      delete man.accountFlags.identitySubmitted;
+      delete man.accountFlags.identitySubmittedAt;
+      delete man.accountFlags.identitySource;
+      delete man.accountFlags.identityUrl;
+      delete man.accountFlags.identityTitle;
+      delete man.accountFlags.identityNextCheckAt;
+      delete man.accountFlags.identityLastCheckAt;
+      delete man.accountFlags.identityLastReason;
+      return man;
+    });
+    if (robeMeta[nome]) {
+      if (robeMeta[nome].whyNotOpen && String(robeMeta[nome].whyNotOpen).startsWith('identity')) delete robeMeta[nome].whyNotOpen;
+    }
+  } catch {}
+}
+
+async function identityMonitorCheckNow(nome, ctrl) {
+  const now = Date.now();
+  try {
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
+    const pages = await ctrl.browser.pages().catch(()=>[]);
+    const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+    const pickFb = () => {
+      for (const pg of (pages || []).slice(0, IDENTITY_CFG.maxPagesScan)) {
+        const u = safeUrl(pg);
+        if (/facebook\.com/i.test(u)) return pg;
+      }
+      return (pages && pages[0]) || null;
+    };
+    const pg = pickFb();
+    if (!pg) return { ok: false, error: 'no_pages' };
+
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'identity_monitor_check_begin',
+        nome: String(nome || ''),
+        url: String(safeUrl(pg) || '').slice(0, 220)
+      });
+    } catch {}
+
+    // Refresh leve + detecção
+    try { await pg.bringToFront?.().catch(()=>{}); } catch {}
+    await pg.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await sleep(900);
+
+    // Assistente safe: se um botão "Carregar/Concluir" habilitar, clica (2 tentativas, 1min total)
+    try {
+      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 60_000, tries: 2 }).catch(()=>null);
+      if (assist && assist.ok) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_assist_clicked', nome: String(nome||''), clicked: String(assist.clicked||''), attempt: Number(assist.attempt||0)||0 }); } catch {}
+        await sleep(900);
+      }
+    } catch {}
+
+    const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+
+    // Atualiza telemetria do monitor
+    try {
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.accountFlags = man.accountFlags || {};
+        if (man.accountFlags.identitySubmitted !== true) return man;
+        man.accountFlags.identityLastCheckAt = now;
+        man.accountFlags.identityLastReason = lr && lr.loginRequired ? String(lr.reason || '') : '';
+        man.accountFlags.identityNextCheckAt = now + IDENTITY_CFG.intervalMs;
+        return man;
+      });
+    } catch {}
+
+    if (!lr || lr.loginRequired !== true) {
+      // Liberou: limpa flags e retoma trabalho normal
+      await clearIdentityFlags(nome);
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+          return d;
+        });
+      } catch {}
+      try {
+        ctrl.humanControl = false;
+        if (automationAllowed(ctrl)) {
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+          ctrl.trabalhando = true;
+        }
+        try { unfreezeCooldownIfWorking(nome); } catch {}
+      } catch {}
+      try { await issues.append(nome, 'mil_action', 'identity_monitor_resolved_active'); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_resolved_active', nome: String(nome || '') }); } catch {}
+      return { ok: true, resolved: true };
+    }
+
+    const rr = String(lr.reason || '').toLowerCase();
+    if (rr.includes('identity_submitted') || rr.includes('identity')) {
+      try { await issues.append(nome, 'mil_action', 'identity_monitor_still_pending'); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_still_pending', nome: String(nome||''), reason: String(lr.reason||'').slice(0, 200), nextAt: now + IDENTITY_CFG.intervalMs }); } catch {}
+      // Mantém em humano/hold
+      return { ok: true, pending: true };
+    }
+
+    // Mudou para outro bloqueio (appeal/captcha/checkpoint etc): delega para pipeline existente.
+    try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
+    try { await issues.append(nome, 'mil_action', `identity_monitor_transition reason=${rr}`); } catch {}
+    try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_transition', nome: String(nome||''), reason: String(lr.reason||'').slice(0,220), nextAt: now + IDENTITY_CFG.intervalMs }); } catch {}
+    return { ok: true, transitioned: true, reason: rr };
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try {
+      await manifestStore.update(nome, (man) => {
+        man = man || {};
+        man.accountFlags = man.accountFlags || {};
+        if (man.accountFlags.identitySubmitted !== true) return man;
+        man.accountFlags.identityLastCheckAt = now;
+        man.accountFlags.identityLastReason = `error:${msg}`.slice(0, 120);
+        man.accountFlags.identityNextCheckAt = now + IDENTITY_CFG.intervalMs;
+        return man;
+      });
+    } catch {}
+    try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_error', nome: String(nome||''), error: String(msg||'').slice(0,220), nextAt: now + IDENTITY_CFG.intervalMs }); } catch {}
     return { ok: false, error: msg };
   }
 }
@@ -1262,6 +1518,31 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.messengerPinAt;
         }
       }
+      if (which.includes('identity')) {
+        if (
+          man.accountFlags.identityRequired ||
+          man.accountFlags.identityRequiredAt ||
+          man.accountFlags.identitySubmitted ||
+          man.accountFlags.identitySubmittedAt ||
+          man.accountFlags.identitySource ||
+          man.accountFlags.identityUrl ||
+          man.accountFlags.identityTitle ||
+          man.accountFlags.identityNextCheckAt ||
+          man.accountFlags.identityLastCheckAt ||
+          man.accountFlags.identityLastReason
+        ) {
+          delete man.accountFlags.identityRequired;
+          delete man.accountFlags.identityRequiredAt;
+          delete man.accountFlags.identitySubmitted;
+          delete man.accountFlags.identitySubmittedAt;
+          delete man.accountFlags.identitySource;
+          delete man.accountFlags.identityUrl;
+          delete man.accountFlags.identityTitle;
+          delete man.accountFlags.identityNextCheckAt;
+          delete man.accountFlags.identityLastCheckAt;
+          delete man.accountFlags.identityLastReason;
+        }
+      }
       if (Object.keys(man.accountFlags).length === 0) delete man.accountFlags;
       return man;
     });
@@ -1273,6 +1554,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     }
     if (which.includes('messengerPin') && (prev && prev.messengerPin)) {
       await issues.append(nome, 'mil_action', `messenger_pin_cleared at=${new Date().toISOString()}`);
+    }
+    if (which.includes('identity') && (prev && (prev.identityRequired || prev.identitySubmitted))) {
+      await issues.append(nome, 'mil_action', `identity_flags_cleared at=${new Date().toISOString()}`);
     }
     robeMeta[nome] = robeMeta[nome] || {};
     if (which.includes('loginRequired')) {
@@ -1291,6 +1575,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('messengerPin')) {
       delete robeMeta[nome].messengerPin;
       if (robeMeta[nome].whyNotOpen === 'messenger_pin_modal') delete robeMeta[nome].whyNotOpen;
+    }
+    if (which.includes('identity')) {
+      if (typeof robeMeta[nome].whyNotOpen === 'string' && robeMeta[nome].whyNotOpen.startsWith('identity')) delete robeMeta[nome].whyNotOpen;
     }
     await snapshotStatusAndWrite();
   } catch {}
@@ -3474,6 +3761,25 @@ async function start_work({ nome, operator }) {
         try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
         return { ok: false, error: 'two_factor' };
       }
+      if (flags && (flags.identitySubmitted === true || flags.identityRequired === true)) {
+        const kind = flags.identitySubmitted === true ? 'identity_submitted' : 'identity_required';
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind, nextAt: Number(flags.identityNextCheckAt||0)||0 }); } catch {}
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            return d;
+          });
+        } catch {}
+        try {
+          ctrl.humanControl = true;
+          ctrl.trabalhando = false;
+          await stopVirtus(nome).catch(()=>{});
+        } catch {}
+        try { await ensureHumanOverlay(nome, ctrl, { reason: `start_work_blocked_${kind}` }); } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        return { ok: false, error: kind };
+      }
       if (flags && flags.appealSubmitted === true) {
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'appeal_submitted', nextAt: Number(flags.appealNextCheckAt||0)||0 }); } catch {}
         try {
@@ -3534,6 +3840,16 @@ async function start_work({ nome, operator }) {
               try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String((lr && lr.title) ? lr.title : '') }); } catch {}
               try { await issues.append(nome, 'mil_action', `start_work_preflight_two_factor reason=${rr}`); } catch {}
               return { ok: false, error: 'two_factor' };
+            }
+            if (rr.includes('identity_submitted')) {
+              try { await setIdentitySubmittedFlag(nome, { source: lr.domain || 'facebook', url: lr.url || '', title: lr.title || '' }); } catch {}
+              try { await issues.append(nome, 'mil_action', `start_work_preflight_identity_submitted reason=${rr}`); } catch {}
+              return { ok: false, error: 'identity_submitted' };
+            }
+            if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_')) {
+              try { await setIdentityRequiredFlag(nome, { source: lr.domain || 'facebook', url: lr.url || '', title: lr.title || '' }); } catch {}
+              try { await issues.append(nome, 'mil_action', `start_work_preflight_identity_required reason=${rr}`); } catch {}
+              return { ok: false, error: 'identity_required' };
             }
           }
           if (lr && lr.loginRequired && String(lr.reason || '').toLowerCase().includes('appeal')) {
@@ -3993,6 +4309,16 @@ const handlers = {
 
         if (best && best.loginRequired) {
           const rr = String(best.reason || '').toLowerCase();
+          if (rr.includes('identity_submitted')) {
+            await setIdentitySubmittedFlag(nome, { source: best.domain || 'facebook', url: best.url || '', title: best.title || '' });
+            try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_identity_submitted', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
+            return { ok: false, error: 'identity_submitted' };
+          }
+          if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_')) {
+            await setIdentityRequiredFlag(nome, { source: best.domain || 'facebook', url: best.url || '', title: best.title || '' });
+            try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_identity_required', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
+            return { ok: false, error: 'identity_required' };
+          }
           if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
             await setAppealSubmittedFlag(nome, { source: best.domain || 'facebook', url: best.url || '', title: best.title || '' });
             try { provisionAudit.append({ ts: Date.now(), event: 'configure_abort_appeal_submitted', nome: String(nome||''), operator: op || null, url: String(best.url || '').slice(0, 220) }); } catch {}
@@ -5447,6 +5773,9 @@ const handlers = {
       const twoFactorAt = man ? ((man.accountFlags && man.accountFlags.twoFactorAt) || null) : null;
       const twoFactorReason = man ? ((man.accountFlags && man.accountFlags.twoFactorReason) || null) : null;
       const twoFactorText = man ? ((man.accountFlags && man.accountFlags.twoFactorText) || null) : null;
+      const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityRequired === true) : false;
+      const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
+      const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
       const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
       const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
       const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
@@ -5455,8 +5784,16 @@ const handlers = {
       const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
       const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
       const problem = man
-        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.twoFactor === true) || (man.accountFlags && man.accountFlags.messengerPin === true))
-        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin);
+        ? !!(
+          (man.accountFlags && man.accountFlags.loginRequired === true) ||
+          (man.accountFlags && man.accountFlags.banned === true) ||
+          (man.accountFlags && man.accountFlags.twoFactor === true) ||
+          (man.accountFlags && man.accountFlags.identityRequired === true) ||
+          (man.accountFlags && man.accountFlags.identitySubmitted === true) ||
+          (man.accountFlags && man.accountFlags.messengerPin === true) ||
+          (man.accountFlags && man.accountFlags.appealSubmitted === true)
+        )
+        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
       const man0 = await manifestStore.read(nome).catch(()=>null);
       const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
@@ -5515,6 +5852,9 @@ const handlers = {
         twoFactorAt,
         twoFactorReason,
         twoFactorText,
+        identityRequired,
+        identitySubmitted,
+        identityNextCheckAt,
         appealSubmitted,
         appealSubmittedAt,
         appealNextCheckAt,
@@ -5720,6 +6060,9 @@ const loginSource = man ? ((man.accountFlags && man.accountFlags.loginSource) ||
 const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
 const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
 const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityRequired === true) : false;
+const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
+const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
 const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
 const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
 const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
@@ -5728,7 +6071,14 @@ const appealLastReason = man ? ((man.accountFlags && man.accountFlags.appealLast
 const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
 const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
 const problem = man
-  ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.messengerPin === true) || (man.accountFlags && man.accountFlags.appealSubmitted === true))
+  ? !!(
+    (man.accountFlags && man.accountFlags.loginRequired === true) ||
+    (man.accountFlags && man.accountFlags.banned === true) ||
+    (man.accountFlags && man.accountFlags.identityRequired === true) ||
+    (man.accountFlags && man.accountFlags.identitySubmitted === true) ||
+    (man.accountFlags && man.accountFlags.messengerPin === true) ||
+    (man.accountFlags && man.accountFlags.appealSubmitted === true)
+  )
   : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin || (robeMeta[nome] || {}).appealSubmitted);
 const man0 = await manifestStore.read(nome).catch(()=>null);
 const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
@@ -5770,6 +6120,9 @@ perfis.push({
   banned,
   bannedAt,
   bannedText,
+  identityRequired,
+  identitySubmitted,
+  identityNextCheckAt,
   appealSubmitted,
   appealSubmittedAt,
   appealNextCheckAt,
@@ -6439,6 +6792,68 @@ async function nurseTick() {
             }
             continue;
           }
+        }
+      } catch {}
+
+      // Monitoramento: identidade (selfie/vídeo) submetida — checa a cada 1h, mesmo com humanHold.
+      try {
+        const flagsI = await readAccountFlags(nome).catch(()=>({}));
+        if (flagsI && flagsI.identitySubmitted === true) {
+          // Garantia ultra enterprise: nunca manter Virtus rodando em identitySubmitted.
+          try {
+            if (ctrl) {
+              ctrl.humanControl = true;
+              ctrl.trabalhando = false;
+              await stopVirtus(nome).catch(()=>{});
+              await ensureHumanOverlay(nome, ctrl, { reason: 'nurse_identity_submitted_guard' }).catch(()=>{});
+              await snapshotStatusAndWrite().catch(()=>{});
+            }
+          } catch {}
+          const nextAt = Number(flagsI.identityNextCheckAt || 0) || 0;
+          if (!nextAt || nextAt <= now) {
+            if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+              await appendIssueNurseDebounced(nome, 'mil_action', 'identity_monitor_check', 'identity_monitor_check');
+              await identityMonitorCheckNow(nome, ctrl).catch(()=>null);
+              await snapshotStatusAndWrite().catch(()=>{});
+            }
+          } else {
+            await appendIssueNurseDebounced(nome, 'mil_action', 'identity_monitor_waiting', 'identity_monitor_waiting');
+          }
+          continue;
+        }
+      } catch {}
+
+      // Identidade requerida (pré-submissão): não automatizável, mas pode ajudar clicando "Continuar/Avançar" quando aparecer.
+      try {
+        const flagsIR = await readAccountFlags(nome).catch(()=>({}));
+        if (flagsIR && flagsIR.identityRequired === true) {
+          try {
+            if (ctrl) {
+              ctrl.humanControl = true;
+              ctrl.trabalhando = false;
+              await stopVirtus(nome).catch(()=>{});
+              await ensureHumanOverlay(nome, ctrl, { reason: 'nurse_identity_required_guard' }).catch(()=>{});
+              // Debounce do assist (não spammar cliques)
+              robeMeta[nome] = robeMeta[nome] || {};
+              const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
+              if (!last || (now - last) > 30_000) {
+                robeMeta[nome].identityAssistLastAt = now;
+                const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+                const pg = pages && pages[0];
+                if (pg) {
+                  await browserHelper.identityAssistStep(pg, { maxWaitMs: 10_000, tries: 1 }).catch(()=>null);
+                  // Se o humano concluiu/uploadou e agora virou "identity_submitted", promove o estado automaticamente.
+                  const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
+                  if (det && det.loginRequired && String(det.reason || '').toLowerCase().includes('identity_submitted')) {
+                    await setIdentitySubmittedFlag(nome, { source: det.domain || 'facebook', url: det.url || '', title: det.title || '' }).catch(()=>{});
+                  }
+                }
+              }
+              await snapshotStatusAndWrite().catch(()=>{});
+            }
+          } catch {}
+          await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_identity_required', 'nurse_identity_required');
+          continue;
         }
       } catch {}
 
