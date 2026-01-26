@@ -396,13 +396,36 @@ async function _installOverlayOnPage(nome, page) {
         try { await syncHumanOverlay(nome); } catch {}
         return true;
       });
+    } catch (e) {
+      // Se já existe, ok. Se falhar por outro motivo, registrar para diagnóstico.
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      if (!/already exists|has been already registered|binding/i.test(msg)) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_expose_resume_failed', nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
+      }
+    }
+
+    // Canal de log do overlay (provas de clique em Copiar/Retomar/Mover/Minimizar).
+    try {
+      await page.exposeFunction('__ctHumanOverlayLog', async (evt) => {
+        try {
+          const e = (evt && typeof evt === 'object') ? evt : { event: String(evt||'') };
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'human_overlay_ui_event',
+            nome: String(nome || ''),
+            uiEvent: String(e.event || '').slice(0, 60),
+            uiData: e && typeof e === 'object' ? e : null
+          });
+        } catch {}
+        return true;
+      });
     } catch {}
 
     // Injeção persistente (recria em toda navegação) + injeção imediata no documento atual.
     try {
       const overlayInstall = () => {
         try {
-          if (window.__ctHumanOverlayInstalled) return;
+          // Não retornar cedo: em SPAs o DOM pode ser recriado; precisamos garantir handlers/drag/dock sempre.
           window.__ctHumanOverlayInstalled = true;
 
           const HOST_ID = 'ct-human-overlay-host';
@@ -416,16 +439,19 @@ async function _installOverlayOnPage(nome, page) {
             host.style.position = 'fixed';
             host.style.top = '12px';
             host.style.right = '12px';
+            host.style.left = 'auto';
+            host.style.bottom = 'auto';
             host.style.zIndex = '2147483647';
             host.style.pointerEvents = 'auto';
+            host.style.userSelect = 'none';
             host.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif';
             document.documentElement.appendChild(host);
 
             const shadow = host.attachShadow({ mode: 'open' });
             shadow.innerHTML = `
               <style>
-                .wrap{ width: 360px; background:#0b1220; color:#e6e9ef; border:1px solid rgba(255,255,255,.18); border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,.45); overflow:hidden; }
-                .hdr{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:rgba(255,255,255,.06); }
+                .wrap{ width: 360px; background:#0b1220; color:#e6e9ef; border:1px solid rgba(255,255,255,.18); border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,.45); overflow:hidden; pointer-events:auto; }
+                .hdr{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:rgba(255,255,255,.06); cursor:move; }
                 .ttl{ font-weight:700; font-size:13px; letter-spacing:.2px; }
                 .tag{ font-size:11px; opacity:.9; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.14); }
                 .body{ padding:10px 12px; display:flex; flex-direction:column; gap:10px; }
@@ -439,6 +465,8 @@ async function _installOverlayOnPage(nome, page) {
                 button.primary{ background:#2563eb; border-color:rgba(255,255,255,.18); }
                 button.primary:hover{ background:#1d4ed8; }
                 button.danger{ background:rgba(239,68,68,.18); border-color:rgba(239,68,68,.35); }
+                button.mini{ padding:6px 8px; font-size:11px; border-radius:9px; }
+                .hdrBtns{ display:flex; gap:6px; align-items:center; }
                 .hint{ font-size:11px; opacity:.75; line-height:1.25; }
                 .ok{ color:#86efac; }
                 .bad{ color:#fca5a5; }
@@ -450,9 +478,13 @@ async function _installOverlayOnPage(nome, page) {
                     <div class="ttl">Modo Humano — Conveniente</div>
                     <div class="hint" id="sub"></div>
                   </div>
-                  <div class="tag" id="tag">HUMANO</div>
+                  <div class="hdrBtns">
+                    <button class="mini" id="dock" title="Mover painel (cantos)">Mover</button>
+                    <button class="mini" id="min" title="Minimizar/maximizar">—</button>
+                    <div class="tag" id="tag">HUMANO</div>
+                  </div>
                 </div>
-                <div class="body">
+                <div class="body" id="body">
                   <div class="row"><div class="k">Conta</div><div class="v" id="nome"></div></div>
                   <div class="row"><div class="k">Motivo</div><div class="v mono" id="reason"></div></div>
                   <div class="row"><div class="k">Login</div><div class="v mono" id="login"></div></div>
@@ -469,6 +501,81 @@ async function _installOverlayOnPage(nome, page) {
             `;
 
             const $ = (id) => shadow.getElementById(id);
+            const body = $('body');
+
+            // Persistência leve da posição (sem dependências)
+            const POS_KEY = 'ctHumanOverlayPosV1';
+            const readPos = () => { try { return JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch { return null; } };
+            const savePos = (p) => { try { localStorage.setItem(POS_KEY, JSON.stringify(p || {})); } catch {} };
+            const applyDock = (dock) => {
+              try {
+                host.style.left = 'auto'; host.style.right = 'auto'; host.style.top = 'auto'; host.style.bottom = 'auto';
+                if (dock === 'tl') { host.style.top = '12px'; host.style.left = '12px'; }
+                else if (dock === 'br') { host.style.bottom = '12px'; host.style.right = '12px'; }
+                else if (dock === 'bl') { host.style.bottom = '12px'; host.style.left = '12px'; }
+                else { host.style.top = '12px'; host.style.right = '12px'; } // tr default
+              } catch {}
+            };
+            const applyFree = (x, y) => {
+              try {
+                host.style.right = 'auto';
+                host.style.bottom = 'auto';
+                host.style.left = `${Math.max(6, Math.min(window.innerWidth - 60, x))}px`;
+                host.style.top  = `${Math.max(6, Math.min(window.innerHeight - 60, y))}px`;
+              } catch {}
+            };
+            // Restaura posição
+            try {
+              const p = readPos();
+              if (p && p.mode === 'free' && typeof p.x === 'number' && typeof p.y === 'number') applyFree(p.x, p.y);
+              else if (p && p.mode && typeof p.mode === 'string') applyDock(p.mode);
+            } catch {}
+
+            // Botão Mover (dock cycle)
+            $('dock')?.addEventListener('click', () => {
+              const seq = ['tr','tl','br','bl'];
+              const cur = (() => { try { const p = readPos(); return (p && p.mode) ? String(p.mode) : 'tr'; } catch { return 'tr'; } })();
+              const next = seq[(seq.indexOf(cur) + 1) % seq.length];
+              applyDock(next);
+              savePos({ mode: next });
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'dock', mode: next }); } catch {}
+            });
+
+            // Minimizar
+            let minimized = false;
+            $('min')?.addEventListener('click', () => {
+              minimized = !minimized;
+              try { if (body) body.style.display = minimized ? 'none' : 'block'; } catch {}
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'minimize', minimized: !!minimized }); } catch {}
+            });
+
+            // Drag (pela header)
+            try {
+              let dragging = false;
+              let dx = 0, dy = 0;
+              const hdr = shadow.querySelector('.hdr');
+              const onMove = (ev) => {
+                if (!dragging) return;
+                const x = (ev && typeof ev.clientX === 'number') ? ev.clientX - dx : 12;
+                const y = (ev && typeof ev.clientY === 'number') ? ev.clientY - dy : 12;
+                applyFree(x, y);
+                savePos({ mode:'free', x, y });
+              };
+              const onUp = () => { dragging = false; };
+              hdr && hdr.addEventListener('mousedown', (ev) => {
+                try {
+                  dragging = true;
+                  const r = host.getBoundingClientRect();
+                  dx = ev.clientX - r.left;
+                  dy = ev.clientY - r.top;
+                  savePos({ mode:'free', x: r.left, y: r.top });
+                  try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'drag_begin' }); } catch {}
+                } catch {}
+              });
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            } catch {}
+
             const copyText = async (txt) => {
               const s = String(txt || '');
               if (!s) return false;
@@ -494,25 +601,33 @@ async function _installOverlayOnPage(nome, page) {
 
             $('copyLogin')?.addEventListener('click', async () => {
               const d = window.__ctHumanOverlayData || {};
-              await copyText(d.login || '');
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'copy_login' }); } catch {}
+              const ok = await copyText(d.login || '');
+              try { $('hint').textContent = ok ? 'Login copiado.' : 'Falha ao copiar login.'; } catch {}
             });
             $('copyPass')?.addEventListener('click', async () => {
               const d = window.__ctHumanOverlayData || {};
-              await copyText(d.password || '');
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'copy_pass' }); } catch {}
+              const ok = await copyText(d.password || '');
+              try { $('hint').textContent = ok ? 'Senha copiada.' : 'Falha ao copiar senha.'; } catch {}
             });
             $('hide')?.addEventListener('click', () => {
               try { host.style.display = 'none'; } catch {}
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'hide' }); } catch {}
             });
             $('resume')?.addEventListener('click', async () => {
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'resume_click' }); } catch {}
+              try { $('hint').textContent = 'Retomando...'; } catch {}
+              try { $('resume').disabled = true; } catch {}
               try {
-                if (!confirm('Retomar trabalho nesta conta?')) return;
-              } catch {}
-              try { host.style.display = 'none'; } catch {}
-              try {
-                if (window.__ctHumanOverlayResume) {
+                if (typeof window.__ctHumanOverlayResume === 'function') {
                   await window.__ctHumanOverlayResume();
+                  try { $('hint').textContent = 'Retomada solicitada. Aguarde...'; } catch {}
+                } else {
+                  try { $('hint').textContent = 'Falha: binding de retomar indisponível. Aguarde resincronização.'; } catch {}
                 }
               } catch {}
+              try { $('resume').disabled = false; } catch {}
             });
 
             return host;
@@ -809,6 +924,24 @@ async function appealMonitorCheckNow(nome, ctrl) {
     try { await pg.bringToFront?.().catch(()=>{}); } catch {}
     await pg.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(900);
+    // Primeiro: suspensão/ban (UI dedicada). Isso evita classificar errado como "appeal".
+    try {
+      const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
+      if (bd && bd.banned) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'appeal_monitor_detected_banned',
+            nome: String(nome || ''),
+            reason: String(bd.reason || 'banned').slice(0, 140),
+            snippet: String(bd.snippet || '').slice(0, 240)
+          });
+        } catch {}
+        try { await setBannedFlag(nome, { reason: String(bd.reason || 'banned'), snippet: String(bd.snippet || '') }); } catch {}
+        return { ok: true, transitioned: true, reason: 'banned', action: 'auto_delete_banned' };
+      }
+    } catch {}
+
     const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
 
     // Atualiza telemetria do monitor
@@ -869,18 +1002,59 @@ async function appealMonitorCheckNow(nome, ctrl) {
       return { ok: true, pending: true };
     }
 
-    // Mudou para outro bloqueio (login/checkpoint/captcha etc): delega para pipeline existente.
-    try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
-    try { await issues.append(nome, 'mil_action', `appeal_monitor_transition reason=${rr}`); } catch {}
+    // Mudou para outro bloqueio (login/checkpoint/captcha etc).
+    // Regra enterprise: SAIR do modo appeal_submitted assim que a tela mudar.
+    // Caso contrário, o nurse fica preso no ramo de "appealSubmitted" e o perfil entra em loop infinito de 1h.
+    try { await clearAppealSubmittedFlag(nome); } catch {}
     try {
       provisionAudit.append({
         ts: Date.now(),
-        event: 'appeal_monitor_transition',
+        event: 'appeal_monitor_exit',
         nome: String(nome || ''),
-        reason: String(lr.reason || '').slice(0, 220),
-        nextAt: now + APPEAL_CFG.intervalMs
+        toReason: String(lr.reason || '').slice(0, 220),
+        toDomain: String(lr.domain || '').slice(0, 80),
+        url: String(lr.url || '').slice(0, 220)
       });
     } catch {}
+
+    // 2FA: exclusão automática
+    if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
+      try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr.title || '') }); } catch {}
+      return { ok: false, transitioned: true, reason: 'two_factor', action: 'auto_delete_two_factor' };
+    }
+
+    // Identidade: flags próprias (não virar loginRequired genérico).
+    if (rr.includes('identity_submitted')) {
+      try { await setIdentitySubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
+      return { ok: true, transitioned: true, reason: 'identity_submitted', action: 'monitor_identity_1h' };
+    }
+    if (rr.includes('identity')) {
+      try { await setIdentityRequiredFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
+      return { ok: true, transitioned: true, reason: 'identity_required', action: 'human_identity' };
+    }
+
+    // Padrão: loginRequired
+    try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
+    try { await issues.append(nome, 'mil_action', `appeal_monitor_transition_exit reason=${rr}`); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'appeal_monitor_transition_exit',
+        nome: String(nome || ''),
+        reason: String(lr.reason || '').slice(0, 220)
+      });
+    } catch {}
+
+    // Política definida: se virar login_form, disparar pipeline de login_remediate automaticamente.
+    if (rr.includes('login_form')) {
+      const op = `appeal_monitor_login_form:${String(nome || '')}:${Date.now()}`;
+      try { provisionAudit.append({ ts: Date.now(), event: 'appeal_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
+      setTimeout(() => {
+        try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
+      }, 0);
+      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_scheduled' };
+    }
+
     return { ok: true, transitioned: true, reason: rr };
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
@@ -1215,10 +1389,48 @@ async function identityMonitorCheckNow(nome, ctrl) {
       return { ok: true, pending: true };
     }
 
-    // Mudou para outro bloqueio (appeal/captcha/checkpoint etc): delega para pipeline existente.
+    // Mudou para outro bloqueio:
+    // Regra enterprise: SAIR do modo identity_submitted assim que a tela mudar.
+    try { await clearIdentityFlags(nome); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'identity_monitor_exit',
+        nome: String(nome || ''),
+        toReason: String(lr.reason || '').slice(0, 220),
+        toDomain: String(lr.domain || '').slice(0, 80),
+        url: String(lr.url || '').slice(0, 220)
+      });
+    } catch {}
+
+    // 2FA: exclusão automática
+    if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
+      try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr.title || '') }); } catch {}
+      return { ok: false, transitioned: true, reason: 'two_factor', action: 'auto_delete_two_factor' };
+    }
+
+    // Se virar appeal_submitted, entra no monitor 1h de recurso
+    if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
+      try { await setAppealSubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
+      try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
+      return { ok: true, transitioned: true, reason: 'appeal_submitted', action: 'monitor_appeal_1h' };
+    }
+
+    // Padrão: loginRequired
     try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' }); } catch {}
-    try { await issues.append(nome, 'mil_action', `identity_monitor_transition reason=${rr}`); } catch {}
-    try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_transition', nome: String(nome||''), reason: String(lr.reason||'').slice(0,220), nextAt: now + IDENTITY_CFG.intervalMs }); } catch {}
+    try { await issues.append(nome, 'mil_action', `identity_monitor_transition_exit reason=${rr}`); } catch {}
+    try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_transition_exit', nome: String(nome||''), reason: String(lr.reason||'').slice(0,220) }); } catch {}
+
+    // Se virar login_form, disparar pipeline de login_remediate automaticamente.
+    if (rr.includes('login_form')) {
+      const op = `identity_monitor_login_form:${String(nome || '')}:${Date.now()}`;
+      try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
+      setTimeout(() => {
+        try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
+      }, 0);
+      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_scheduled' };
+    }
+
     return { ok: true, transitioned: true, reason: rr };
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
@@ -1310,7 +1522,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
                 try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
                 ctrl.virtus = null;
                 ctrl.trabalhando = false;
-                try { await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_delete', allowKillUserDataDir: false }), 75_000).catch(()=>null); } catch {}
+                // allowKillUserDataDir=true aqui é para matar processos órfãos do perfil (via userDataDir).
+                // NÃO deleta diretório; a remoção do userDataDir acontece em outro bloco (rimrafSync).
+                try { await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_delete', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
               }
             } catch {}
             try { controllers.delete(nome); } catch {}
@@ -1459,7 +1673,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
                 try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
                 ctrl.virtus = null;
                 ctrl.trabalhando = false;
-                try { await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_delete', allowKillUserDataDir: false }), 75_000).catch(()=>null); } catch {}
+                try { await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_delete', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
               }
             } catch {}
             try { controllers.delete(nome); } catch {}

@@ -1285,6 +1285,40 @@
         nameEl.textContent = `[${idxStr}] ${display}`; // <- enumerado
         titleRow.append(nameEl);
 
+        // Pill: slug/id técnico (para rastreabilidade e logs)
+        try {
+          const idPill = buildPill(`ID: ${p.nome}`, 'info');
+          idPill.title = 'Copiar ID/slug do perfil';
+          idPill.style.cursor = 'pointer';
+          const copy = async (txt) => {
+            const s = String(txt || '');
+            if (!s) return false;
+            try {
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(s);
+                return true;
+              }
+            } catch {}
+            try {
+              const ta = document.createElement('textarea');
+              ta.value = s;
+              ta.style.position = 'fixed';
+              ta.style.left = '-9999px';
+              document.body.appendChild(ta);
+              ta.select();
+              const ok = document.execCommand('copy');
+              document.body.removeChild(ta);
+              return !!ok;
+            } catch {}
+            return false;
+          };
+          idPill.onclick = async () => {
+            const ok = await copy(p.nome);
+            if (!ok) alert('Falha ao copiar ID.');
+          };
+          titleRow.append(idPill);
+        } catch {}
+
         // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
         titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
