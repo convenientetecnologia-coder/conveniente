@@ -1555,6 +1555,18 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         }
       } catch {}
 
+      // 0.9) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
+      // entre close->delete (isso causa exatamente o “fechou e depois abriu de novo”).
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {};
+          d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+          return d;
+        });
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_desired_disabled', nome: String(nome||'') }); } catch {}
+      } catch {}
+
       // 1) FECHA o navegador (não excluir com navegador aberto)
       try {
         try {
@@ -1590,12 +1602,24 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
           ctrl.virtus = null;
           ctrl.trabalhando = false;
-          try { await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+          // Captura PID antes de fechar (rootPid mais confiável quando lastRootPid ainda não foi persistido)
+          let pidBefore = 0;
+          try {
+            if (ctrl.browser && typeof ctrl.browser.process === 'function') {
+              const proc0 = ctrl.browser.process();
+              if (proc0 && proc0.pid) pidBefore = Number(proc0.pid) || 0;
+            }
+          } catch {}
+          let closeR = null;
+          try { closeR = await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
           // GARANTIA (enterprise HARD): mesmo com controller ativo, forçar taskkill por lastRootPid
           // antes de aceitar qualquer delete. Isso elimina dependência de WMI/CommandLine e evita janela zumbi.
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
-            const pid = man && Number(man.lastRootPid || 0) || 0;
+            const pid =
+              (closeR && Number(closeR.rootPid || 0) || 0) ||
+              (man && Number(man.lastRootPid || 0) || 0) ||
+              (pidBefore || 0);
             const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
             if (pid) {
               await withTimeout('auto_banned_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
@@ -1938,6 +1962,18 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         }
       } catch {}
 
+      // 0.9) ENTERPRISE: desliga desired imediatamente para impedir reabertura automática
+      // entre close->delete (isso causa “fechou e abriu de novo”).
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {};
+          d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+          return d;
+        });
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_desired_disabled', nome: String(nome||'') }); } catch {}
+      } catch {}
+
       // 1) FECHA o navegador (não excluir com navegador aberto)
       try {
         try {
@@ -1969,12 +2005,24 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
           ctrl.virtus = null;
           ctrl.trabalhando = false;
-          try { await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+          // Captura PID antes de fechar (rootPid mais confiável quando lastRootPid ainda não foi persistido)
+          let pidBefore = 0;
+          try {
+            if (ctrl.browser && typeof ctrl.browser.process === 'function') {
+              const proc0 = ctrl.browser.process();
+              if (proc0 && proc0.pid) pidBefore = Number(proc0.pid) || 0;
+            }
+          } catch {}
+          let closeR = null;
+          try { closeR = await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
           // GARANTIA (enterprise HARD): mesmo com controller ativo, forçar taskkill por lastRootPid
           // antes de aceitar qualquer delete. Evita janela zumbi em 2FA.
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
-            const pid = man && Number(man.lastRootPid || 0) || 0;
+            const pid =
+              (closeR && Number(closeR.rootPid || 0) || 0) ||
+              (man && Number(man.lastRootPid || 0) || 0) ||
+              (pidBefore || 0);
             const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
             if (pid) {
               await withTimeout('auto_two_factor_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);

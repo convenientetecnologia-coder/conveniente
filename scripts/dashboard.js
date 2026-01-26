@@ -1066,6 +1066,39 @@ function tailFileLines(filePath, maxLines = 2000, maxBytes = 1200_000) {
     return { ok:false, error: (e && e.message) || String(e), filePath };
   }
 }
+
+function tailFileGrep(filePath, { patterns = [], maxBytes = 10_000_000, maxMatches = 600 } = {}) {
+  try {
+    if (!fsSync.existsSync(filePath)) return { ok:false, error:'not_found', filePath };
+    const st = fsSync.statSync(filePath);
+    const size = Number(st.size || 0) || 0;
+    const readBytes = Math.min(Math.max(0, Number(maxBytes || 0) || 0), size);
+    const start = Math.max(0, size - readBytes);
+    const buf = Buffer.alloc(readBytes);
+    const fd = fsSync.openSync(filePath, 'r');
+    try { fsSync.readSync(fd, buf, 0, readBytes, start); }
+    finally { try { fsSync.closeSync(fd); } catch {} }
+    const txt = buf.toString('utf8');
+    const lines = txt.split(/\r?\n/);
+    const pats = Array.isArray(patterns) ? patterns.map(x => String(x||'').trim()).filter(Boolean) : [];
+    if (!pats.length) return { ok:false, error:'missing_patterns', filePath };
+    const out = [];
+    for (const line of lines) {
+      if (!line) continue;
+      let hit = false;
+      for (const p of pats) {
+        if (line.includes(p)) { hit = true; break; }
+      }
+      if (!hit) continue;
+      out.push(line);
+      if (out.length >= maxMatches) break;
+    }
+    const truncated = (start > 0) || (out.length >= maxMatches);
+    return { ok:true, filePath, bytes: readBytes, lines: out.length, truncated, text: out.join('\n') };
+  } catch (e) {
+    return { ok:false, error: (e && e.message) || String(e), filePath };
+  }
+}
 async function postLogsToNotifier({ requestId, items }) {
   const base = notifierBaseFromEndpoints();
   if (!base) throw new Error('notifier_base_unavailable');
@@ -1108,6 +1141,27 @@ async function execFetchLogs(cmd) {
     const r = tailFileLines(fp, tailLines);
     items.push({ key, ...r });
   }
+  await postLogsToNotifier({ requestId, items });
+}
+
+async function execFetchLogsQuery(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const requestId = String(payload.requestId || '').trim();
+  const key = String(payload.key || '').trim();
+  const patterns = Array.isArray(payload.patterns) ? payload.patterns : [];
+  const maxBytes = Math.max(500_000, Math.min(50_000_000, Number(payload.maxBytes || 10_000_000) || 10_000_000));
+  const maxMatches = Math.max(10, Math.min(5000, Number(payload.maxMatches || 600) || 600));
+  if (!requestId) throw new Error('missing_requestId');
+  if (!key) throw new Error('missing_key');
+  const allow = logsAllowlist();
+  const fp = allow[key];
+  if (!fp) throw new Error('not_allowed');
+  const r = tailFileGrep(fp, { patterns, maxBytes, maxMatches });
+  const items = [{
+    key: `query_${key}`,
+    ...r,
+    meta: { key, patterns: patterns.map(x => String(x||'').slice(0, 120)), maxBytes, maxMatches }
+  }];
   await postLogsToNotifier({ requestId, items });
 }
 
@@ -1385,6 +1439,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
+      else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
       else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
