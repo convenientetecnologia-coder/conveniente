@@ -6279,7 +6279,6 @@ let _provisionPauseLastUntilMs = 0;
 async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
-  if (controllers.size === 0) { _nurseTickRunning = false; return; }
   try {
     // Ultra enterprise: durante provisionamento, pausar Virtus de forma controlada
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
@@ -6381,6 +6380,26 @@ async function nurseTick() {
             try { await setTwoFactorFlag(nome, { reason: String(flags2.twoFactorReason || 'two_factor'), snippet: String(flags2.twoFactorText || '') }); } catch {}
           }
           continue;
+        }
+      } catch {}
+
+      // Compat retroativa: versões antigas marcavam 2FA como loginRequired com reason "two_factor/2fa".
+      // Se isso acontecer, convertemos para twoFactor e excluímos.
+      try {
+        const flags3 = await readAccountFlags(nome).catch(()=>({}));
+        if (flags3 && flags3.loginRequired === true) {
+          const rr = String(flags3.loginReason || flags3.reason || '').toLowerCase();
+          const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
+          if (isTwoFactor) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            const last = Number(robeMeta[nome].twoFactorCompatSweepLastAt || 0) || 0;
+            if (!last || (now - last) > (2 * 60 * 1000)) {
+              robeMeta[nome].twoFactorCompatSweepLastAt = now;
+              try { provisionAudit.append({ ts: now, event: 'two_factor_compat_sweep_attempt', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
+              try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(flags3.loginReason || '') }); } catch {}
+            }
+            continue;
+          }
         }
       } catch {}
 
