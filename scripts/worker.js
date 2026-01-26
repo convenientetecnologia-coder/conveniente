@@ -6280,6 +6280,45 @@ async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
   try {
+    // Ultra enterprise (safety+performance):
+    // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
+    // Mas ainda precisamos de um sweep leve para exclusões retroativas (ban/2FA) já marcadas em flags.
+    const now0 = Date.now();
+    if (controllers.size === 0) {
+      try {
+        robeMeta.system = robeMeta.system || {};
+        const last = Number(robeMeta.system.nurseZeroControllersSweepAt || 0) || 0;
+        if (!last || (now0 - last) > 60_000) { // no máximo 1x/min
+          robeMeta.system.nurseZeroControllersSweepAt = now0;
+          const desired0 = readJsonFile(desiredPath, { perfis: {} });
+          for (const nome of Object.keys(desired0.perfis || {})) {
+            try {
+              const flags = await readAccountFlags(nome).catch(()=>({}));
+              // Ban já marcado => tentar excluir (best-effort, idempotente)
+              if (flags && flags.banned === true) {
+                try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
+                continue;
+              }
+              // 2FA já marcado => tentar excluir
+              if (flags && flags.twoFactor === true) {
+                try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
+                continue;
+              }
+              // Compat retroativa: loginRequired+reason two_factor => excluir
+              if (flags && flags.loginRequired === true) {
+                const rr = String(flags.loginReason || '').toLowerCase();
+                if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
+                  try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(flags.loginReason || '') }); } catch {}
+                  continue;
+                }
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+      _nurseTickRunning = false;
+      return;
+    }
     // Ultra enterprise: durante provisionamento, pausar Virtus de forma controlada
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
     try {
