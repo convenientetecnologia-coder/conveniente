@@ -3156,6 +3156,20 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             return (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
           } catch { return true; }
         };
+        const isVisiblyClickable = (el) => {
+          try {
+            const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (!r || r.width < 6 || r.height < 6) return false;
+            const cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (!cs) return false;
+            if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+            if (cs.pointerEvents === 'none') return false;
+            // Botões "cinza" às vezes não expõem aria-disabled mas ficam com opacidade baixa.
+            const op = Number(cs.opacity || '1');
+            if (Number.isFinite(op) && op < 0.70) return false;
+            return true;
+          } catch { return false; }
+        };
         const textOf = (el) => norm(el.innerText || el.value || el.textContent || '');
         const aria = (el) => norm(el.getAttribute('aria-label') || '');
 
@@ -3165,7 +3179,16 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             const t = textOf(b);
             const al = aria(b);
             if (!p.words.some(w => t.includes(w) || al.includes(w))) continue;
-            if (isDisabled(b)) continue;
+            // Não gerar falso positivo: só clicar se estiver habilitado E realmente clicável.
+            if (isDisabled(b) || !isVisiblyClickable(b)) {
+              return {
+                ok: false,
+                found: p.key,
+                disabled: true,
+                ariaDisabled: b.getAttribute('aria-disabled'),
+                tabindex: b.getAttribute('tabindex')
+              };
+            }
             try { b.click(); } catch {}
             return { ok: true, clicked: p.key, label: (b.getAttribute('aria-label') || '').slice(0, 80), text: (b.innerText || b.textContent || '').slice(0, 80) };
           }
@@ -3179,16 +3202,25 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
 
   let attempt = 0;
   let lastErr = '';
+  let firstSeenAt = 0;
+  let lastSeen = null;
   while (true) {
     attempt += 1;
     const r = await pickAndClick();
     if (r && r.ok) return { ok: true, attempt, clicked: r.clicked, meta: { text: r.text || '', label: r.label || '' } };
     lastErr = (r && r.error) ? String(r.error) : 'no_click';
+    if (r && r.found) {
+      if (!firstSeenAt) firstSeenAt = Date.now();
+      lastSeen = r;
+    }
     const elapsed = Date.now() - start;
     if (elapsed >= budget && attempt >= minTries) break;
-    await sleep(1200);
+    // Polling curto: clica assim que habilitar (sem esperar "burro")
+    await sleep(250);
+    // Se nem apareceu botão alvo por alguns segundos, não fica preso numa página errada.
+    if (!firstSeenAt && elapsed > 8_000 && attempt >= minTries) break;
   }
-  return { ok: false, error: `no_step_clicked:${lastErr}`.slice(0, 120), waitedMs: Date.now() - start, attempts: attempt };
+  return { ok: false, error: `no_step_clicked:${lastErr}`.slice(0, 120), waitedMs: Date.now() - start, attempts: attempt, lastSeen };
 }
 
 // ========= LOGIN (email/senha) =========
