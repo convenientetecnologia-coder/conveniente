@@ -1499,7 +1499,8 @@ async function identityMonitorCheckNow(nome, ctrl) {
 }
 
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
-  try {
+  return lockProfileAction(nome, async () => {
+    try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.banned === true;
     // Evidence + auto-delete (ultra enterprise):
@@ -1575,6 +1576,19 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           } catch {}
         }
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', nome: String(nome||'') }); } catch {}
+
+        // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
+        try {
+          if (robeMeta[nome]) robeMeta[nome].rootPid = null;
+        } catch {}
+        try {
+          await manifestStore.update(nome, (man) => {
+            man = man || {};
+            delete man.lastRootPid;
+            delete man.lastRootPidAt;
+            return man;
+          });
+        } catch {}
       } catch {}
 
       // 2) EXCLUI a conta do servidor (perfil local) — best-effort
@@ -1699,13 +1713,17 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     // Mantém coerência no runtime store também.
     delete robeMeta[nome].loginRemediateFailed;
     delete robeMeta[nome].loginRemediateFailedReason;
-  } catch {}
+    } catch {}
+    // Sempre retorna (não propaga)
+    return { ok: true };
+  });
 }
 
 // 2FA (two-factor) => exclusão automática (ultra enterprise)
 // Regra do cliente: 2FA não é automatizável e não deve consumir slot do estoque.
 async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = {}) {
-  try {
+  return lockProfileAction(nome, async () => {
+    try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.twoFactor === true;
 
@@ -1775,6 +1793,19 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           } catch {}
         }
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', nome: String(nome||'') }); } catch {}
+
+        // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
+        try {
+          if (robeMeta[nome]) robeMeta[nome].rootPid = null;
+        } catch {}
+        try {
+          await manifestStore.update(nome, (man) => {
+            man = man || {};
+            delete man.lastRootPid;
+            delete man.lastRootPidAt;
+            return man;
+          });
+        } catch {}
       } catch {}
 
       // 2) EXCLUI a conta do servidor (perfil local) — best-effort
@@ -1897,7 +1928,9 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
 
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].twoFactor = true;
-  } catch {}
+    } catch {}
+    return { ok: true };
+  });
 }
 
 async function setMessengerPinFlag(nome, { reason = 'messenger_pin_modal', source = 'messenger' } = {}) {
