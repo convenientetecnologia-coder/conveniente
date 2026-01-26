@@ -5129,6 +5129,9 @@ const handlers = {
     });
   } catch {}
   const preserve = (policy === 'preserveDesired');
+  const strictCloseRequired =
+    !preserve &&
+    /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
   let reopenDelayMs = 0;
   if (preserve) {
     try { registerFailure(nome, reason || 'deactivate_preserve'); } catch {}
@@ -5142,6 +5145,64 @@ const handlers = {
   }
   const ctrl = controllers.get(nome);
   if (!ctrl) {
+    // Enterprise HARD: se este deactivate faz parte de um fluxo de delete, não podemos “fingir ok”
+    // quando ainda existe Chrome vivo para este perfil (isso gera exatamente o navegador fantasma).
+    if (strictCloseRequired) {
+      let udir = '';
+      try {
+        const man0 = await manifestStore.read(nome).catch(()=>null);
+        if (man0 && man0.userDataDir) udir = String(man0.userDataDir);
+      } catch {}
+      if (!udir) {
+        try {
+          const perfisArr = loadPerfisJson();
+          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+          if (perfil && perfil.userDataDir) udir = String(perfil.userDataDir);
+        } catch {}
+      }
+      if (udir) {
+        const chk = (browserHelper.getChromeProfilePidsMeta
+          ? browserHelper.getChromeProfilePidsMeta(udir)
+          : { ok: true, pids: (browserHelper.getChromeProfilePids ? (browserHelper.getChromeProfilePids(udir) || []) : []) });
+        const pids = chk && Array.isArray(chk.pids) ? chk.pids : [];
+        if (!chk || chk.ok === false || pids.length) {
+          try {
+            provisionAudit.append({
+              event: 'deactivate_blocked_controller_missing_chrome_alive',
+              nome: String(nome || ''),
+              reason: String(reason || ''),
+              userDataDir: String(udir).slice(0, 260),
+              pids: pids.slice(0, 24),
+              pidCheckOk: chk && chk.ok === false ? false : true,
+              pidCheckErr: chk && chk.ok === false ? String(chk.error || 'pid_check_failed').slice(0, 180) : null
+            });
+          } catch {}
+          try {
+            await manifestStore.update(nome, (man) => {
+              man = man || {};
+              man.accountFlags = man.accountFlags || {};
+              man.accountFlags.pendingClose = true;
+              man.accountFlags.pendingCloseAt = Date.now();
+              man.accountFlags.pendingCloseReason = 'controller_missing_chrome_alive';
+              man.accountFlags.pendingClosePids = pids.slice(0, 24);
+              return man;
+            });
+          } catch {}
+          await snapshotStatusAndWrite();
+          return { ok: false, error: 'controller_missing_chrome_alive' };
+        }
+      } else {
+        try {
+          provisionAudit.append({
+            event: 'deactivate_blocked_controller_missing_no_userDataDir',
+            nome: String(nome || ''),
+            reason: String(reason || '')
+          });
+        } catch {}
+        await snapshotStatusAndWrite();
+        return { ok: false, error: 'controller_missing_no_userDataDir' };
+      }
+    }
     const d = readJsonFile(desiredPath, { perfis: {} });
     const isHold = d.perfis?.[nome]?.humanHold === true;
     if (preserve && !isFrozenNow(nome) && !isHold) {
