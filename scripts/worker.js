@@ -1544,6 +1544,12 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_begin', nome: String(nome||'') });
         } catch {}
         const ctrl = controllers.get(nome);
+        // Capturar userDataDir para validação hard (anti-janela zumbi)
+        let udirForCheck = '';
+        try {
+          const man0 = await manifestStore.read(nome).catch(()=>null);
+          if (man0 && man0.userDataDir) udirForCheck = String(man0.userDataDir);
+        } catch {}
         if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
           // Fecha via Puppeteer (graceful) e só força se necessário (hardCloseController encapsula isso)
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
@@ -1585,6 +1591,41 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           } catch {}
         }
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', nome: String(nome||'') }); } catch {}
+
+        // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
+        // (Caso contrário, o Windows deixa janela "quebrada" aberta, mesmo após apagar diretório.)
+        try {
+          const t0 = Date.now();
+          const deadlineMs = 30_000;
+          let last = [];
+          while (udirForCheck && (Date.now() - t0) < deadlineMs) {
+            last = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            if (!last.length) break;
+            // força kill e revalida
+            try { browserHelper.killChromeProfileProcesses(udirForCheck); } catch {}
+            await sleep(800);
+          }
+          if (udirForCheck) {
+            const still = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            if (still.length) {
+              try {
+                provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_incomplete_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), pids: still.slice(0, 24) });
+              } catch {}
+              // Não deletar: marca pendente e sai (nurse tentará novamente em próxima detecção).
+              try {
+                await manifestStore.update(nome, (man) => {
+                  man = man || {};
+                  man.accountFlags = man.accountFlags || {};
+                  man.accountFlags.bannedPendingClose = true;
+                  man.accountFlags.bannedPendingCloseAt = Date.now();
+                  man.accountFlags.bannedPendingClosePids = still.slice(0, 24);
+                  return man;
+                });
+              } catch {}
+              return { ok: false, error: 'banned_close_incomplete' };
+            }
+          }
+        } catch {}
 
         // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
         try {
@@ -1764,6 +1805,12 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_begin', nome: String(nome||'') });
         } catch {}
         const ctrl = controllers.get(nome);
+        // Capturar userDataDir para validação hard (anti-janela zumbi)
+        let udirForCheck = '';
+        try {
+          const man0 = await manifestStore.read(nome).catch(()=>null);
+          if (man0 && man0.userDataDir) udirForCheck = String(man0.userDataDir);
+        } catch {}
         if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
           try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
           ctrl.virtus = null;
@@ -1802,6 +1849,37 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           } catch {}
         }
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', nome: String(nome||'') }); } catch {}
+
+        // GARANTIA: não deletar se ainda houver processos do Chrome usando este userDataDir.
+        try {
+          const t0 = Date.now();
+          const deadlineMs = 30_000;
+          while (udirForCheck && (Date.now() - t0) < deadlineMs) {
+            const pids = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            if (!pids.length) break;
+            try { browserHelper.killChromeProfileProcesses(udirForCheck); } catch {}
+            await sleep(800);
+          }
+          if (udirForCheck) {
+            const still = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            if (still.length) {
+              try {
+                provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_incomplete_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), pids: still.slice(0, 24) });
+              } catch {}
+              try {
+                await manifestStore.update(nome, (man) => {
+                  man = man || {};
+                  man.accountFlags = man.accountFlags || {};
+                  man.accountFlags.twoFactorPendingClose = true;
+                  man.accountFlags.twoFactorPendingCloseAt = Date.now();
+                  man.accountFlags.twoFactorPendingClosePids = still.slice(0, 24);
+                  return man;
+                });
+              } catch {}
+              return { ok: false, error: 'two_factor_close_incomplete' };
+            }
+          }
+        } catch {}
 
         // Após fechar: limpar PIDs persistidos para não confundir futuras ações.
         try {

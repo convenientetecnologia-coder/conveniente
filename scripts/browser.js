@@ -497,6 +497,17 @@ function closeChromeProfileProcessesGraceful(userDataDir) {
   }
 }
 
+function getChromeProfilePids(userDataDir) {
+  // Retorna lista de PIDs do Chrome/Chromium cujo CommandLine contém o userDataDir.
+  // Uso: validação "antes de deletar" (anti-janela zumbi).
+  if (process.platform !== 'win32') return [];
+  try {
+    return listProfilePidsWin(String(userDataDir || '').trim());
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Imprime as primeiras linhas do log do Chrome (se existir).
  */
@@ -3465,5 +3476,7 @@ module.exports = {
   tryLoginEmailPass,
   collectFreshCookies,
   detectAccountSuspended,
-  killChromeProfileProcesses
+  killChromeProfileProcesses,
+  closeChromeProfileProcessesGraceful,
+  getChromeProfilePids
 };
