@@ -415,6 +415,16 @@ function listProfilePidsWin(userDataDir) {
   }
 }
 
+function listProfilePidsWinMeta(userDataDir) {
+  // Mesmo comportamento do listProfilePidsWin, mas preserva sinal de falha (ok=false).
+  try {
+    const pids = listProfilePidsWin(userDataDir);
+    return { ok: true, pids: Array.isArray(pids) ? pids : [] };
+  } catch (e) {
+    return { ok: false, pids: [], error: (e && e.message) ? String(e.message).slice(0, 180) : 'wmi_failed' };
+  }
+}
+
 /**
  * Mata processos do Chrome usando ESTE userDataDir (Windows).
  * Implementação real usando PowerShell + taskkill.
@@ -533,6 +543,31 @@ function getChromeProfilePids(userDataDir) {
     return [];
   } catch {
     return [];
+  }
+}
+
+function getChromeProfilePidsMeta(userDataDir) {
+  // Versão enterprise: não perde sinal de falha (ok=false).
+  if (process.platform !== 'win32') return { ok: true, pids: [] };
+  try {
+    const raw = String(userDataDir || '').trim();
+    const r0 = listProfilePidsWinMeta(raw);
+    if (r0 && r0.ok && r0.pids && r0.pids.length) return { ok: true, pids: r0.pids };
+    // fallback curto por slug (\\Conveniente\\<slug>)
+    try {
+      const s = raw.replace(/[\\\/]+$/g, '');
+      const slug = s ? path.basename(s) : '';
+      if (slug) {
+        const r1 = listProfilePidsWinMeta(`\\Conveniente\\${slug}`);
+        if (r1 && r1.ok) return { ok: true, pids: r1.pids || [] };
+        return { ok: false, pids: [], error: (r1 && r1.error) ? r1.error : 'wmi_failed' };
+      }
+    } catch {}
+    // Se não temos slug e a primeira tentativa falhou, isso é "unknown" => ok=false
+    if (r0 && r0.ok === false) return { ok: false, pids: [], error: r0.error || 'wmi_failed' };
+    return { ok: true, pids: [] };
+  } catch (e) {
+    return { ok: false, pids: [], error: (e && e.message) ? String(e.message).slice(0, 180) : 'wmi_failed' };
   }
 }
 
@@ -1096,6 +1131,17 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
             let u = '';
             try { u = await p.url(); } catch {}
             if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
+            if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
+          }
+        }
+      } catch {}
+    };
+    // Enterprise HARDCORE: fecha TUDO exceto a aba 0 (independente de URL).
+    browser.forceCloseExtrasHard = async () => {
+      try {
+        const pages = await browser.pages();
+        if (pages && pages.length > 1) {
+          for (const p of pages.slice(1)) {
             if (typeof p.close === 'function') await p.close({ runBeforeUnload: false }).catch(()=>{});
           }
         }
@@ -3528,6 +3574,13 @@ module.exports = {
     if (!browser) return;
     try { await browser.forceCloseExtras(); } catch {}
   },
+  forceCloseExtrasHard: async function (browser) {
+    if (!browser) return;
+    try {
+      if (typeof browser.forceCloseExtrasHard === 'function') await browser.forceCloseExtrasHard();
+      else if (typeof browser.forceCloseExtras === 'function') await browser.forceCloseExtras();
+    } catch {}
+  },
   attachHealthProbes, // NOVO!
   hardCleanProfileOnDisk,
   detectMessengerTempBlock, // NOVO: exportado para uso pelo worker
@@ -3553,5 +3606,6 @@ module.exports = {
   detectAccountSuspended,
   killChromeProfileProcesses,
   closeChromeProfileProcessesGraceful,
-  getChromeProfilePids
+  getChromeProfilePids,
+  getChromeProfilePidsMeta
 };

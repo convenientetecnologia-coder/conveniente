@@ -1635,14 +1635,48 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           const deadlineMs = 30_000;
           let last = [];
           while (udirForCheck && (Date.now() - t0) < deadlineMs) {
-            last = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            const chk = (browserHelper.getChromeProfilePidsMeta
+              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
+              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
+            if (!chk || chk.ok === false) {
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk && chk.error ? String(chk.error).slice(0,180) : 'pid_check_failed' }); } catch {}
+              try {
+                await manifestStore.update(nome, (man) => {
+                  man = man || {};
+                  man.accountFlags = man.accountFlags || {};
+                  man.accountFlags.bannedPendingClose = true;
+                  man.accountFlags.bannedPendingCloseAt = Date.now();
+                  man.accountFlags.bannedPendingCloseReason = 'pid_check_failed';
+                  return man;
+                });
+              } catch {}
+              return { ok: false, error: 'banned_close_unknown_pids' };
+            }
+            last = chk.pids || [];
             if (!last.length) break;
             // força kill e revalida
             try { browserHelper.killChromeProfileProcesses(udirForCheck); } catch {}
             await sleep(800);
           }
           if (udirForCheck) {
-            const still = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            const chk2 = (browserHelper.getChromeProfilePidsMeta
+              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
+              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
+            if (!chk2 || chk2.ok === false) {
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk2 && chk2.error ? String(chk2.error).slice(0,180) : 'pid_check_failed' }); } catch {}
+              try {
+                await manifestStore.update(nome, (man) => {
+                  man = man || {};
+                  man.accountFlags = man.accountFlags || {};
+                  man.accountFlags.bannedPendingClose = true;
+                  man.accountFlags.bannedPendingCloseAt = Date.now();
+                  man.accountFlags.bannedPendingCloseReason = 'pid_check_failed';
+                  return man;
+                });
+              } catch {}
+              return { ok: false, error: 'banned_close_unknown_pids' };
+            }
+            const still = chk2.pids || [];
             if (still.length) {
               try {
                 provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_incomplete_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), pids: still.slice(0, 24) });
@@ -1906,13 +1940,47 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           const t0 = Date.now();
           const deadlineMs = 30_000;
           while (udirForCheck && (Date.now() - t0) < deadlineMs) {
-            const pids = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            const chk = (browserHelper.getChromeProfilePidsMeta
+              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
+              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
+            if (!chk || chk.ok === false) {
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk && chk.error ? String(chk.error).slice(0,180) : 'pid_check_failed' }); } catch {}
+              try {
+                await manifestStore.update(nome, (man) => {
+                  man = man || {};
+                  man.accountFlags = man.accountFlags || {};
+                  man.accountFlags.twoFactorPendingClose = true;
+                  man.accountFlags.twoFactorPendingCloseAt = Date.now();
+                  man.accountFlags.twoFactorPendingCloseReason = 'pid_check_failed';
+                  return man;
+                });
+              } catch {}
+              return { ok: false, error: 'two_factor_close_unknown_pids' };
+            }
+            const pids = chk.pids || [];
             if (!pids.length) break;
             try { browserHelper.killChromeProfileProcesses(udirForCheck); } catch {}
             await sleep(800);
           }
           if (udirForCheck) {
-            const still = browserHelper.getChromeProfilePids(udirForCheck) || [];
+            const chk2 = (browserHelper.getChromeProfilePidsMeta
+              ? browserHelper.getChromeProfilePidsMeta(udirForCheck)
+              : { ok: true, pids: (browserHelper.getChromeProfilePids(udirForCheck) || []) });
+            if (!chk2 || chk2.ok === false) {
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_pid_check_failed_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), error: chk2 && chk2.error ? String(chk2.error).slice(0,180) : 'pid_check_failed' }); } catch {}
+              try {
+                await manifestStore.update(nome, (man) => {
+                  man = man || {};
+                  man.accountFlags = man.accountFlags || {};
+                  man.accountFlags.twoFactorPendingClose = true;
+                  man.accountFlags.twoFactorPendingCloseAt = Date.now();
+                  man.accountFlags.twoFactorPendingCloseReason = 'pid_check_failed';
+                  return man;
+                });
+              } catch {}
+              return { ok: false, error: 'two_factor_close_unknown_pids' };
+            }
+            const still = chk2.pids || [];
             if (still.length) {
               try {
                 provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_incomplete_block_delete', nome: String(nome||''), userDataDir: String(udirForCheck).slice(0,260), pids: still.slice(0, 24) });
@@ -5189,6 +5257,8 @@ const handlers = {
             ctrl.humanControl = true;
             ctrl.trabalhando = false;
             try { await stopVirtus(nome); } catch {}
+            // UX HARDCORE: nunca deixar humano com múltiplas abas abertas
+            try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
           }
         } catch {}
 
@@ -5525,6 +5595,9 @@ const handlers = {
           const pages = await ctrl.browser.pages().catch(()=>[]);
           const p0 = pages && pages[0];
           if (!p0) throw new Error('no_page0');
+
+          // UX HARDCORE: antes de login+senha, fechar todas as abas extras (fica só na aba 0)
+          try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
 
           const man2 = await manifestStore.read(nome).catch(()=>null);
           const login2 = man2 && (man2.login || man2.email || man2.user || man2.username);
