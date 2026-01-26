@@ -113,16 +113,25 @@ async function captureLoginRequiredEvidence(nome, page, lr) {
   return false;
 }
 
+const { AsyncLocalStorage } = require('async_hooks');
+const _profileLockAls = new AsyncLocalStorage();
 const _profileOpLocks = new Map();
 async function lockProfileAction(nome, fn) {
   if (!nome) return fn();
+  // Reentrância enterprise: se já estamos executando uma ação bloqueada para este mesmo perfil
+  // (ex.: login_remediate -> detecta ban -> setBannedFlag), não pode deadlockar.
+  try {
+    const st = _profileLockAls.getStore();
+    if (st && st.nome === nome) return await fn();
+  } catch {}
+
   const prev = _profileOpLocks.get(nome) || Promise.resolve();
   let resolveNext;
   const next = new Promise(res => resolveNext = res);
   _profileOpLocks.set(nome, prev.then(() => next));
   try {
     await prev;
-    return await fn();
+    return await _profileLockAls.run({ nome }, fn);
   } finally {
     resolveNext();
     if (_profileOpLocks.get(nome) === next) _profileOpLocks.delete(nome);
