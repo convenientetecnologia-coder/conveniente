@@ -809,6 +809,17 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
       // Por padrão, não começa a monitorar imediatamente: "Retomar trabalho" arma o monitor.
       if (!man.accountFlags.appealNextCheckAt) man.accountFlags.appealNextCheckAt = 0;
       man.accountFlags.appealLastReason = 'appeal_submitted';
+      // Blindagem: ao entrar em recurso em análise, limpar flags antigas que mascaram o estado real.
+      delete man.accountFlags.loginRemediateFailed;
+      delete man.accountFlags.loginRemediateFailedAt;
+      delete man.accountFlags.loginRemediateFailedReason;
+      delete man.accountFlags.loginRemediateFailedSource;
+      delete man.accountFlags.loginRemediateFailedStage;
+      delete man.accountFlags.loginRemediateFailedCount;
+      delete man.accountFlags.loginRequired;
+      delete man.accountFlags.loginReason;
+      delete man.accountFlags.loginSource;
+      delete man.accountFlags.lastLoginRequiredAt;
       return man;
     });
     // Evidência enterprise: provision_audit é allowlisted via fetch_logs.
@@ -825,6 +836,10 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].appealSubmitted = true;
     robeMeta[nome].whyNotOpen = 'appeal_submitted';
+    delete robeMeta[nome].loginRemediateFailed;
+    delete robeMeta[nome].loginRemediateFailedReason;
+    delete robeMeta[nome].loginRequired;
+    delete robeMeta[nome].loginReason;
   } catch {}
 
   // Modo seguro: automação OFF e browser disponível para inspeção.
@@ -1194,6 +1209,18 @@ async function setIdentityRequiredFlag(nome, { source = '', url = '', title = ''
       man.accountFlags.identityUrl = String(url || '').slice(0, 300);
       man.accountFlags.identityTitle = String(title || '').slice(0, 200);
       man.accountFlags.identityLastReason = 'identity_required';
+      // Blindagem enterprise: identidade é um estado próprio e não pode ficar mascarada por flags antigas.
+      // Se entrou em identidade, remover sinais de "login/cookies falhou" e "loginRequired" genérico.
+      delete man.accountFlags.loginRemediateFailed;
+      delete man.accountFlags.loginRemediateFailedAt;
+      delete man.accountFlags.loginRemediateFailedReason;
+      delete man.accountFlags.loginRemediateFailedSource;
+      delete man.accountFlags.loginRemediateFailedStage;
+      delete man.accountFlags.loginRemediateFailedCount;
+      delete man.accountFlags.loginRequired;
+      delete man.accountFlags.loginReason;
+      delete man.accountFlags.loginSource;
+      delete man.accountFlags.lastLoginRequiredAt;
       return man;
     });
     try {
@@ -1208,6 +1235,10 @@ async function setIdentityRequiredFlag(nome, { source = '', url = '', title = ''
     } catch {}
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].whyNotOpen = 'identity_required';
+    delete robeMeta[nome].loginRemediateFailed;
+    delete robeMeta[nome].loginRemediateFailedReason;
+    delete robeMeta[nome].loginRequired;
+    delete robeMeta[nome].loginReason;
   } catch {}
 
   // Sempre humano (não é automatizável)
@@ -1246,6 +1277,17 @@ async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '
       // Se chegou aqui, não faz sentido manter identityRequired “acima” do estado submitted.
       delete man.accountFlags.identityRequired;
       delete man.accountFlags.identityRequiredAt;
+      // Blindagem: ao entrar em identity_submitted, limpar flags antigas de login/cookies falhou e loginRequired.
+      delete man.accountFlags.loginRemediateFailed;
+      delete man.accountFlags.loginRemediateFailedAt;
+      delete man.accountFlags.loginRemediateFailedReason;
+      delete man.accountFlags.loginRemediateFailedSource;
+      delete man.accountFlags.loginRemediateFailedStage;
+      delete man.accountFlags.loginRemediateFailedCount;
+      delete man.accountFlags.loginRequired;
+      delete man.accountFlags.loginReason;
+      delete man.accountFlags.loginSource;
+      delete man.accountFlags.lastLoginRequiredAt;
       return man;
     });
     try {
@@ -1260,6 +1302,10 @@ async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '
     } catch {}
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].whyNotOpen = 'identity_submitted';
+    delete robeMeta[nome].loginRemediateFailed;
+    delete robeMeta[nome].loginRemediateFailedReason;
+    delete robeMeta[nome].loginRequired;
+    delete robeMeta[nome].loginReason;
   } catch {}
 
   // Modo seguro: automação OFF e browser disponível para inspeção.
@@ -6937,6 +6983,123 @@ let _provisionPauseLastLogAt = 0;
 let _provisionPauseLastOwner = null;
 let _provisionPauseLastUntilMs = 0;
 
+// ===== Reconciliador de estado (modo humano) =====
+// Problema real observado em produção (RM4): perfis ficam "engessados" com flags antigas
+// (ex.: loginRemediateFailed) mesmo quando a UI mudou para identidade/ban/login_form.
+// Este reconciliador NÃO posta nada e NÃO liga Virtus; ele só:
+// - detecta BAN/disabled_checkpoint e aplica setBannedFlag (auto delete)
+// - detecta identidade/appeal/login_required e atualiza flags corretas (limpando flags obsoletas)
+// - opcional: se for login_form, pode agendar login_remediate com backoff (política do cliente)
+const HUMAN_RECONCILE_CFG = {
+  enabled: String(process.env.HUMAN_RECONCILE || '1').trim() !== '0',
+  minIntervalMs: parseInt(process.env.HUMAN_RECONCILE_MIN_INTERVAL_MS || '60000', 10), // 60s por perfil
+  maxPagesScan: 8,
+  allowScheduleLoginRemediate: String(process.env.HUMAN_RECONCILE_SCHEDULE_LOGIN_REMEDIATE || '1').trim() !== '0',
+  minIntervalScheduleMs: parseInt(process.env.HUMAN_RECONCILE_LOGIN_REMEDIATE_MIN_INTERVAL_MS || String(30 * 60 * 1000), 10) // 30min
+};
+
+async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
+  const now = Date.now();
+  try {
+    if (!HUMAN_RECONCILE_CFG.enabled) return { ok: false, skipped: 'disabled' };
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, skipped: 'no_browser' };
+    robeMeta[nome] = robeMeta[nome] || {};
+    const last = Number(robeMeta[nome].humanReconcileLastAt || 0) || 0;
+    if (last && (now - last) < HUMAN_RECONCILE_CFG.minIntervalMs) return { ok: false, skipped: 'throttle' };
+    robeMeta[nome].humanReconcileLastAt = now;
+
+    const pages = await ctrl.browser.pages().catch(()=>[]);
+    const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+    const pick = () => {
+      for (const pg of (pages || []).slice(0, HUMAN_RECONCILE_CFG.maxPagesScan)) {
+        const u = safeUrl(pg);
+        if (/facebook\.com|messenger\.com/i.test(u)) return pg;
+      }
+      return (pages && pages[0]) || null;
+    };
+    const pg = pick();
+    if (!pg) return { ok: false, skipped: 'no_pages' };
+
+    // 1) Ban/Suspensão (desabilitamos sua conta, disabled_checkpoint)
+    try {
+      const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
+      if (bd && bd.banned) {
+        try {
+          provisionAudit.append({
+            ts: now,
+            event: 'human_reconcile_banned',
+            nome: String(nome||''),
+            source: String(source||''),
+            url: String(safeUrl(pg)||'').slice(0,220),
+            reason: String(bd.reason||'banned').slice(0,140)
+          });
+        } catch {}
+        try { await setBannedFlag(nome, { reason: String(bd.reason || 'banned'), snippet: String(bd.snippet || '') }); } catch {}
+        return { ok: true, state: 'banned', reason: bd.reason || '' };
+      }
+    } catch {}
+
+    // 2) LoginRequired/Identity/Appeal
+    const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    if (!lr || lr.loginRequired !== true) {
+      try { provisionAudit.append({ ts: now, event: 'human_reconcile_ok_no_login_required', nome: String(nome||''), url: String(safeUrl(pg)||'').slice(0,220) }); } catch {}
+      return { ok: true, state: 'not_login_required' };
+    }
+
+    const rr = String(lr.reason || '').toLowerCase();
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'human_reconcile_login_required',
+        nome: String(nome||''),
+        source: String(source||''),
+        reason: String(lr.reason||'').slice(0,160),
+        url: String(lr.url||safeUrl(pg)||'').slice(0,220)
+      });
+    } catch {}
+
+    if (rr.includes('identity_submitted')) {
+      try { await setIdentitySubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      return { ok: true, state: 'identity_submitted' };
+    }
+    if (rr.includes('identity')) {
+      try { await setIdentityRequiredFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      return { ok: true, state: 'identity_required' };
+    }
+    if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
+      try { await setAppealSubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
+      return { ok: true, state: 'appeal_submitted' };
+    }
+
+    // login_form: permitir liberar o sistema (política do cliente) com agendamento controlado
+    if (rr.includes('login_form') && HUMAN_RECONCILE_CFG.allowScheduleLoginRemediate) {
+      const lastSch = Number(robeMeta[nome].humanReconcileLastScheduleAt || 0) || 0;
+      if (!lastSch || (now - lastSch) >= HUMAN_RECONCILE_CFG.minIntervalScheduleMs) {
+        robeMeta[nome].humanReconcileLastScheduleAt = now;
+        const op = `human_reconcile_login_form:${String(nome||'')}:${now}`;
+        try { provisionAudit.append({ ts: now, event: 'human_reconcile_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
+        setTimeout(() => {
+          try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
+        }, 0);
+      } else {
+        try { provisionAudit.append({ ts: now, event: 'human_reconcile_schedule_suppressed', nome: String(nome||''), reason: 'min_interval' }); } catch {}
+      }
+      // Mesmo agendando, marque loginRequired correto (sem deixar "loginRemediateFailed" como estado final)
+      try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || source }); } catch {}
+      return { ok: true, state: 'login_form' };
+    }
+
+    // Padrão: loginRequired, mas não tentar automação (captcha/checkpoint etc)
+    try { await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || source }); } catch {}
+    return { ok: true, state: 'login_required', reason: rr };
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try { provisionAudit.append({ ts: now, event: 'human_reconcile_error', nome: String(nome||''), error: msg.slice(0,220) }); } catch {}
+    return { ok: false, error: msg };
+  }
+}
+
 async function nurseTick() {
   if (_nurseTickRunning) return;
   _nurseTickRunning = true;
@@ -7044,6 +7207,18 @@ async function nurseTick() {
       }
       const want = desired.perfis[nome] || {};
       const ctrl = controllers.get(nome);
+
+      // Reconciliador: mesmo em modo humano/hold, precisamos atualizar flags conforme a UI real,
+      // senão o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
+      try {
+        const flagsR = await readAccountFlags(nome).catch(()=>({}));
+        const needsRecon =
+          (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) &&
+          (ctrl.humanControl === true || want.humanHold === true || (flagsR && flagsR.loginRemediateFailed === true));
+        if (needsRecon) {
+          await reconcileHumanState(nome, ctrl, { source: 'nurse' }).catch(()=>null);
+        }
+      } catch {}
 
       // Auto-exclusão enterprise: se já está marcado como banned/suspended, arquiva no CT e deleta o perfil local.
       // Isso cobre casos pós-restart onde a flag já estava setada e não vai passar novamente pelos fluxos de detecção.
