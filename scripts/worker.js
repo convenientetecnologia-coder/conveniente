@@ -453,6 +453,7 @@ async function _installOverlayOnPage(nome, page) {
                 .wrap{ width: 360px; background:#0b1220; color:#e6e9ef; border:1px solid rgba(255,255,255,.18); border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,.45); overflow:hidden; pointer-events:auto; }
                 .hdr{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:rgba(255,255,255,.06); cursor:move; }
                 .ttl{ font-weight:700; font-size:13px; letter-spacing:.2px; }
+                .moveHint{ font-size:11px; opacity:.78; margin-top:2px; }
                 .tag{ font-size:11px; opacity:.9; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.14); }
                 .body{ padding:10px 12px; display:flex; flex-direction:column; gap:10px; }
                 .row{ display:flex; gap:8px; align-items:flex-start; }
@@ -473,10 +474,11 @@ async function _installOverlayOnPage(nome, page) {
                 .warn{ color:#fde68a; }
               </style>
               <div class="wrap" id="wrap">
-                <div class="hdr">
+                <div class="hdr" title="Dica: arraste esta barra para mover o painel">
                   <div>
                     <div class="ttl">Modo Humano — Conveniente</div>
                     <div class="hint" id="sub"></div>
+                    <div class="moveHint">Arraste o topo para mover • Use “Mover” para trocar de canto</div>
                   </div>
                   <div class="hdrBtns">
                     <button class="mini" id="dock" title="Mover painel (cantos)">Mover</button>
