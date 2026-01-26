@@ -331,16 +331,22 @@ function extractUserDataDirFromCmd(cmd) {
 
 function listChromeProcessesWin() {
   try {
+    // Nota: usar -Filter (WMI-side) é MUITO mais rápido/estável que pipe+Where em hosts carregados.
+    // Também adiciona timeout para não travar o worker em cenário de WMI lento.
     const ps = `
-      $procs = Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -eq 'chrome.exe' -or $_.Name -eq 'chromium.exe' } |
-        Select-Object ProcessId, Name, CommandLine;
-      $procs | ConvertTo-Json -Compress
+      $names = @('chrome.exe','chromium.exe');
+      $all = @();
+      foreach ($n in $names) {
+        try {
+          $all += (Get-CimInstance Win32_Process -Filter ("Name='" + $n + "'") | Select-Object ProcessId, Name, CommandLine);
+        } catch {}
+      }
+      $all | ConvertTo-Json -Compress
     `;
     const out = execFileSync(
       'powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps],
-      { encoding: 'utf8', windowsHide: true, maxBuffer: 20 * 1024 * 1024 }
+      { encoding: 'utf8', windowsHide: true, maxBuffer: 20 * 1024 * 1024, timeout: 8000 }
     ).trim();
     if (!out) return [];
     const json = JSON.parse(out);
@@ -357,10 +363,45 @@ function listChromeProcessesWin() {
 
 function taskkillTreeWin(pid) {
   try {
-    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 8000 });
     return true;
   } catch {
     return false;
+  }
+}
+
+function listProfilePidsWin(userDataDir) {
+  try {
+    const expected = String(userDataDir || '').trim();
+    if (!expected) return [];
+    // Retorna só PIDs (compacto) para evitar JSON gigantes e reduzir chance de falha.
+    const ps = `
+      $expected = $args[0];
+      if (-not $expected) { "[]" ; exit 0 }
+      $esc = [Regex]::Escape($expected);
+      $names = @('chrome.exe','chromium.exe');
+      $pids = @();
+      foreach ($n in $names) {
+        try {
+          $procs = Get-CimInstance Win32_Process -Filter ("Name='" + $n + "'") |
+            Where-Object { $_.CommandLine -and ($_.CommandLine -match $esc) } |
+            Select-Object -ExpandProperty ProcessId;
+          if ($procs) { $pids += $procs; }
+        } catch {}
+      }
+      ($pids | Sort-Object -Unique) | ConvertTo-Json -Compress
+    `;
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps, expected],
+      { encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024, timeout: 8000 }
+    ).trim();
+    if (!out) return [];
+    const json = JSON.parse(out);
+    const arr = Array.isArray(json) ? json : (json ? [json] : []);
+    return arr.map(x => Number(x)).filter(n => Number.isFinite(n) && n > 0);
+  } catch {
+    return [];
   }
 }
 
@@ -371,28 +412,54 @@ function taskkillTreeWin(pid) {
 function killChromeProfileProcesses(userDataDir, openingMap) {
   if (process.platform !== 'win32') return;
   try {
-    const expected = normalizePathForCompare(userDataDir);
+    const expectedRaw = String(userDataDir || '').trim();
+    const expected = normalizePathForCompare(expectedRaw).replace(/\/+$/g, '');
     if (!expected) return;
-    const procs = listChromeProcessesWin();
     const toKill = new Set();
-    for (const pr of procs) {
-      const ud = extractUserDataDirFromCmd(pr.cmd);
-      if (ud) {
-        if (normalizePathForCompare(ud) === expected) {
-          toKill.add(pr.pid);
-        }
-      } else {
-        // fallback: se não achou o param, mas cmd contém o path inteiro
-        if (pr.cmd && normalizePathForCompare(pr.cmd).includes(expected)) {
-          toKill.add(pr.pid);
+
+    // PASSO A: tentativa rápida (lista cmdline completa)
+    try {
+      const procs = listChromeProcessesWin();
+      for (const pr of procs) {
+        const ud = extractUserDataDirFromCmd(pr.cmd);
+        if (ud) {
+          if (normalizePathForCompare(ud).replace(/\/+$/g, '') === expected) {
+            toKill.add(pr.pid);
+          }
+        } else {
+          // fallback: se não achou o param, mas cmd contém o path inteiro
+          if (pr.cmd && normalizePathForCompare(pr.cmd).includes(expected)) {
+            toKill.add(pr.pid);
+          }
         }
       }
+    } catch {}
+
+    // PASSO B: fallback robusto (WMI filtra por substring e retorna só PIDs)
+    if (!toKill.size) {
+      try {
+        const pids = listProfilePidsWin(expectedRaw);
+        for (const pid of pids) toKill.add(pid);
+      } catch {}
     }
+
     if (!toKill.size) return;
+
     let killed = 0;
     for (const pid of toKill) {
       if (taskkillTreeWin(pid)) killed++;
     }
+
+    // PASSO C: validação + retry (caso ainda exista processo vivo com o userDataDir)
+    try {
+      const still = listProfilePidsWin(expectedRaw);
+      if (still && still.length) {
+        for (const pid of still) {
+          if (taskkillTreeWin(pid)) killed++;
+        }
+      }
+    } catch {}
+
     try {
       if (killed > 0) {
         logger.warn('[BROWSER][KILL][userDataDir] Chrome órfão removido', { userDataDir, killed });
