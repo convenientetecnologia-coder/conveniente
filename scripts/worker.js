@@ -3046,6 +3046,21 @@ async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataD
     const man = await manifestStore.read(nome).catch(()=>null);
     if (man && man.userDataDir) userDataDir = String(man.userDataDir);
   } catch {}
+  // ENTERPRISE: fallback para perfis.json (manifest pode estar incompleto em casos de restart/erro).
+  // Sem userDataDir, o kill por userDataDir vira falso-negativo e deixa Chrome vivo.
+  if (!userDataDir) {
+    try {
+      const perfisArr = loadPerfisJson();
+      const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+      if (perfil && perfil.userDataDir) userDataDir = String(perfil.userDataDir);
+    } catch {}
+  }
+  // Fallback final determinístico (padrão do sistema)
+  if (!userDataDir) {
+    try {
+      userDataDir = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
+    } catch {}
+  }
   let closeOutcome = { ok: false, timeout: false, err: null };
   const rootPidAliveBefore = rootPid ? isPidAlive(rootPid) : null;
   const closePromise = (async () => {
@@ -3124,11 +3139,57 @@ async function killStrayChromes() {
   return;
 }
 
+// ===== BUILD / VERSION TRACE (ultra enterprise) =====
+// Objetivo: provar 110% qual build está rodando no host (RM4), sem depender de git.
+const BUILD_INFO = (() => {
+  const startedAt = Date.now();
+  try {
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const stWorker = fs.statSync(__filename);
+    return {
+      name: String(pkg && pkg.name || 'conveniente'),
+      version: String(pkg && pkg.version || '0.0.0'),
+      buildId: String(process.env.CT_BUILD_ID || `${String(pkg && pkg.version || '0.0.0')}|worker_mtime=${Math.round(stWorker.mtimeMs)}`),
+      workerFile: String(__filename),
+      workerMtimeMs: Math.round(stWorker.mtimeMs),
+      startedAt
+    };
+  } catch (e) {
+    return {
+      name: 'conveniente',
+      version: '0.0.0',
+      buildId: String(process.env.CT_BUILD_ID || 'unknown'),
+      workerFile: String(__filename),
+      workerMtimeMs: null,
+      startedAt,
+      error: (e && e.message) ? String(e.message).slice(0, 180) : 'build_info_failed'
+    };
+  }
+})();
+function buildStatusSnap() {
+  try {
+    return Object.assign({}, BUILD_INFO, {
+      pid: process.pid,
+      cwd: process.cwd(),
+      uptimeSec: Math.round((Date.now() - (BUILD_INFO.startedAt || Date.now())) / 1000)
+    });
+  } catch {
+    return Object.assign({}, BUILD_INFO);
+  }
+}
+try {
+  const outDir = path.join(__dirname, '..', 'dados');
+  try { if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true }); } catch {}
+  fs.writeFileSync(path.join(outDir, 'build.json'), JSON.stringify(buildStatusSnap(), null, 2), 'utf8');
+} catch {}
+
 try {
   logger.info('[WORKER][BOOT]', {
     pid: process.pid,
     execPath: process.execPath,
     versions: process.versions,
+    buildId: BUILD_INFO && BUILD_INFO.buildId ? String(BUILD_INFO.buildId).slice(0, 220) : null,
     npm_node_execpath: process.env.npm_node_execpath || '',
     ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE || '',
     platform: process.platform,
@@ -5132,6 +5193,22 @@ const handlers = {
   const strictCloseRequired =
     !preserve &&
     /^(auto_banned|auto_two_factor|admin_delete|ct_delete_on_server|auto_delete|delete)$/i.test(String(reason || '').trim());
+  // Resolver userDataDir cedo (para validação pós-close determinística)
+  let udirForCheck = '';
+  try {
+    const man0 = await manifestStore.read(nome).catch(()=>null);
+    if (man0 && man0.userDataDir) udirForCheck = String(man0.userDataDir);
+  } catch {}
+  if (!udirForCheck) {
+    try {
+      const perfisArr = loadPerfisJson();
+      const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+      if (perfil && perfil.userDataDir) udirForCheck = String(perfil.userDataDir);
+    } catch {}
+  }
+  if (!udirForCheck) {
+    try { udirForCheck = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim()); } catch {}
+  }
   let reopenDelayMs = 0;
   if (preserve) {
     try { registerFailure(nome, reason || 'deactivate_preserve'); } catch {}
@@ -5233,12 +5310,108 @@ const handlers = {
   ctrl.virtus = null;
   ctrl.trabalhando = false;
   // HARD CLOSE militar
+  let hc = null;
   try {
-    await hardCloseController(nome, ctrl, {
+    hc = await hardCloseController(nome, ctrl, {
       reason: reason || 'deactivate',
       allowKillUserDataDir: !preserve
     });
-  } catch {}
+  } catch (e) {
+    hc = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+
+  // ENTERPRISE HARD: em fluxo de delete, NÃO retornar ok:true se ainda existir Chrome vivo.
+  // (Isso causa exatamente o cenário: perfil deletado + navegador aberto/bugado.)
+  if (strictCloseRequired) {
+    const udir = (hc && hc.userDataDir) ? String(hc.userDataDir) : String(udirForCheck || '');
+    // 1) Se hardClose deixou rootPid vivo, já é incompleto.
+    const rootAliveAfter = (hc && typeof hc.rootPidAliveAfter === 'boolean') ? hc.rootPidAliveAfter : null;
+
+    // 2) Check PIDs por userDataDir (sinal forte do Chrome do perfil ainda vivo)
+    let chk = null;
+    try {
+      if (udir && browserHelper.getChromeProfilePidsMeta) chk = browserHelper.getChromeProfilePidsMeta(udir);
+      else if (udir && browserHelper.getChromeProfilePids) chk = { ok: true, pids: browserHelper.getChromeProfilePids(udir) || [] };
+      else chk = { ok: false, pids: [], error: 'pid_check_unavailable' };
+    } catch (e) {
+      chk = { ok: false, pids: [], error: (e && e.message) ? String(e.message).slice(0, 180) : 'pid_check_failed' };
+    }
+    const pidOk = !!(chk && chk.ok);
+    const pids = (chk && Array.isArray(chk.pids)) ? chk.pids : [];
+
+    if (!pidOk || pids.length || rootAliveAfter === true) {
+      // Tentativa extra (graciosa) antes de bloquear: fechar por userDataDir sem /F.
+      try {
+        if (udir && browserHelper.closeChromeProfileProcessesGraceful) {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'deactivate_extra_graceful_close_begin',
+              nome: String(nome || ''),
+              reason: String(reason || ''),
+              userDataDir: String(udir).slice(0, 260),
+              pids: pids.slice(0, 24),
+              pidCheckOk: pidOk,
+              pidCheckErr: pidOk ? null : (chk && chk.error ? String(chk.error).slice(0, 180) : 'pid_check_failed')
+            });
+          } catch {}
+          browserHelper.closeChromeProfileProcessesGraceful(udir);
+          await sleep(900);
+        }
+      } catch {}
+
+      // Re-check após tentativa graciosa
+      let chk2 = null;
+      try {
+        if (udir && browserHelper.getChromeProfilePidsMeta) chk2 = browserHelper.getChromeProfilePidsMeta(udir);
+        else if (udir && browserHelper.getChromeProfilePids) chk2 = { ok: true, pids: browserHelper.getChromeProfilePids(udir) || [] };
+        else chk2 = { ok: false, pids: [], error: 'pid_check_unavailable' };
+      } catch (e) {
+        chk2 = { ok: false, pids: [], error: (e && e.message) ? String(e.message).slice(0, 180) : 'pid_check_failed' };
+      }
+      const pid2Ok = !!(chk2 && chk2.ok);
+      const pids2 = (chk2 && Array.isArray(chk2.pids)) ? chk2.pids : [];
+
+      if (!pid2Ok || pids2.length || rootAliveAfter === true) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'deactivate_close_incomplete_block_delete',
+            nome: String(nome || ''),
+            reason: String(reason || ''),
+            policy: policy == null ? null : String(policy),
+            userDataDir: udir ? String(udir).slice(0, 260) : null,
+            pidCheckOk: pid2Ok,
+            pidCheckErr: pid2Ok ? null : (chk2 && chk2.error ? String(chk2.error).slice(0, 180) : 'pid_check_failed'),
+            pids: pids2.slice(0, 24),
+            hardClose: (hc && hc.flowId) ? {
+              flowId: hc.flowId,
+              durMs: hc.durMs || null,
+              rootPid: hc.rootPid || null,
+              rootPidAliveAfter: rootAliveAfter,
+              udirPidsMetaOk: hc.udirPidsMetaOk,
+              udirPidsMetaErr: hc.udirPidsMetaErr,
+              udirPidsAfter: hc.udirPidsAfter || null
+            } : null
+          });
+        } catch {}
+        try {
+          await manifestStore.update(nome, (man) => {
+            man = man || {};
+            man.accountFlags = man.accountFlags || {};
+            man.accountFlags.pendingClose = true;
+            man.accountFlags.pendingCloseAt = Date.now();
+            man.accountFlags.pendingCloseReason = 'deactivate_close_incomplete';
+            man.accountFlags.pendingClosePids = pids2.slice(0, 24);
+            man.accountFlags.pendingCloseUserDataDir = udir ? String(udir).slice(0, 260) : null;
+            return man;
+          });
+        } catch {}
+        await snapshotStatusAndWrite();
+        return { ok: false, error: 'chrome_alive_after_deactivate' };
+      }
+    }
+  }
   // cleanup pós-fechamento
   try {
     const root = robeMeta[nome]?.rootPid;
@@ -7377,7 +7550,7 @@ const sys = {
   cores: (os.cpus()||[]).length,
   cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
 };
-const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, ts: Date.now() };
+const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null), ts: Date.now() };
 
 // LOGS DE DIAGNÓSTICO DA RAM — somente quando estiver null/undefined
 try {

@@ -29,6 +29,9 @@ dados/perfis.json
 dados/supervisor_state.json
 dados/fotos_postadas.json
 dados/ct_config.json
+dados/build.json
+dados/provision_audit.jsonl
+dados/ct_archive_queue/
 _backup_local_before_reset_*/
 
 # Arquivos temporários gerados pelo cluster/sistema
