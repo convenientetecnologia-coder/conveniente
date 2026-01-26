@@ -36,6 +36,32 @@ const opsState = require('./opsState.js');
 const provisionLock = require('./provisionLock.js');
 
 module.exports = (app, workerClient, fileStore) => {
+  // ===== Maintenance: provision lock =====
+  // GET status do lock (para diagnosticar maintenance_provision)
+  app.get('/api/maintenance/provision-lock', (req, res) => {
+    try {
+      const cur = provisionLock.get();
+      return res.json({ ok: true, active: !!(cur && cur.active), lock: cur && cur.lock ? cur.lock : null, lockPath: provisionLock.LOCK_PATH });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // POST force-release do lock (uso pós-crash). Seguro: lock é local ao host.
+  app.post('/api/maintenance/provision-lock/release', (req, res) => {
+    try {
+      const cur = provisionLock.get();
+      const owner = cur && cur.lock && cur.lock.owner ? String(cur.lock.owner) : '';
+      const rr = provisionLock.release({ owner, force: true });
+      try {
+        provisionAudit.append({ ts: Date.now(), event: 'maintenance_force_release_provision_lock', ok: !!(rr && rr.ok), released: !!(rr && rr.released), owner: owner || null });
+      } catch {}
+      return res.json({ ok: true, released: !!(rr && rr.released), prevOwner: owner || null });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
     try {
