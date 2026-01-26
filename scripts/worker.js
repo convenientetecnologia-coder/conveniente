@@ -1391,9 +1391,9 @@ async function identityMonitorCheckNow(nome, ctrl) {
     await pg.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(900);
 
-    // Assistente safe: se um botão "Carregar/Concluir" habilitar, clica (2 tentativas, 1min total)
+    // Assistente safe: o botão "Carregar" pode demorar 10–120s para habilitar.
     try {
-      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 60_000, tries: 2 }).catch(()=>null);
+      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 150_000, tries: 2 }).catch(()=>null);
       if (assist && assist.ok) {
         try { provisionAudit.append({ ts: Date.now(), event: 'identity_assist_clicked', nome: String(nome||''), clicked: String(assist.clicked||''), attempt: Number(assist.attempt||0)||0 }); } catch {}
         await sleep(900);

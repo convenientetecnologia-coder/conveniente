@@ -2984,8 +2984,10 @@ async function detectLoginRequired(page) {
 
     // Recurso submetido: não é “login_form”, mas bloqueia conta (precisa monitorar).
     if (hasAppealSubmitted) {
-      // Se há sinais de identidade (selfie/vídeo), classifica como identity_submitted (monitor 1h).
-      if (hasIdentitySubmitted || hasIdentityText || bodyHasIdentityHints) {
+      // Importante (anti-falso-positivo):
+      // após concluir identidade, a página pode conter palavras genéricas como "identidade" no texto,
+      // então NÃO use "bodyHasIdentityHints" aqui. Só trate como identity_submitted se houver sinais fortes.
+      if (hasIdentitySubmitted || hasIdentityText) {
         return {
           loginRequired: true,
           reason: 'identity_submitted',
