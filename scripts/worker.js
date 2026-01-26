@@ -280,6 +280,7 @@ function _overlayReasonFromFlags(flags) {
   try {
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
+    if (flags.twoFactor === true) return `two_factor:${flags.twoFactorReason || ''}`.trim();
     if (flags.appealSubmitted === true) return 'appeal_submitted';
     if (flags.messengerPin === true) return `messenger_pin:${flags.messengerPinReason || ''}`.trim();
     if (flags.loginRemediateFailed === true) return `login_remediate_failed:${flags.loginRemediateFailedReason || ''}`.trim();
@@ -522,6 +523,7 @@ async function _installOverlayOnPage(nome, page) {
             const f = d.flags || {};
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida';
+            else if (f.twoFactor) statusTxt = '2FA requerido (excluída)';
             else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
             else if (f.loginRemediateFailed) statusTxt = 'Login/Cookies falhou (humano)';
             else if (f.loginRequired) statusTxt = 'Login requerido';
@@ -1037,6 +1039,157 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     // Mantém coerência no runtime store também.
     delete robeMeta[nome].loginRemediateFailed;
     delete robeMeta[nome].loginRemediateFailedReason;
+  } catch {}
+}
+
+// 2FA (two-factor) => exclusão automática (ultra enterprise)
+// Regra do cliente: 2FA não é automatizável e não deve consumir slot do estoque.
+async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = {}) {
+  try {
+    const prev = await readAccountFlags(nome);
+    const already = prev && prev.twoFactor === true;
+
+    // Evidence + auto-delete:
+    // - arquiva no CT (Excluídas) com print
+    // - deleta o perfil local para liberar slot
+    try {
+      // 1) Captura screenshot (se o browser estiver aberto)
+      let b64 = '';
+      let url = '';
+      try {
+        const ctrl = controllers.get(nome);
+        const pages = ctrl && ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+        const p0 = pages && pages[0];
+        if (p0) {
+          try { url = (typeof p0.url === 'function') ? (p0.url() || '') : ''; } catch {}
+          try {
+            const buf = await p0.screenshot({ type: 'jpeg', quality: 75, fullPage: true }).catch(()=>null);
+            if (buf && buf.length) b64 = Buffer.from(buf).toString('base64');
+          } catch {}
+        }
+      } catch {}
+
+      // 2) Arquiva no CT com evidence (se CT configurado)
+      try {
+        const rr = await archiveBanWithEvidenceToCT({
+          profileName: nome,
+          reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`,
+          evidenceB64: b64,
+          evidenceUrl: url
+        });
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'auto_archive_two_factor_ct',
+            nome: String(nome||''),
+            ok: !!(rr && rr.ok),
+            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180),
+            stockAccountId: rr && rr.stockAccountId || null
+          });
+        } catch {}
+      } catch {}
+
+      // 3) Deleta o perfil local (best-effort) — mesmo mecanismo do ban (sem HTTP, evita deadlock)
+      try {
+        const rr = await (async () => {
+          try {
+            // desired OFF
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+                return d;
+              });
+            } catch {}
+
+            // hard close do controller (se ativo)
+            try {
+              const ctrl = controllers.get(nome);
+              if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+                try { if (ctrl.virtus && typeof ctrl.virtus.stop === 'function') await ctrl.virtus.stop(); } catch {}
+                ctrl.virtus = null;
+                ctrl.trabalhando = false;
+                try { await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_delete', allowKillUserDataDir: false }), 75_000).catch(()=>null); } catch {}
+              }
+            } catch {}
+            try { controllers.delete(nome); } catch {}
+            try { stopPruneLoop(nome); } catch {}
+
+            // remover userDataDir externo e perfis.json
+            try {
+              const perfisArr = loadPerfisJson();
+              const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+              const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+              if (udir) {
+                try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
+              }
+              const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+              try { savePerfisJson(arr2); } catch {}
+            } catch {}
+
+            // remover desired e diretório do perfil
+            try { await fileStore.removeDesired(nome); } catch {}
+            try {
+              const dir = path.join(fileStore.perfisDir, nome);
+              try { fileStore.rimrafSync(dir); } catch {}
+            } catch {}
+
+            // limpeza status.json
+            try {
+              const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+              if (st && Array.isArray(st.perfis)) {
+                st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+                fileStore.writeJsonAtomic(fileStore.statusPath, st);
+              }
+            } catch {}
+
+            try { await snapshotStatusAndWrite(); } catch {}
+            return { ok: true };
+          } catch (e) {
+            return { ok: false, error: (e && e.message) || String(e) };
+          }
+        })();
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'auto_delete_two_factor_profile',
+            nome: String(nome||''),
+            ok: !!(rr && rr.ok),
+            error: rr && rr.ok ? null : String(rr && rr.error || 'error').slice(0, 180)
+          });
+        } catch {}
+      } catch {}
+    } catch {}
+
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.twoFactor = true;
+      man.accountFlags.twoFactorAt = Date.now();
+      man.accountFlags.twoFactorReason = String(reason||'');
+      man.accountFlags.twoFactorText = String(snippet||'').slice(0, 400);
+      // 2FA exclui do fluxo, então não faz sentido manter flags que induzem auto-remediação
+      delete man.accountFlags.loginRemediateFailed;
+      delete man.accountFlags.loginRemediateFailedAt;
+      delete man.accountFlags.loginRemediateFailedReason;
+      delete man.accountFlags.loginRemediateFailedSource;
+      delete man.accountFlags.loginRemediateFailedStage;
+      delete man.accountFlags.loginRemediateFailedCount;
+      return man;
+    });
+
+    if (!already) {
+      try {
+        await issues.append(
+          nome,
+          'account_two_factor_detected',
+          `reason=${reason||''} snippet="${(snippet||'').slice(0,120)}" at=${new Date().toISOString()}`
+        );
+      } catch {}
+    }
+
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].twoFactor = true;
   } catch {}
 }
 
@@ -3316,6 +3469,11 @@ async function start_work({ nome, operator }) {
         try { await setBannedFlag(nome, { reason: String(flags.bannedReason || 'banned'), snippet: String(flags.bannedText || '') }); } catch {}
         return { ok: false, error: 'banned' };
       }
+      if (flags && flags.twoFactor === true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'two_factor', reason: String(flags.twoFactorReason||flags.reason||'two_factor').slice(0,120) }); } catch {}
+        try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
+        return { ok: false, error: 'two_factor' };
+      }
       if (flags && flags.appealSubmitted === true) {
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'appeal_submitted', nextAt: Number(flags.appealNextCheckAt||0)||0 }); } catch {}
         try {
@@ -3369,6 +3527,15 @@ async function start_work({ nome, operator }) {
             return { ok: false, error: 'banned' };
           }
           const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          // 2FA => exclusão automática (não é humano, não é automação)
+          if (lr && lr.loginRequired) {
+            const rr = String(lr.reason || '').toLowerCase();
+            if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
+              try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String((lr && lr.title) ? lr.title : '') }); } catch {}
+              try { await issues.append(nome, 'mil_action', `start_work_preflight_two_factor reason=${rr}`); } catch {}
+              return { ok: false, error: 'two_factor' };
+            }
+          }
           if (lr && lr.loginRequired && String(lr.reason || '').toLowerCase().includes('appeal')) {
             try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
             ctrl.humanControl = true;
@@ -4483,6 +4650,11 @@ const handlers = {
       const na = nonAutomatableReason(lrMessenger) || nonAutomatableReason(lrFacebook);
       if (na) {
         pushStep({ step: 'non_automatable_after_login', reason: na, lrMessenger, lrFacebook });
+        // 2FA => exclusão automática (não vira humano)
+        if (String(na) === 'two_factor') {
+          try { await setTwoFactorFlag(nome, { reason: 'two_factor', snippet: '' }); } catch {}
+          return { ok: false, error: 'two_factor', steps, closedForRam, pausedVirtus };
+        }
         try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate' }); } catch {}
         await failFastToHuman(na);
         return { ok: false, error: na, steps, closedForRam, pausedVirtus };
@@ -4865,12 +5037,20 @@ const handlers = {
               return { ok: true, preflight };
             }
 
-            // Non-automatable: captcha/identity/checkpoint/2FA => humano direto.
+            // Non-automatable: captcha/identity/checkpoint => humano direto.
+            // 2FA => exclusão automática.
+            const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
             const needsHuman =
               rr.includes('captcha') ||
               rr.includes('identity') ||
-              rr.includes('two_factor') ||
               rr.includes('checkpoint');
+            if (isTwoFactor) {
+              preflight.state = 'two_factor';
+              try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
+              await snapshotStatusAndWrite();
+              logger.info('[HANDLER] human-resume preflight -> two_factor', { nome, reason: lr.reason || '' });
+              return { ok: false, error: 'two_factor', preflight };
+            }
             if (needsHuman) {
               preflight.state = 'needs_human';
               try { await setLoginRemediateFailedFlag(nome, { reason: lr.reason || 'login_requires_human', source: 'human_resume', stage: 'human_resume_preflight' }); } catch {}
@@ -5263,6 +5443,10 @@ const handlers = {
       const banned = man ? !!(man.accountFlags && man.accountFlags.banned === true) : !!robeMeta[nome]?.banned;
       const bannedAt = man ? ((man.accountFlags && man.accountFlags.bannedAt) || null) : null;
       const bannedText = man ? ((man.accountFlags && man.accountFlags.bannedText) || null) : null;
+      const twoFactor = man ? !!(man.accountFlags && man.accountFlags.twoFactor === true) : !!robeMeta[nome]?.twoFactor;
+      const twoFactorAt = man ? ((man.accountFlags && man.accountFlags.twoFactorAt) || null) : null;
+      const twoFactorReason = man ? ((man.accountFlags && man.accountFlags.twoFactorReason) || null) : null;
+      const twoFactorText = man ? ((man.accountFlags && man.accountFlags.twoFactorText) || null) : null;
       const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
       const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
       const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
@@ -5271,8 +5455,8 @@ const handlers = {
       const messengerPin = man ? !!(man.accountFlags && man.accountFlags.messengerPin === true) : !!robeMeta[nome]?.messengerPin;
       const messengerPinReason = man ? ((man.accountFlags && man.accountFlags.messengerPinReason) || null) : null;
       const problem = man
-        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.messengerPin === true))
-        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).messengerPin);
+        ? !!((man.accountFlags && man.accountFlags.loginRequired === true) || (man.accountFlags && man.accountFlags.banned === true) || (man.accountFlags && man.accountFlags.twoFactor === true) || (man.accountFlags && man.accountFlags.messengerPin === true))
+        : !!((robeMeta[nome] || {}).loginRequired || (robeMeta[nome] || {}).banned || (robeMeta[nome] || {}).twoFactor || (robeMeta[nome] || {}).messengerPin);
       const man0 = await manifestStore.read(nome).catch(()=>null);
       const robeMode = (man0 && man0.robeMode) ? String(man0.robeMode) : 'itens';
 
@@ -5327,6 +5511,10 @@ const handlers = {
         banned,
         bannedAt,
         bannedText,
+        twoFactor,
+        twoFactorAt,
+        twoFactorReason,
+        twoFactorText,
         appealSubmitted,
         appealSubmittedAt,
         appealNextCheckAt,
@@ -6181,6 +6369,21 @@ async function nurseTick() {
         }
       } catch {}
 
+      // Auto-exclusão enterprise: 2FA (persistente) — cobre pós-restart.
+      try {
+        const flags2 = await readAccountFlags(nome).catch(()=>({}));
+        if (flags2 && flags2.twoFactor === true) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          const last = Number(robeMeta[nome].twoFactorSweepLastAt || 0) || 0;
+          if (!last || (now - last) > (2 * 60 * 1000)) {
+            robeMeta[nome].twoFactorSweepLastAt = now;
+            try { provisionAudit.append({ ts: now, event: 'two_factor_sweep_attempt', nome: String(nome||''), reason: String(flags2.twoFactorReason||'two_factor').slice(0,160) }); } catch {}
+            try { await setTwoFactorFlag(nome, { reason: String(flags2.twoFactorReason || 'two_factor'), snippet: String(flags2.twoFactorText || '') }); } catch {}
+          }
+          continue;
+        }
+      } catch {}
+
       // Monitoramento: recurso/apelação submetida (após "Retomar trabalho")
       try {
         const flags = await readAccountFlags(nome).catch(()=>({}));
@@ -6507,6 +6710,16 @@ async function nurseTick() {
                 } catch {}
               }
             } catch {}
+          } catch {}
+          // 2FA => exclusão automática (não é humano, não é automação)
+          try {
+            const rr0 = String(lr && lr.reason || '').toLowerCase();
+            if (rr0.includes('two_factor') || rr0.includes('2fa') || rr0.includes('two factor')) {
+              try { await issues.append(nome, 'mil_action', `two_factor_detected_autodelete reason=${rr0}`); } catch {}
+              try { await setTwoFactorFlag(nome, { reason: rr0 || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
+              // Perfil pode ter sido deletado; sair do fluxo atual.
+              return;
+            }
           } catch {}
           await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
 
