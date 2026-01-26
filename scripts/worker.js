@@ -1591,6 +1591,23 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           ctrl.virtus = null;
           ctrl.trabalhando = false;
           try { await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+          // GARANTIA (enterprise HARD): mesmo com controller ativo, forçar taskkill por lastRootPid
+          // antes de aceitar qualquer delete. Isso elimina dependência de WMI/CommandLine e evita janela zumbi.
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            const pid = man && Number(man.lastRootPid || 0) || 0;
+            const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
+            if (pid) {
+              await withTimeout('auto_banned_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
+              await sleep(800);
+            }
+            if (udir) {
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+              await sleep(600);
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+            }
+          } catch {}
         } else {
           // Sem controller: tentar fechar por PID (sem /F) e por userDataDir (sem /F); se não fechar, força no final.
           let man = null;
@@ -1953,6 +1970,23 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           ctrl.virtus = null;
           ctrl.trabalhando = false;
           try { await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
+          // GARANTIA (enterprise HARD): mesmo com controller ativo, forçar taskkill por lastRootPid
+          // antes de aceitar qualquer delete. Evita janela zumbi em 2FA.
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            const pid = man && Number(man.lastRootPid || 0) || 0;
+            const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
+            if (pid) {
+              await withTimeout('auto_two_factor_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
+              await sleep(800);
+            }
+            if (udir) {
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+              await sleep(600);
+              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+            }
+          } catch {}
         } else {
           let man = null;
           try { man = await manifestStore.read(nome).catch(()=>null); } catch {}

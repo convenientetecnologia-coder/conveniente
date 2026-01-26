@@ -786,6 +786,9 @@ async function execStockProvision(cmd) {
       const cookies = a && a.cookies;
       const label = String(a && a.label || '').trim();
       const stockAccountId = (a && (a.stockAccountId || a.stock_account_id)) ? Number(a.stockAccountId || a.stock_account_id) : null;
+      // Credenciais podem vir do CT Stock payload (não logar).
+      const login = String(a && (a.login || a.user || a.email || a.username) || '').trim();
+      const password = String(a && (a.password || a.pass) || '').trim();
       const category = String(a && a.category || '').trim().toLowerCase();
       const robeMode = (category === 'veiculos') ? 'veiculos' : 'itens';
 
@@ -848,7 +851,13 @@ async function execStockProvision(cmd) {
 
         // 1) criar perfil
         const created = await runStep('create_profile', async () => {
-          const r = await httpJson('/api/perfis', { method: 'POST', headers: { 'x-operator': lockOwner }, body: { cidade: city, cookies } });
+          const r = await httpJson('/api/perfis', {
+            method: 'POST',
+            headers: { 'x-operator': lockOwner },
+            // Ultra enterprise: persiste login/senha no manifest já na criação, para permitir fluxo
+            // automático "cookies -> login+senha" sem depender de clique em "retomar trabalho".
+            body: { cidade: city, cookies, login, password }
+          });
           if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'create_profile_failed');
           return r;
         });

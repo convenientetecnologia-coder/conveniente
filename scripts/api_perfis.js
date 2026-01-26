@@ -89,7 +89,7 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
-  // Criar perfil (POST) { cidade, cookies }
+  // Criar perfil (POST) { cidade, cookies, login?, password? }
   app.post('/api/perfis', async (req, res) => {
     logger.info('POST /api/perfis chamada', {});
     try {
@@ -101,7 +101,7 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: 'criar_perfil_somente_estoque' });
       }
 
-      const { cidade, cookies } = req.body || {};
+      const { cidade, cookies, login, password } = req.body || {};
       if (!cidade || !cookies) {
         logger.warn('Tentativa de criação de perfil sem cidade ou cookies', { cidade });
         return res.json({ ok: false, error: 'Cidade e cookies obrigatórios.' });
@@ -176,7 +176,16 @@ module.exports = (app, workerClient, fileStore) => {
       fileStore.savePerfisJson(perfisArr);
 
       // Grava manifest.json SOMENTE no userDataDir externo
-      fs.writeFileSync(path.join(userDataDir, 'manifest.json'), JSON.stringify(perfilObj, null, 2), 'utf8');
+      // Ultra enterprise: gravar credenciais no manifest para permitir fluxo automático
+      // "cookies -> login+senha" (sem clique manual), mas NÃO devolver password na resposta.
+      const manifestObj = { ...perfilObj };
+      try {
+        const l = String(login || '').trim();
+        const p = String(password || '').trim();
+        if (l) manifestObj.login = l;
+        if (p) manifestObj.password = p;
+      } catch {}
+      fs.writeFileSync(path.join(userDataDir, 'manifest.json'), JSON.stringify(manifestObj, null, 2), 'utf8');
 
       // desired.json default (não liga nada) - ATOMICIDADE GARANTIDA PELO LOCK!
       // ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
