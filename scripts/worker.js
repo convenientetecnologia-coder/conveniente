@@ -1578,10 +1578,22 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
 
             // 3.3) remover userDataDir externo (se houver) e remover do perfis.json
             try {
+              // Fonte primária: manifestStore (mais confiável que perfis.json)
+              let udirFromManifest = '';
+              try {
+                const man = await manifestStore.read(nome).catch(()=>null);
+                if (man && man.userDataDir) udirFromManifest = String(man.userDataDir);
+              } catch {}
               const perfisArr = loadPerfisJson();
               const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-              const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+              const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
+                // CRÍTICO (anti-orphan): matar processos do Chrome ligados a esse userDataDir,
+                // mesmo se não havia controller conectado (caso de browser órfão).
+                try {
+                  browserHelper.killChromeProfileProcesses(udir);
+                  provisionAudit.append({ ts: Date.now(), event: 'auto_banned_kill_by_userDataDir', nome: String(nome||''), userDataDir: String(udir).slice(0, 260) });
+                } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
               const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
@@ -1727,10 +1739,22 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
 
             // remover userDataDir externo e perfis.json
             try {
+              // Fonte primária: manifestStore (mais confiável que perfis.json)
+              let udirFromManifest = '';
+              try {
+                const man = await manifestStore.read(nome).catch(()=>null);
+                if (man && man.userDataDir) udirFromManifest = String(man.userDataDir);
+              } catch {}
               const perfisArr = loadPerfisJson();
               const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-              const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+              const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
+                // CRÍTICO (anti-orphan): matar processos do Chrome ligados a esse userDataDir,
+                // mesmo se não havia controller conectado (caso de browser órfão).
+                try {
+                  browserHelper.killChromeProfileProcesses(udir);
+                  provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_kill_by_userDataDir', nome: String(nome||''), userDataDir: String(udir).slice(0, 260) });
+                } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
               const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
