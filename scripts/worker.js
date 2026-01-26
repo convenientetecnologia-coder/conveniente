@@ -915,6 +915,99 @@ const IDENTITY_CFG = {
   maxPagesScan: 8
 };
 
+// Identity Gate (ultra enterprise):
+// - garante que apenas 1 fluxo de identidade "avance botões" por vez (global no host)
+// - após qualquer ação (clique), aplica cooldown randomizado de 5–10min antes de permitir outra
+// - o timer de identidadeSubmitted (1h) é independente e "corre solto"
+const IDENTITY_GATE = {
+  cooldownMinMs: 5 * 60 * 1000,
+  cooldownMaxMs: 10 * 60 * 1000,
+  leaseMs: 90 * 1000 // lease curto para evitar deadlock se o worker cair no meio
+};
+
+function _randIdentityCooldownMs() {
+  const min = IDENTITY_GATE.cooldownMinMs;
+  const max = IDENTITY_GATE.cooldownMaxMs;
+  const span = Math.max(0, max - min);
+  return min + Math.floor(Math.random() * (span + 1));
+}
+
+async function _identityGateTryAcquire({ owner = '', nome = '' } = {}) {
+  const now = Date.now();
+  const leaseUntil = now + IDENTITY_GATE.leaseMs;
+  let denied = null;
+  let snap = null;
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d._identityGate = d._identityGate || {};
+      const g = d._identityGate;
+      const curLease = Number(g.leaseUntil || 0) || 0;
+      const curCooldown = Number(g.cooldownUntil || 0) || 0;
+      if (curLease && curLease > now) {
+        denied = { why: 'leased', leaseUntil: curLease, owner: String(g.owner || '') };
+        snap = { ...g };
+        return d;
+      }
+      if (curCooldown && curCooldown > now) {
+        denied = { why: 'cooldown', cooldownUntil: curCooldown, lastActionAt: Number(g.lastActionAt || 0) || 0, lastActionProfile: String(g.lastActionProfile || '') };
+        snap = { ...g };
+        return d;
+      }
+      g.owner = String(owner || '').slice(0, 80);
+      g.leaseUntil = leaseUntil;
+      g.leaseAt = now;
+      g.leaseProfile = String(nome || '').slice(0, 120);
+      snap = { ...g };
+      return d;
+    });
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+  if (denied) {
+    try { provisionAudit.append({ ts: now, event: 'identity_gate_denied', nome: String(nome||''), why: denied.why, leaseUntil: denied.leaseUntil || null, cooldownUntil: denied.cooldownUntil || null, owner: denied.owner || null, lastActionAt: denied.lastActionAt || null, lastActionProfile: denied.lastActionProfile || null }); } catch {}
+    return { ok: false, denied: true, ...denied, gate: snap };
+  }
+  try { provisionAudit.append({ ts: now, event: 'identity_gate_acquired', nome: String(nome||''), owner: String(owner||''), leaseUntil }); } catch {}
+  return { ok: true, owner: String(owner||''), leaseUntil, gate: snap };
+}
+
+async function _identityGateRelease({ owner = '', nome = '', didAction = false, actionKind = '' } = {}) {
+  const now = Date.now();
+  const cooldownMs = didAction ? _randIdentityCooldownMs() : 0;
+  const cooldownUntil = didAction ? (now + cooldownMs) : 0;
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d._identityGate = d._identityGate || {};
+      const g = d._identityGate;
+      // Só o dono limpa o lease (ou se lease expirou)
+      const curOwner = String(g.owner || '');
+      const curLease = Number(g.leaseUntil || 0) || 0;
+      const leaseExpired = (!curLease || curLease <= now);
+      if (curOwner === String(owner || '') || leaseExpired) {
+        g.leaseUntil = 0;
+        g.leaseAt = 0;
+        g.leaseProfile = '';
+      }
+      if (didAction) {
+        g.cooldownUntil = cooldownUntil;
+        g.lastActionAt = now;
+        g.lastActionProfile = String(nome || '').slice(0, 120);
+        g.lastActionKind = String(actionKind || '').slice(0, 40);
+        g.lastCooldownMs = cooldownMs;
+      }
+      return d;
+    });
+  } catch {}
+  if (didAction) {
+    try { provisionAudit.append({ ts: now, event: 'identity_gate_cooldown_set', nome: String(nome||''), owner: String(owner||''), actionKind: String(actionKind||''), cooldownMs, cooldownUntil }); } catch {}
+  } else {
+    try { provisionAudit.append({ ts: now, event: 'identity_gate_released', nome: String(nome||''), owner: String(owner||'') }); } catch {}
+  }
+  return { ok: true, cooldownMs, cooldownUntil };
+}
+
 async function setIdentityRequiredFlag(nome, { source = '', url = '', title = '' } = {}) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -6838,14 +6931,29 @@ async function nurseTick() {
               const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
               if (!last || (now - last) > 30_000) {
                 robeMeta[nome].identityAssistLastAt = now;
-                const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
-                const pg = pages && pages[0];
-                if (pg) {
-                  await browserHelper.identityAssistStep(pg, { maxWaitMs: 10_000, tries: 1 }).catch(()=>null);
-                  // Se o humano concluiu/uploadou e agora virou "identity_submitted", promove o estado automaticamente.
-                  const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
-                  if (det && det.loginRequired && String(det.reason || '').toLowerCase().includes('identity_submitted')) {
-                    await setIdentitySubmittedFlag(nome, { source: det.domain || 'facebook', url: det.url || '', title: det.title || '' }).catch(()=>{});
+                // Gate global: apenas 1 identidade por vez no host + cooldown random (5–10min) entre ações.
+                const owner = `pid:${process.pid}`;
+                const g = await _identityGateTryAcquire({ owner, nome }).catch(()=>null);
+                if (g && g.ok) {
+                  let didAction = false;
+                  let actionKind = '';
+                  try {
+                    const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+                    const pg = pages && pages[0];
+                    if (pg) {
+                      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 10_000, tries: 1 }).catch(()=>null);
+                      if (assist && assist.ok) {
+                        didAction = true;
+                        actionKind = String(assist.clicked || 'clicked');
+                      }
+                      // Se o humano concluiu/uploadou e agora virou "identity_submitted", promove o estado automaticamente.
+                      const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
+                      if (det && det.loginRequired && String(det.reason || '').toLowerCase().includes('identity_submitted')) {
+                        await setIdentitySubmittedFlag(nome, { source: det.domain || 'facebook', url: det.url || '', title: det.title || '' }).catch(()=>{});
+                      }
+                    }
+                  } finally {
+                    await _identityGateRelease({ owner, nome, didAction, actionKind }).catch(()=>{});
                   }
                 }
               }
