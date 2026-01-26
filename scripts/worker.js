@@ -1574,9 +1574,10 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               await sleep(900);
             }
           } catch {}
-          // Fallback final (force) apenas se ainda existir PID vivo ou processos por userDataDir
+          // Fallback final (force) se não fechou: tentar taskkill por PID e depois por userDataDir.
+          // Importante: não depender só de isPidAlive, pois EPERM pode mascarar processo vivo.
           try {
-            if (pid && isPidAlive(pid)) {
+            if (pid) {
               await withTimeout('auto_banned_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
               try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid }); } catch {}
               await sleep(800);
@@ -1834,7 +1835,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             }
           } catch {}
           try {
-            if (pid && isPidAlive(pid)) {
+            if (pid) {
               await withTimeout('auto_two_factor_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
               try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid }); } catch {}
               await sleep(800);
@@ -2534,7 +2535,17 @@ async function closeProcessTreeByRootPid(pid) {
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
 function isPidAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // Windows/enterprise hardening:
+    // EPERM/EACCES normalmente significa "process exists but we can't signal it".
+    // Tratar como vivo evita pular taskkill e deixar Chrome zumbi aberto.
+    const code = String(e && e.code || '');
+    if (code === 'EPERM' || code === 'EACCES' || code === 'ACCESS_DENIED') return true;
+    return false;
+  }
 }
 
 async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
