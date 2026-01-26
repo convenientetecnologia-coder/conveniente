@@ -1640,8 +1640,8 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           } catch {}
           let closeR = null;
           try { closeR = await withTimeout('auto_banned_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_banned_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
-          // GARANTIA (enterprise HARD): mesmo com controller ativo, forçar taskkill por lastRootPid
-          // antes de aceitar qualquer delete. Isso elimina dependência de WMI/CommandLine e evita janela zumbi.
+          // Enterprise: preferir fechamento graceful; só usar taskkill/PID-kill como fallback
+          // quando ainda existirem processos para o userDataDir (garantia de 110% sem matar à toa).
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
             const pid =
@@ -1649,15 +1649,30 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               (man && Number(man.lastRootPid || 0) || 0) ||
               (pidBefore || 0);
             const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-            if (pid) {
-              await withTimeout('auto_banned_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
-              await sleep(800);
+            let needsKill = false;
+            if (udir && browserHelper.getChromeProfilePidsMeta) {
+              const chk = browserHelper.getChromeProfilePidsMeta(udir);
+              needsKill = !chk || chk.ok === false || ((chk.pids || []).length > 0);
+            } else if (udir && browserHelper.getChromeProfilePids) {
+              const pids = browserHelper.getChromeProfilePids(udir) || [];
+              needsKill = (pids.length > 0);
+            } else {
+              // Sem userDataDir/PID check confiável => fallback conservador (mata) para não deixar órfão.
+              needsKill = true;
             }
-            if (udir) {
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-              await sleep(600);
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+            if (!needsKill) {
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_skipped_no_pids', nome: String(nome||''), rootPid: pid || null }); } catch {}
+            } else {
+              if (pid) {
+                await withTimeout('auto_banned_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+                try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
+                await sleep(800);
+              }
+              if (udir) {
+                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+                await sleep(600);
+                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+              }
             }
           } catch {}
         } else {
@@ -2043,8 +2058,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           } catch {}
           let closeR = null;
           try { closeR = await withTimeout('auto_two_factor_hard_close', hardCloseController(nome, ctrl, { reason: 'auto_two_factor_close', allowKillUserDataDir: true }), 75_000).catch(()=>null); } catch {}
-          // GARANTIA (enterprise HARD): mesmo com controller ativo, forçar taskkill por lastRootPid
-          // antes de aceitar qualquer delete. Evita janela zumbi em 2FA.
+          // Enterprise: preferir fechamento graceful; só usar taskkill/PID-kill como fallback
+          // quando ainda existirem processos para o userDataDir (garantia sem matar à toa).
           try {
             const man = await manifestStore.read(nome).catch(()=>null);
             const pid =
@@ -2052,15 +2067,29 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               (man && Number(man.lastRootPid || 0) || 0) ||
               (pidBefore || 0);
             const udir = man && man.userDataDir ? String(man.userDataDir) : (udirForCheck || '');
-            if (pid) {
-              await withTimeout('auto_two_factor_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
-              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
-              await sleep(800);
+            let needsKill = false;
+            if (udir && browserHelper.getChromeProfilePidsMeta) {
+              const chk = browserHelper.getChromeProfilePidsMeta(udir);
+              needsKill = !chk || chk.ok === false || ((chk.pids || []).length > 0);
+            } else if (udir && browserHelper.getChromeProfilePids) {
+              const pids = browserHelper.getChromeProfilePids(udir) || [];
+              needsKill = (pids.length > 0);
+            } else {
+              needsKill = true;
             }
-            if (udir) {
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-              await sleep(600);
-              try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+            if (!needsKill) {
+              try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_skipped_no_pids', nome: String(nome||''), rootPid: pid || null }); } catch {}
+            } else {
+              if (pid) {
+                await withTimeout('auto_two_factor_taskkill_rootpid_connected', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+                try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid, connected: true }); } catch {}
+                await sleep(800);
+              }
+              if (udir) {
+                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+                await sleep(600);
+                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+              }
             }
           } catch {}
         } else {

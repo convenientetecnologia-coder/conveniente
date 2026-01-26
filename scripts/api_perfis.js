@@ -358,6 +358,34 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // ===== NOVO: login_remediate via API (para stock_provision usar o mesmo motor do login_required) =====
+  app.post('/api/perfis/:nome/login-remediate', async (req, res) => {
+    const nome = req.params.nome;
+    logger.info('POST /api/perfis/:nome/login-remediate chamada', { nome });
+    try {
+      const op = String(req.headers['x-operator'] || '').trim();
+      const operator = op || `admin_login_remediate:${nome}:${Date.now()}`;
+      const options = (req.body && typeof req.body === 'object') ? (req.body.options || req.body) : {};
+      // Timeout alto: fluxo pode levar até ~8min (cookies + login FB + login Msg + cookies)
+      const timeoutMs = Math.max(120_000, Number(options && options.timeoutMs || 0) || (9 * 60 * 1000));
+      const resp = await workerClient.sendWorkerCommand(
+        'login_remediate',
+        { nome, operator, options: options && typeof options === 'object' ? options : {} },
+        { timeoutMs }
+      ).catch(e => {
+        logger.error('Erro ao enviar login_remediate p/ worker', { nome, error: e && e.message }, e);
+        return { ok: false, error: (e && e.message) || String(e) };
+      });
+      if (!resp || resp.ok === false) {
+        return res.json({ ok: false, error: (resp && resp.error) ? String(resp.error) : 'login_remediate_failed', details: resp || null });
+      }
+      return res.json({ ok: true, result: resp });
+    } catch (e) {
+      logger.error('Erro fatal na rota login-remediate', { nome, rota: '/api/perfis/:nome/login-remediate', error: e && e.message }, e);
+      return res.status(500).json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // ===== NOVO: login_remediate via API (cluster-safe) =====
   // Motivação enterprise: evitar "dois workers" (workerClient.js) abrindo Chrome fora do cluster,
   // o que faz o dashboard mostrar active=0 mesmo com navegador aberto.

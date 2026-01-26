@@ -903,27 +903,26 @@ async function execStockProvision(cmd) {
           return r4;
         });
 
-        // 5) configure (inject cookies etc)
-        await runStep('configure', async () => {
-          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
-          if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
+        // 5) Procedimento enterprise unificado:
+        // Em vez de "configure + fechar/reabrir + start_work", usamos o MESMO motor do login_required:
+        // login_remediate = cookies -> login/senha -> detecção -> (sucesso) desired active+virtus on
+        // Isso elimina divergência de comportamento e o ciclo "fechou/reabriu" observado.
+        await runStep('login_remediate', async () => {
+          const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
+            method: 'POST',
+            headers: { 'x-operator': lockOwner },
+            body: {
+              // defaults do worker já são bons; só garantimos pós-sucesso: startAfterSuccess=true
+              totalTimeoutMs: 8 * 60 * 1000,
+              closeAfterSuccess: true,
+              startAfterSuccess: true,
+              reopenClosedForRam: true
+            }
+          });
+          if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'login_remediate_failed');
+          // Se result.ok=false, consideramos falha (o worker já terá feito hold/ban/2fa conforme regra).
+          if (!r5.result || r5.result.ok !== true) throw new Error((r5.result && r5.result.error) ? String(r5.result.error) : 'login_remediate_failed');
           return r5;
-        });
-
-        // 5.5) Procedimento enterprise pós-injeção:
-        // fecha o navegador e reabre em modo trabalho (evita sessão “suja”/popups pós-config)
-        await runStep('deactivate_after_configure', async () => {
-          const r55 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
-          if (!r55 || r55.ok === false) throw new Error((r55 && r55.error) ? String(r55.error) : 'deactivate_after_configure_failed');
-          return r55;
-        });
-        await sleep(1200);
-
-        // 6) start work
-        await runStep('start_work', async () => {
-          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
-          if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'start_work_failed');
-          return r6;
         });
 
         out.ok = true;

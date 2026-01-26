@@ -109,7 +109,31 @@ function tryAcquire({ owner, ttlMs = 9 * 60 * 1000, meta } = {}) {
   const o = String(owner || "").trim();
   if (!o) return { ok: false, error: "missing_owner" };
   const cur = get();
-  if (cur.active) return { ok: false, error: "busy", lock: cur.lock };
+  if (cur.active) {
+    // Enterprise: permitir reentrância por "token" (owner string) entre processos.
+    // Ex.: dashboard (stock_provision:<batchId>) segura o lock e o worker (login_remediate) deve poder rodar
+    // sob o MESMO owner sem "busy", evitando fechar/reabrir e divergência de fluxos.
+    if (ownerMatchesOperator(cur.lock, o)) {
+      // Opcional: estender TTL se solicitado (evita expirar no meio do pipeline).
+      try {
+        const wantTtl = Math.max(10_000, Number(ttlMs) || 0);
+        const wantUntil = now() + wantTtl;
+        const curUntil = Number(cur.lock && cur.lock.untilMs || 0) || 0;
+        if (wantUntil > curUntil) {
+          const next = { ...(cur.lock || {}) };
+          next.untilMs = wantUntil;
+          // hard safety (não permite TTL infinito)
+          if (next.sinceMs && next.untilMs && (next.untilMs - next.sinceMs) > HARD_MAX_TTL_MS) {
+            next.untilMs = next.sinceMs + HARD_MAX_TTL_MS;
+          }
+          _writeJsonAtomic(LOCK_PATH, next);
+          return { ok: true, lock: next, reentrant: true, extended: true };
+        }
+      } catch {}
+      return { ok: true, lock: cur.lock, reentrant: true, extended: false };
+    }
+    return { ok: false, error: "busy", lock: cur.lock };
+  }
   const t = Math.max(10_000, Number(ttlMs) || 0);
   const lock = {
     owner: o,
