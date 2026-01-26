@@ -922,7 +922,8 @@ const IDENTITY_CFG = {
 const IDENTITY_GATE = {
   cooldownMinMs: 5 * 60 * 1000,
   cooldownMaxMs: 10 * 60 * 1000,
-  leaseMs: 90 * 1000 // lease curto para evitar deadlock se o worker cair no meio
+  // O botão "Carregar" pode levar 20–120s para habilitar; manter lease maior evita expirar durante a espera.
+  leaseMs: 4 * 60 * 1000 // lease curto o suficiente p/ evitar deadlock, longo o suficiente p/ completar a etapa
 };
 
 function _randIdentityCooldownMs() {
@@ -6941,10 +6942,29 @@ async function nurseTick() {
                     const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
                     const pg = pages && pages[0];
                     if (pg) {
-                      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 10_000, tries: 1 }).catch(()=>null);
+                      // Espera longa: o botão "Carregar" pode demorar 20–120s para liberar.
+                      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 150_000, tries: 2 }).catch(()=>null);
                       if (assist && assist.ok) {
                         didAction = true;
                         actionKind = String(assist.clicked || 'clicked');
+                        try {
+                          let u = '';
+                          try { u = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+                          provisionAudit.append({ ts: Date.now(), event: 'identity_assist_clicked', nome: String(nome||''), clicked: String(actionKind||''), url: String(u||'').slice(0, 220) });
+                        } catch {}
+                        await sleep(1500);
+                        // Segundo passe: muitas vezes após "Carregar" aparece "Concluir" ou outro botão.
+                        const assist2 = await browserHelper.identityAssistStep(pg, { maxWaitMs: 90_000, tries: 2 }).catch(()=>null);
+                        if (assist2 && assist2.ok) {
+                          didAction = true;
+                          actionKind = `${actionKind},${String(assist2.clicked || 'clicked')}`;
+                          try {
+                            let u2 = '';
+                            try { u2 = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+                            provisionAudit.append({ ts: Date.now(), event: 'identity_assist_clicked', nome: String(nome||''), clicked: String(assist2.clicked||''), url: String(u2||'').slice(0, 220) });
+                          } catch {}
+                          await sleep(1200);
+                        }
                       }
                       // Se o humano concluiu/uploadou e agora virou "identity_submitted", promove o estado automaticamente.
                       const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
