@@ -1590,12 +1590,26 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
               const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
+                // GARANTIA 110%: se temos lastRootPid no manifest, matar a árvore inteira por PID primeiro.
+                // Isso cobre o caso em que WMI/CommandLine não está acessível e o kill por userDataDir falha.
+                try {
+                  const man = await manifestStore.read(nome).catch(()=>null);
+                  const pid = man && Number(man.lastRootPid || 0) || 0;
+                  if (pid && isPidAlive(pid)) {
+                    await withTimeout('auto_banned_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+                    provisionAudit.append({ ts: Date.now(), event: 'auto_banned_taskkill_rootpid', nome: String(nome||''), rootPid: pid });
+                    await sleep(800);
+                  }
+                } catch {}
                 // CRÍTICO (anti-orphan): matar processos do Chrome ligados a esse userDataDir,
                 // mesmo se não havia controller conectado (caso de browser órfão).
                 try {
                   browserHelper.killChromeProfileProcesses(udir);
                   provisionAudit.append({ ts: Date.now(), event: 'auto_banned_kill_by_userDataDir', nome: String(nome||''), userDataDir: String(udir).slice(0, 260) });
                 } catch {}
+                // Retry curto: alguns Chromes ficam “meio mortos” após o 1º taskkill.
+                try { await sleep(600); } catch {}
+                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
               const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
@@ -1751,12 +1765,24 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
               const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
+                // GARANTIA 110%: se temos lastRootPid no manifest, matar a árvore inteira por PID primeiro.
+                try {
+                  const man = await manifestStore.read(nome).catch(()=>null);
+                  const pid = man && Number(man.lastRootPid || 0) || 0;
+                  if (pid && isPidAlive(pid)) {
+                    await withTimeout('auto_two_factor_taskkill_rootpid', killProcessTreeByRootPid(pid), 12_000).catch(()=>null);
+                    provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_taskkill_rootpid', nome: String(nome||''), rootPid: pid });
+                    await sleep(800);
+                  }
+                } catch {}
                 // CRÍTICO (anti-orphan): matar processos do Chrome ligados a esse userDataDir,
                 // mesmo se não havia controller conectado (caso de browser órfão).
                 try {
                   browserHelper.killChromeProfileProcesses(udir);
                   provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_kill_by_userDataDir', nome: String(nome||''), userDataDir: String(udir).slice(0, 260) });
                 } catch {}
+                try { await sleep(600); } catch {}
+                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
               const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
@@ -2811,6 +2837,15 @@ async function activateOnce(nome, source = '', operator = '') {
           robeMeta[nome] = robeMeta[nome] || {};
           robeMeta[nome].rootPid = proc.pid;
           logger.info('[WORKER][activateOnce] rootPid setado', { nome, rootPid: proc.pid });
+          // Persistência enterprise: garante kill por PID mesmo se o controller virar órfão depois.
+          try {
+            await manifestStore.update(nome, (man) => {
+              man = man || {};
+              man.lastRootPid = proc.pid;
+              man.lastRootPidAt = Date.now();
+              return man;
+            });
+          } catch {}
         } else {
           logger.warn('[WORKER][activateOnce] rootPid NÃO setado', {
             nome,
@@ -2825,6 +2860,14 @@ async function activateOnce(nome, source = '', operator = '') {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].rootPid = proc2.pid;
                 logger.info('[WORKER][activateOnce] rootPid recapturado (delayed)', { nome, rootPid: proc2.pid });
+                try {
+                  await manifestStore.update(nome, (man) => {
+                    man = man || {};
+                    man.lastRootPid = proc2.pid;
+                    man.lastRootPidAt = Date.now();
+                    return man;
+                  });
+                } catch {}
               }
             } catch {}
           }, 2000);
