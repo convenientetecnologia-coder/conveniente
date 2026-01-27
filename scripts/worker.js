@@ -442,6 +442,101 @@ function _shouldEmitUaFp(nome, kind, windowMs) {
   }
 }
 
+// =========================
+// UA+FP presets -> CT (lista canônica 1..N, ex.: 89)
+// =========================
+const UA_PRESETS_PATH = path.join(__dirname, '..', 'dados', 'ua_presets.json');
+let _uafpPresetsLastHash = '';
+let _uafpPresetsLastSentAt = 0;
+
+function _readUaPresetsSlim() {
+  try {
+    if (!fs.existsSync(UA_PRESETS_PATH)) return { ok: false, error: 'ua_presets_not_found' };
+    const raw = fs.readFileSync(UA_PRESETS_PATH, 'utf8');
+    const arr = JSON.parse(String(raw || '[]'));
+    if (!Array.isArray(arr)) return { ok: false, error: 'ua_presets_invalid' };
+    const slim = arr.map(p => ({
+      id: p && p.id ? String(p.id) : '',
+      label: p && p.label ? String(p.label) : '',
+      uaString: p && p.uaString ? String(p.uaString) : '',
+      viewport: (p && p.viewport && typeof p.viewport === 'object') ? { width: Number(p.viewport.width||0)||0, height: Number(p.viewport.height||0)||0 } : null,
+      dpr: (p && p.dpr !== undefined && p.dpr !== null) ? Number(p.dpr) : null,
+      hardwareConcurrency: (p && p.hardwareConcurrency !== undefined && p.hardwareConcurrency !== null) ? Number(p.hardwareConcurrency) : null
+    })).filter(p => p.id);
+    slim.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    return { ok: true, presets: slim };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+function _hashJson(obj) {
+  try {
+    const s = JSON.stringify(obj);
+    return crypto.createHash('sha1').update(s).digest('hex');
+  } catch {
+    return '';
+  }
+}
+
+async function emitUaFpPresetsToCT({ force = false, reason = 'periodic' } = {}) {
+  const cfg = readCtConfig();
+  let base = String(cfg && cfg.ctBaseUrl || '').trim();
+  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  if (!base) {
+    try {
+      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
+      base = String(notifierBaseFromEndpoints() || '').trim();
+    } catch {}
+  }
+  base = base.replace(/\/+$/, '');
+  const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
+  const hostId = readHostIdSync();
+  if (!base || !secret || !hostId) return { ok: false, skipped: true, reason: 'ct_config_missing' };
+
+  const rr = _readUaPresetsSlim();
+  if (!rr.ok) return { ok: false, skipped: true, reason: rr.error || 'ua_presets_read_fail' };
+  const presets = rr.presets || [];
+  if (!presets.length) return { ok: false, skipped: true, reason: 'ua_presets_empty' };
+
+  const hash = _hashJson(presets);
+  const now = Date.now();
+  const minIntervalMs = 6 * 60 * 60 * 1000; // 6h
+  if (!force) {
+    if (hash && _uafpPresetsLastHash && hash === _uafpPresetsLastHash && (now - _uafpPresetsLastSentAt) < minIntervalMs) {
+      return { ok: true, skipped: true, reason: 'unchanged' };
+    }
+    if (_uafpPresetsLastSentAt > 0 && (now - _uafpPresetsLastSentAt) < (60 * 1000)) {
+      return { ok: true, skipped: true, reason: 'cooldown_60s' };
+    }
+  }
+
+  try {
+    const Aborter = global.AbortController || require('node-abort-controller');
+    const ac = new Aborter();
+    const t = setTimeout(() => { try { ac.abort(); } catch {} }, 20000);
+    const resp = await fetch(`${base}/api/stock/uafp_presets_secret`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      body: JSON.stringify({ hostId, sourceHash: hash || null, reason: String(reason||'').slice(0, 60), presets }),
+      signal: ac.signal
+    });
+    clearTimeout(t);
+    const txt = await resp.text().catch(()=> '');
+    let j = null;
+    try { j = JSON.parse(txt); } catch { j = null; }
+    if (!j || j.ok !== true) {
+      const err = (j && j.error) ? String(j.error) : `http_${resp.status}`;
+      return { ok: false, error: err, details: { httpStatus: resp.status, bodySnippet: String(txt||'').slice(0, 200) } };
+    }
+    _uafpPresetsLastHash = hash || _uafpPresetsLastHash;
+    _uafpPresetsLastSentAt = now;
+    return { ok: true, upserted: j.upserted || null };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } = {}) {
   const cfg = readCtConfig();
   let base = String(cfg && cfg.ctBaseUrl || '').trim();
@@ -10253,6 +10348,10 @@ setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
 setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickMs);
 setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
+
+// UA+FP presets sync -> CT (mantém lista completa 1..N mesmo quando uso=0)
+setTimeout(() => { emitUaFpPresetsToCT({ force: true, reason: 'boot' }).catch(()=>{}); }, 15000);
+setInterval(() => { emitUaFpPresetsToCT({ force: false, reason: 'interval' }).catch(()=>{}); }, 6 * 60 * 60 * 1000);
 
 // Inicializa reloadManager após todos os sistemas estarem prontos
 reloadManager.startReloadManager(controllers, robeMeta);
