@@ -3251,20 +3251,34 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
         const scope = document.querySelector('div[role="dialog"]') || document;
         // FB às vezes usa "role=none" para botões estilizados; então buscamos por texto também.
         const all = Array.from(scope.querySelectorAll('*')).slice(0, 1600);
-        const priority = [
-          // Fluxo de identidade (selfie/vídeo) — passos típicos:
-          // 1) Continuar/Avançar -> 2) Iniciar selfie de vídeo -> 3) Carregar -> 4) Confirmar/Concluir/Finalizar
-          // Ordem abaixo prioriza passos finais (para não “voltar” no fluxo quando já existe Carregar/Concluir).
-          { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
-          { key: 'confirmar', words: ['confirmar', 'confirm'] },
-          { key: 'enviar', words: ['enviar', 'submit'] },
-          { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vídeo', 'iniciar selfie', 'começar', 'comecar', 'start'] },
-          // "Carregar" pode aparecer desabilitado enquanto ainda existe "Continuar/Avançar" clicável.
-          // Só devemos “esperar ficar azul” se nada anterior estiver clicável.
-          { key: 'carregar', words: ['carregar', 'upload'] },
-          { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
-          { key: 'continuar', words: ['continuar', 'continue'] },
-        ];
+
+        // Detecção de estágio (evita clicar "Confirmar" quando o primeiro passo ainda é "Continuar/Iniciar").
+        const hasUploadStage =
+          bodyTxt.includes('carregar') ||
+          bodyTxt.includes('upload') ||
+          bodyTxt.includes('carregamento desse video') ||
+          bodyTxt.includes('selfie de video finalizada') ||
+          bodyTxt.includes('selfie de vídeo finalizada');
+
+        const priority = hasUploadStage
+          ? [
+              { key: 'carregar', words: ['carregar', 'upload'] },
+              { key: 'enviar', words: ['enviar', 'submit'] },
+              { key: 'confirmar', words: ['confirmar', 'confirm'] },
+              { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
+              { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+              { key: 'continuar', words: ['continuar', 'continue'] },
+            ]
+          : [
+              // Estágio inicial: normalmente é Continuar/Avançar -> Iniciar selfie -> (só então) Carregar -> Confirmar/Concluir
+              { key: 'continuar', words: ['continuar', 'continue'] },
+              { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+              { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vídeo', 'iniciar selfie', 'começar', 'comecar', 'start'] },
+              { key: 'carregar', words: ['carregar', 'upload'] },
+              { key: 'confirmar', words: ['confirmar', 'confirm'] },
+              { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
+              { key: 'enviar', words: ['enviar', 'submit'] },
+            ];
         const isDisabled = (el) => {
           try {
             return (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
@@ -3278,6 +3292,9 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             if (!cs) return false;
             if (cs.display === 'none' || cs.visibility === 'hidden') return false;
             if (cs.pointerEvents === 'none') return false;
+            // Para div/span, exigir um indicativo de "click" para evitar falso positivo em containers.
+            const tag = String(el.tagName || '').toLowerCase();
+            if ((tag === 'div' || tag === 'span') && String(cs.cursor || '') !== 'pointer') return false;
             return true;
           } catch { return false; }
         };
@@ -3288,8 +3305,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             if (!el) return null;
             // Sobe para containers que geralmente recebem o click (sem depender de classes do FB).
             return (
-              el.closest('button,[role="button"],a[role="button"],input[type="submit"]') ||
-              el.closest('a,div,span') ||
+              el.closest('button,[role="button"],a,input[type="submit"],[tabindex]') ||
               el
             );
           } catch { return el; }

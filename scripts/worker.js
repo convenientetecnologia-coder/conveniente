@@ -1655,9 +1655,35 @@ async function _identityGateTryAcquire({ owner = '', nome = '' } = {}) {
       const curLease = Number(g.leaseUntil || 0) || 0;
       const curCooldown = Number(g.cooldownUntil || 0) || 0;
       if (curLease && curLease > now) {
-        denied = { why: 'leased', leaseUntil: curLease, owner: String(g.owner || '') };
-        snap = { ...g };
-        return d;
+        // Hardening: lease órfão após restart/crash.
+        // Se o owner for "pid:<n>" e o processo não existir mais, limpa o lease imediatamente.
+        try {
+          const o = String(g.owner || '').trim();
+          const m = /^pid:(\d+)$/.exec(o);
+          if (m && m[1]) {
+            const pid = Number(m[1]) || 0;
+            if (pid && pid !== process.pid) {
+              let alive = true;
+              try { process.kill(pid, 0); alive = true; }
+              catch (e) {
+                const code = (e && e.code) ? String(e.code) : '';
+                // ESRCH => não existe; EPERM => existe mas sem permissão (assume vivo)
+                if (code === 'ESRCH') alive = false;
+              }
+              if (!alive) {
+                g.leaseUntil = 0;
+                g.leaseAt = 0;
+                g.leaseProfile = '';
+              }
+            }
+          }
+        } catch {}
+        const curLease2 = Number(g.leaseUntil || 0) || 0;
+        if (curLease2 && curLease2 > now) {
+          denied = { why: 'leased', leaseUntil: curLease2, owner: String(g.owner || '') };
+          snap = { ...g };
+          return d;
+        }
       }
       if (curCooldown && curCooldown > now) {
         denied = { why: 'cooldown', cooldownUntil: curCooldown, lastActionAt: Number(g.lastActionAt || 0) || 0, lastActionProfile: String(g.lastActionProfile || '') };
