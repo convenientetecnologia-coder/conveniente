@@ -3206,7 +3206,9 @@ async function detectLoginRequired(page) {
       evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
     };
   } catch {}
-  return { loginRequired: false };
+  // Fail-safe enterprise: se o probe falhar (contexto destruído/aba fechando),
+  // não podemos concluir "liberado". Mantemos como loginRequired=true para evitar ações erradas.
+  return { loginRequired: true, reason: 'probe_failed' };
 }
 
 /**
@@ -3235,17 +3237,29 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
     try {
       return await page.evaluate(() => {
         function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+        const href = norm(String(location && location.href ? location.href : ''));
+        // Captcha/persona (aerr=1621002) é um fluxo humano; não deve receber cliques de "identidade".
+        if (href.includes('aerr=1621002')) return { ok: false, error: 'captcha_persona_context' };
         const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
-        const looksIdentity =
-          bodyTxt.includes('confirme sua identidade') ||
-          bodyTxt.includes('confirm your identity') ||
-          bodyTxt.includes('selfie') ||
-          bodyTxt.includes('identidade') ||
-          bodyTxt.includes('checkpoint') ||
-          bodyTxt.includes('pessoa real') ||
+        // Só considerar "fluxo de identidade" quando houver sinais claros do fluxo de selfie/vídeo
+        // (evita clicar em telas de checkpoint/captcha que também falam "pessoa real").
+        const hasSelfieFlowSignal =
+          bodyTxt.includes('iniciar selfie') ||
+          bodyTxt.includes('selfie de video') ||
+          bodyTxt.includes('selfie de vídeo') ||
           bodyTxt.includes('carregamento desse video') ||
+          bodyTxt.includes('carregar') ||
+          bodyTxt.includes('upload') ||
           bodyTxt.includes('selfie de video finalizada') ||
-          bodyTxt.includes('confirmacao de identidade');
+          bodyTxt.includes('selfie de vídeo finalizada');
+        const looksIdentity =
+          hasSelfieFlowSignal &&
+          (bodyTxt.includes('confirme sua identidade') ||
+            bodyTxt.includes('confirm your identity') ||
+            bodyTxt.includes('identidade') ||
+            bodyTxt.includes('confirmacao de identidade') ||
+            bodyTxt.includes('confirmacao') ||
+            bodyTxt.includes('confirm'));
         if (!looksIdentity) return { ok: false, error: 'not_identity_context' };
 
         const scope = document.querySelector('div[role="dialog"]') || document;

@@ -1467,13 +1467,13 @@ async function appealMonitorCheckNow(nome, ctrl) {
 
     // Detecta estado após refresh. Se estiver em "appeal_submitted", faz uma navegação determinística (home)
     // para evitar falso-positivo por DOM/aba antiga.
-    let lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    let lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
     try {
       const rr0 = String(lr && lr.reason || '').toLowerCase();
       if (lr && lr.loginRequired === true && rr0.includes('appeal_submitted')) {
         await reloadPageEnterprise(pg, { nome, tag: 'appeal_monitor_home_check', timeoutMs: 60_000 }).catch(()=>null);
         await sleep(900);
-        lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+        lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
       }
     } catch {}
 
@@ -1838,6 +1838,16 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
           continue;
         }
 
+        // Falhas transitórias típicas (navegação/iframe): recarrega e tenta mais um step dentro do budget.
+        try {
+          const emsg = String((a && a.error) ? a.error : '').toLowerCase();
+          if (emsg.includes('detached frame') || emsg.includes('execution context was destroyed') || emsg.includes('context was destroyed')) {
+            await reloadPageEnterprise(pg, { nome, tag: 'identity_flow_transient', timeoutMs: 45_000 }).catch(()=>null);
+            await sleep(700);
+            continue;
+          }
+        } catch {}
+
         // Se não clicou, não “martelar”: paramos para reclassificar/encaminhar.
         break;
       }
@@ -1849,7 +1859,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
       }
 
       // Reclassificar e encaminhar para o pipeline certo.
-      const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+      const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
       if (!lr2 || lr2.loginRequired !== true) {
         // Liberou: limpa flags de identidade e retoma (se desejado).
         try { await clearIdentityFlags(nome); } catch {}
@@ -1867,7 +1877,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
       }
 
       const rr2 = String(lr2.reason || '').toLowerCase();
-      if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
+      if (rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
         await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: String(lr2.domain||'') || 'facebook', url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
         try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'captcha_checkpoint', reason: rr2.slice(0,160) }); } catch {}
         return { ok: true, flowId: id, result: 'captcha_checkpoint', didAction, actions: actionKinds };
@@ -2086,15 +2096,6 @@ async function identityMonitorCheckNow(nome, ctrl) {
     // Refresh enterprise (com fallback + log explícito)
     await reloadPageEnterprise(pg, { nome, tag: 'identity_monitor', timeoutMs: 45_000 }).catch(()=>null);
     await sleep(900);
-
-    // Assistente safe: o botão "Carregar" pode demorar 10–120s para habilitar.
-    try {
-      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 150_000, tries: 2 }).catch(()=>null);
-      if (assist && assist.ok) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'identity_assist_clicked', nome: String(nome||''), clicked: String(assist.clicked||''), attempt: Number(assist.attempt||0)||0 }); } catch {}
-        await sleep(900);
-      }
-    } catch {}
 
     // Detecta estado após refresh. Se ainda disser "identity_submitted", valida também via navegação determinística
     // para evitar ficar preso em DOM/aba antiga.
@@ -4267,7 +4268,8 @@ async function activateOnce(nome, source = '', operator = '') {
                 maxPagesWhenAllow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
-                  if (c && c.humanControl === true) return Number.MAX_SAFE_INTEGER;
+                  // Ultra enterprise: em modo humano/captcha, manter APENAS 1 aba (economia + previsibilidade).
+                  if (c && c.humanControl === true) return 1;
                   return rm.emExecucao === true ? 3 : 10;
                 },
                 onNumPages: (n) => {
@@ -5302,6 +5304,18 @@ try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 const ctrl = controllers.get(nome);
 if (ctrl) { ctrl.humanControl = false; ctrl.configurando = false; }
 try {
+  provisionAudit.append({
+    ts: Date.now(),
+    event: 'browser_disconnected',
+    nome: String(nome || ''),
+    working: !!(ctrl && ctrl.trabalhando),
+    humanControl: !!(ctrl && ctrl.humanControl),
+    configurando: !!(ctrl && ctrl.configurando),
+    emExecucao: !!(robeMeta[nome] && robeMeta[nome].emExecucao),
+    freeMB: getAvailableMB()
+  });
+} catch {}
+try {
   if (ctrl && ctrl.virtus && typeof ctrl.virtus.stop === 'function') {
     await ctrl.virtus.stop().catch(()=>{});
   }
@@ -5685,11 +5699,18 @@ const handlers = {
   logger.info('[HANDLER] deactivate chamada', { nome, reason, policy });
   try {
     provisionAudit.append({
+      ts: Date.now(),
       event: 'worker_deactivate_handler_called',
       nome: String(nome || ''),
       reason: String(reason || ''),
       policy: policy == null ? null : String(policy),
-      freeMB: getAvailableMB()
+      freeMB: getAvailableMB(),
+      ctrlPresent: !!controllers.get(nome),
+      working: !!(controllers.get(nome) && controllers.get(nome).trabalhando),
+      humanControl: !!(controllers.get(nome) && controllers.get(nome).humanControl),
+      configurando: !!(controllers.get(nome) && controllers.get(nome).configurando),
+      emExecucao: !!(robeMeta[nome] && robeMeta[nome].emExecucao),
+      closingReason: (robeMeta[nome] && robeMeta[nome].closingReason) ? String(robeMeta[nome].closingReason).slice(0, 120) : null
     });
   } catch {}
   const preserve = (policy === 'preserveDesired');
