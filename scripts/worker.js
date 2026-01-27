@@ -421,6 +421,100 @@ async function archiveBanWithEvidenceToCT({ profileName, stockAccountId = null, 
   }
 }
 
+// =========================
+// UA+FP telemetry -> CT (anti falso-positivo)
+// =========================
+function _shouldEmitUaFp(nome, kind, windowMs) {
+  try {
+    if (!nome) return false;
+    const k = String(kind || '').trim().toLowerCase();
+    if (!k) return false;
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome]._uafpEmit = robeMeta[nome]._uafpEmit || {};
+    const now = Date.now();
+    const last = Number(robeMeta[nome]._uafpEmit[k] || 0) || 0;
+    const w = Number(windowMs || 0) || 0;
+    if (last > 0 && w > 0 && (now - last) < w) return false;
+    robeMeta[nome]._uafpEmit[k] = now;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } = {}) {
+  const cfg = readCtConfig();
+  let base = String(cfg && cfg.ctBaseUrl || '').trim();
+  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  if (!base) {
+    try {
+      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
+      base = String(notifierBaseFromEndpoints() || '').trim();
+    } catch {}
+  }
+  base = base.replace(/\/+$/, '');
+  const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
+  const hostId = readHostIdSync();
+  if (!base || !secret || !hostId || !nome) return { ok: false, error: 'ct_config_missing' };
+
+  // Throttle enterprise: evita spam de eventos repetidos do mesmo perfil
+  const kind = String(eventKind || '').trim().toLowerCase();
+  const windowMs =
+    kind.includes('banned') ? (24 * 60 * 60 * 1000) :
+    kind.includes('two') ? (24 * 60 * 60 * 1000) :
+    kind.includes('identity') ? (6 * 60 * 60 * 1000) :
+    kind.includes('captcha') ? (6 * 60 * 60 * 1000) :
+    (6 * 60 * 60 * 1000);
+  if (!_shouldEmitUaFp(nome, kind, windowMs)) return { ok: true, skipped: true, reason: 'throttled' };
+
+  let stockAccountId = null;
+  let uaPresetId = '';
+  try {
+    const man = await manifestStore.read(nome).catch(()=>null);
+    if (man && (man.stockAccountId || man.stock_account_id)) stockAccountId = Number(man.stockAccountId || man.stock_account_id) || null;
+    if (man && man.uaPresetId) uaPresetId = String(man.uaPresetId || '').trim();
+  } catch {}
+  // Fallback: overlay cache (quando ainda não persistiu no manifest)
+  try {
+    if (!stockAccountId) {
+      const cached = robeMeta[nome] && robeMeta[nome].overlayCredCache;
+      if (cached && cached.stockAccountId) stockAccountId = Number(cached.stockAccountId) || null;
+    }
+  } catch {}
+
+  try {
+    const Aborter = global.AbortController || require('node-abort-controller');
+    const ac = new Aborter();
+    const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
+    const resp = await fetch(`${base}/api/stock/uafp_event_secret`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      body: JSON.stringify({
+        hostId,
+        profileName: String(nome || '').trim(),
+        stockAccountId: stockAccountId || null,
+        uaPresetId: uaPresetId || null,
+        eventKind: String(eventKind || '').trim(),
+        url: String(url || '').trim(),
+        title: String(title || '').trim()
+      }),
+      signal: ac.signal
+    });
+    clearTimeout(t);
+    const txt = await resp.text().catch(()=> '');
+    let j = null;
+    try { j = JSON.parse(txt); } catch { j = null; }
+    if (!j || j.ok !== true) {
+      const bodySnippet = String(txt || '').slice(0, 220);
+      const err = (j && j.error) ? String(j.error) : `http_${resp.status}`;
+      return { ok: false, error: err, details: { httpStatus: resp.status, base, bodySnippet } };
+    }
+    return { ok: true, sent: true, eventKey: j.eventKey || null, created: j.created, updated: j.updated };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
   // Guardrail enterprise: identidade (selfie/vídeo) não deve virar "loginRequired" genérico.
   // Ela tem semântica própria (humano + monitor 1h quando submetido).
@@ -553,6 +647,9 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
     delete robeMeta[nome].loginRemediateFailed;
     delete robeMeta[nome].loginRemediateFailedReason;
   } catch {}
+
+  // UA+FP telemetry (captcha/checkpoint)
+  try { await emitUaFpEventToCT(nome, { eventKind: 'captcha', url, title }); } catch {}
 
   // Captcha/Checkpoint: por ordem do usuário, invocar humano automaticamente.
   try {
@@ -2172,6 +2269,9 @@ async function setIdentityRequiredFlag(nome, { source = '', url = '', title = ''
     delete robeMeta[nome].loginReason;
   } catch {}
 
+  // UA+FP telemetry (identity)
+  try { await emitUaFpEventToCT(nome, { eventKind: 'identity', url, title }); } catch {}
+
   // Regra enterprise: identidade NÃO deve virar "humano invocado" automaticamente.
   // Mantém Virtus OFF para não postar/robe enquanto há identidade, mas deixa o navegador livre.
   try {
@@ -2476,6 +2576,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         }
       } catch {}
 
+      // UA+FP telemetry (banned/disabled)
+      try { await emitUaFpEventToCT(nome, { eventKind: 'banned', url, title: String(snippet || '').slice(0, 180) }); } catch {}
+
       // Evidência local (para retry se CT estiver fora)
       let evidencePath = '';
       try {
@@ -2732,6 +2835,9 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           } catch {}
         }
       } catch {}
+
+      // UA+FP telemetry (2FA)
+      try { await emitUaFpEventToCT(nome, { eventKind: 'two_factor', url, title: String(snippet || '').slice(0, 180) }); } catch {}
 
       // Evidência local (para retry se CT estiver fora)
       let evidencePath = '';

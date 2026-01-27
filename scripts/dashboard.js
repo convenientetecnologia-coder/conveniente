@@ -1295,6 +1295,8 @@ async function execStockExportProfiles(cmd) {
           label: String(p.label || '').trim() || null,
           active: !!(p.active),
           working: !!(p.trabalhando),
+          uaPresetId: null,
+          fp_summary_json: null,
           cookies: null,
           cookie_fp: null
         };
@@ -1306,6 +1308,20 @@ async function execStockExportProfiles(cmd) {
           const manifest = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/manifest`);
           if (manifest && manifest.manifest && manifest.manifest.cookies) {
             const cookiesArr = Array.isArray(manifest.manifest.cookies) ? manifest.manifest.cookies : [];
+            try {
+              const uaPresetId = manifest && manifest.manifest && manifest.manifest.uaPresetId ? String(manifest.manifest.uaPresetId).trim() : '';
+              if (uaPresetId) result.uaPresetId = uaPresetId;
+              const fp = (manifest && manifest.manifest && manifest.manifest.fp && typeof manifest.manifest.fp === 'object') ? manifest.manifest.fp : null;
+              const uaString = manifest && manifest.manifest && manifest.manifest.uaString ? String(manifest.manifest.uaString) : '';
+              // fp_summary_json é usado no CT para drilldown humano (sem poluir a tabela principal)
+              const fpSummary = {
+                viewport: fp && fp.viewport ? fp.viewport : null,
+                dpr: fp && (fp.dpr !== undefined) ? fp.dpr : null,
+                hardwareConcurrency: fp && (fp.hardwareConcurrency !== undefined) ? fp.hardwareConcurrency : null,
+                uaString: uaString ? uaString.slice(0, 260) : null
+              };
+              result.fp_summary_json = JSON.stringify(fpSummary);
+            } catch {}
             // Calcula fingerprint (sempre, se possível)
             if (cookiesArr.length) {
               try {
