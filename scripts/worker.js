@@ -9645,6 +9645,11 @@ async function nurseTick() {
         if (ctrl && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true) && ctrl.browser && typeof ctrl.browser.pages === 'function') {
           robeMeta[nome] = robeMeta[nome] || {};
           const nowp = Date.now();
+          const cd = Number(robeMeta[nome].pinCooldownUntil || 0) || 0;
+          if (cd && cd > nowp) {
+            // Anti-loop: se já tentamos recentemente, não mexer no modal (evita “piscar” infinito)
+            // (o login_remediate/configure também tenta em momentos próprios).
+          } else {
           const lastScan = Number(robeMeta[nome].lastPinScanAt || 0) || 0;
           if (!lastScan || (nowp - lastScan) > 8000) {
             robeMeta[nome].lastPinScanAt = nowp;
@@ -9672,25 +9677,13 @@ async function nurseTick() {
 
             if (firstMatch) {
               try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${firstMatch.det.kind||''}`); } catch {}
-              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 6 }).catch(()=>null);
+              // Anti-loop: ao ver PIN_INPUT, não usar GPT (pode clicar em X/voltar e ficar “piscando”).
+              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 2 }).catch(()=>null);
+              // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
+              robeMeta[nome].pinCooldownUntil = Date.now() + 45_000;
               const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
               if (still && still.present) {
-                // fallback GPT (central) para sugerir clique seguro dentro do modal (selectorHints)
-                try {
-                  if (browserHelper && typeof browserHelper.gptRemediateFbUi === 'function') {
-                    await browserHelper.gptRemediateFbUi(firstMatch.pg, nome, { reason: 'messenger_pin_modal', stage: 'nurse_pin_try_1' }).catch(()=>null);
-                    await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN][postgpt]', maxTries: 4 }).catch(()=>null);
-                  }
-                } catch {}
-                const still2 = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
-                if (still2 && still2.present) {
-                  try {
-                    const fsSync2 = require('fs');
-                    const path2 = require('path');
-                    const p = path2.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
-                    fsSync2.appendFileSync(p, JSON.stringify({ ts: Date.now(), src:'worker.js', perfil:nome, event:'gpt_failed_or_insufficient', kind: still2.kind||null }) + '\n');
-                  } catch {}
-                }
+                // PIN_INPUT: não chamar GPT. Apenas marcar flag para humano ver, mas sem loop.
                 await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
                 try {
                   const fsSync2 = require('fs');
@@ -9711,6 +9704,7 @@ async function nurseTick() {
               // se não há PIN em nenhuma aba, limpa flag (se existir)
               await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
             }
+          }
           }
         }
       } catch {}

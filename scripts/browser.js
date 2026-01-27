@@ -1501,66 +1501,41 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function tryEnterPin(pinValue = DEFAULT_PIN) {
+    // Regra ultra enterprise (anti-loop): NO MODAL DE PIN, NÃO clicar em X/voltar/fechar.
+    // Só focar o input e digitar com cadência humana (digit-by-digit), depois Enter.
     try {
-      // Encontra o input de PIN e digita o valor
-      const entered = await page.evaluate((pin) => {
-        const pinInput =
-          document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
-          document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
-          Array.from(document.querySelectorAll('input[type="text"][maxlength="6"]')).find(el => {
-            const al = (el.getAttribute('aria-label') || '').toLowerCase();
-            return al.includes('pin');
-          }) ||
-          null;
-        if (!pinInput) return { ok: false, error: 'pin_input_not_found' };
-        
-        // Foca no input
-        pinInput.focus();
-        // Limpa o input (caso tenha algo)
-        pinInput.value = '';
-        // Digita o PIN
-        pinInput.value = pin;
-        // Dispara eventos de input para garantir que o React detecte
-        const inputEvent = new Event('input', { bubbles: true });
-        pinInput.dispatchEvent(inputEvent);
-        const changeEvent = new Event('change', { bubbles: true });
-        pinInput.dispatchEvent(changeEvent);
-        
-        return { ok: true, pinLength: pin.length };
-      }, pinValue);
-
-      if (entered && entered.ok) {
-        await sleep(300);
-        // Tenta pressionar Enter ou encontrar botão de confirmação
-        const confirmed = await page.evaluate(() => {
-          const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-          // Procura botão "Confirmar", "Avançar", "Continuar", etc.
-          const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
-          for (const b of buttons) {
-            const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
-            if (disabled) continue;
-            const t = norm(b.innerText || b.textContent || '');
-            const al = norm(b.getAttribute('aria-label') || '');
-            if (t.includes('confirmar') || t.includes('avancar') || t.includes('continuar') || 
-                al.includes('confirmar') || al.includes('avancar') || al.includes('continuar')) {
-              b.click();
-              return true;
-            }
-          }
-          return false;
-        });
-        
-        if (!confirmed) {
-          // Se não encontrou botão, tenta Enter
-          await page.keyboard.press('Enter').catch(()=>{});
-          await sleep(500);
-        } else {
-          await sleep(800);
-        }
-        
-        return { ok: true, entered: true, confirmed: !!confirmed };
+      const sel = [
+        'input[aria-label="PIN"][maxlength="6"]',
+        'input#mw-numeric-code-input-prevent-composer-focus-steal',
+        'input[type="text"][maxlength="6"]',
+        'input[type="tel"][maxlength="6"]'
+      ];
+      let h = null;
+      for (const s of sel) {
+        try {
+          h = await page.$(s).catch(()=>null);
+          if (h) break;
+        } catch {}
       }
-      return { ok: false, error: entered?.error || 'pin_enter_failed' };
+      if (!h) return { ok: false, error: 'pin_input_not_found' };
+
+      // Foco + limpar sem "ruído"
+      try { await h.click({ clickCount: 3, delay: 60 }).catch(()=>{}); } catch {}
+      try { await page.keyboard.press('Backspace').catch(()=>{}); } catch {}
+      await sleep(220);
+
+      // Digitar 8 8 2 5 8 4 com calma
+      const digits = String(pinValue || '').trim();
+      if (!digits || digits.length < 6) return { ok: false, error: 'pin_value_invalid' };
+      for (const ch of digits) {
+        try { await page.keyboard.type(String(ch), { delay: 240 }).catch(()=>{}); } catch {}
+      }
+
+      await sleep(420);
+      // Preferir Enter (menos risco de clicar fora e fazer o modal “piscar”)
+      try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
+      await sleep(1200);
+      return { ok: true, entered: true, confirmed: false };
     } catch (e) {
       return { ok: false, error: (e && e.message) || 'pin_enter_exception' };
     }
@@ -1601,7 +1576,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       }
     }
 
-    // NOVO: Se for modal de "Insira seu PIN" (pin_input), digita o PIN automaticamente
+    // PIN INPUT: só digita. Não clicar em nada (anti-loop).
     if (det.kind === 'pin_input' && det.hasPinInput) {
       try {
         pinLog({ event: 'pin_enter_attempt', attempt, pin: DEFAULT_PIN });
@@ -1623,6 +1598,9 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       } catch (e) {
         pinLog({ event: 'pin_enter_exception', attempt, error: (e && e.message) || String(e) });
       }
+      // Anti-loop: no pin_input não fazemos "trusted clicks" (Fechar/Não restaurar/voltar).
+      // Deixe o worker/nurse aplicar cooldown e reavaliar depois.
+      return { ok: false, error: 'pin_still_present', dismissed: false, pinEntered: true };
     }
 
     let clickedTrusted = false;
@@ -2091,17 +2069,17 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
       await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar-2]' });
     }
 
-    // Curador: modal do PIN (se falhar, GPT e re-tenta)
+    // Curador: modal do PIN (determinístico, sem GPT — GPT tende a clicar/fechar e causar loop)
     try {
       const pin1 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 4 });
       if (!pin1.ok) {
-        for (let k = 1; k <= 2; k++) {
-          await gptRemediateFbUi(p2, nome, { reason: 'messenger_pin_modal', stage: `configure_pin_try_${k}` }).catch(()=>null);
-          const pin2 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-postgpt]', maxTries: 1 });
-          if (pin2.ok) break;
+        // Uma espera extra e re-tenta 1 vez (sem cliques adicionais)
+        await sleep(2500);
+        const pin2 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-retry]', maxTries: 2 });
+        if (!pin2.ok) {
+          const still = await detectMessengerPinModal(p2);
+          if (still.present) throw new Error('messenger_pin_modal');
         }
-        const still = await detectMessengerPinModal(p2);
-        if (still.present) throw new Error('messenger_pin_modal');
       }
     } catch (e) {
       throw e;
