@@ -4525,7 +4525,11 @@ async function activateOnce(nome, source = '', operator = '') {
                   const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
                   // Ultra enterprise: em modo humano/captcha, manter APENAS 1 aba (economia + previsibilidade).
                   if (c && c.humanControl === true) return 1;
-                  // Bootstrap: permitir 2 abas para navegar Messenger+Facebook sem ser podado.
+                  // CRÍTICO (provision/injetar cookies): durante configuração precisamos 3 abas estáveis:
+                  // 0) FB base  1) FB create (item|vehicle)  2) Messenger
+                  // Se bootstrap limitar para 2, ele fecha uma aba e causa exatamente o "atropelo" (Messenger sendo puxado pro create).
+                  if (c && c.configurando === true) return 3;
+                  // Bootstrap (fora de configure): permitir 2 abas para navegar Messenger+Facebook sem ser podado.
                   if (isBootstrap) return 2;
                   return rm.emExecucao === true ? 3 : 10;
                 },
