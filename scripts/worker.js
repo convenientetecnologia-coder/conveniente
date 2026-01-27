@@ -26,7 +26,7 @@ const { readCtConfig } = require('./ctConfig.js');
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
-const WORKER_BUILD_TAG = '2026-01-25_ultra_enterprise_diag_v1';
+const WORKER_BUILD_TAG = '2026-01-27_provision_3tabs_v1';
 try {
   provisionAudit.append({
     ts: Date.now(),
