@@ -742,6 +742,8 @@ function installOneTabGuard(browser, nome, {
   allow = () => false,              // função externa que diz se “mais de 1 aba” é permitido
   maxPagesWhenAllow = 2,            // máximo permitido quando allow() é true (Robe/config)
   onNumPages = null,                // callback para atualizar robeMeta[nome].numPages
+  onPrune = null,                   // callback quando o guard fechou abas (telemetria/auditoria)
+  getReason = null,                 // string|fn para explicar por que allow/limOpt foram escolhidos
   log = (m,ctx)=>{ try{require('./logger.js').info(m,ctx);}catch{} }
 } = {}) {
   try {
@@ -757,10 +759,17 @@ function installOneTabGuard(browser, nome, {
     async function enforceHardCap() {
       try {
         const pages = await browser.pages();
+        const beforeCount = Array.isArray(pages) ? pages.length : 0;
         let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
         if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
         const lim = (allow && allow()) ? limOpt : 1;
         if (Array.isArray(pages) && pages.length > lim) {
+          let reason = '';
+          try {
+            reason = (typeof getReason === 'function') ? String(getReason() || '') : String(getReason || '');
+          } catch { reason = ''; }
+
+          const closedUrls = [];
           // Mantenha a primeira (main) e feche todas as demais
           for (let i = pages.length - 1; i >= 1; i--) {
             if (pages.length <= lim) break;
@@ -768,11 +777,25 @@ function installOneTabGuard(browser, nome, {
             let u = '';
             try { u = await p.url().catch(()=>''); } catch {}
             if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // Nunca fechar create item
+            try { closedUrls.push(String(u || '')); } catch {}
             try { await p.close({ runBeforeUnload: false }).catch(()=>{}); }
             catch {}
           }
           const cur = await browser.pages();
-          log('[PRUNER][HARD] Guard fechou abas extras', { nome, final: (cur && cur.length) || 0, lim });
+          const afterCount = (cur && cur.length) || 0;
+          log('[PRUNER][HARD] Guard fechou abas extras', { nome, final: afterCount, lim, reason });
+          try {
+            if (onPrune) {
+              Promise.resolve(onPrune({
+                nome,
+                lim,
+                beforeCount,
+                afterCount,
+                reason,
+                closedUrls: closedUrls.slice(0, 8)
+              })).catch(()=>{});
+            }
+          } catch {}
         }
       } catch (e) {
         if (process.env.PRUNE_DEBUG === '1') {
@@ -2865,11 +2888,17 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           const now = Date.now();
           const birth = (browser && browser._pageBirth && browser._pageBirth[key]) || 0;
           const age = birth ? (now - birth) : null;
+          // Override por perfil (ex.: bootstrap precisa de mais tempo para navegar)
+          let maxAge = ABOUTBLANK_MAX_AGE_MS;
+          try {
+            const ov = (browser && browser._aboutBlankMaxAgeMs && browser._aboutBlankMaxAgeMs[nome]) || 0;
+            if (ov && Number.isFinite(Number(ov)) && Number(ov) > 0) maxAge = Number(ov);
+          } catch {}
           const sup = (browser && browser._suppressBlankKillUntil && browser._suppressBlankKillUntil[nome]) || 0;
           const suppressed = (browser && browser._robeActiveFor === nome) || (sup > now);
 
           if (suppressed) {
-            if (age != null && age >= ABOUTBLANK_MAX_AGE_MS) {
+            if (age != null && age >= maxAge) {
               try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
               try { await issues.append(nome, 'mil_action', 'about_blank_killed_max_age'); } catch {}
               return;

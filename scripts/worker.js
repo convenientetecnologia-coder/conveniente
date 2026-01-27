@@ -4262,18 +4262,68 @@ async function activateOnce(nome, source = '', operator = '') {
               }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
+              // Bootstrap ultra enterprise:
+              // Durante a abertura (open-all/activate), o Chrome cria 2 abas about:blank.
+              // Se o oneTabGuard/blank-killer agir cedo, vira loop abre/fecha/disconnected.
+              const BOOTSTRAP_TABS_MS = parseInt(process.env.BOOTSTRAP_TABS_MS || '60000', 10);
+              const ABOUTBLANK_BOOT_MAX_AGE_MS = parseInt(process.env.ABOUTBLANK_BOOT_MAX_AGE_MS || '120000', 10);
+              try {
+                const now = Date.now();
+                ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
+                ctrl.browser._aboutBlankMaxAgeMs = ctrl.browser._aboutBlankMaxAgeMs || {};
+                ctrl.browser._suppressBlankKillUntil[nome] = Math.max(ctrl.browser._suppressBlankKillUntil[nome] || 0, now + BOOTSTRAP_TABS_MS);
+                ctrl.browser._aboutBlankMaxAgeMs[nome] = Math.max(ctrl.browser._aboutBlankMaxAgeMs[nome] || 0, ABOUTBLANK_BOOT_MAX_AGE_MS);
+                setTimeout(() => {
+                  try {
+                    const b = controllers.get(nome)?.browser;
+                    if (!b) return;
+                    if (b._suppressBlankKillUntil && b._suppressBlankKillUntil[nome]) delete b._suppressBlankKillUntil[nome];
+                    if (b._aboutBlankMaxAgeMs && b._aboutBlankMaxAgeMs[nome]) delete b._aboutBlankMaxAgeMs[nome];
+                  } catch {}
+                }, BOOTSTRAP_TABS_MS + 5000);
+              } catch {}
+
               browserHelper.installOneTabGuard(ctrl.browser, nome, {
                 allow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
-                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true));
+                  const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
+                  const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+                  return !!(c && (c.configurando === true || c.humanControl === true || rm.emExecucao === true || isBootstrap === true));
                 },
                 maxPagesWhenAllow: () => {
                   const c = controllers.get(nome);
                   const rm = robeMeta[nome] || {};
+                  const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
+                  const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
                   // Ultra enterprise: em modo humano/captcha, manter APENAS 1 aba (economia + previsibilidade).
                   if (c && c.humanControl === true) return 1;
+                  // Bootstrap: permitir 2 abas para navegar Messenger+Facebook sem ser podado.
+                  if (isBootstrap) return 2;
                   return rm.emExecucao === true ? 3 : 10;
+                },
+                getReason: () => {
+                  try {
+                    const c = controllers.get(nome);
+                    const rm = robeMeta[nome] || {};
+                    const actAt = (rm && rm.activatedAt) ? Number(rm.activatedAt) : 0;
+                    const isBootstrap = !!(actAt && (Date.now() - actAt) < (Number.isFinite(BOOTSTRAP_TABS_MS) ? BOOTSTRAP_TABS_MS : 60000));
+                    if (c && c.humanControl === true) return 'human';
+                    if (c && c.configurando === true) return 'config';
+                    if (rm && rm.emExecucao === true) return 'robe';
+                    if (isBootstrap) return 'bootstrap';
+                    return 'default';
+                  } catch { return 'default'; }
+                },
+                onPrune: (info) => {
+                  try {
+                    provisionAudit.append({
+                      ts: Date.now(),
+                      event: 'one_tab_guard_prune',
+                      nome: String(nome || ''),
+                      ...info
+                    });
+                  } catch {}
                 },
                 onNumPages: (n) => {
                   robeMeta[nome] = robeMeta[nome] || {};
