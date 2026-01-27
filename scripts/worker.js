@@ -1077,6 +1077,55 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
   return { ok: !!ok, method, durMs, error, urlBefore: u0, urlAfter: safeUrl() };
 }
 
+// Anti-tela-preta (about:blank) ao abrir em modo humano:
+// Garante que exista uma aba real navegada ANTES de invocar humano/overlay.
+async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'human_entry' } = {}) {
+  try {
+    if (!ctrl || !ctrl.browser) return { ok: false, error: 'no_browser' };
+    const pages = await ctrl.browser.pages().catch(()=>[]);
+    let p0 = pages && pages[0];
+    let u0 = '';
+    try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
+    if (!p0 || !u0 || u0 === 'about:blank') {
+      p0 = await ctrl.browser.newPage().catch(()=>null);
+      if (p0) {
+        try {
+          const man = await manifestStore.read(nome).catch(()=>null);
+          await browserHelper.patchPage(nome, p0, utils.getCoords(man && man.cidade || '')).catch(()=>{});
+        } catch {}
+      }
+    }
+    if (!p0) return { ok: false, error: 'no_page' };
+    try { await p0.bringToFront?.().catch(()=>{}); } catch {}
+
+    const targetUrl =
+      (prefer === 'messenger')
+        ? 'https://www.messenger.com/marketplace'
+        : 'https://www.facebook.com/';
+    await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await sleep(900);
+
+    // Destravar UI (fecha modais, etc)
+    try { await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase, allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
+    ctrl.mainPage = p0;
+
+    // Limpa abas about:blank órfãs para não ficar "Abas: 2" e economizar RAM
+    try {
+      const ps = await ctrl.browser.pages().catch(()=>[]);
+      for (const pg of (ps || [])) {
+        if (!pg || pg === p0) continue;
+        const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
+        if (!uu || uu === 'about:blank') {
+          try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+        }
+      }
+    } catch {}
+    return { ok: true, url: targetUrl };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' } = {}) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -3851,40 +3900,35 @@ async function activateOnce(nome, source = '', operator = '') {
               await reportAction(nome, 'mil_action', 'opened_in_human_mode (loginRemediateFailed=true)');
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_login_failed'); } catch {}
               try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_login_failed' }); } catch {}
-              // Anti-tela-preta: garanta uma aba navegada para o humano (não depende de retomar trabalho)
-              try {
-                const pages = await ctrl.browser.pages().catch(()=>[]);
-                let p0 = pages && pages[0];
-                const u0 = (() => { try { return p0 && typeof p0.url === 'function' ? String(p0.url() || '') : ''; } catch { return ''; } })();
-                if (!p0 || !u0 || u0 === 'about:blank') {
-                  p0 = await ctrl.browser.newPage().catch(()=>null);
-                  if (p0) {
-                    try {
-                      const man = await manifestStore.read(nome).catch(()=>null);
-                      await browserHelper.patchPage(nome, p0, utils.getCoords(man && man.cidade || '')).catch(()=>{});
-                    } catch {}
-                  }
-                }
-                if (p0) {
-                  await p0.bringToFront?.().catch(()=>{});
-                  await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-                  await new Promise(r => setTimeout(r, 1400));
-                  await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'human_mode_entry_on_open', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-                  ctrl.mainPage = p0;
+              // Anti-tela-preta: navegar ANTES de qualquer ação humana (não usar about:blank como "home")
+              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: 'human_mode_entry_login_failed' }); } catch {}
+            }
+          }
+        } catch {}
 
-                  // Remover abas about:blank sobrando (economia de RAM / "Abas: 2" indevido)
-                  try {
-                    const ps = await ctrl.browser.pages().catch(()=>[]);
-                    for (const pg of (ps || [])) {
-                      if (!pg || pg === p0) continue;
-                      const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
-                      if (!uu || uu === 'about:blank') {
-                        try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-                      }
-                    }
-                  } catch {}
-                }
+        // Enterprise: se está em identidade (required/submitted), abrir em modo humano,
+        // mas NUNCA invocar humano em about:blank. Navega para o Facebook e mantém overlay.
+        try {
+          const flagsI = await readAccountFlags(nome).catch(()=>({}));
+          if (flagsI && (flagsI.identityRequired === true || flagsI.identitySubmitted === true)) {
+            const ctrl = controllers.get(nome);
+            if (ctrl) {
+              ctrl.humanControl = true;
+              ctrl.trabalhando = false;
+              try { await stopVirtus(nome); } catch {}
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d.perfis = d.perfis || {};
+                  // humanHold=true é correto para identidade (bloqueia automação, mas bulk_open_all ainda pode abrir).
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                  return d;
+                });
               } catch {}
+              await reportAction(nome, 'mil_action', `opened_in_human_mode (identity=${flagsI.identitySubmitted?'submitted':'required'})`);
+              try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_identity'); } catch {}
+              try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_identity' }); } catch {}
+              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_identity' }); } catch {}
+              try { await snapshotStatusAndWrite(); } catch {}
             }
           }
         } catch {}
@@ -3908,7 +3952,17 @@ async function activateOnce(nome, source = '', operator = '') {
               } catch {}
               await reportAction(nome, 'mil_action', 'opened_in_human_mode (appealSubmitted=true)');
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_appeal_submitted'); } catch {}
-              try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+              // Anti-tela-preta: navega antes (Facebook) e só invoca humano automaticamente se for captcha/checkpoint.
+              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_appeal' }); } catch {}
+              try {
+                const pg = ctrl.mainPage;
+                const lr = pg ? await browserHelper.detectLoginRequired(pg).catch(()=>null) : null;
+                const rr = String(lr && lr.reason || '').toLowerCase();
+                const isCaptcha = rr.includes('captcha') || rr.includes('checkpoint');
+                if (isCaptcha) {
+                  try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+                }
+              } catch {}
               try { freezeCooldownIfNotWorking(nome); } catch {}
               try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_appeal_submitted' }); } catch {}
               try { await snapshotStatusAndWrite(); } catch {}
