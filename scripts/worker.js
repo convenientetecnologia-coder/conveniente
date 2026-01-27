@@ -159,6 +159,7 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
 
     const rr = await archiveBanWithEvidenceToCT({ profileName, stockAccountId: sid || null, reason, evidenceB64: b64, evidenceUrl: evidUrl }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
     const ok = !!(rr && rr.ok);
+    const errStr = ok ? '' : String(rr && rr.error || 'error');
     try {
       provisionAudit.append({ ts: Date.now(), event: 'ct_archive_retry_done', flowId: flowId || null, profileName, stockAccountId: sid || null, ok, error: ok ? null : String(rr && rr.error || 'error').slice(0, 220) });
     } catch {}
@@ -173,6 +174,45 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
       try { if (evidPath && fs.existsSync(evidPath + '.meta.json')) fs.unlinkSync(evidPath + '.meta.json'); } catch {}
       continue;
     }
+
+    // Enterprise: se o CT responder "not_found_assigned", não podemos ficar em loop infinito
+    // segurando um perfil desabilitado/2FA dentro do servidor (risco de duplicidade em múltiplos hosts).
+    // Regra pedida: se não há controller e desired.active==false, remover o perfil local imediatamente.
+    try {
+      if (String(errStr || '').includes('not_found_assigned')) {
+        const nome = profileName;
+        const hasCtrl = controllers.has(nome);
+        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
+        if (!hasCtrl && !isActive && nome) {
+          try {
+            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_delete_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null });
+          } catch {}
+          // Remoção local best-effort (mesma lógica do banflow)
+          try {
+            const perfisArr = loadPerfisJson();
+            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+            const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+            if (udir && fs.existsSync(udir)) { try { fileStore.rimrafSync(udir); } catch {} }
+            const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+            try { savePerfisJson(arr2); } catch {}
+          } catch {}
+          try { await fileStore.removeDesired(nome); } catch {}
+          try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
+          try {
+            const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+            if (st && Array.isArray(st.perfis)) {
+              st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+              fileStore.writeJsonAtomic(fileStore.statusPath, st);
+            }
+          } catch {}
+          try { await snapshotStatusAndWrite(); } catch {}
+          try {
+            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_deleted_local', flowId: flowId || null, profileName: String(nome||''), ok: true });
+          } catch {}
+        }
+      }
+    } catch {}
+
     // Reagendar com backoff
     try {
       const attempts = (Number(job.attempts || 0) || 0) + 1;
