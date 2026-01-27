@@ -209,7 +209,9 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/activate', async (req, res) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/activate chamada', { nome });
-    const op = String(req.headers['x-operator'] || 'unknown');
+    // Ultra enterprise: se UI não mandar x-operator, tratar como manual (para pós-probe/identidade).
+    const opRaw = String(req.headers['x-operator'] || 'unknown');
+    const op = (!opRaw || opRaw === 'unknown') ? 'ui' : opRaw;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) { 
       logger.warn('Ativação de perfil inexistente ou inválido', { nome, error: e && e.message });
@@ -491,7 +493,9 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/:nome/start-work', async (req, res) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/start-work chamada', { nome });
-    const op = String(req.headers['x-operator'] || 'unknown');
+    // Ultra enterprise: se UI não mandar x-operator, tratar como manual (para pós-probe/identidade).
+    const opRaw = String(req.headers['x-operator'] || 'unknown');
+    const op = (!opRaw || opRaw === 'unknown') ? 'ui' : opRaw;
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) {
       logger.warn('Tentativa de start_work perfil inexistente ou inválido', { nome, error: e && e.message });

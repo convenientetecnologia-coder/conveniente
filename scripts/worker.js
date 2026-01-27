@@ -1627,8 +1627,10 @@ const IDENTITY_CFG = {
 // - após qualquer ação (clique), aplica cooldown randomizado de 5–10min antes de permitir outra
 // - o timer de identidadeSubmitted (1h) é independente e "corre solto"
 const IDENTITY_GATE = {
-  cooldownMinMs: 5 * 60 * 1000,
-  cooldownMaxMs: 10 * 60 * 1000,
+  // Requisito operacional (ROBE MÃE 5): evitar câmera "em uso" e travamentos.
+  // Identidade deve rodar 1 por vez por host, com cooldown fixo de 2min entre tentativas.
+  cooldownMinMs: 2 * 60 * 1000,
+  cooldownMaxMs: 2 * 60 * 1000,
   // O botão "Carregar" pode levar 20–120s para habilitar; manter lease maior evita expirar durante a espera.
   leaseMs: 4 * 60 * 1000 // lease curto o suficiente p/ evitar deadlock, longo o suficiente p/ completar a etapa
 };
@@ -4011,8 +4013,12 @@ async function activateOnce(nome, source = '', operator = '') {
   // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
-  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(String(operator || '').trim());
-  const _isManualOpen = /(^admin|^ui|manual|user|humano|human)/i.test(String(operator || '').trim());
+  const opTrim = String(operator || '').trim();
+  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim);
+  // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
+  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
+  const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
+  const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
   try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
@@ -4209,8 +4215,19 @@ async function activateOnce(nome, source = '', operator = '') {
             }
               // Open / Open-all / Open manual: não pode ficar em about:blank (tela preta).
               // Garante navegação e faz probe para refletir estado real (identity/captcha/login/appeal).
+              // Pós-abertura: sempre probe (bulk/manual/unknown).
+              // Importante: NÃO navegar pra home se já estamos numa tela real (ex.: identidade),
+              // senão removemos o contexto e atrasamos/impedimos o fluxo.
               if (_isBulkOpen || _isManualOpen) {
-                try { await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' }); } catch {}
+                try {
+                  const p0 = pages && pages[0];
+                  let u0 = '';
+                  try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
+                  const isBlank = (!u0 || u0 === 'about:blank');
+                  if (isBlank) {
+                    await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' });
+                  }
+                } catch {}
                 try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
               }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
@@ -5384,6 +5401,19 @@ async function start_work({ nome, operator }) {
       if (flags && (flags.identitySubmitted === true || flags.identityRequired === true)) {
         const kind = flags.identitySubmitted === true ? 'identity_submitted' : 'identity_required';
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind, nextAt: Number(flags.identityNextCheckAt||0)||0 }); } catch {}
+        // Ultra enterprise: se start_work foi acionado manualmente e a conta está em identidade,
+        // não “falhar seco”: agenda o fluxo de identidade imediatamente (1 por vez + cooldown).
+        try {
+          const pages = ctrl && ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+          const p0 = pages && pages[0];
+          if (p0) {
+            const flowId = newFlowId('identity_start_work_flags');
+            try { provisionAudit.append({ ts: Date.now(), event: 'start_work_identity_flow_scheduled', nome: String(nome||''), kind, flowId, source: 'start_work_flags' }); } catch {}
+            setTimeout(() => {
+              try { runIdentityFlow(nome, ctrl, p0, { source: 'start_work_flags', flowId }).catch(()=>{}); } catch {}
+            }, 0);
+          }
+        } catch {}
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
@@ -5459,6 +5489,20 @@ async function start_work({ nome, operator }) {
             if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_')) {
               try { await setIdentityRequiredFlag(nome, { source: lr.domain || 'facebook', url: lr.url || '', title: lr.title || '' }); } catch {}
               try { await issues.append(nome, 'mil_action', `start_work_preflight_identity_required reason=${rr}`); } catch {}
+              // Ultra enterprise: agenda identity flow imediatamente ao detectar preflight identity.
+              try {
+                const flowId = newFlowId('identity_start_work_preflight');
+                try { provisionAudit.append({ ts: Date.now(), event: 'start_work_identity_flow_scheduled', nome: String(nome||''), kind: 'identity_required', flowId, source: 'start_work_preflight', reason: rr.slice(0,120) }); } catch {}
+                setTimeout(() => {
+                  try {
+                    const pages = ctrl && ctrl.browser ? (ctrl.browser.pages?.().catch(()=>[])) : Promise.resolve([]);
+                    Promise.resolve(pages).then(ps => {
+                      const p0 = ps && ps[0];
+                      if (p0) runIdentityFlow(nome, ctrl, p0, { source: 'start_work_preflight', flowId }).catch(()=>{});
+                    }).catch(()=>{});
+                  } catch {}
+                }, 0);
+              } catch {}
               return { ok: false, error: 'identity_required' };
             }
           }
