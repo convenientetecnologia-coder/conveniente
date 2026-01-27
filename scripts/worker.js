@@ -971,6 +971,70 @@ const APPEAL_CFG = {
   maxPagesScan: 8
 };
 
+// Reload enterprise (anti-loop infinito):
+// - não engole falhas silenciosamente
+// - fallback: goto(url atual) e, se necessário, goto('https://www.facebook.com/')
+// - logs explícitos para auditoria (prova 110% do que aconteceu)
+async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs = 45_000 } = {}) {
+  const t0 = Date.now();
+  const safeUrl = () => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+  const u0 = safeUrl();
+  let ok = false;
+  let method = '';
+  let error = null;
+  try { await pg.bringToFront?.().catch(()=>{}); } catch {}
+  // Desabilitar cache só durante o reload (evita “tela antiga” em SPAs)
+  try { if (pg && typeof pg.setCacheEnabled === 'function') await pg.setCacheEnabled(false).catch(()=>{}); } catch {}
+  try {
+    await pg.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    ok = true;
+    method = 'reload';
+  } catch (e1) {
+    error = (e1 && e1.message) ? String(e1.message).slice(0, 180) : String(e1).slice(0, 180);
+  }
+  if (!ok) {
+    // Fallback 1: goto URL atual (mais forte que reload em alguns casos)
+    try {
+      const u = safeUrl() || u0;
+      if (u && !/^about:/i.test(u)) {
+        await pg.goto(u, { waitUntil: 'domcontentloaded', timeout: Math.max(timeoutMs, 60_000) }).catch(()=>{});
+        ok = true;
+        method = 'goto_same_url';
+        error = null;
+      }
+    } catch (e2) {
+      error = (e2 && e2.message) ? String(e2.message).slice(0, 180) : String(e2).slice(0, 180);
+    }
+  }
+  if (!ok) {
+    // Fallback 2: navegação determinística (estado real do FB)
+    try {
+      await pg.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: Math.max(timeoutMs, 70_000) }).catch(()=>{});
+      ok = true;
+      method = 'goto_facebook_home';
+      error = null;
+    } catch (e3) {
+      error = (e3 && e3.message) ? String(e3.message).slice(0, 180) : String(e3).slice(0, 180);
+    }
+  }
+  try { if (pg && typeof pg.setCacheEnabled === 'function') await pg.setCacheEnabled(true).catch(()=>{}); } catch {}
+  const durMs = Date.now() - t0;
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: `${String(tag||'monitor')}_reload`,
+      nome: String(nome || ''),
+      ok: !!ok,
+      method: method || null,
+      durMs,
+      urlBefore: String(u0 || '').slice(0, 220),
+      urlAfter: String(safeUrl() || '').slice(0, 220),
+      error
+    });
+  } catch {}
+  return { ok: !!ok, method, durMs, error, urlBefore: u0, urlAfter: safeUrl() };
+}
+
 async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' } = {}) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -1109,6 +1173,13 @@ async function appealMonitorCheckNow(nome, ctrl) {
     const pages = await ctrl.browser.pages().catch(()=>[]);
     const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
     const pickFb = () => {
+      // Prioridade: checkpoint/appeal (mais provável de refletir o estado)
+      for (const pg of (pages || []).slice(0, APPEAL_CFG.maxPagesScan)) {
+        const u = safeUrl(pg);
+        if (!/facebook\.com/i.test(u)) continue;
+        if (/checkpoint|appeal|help\/contact|recover/i.test(u)) return pg;
+      }
+      // Fallback: primeira aba facebook.com
       for (const pg of (pages || []).slice(0, APPEAL_CFG.maxPagesScan)) {
         const u = safeUrl(pg);
         if (/facebook\.com/i.test(u)) return pg;
@@ -1127,9 +1198,8 @@ async function appealMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // Refresh leve + detecção
-    try { await pg.bringToFront?.().catch(()=>{}); } catch {}
-    await pg.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    // Refresh enterprise (com fallback + log explícito)
+    await reloadPageEnterprise(pg, { nome, tag: 'appeal_monitor', timeoutMs: 45_000 }).catch(()=>null);
     await sleep(900);
     // Primeiro: suspensão/ban (UI dedicada). Isso evita classificar errado como "appeal".
     try {
@@ -1149,7 +1219,17 @@ async function appealMonitorCheckNow(nome, ctrl) {
       }
     } catch {}
 
-    const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    // Detecta estado após refresh. Se estiver em "appeal_submitted", faz uma navegação determinística (home)
+    // para evitar falso-positivo por DOM/aba antiga.
+    let lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    try {
+      const rr0 = String(lr && lr.reason || '').toLowerCase();
+      if (lr && lr.loginRequired === true && rr0.includes('appeal_submitted')) {
+        await reloadPageEnterprise(pg, { nome, tag: 'appeal_monitor_home_check', timeoutMs: 60_000 }).catch(()=>null);
+        await sleep(900);
+        lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+      }
+    } catch {}
 
     // Atualiza telemetria do monitor
     try {
@@ -1551,6 +1631,11 @@ async function identityMonitorCheckNow(nome, ctrl) {
     const pickFb = () => {
       for (const pg of (pages || []).slice(0, IDENTITY_CFG.maxPagesScan)) {
         const u = safeUrl(pg);
+        if (!/facebook\.com/i.test(u)) continue;
+        if (/checkpoint|identity|help\/contact|recover/i.test(u)) return pg;
+      }
+      for (const pg of (pages || []).slice(0, IDENTITY_CFG.maxPagesScan)) {
+        const u = safeUrl(pg);
         if (/facebook\.com/i.test(u)) return pg;
       }
       return (pages && pages[0]) || null;
@@ -1567,9 +1652,8 @@ async function identityMonitorCheckNow(nome, ctrl) {
       });
     } catch {}
 
-    // Refresh leve + detecção
-    try { await pg.bringToFront?.().catch(()=>{}); } catch {}
-    await pg.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    // Refresh enterprise (com fallback + log explícito)
+    await reloadPageEnterprise(pg, { nome, tag: 'identity_monitor', timeoutMs: 45_000 }).catch(()=>null);
     await sleep(900);
 
     // Assistente safe: o botão "Carregar" pode demorar 10–120s para habilitar.
@@ -1581,7 +1665,17 @@ async function identityMonitorCheckNow(nome, ctrl) {
       }
     } catch {}
 
-    const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    // Detecta estado após refresh. Se ainda disser "identity_submitted", valida também via navegação determinística
+    // para evitar ficar preso em DOM/aba antiga.
+    let lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    try {
+      const rr0 = String(lr && lr.reason || '').toLowerCase();
+      if (lr && lr.loginRequired === true && (rr0.includes('identity_submitted') || rr0.includes('identity'))) {
+        await reloadPageEnterprise(pg, { nome, tag: 'identity_monitor_home_check', timeoutMs: 60_000 }).catch(()=>null);
+        await sleep(900);
+        lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+      }
+    } catch {}
 
     // Atualiza telemetria do monitor
     try {
