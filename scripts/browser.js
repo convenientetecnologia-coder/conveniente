@@ -727,7 +727,7 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
         if (mainPage && p === mainPage) continue;
         if (!mainPage && pages[0] && p === pages[0]) continue;
         let u = ''; try { u = p.url(); } catch {}
-        if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue;
+        if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
       }
       await sleep(intervalMs);
@@ -776,7 +776,7 @@ function installOneTabGuard(browser, nome, {
             const p = pages[i];
             let u = '';
             try { u = await p.url().catch(()=>''); } catch {}
-            if (/facebook.com\/marketplace\/create\/item/i.test(u)) continue; // Nunca fechar create item
+            if (/facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) continue; // Nunca fechar create item/vehicle
             try { closedUrls.push(String(u || '')); } catch {}
             try { await p.close({ runBeforeUnload: false }).catch(()=>{}); }
             catch {}

@@ -6746,6 +6746,12 @@ const handlers = {
         return { ok: false, error: 'browser_not_connected', steps };
       }
 
+      // IMPORTANTE (anti-pânico): durante TODO o login_remediate nós mantemos "configurando=true"
+      // para impedir oneTabGuard/pruners de fechar abas do provision (3 abas) no meio da validação.
+      // (Antes: configurando virava false logo após configureProfile e o bootstrap capava para 2 abas.)
+      const prevConfigurando = !!ctrl.configurando;
+      ctrl.configurando = true;
+
       // 2) Ultra enterprise: quiescência determinística antes de injetar cookies
       // - espera envios/postagens ativos terminarem (busy)
       // - pausa Virtus de todos os perfis "pausáveis"
@@ -6803,7 +6809,6 @@ const handlers = {
       }
 
       // 4) tentativa 1: reinjetar cookies (configureProfile)
-      ctrl.configurando = true;
       try {
         const man0 = await manifestStore.read(nome).catch(()=>null);
         const cookies = (man0 && Array.isArray(man0.cookies)) ? man0.cookies : [];
@@ -6823,8 +6828,9 @@ const handlers = {
       } catch (e) {
         pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
       } finally {
-        ctrl.configurando = false;
-        // Não remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos após configure.
+        // Não desativar configurando aqui: a validação pós-injeção ainda precisa das 3 abas vivas.
+        // O reset acontece no finally global do login_remediate (abaixo).
+        // Também não remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos após configure.
       }
 
       // 5) validar loginRequired em TODAS as abas reais (sem “puxar” tudo para /marketplace)
@@ -6846,7 +6852,7 @@ const handlers = {
 
         // Seleção robusta por URL (evita falso positivo por ordem de abas variar)
         const pMsg = pick((u) => /messenger\.com/i.test(u)); // Messenger (Virtus)
-        const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/item/i.test(u)); // Robe create (FB)
+        const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)); // Robe create (FB)
         const pFb = pick((u) => /facebook\.com\/marketplace/i.test(u)); // Marketplace (FB) fallback
         const pLang = pick((u) => /facebook\.com\/settings\/language/i.test(u)); // sanity
         const pAny = (pages && pages[0]) || pMsg || pCreate || pFb || null;
@@ -6861,9 +6867,16 @@ const handlers = {
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
-              // Regra 110% enterprise: para validar Facebook/Marketplace para Robe, a rota REAL é create/item.
-              // Evita falso "ok" do feed (/marketplace) e também evita a aba 0 ficar navegando para o lugar errado.
-              const targetUrl = 'https://www.facebook.com/marketplace/create/item';
+              // Regra 110% enterprise: para validar Facebook/Marketplace para Robe, usar a rota REAL create/(item|vehicle)
+              // conforme robeMode do manifest (evita fechar/prunar a aba "errada" e evita navegação do Messenger para FB).
+              let robeMode = 'itens';
+              try {
+                const manx = await manifestStore.read(nome).catch(()=>null);
+                if (manx && manx.robeMode) robeMode = String(manx.robeMode);
+              } catch {}
+              const targetUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
+                ? 'https://www.facebook.com/marketplace/create/vehicle'
+                : 'https://www.facebook.com/marketplace/create/item';
               await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
@@ -7361,6 +7374,11 @@ const handlers = {
 
       return out;
       } finally {
+        // Reset flags de config SEMPRE (evita ficar "travado" em modo configurando).
+        try {
+          const c2 = controllers.get(nome);
+          if (c2) c2.configurando = prevConfigurando ? true : false;
+        } catch {}
         // 7) libera lock global sempre (mesmo com returns/erros)
         try { provisionLock.release({ owner: op }); } catch {}
       }
