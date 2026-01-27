@@ -7050,8 +7050,8 @@ const handlers = {
             // Non-automatable: captcha/identity/checkpoint => humano direto.
             // 2FA => exclusão automática.
             const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
+            const isCaptchaCheckpoint = rr.includes('captcha') || rr.includes('checkpoint');
             const needsHuman =
-              rr.includes('captcha') ||
               rr.includes('checkpoint');
             if (isTwoFactor) {
               preflight.state = 'two_factor';
@@ -7059,6 +7059,28 @@ const handlers = {
               await snapshotStatusAndWrite();
               logger.info('[HANDLER] human-resume preflight -> two_factor', { nome, reason: lr.reason || '' });
               return { ok: false, error: 'two_factor', preflight };
+            }
+            if (isCaptchaCheckpoint) {
+              // Captcha/Checkpoint é um estado próprio: NÃO marcar como "login/cookies falhou".
+              preflight.state = 'captcha_checkpoint';
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d.perfis = d.perfis || {};
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                  return d;
+                });
+              } catch {}
+              try {
+                ctrl.humanControl = true;
+                ctrl.trabalhando = false;
+                try { await stopVirtus(nome); } catch {}
+                await browserHelper.invocarHumano(ctrl.browser, nome);
+                try { freezeCooldownIfNotWorking(nome); } catch {}
+                try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_captcha_checkpoint' }); } catch {}
+              } catch {}
+              await snapshotStatusAndWrite();
+              logger.info('[HANDLER] human-resume preflight -> captcha/checkpoint', { nome, reason: lr.reason || '' });
+              return { ok: true, preflight };
             }
             if (needsHuman) {
               preflight.state = 'needs_human';
