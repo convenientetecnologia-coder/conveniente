@@ -916,8 +916,13 @@ async function _installOverlayOnPage(nome, page) {
 
 async function syncHumanOverlay(nome) {
   try {
-    if (!HUMAN_OVERLAY_CFG.enabled) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_disabled', nome: String(nome || ''), env: String(process.env.HUMAN_OVERLAY || '').trim() }); } catch {}
+    // Enterprise: permitir "force overlay" mesmo se HUMAN_OVERLAY=0 (útil para captcha/checkpoint).
+    // Isso evita ficar sem painel (login/senha/botões) quando o humano é realmente necessário.
+    const now0 = Date.now();
+    const forceUntil = Number(robeMeta?.[nome]?.forceOverlayUntil || 0) || 0;
+    const forced = (forceUntil && forceUntil > now0);
+    if (!HUMAN_OVERLAY_CFG.enabled && !forced) {
+      try { provisionAudit.append({ ts: now0, event: 'human_overlay_disabled', nome: String(nome || ''), env: String(process.env.HUMAN_OVERLAY || '').trim() }); } catch {}
       return;
     }
     const ctrl = controllers.get(nome);
@@ -925,7 +930,7 @@ async function syncHumanOverlay(nome) {
 
     const desired = readJsonFile(desiredPath, { perfis: {} });
     const wantHold = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
-    const want = wantHold || (ctrl.humanControl === true);
+    const want = forced || wantHold || (ctrl.humanControl === true);
 
     const pages = await ctrl.browser.pages().catch(()=>[]);
     const data = want ? await _buildHumanOverlayData(nome) : { enabled: false, nome: String(nome || ''), ts: Date.now() };
@@ -974,6 +979,7 @@ async function syncHumanOverlay(nome) {
         nome: String(nome || ''),
         wantHold: !!wantHold,
         want: !!want,
+        forced: !!forced,
         pagesCount: Array.isArray(pages) ? pages.length : 0,
         scanned: scanned.length,
         diag: diag.slice(0, 4) // evita log gigante
@@ -984,7 +990,8 @@ async function syncHumanOverlay(nome) {
 
 async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
   try {
-    if (!HUMAN_OVERLAY_CFG.enabled) {
+    const force = /captcha|checkpoint|invoke_human|captcha_checkpoint/i.test(String(reason || '').toLowerCase());
+    if (!HUMAN_OVERLAY_CFG.enabled && !force) {
       try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_ensure_skipped_disabled', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
       return;
     }
@@ -993,6 +1000,13 @@ async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
     try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_installed', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
 
     // Instala nos pages atuais + sincroniza data.
+    if (force) {
+      // janela curta onde o sync deve acontecer mesmo se HUMAN_OVERLAY=0
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].forceOverlayUntil = Date.now() + 60_000;
+      } catch {}
+    }
     await syncHumanOverlay(nome);
 
     // Hook para novas abas (1x por perfil).
@@ -8984,6 +8998,43 @@ async function nurseTick() {
                 await setIdentitySubmittedFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
               } else if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_') || rr.includes('identity')) {
                 await setIdentityRequiredFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
+                // AÇÃO AUTOMÁTICA (ultra enterprise): se caiu em identidade, executa os cliques necessários
+                // (Continuar / Iniciar selfie / Carregar / Concluir) sem depender de flag/painel.
+                try {
+                  const pg = (lrPage || p0);
+                  if (pg && ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+                    const a1 = await browserHelper.identityAssistStep(pg, { maxWaitMs: 150_000, tries: 2 }).catch(()=>null);
+                    try {
+                      provisionAudit.append({
+                        ts: Date.now(),
+                        event: 'identity_auto_step',
+                        nome: String(nome||''),
+                        ok: !!(a1 && a1.ok),
+                        clicked: a1 && a1.clicked ? String(a1.clicked) : null,
+                        error: a1 && a1.error ? String(a1.error).slice(0,160) : null
+                      });
+                    } catch {}
+                    if (a1 && a1.ok) {
+                      await sleep(1200);
+                      await reloadPageEnterprise(pg, { nome, tag: 'identity_auto', timeoutMs: 60_000 }).catch(()=>null);
+                    }
+                    // Reavalia e encaminha (captcha → humano, appeal → monitor, login_form → remediate)
+                    const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+                    if (lr2 && lr2.loginRequired) {
+                      const rr2 = String(lr2.reason || '').toLowerCase();
+                      if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
+                        await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: String(lr2.domain||'') || 'facebook', url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
+                      } else if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
+                        await setAppealSubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
+                        await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }).catch(()=>{});
+                      } else if (rr2.includes('login_form')) {
+                        queueAutoLoginRemediate(nome, { reason: lr2.reason || '', source: lr2.domain || '', immediate: true });
+                      } else if (rr2.includes('identity_submitted')) {
+                        await setIdentitySubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
+                      }
+                    }
+                  }
+                } catch {}
               } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
                 await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
               }
@@ -9014,19 +9065,6 @@ async function nurseTick() {
                   source: lr.domain || '',
                   url: lr.url || '',
                   title: lr.title || ''
-                });
-              } catch {}
-            } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
-              // Regra do usuário: NUNCA invocar humano automaticamente em captcha/checkpoint.
-              // Apenas trava automação (Virtus OFF).
-              try { await issues.append(nome, 'mil_action', `login_requires_human_hold reason=${rr}`); } catch {}
-              try { ctrl.trabalhando = false; } catch {}
-              try { await stopVirtus(nome); } catch {}
-              try {
-                await fileStore.withDesiredFileLockUpdate((desired) => {
-                  desired.perfis = desired.perfis || {};
-                  desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false, virtus: 'off', active: true };
-                  return desired;
                 });
               } catch {}
             } else if (rr.includes('login_form')) {
