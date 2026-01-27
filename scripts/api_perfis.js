@@ -1049,39 +1049,32 @@ module.exports = (app, workerClient, fileStore) => {
         } catch {}
       }
 
-      // 2) Loop de abertura (sequencial).
-      // Perfis human-only: abre (activate), mas NÃO dá start_work.
-      const results = [];
-      for (const p of perfisArr) {
-        const nome = p.nome;
-        let okActivate = false, okStart = false, err = null;
-
+      // 2) Ack rápido (ULTRA enterprise):
+      // Não manter o HTTP pendurado enquanto o worker abre 20-200 navegadores.
+      // A abertura real é reconciliada pelo NURSE tick via desired.active=true.
+      //
+      // Opcionalmente damos um "kickstart" leve em background (sem await) para reduzir latência percebida,
+      // mas sem travar o painel se houver login_remediate/provisionLock/etc.
+      const kickN = Math.max(0, Math.min(3, perfisArr.length));
+      setTimeout(() => {
         try {
-          // Enterprise: propagar operator para o worker para que activateOnce reconheça bulk-open
-          // e execute o pós-probe (ensureNonBlankEntryPage + probeHumanStateOnOpen).
-          const r1 = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 });
-          okActivate = !!(r1 && r1.ok);
-        } catch (e) {
-          err = (e && e.message) || String(e);
-        }
-
-        const isHumanOnly = humanOnlySet.has(nome);
-        if (okActivate && !isHumanOnly) {
-          try {
-            const r2 = await workerClient.sendWorkerCommand('start_work', { nome, operator: op }, { timeoutMs: 60000 });
-            okStart = !!(r2 && r2.ok);
-          } catch (e) {
-            err = (e && e.message) || String(e);
+          for (let i = 0; i < kickN; i++) {
+            const nome = perfisArr[i] && perfisArr[i].nome;
+            if (!nome) continue;
+            // Enterprise: propagar operator para o worker para que activateOnce reconheça bulk-open
+            // e execute o pós-probe (ensureNonBlankEntryPage + probeHumanStateOnOpen).
+            workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 8000 }).catch(()=>{});
+            // start_work fica a cargo do NURSE/reconciliador; evita storm enquanto provision/login_remediate roda.
           }
-        }
+        } catch {}
+      }, 0);
 
-        results.push({ nome, activate: okActivate, start: isHumanOnly ? null : okStart, humanOnly: isHumanOnly, error: err || null });
-
-        // pequeno respiro (igual ao front local)
-        await new Promise(r => setTimeout(r, 800));
-      }
-
-      return res.json({ ok: true, total: perfisArr.length, results });
+      return res.json({
+        ok: true,
+        total: perfisArr.length,
+        humanOnly: humanOnlySet.size,
+        kickstart: { requested: kickN }
+      });
 
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });

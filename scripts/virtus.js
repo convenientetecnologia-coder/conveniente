@@ -1483,5 +1483,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 }
 
 module.exports = {
-  startVirtus
+  startVirtus,
+  // Exportado para o bootstrap enterprise no worker:
+  // - garante sinais reais do Marketplace antes de avançar para checagem Robe.
+  garantirMarketplace
 };
