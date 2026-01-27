@@ -1049,32 +1049,12 @@ module.exports = (app, workerClient, fileStore) => {
         } catch {}
       }
 
-      // 2) Ack rápido (ULTRA enterprise):
-      // Não manter o HTTP pendurado enquanto o worker abre 20-200 navegadores.
-      // A abertura real é reconciliada pelo NURSE tick via desired.active=true.
-      //
-      // Opcionalmente damos um "kickstart" leve em background (sem await) para reduzir latência percebida,
-      // mas sem travar o painel se houver login_remediate/provisionLock/etc.
-      const kickN = Math.max(0, Math.min(3, perfisArr.length));
-      setTimeout(() => {
-        try {
-          for (let i = 0; i < kickN; i++) {
-            const nome = perfisArr[i] && perfisArr[i].nome;
-            if (!nome) continue;
-            // Enterprise: propagar operator para o worker para que activateOnce reconheça bulk-open
-            // e execute o pós-probe (ensureNonBlankEntryPage + probeHumanStateOnOpen).
-            workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 8000 }).catch(()=>{});
-            // start_work fica a cargo do NURSE/reconciliador; evita storm enquanto provision/login_remediate roda.
-          }
-        } catch {}
-      }, 0);
-
-      return res.json({
-        ok: true,
-        total: perfisArr.length,
-        humanOnly: humanOnlySet.size,
-        kickstart: { requested: kickN }
-      });
+      // 2) Ack rápido (ULTRA enterprise) + sequência estrita:
+      // - Não manter o HTTP pendurado.
+      // - NÃO iniciar activates em paralelo aqui.
+      // A abertura real fica 100% a cargo do NURSE tick (que já tem MAX_OPEN_CONCURRENCY=1),
+      // garantindo: Messenger OK -> Robe OK/erro -> próximo.
+      return res.json({ ok: true, total: perfisArr.length, humanOnly: humanOnlySet.size });
 
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });

@@ -2496,6 +2496,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       // hostId+profileName => conta some (não aparece em Excluídas).
       let ctArchiveOk = false;
       let ctArchiveResp = null;
+      let ctArchiveErr = '';
+      let ctArchiveProceed = false;
+      let ctArchiveProceedReason = '';
       try {
         const rr = await archiveBanWithEvidenceToCT({
           profileName: nome,
@@ -2506,6 +2509,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         });
         ctArchiveResp = rr || null;
         ctArchiveOk = !!(rr && rr.ok);
+        ctArchiveErr = rr && rr.ok ? '' : String(rr && rr.error || 'error');
         if (rr && rr.stockAccountId && !stockAccountId) stockAccountId = Number(rr.stockAccountId) || stockAccountId;
         try {
           provisionAudit.append({
@@ -2523,10 +2527,21 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
           // CT fora/arq falhou: NÃO deletar se não temos stockAccountId, para não perder o vínculo por profileName.
           const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `banned:${String(reason||'banned').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
           try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
-          if (!stockAccountId) {
-            // sem ID => bloquear delete e sair (garante que não some do CT)
-            return { ok: false, error: 'ct_archive_failed_predelete' };
-          }
+          // NOVA REGRA (pedida): mesmo que CT não consiga mapear (ex.: not_found_assigned),
+          // nós SEMPRE removemos do servidor para evitar duplicidade em múltiplos hosts.
+          // A evidência fica no provision_audit + ct_archive_queue.
+          ctArchiveProceed = true;
+          ctArchiveProceedReason = ctArchiveErr || 'ct_archive_failed_predelete';
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'banflow_ct_archive_failed_proceed_delete',
+              flowId,
+              nome: String(nome||''),
+              stockAccountId: stockAccountId || null,
+              error: String(ctArchiveProceedReason || '').slice(0, 220)
+            });
+          } catch {}
         }
       } catch {}
 
@@ -6865,7 +6880,9 @@ const handlers = {
           if (bd && bd.banned) {
             pushStep({ step: 'banned_detected', stage: String(stage||''), reason: bd.reason || '', snippet: (bd.snippet || '').slice(0, 420) });
             try { await setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }); } catch {}
-            await failFastToHuman(`banned:${bd.reason || 'banned'}`);
+            // IMPORTANTE (enterprise): ban/disabled NÃO é “login/cookies falhou”.
+            // Aqui a ação correta é setBannedFlag() (que fecha + remove do servidor).
+            // Não deve marcar loginRemediateFailed/loginRequired depois disso.
             return true;
           }
         } catch {}
@@ -8978,6 +8995,47 @@ async function nurseTick() {
 
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
+
+    // ===== PRIORIDADE ENTERPRISE: Recurso em análise (Pronto!) =====
+    // Se existir qualquer perfil com appealSubmitted=true e appealNextCheckAt<=now e ainda sem controller,
+    // ele deve ser o próximo a abrir (não pode ser “pulado”).
+    let appealReadyPick = '';
+    try {
+      const names0 = Object.keys(desired.perfis || {});
+      for (const n of names0) {
+        try {
+          if (!n) continue;
+          if (SHARD_SET.size && !inShard(n)) continue;
+          const want0 = desired.perfis[n] || {};
+          if (want0.active !== true) continue;
+          if (controllers.has(n)) continue;
+          if (robeMeta[n]?.activationHeldUntil && robeMeta[n].activationHeldUntil > Date.now()) continue;
+          if (robeMeta[n]?.reopenAt && robeMeta[n].reopenAt > Date.now()) continue;
+          const flags = await readAccountFlags(n).catch(()=>null);
+          const ap = flags && flags.appealSubmitted === true;
+          const nextAt = flags ? (Number(flags.appealNextCheckAt || 0) || 0) : 0;
+          if (ap && nextAt && nextAt <= Date.now()) { appealReadyPick = String(n); break; }
+        } catch {}
+      }
+    } catch {}
+
+    // Se achamos um "Pronto!", abre ele agora e não abre outros nesta rodada.
+    if (appealReadyPick) {
+      if (robeMeta[appealReadyPick]?.activationHeldUntil && robeMeta[appealReadyPick].activationHeldUntil > Date.now()) {
+        // Não deve acontecer (guard), mas não travar: segue o loop normal.
+      } else if (slotsInUse < MAX_OPEN_CONCURRENCY) {
+        slotsInUse++;
+        try {
+          await reportAction(appealReadyPick, 'nurse_restart', 'appeal_ready_priority_open');
+          await activateOnce(appealReadyPick, 'nurse_appeal_ready').catch(()=>null);
+        } catch {} finally {
+          slotsInUse--;
+        }
+        await new Promise(r => setTimeout(r, OPEN_ACTIVATION_DELAY_MS));
+        return;
+      }
+    }
+
     for (const nome of Object.keys(desired.perfis || {})) {
       if (SHARD_SET.size && !inShard(nome)) {
         if (process.env.NURSE_DEBUG === '1') {
