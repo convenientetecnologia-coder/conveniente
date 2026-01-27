@@ -2103,7 +2103,20 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
         const pin2 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-retry]', maxTries: 2 });
         if (!pin2.ok) {
           const still = await detectMessengerPinModal(p2);
-          if (still.present) throw new Error('messenger_pin_modal');
+          if (still.present) {
+            // Fallback enterprise: permitir GPT ajudar a clicar “Criar PIN”/“Continuar sem PIN”
+            // APENAS se a solução determinística falhar.
+            try {
+              await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg_pin', allowGpt: true, maxRounds: 4 }).catch(()=>null);
+            } catch {}
+            await sleep(1200);
+            const pin3 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-gpt-retry]', maxTries: 2 }).catch(()=>({ ok:false }));
+            const still2 = await detectMessengerPinModal(p2).catch(()=>({ present:false }));
+            if (still2 && still2.present) throw new Error('messenger_pin_modal');
+            if (!pin3 || pin3.ok !== true) {
+              // Se resolveu via UI unblock, ok; se não, o erro acima já aborta.
+            }
+          }
         }
       }
     } catch (e) {
@@ -2114,6 +2127,9 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     if (dbg) logger.debug('[CONFIG] msg ui', { nome, ui: ui2 || null });
   } catch (e) {
     if (dbg) logger.debug('[CONFIG] messenger tab fail', { nome, error: (e && e.message) || String(e) });
+    // Se ficou preso em PIN no provision, não mascarar: deixe o worker registrar/flaggear corretamente.
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    if (/messenger_pin_modal/i.test(msg)) throw e;
   }
 
   if (dbg) {

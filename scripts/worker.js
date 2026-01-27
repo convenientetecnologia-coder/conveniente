@@ -1839,9 +1839,11 @@ const IDENTITY_CFG = {
 // - o timer de identidadeSubmitted (1h) é independente e "corre solto"
 const IDENTITY_GATE = {
   // Requisito operacional (ROBE MÃE 5): evitar câmera "em uso" e travamentos.
-  // Identidade deve rodar 1 por vez por host, com cooldown fixo de 2min entre tentativas.
-  cooldownMinMs: 2 * 60 * 1000,
-  cooldownMaxMs: 2 * 60 * 1000,
+  // Identidade deve rodar 1 por vez por host, com cooldown RANDOMIZADO 10–30min entre execuções.
+  // Semântica desejada: o timer “corre livre”. Se não houver identidade, nada acontece;
+  // quando aparecer uma, só roda se cooldown já expirou.
+  cooldownMinMs: 10 * 60 * 1000,
+  cooldownMaxMs: 30 * 60 * 1000,
   // O botão "Carregar" pode levar 20–120s para habilitar; manter lease maior evita expirar durante a espera.
   leaseMs: 4 * 60 * 1000 // lease curto o suficiente p/ evitar deadlock, longo o suficiente p/ completar a etapa
 };
