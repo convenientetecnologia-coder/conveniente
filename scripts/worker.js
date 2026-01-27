@@ -401,6 +401,16 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
+      // Regra enterprise: estado atual manda. Se agora é login_required, limpar flags antigas que mascaram a verdade.
+      // Ex.: estava "recurso em análise", mas voltou para login_form -> precisamos remediar login.
+      delete man.accountFlags.appealSubmitted;
+      delete man.accountFlags.appealSubmittedAt;
+      delete man.accountFlags.appealSource;
+      delete man.accountFlags.appealUrl;
+      delete man.accountFlags.appealTitle;
+      delete man.accountFlags.appealNextCheckAt;
+      delete man.accountFlags.appealLastReason;
+
       man.accountFlags.loginRequired = true;
       man.accountFlags.loginReason = String(reason||'');
       man.accountFlags.loginSource = String(source||'');
@@ -1228,6 +1238,36 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       // 1) Messenger OK — antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
       try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_ok', nome: String(nome||''), source: String(source||'') }); } catch {}
 
+      // Espera UI real do Messenger Marketplace (anti-atropelo).
+      try {
+        const tMsg0 = Date.now();
+        let okMsg = false;
+        let errMsg = '';
+        try {
+          await virtusHelper.garantirMarketplace(pg, { timeoutMs: 45000 });
+          okMsg = true;
+        } catch (e) {
+          okMsg = false;
+          errMsg = (e && e.message) ? String(e.message) : String(e);
+        }
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'bootstrap_messenger_ready',
+            nome: String(nome||''),
+            source: String(source||''),
+            ok: !!okMsg,
+            durMs: Date.now() - tMsg0,
+            error: okMsg ? null : String(errMsg || '').slice(0, 180),
+            url: (() => { try { return String(pg.url() || ''); } catch { return ''; } })()
+          });
+        } catch {}
+        if (!okMsg) {
+          // Não avança para Robe nem libera trabalho se o Messenger não ficou realmente pronto.
+          return { ok: false, error: 'messenger_marketplace_not_ready' };
+        }
+      } catch {}
+
       let robeProbe = null;
       try {
         const man = await manifestStore.read(nome).catch(()=>null);
@@ -1238,12 +1278,52 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         const flowId = newFlowId('robe_probe');
         try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_begin', nome: String(nome||''), source: String(source||''), flowId, robeMode, targetUrl }); } catch {}
 
-        // Janela curta e segura: abre aba, valida, fecha.
+        // Janela curta e segura: abre aba, valida pronto de verdade, fecha.
+        const tProbe0 = Date.now();
         const p = await ctrl.browser.newPage().catch(()=>null);
         if (!p) throw new Error('robe_probe_no_newPage');
         try { await wirePageObservers(nome, p); } catch {}
-        try { await p.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-        try { await sleep(900); } catch {}
+        // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda) — igual ao Robe.
+        try {
+          const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
+          guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 20000);
+        } catch {}
+        // PatchPage na aba 1 para consistência (coords/UA/stealth hooks)
+        try {
+          const coords = utils.getCoords((man && man.cidade) ? String(man.cidade) : '');
+          await browserHelper.patchPage(nome, p, coords).catch(()=>{});
+        } catch {}
+        const tNav0 = Date.now();
+        try { await p.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }); } catch (e) {}
+        const navDurMs = Date.now() - tNav0;
+        // Espera sinais reais de create (anti-atropelo), com timeout curto.
+        const tReady0 = Date.now();
+        let okReady = false;
+        try {
+          okReady = await p.waitForFunction((want) => {
+            try {
+              const href = String(location && location.href ? location.href : '');
+              const path = String(location && location.pathname ? location.pathname : '');
+              if (!href || href === 'about:blank') return false;
+              if (want === 'vehicle') {
+                if (!/\/marketplace\/create\/vehicle\b/i.test(path)) return false;
+              } else {
+                if (!/\/marketplace\/create\/item\b/i.test(path)) return false;
+              }
+              const hasMain = !!document.querySelector('div[role="main"]');
+              const hasFile = !!document.querySelector('input[type="file"]');
+              const hasAria = !!document.querySelector('[aria-label]');
+              return hasMain && (hasFile || hasAria);
+            } catch { return false; }
+          }, { timeout: 20000 }, (robeMode === 'veiculos') ? 'vehicle' : 'item').catch(()=>false);
+        } catch { okReady = false; }
+        const readyDurMs = Date.now() - tReady0;
+        // Não fechar instantâneo: garantir que houve tempo mínimo de validação (anti-flake visual).
+        const minHoldMs = parseInt(process.env.BOOTSTRAP_ROBE_MIN_HOLD_MS || '1800', 10);
+        const elapsed = Date.now() - tProbe0;
+        if (minHoldMs > elapsed) {
+          try { await sleep(minHoldMs - elapsed); } catch {}
+        }
         try { await browserHelper.ensureFbUiUnblocked(p, nome, { reasonBase: 'bootstrap_robe_probe', allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
         const lr2 = await browserHelper.detectLoginRequired(p).catch(()=>({ loginRequired:false }));
         robeProbe = { ok: true, robeMode, targetUrl, lr: lr2 };
@@ -1260,6 +1340,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             ok: true,
             robeMode,
             targetUrl,
+            navDurMs,
+            readyOk: !!okReady,
+            readyDurMs,
             finalUrl: String(u1||'').slice(0, 260),
             title: String(t1||'').slice(0, 200),
             loginRequired: !!(lr2 && lr2.loginRequired),
