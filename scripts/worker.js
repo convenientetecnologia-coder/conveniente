@@ -1196,18 +1196,16 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       return { ok: true, state: 'appeal_submitted', reason: rr };
     }
     if (rr.includes('captcha') || rr.includes('checkpoint')) {
-      // captcha/checkpoint: aqui sim invocar humano faz sentido
+      // Regra do usuário (ultra enterprise): NUNCA invocar humano automaticamente.
+      // Apenas marca estado e mantém Virtus OFF. Operador decide se clica "Invocar humano".
       try { await setLoginRequiredFlag(nome, { reason: lr.reason || 'captcha', source: lr.domain || source }); } catch {}
       try {
         await fileStore.withDesiredFileLockUpdate((d) => {
           d = d || {}; d.perfis = d.perfis || {};
-          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: true, virtus: 'off' };
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'off' };
           return d;
         });
       } catch {}
-      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-      try { freezeCooldownIfNotWorking(nome); } catch {}
-      try { await ensureHumanOverlay(nome, ctrl, { reason: 'open_human_probe_captcha' }); } catch {}
       return { ok: true, state: 'captcha_checkpoint', reason: rr };
     }
 
@@ -3946,10 +3944,15 @@ async function activateOnce(nome, source = '', operator = '') {
                 const pr = await probeHumanStateOnOpen(nome, ctrl, { source: 'open_login_failed' }).catch(()=>null);
                 const st = pr && pr.state ? String(pr.state) : '';
                 if (st === 'captcha_checkpoint' || st === 'login_required') {
-                  // Somente aqui entra em "humano invocado".
-                  try { ctrl.humanControl = true; } catch {}
-                  try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_login_failed' }); } catch {}
-                  try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+                  // Regra do usuário: NUNCA invocar humano automaticamente (nem em login_failed).
+                  // Mantém Virtus OFF e deixa o operador decidir se chama invoke_human.
+                  try {
+                    await fileStore.withDesiredFileLockUpdate((d) => {
+                      d = d || {}; d.perfis = d.perfis || {};
+                      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+                      return d;
+                    });
+                  } catch {}
                 } else {
                   // Se virou identidade/appeal/liberou, não manter "loginRemediateFailed" como estado final.
                   try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
@@ -5161,16 +5164,11 @@ async function start_work({ nome, operator }) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
             return d;
           });
         } catch {}
-        try {
-          ctrl.humanControl = true;
-          ctrl.trabalhando = false;
-          await stopVirtus(nome).catch(()=>{});
-        } catch {}
-        try { await ensureHumanOverlay(nome, ctrl, { reason: `start_work_blocked_${kind}` }); } catch {}
+        try { ctrl.trabalhando = false; await stopVirtus(nome).catch(()=>{}); } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         return { ok: false, error: kind };
       }
@@ -5179,16 +5177,11 @@ async function start_work({ nome, operator }) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
             return d;
           });
         } catch {}
-        try {
-          ctrl.humanControl = true;
-          ctrl.trabalhando = false;
-          await stopVirtus(nome).catch(()=>{});
-        } catch {}
-        try { await ensureHumanOverlay(nome, ctrl, { reason: 'start_work_blocked_appeal_submitted' }); } catch {}
+        try { ctrl.trabalhando = false; await stopVirtus(nome).catch(()=>{}); } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         return { ok: false, error: 'appeal_submitted' };
       }
@@ -5248,17 +5241,15 @@ async function start_work({ nome, operator }) {
           }
           if (lr && lr.loginRequired && String(lr.reason || '').toLowerCase().includes('appeal')) {
             try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
-            ctrl.humanControl = true;
             ctrl.trabalhando = false;
             try { await stopVirtus(nome); } catch {}
             try {
               await fileStore.withDesiredFileLockUpdate((d) => {
                 d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
                 return d;
               });
             } catch {}
-            try { await ensureHumanOverlay(nome, ctrl, { reason: 'start_work_preflight_appeal_submitted' }); } catch {}
             try { await snapshotStatusAndWrite(); } catch {}
             try { await issues.append(nome, 'mil_action', `start_work_preflight_appeal_submitted reason=${String(lr.reason||'').slice(0,80)}`); } catch {}
             return { ok: false, error: 'appeal_submitted' };
@@ -5738,7 +5729,9 @@ const handlers = {
 
       const invokeHumanForConfigure = async (reason) => {
         const why = String(reason || 'configure_failed');
-        enteredHuman = true;
+        // Regra do usuário: NUNCA invocar humano automaticamente.
+        // Mantém Virtus OFF e registra erro, mas não seta humanHold/humanControl.
+        enteredHuman = false;
         try {
           provisionAudit.append({ ts: Date.now(), event: 'configure_human_hold', nome: String(nome || ''), operator: op || null, reason: why });
         } catch {}
@@ -5747,16 +5740,11 @@ const handlers = {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            // Regra enterprise: manter browser aberto para inspeção humana
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
             return d;
           });
         } catch {}
-        try {
-          ctrl.humanControl = true;
-          ctrl.trabalhando = false;
-          try { await stopVirtus(nome); } catch {}
-        } catch {}
+        try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
       };
 
       const reasonPriority = (r) => {
@@ -6073,62 +6061,17 @@ const handlers = {
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        // Hard safety: travar automação + deixar evidência visível
+        // Regra do usuário: NUNCA entrar em humano invocado automaticamente.
+        // Apenas trava automação (Virtus OFF) e registra evidência.
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            // Regra enterprise:
-            // - manter o navegador ABERTO para inspeção humana (invocar humano real)
-            // - automação OFF até o usuário "Retomar trabalho"
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
             return d;
           });
         } catch {}
 
-        // Mantém o browser aberto e entra em modo humano (se estiver conectado)
-        try {
-          const ctrl = controllers.get(nome);
-          if (ctrl) {
-            ctrl.humanControl = true;
-            ctrl.trabalhando = false;
-            try { await stopVirtus(nome); } catch {}
-            // UX HARDCORE: nunca deixar humano com múltiplas abas abertas
-            try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
-          }
-        } catch {}
-
-        // Blindagem UX: se o navegador está “preto”/blank, garante ao menos uma aba navegada/visível para o humano.
-        try {
-          const ctrl = controllers.get(nome);
-          if (ctrl && ctrl.browser && typeof ctrl.browser.pages === 'function' && ctrl.browser.isConnected?.()) {
-            const pages = await ctrl.browser.pages().catch(()=>[]);
-            const p0 = pages && pages[0];
-            const u0 = (() => { try { return p0 && typeof p0.url === 'function' ? String(p0.url() || '') : ''; } catch { return ''; } })();
-            const needsNewPage = (!p0 || !u0 || u0 === 'about:blank');
-            const ensurePage = async (page) => {
-              try { await page.bringToFront?.().catch(()=>{}); } catch {}
-              // navega para uma tela “humana” padrão (Messenger Marketplace) para inspeção imediata
-              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-              await new Promise(r => setTimeout(r, 1600));
-              await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: 'human_mode_entry', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-            };
-            if (needsNewPage) {
-              const np = await ctrl.browser.newPage().catch(()=>null);
-              if (np) {
-                try {
-                  const man = await manifestStore.read(nome).catch(()=>null);
-                  await browserHelper.patchPage(nome, np, utils.getCoords(man && man.cidade || '')).catch(()=>{});
-                } catch {}
-                await ensurePage(np);
-                ctrl.mainPage = np;
-                try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
-              }
-            } else {
-              await ensurePage(p0);
-              ctrl.mainPage = p0;
-            }
-          }
-        } catch {}
+        try { const ctrl = controllers.get(nome); if (ctrl) { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } } catch {}
 
         // UX/telemetria: expõe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnóstico)
         try {
@@ -6905,9 +6848,10 @@ const handlers = {
       }
 
       // ===== Enterprise HARDENING: diagnóstico imediato do estado real antes de "voltar a trabalhar" =====
-      // Regras:
-      // - Se estiver suspensa/banida: marca e invoca humano (não tenta automação).
-      // - Se estiver em captcha/identity/checkpoint/2FA: invoca humano (não tenta automação).
+      // Regras (ultra enterprise - usuário mandou):
+      // - NUNCA invocar humano automaticamente. Somente via handler explícito invoke_human.
+      // - Se estiver suspensa/banida: marca (auto delete/stock) e não tenta automação.
+      // - Se estiver em captcha/identity/checkpoint/2FA: marca flags e mantém Virtus OFF.
       // - Se estiver em login/senha (login_form): agenda login_remediate (cookies -> login -> humano) sob provisionLock/quiesce.
       // - Se estiver em appeal_submitted: não retoma automação; arma monitoramento (1h).
       let scheduledLoginRemediate = false;
@@ -6925,22 +6869,15 @@ const handlers = {
           if (bd && bd.banned) {
             preflight = { ok: true, state: 'banned', reason: String(bd.reason || 'suspended_ui') };
             try { await setBannedFlag(nome, { reason: String(bd.reason || 'suspended_ui'), snippet: String(bd.snippet || '') }); } catch {}
+            try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
             try {
               await fileStore.withDesiredFileLockUpdate((d) => {
                 d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
                 return d;
               });
             } catch {}
-            try {
-              ctrl.humanControl = true;
-              ctrl.trabalhando = false;
-              try { await stopVirtus(nome); } catch {}
-              await browserHelper.invocarHumano(ctrl.browser, nome);
-              try { freezeCooldownIfNotWorking(nome); } catch {}
-              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_banned' }); } catch {}
-              await snapshotStatusAndWrite();
-            } catch {}
+            try { await snapshotStatusAndWrite(); } catch {}
             logger.info('[HANDLER] human-resume preflight -> banned', { nome, reason: preflight.reason });
             return { ok: true, preflight };
           }
@@ -6961,7 +6898,6 @@ const handlers = {
               try { await stopVirtus(nome); } catch {}
               try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
               await snapshotStatusAndWrite();
-              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_appeal_submitted' }); } catch {}
               logger.info('[HANDLER] human-resume preflight -> appeal_submitted', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
@@ -6973,7 +6909,6 @@ const handlers = {
               ctrl.trabalhando = false;
               try { await stopVirtus(nome); } catch {}
               await snapshotStatusAndWrite();
-              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_identity_submitted' }); } catch {}
               logger.info('[HANDLER] human-resume preflight -> identity_submitted', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
@@ -6984,7 +6919,6 @@ const handlers = {
               ctrl.trabalhando = false;
               try { await stopVirtus(nome); } catch {}
               await snapshotStatusAndWrite();
-              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_identity_required' }); } catch {}
               logger.info('[HANDLER] human-resume preflight -> identity_required', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
@@ -7008,18 +6942,11 @@ const handlers = {
               try {
                 await fileStore.withDesiredFileLockUpdate((d) => {
                   d.perfis = d.perfis || {};
-                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
                   return d;
                 });
               } catch {}
-              try {
-                ctrl.humanControl = true;
-                ctrl.trabalhando = false;
-                try { await stopVirtus(nome); } catch {}
-                await browserHelper.invocarHumano(ctrl.browser, nome);
-                try { freezeCooldownIfNotWorking(nome); } catch {}
-                try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_captcha_checkpoint' }); } catch {}
-              } catch {}
+              try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
               await snapshotStatusAndWrite();
               logger.info('[HANDLER] human-resume preflight -> captcha/checkpoint', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
@@ -7030,18 +6957,11 @@ const handlers = {
               try {
                 await fileStore.withDesiredFileLockUpdate((d) => {
                   d.perfis = d.perfis || {};
-                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
                   return d;
                 });
               } catch {}
-              try {
-                ctrl.humanControl = true;
-                ctrl.trabalhando = false;
-                try { await stopVirtus(nome); } catch {}
-                await browserHelper.invocarHumano(ctrl.browser, nome);
-                try { freezeCooldownIfNotWorking(nome); } catch {}
-                try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_needs_human' }); } catch {}
-              } catch {}
+              try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
               await snapshotStatusAndWrite();
               logger.info('[HANDLER] human-resume preflight -> needs_human', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
@@ -8606,10 +8526,8 @@ async function nurseTick() {
           // Garantia ultra enterprise: nunca manter Virtus rodando em identitySubmitted.
           try {
             if (ctrl) {
-              ctrl.humanControl = true;
               ctrl.trabalhando = false;
               await stopVirtus(nome).catch(()=>{});
-              await ensureHumanOverlay(nome, ctrl, { reason: 'nurse_identity_submitted_guard' }).catch(()=>{});
               await snapshotStatusAndWrite().catch(()=>{});
             }
           } catch {}
@@ -8627,16 +8545,15 @@ async function nurseTick() {
         }
       } catch {}
 
-      // Identidade requerida (pré-submissão): não automatizável, mas pode ajudar clicando "Continuar/Avançar" quando aparecer.
+      // Identidade requerida (pré-submissão):
+      // Regra do usuário: NUNCA invocar humano automaticamente. O nurse pode rodar assist, mas não seta humanControl/overlay.
       try {
         const flagsIR = await readAccountFlags(nome).catch(()=>({}));
         if (flagsIR && flagsIR.identityRequired === true) {
           try {
             if (ctrl) {
-              ctrl.humanControl = true;
               ctrl.trabalhando = false;
               await stopVirtus(nome).catch(()=>{});
-              await ensureHumanOverlay(nome, ctrl, { reason: 'nurse_identity_required_guard' }).catch(()=>{});
               // Debounce do assist (não spammar cliques)
               robeMeta[nome] = robeMeta[nome] || {};
               const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
@@ -8717,11 +8634,8 @@ async function nurseTick() {
           // Garantia ultra enterprise: nunca manter Virtus rodando em appealSubmitted.
           try {
             if (ctrl) {
-              ctrl.humanControl = true;
               ctrl.trabalhando = false;
               await stopVirtus(nome).catch(()=>{});
-              // overlay é o “painel de comando” do humano
-              await ensureHumanOverlay(nome, ctrl, { reason: 'nurse_appeal_submitted_guard' }).catch(()=>{});
               await snapshotStatusAndWrite().catch(()=>{});
             }
           } catch {}
@@ -9020,17 +8934,18 @@ async function nurseTick() {
               }
             } catch {}
 
-            // Se for "Confirme sua identidade" (selfie/vídeo), NÃO tentar resolver automaticamente.
-            // Ação enterprise: travar automação e pedir humano (humanHold).
+            // Se for "Confirme sua identidade" (selfie/vídeo):
+            // Regra do usuário: NUNCA invocar humano automaticamente.
+            // Apenas trava automação (Virtus OFF) e mantém browser livre.
             try {
               if (String(curReason || '').toLowerCase().includes('identity')) {
                 try { await issues.append(nome, 'mil_action', `identity_required_hold reason=${curReason}`); } catch {}
-                try { ctrl.humanControl = true; ctrl.trabalhando = false; } catch {}
+                try { ctrl.trabalhando = false; } catch {}
                 try { await stopVirtus(nome); } catch {}
                 try {
                   await fileStore.withDesiredFileLockUpdate((desired) => {
                     desired.perfis = desired.perfis || {};
-                    desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off', active: true };
+                    desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false, virtus: 'off', active: true };
                     return desired;
                   });
                 } catch {}
@@ -9064,13 +8979,15 @@ async function nurseTick() {
                 });
               } catch {}
             } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
+              // Regra do usuário: NUNCA invocar humano automaticamente em captcha/checkpoint.
+              // Apenas trava automação (Virtus OFF).
               try { await issues.append(nome, 'mil_action', `login_requires_human_hold reason=${rr}`); } catch {}
-              try { ctrl.humanControl = true; ctrl.trabalhando = false; } catch {}
+              try { ctrl.trabalhando = false; } catch {}
               try { await stopVirtus(nome); } catch {}
               try {
                 await fileStore.withDesiredFileLockUpdate((desired) => {
                   desired.perfis = desired.perfis || {};
-                  desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: true, virtus: 'off', active: true };
+                  desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false, virtus: 'off', active: true };
                   return desired;
                 });
               } catch {}
