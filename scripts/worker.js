@@ -467,6 +467,7 @@ function _overlayReasonFromFlags(flags) {
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
     if (flags.twoFactor === true) return `two_factor:${flags.twoFactorReason || ''}`.trim();
+    if (flags.captchaCheckpoint === true) return `captcha_checkpoint:${flags.captchaCheckpointReason || ''}`.trim();
     if (flags.identitySubmitted === true) return 'identity_submitted';
     if (flags.identityRequired === true) return 'identity_required';
     if (flags.appealSubmitted === true) return 'appeal_submitted';
@@ -475,6 +476,52 @@ function _overlayReasonFromFlags(flags) {
     if (flags.loginRequired === true) return String(flags.loginReason || 'login_required');
     return 'human_mode';
   } catch { return 'human_mode'; }
+}
+
+async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  try {
+    await manifestStore.update(nome, (man) => {
+      man = man || {};
+      man.accountFlags = man.accountFlags || {};
+      man.accountFlags.captchaCheckpoint = true;
+      man.accountFlags.captchaCheckpointAt = Number(man.accountFlags.captchaCheckpointAt || 0) || Date.now();
+      man.accountFlags.captchaCheckpointReason = String(reason || '').slice(0, 220);
+      man.accountFlags.captchaCheckpointSource = String(source || '').slice(0, 80);
+      man.accountFlags.captchaCheckpointUrl = String(url || '').slice(0, 300);
+      man.accountFlags.captchaCheckpointTitle = String(title || '').slice(0, 200);
+      // Blindagem: captcha/checkpoint NÃO pode ficar mascarado por "login/cookies falhou".
+      delete man.accountFlags.loginRemediateFailed;
+      delete man.accountFlags.loginRemediateFailedAt;
+      delete man.accountFlags.loginRemediateFailedReason;
+      delete man.accountFlags.loginRemediateFailedSource;
+      delete man.accountFlags.loginRemediateFailedStage;
+      delete man.accountFlags.loginRemediateFailedCount;
+      return man;
+    });
+    robeMeta[nome] = robeMeta[nome] || {};
+    robeMeta[nome].whyNotOpen = 'captcha_checkpoint';
+    delete robeMeta[nome].loginRemediateFailed;
+    delete robeMeta[nome].loginRemediateFailedReason;
+  } catch {}
+
+  // Captcha/Checkpoint: por ordem do usuário, invocar humano automaticamente.
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {}; d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      return d;
+    });
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.trabalhando = false;
+      ctrl.humanControl = true;
+      try { await stopVirtus(nome); } catch {}
+      try { await ensureHumanOverlay(nome, ctrl, { reason: 'captcha_checkpoint' }); } catch {}
+      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+    }
+  } catch {}
 }
 
 async function _buildHumanOverlayData(nome) {
@@ -525,6 +572,7 @@ async function _buildHumanOverlayData(nome) {
         loginRequired: flags && flags.loginRequired === true,
         loginReason: flags ? (flags.loginReason || '') : '',
         banned: flags && flags.banned === true,
+        captchaCheckpoint: flags && flags.captchaCheckpoint === true,
         identityRequired: flags && flags.identityRequired === true,
         identitySubmitted: flags && flags.identitySubmitted === true,
         identityNextCheckAt: flags ? (flags.identityNextCheckAt || null) : null,
@@ -832,6 +880,7 @@ async function _installOverlayOnPage(nome, page) {
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida';
             else if (f.twoFactor) statusTxt = '2FA requerido (excluída)';
+            else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
             else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
             else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
             else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
@@ -1196,16 +1245,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       return { ok: true, state: 'appeal_submitted', reason: rr };
     }
     if (rr.includes('captcha') || rr.includes('checkpoint')) {
-      // Regra do usuário (ultra enterprise): NUNCA invocar humano automaticamente.
-      // Apenas marca estado e mantém Virtus OFF. Operador decide se clica "Invocar humano".
-      try { await setLoginRequiredFlag(nome, { reason: lr.reason || 'captcha', source: lr.domain || source }); } catch {}
-      try {
-        await fileStore.withDesiredFileLockUpdate((d) => {
-          d = d || {}; d.perfis = d.perfis || {};
-          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'off' };
-          return d;
-        });
-      } catch {}
+      // Captcha/Checkpoint: aqui SIM invoca humano automaticamente (ordem do usuário).
+      try { await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
       return { ok: true, state: 'captcha_checkpoint', reason: rr };
     }
 
@@ -8934,21 +8975,17 @@ async function nurseTick() {
               }
             } catch {}
 
-            // Se for "Confirme sua identidade" (selfie/vídeo):
-            // Regra do usuário: NUNCA invocar humano automaticamente.
-            // Apenas trava automação (Virtus OFF) e mantém browser livre.
+            // Classificação enterprise do LR (sem achismo):
+            // - Identidade => marca identityRequired/Submitted e roda assist (sem humano invocado)
+            // - Captcha/Checkpoint => marca captchaCheckpoint e aqui SIM invoca humano automaticamente (ordem do usuário)
             try {
-              if (String(curReason || '').toLowerCase().includes('identity')) {
-                try { await issues.append(nome, 'mil_action', `identity_required_hold reason=${curReason}`); } catch {}
-                try { ctrl.trabalhando = false; } catch {}
-                try { await stopVirtus(nome); } catch {}
-                try {
-                  await fileStore.withDesiredFileLockUpdate((desired) => {
-                    desired.perfis = desired.perfis || {};
-                    desired.perfis[nome] = { ...(desired.perfis[nome] || {}), humanHold: false, virtus: 'off', active: true };
-                    return desired;
-                  });
-                } catch {}
+              const rr = String(curReason || '').toLowerCase();
+              if (rr.includes('identity_submitted')) {
+                await setIdentitySubmittedFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
+              } else if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_') || rr.includes('identity')) {
+                await setIdentityRequiredFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
+              } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
+                await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
               }
             } catch {}
           } catch {}
@@ -8962,6 +8999,7 @@ async function nurseTick() {
               return;
             }
           } catch {}
+          // Mantém também o flag genérico para rastreio, mas sem mascarar identidade/captcha:
           await setLoginRequiredFlag(nome, { reason: lr.reason || '', source: lr.domain || '' });
 
           // Enterprise autopilot:
