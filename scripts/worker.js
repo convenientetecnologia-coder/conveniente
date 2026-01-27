@@ -1270,26 +1270,16 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
     delete robeMeta[nome].loginReason;
   } catch {}
 
-  // Modo seguro: automação OFF e browser disponível para inspeção.
+  // Regra enterprise: "Recurso em análise" NÃO deve virar humano invocado automaticamente.
+  // Mantém automação OFF (Virtus OFF), mas não seta humanHold.
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d.perfis = d.perfis || {};
-      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
       return d;
     });
   } catch {}
-  try {
-    const ctrl = controllers.get(nome);
-    if (ctrl) {
-      ctrl.humanControl = true;
-      ctrl.trabalhando = false;
-      try { await stopVirtus(nome); } catch {}
-    }
-  } catch {}
-  try {
-    const ctrl = controllers.get(nome);
-    if (ctrl) await ensureHumanOverlay(nome, ctrl, { reason: 'appeal_submitted' });
-  } catch {}
+  try { const ctrl = controllers.get(nome); if (ctrl) { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } } catch {}
 }
 
 async function armAppealMonitor(nome, { delayMs = APPEAL_CFG.firstDelayMs } = {}) {
@@ -1695,21 +1685,20 @@ async function setIdentityRequiredFlag(nome, { source = '', url = '', title = ''
     delete robeMeta[nome].loginReason;
   } catch {}
 
-  // Sempre humano (não é automatizável)
+  // Regra enterprise: identidade NÃO deve virar "humano invocado" automaticamente.
+  // Mantém Virtus OFF para não postar/robe enquanto há identidade, mas deixa o navegador livre.
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d.perfis = d.perfis || {};
-      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
       return d;
     });
   } catch {}
   try {
     const ctrl = controllers.get(nome);
     if (ctrl) {
-      ctrl.humanControl = true;
       ctrl.trabalhando = false;
       try { await stopVirtus(nome); } catch {}
-      await ensureHumanOverlay(nome, ctrl, { reason: 'identity_required' }).catch(()=>{});
     }
   } catch {}
 }
@@ -1762,21 +1751,20 @@ async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '
     delete robeMeta[nome].loginReason;
   } catch {}
 
-  // Modo seguro: automação OFF e browser disponível para inspeção.
+  // Regra enterprise: identity_submitted também NÃO deve virar humano invocado automaticamente.
+  // Mantém Virtus OFF e agenda monitor, mas não seta humanHold.
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d.perfis = d.perfis || {};
-      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
       return d;
     });
   } catch {}
   try {
     const ctrl = controllers.get(nome);
     if (ctrl) {
-      ctrl.humanControl = true;
       ctrl.trabalhando = false;
       try { await stopVirtus(nome); } catch {}
-      await ensureHumanOverlay(nome, ctrl, { reason: 'identity_submitted' }).catch(()=>{});
     }
   } catch {}
 }
@@ -3787,8 +3775,9 @@ async function activateOnce(nome, source = '', operator = '') {
 
   opening[nome] = true;
   let _supervisorSlotGranted = false;
+  // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
+  // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
-  let _humanHoldAllowOpen = false;
   try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
@@ -3815,20 +3804,21 @@ async function activateOnce(nome, source = '', operator = '') {
       }
     } catch {}
 
+    // Se vier humanHold marcado, limpamos antes de abrir e fazemos probe real depois.
+    // Só voltará a humano invocado se o probe detectar captcha/checkpoint ou falha real de login.
     try {
       const desired = readJsonFile(desiredPath, { perfis: {} });
       _humanHoldAtStart = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
       if (_humanHoldAtStart) {
-        const op = String(operator || '').trim();
-        const isHumanOp = /(^admin|^ui|manual|user|humano|human)/i.test(op);
-        // Regra enterprise: humanHold deve bloquear automação, mas NÃO deve impedir o humano de abrir o navegador.
-        // Também permite bulk open (abrir tudo) reabrir navegadores em modo humano após restart.
-        const isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(op);
-        _humanHoldAllowOpen = !!(isHumanOp || isBulkOpen);
-        if (!_humanHoldAllowOpen) {
-          await reportAction(nome, 'mil_action', 'activate_skip_human_hold');
-          return { ok: false, error: 'human_hold' };
-        }
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {};
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), humanHold: false };
+            return d;
+          });
+        } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'activate_clear_human_hold_on_open', nome: String(nome||''), operator: String(operator||'') }); } catch {}
       }
     } catch {}
 
@@ -3921,21 +3911,8 @@ async function activateOnce(nome, source = '', operator = '') {
         }
         controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
 
-        // Enterprise: se está em humanHold e o operador é humano, abre em modo humano (sem automação).
-        if (_humanHoldAtStart && _humanHoldAllowOpen) {
-          const ctrl = controllers.get(nome);
-          if (ctrl) {
-            ctrl.humanControl = true;
-            ctrl.trabalhando = false;
-            try { await stopVirtus(nome); } catch {}
-            await reportAction(nome, 'mil_action', 'opened_in_human_mode (humanHold=true)');
-            try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_human_hold'); } catch {}
-            try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_human_hold' }); } catch {}
-            // Anti-tela-preta: entrar no Facebook (não Messenger) e fazer probe para corrigir flags.
-            try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_human_hold' }); } catch {}
-            try { await probeHumanStateOnOpen(nome, ctrl, { source: 'open_human_hold' }); } catch {}
-          }
-        }
+        // Regra enterprise: NÃO abrir já em humano/overlay por "humanHold".
+        // Abertura sempre começa normal; o probe decide (captcha/checkpoint => invocar humano).
 
         // Enterprise: se este perfil está marcado como "loginRemediateFailed",
         // abrir já em modo humano (sem automação) ao invés de tentar loops automáticos.
@@ -3964,74 +3941,10 @@ async function activateOnce(nome, source = '', operator = '') {
           }
         } catch {}
 
-        // Enterprise: se está em identidade (required/submitted), abrir em modo humano,
-        // mas NUNCA invocar humano em about:blank. Navega para o Facebook e mantém overlay.
-        try {
-          const flagsI = await readAccountFlags(nome).catch(()=>({}));
-          if (flagsI && (flagsI.identityRequired === true || flagsI.identitySubmitted === true)) {
-            const ctrl = controllers.get(nome);
-            if (ctrl) {
-              ctrl.humanControl = true;
-              ctrl.trabalhando = false;
-              try { await stopVirtus(nome); } catch {}
-              try {
-                await fileStore.withDesiredFileLockUpdate((d) => {
-                  d.perfis = d.perfis || {};
-                  // humanHold=true é correto para identidade (bloqueia automação, mas bulk_open_all ainda pode abrir).
-                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-                  return d;
-                });
-              } catch {}
-              await reportAction(nome, 'mil_action', `opened_in_human_mode (identity=${flagsI.identitySubmitted?'submitted':'required'})`);
-              try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_identity'); } catch {}
-              try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_identity' }); } catch {}
-              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_identity' }); } catch {}
-              // Enterprise: abrir em modo humano por identidade precisa setar flags reais via probe,
-              // senão o painel fica "sem motivo" e o monitor de identidade não roda.
-              try { await probeHumanStateOnOpen(nome, ctrl, { source: 'open_identity' }); } catch {}
-              try { await snapshotStatusAndWrite(); } catch {}
-            }
-          }
-        } catch {}
+        // Regra enterprise: identidade/appeal NÃO devem abrir já em "humano invocado".
+        // Quem decide humano invocado é SOMENTE captcha/checkpoint ou login falhou de verdade.
 
-        // Enterprise: se está em "Recurso em análise" (appealSubmitted),
-        // abrir já em modo humano (sem automação) e manter Virtus OFF.
-        try {
-          const flags2 = await readAccountFlags(nome).catch(()=>({}));
-          if (flags2 && flags2.appealSubmitted === true) {
-            const ctrl = controllers.get(nome);
-            if (ctrl) {
-              ctrl.humanControl = true;
-              ctrl.trabalhando = false;
-              try { await stopVirtus(nome); } catch {}
-              try {
-                await fileStore.withDesiredFileLockUpdate((d) => {
-                  d.perfis = d.perfis || {};
-                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-                  return d;
-                });
-              } catch {}
-              await reportAction(nome, 'mil_action', 'opened_in_human_mode (appealSubmitted=true)');
-              try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_appeal_submitted'); } catch {}
-              // Anti-tela-preta: navega antes (Facebook) e só invoca humano automaticamente se for captcha/checkpoint.
-              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_appeal' }); } catch {}
-              // Enterprise: garantir que as flags reflitam a tela real após abrir (pode ter virado login/identity/captcha).
-              try { await probeHumanStateOnOpen(nome, ctrl, { source: 'open_appeal' }); } catch {}
-              try {
-                const pg = ctrl.mainPage;
-                const lr = pg ? await browserHelper.detectLoginRequired(pg).catch(()=>null) : null;
-                const rr = String(lr && lr.reason || '').toLowerCase();
-                const isCaptcha = rr.includes('captcha') || rr.includes('checkpoint');
-                if (isCaptcha) {
-                  try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-                }
-              } catch {}
-              try { freezeCooldownIfNotWorking(nome); } catch {}
-              try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_appeal_submitted' }); } catch {}
-              try { await snapshotStatusAndWrite(); } catch {}
-            }
-          }
-        } catch {}
+        // AppealSubmitted (recurso em análise) deve ser monitorado, não "humano invocado" na abertura.
 
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activatedAt = Date.now();
