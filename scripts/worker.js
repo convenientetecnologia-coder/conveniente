@@ -1122,22 +1122,32 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
 
 async function armAppealMonitor(nome, { delayMs = APPEAL_CFG.firstDelayMs } = {}) {
   try {
-    const next = Date.now() + Math.max(60_000, Number(delayMs || 0) || 0);
+    const now = Date.now();
+    const next = now + Math.max(60_000, Number(delayMs || 0) || 0);
+    let skipped = false;
+    let existingNext = 0;
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
       if (man.accountFlags.appealSubmitted !== true) return man;
-      man.accountFlags.appealLastArmedAt = Date.now();
+      // Ultra enterprise: armamento idempotente.
+      // Se já existe um "next check" no futuro, NÃO rearmar (isso reinicia o timer no painel e cria loop infinito).
+      existingNext = Number(man.accountFlags.appealNextCheckAt || 0) || 0;
+      if (existingNext && existingNext > (now + 30_000)) {
+        skipped = true;
+        return man;
+      }
+      man.accountFlags.appealLastArmedAt = now;
       man.accountFlags.appealNextCheckAt = next;
       return man;
     });
     try {
       provisionAudit.append({
         ts: Date.now(),
-        event: 'appeal_monitor_armed',
+        event: skipped ? 'appeal_monitor_arm_skipped' : 'appeal_monitor_armed',
         nome: String(nome || ''),
-        nextAt: next,
-        delayMs: Math.max(0, next - Date.now())
+        nextAt: skipped ? existingNext : next,
+        delayMs: skipped ? Math.max(0, existingNext - Date.now()) : Math.max(0, next - Date.now())
       });
     } catch {}
   } catch {}
