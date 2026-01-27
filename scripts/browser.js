@@ -2947,7 +2947,7 @@ async function detectLoginRequired(page) {
       const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
       // HARDEN: também usa body.innerText, porque às vezes o texto está fora do recorte inicial
       const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
-      const hasPersonaText =
+      const hasPersonaTextRaw =
         h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person')) ||
         bodyTxt.includes('confirme que voce e uma pessoa') ||
         bodyTxt.includes('confirm that you are a person');
@@ -3009,6 +3009,11 @@ async function detectLoginRequired(page) {
         (bodyTxt.includes('carregamento desse video') && bodyTxt.includes('confirmar sua identidade')) ||
         (bodyTxt.includes('grave') && bodyTxt.includes('selfie') && bodyTxt.includes('video')) ||
         (bodyTxt.includes('gravar') && bodyTxt.includes('selfie') && bodyTxt.includes('video'));
+
+      // Anti-falso-positivo crítico:
+      // Em telas de identidade o FB usa texto "pessoa real" (parece captcha), mas é IDENTIDADE (selfie/vídeo).
+      // Se há sinais fortes de identidade, NÃO classificar como captcha_persona.
+      const hasPersonaText = hasPersonaTextRaw && !identityStrongHints;
 
       const hasIdentitySubmitted =
         // textos explícitos de identidade "em andamento"

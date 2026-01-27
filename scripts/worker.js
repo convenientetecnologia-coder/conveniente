@@ -1126,6 +1126,18 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
   }
 }
 
+// Anti-tela-preta (about:blank) para aberturas "open/open-all":
+// - Não invoca humano.
+// - Garante que exista uma aba navegada para que detectores consigam rodar.
+async function ensureNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'open_entry' } = {}) {
+  try {
+    const r = await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer, reasonBase }).catch(()=>null);
+    return r && r.ok ? r : { ok: false, error: (r && r.error) ? r.error : 'failed' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 // Probe enterprise pós-abertura (anti-engessamento):
 // - garante que as flags reflitam a tela REAL (identity/appeal/captcha/login_form)
 // - não deixa "invocar humano" virar estado final por engano
@@ -3778,6 +3790,8 @@ async function activateOnce(nome, source = '', operator = '') {
   // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
+  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(String(operator || '').trim());
+  const _isManualOpen = /(^admin|^ui|manual|user|humano|human)/i.test(String(operator || '').trim());
   try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
@@ -3915,26 +3929,30 @@ async function activateOnce(nome, source = '', operator = '') {
         // Abertura sempre começa normal; o probe decide (captcha/checkpoint => invocar humano).
 
         // Enterprise: se este perfil está marcado como "loginRemediateFailed",
-        // abrir já em modo humano (sem automação) ao invés de tentar loops automáticos.
+        // NÃO invocar humano às cegas: primeiro navegar + revalidar (pode ter virado identidade).
         try {
           const flags = await readAccountFlags(nome).catch(()=>({}));
           if (flags && flags.loginRemediateFailed === true) {
             const ctrl = controllers.get(nome);
             if (ctrl) {
-              ctrl.humanControl = true;
               ctrl.trabalhando = false;
               try { await stopVirtus(nome); } catch {}
               await reportAction(nome, 'mil_action', 'opened_in_human_mode (loginRemediateFailed=true)');
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_login_failed'); } catch {}
-              try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_login_failed' }); } catch {}
               // Anti-engessamento: navegar para Facebook e validar se é login/captcha/identity/appeal de fato.
               // Só invocar humano se for captcha/checkpoint OU login_form real.
-              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_login_failed' }); } catch {}
+              try { await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'open_login_failed_entry' }); } catch {}
               try {
                 const pr = await probeHumanStateOnOpen(nome, ctrl, { source: 'open_login_failed' }).catch(()=>null);
                 const st = pr && pr.state ? String(pr.state) : '';
                 if (st === 'captcha_checkpoint' || st === 'login_required') {
+                  // Somente aqui entra em "humano invocado".
+                  try { ctrl.humanControl = true; } catch {}
+                  try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_login_failed' }); } catch {}
                   try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+                } else {
+                  // Se virou identidade/appeal/liberou, não manter "loginRemediateFailed" como estado final.
+                  try { await clearAccountFlags(nome, ['loginRemediateFailed']); } catch {}
                 }
               } catch {}
             }
@@ -3963,6 +3981,12 @@ async function activateOnce(nome, source = '', operator = '') {
               ctrl.mainPage = pages[0];
               try { await wirePageObservers(nome, ctrl.mainPage); } catch {}
             }
+              // Open / Open-all / Open manual: não pode ficar em about:blank (tela preta).
+              // Garante navegação e faz probe para refletir estado real (identity/captcha/login/appeal).
+              if (_isBulkOpen || _isManualOpen) {
+                try { await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' }); } catch {}
+                try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
+              }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
               browserHelper.installOneTabGuard(ctrl.browser, nome, {
