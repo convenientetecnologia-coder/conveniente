@@ -944,6 +944,108 @@ module.exports = (app, workerClient, fileStore) => {
       }
       await issues.append(nome, 'admin_delete_perfil', `by=${op}`);
 
+      // ===== Enterprise 110%: enviar para CT (Estoque Excluídas) ANTES de deletar local =====
+      // Motivação: evitar duplicidade (mesma conta em 2 servidores) e garantir rastreabilidade no CT.
+      // Regra: se CT estiver fora, enfileirar em dados/ct_archive_queue/pending para retry pelo worker.
+      let ct = { attempted: false, ok: false, queued: false, error: null };
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const crypto = require('crypto');
+        const { readCtConfig } = require('./ctConfig');
+        const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
+        const CTQ_PENDING = path.join(__dirname, '..', 'dados', 'ct_archive_queue', 'pending');
+        const ensureDirSync = (p) => { try { fs.mkdirSync(p, { recursive: true }); } catch {} };
+        const readHostId = () => { try { return fs.existsSync(HOSTID_PATH) ? String(fs.readFileSync(HOSTID_PATH, 'utf8') || '').trim() : ''; } catch { return ''; } };
+        const hostId = readHostId();
+        const cfg = (() => { try { return readCtConfig(); } catch { return null; } })();
+        let base = String((cfg && cfg.ctBaseUrl) ? cfg.ctBaseUrl : (process.env.CT_BASE_URL || process.env.CT_URL || '')).trim();
+        base = base.replace(/\/+$/, '');
+        const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
+        if (!hostId || !base || !secret) {
+          ct = { attempted: true, ok: false, queued: false, error: 'ct_config_missing' };
+        } else {
+          // Descobrir stockAccountId se existir (ajuda o CT a mapear)
+          let stockAccountId = null;
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            if (man && (man.stockAccountId || man.stock_account_id)) stockAccountId = Number(man.stockAccountId || man.stock_account_id) || null;
+          } catch {}
+
+          ct.attempted = true;
+          const reason = `manual_delete:${String(op || '').slice(0, 60)}`.slice(0, 120);
+          try {
+            const Aborter = global.AbortController || require('node-abort-controller');
+            const ac = new Aborter();
+            const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
+            const resp = await fetch(`${base}/api/stock/assigned/archive_with_evidence_secret`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+              body: JSON.stringify({
+                hostId,
+                profileName: String(nome || '').trim(),
+                stockAccountId: stockAccountId || null,
+                reason,
+                by: 'admin',
+                evidenceB64: '',
+                evidenceUrl: ''
+              }),
+              signal: ac.signal
+            }).catch(e => ({ ok:false, _err: e }));
+            clearTimeout(t);
+            if (resp && resp.ok) {
+              const j = await resp.json().catch(()=>null);
+              if (j && j.ok === true) {
+                ct.ok = true;
+                ct.error = null;
+              } else {
+                ct.ok = false;
+                ct.error = (j && j.error) ? String(j.error) : `http_${resp.status || 0}`;
+              }
+            } else {
+              ct.ok = false;
+              ct.error = (resp && resp._err && resp._err.message) ? String(resp._err.message) : 'ct_fetch_failed';
+            }
+          } catch (e) {
+            ct.ok = false;
+            ct.error = (e && e.message) ? String(e.message) : String(e);
+          }
+
+          if (!ct.ok) {
+            // Queue para retry (worker processa ct_archive_queue)
+            try {
+              ensureDirSync(CTQ_PENDING);
+              const flowId = (() => { try { return `manual_delete_${Date.now()}_${crypto.randomUUID()}`; } catch { return `manual_delete_${Date.now()}_${Math.random().toString(16).slice(2)}`; } })();
+              const job = {
+                createdAt: Date.now(),
+                nextAttemptAt: 0,
+                attempts: 0,
+                stockAccountId: stockAccountId || null,
+                profileName: String(nome || ''),
+                reason,
+                evidencePath: '',
+                evidenceUrl: '',
+                flowId
+              };
+              const fp = path.join(CTQ_PENDING, `${Date.now()}_${flowId}_profile_${String(nome||'').replace(/[^a-zA-Z0-9._-]+/g,'_').slice(0,60)}.json`);
+              fs.writeFileSync(fp, JSON.stringify(job, null, 2), 'utf8');
+              ct.queued = true;
+            } catch (e) {
+              ct.queued = false;
+              ct.error = `ct_queue_failed:${(e && e.message) ? String(e.message) : String(e)}`;
+            }
+          }
+        }
+      } catch (e) {
+        ct = { attempted: true, ok: false, queued: false, error: (e && e.message) ? String(e.message) : String(e) };
+      }
+
+      // Se não conseguimos nem arquivar nem enfileirar, aborta a exclusão local (garantia 110%).
+      if (ct && ct.attempted && ct.ok !== true && ct.queued !== true) {
+        logger.error('Delete bloqueado: falha ao arquivar/enfileirar no CT', { nome, ctError: ct.error });
+        return res.json({ ok: false, error: `Falha ao enviar para Excluídas (CT): ${ct.error || 'unknown'}` });
+      }
+
       // Tenta remover userDataDir externo de forma correta (busca perfis.json)
       try {
         const perfisArr = fileStore.loadPerfisJson();
@@ -983,7 +1085,7 @@ module.exports = (app, workerClient, fileStore) => {
       }
 
       logger.info('Perfil deletado com sucesso', { nome });
-      res.json({ ok: true });
+      res.json({ ok: true, ct });
     } catch (e) {
       logger.error('Erro fatal na rota delete perfil', { rota: '/api/perfis/:nome', nome: req.params && req.params.nome, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });
