@@ -1126,6 +1126,87 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
   }
 }
 
+// Probe enterprise pós-abertura (anti-engessamento):
+// - garante que as flags reflitam a tela REAL (identity/appeal/captcha/login_form)
+// - não deixa "invocar humano" virar estado final por engano
+// Retorna { ok, state, reason }
+async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {}) {
+  try {
+    const pg = ctrl && ctrl.mainPage ? ctrl.mainPage : null;
+    if (!pg) return { ok: false, error: 'no_main_page' };
+
+    // 0) Ban/Suspensão
+    try {
+      const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
+      if (bd && bd.banned) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_banned', nome: String(nome||''), source: String(source||''), reason: String(bd.reason||'banned').slice(0,140) }); } catch {}
+        try { await setBannedFlag(nome, { reason: String(bd.reason || 'banned'), snippet: String(bd.snippet || '') }); } catch {}
+        return { ok: true, state: 'banned', reason: bd.reason || '' };
+      }
+    } catch {}
+
+    // 1) LoginRequired/Identity/Appeal/Captcha
+    const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    if (!lr || lr.loginRequired !== true) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_clear', nome: String(nome||''), source: String(source||'') }); } catch {}
+      // Se abriu "human-only" por flag velha e já está OK, liberar automação.
+      try { await clearAppealSubmittedFlag(nome); } catch {}
+      try { await clearIdentityFlags(nome); } catch {}
+      try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin']); } catch {}
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {}; d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+          return d;
+        });
+      } catch {}
+      // Agenda start_work (sem travar activateOnce)
+      setTimeout(() => {
+        try { handlers.start_work({ nome, operator: 'bulk_open_all_auto_probe' }).catch(()=>{}); } catch {}
+      }, 0);
+      return { ok: true, state: 'not_login_required' };
+    }
+
+    const rr = String(lr.reason || '').toLowerCase();
+    try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_login_required', nome: String(nome||''), source: String(source||''), reason: String(lr.reason||'').slice(0,160) }); } catch {}
+
+    if (rr.includes('identity_submitted')) {
+      try { await setIdentitySubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      return { ok: true, state: 'identity_submitted', reason: rr };
+    }
+    if (rr.includes('identity')) {
+      try { await setIdentityRequiredFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      return { ok: true, state: 'identity_required', reason: rr };
+    }
+    if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
+      try { await setAppealSubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
+      return { ok: true, state: 'appeal_submitted', reason: rr };
+    }
+    if (rr.includes('captcha') || rr.includes('checkpoint')) {
+      // captcha/checkpoint: aqui sim invocar humano faz sentido
+      try { await setLoginRequiredFlag(nome, { reason: lr.reason || 'captcha', source: lr.domain || source }); } catch {}
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {}; d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: true, virtus: 'off' };
+          return d;
+        });
+      } catch {}
+      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+      try { freezeCooldownIfNotWorking(nome); } catch {}
+      try { await ensureHumanOverlay(nome, ctrl, { reason: 'open_human_probe_captcha' }); } catch {}
+      return { ok: true, state: 'captcha_checkpoint', reason: rr };
+    }
+
+    // login_form / outros: se for "login/cookies falhou", aqui é válido invocar humano
+    try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
+    return { ok: true, state: 'login_required', reason: rr };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' } = {}) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -3850,40 +3931,9 @@ async function activateOnce(nome, source = '', operator = '') {
             await reportAction(nome, 'mil_action', 'opened_in_human_mode (humanHold=true)');
             try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_human_hold'); } catch {}
             try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_human_hold' }); } catch {}
-            // Anti-tela-preta: garanta uma aba navegada para o humano (não depende de retomar trabalho)
-            try {
-              const pages = await ctrl.browser.pages().catch(()=>[]);
-              let p0 = pages && pages[0];
-              const u0 = (() => { try { return p0 && typeof p0.url === 'function' ? String(p0.url() || '') : ''; } catch { return ''; } })();
-              if (!p0 || !u0 || u0 === 'about:blank') {
-                p0 = await ctrl.browser.newPage().catch(()=>null);
-                if (p0) {
-                  try {
-                    const man = await manifestStore.read(nome).catch(()=>null);
-                    await browserHelper.patchPage(nome, p0, utils.getCoords(man && man.cidade || '')).catch(()=>{});
-                  } catch {}
-                }
-              }
-              if (p0) {
-                await p0.bringToFront?.().catch(()=>{});
-                await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-                await new Promise(r => setTimeout(r, 1400));
-                await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'human_mode_entry_on_open', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-                ctrl.mainPage = p0;
-
-                // Remover abas about:blank sobrando (economia de RAM / "Abas: 2" indevido)
-                try {
-                  const ps = await ctrl.browser.pages().catch(()=>[]);
-                  for (const pg of (ps || [])) {
-                    if (!pg || pg === p0) continue;
-                    const uu = (() => { try { return pg.url ? String(pg.url()||'') : ''; } catch { return ''; } })();
-                    if (!uu || uu === 'about:blank') {
-                      try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-                    }
-                  }
-                } catch {}
-              }
-            } catch {}
+            // Anti-tela-preta: entrar no Facebook (não Messenger) e fazer probe para corrigir flags.
+            try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_human_hold' }); } catch {}
+            try { await probeHumanStateOnOpen(nome, ctrl, { source: 'open_human_hold' }); } catch {}
           }
         }
 
@@ -3900,8 +3950,16 @@ async function activateOnce(nome, source = '', operator = '') {
               await reportAction(nome, 'mil_action', 'opened_in_human_mode (loginRemediateFailed=true)');
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_login_failed'); } catch {}
               try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_login_failed' }); } catch {}
-              // Anti-tela-preta: navegar ANTES de qualquer ação humana (não usar about:blank como "home")
-              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: 'human_mode_entry_login_failed' }); } catch {}
+              // Anti-engessamento: navegar para Facebook e validar se é login/captcha/identity/appeal de fato.
+              // Só invocar humano se for captcha/checkpoint OU login_form real.
+              try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_login_failed' }); } catch {}
+              try {
+                const pr = await probeHumanStateOnOpen(nome, ctrl, { source: 'open_login_failed' }).catch(()=>null);
+                const st = pr && pr.state ? String(pr.state) : '';
+                if (st === 'captcha_checkpoint' || st === 'login_required') {
+                  try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+                }
+              } catch {}
             }
           }
         } catch {}
