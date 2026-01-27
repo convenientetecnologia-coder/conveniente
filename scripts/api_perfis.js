@@ -1053,7 +1053,9 @@ module.exports = (app, workerClient, fileStore) => {
         let okActivate = false, okStart = false, err = null;
 
         try {
-          const r1 = await workerClient.sendWorkerCommand('activate', { nome }, { timeoutMs: 60000 });
+          // Enterprise: propagar operator para o worker para que activateOnce reconheça bulk-open
+          // e execute o pós-probe (ensureNonBlankEntryPage + probeHumanStateOnOpen).
+          const r1 = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 });
           okActivate = !!(r1 && r1.ok);
         } catch (e) {
           err = (e && e.message) || String(e);

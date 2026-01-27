@@ -1251,6 +1251,15 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     }
     if (rr.includes('identity')) {
       try { await setIdentityRequiredFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      // Ultra enterprise: iniciar o fluxo de identidade imediatamente (sem travar activateOnce).
+      // Guardrails: gate + debounce dentro de runIdentityFlow.
+      setTimeout(() => {
+        try {
+          const c = controllers.get(nome);
+          const p = (c && c.mainPage) ? c.mainPage : pg;
+          if (c && p) runIdentityFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
+        } catch {}
+      }, 0);
       return { ok: true, state: 'identity_required', reason: rr };
     }
     if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
@@ -1705,6 +1714,165 @@ async function _identityGateRelease({ owner = '', nome = '', didAction = false, 
     try { provisionAudit.append({ ts: now, event: 'identity_gate_released', nome: String(nome||''), owner: String(owner||'') }); } catch {}
   }
   return { ok: true, cooldownMs, cooldownUntil };
+}
+
+// ===== Identidade (selfie/vídeo) — executor 24/7 (multi-step) =====
+// Objetivo: quando a UI cair em identidade, avançar os botões necessários
+// (Continuar/Avançar -> Iniciar selfie -> Carregar -> Confirmar/Concluir -> refresh)
+// com guardrails (gate + debounce) e telemetria auditável.
+const IDENTITY_FLOW_CFG = {
+  maxRunMs: 4 * 60 * 1000,     // budget total por execução (anti-loop)
+  maxSteps: 6,                // limite de cliques “sem cérebro”
+  stepWaitMs: 150_000,        // botão Carregar pode demorar 10–120s para habilitar
+  debounceMs: 15_000          // evita disparos duplos (probe + nurse + scan)
+};
+
+async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
+  const now = Date.now();
+  const id = String(flowId || newFlowId('identity'));
+  try {
+    if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
+    if (!pg) return { ok: false, error: 'no_page' };
+
+    robeMeta[nome] = robeMeta[nome] || {};
+    const last = Number(robeMeta[nome].identityFlowLastAt || 0) || 0;
+    if (!force && last && (now - last) < IDENTITY_FLOW_CFG.debounceMs) {
+      return { ok: false, skipped: true, reason: 'debounced', sinceMs: now - last };
+    }
+    robeMeta[nome].identityFlowLastAt = now;
+
+    const owner = `pid:${process.pid}`;
+    const g = await _identityGateTryAcquire({ owner, nome }).catch(()=>null);
+    if (!g || !g.ok) {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'identity_flow_gate_denied',
+          flowId: id,
+          nome: String(nome||''),
+          source: String(source||'').slice(0, 80),
+          why: g && g.why ? String(g.why) : (g && g.denied ? 'denied' : 'unknown'),
+          leaseUntil: g && g.leaseUntil ? g.leaseUntil : null,
+          cooldownUntil: g && g.cooldownUntil ? g.cooldownUntil : null,
+          owner: g && g.owner ? String(g.owner) : null
+        });
+      } catch {}
+      return { ok: false, denied: true, flowId: id };
+    }
+
+    let didAction = false;
+    let actionKinds = [];
+    const t0 = Date.now();
+    try {
+      let url0 = '';
+      try { url0 = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'identity_flow_begin',
+          flowId: id,
+          nome: String(nome||''),
+          source: String(source||'').slice(0, 80),
+          url: String(url0||'').slice(0, 220)
+        });
+      } catch {}
+
+      // Loop multi-step: clica o que estiver disponível e habilitado, respeitando budget.
+      let stepIndex = 0;
+      while (true) {
+        const elapsed = Date.now() - t0;
+        if (elapsed >= IDENTITY_FLOW_CFG.maxRunMs) break;
+        if (stepIndex >= IDENTITY_FLOW_CFG.maxSteps) break;
+
+        const a = await browserHelper.identityAssistStep(pg, { maxWaitMs: IDENTITY_FLOW_CFG.stepWaitMs, tries: 2 }).catch(()=>null);
+        stepIndex += 1;
+
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'identity_flow_step',
+            flowId: id,
+            nome: String(nome||''),
+            source: String(source||'').slice(0, 80),
+            stepIndex,
+            ok: !!(a && a.ok),
+            clicked: a && a.clicked ? String(a.clicked) : null,
+            error: a && a.error ? String(a.error).slice(0, 160) : null,
+            waitedMs: a && typeof a.waitedMs === 'number' ? a.waitedMs : null,
+            attempts: a && typeof a.attempts === 'number' ? a.attempts : null
+          });
+        } catch {}
+
+        if (a && a.ok) {
+          didAction = true;
+          actionKinds.push(String(a.clicked || 'clicked'));
+          await sleep(1100);
+          continue;
+        }
+
+        // Se não clicou, não “martelar”: paramos para reclassificar/encaminhar.
+        break;
+      }
+
+      // Refresh após ações (padrão do fluxo: após concluir passos, atualizar).
+      if (didAction) {
+        await reloadPageEnterprise(pg, { nome, tag: `identity_flow_${String(source||'').slice(0, 28)}`, timeoutMs: 60_000 }).catch(()=>null);
+        await sleep(900);
+      }
+
+      // Reclassificar e encaminhar para o pipeline certo.
+      const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+      if (!lr2 || lr2.loginRequired !== true) {
+        // Liberou: limpa flags de identidade e retoma (se desejado).
+        try { await clearIdentityFlags(nome); } catch {}
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {}; d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+            return d;
+          });
+        } catch {}
+        // Não travar aqui (activateOnce): agenda start_work.
+        setTimeout(() => { try { handlers.start_work({ nome, operator: `identity_flow_resolved:${id}` }).catch(()=>{}); } catch {} }, 0);
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'clear' }); } catch {}
+        return { ok: true, flowId: id, result: 'clear', didAction, actions: actionKinds };
+      }
+
+      const rr2 = String(lr2.reason || '').toLowerCase();
+      if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
+        await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: String(lr2.domain||'') || 'facebook', url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'captcha_checkpoint', reason: rr2.slice(0,160) }); } catch {}
+        return { ok: true, flowId: id, result: 'captcha_checkpoint', didAction, actions: actionKinds };
+      }
+      if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
+        await setAppealSubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
+        await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }).catch(()=>{});
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'appeal_submitted' }); } catch {}
+        return { ok: true, flowId: id, result: 'appeal_submitted', didAction, actions: actionKinds };
+      }
+      if (rr2.includes('login_form')) {
+        queueAutoLoginRemediate(nome, { reason: lr2.reason || '', source: lr2.domain || '', immediate: true });
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'login_form' }); } catch {}
+        return { ok: true, flowId: id, result: 'login_form', didAction, actions: actionKinds };
+      }
+      if (rr2.includes('identity_submitted')) {
+        await setIdentitySubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'identity_submitted' }); } catch {}
+        return { ok: true, flowId: id, result: 'identity_submitted', didAction, actions: actionKinds };
+      }
+
+      // Fallback: mantém LR genérico atualizado (sem mascarar), mas não inventa ação.
+      await setLoginRequiredFlag(nome, { reason: lr2.reason || '', source: lr2.domain || '' }).catch(()=>{});
+      try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'other_login_required', reason: rr2.slice(0,160) }); } catch {}
+      return { ok: true, flowId: id, result: 'other_login_required', didAction, actions: actionKinds };
+    } finally {
+      await _identityGateRelease({ owner, nome, didAction, actionKind: actionKinds.join(',') }).catch(()=>{});
+    }
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
+    return { ok: false, flowId: id, error: msg };
+  }
 }
 
 async function setIdentityRequiredFlag(nome, { source = '', url = '', title = '' } = {}) {
@@ -8614,64 +8782,10 @@ async function nurseTick() {
               const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
               if (!last || (now - last) > 30_000) {
                 robeMeta[nome].identityAssistLastAt = now;
-                // Gate global: apenas 1 identidade por vez no host + cooldown random (5–10min) entre ações.
-                const owner = `pid:${process.pid}`;
-                const g = await _identityGateTryAcquire({ owner, nome }).catch(()=>null);
-                if (g && g.ok) {
-                  let didAction = false;
-                  let actionKind = '';
-                  try {
-                    const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
-                    const pg = pages && pages[0];
-                    if (pg) {
-                      // Espera longa: o botão "Carregar" pode demorar 20–120s para liberar.
-                      const assist = await browserHelper.identityAssistStep(pg, { maxWaitMs: 150_000, tries: 2 }).catch(()=>null);
-                      if (assist && assist.ok) {
-                        didAction = true;
-                        actionKind = String(assist.clicked || 'clicked');
-                        try {
-                          let u = '';
-                          try { u = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
-                          provisionAudit.append({ ts: Date.now(), event: 'identity_assist_clicked', nome: String(nome||''), clicked: String(actionKind||''), url: String(u||'').slice(0, 220) });
-                        } catch {}
-                        await sleep(1500);
-                        // Segundo passe: muitas vezes após "Carregar" aparece "Concluir" ou outro botão.
-                        const assist2 = await browserHelper.identityAssistStep(pg, { maxWaitMs: 90_000, tries: 2 }).catch(()=>null);
-                        if (assist2 && assist2.ok) {
-                          didAction = true;
-                          actionKind = `${actionKind},${String(assist2.clicked || 'clicked')}`;
-                          try {
-                            let u2 = '';
-                            try { u2 = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
-                            provisionAudit.append({ ts: Date.now(), event: 'identity_assist_clicked', nome: String(nome||''), clicked: String(assist2.clicked||''), url: String(u2||'').slice(0, 220) });
-                          } catch {}
-                          await sleep(1200);
-                        }
-                      } else {
-                        // Logs ultra enterprise: deixa claro por que não clicou (context/button/timeout).
-                        try {
-                          let u3 = '';
-                          try { u3 = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
-                          provisionAudit.append({
-                            ts: Date.now(),
-                            event: 'identity_assist_no_click',
-                            nome: String(nome||''),
-                            url: String(u3||'').slice(0, 220),
-                            error: assist && assist.error ? String(assist.error).slice(0, 160) : 'no_result',
-                            waitedMs: assist && typeof assist.waitedMs === 'number' ? assist.waitedMs : null,
-                            attempts: assist && typeof assist.attempts === 'number' ? assist.attempts : null
-                          });
-                        } catch {}
-                      }
-                      // Se o humano concluiu/uploadou e agora virou "identity_submitted", promove o estado automaticamente.
-                      const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
-                      if (det && det.loginRequired && String(det.reason || '').toLowerCase().includes('identity_submitted')) {
-                        await setIdentitySubmittedFlag(nome, { source: det.domain || 'facebook', url: det.url || '', title: det.title || '' }).catch(()=>{});
-                      }
-                    }
-                  } finally {
-                    await _identityGateRelease({ owner, nome, didAction, actionKind }).catch(()=>{});
-                  }
+                const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+                const pg = pages && pages[0];
+                if (pg) {
+                  await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
                 }
               }
               await snapshotStatusAndWrite().catch(()=>{});
@@ -8998,41 +9112,12 @@ async function nurseTick() {
                 await setIdentitySubmittedFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
               } else if (rr.includes('identity_confirm') || rr === 'identity' || rr.startsWith('identity_') || rr.includes('identity')) {
                 await setIdentityRequiredFlag(nome, { source: curSource || '', url: lr.url || '', title: lr.title || '' }).catch(()=>{});
-                // AÇÃO AUTOMÁTICA (ultra enterprise): se caiu em identidade, executa os cliques necessários
-                // (Continuar / Iniciar selfie / Carregar / Concluir) sem depender de flag/painel.
+                // AÇÃO AUTOMÁTICA (ultra enterprise): se caiu em identidade, executa o fluxo multi-step
+                // com gate/cooldown + refresh + reclassificação.
                 try {
                   const pg = (lrPage || p0);
                   if (pg && ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-                    const a1 = await browserHelper.identityAssistStep(pg, { maxWaitMs: 150_000, tries: 2 }).catch(()=>null);
-                    try {
-                      provisionAudit.append({
-                        ts: Date.now(),
-                        event: 'identity_auto_step',
-                        nome: String(nome||''),
-                        ok: !!(a1 && a1.ok),
-                        clicked: a1 && a1.clicked ? String(a1.clicked) : null,
-                        error: a1 && a1.error ? String(a1.error).slice(0,160) : null
-                      });
-                    } catch {}
-                    if (a1 && a1.ok) {
-                      await sleep(1200);
-                      await reloadPageEnterprise(pg, { nome, tag: 'identity_auto', timeoutMs: 60_000 }).catch(()=>null);
-                    }
-                    // Reavalia e encaminha (captcha → humano, appeal → monitor, login_form → remediate)
-                    const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
-                    if (lr2 && lr2.loginRequired) {
-                      const rr2 = String(lr2.reason || '').toLowerCase();
-                      if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
-                        await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: String(lr2.domain||'') || 'facebook', url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
-                      } else if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
-                        await setAppealSubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
-                        await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }).catch(()=>{});
-                      } else if (rr2.includes('login_form')) {
-                        queueAutoLoginRemediate(nome, { reason: lr2.reason || '', source: lr2.domain || '', immediate: true });
-                      } else if (rr2.includes('identity_submitted')) {
-                        await setIdentitySubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
-                      }
-                    }
+                    await runIdentityFlow(nome, ctrl, pg, { source: 'lr_scan' }).catch(()=>null);
                   }
                 } catch {}
               } else if (rr.includes('captcha') || rr.includes('checkpoint')) {

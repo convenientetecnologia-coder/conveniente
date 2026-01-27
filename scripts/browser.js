@@ -3250,13 +3250,16 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
         // FB às vezes usa "role=none" para botões estilizados; então buscamos por texto também.
         const all = Array.from(scope.querySelectorAll('*')).slice(0, 1600);
         const priority = [
-          // Fluxo de selfie/vídeo:
-          // 1) Continuar -> 2) Iniciar selfie de vídeo -> 3) Carregar/Concluir (quando aplicável)
-          { key: 'continuar', words: ['continuar', 'continue'] },
-          { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vídeo'] },
-          { key: 'concluir', words: ['concluir', 'finish', 'done'] },
+          // Fluxo de identidade (selfie/vídeo) — passos típicos:
+          // 1) Continuar/Avançar -> 2) Iniciar selfie de vídeo -> 3) Carregar -> 4) Confirmar/Concluir/Finalizar
+          // Ordem abaixo prioriza passos finais (para não “voltar” no fluxo quando já existe Carregar/Concluir).
+          { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
+          { key: 'confirmar', words: ['confirmar', 'confirm'] },
+          { key: 'enviar', words: ['enviar', 'submit'] },
           { key: 'carregar', words: ['carregar', 'upload'] },
+          { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vídeo'] },
           { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+          { key: 'continuar', words: ['continuar', 'continue'] },
         ];
         const isDisabled = (el) => {
           try {
