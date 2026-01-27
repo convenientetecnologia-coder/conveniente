@@ -4283,9 +4283,20 @@ async function activateOnce(nome, source = '', operator = '') {
     }
     logger.info(`[WORKER][ACTIVATE][SHARD_CHECK] nome=${nome} has=${inShard(nome)} size=${SHARD_SET.size}`);
 
-    if (killGuardActive(nome)) {
+    // Ultra enterprise: em fechamentos planejados (ex.: login_remediate pós-sucesso),
+    // não bloquear reabertura imediata com kill_guard. Kill guard é anti-flap para falhas.
+    const _source = String(source || '');
+    const _bypassKillGuard = /login_remediate_post_success/i.test(_source);
+    if (killGuardActive(nome) && !_bypassKillGuard) {
       await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
       return { ok:false, error:"kill_guard_until" };
+    }
+    if (_bypassKillGuard) {
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].killGuardUntil = 0;
+      } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
     }
 
     // Hardening: durante stock_provision (maintenance lock), bloquear novas aberturas,
@@ -7076,6 +7087,21 @@ const handlers = {
           // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
           if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
           if (lrCreate && lrCreate.loginRequired) lrFacebook = lrCreate;
+          // Caso comum (conta nova): "probe_failed" no fb_main não pode derrubar o provision
+          // se o create/item (Robe real) já validou ok.
+          try {
+            const fbReason = String((lrFacebook && lrFacebook.reason) || '');
+            if (
+              lrFacebook &&
+              lrFacebook.loginRequired === true &&
+              fbReason === 'probe_failed' &&
+              lrCreate &&
+              lrCreate.loginRequired === false
+            ) {
+              pushStep({ step: 'fb_probe_failed_overridden_by_create', fbReason, lrCreate });
+              lrFacebook = lrCreate;
+            }
+          } catch {}
 
         } catch (e) {
           pushStep({ step: 'attempt2_login_fail', error: (e && e.message) || String(e) });

@@ -1500,7 +1500,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     }
   }
 
-  async function tryEnterPin(pinValue = DEFAULT_PIN) {
+  async function tryEnterPin(pinValue = DEFAULT_PIN, round = 1) {
     // Regra ultra enterprise (anti-loop): NO MODAL DE PIN, NÃO clicar em X/voltar/fechar.
     // Só focar o input e digitar com cadência humana (digit-by-digit), depois Enter.
     try {
@@ -1535,7 +1535,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       // Preferir Enter (menos risco de clicar fora e fazer o modal “piscar”)
       try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
       await sleep(1200);
-      return { ok: true, entered: true, confirmed: false };
+      return { ok: true, entered: true, confirmed: (Number(round) >= 2) };
     } catch (e) {
       return { ok: false, error: (e && e.message) || 'pin_enter_exception' };
     }
@@ -1580,7 +1580,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     if (det.kind === 'pin_input' && det.hasPinInput) {
       try {
         pinLog({ event: 'pin_enter_attempt', attempt, pin: DEFAULT_PIN });
-        const enterResult = await tryEnterPin(DEFAULT_PIN);
+        const enterResult = await tryEnterPin(DEFAULT_PIN, 1);
         if (enterResult.ok) {
           pinLog({ event: 'pin_entered', attempt, pin: DEFAULT_PIN, confirmed: !!enterResult.confirmed });
           await sleep(1500); // Aguarda processamento
@@ -1590,8 +1590,23 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
             pinLog({ event: 'pin_success_modal_dismissed', attempt });
             return { ok: true, dismissed: true, pinEntered: true };
           }
-          // Se ainda está presente, pode ser que precise de confirmação adicional
+          // Se ainda está presente, pode ser que precise confirmar digitando de novo (comum em conta nova)
           pinLog({ event: 'pin_entered_but_modal_still_present', attempt });
+          if (detAfter.kind === 'pin_input' && detAfter.hasPinInput) {
+            pinLog({ event: 'pin_confirm_second_entry_attempt', attempt, pin: DEFAULT_PIN });
+            const enter2 = await tryEnterPin(DEFAULT_PIN, 2);
+            if (enter2.ok) {
+              pinLog({ event: 'pin_second_entry_done', attempt, confirmed: !!enter2.confirmed });
+              await sleep(1800);
+              const detAfter2 = await detectMessengerPinModal(page);
+              if (!detAfter2.present) {
+                pinLog({ event: 'pin_success_modal_dismissed_after_second', attempt });
+                return { ok: true, dismissed: true, pinEntered: true };
+              }
+            } else {
+              pinLog({ event: 'pin_second_entry_failed', attempt, error: enter2.error });
+            }
+          }
         } else {
           pinLog({ event: 'pin_enter_failed', attempt, error: enterResult.error });
         }
