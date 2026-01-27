@@ -3238,7 +3238,8 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
         if (!looksIdentity) return { ok: false, error: 'not_identity_context' };
 
         const scope = document.querySelector('div[role="dialog"]') || document;
-        const btns = Array.from(scope.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 240);
+        // FB às vezes usa "role=none" para botões estilizados; então buscamos por texto também.
+        const all = Array.from(scope.querySelectorAll('*')).slice(0, 1600);
         const priority = [
           { key: 'concluir', words: ['concluir', 'finish', 'done'] },
           { key: 'carregar', words: ['carregar', 'upload'] },
@@ -3258,34 +3259,80 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             if (!cs) return false;
             if (cs.display === 'none' || cs.visibility === 'hidden') return false;
             if (cs.pointerEvents === 'none') return false;
-            // Botões "cinza" às vezes não expõem aria-disabled mas ficam com opacidade baixa.
-            const op = Number(cs.opacity || '1');
-            if (Number.isFinite(op) && op < 0.70) return false;
             return true;
           } catch { return false; }
         };
         const textOf = (el) => norm(el.innerText || el.value || el.textContent || '');
         const aria = (el) => norm(el.getAttribute('aria-label') || '');
+        const pickClickableContainer = (el) => {
+          try {
+            if (!el) return null;
+            // Sobe para containers que geralmente recebem o click (sem depender de classes do FB).
+            return (
+              el.closest('button,[role="button"],a[role="button"],input[type="submit"]') ||
+              el.closest('a,div,span') ||
+              el
+            );
+          } catch { return el; }
+        };
+        const hitTestCenter = (el) => {
+          try {
+            const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (!r || r.width < 6 || r.height < 6) return { ok: false, reason: 'no_rect' };
+            const x = Math.floor(r.left + Math.min(r.width - 1, Math.max(2, r.width / 2)));
+            const y = Math.floor(r.top + Math.min(r.height - 1, Math.max(2, r.height / 2)));
+            const topEl = document.elementFromPoint(x, y);
+            if (!topEl) return { ok: false, reason: 'no_element_from_point', x, y };
+            const hit = (el === topEl) || el.contains(topEl) || topEl.contains(el);
+            if (!hit) return { ok: false, reason: 'overlay_hit', x, y, topTag: String(topEl.tagName||'').toLowerCase() };
+            return { ok: true, x, y };
+          } catch { return { ok: false, reason: 'hit_test_failed' }; }
+        };
 
         for (const p of priority) {
-          for (const b of btns) {
-            if (!b) continue;
-            const t = textOf(b);
-            const al = aria(b);
+          // Colete candidatos desta prioridade; só retorna quando achar um realmente clicável.
+          let lastDisabled = null;
+          for (const el of all) {
+            if (!el) continue;
+            const t = textOf(el);
+            const al = aria(el);
             if (!p.words.some(w => t.includes(w) || al.includes(w))) continue;
+            const b = pickClickableContainer(el);
+            if (!b) continue;
             // Não gerar falso positivo: só clicar se estiver habilitado E realmente clicável.
             if (isDisabled(b) || !isVisiblyClickable(b)) {
-              return {
+              lastDisabled = {
                 ok: false,
                 found: p.key,
                 disabled: true,
+                why: isDisabled(b) ? 'disabled_attr' : 'not_visible',
                 ariaDisabled: b.getAttribute('aria-disabled'),
                 tabindex: b.getAttribute('tabindex')
               };
+              continue;
             }
-            try { b.click(); } catch {}
-            return { ok: true, clicked: p.key, label: (b.getAttribute('aria-label') || '').slice(0, 80), text: (b.innerText || b.textContent || '').slice(0, 80) };
+            const ht = hitTestCenter(b);
+            if (!ht || !ht.ok) {
+              lastDisabled = {
+                ok: false,
+                found: p.key,
+                disabled: true,
+                why: ht && ht.reason ? ht.reason : 'hit_test',
+                ariaDisabled: b.getAttribute('aria-disabled'),
+                tabindex: b.getAttribute('tabindex')
+              };
+              continue;
+            }
+            return {
+              ok: true,
+              clicked: p.key,
+              x: ht.x,
+              y: ht.y,
+              label: (b.getAttribute('aria-label') || '').slice(0, 80),
+              text: (b.innerText || b.textContent || '').slice(0, 80)
+            };
           }
+          if (lastDisabled) return lastDisabled;
         }
         return { ok: false, error: 'no_clickable_button' };
       });
@@ -3301,7 +3348,12 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
   while (true) {
     attempt += 1;
     const r = await pickAndClick();
-    if (r && r.ok) return { ok: true, attempt, clicked: r.clicked, meta: { text: r.text || '', label: r.label || '' } };
+    if (r && r.ok && typeof r.x === 'number' && typeof r.y === 'number') {
+      // Clique real (mouse) para evitar falso "click()" sem efeito.
+      try { await page.mouse.click(r.x, r.y, { delay: 28 }).catch(()=>{}); } catch {}
+      await sleep(650);
+      return { ok: true, attempt, clicked: r.clicked, meta: { text: r.text || '', label: r.label || '' } };
+    }
     lastErr = (r && r.error) ? String(r.error) : 'no_click';
     if (r && r.found) {
       if (!firstSeenAt) firstSeenAt = Date.now();
