@@ -3028,7 +3028,7 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('identidade') ||
         bodyTxt.includes('video selfie');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, bodyHasIdentityHints, href0, path0, title0 };
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -3040,6 +3040,7 @@ async function detectLoginRequired(page) {
     const hasCheckpointText = !!(v && v.hasCheckpointText);
     const hasIdentityText = !!(v && v.hasIdentityText);
     const hasIdentitySubmitted = !!(v && v.hasIdentitySubmitted);
+    const identityStrongHints = !!(v && v.identityStrongHints);
     const bodyHasIdentityHints = !!(v && v.bodyHasIdentityHints);
     const hasTwoFactorText = !!(v && v.hasTwoFactorText);
     const hasAppealSubmitted = !!(v && v.hasAppealSubmitted);
@@ -3154,10 +3155,13 @@ async function detectLoginRequired(page) {
         evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
-    if (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title))) {
+    // Identidade (selfie/vídeo) deve ser reconhecida mesmo fora de /checkpoint.
+    // Motivo: em alguns fluxos o FB renderiza a etapa dentro de / (home) com modal/SPA.
+    // Blindagem anti-falso-positivo: exigir hints fortes (selfie+vídeo) para considerar.
+    if (hasIdentitySubmitted || (identityStrongHints && bodyHasIdentityHints) || (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title)))) {
       return {
         loginRequired: true,
-        reason: 'identity_confirm_selfie',
+        reason: hasIdentitySubmitted ? 'identity_submitted' : 'identity_confirm_selfie',
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
