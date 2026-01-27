@@ -1435,7 +1435,8 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
     try {
       const clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-        const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+        const dlg = document.querySelector('div[role="dialog"]') || document;
+        const buttons = Array.from(dlg.querySelectorAll('button,[role="button"]')).slice(0, 220);
         for (const b of buttons) {
           const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
           if (disabled) continue;
@@ -1550,26 +1551,35 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       pinLog({ event: 'pin_present', attempt, kind: det.kind || null, hasPinInput: !!det.hasPinInput, hasNaoRestaurarBtn: !!det.hasNaoRestaurarBtn, hasCreateBtn: !!det.hasCreateBtn });
     } catch {}
 
-    // NOVO: Se for modal de "Criar PIN", clica no botão primeiro
+    // Se for modal de "Criar PIN", a regra é: tentar CRIAR PIN (não pular) — fallbacks só se falhar.
     if (det.kind === 'create_pin' && det.hasCreateBtn) {
       try {
         pinLog({ event: 'pin_create_click_attempt', attempt });
-        // tenta "Criar PIN"; se não existir, tenta "Mais opções" e pular
-        const createClicked = await clickCreatePinButton();
-        if (!createClicked) {
-          const more = await clickMoreOptionsThenSkip();
-          pinLog({ event: 'pin_more_options_try', attempt, ok: !!(more && more.ok), error: more && more.error });
+        let createClicked = false;
+        for (let k = 1; k <= 3; k++) {
+          createClicked = await clickCreatePinButton();
+          try { pinLog({ event: 'pin_create_click_try', attempt, k, ok: !!createClicked }); } catch {}
+          if (createClicked) break;
+          await sleep(650);
         }
-        await sleep(1000);
+        await sleep(900);
         if (createClicked) {
           pinLog({ event: 'pin_create_clicked', attempt });
-        }
-        // Após clicar, pode aparecer o input de PIN, então continua o fluxo
-        // Re-detecta para ver se agora é pin_input
-        const detAfterCreate = await detectMessengerPinModal(page);
-        if (detAfterCreate.present && detAfterCreate.kind === 'pin_input') {
-          det.kind = 'pin_input';
-          det.hasPinInput = true;
+          const t0 = Date.now();
+          while (Date.now() - t0 < 12_000) {
+            const detAfterCreate = await detectMessengerPinModal(page);
+            if (detAfterCreate.present && detAfterCreate.kind === 'pin_input' && detAfterCreate.hasPinInput) {
+              det.kind = 'pin_input';
+              det.hasPinInput = true;
+              try { pinLog({ event: 'pin_input_visible_after_create', attempt, waitMs: Date.now() - t0 }); } catch {}
+              break;
+            }
+            await sleep(450);
+          }
+        } else {
+          // Fallback: só se realmente não conseguimos clicar em "Criar PIN".
+          const more = await clickMoreOptionsThenSkip();
+          pinLog({ event: 'pin_more_options_fallback', attempt, ok: !!(more && more.ok), error: more && more.error });
         }
       } catch (e) {
         pinLog({ event: 'pin_create_click_error', attempt, error: (e && e.message) || String(e) });

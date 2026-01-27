@@ -7200,6 +7200,43 @@ const handlers = {
 
       if (success) {
         pushStep({ step: 'login_remediate_success' });
+        // Conta nova (stock_provision): garantir Robe pausado 24h SEMPRE (110%).
+        // Regra do lead: conta nova inicia trabalho com Virtus ON, mas Robe pausado 24h antes de postar.
+        try {
+          const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
+          if (isStockProvision) {
+            const plus24 = 24 * 60 * 60 * 1000;
+            const now = Date.now();
+            const desiredUntil = now + plus24;
+            await manifestStore.update(nome, (m) => {
+              m = m || {};
+              const curUntil = Number(m.robeCooldownUntil || 0) || 0;
+              // Garantia: pelo menos 24h a partir de agora.
+              m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
+              m.robeCooldownRemainingMs = 0;
+              // Não sobrescrever "limit_posting" (estado mais forte), mas em conta nova queremos new_account.
+              const r = String(m.robePauseReason || '');
+              if (String(r).toLowerCase() !== 'limit_posting') {
+                m.robePauseReason = 'new_account';
+              }
+              return m;
+            });
+            pushStep({ step: 'new_account_robe_pause_applied', untilMs: desiredUntil, reason: 'new_account' });
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'new_account_robe_pause_applied',
+                nome: String(nome || ''),
+                operator: op,
+                untilMs: desiredUntil,
+                reason: 'new_account'
+              });
+            } catch {}
+            try { robeUpdateMeta(nome, { pauseReason: 'new_account' }); } catch {}
+          }
+        } catch (e) {
+          pushStep({ step: 'new_account_robe_pause_apply_fail', error: (e && e.message) || String(e) });
+        }
         // Atualiza cookies frescos no manifest (pipeline imediato)
         try {
           const fresh = await withTimeout('collectCookies', browserHelper.collectFreshCookies(ctrl.browser), stageTimeoutMs.collectCookies);

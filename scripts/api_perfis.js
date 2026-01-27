@@ -505,7 +505,7 @@ module.exports = (app, workerClient, fileStore) => {
 
     // Enterprise (produção): perfil recém-provisionado via Estoque deve entrar com
     // Robe pausado por 24h, mas Virtus ON imediatamente.
-    // Importante: isso NÃO deve "resetar" o cooldown se o operador chamar start-work depois.
+    // Regra do lead: conta nova = garantir 24h (mínimo) para não postar cedo.
     if (op && String(op).toLowerCase().startsWith('stock_provision')) {
       try {
         const manifestStore = require('./manifestStore.js');
@@ -513,14 +513,13 @@ module.exports = (app, workerClient, fileStore) => {
         await manifestStore.update(nome, (m) => {
           const now = Date.now();
           m = m || {};
-          const hasPosted = !!(m.ultimaPostagemRobe && Number(m.ultimaPostagemRobe || 0) > 0);
-          const until = Number(m.robeCooldownUntil || 0) || 0;
-          const remaining = Number(m.robeCooldownRemainingMs || 0) || 0;
-          const cooldownActive = (until > now) || (remaining > 0);
-          // Só aplica se ainda não tiver cooldown e ainda não postou.
-          if (!hasPosted && !cooldownActive) {
-            m.robeCooldownUntil = now + plus24;
-            m.robeCooldownRemainingMs = 0;
+          const desiredUntil = now + plus24;
+          const curUntil = Number(m.robeCooldownUntil || 0) || 0;
+          // Garantia: pelo menos 24h a partir de agora (não encurta cooldown maior).
+          m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
+          m.robeCooldownRemainingMs = 0;
+          const r = String(m.robePauseReason || '');
+          if (String(r).toLowerCase() !== 'limit_posting') {
             m.robePauseReason = 'new_account';
           }
           return m;
