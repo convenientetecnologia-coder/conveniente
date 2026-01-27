@@ -1693,6 +1693,8 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.banned === true;
+    let banResult = { ok: true };
+    let closeOk = true;
 
     // Evidence + auto-delete (ultra enterprise, mas sem “mágica por trás dos panos”):
     // REGRA (ordem determinística):
@@ -1773,7 +1775,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         const dr = await handlers.deactivate({ nome, reason: 'auto_banned', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(dr && dr.ok), error: dr && dr.ok ? null : String(dr && dr.error || 'deactivate_failed').slice(0,180) }); } catch {}
         if (!dr || dr.ok !== true) {
-          // Se não fechou, não pode deletar (evita janela fantasma).
+          closeOk = false;
+          banResult = { ok: false, error: 'banned_close_failed' };
+          // Se não fechou, NÃO deletar (evita janela fantasma). Mas ainda assim vamos arquivar no CT.
           try {
             await manifestStore.update(nome, (man) => {
               man = man || {};
@@ -1784,7 +1788,6 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               return man;
             });
           } catch {}
-          return { ok: false, error: 'banned_close_failed' };
         }
       } catch {}
 
@@ -1832,6 +1835,9 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       // - deve estar inativo aqui; se ainda estiver ativo, bloqueia (anti-fantasma).
       // - remoção de userDataDir externo é best-effort.
       try {
+        if (!closeOk) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
+        } else {
         const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
         if (isActive) {
           try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
@@ -1861,6 +1867,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: true }); } catch {}
+        }
       } catch (e) {
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
       }
@@ -1924,7 +1931,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
     delete robeMeta[nome].loginRemediateFailedReason;
     } catch {}
     // Sempre retorna (não propaga)
-    return { ok: true };
+    return banResult;
   });
 }
 
@@ -1935,6 +1942,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
     try {
     const prev = await readAccountFlags(nome);
     const already = prev && prev.twoFactor === true;
+    let tfResult = { ok: true };
+    let closeOk = true;
 
     // Evidence + auto-delete:
     // REGRA (ultra enterprise, ordem determinística):
@@ -2007,6 +2016,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         const dr = await handlers.deactivate({ nome, reason: 'auto_two_factor', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_close_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(dr && dr.ok), error: dr && dr.ok ? null : String(dr && dr.error || 'deactivate_failed').slice(0,180) }); } catch {}
         if (!dr || dr.ok !== true) {
+          closeOk = false;
+          tfResult = { ok: false, error: 'two_factor_close_failed' };
           try {
             await manifestStore.update(nome, (man) => {
               man = man || {};
@@ -2017,7 +2028,6 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
               return man;
             });
           } catch {}
-          return { ok: false, error: 'two_factor_close_failed' };
         }
 
         // 3) arquiva no CT antes de deletar (garante que não some de Excluídas)
@@ -2056,6 +2066,10 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         }
 
         // 4) delete local (mesmo fluxo do DELETE /api/perfis/:nome, sem HTTP)
+        if (!closeOk) {
+          // Regra: se o navegador não fechou, NÃO deletar. Mas a conta já foi arquivada no CT (Excluídas).
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
+        } else {
         const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
         if (isActive) {
           try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
@@ -2082,6 +2096,7 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_two_factor_profile', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: true }); } catch {}
+        }
 
         // flags/issue: mantém comportamento anterior
         try {
@@ -2113,7 +2128,11 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].twoFactor = true;
         try { provisionAudit.append({ ts: Date.now(), event: 'twofactorflow_official_done', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        return { ok: true };
+        // Se não fechou, sinaliza erro para o caller (mas já arquivou no CT).
+        if (!closeOk && tfResult && tfResult.ok === false) {
+          tfResult = { ok: false, error: 'two_factor_close_failed_archived' };
+        }
+        return tfResult;
       } catch {}
 
       // 1) FECHA o navegador (não excluir com navegador aberto)
