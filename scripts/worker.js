@@ -3986,6 +3986,9 @@ async function activateOnce(nome, source = '', operator = '') {
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_identity'); } catch {}
               try { await ensureHumanOverlay(nome, ctrl, { reason: 'opened_in_human_mode_identity' }); } catch {}
               try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_identity' }); } catch {}
+              // Enterprise: abrir em modo humano por identidade precisa setar flags reais via probe,
+              // senão o painel fica "sem motivo" e o monitor de identidade não roda.
+              try { await probeHumanStateOnOpen(nome, ctrl, { source: 'open_identity' }); } catch {}
               try { await snapshotStatusAndWrite(); } catch {}
             }
           }
@@ -4012,6 +4015,8 @@ async function activateOnce(nome, source = '', operator = '') {
               try { await issues.append(nome, 'mil_action', 'opened_in_human_mode_appeal_submitted'); } catch {}
               // Anti-tela-preta: navega antes (Facebook) e só invoca humano automaticamente se for captcha/checkpoint.
               try { await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: 'human_mode_entry_appeal' }); } catch {}
+              // Enterprise: garantir que as flags reflitam a tela real após abrir (pode ter virado login/identity/captcha).
+              try { await probeHumanStateOnOpen(nome, ctrl, { source: 'open_appeal' }); } catch {}
               try {
                 const pg = ctrl.mainPage;
                 const lr = pg ? await browserHelper.detectLoginRequired(pg).catch(()=>null) : null;
