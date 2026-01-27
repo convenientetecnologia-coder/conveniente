@@ -7065,11 +7065,11 @@ const handlers = {
         }
       }
 
-      const uiOk =
+      let uiOk =
         (!uiMessenger || uiMessenger.ok === true) &&
         (!uiFacebook || uiFacebook.ok === true);
 
-      const success =
+      let success =
         !(lrMessenger && lrMessenger.loginRequired) &&
         !(lrFacebook && lrFacebook.loginRequired) &&
         !!uiOk;
@@ -7095,6 +7095,55 @@ const handlers = {
         try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate' }); } catch {}
         await failFastToHuman(na);
         return { ok: false, error: na, steps, closedForRam, pausedVirtus };
+      }
+
+      // Se não é loginRequired, mas a UI está bloqueada (consent/popup não resolvido), NÃO marque sucesso.
+      if (!uiOk) {
+        // Stock provision: tente mais uma rodada determinística (reload + unblock) antes de declarar "UI bloqueada (Humano)".
+        // Motivação: conta nova costuma cair em consent/dialog temporário; dá para resolver sem humano em muitos casos.
+        const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
+        if (isStockProvision) {
+          try {
+            pushStep({ step: 'ui_blocked_retry_begin', uiMessenger, uiFacebook });
+            const pages = await ctrl.browser.pages().catch(()=>[]);
+            const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+            const pick = (pred) => {
+              for (const pg of (pages || [])) {
+                const u = safeUrl(pg);
+                if (!u) continue;
+                try { if (pred(u, pg)) return pg; } catch {}
+              }
+              return null;
+            };
+            const pMsg = pick((u) => /messenger\.com/i.test(u));
+            const pCreate = pick((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u));
+            const pAny = (pages && pages[0]) || pMsg || pCreate || null;
+
+            async function retryOn(page, label) {
+              if (!page) return null;
+              try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+              await sleep(1400);
+              const ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_ui_retry_${label}`, allowGpt: true, maxRounds: 5 }).catch(()=>null);
+              return ui;
+            }
+
+            // Retry messenger
+            const uiM2 = await retryOn(pMsg || pAny, 'msg');
+            if (uiM2) uiMessenger = uiM2;
+            // Retry facebook create
+            const uiF2 = await retryOn(pCreate || pAny, 'fb');
+            if (uiF2) uiFacebook = uiF2;
+
+            uiOk =
+              (!uiMessenger || uiMessenger.ok === true) &&
+              (!uiFacebook || uiFacebook.ok === true);
+            success =
+              !(lrMessenger && lrMessenger.loginRequired) &&
+              !(lrFacebook && lrFacebook.loginRequired) &&
+              !!uiOk;
+            pushStep({ step: 'ui_blocked_retry_done', uiOk, uiMessenger, uiFacebook });
+          } catch {}
+        }
       }
 
       // Se não é loginRequired, mas a UI está bloqueada (consent/popup não resolvido), NÃO marque sucesso.

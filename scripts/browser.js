@@ -1984,253 +1984,143 @@ async function ensureFbUiUnblocked(page, nome, { reasonBase = 'fb_ui_unblock', a
 // configureProfile USA A LEITURA correta do manifest
 // ===============
 async function configureProfile(browser, nome, cookiesOverride = null) {
-  if (process.env.CONFIGURE_DEBUG === '1') {
-    logger.debug('[CONFIG] Iniciando configureProfile para ' + nome);
+  const dbg = process.env.CONFIGURE_DEBUG === '1';
+  if (dbg) logger.debug('[CONFIG] configureProfile (3-tabs) begin', { nome });
+
+  // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsíveis:
+  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com/marketplace
+  let pages = [];
+  try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
+  if (!pages || !pages.length) {
+    try { pages = [await browser.newPage()]; } catch {}
   }
+  if (!pages || !pages[0]) throw new Error('configureProfile_no_page0');
 
-  let pages;
+  const p0 = pages[0];
+  await bringWindowToFront(p0);
+
+  // Fechar extras pré-existentes (para não herdar lixo de tentativas anteriores)
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 1A: Antes de pegar pages (await browser.pages())');
-    pages = await browser.pages();
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 1B: Depois de pegar pages (await browser.pages())');
-  } catch (e) {
-    if (process.env.CONFIGURE_DEBUG === '1') {
-      logger.debug('[CONFIG][ERRO][CHECKPOINT 1][browser.pages()]: ' + ((e && e.stack) ? e.stack : e));
+    for (const pg of (pages || []).slice(1)) {
+      try { await pg.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
     }
-    throw e;
-  }
-
-  // NOVO: TRAZ FOCO AO INJETAR COOKIES
-  await bringWindowToFront(pages[0]);
-
-  let page, manifest, coords;
-  try {
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 2A: Antes de patchPage');
-    page = pages[0];
-    // LEITURA DE MANIFEST VIA userDataDir DEFINIDO EM perfis.json
-    const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
-    const perfil = perfisArr.find(p => p && p.nome === nome);
-    if (!perfil || !perfil.userDataDir) throw new Error('userDataDir do perfil não encontrado: ' + nome);
-    const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
-    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    coords = utils.getCoords(manifest.cidade || '');
-    await patchPage(nome, page, coords);
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 2B: Depois de patchPage');
-  } catch (e) {
-    if (process.env.CONFIGURE_DEBUG === '1') {
-      logger.debug('[CONFIG][ERRO][CHECKPOINT 2][patchPage]: ' + ((e && e.stack) ? e.stack : e));
-    }
-    throw e;
-  }
-
-  // ==================== PATCH INJEÇÃO UNIVERSAL ====================
-  // Injete TODOS os cookies (normalizados) direto na Facebook antes de navegar:
-  await injectCookies(pages[0], manifest.cookies);
-  // ================================================================
-
-  try {
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 8A: Antes de page.goto("https://facebook.com/")');
-    await pages[0].goto('https://facebook.com/', { waitUntil: 'domcontentloaded' }).catch((e) => {
-      if (process.env.CONFIGURE_DEBUG === '1') {
-        logger.debug('[CONFIG][ERRO][CHECKPOINT 8][goto facebook.com.catch]: ' + ((e && e.stack) ? e.stack : e));
-      }
-    });
-
-    try {
-      const title = await pages[0].title();
-      const url = pages[0].url();
-      if (process.env.CONFIGURE_DEBUG === '1') {
-        logger.debug(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
-      }
-    } catch(logerr) {
-      if (process.env.CONFIGURE_DEBUG === '1') {
-        logger.debug('[STATE] Erro ao obter título/URL após goto facebook.com: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
-      }
-    }
-
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 8B: Depois de page.goto("https://facebook.com/")');
-  } catch(e) {
-    if (process.env.CONFIGURE_DEBUG === '1') {
-      logger.debug('[CONFIG][ERRO][CHECKPOINT 8][page.goto facebook.com]: ' + ((e && e.stack) ? e.stack : e));
-    }
-    throw e;
-  }
-
-  // ===== ENTERPRISE: prova real do Robe na aba 0 (evita feed /marketplace) =====
-  try {
-    await pages[0].goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-    await new Promise(r => setTimeout(r, 1800));
   } catch {}
 
+  // Ler manifest (fonte de verdade) + fallback de cidade via perfis.json só para coords
+  let manifest = null;
+  let coords = null;
+  let robeMode = 'itens';
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 9A: Antes do delay após logar/principal (6s) ===');
-    await new Promise(r => setTimeout(r, 6000));
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 9B: Depois do delay após logar/principal (6s) ===');
-  } catch(e) {
-    if (process.env.CONFIGURE_DEBUG === '1') {
-      logger.debug('[CONFIG][ERRO][CHECKPOINT 9][Delay de 6s após logar/principal]: ' + ((e && e.stack) ? e.stack : e));
-    }
-    throw e;
+    manifest = await manifestStore.read(nome).catch(()=>null);
+    if (manifest && manifest.robeMode) robeMode = String(manifest.robeMode);
+  } catch {}
+  try {
+    // fallback cidade para coords (não bloqueante)
+    const perfisArr = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'perfis.json')));
+    const perfil = perfisArr.find(p => p && p.nome === nome);
+    const city = (manifest && manifest.cidade) ? String(manifest.cidade) : String((perfil && perfil.cidade) || '');
+    coords = utils.getCoords(city || '');
+  } catch {}
+
+  const cookies = Array.isArray(cookiesOverride) && cookiesOverride.length
+    ? cookiesOverride
+    : (manifest && Array.isArray(manifest.cookies) ? manifest.cookies : []);
+  if (!Array.isArray(cookies) || !cookies.length) {
+    if (dbg) logger.debug('[CONFIG] missing cookies', { nome });
+    return; // caller (worker) vai detectar missing_cookies e tratar
   }
 
-  const openedPages = [];
+  const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
+    ? 'https://www.facebook.com/marketplace/create/vehicle'
+    : 'https://www.facebook.com/marketplace/create/item';
+  const msgUrl = 'https://www.messenger.com/marketplace';
+
+  // Aba 0 — Facebook base
   try {
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10A: Antes de abrir abas auxiliares ===');
-    openedPages[0] = pages[0];
-
-    // Aba 1 — criar item (ROBE)
-    try {
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.1A: Antes de newPage (marketplace)');
-      openedPages[1] = await browser.newPage();
-      await patchPage(nome, openedPages[1], coords);
-      await new Promise(r => setTimeout(r, 1000));
-      // IMPORTANT: o Robe usa a rota de criação. O feed (/marketplace) pode parecer “ok” mas não prova que dá pra postar.
-      await openedPages[1].goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded' }).catch((e) => {
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug('[CONFIG][ERRO][CHECKPOINT 10.1][goto marketplace.catch]: ' + ((e && e.stack) ? e.stack : e));
-        }
-      });
-      try {
-        const title = await openedPages[1].title();
-        const url = await openedPages[1].url();
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
-        }
-      } catch(logerr) {
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug('[STATE] Erro ao obter título/URL após goto marketplace: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
-        }
-      }
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.1D: goto marketplace OK');
-      await new Promise(r => setTimeout(r, 6000));
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.1E: Delay após marketplace OK');
-    } catch(e) {
-      if (process.env.CONFIGURE_DEBUG === '1') {
-        logger.debug('[CONFIG][ERRO][CHECKPOINT 10.1][Aba Marketplace]: ' + ((e && e.stack) ? e.stack : e));
-      }
-    }
-
-    // Aba 2 — idioma
-    try {
-      await new Promise(r => setTimeout(r, 1000));
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.2A: Antes de newPage (idioma)');
-      openedPages[2] = await browser.newPage();
-      await patchPage(nome, openedPages[2], coords);
-      await new Promise(r => setTimeout(r, 1000));
-      await openedPages[2].goto('https://www.facebook.com/settings/?tab=language', { waitUntil: 'domcontentloaded' }).catch((e) => {
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug('[CONFIG][ERRO][CHECKPOINT 10.2][goto idioma.catch]: ' + ((e && e.stack) ? e.stack : e));
-        }
-      });
-      try {
-        const title = await openedPages[2].title();
-        const url = await openedPages[2].url();
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug(`[STATE] Após goto: Título: "${title}" | URL: ${url}`);
-        }
-      } catch(logerr) {
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug('[STATE] Erro ao obter título/URL após goto idioma: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
-        }
-      }
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.2D: goto idioma OK');
-      await new Promise(r => setTimeout(r, 6000));
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.2E: Delay após idioma OK');
-    } catch(e) {
-      if (process.env.CONFIGURE_DEBUG === '1') {
-        logger.debug('[CONFIG][ERRO][CHECKPOINT 10.2][Aba Idioma]: ' + ((e && e.stack) ? e.stack : e));
-      }
-    }
-
-    // Aba 3 — MESSENGER: PATCH UNIVERSAL COOKIES
-    try {
-      await new Promise(r => setTimeout(r, 1000));
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.3A: Antes de newPage (messenger)');
-      openedPages[3] = await browser.newPage();
-      await patchPage(nome, openedPages[3], coords);
-      await new Promise(r => setTimeout(r, 1000));
-
-      // 1. Injete cookies (normalizados) ANTES de navegar:
-      await injectCookies(openedPages[3], manifest.cookies);
-
-      // 2. Vai para Messenger e FAZ RELOAD (comportamento do legado!):
-      await openedPages[3].goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
-      await sleep(800);
-      try {
-        await openedPages[3].reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
-        await sleep(800);
-      } catch {
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug('[CONFIG][Messenger] reload inicial falhou, seguindo...');
-        }
-      }
-
-      // 3. Resolve nonce se aparecer:
-      await resolveNonceIfPresent(openedPages[3], { logPrefix: '[CONFIG][Messenger][nonce]' });
-
-      // 4. TENTA CLIQUE CONTINUAR COMO... (super robusto!)
-      const clicked = await clickContinuarComo(openedPages[3], { logPrefix: '[CONFIG][Messenger][continuar]' });
-
-      if (!clicked) {
-        // 5. Tente resolver nonce e clique de novo
-        await resolveNonceIfPresent(openedPages[3], { logPrefix: '[CONFIG][Messenger][nonce-2]' });
-        await clickContinuarComo(openedPages[3], { logPrefix: '[CONFIG][Messenger][continuar-2]' });
-      }
-
-      // 6. Loga título/URL final
-      try {
-        const title = await openedPages[3].title();
-        const url = await openedPages[3].url();
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug(`[STATE] Messenger Após fluxo: "${title}" | URL: ${url}`);
-        }
-      } catch(logerr) {
-        if (process.env.CONFIGURE_DEBUG === '1') {
-          logger.debug('[STATE] Erro ao obter título/URL após fluxo messenger: ' + ((logerr && logerr.stack) ? logerr.stack : logerr));
-        }
-      }
-      if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10.3Z: Fluxo Messenger finalizado (robusto)');
-
-      // 7) Curador enterprise: modal do PIN (fecha determinístico; se falhar, GPT + re-tenta)
-      try {
-        const pin1 = await tryDismissMessengerPinModal(openedPages[3], { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 4 });
-        if (!pin1.ok) {
-          // fallback GPT com histórico (tenta 2 rodadas)
-          for (let k = 1; k <= 2; k++) {
-            await gptRemediateFbUi(openedPages[3], nome, { reason: 'messenger_pin_modal', stage: `configure_pin_try_${k}` }).catch(()=>null);
-            const pin2 = await tryDismissMessengerPinModal(openedPages[3], { logPrefix: '[CONFIG][Messenger][pin-postgpt]', maxTries: 1 });
-            if (pin2.ok) break;
-          }
-          const still = await detectMessengerPinModal(openedPages[3]);
-          if (still.present) {
-            throw new Error('messenger_pin_modal');
-          }
-        }
-      } catch (e) {
-        // deixe falhar o configure (isso vai virar job error e pedir humano, mas a conta fica assigned no CT)
-        throw e;
-      }
-
-      await new Promise(r => setTimeout(r, 4000)); // settle curto
-    } catch(e) {
-      if (process.env.CONFIGURE_DEBUG === '1') {
-        logger.debug('[CONFIG][ERRO][CHECKPOINT 10.3][Aba Messenger robusta]: ' + ((e && e.stack) ? e.stack : e));
-      }
-    }
-    // FIM ABA MESSENGER PATCH UNIVERSAL COOKIES
-
-    if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 10B: Depois de abrir abas auxiliares ===');
-  } catch(e) {
-    if (process.env.CONFIGURE_DEBUG === '1') {
-      logger.debug('[CONFIG][ERRO][CHECKPOINT 10][Abrindo abas auxiliares]: ' + ((e && e.stack) ? e.stack : e));
-    }
+    await patchPage(nome, p0, coords);
+  } catch (e) {
+    if (dbg) logger.debug('[CONFIG] patchPage p0 fail', { nome, error: (e && e.message) || String(e) });
     throw e;
   }
+  await injectCookies(p0, cookies);
+  try { await p0.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+  try { await sleep(900); } catch {}
+  try {
+    const ui0 = await ensureFbUiUnblocked(p0, nome, { reasonBase: 'configure_fb0', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+    if (dbg) logger.debug('[CONFIG] fb0 ui', { nome, ui: ui0 || null });
+  } catch {}
+  // Se já caiu em login_form, não faz sentido abrir as outras abas (o worker seguirá para login+senha).
+  try {
+    const lr0 = await detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+    if (dbg) logger.debug('[CONFIG] fb0 lr', { nome, lr: lr0 || null, url: (p0.url ? String(p0.url()||'') : '') });
+    if (lr0 && lr0.loginRequired && String(lr0.reason || '').toLowerCase().includes('login_form')) {
+      return;
+    }
+  } catch {}
 
-  // (REMOVIDO BLOCO DE PRUNING APÓS CONFIGURATION CONFORME INSTRUÇÃO)
+  // Aba 1 — Create (Robe)
+  let p1 = null;
+  try {
+    p1 = await browser.newPage();
+    await patchPage(nome, p1, coords);
+    await injectCookies(p1, cookies);
+    await p1.goto(createUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await sleep(1200);
+    const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+    if (dbg) logger.debug('[CONFIG] create ui', { nome, createUrl, ui: ui1 || null });
+  } catch (e) {
+    if (dbg) logger.debug('[CONFIG] create tab fail', { nome, error: (e && e.message) || String(e) });
+  }
 
-  if (process.env.CONFIGURE_DEBUG === '1') logger.debug('=== CHECKPOINT 14: Todas abas abertas/logadas, firmadas e curadas. Configuração concluída!');
-  if (process.env.CONFIGURE_DEBUG === '1') logger.debug('[CONFIG] configureProfile FINALIZADO em ' + nome);
+  // Aba 2 — Messenger (Virtus)
+  let p2 = null;
+  try {
+    p2 = await browser.newPage();
+    await patchPage(nome, p2, coords);
+    await injectCookies(p2, cookies);
+    await p2.goto(msgUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await sleep(900);
+    try { await p2.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+    await sleep(900);
+
+    // Nonce + “Continuar como...”
+    await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce]' });
+    const clicked = await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar]' });
+    if (!clicked) {
+      await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce-2]' });
+      await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar-2]' });
+    }
+
+    // Curador: modal do PIN (se falhar, GPT e re-tenta)
+    try {
+      const pin1 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 4 });
+      if (!pin1.ok) {
+        for (let k = 1; k <= 2; k++) {
+          await gptRemediateFbUi(p2, nome, { reason: 'messenger_pin_modal', stage: `configure_pin_try_${k}` }).catch(()=>null);
+          const pin2 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-postgpt]', maxTries: 1 });
+          if (pin2.ok) break;
+        }
+        const still = await detectMessengerPinModal(p2);
+        if (still.present) throw new Error('messenger_pin_modal');
+      }
+    } catch (e) {
+      throw e;
+    }
+
+    const ui2 = await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg', allowGpt: true, maxRounds: 3 }).catch(()=>null);
+    if (dbg) logger.debug('[CONFIG] msg ui', { nome, ui: ui2 || null });
+  } catch (e) {
+    if (dbg) logger.debug('[CONFIG] messenger tab fail', { nome, error: (e && e.message) || String(e) });
+  }
+
+  if (dbg) {
+    try {
+      const ps = await browser.pages().catch(()=>[]);
+      const urls = [];
+      for (const pg of (ps || []).slice(0, 5)) { try { urls.push(String(pg.url() || '')); } catch { urls.push(''); } }
+      logger.debug('[CONFIG] configureProfile (3-tabs) end', { nome, tabs: (ps || []).length, urls, robeMode, createUrl });
+    } catch {}
+  }
 }
 
 // ===============
