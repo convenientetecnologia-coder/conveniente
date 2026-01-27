@@ -1008,10 +1008,11 @@ module.exports = (app, workerClient, fileStore) => {
           if (!nome) continue;
           const man = await manifestStore.read(nome).catch(()=>null);
           const f = (man && man.accountFlags && typeof man.accountFlags === 'object') ? man.accountFlags : {};
+          // Ultra enterprise: "humanOnly" aqui deve ser apenas para estados realmente bloqueantes,
+          // não para flags auto-resolvíveis (ex.: loginRemediateFailed/messengerPin podem estar presas
+          // mesmo com UI ok, e o worker reconciliador já limpa).
           const shouldHumanOnly =
-            f.loginRemediateFailed === true ||
             f.loginRequired === true ||
-            f.messengerPin === true ||
             f.identityRequired === true ||
             f.identitySubmitted === true ||
             f.appealSubmitted === true ||

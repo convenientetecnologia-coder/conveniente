@@ -9001,8 +9001,50 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     // 2) LoginRequired/Identity/Appeal
     const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
-      try { provisionAudit.append({ ts: now, event: 'human_reconcile_ok_no_login_required', nome: String(nome||''), url: String(safeUrl(pg)||'').slice(0,220) }); } catch {}
-      return { ok: true, state: 'not_login_required' };
+      // Estado real mudou: browser está ok, mas flags antigas podem ter ficado presas (ex.: loginRemediateFailed).
+      // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
+      let cleared = [];
+      let setVirtusOn = false;
+      try {
+        const flagsPrev = await readAccountFlags(nome).catch(()=>({}));
+        const needsClear =
+          (flagsPrev && flagsPrev.loginRemediateFailed === true) ||
+          (flagsPrev && flagsPrev.loginRequired === true) ||
+          (flagsPrev && flagsPrev.messengerPin === true);
+        if (needsClear) {
+          try { await clearAccountFlags(nome, ['loginRemediateFailed', 'loginRequired', 'messengerPin']).catch(()=>{}); } catch {}
+          cleared = ['loginRemediateFailed', 'loginRequired', 'messengerPin'];
+        }
+      } catch {}
+
+      // Se o perfil está active=true no desired e virtus estava off por conta dessas flags presas, religar.
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {};
+          d.perfis = d.perfis || {};
+          const cur = d.perfis[nome] || {};
+          if (cur && cur.active === true && cur.virtus === 'off') {
+            d.perfis[nome] = { ...cur, virtus: 'on', humanHold: false };
+            setVirtusOn = true;
+          }
+          return d;
+        });
+      } catch {}
+
+      try {
+        provisionAudit.append({
+          ts: now,
+          event: 'human_reconcile_ok_no_login_required',
+          nome: String(nome||''),
+          url: String(safeUrl(pg)||'').slice(0,220),
+          cleared,
+          setVirtusOn
+        });
+      } catch {}
+      if (setVirtusOn) {
+        try { await snapshotStatusAndWrite(); } catch {}
+      }
+      return { ok: true, state: 'not_login_required', cleared, setVirtusOn };
     }
 
     const rr = String(lr.reason || '').toLowerCase();
