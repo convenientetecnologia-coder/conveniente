@@ -6794,8 +6794,9 @@ const handlers = {
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
+      // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
+      // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
-      const hasAppeal = !!(flagsBefore && flagsBefore.appealSubmitted === true);
 
       ctrl.humanControl = false;
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
@@ -6841,11 +6842,11 @@ const handlers = {
       try { pages = await ctrl.browser.pages(); } catch {}
       if (pages && pages[0]) {
         try {
-          // Refresh + destravar modais do FB antes de navegar para o Messenger (evita falso-positivo "appeal" e loops).
+          // Refresh + destravar modais do FB ANTES do preflight.
+          // NÃO navegar para Messenger aqui, senão o preflight olha a aba errada e não detecta identidade/appeal.
           await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
           await new Promise(r => setTimeout(r, 350));
           await reloadPageEnterprise(pages[0], { nome, tag: 'human_resume_refresh', timeoutMs: 60_000 }).catch(()=>null);
-          await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
         } catch {}
       }
 
@@ -6856,9 +6857,14 @@ const handlers = {
       // - Se estiver em login/senha (login_form): agenda login_remediate (cookies -> login -> humano) sob provisionLock/quiesce.
       // - Se estiver em appeal_submitted: não retoma automação; arma monitoramento (1h).
       let scheduledLoginRemediate = false;
+      let appealDetectedInPreflight = false;
       let preflight = { ok: true, state: 'unknown', reason: '' };
       try {
-        const p0 = (pages && pages[0]) ? pages[0] : null;
+        // Preferir uma aba do Facebook (onde aparecem identity/appeal modals), não Messenger.
+        const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
+        const p0 =
+          (pages && pages.find(p => /facebook\.com/i.test(safeUrl(p)) )) ||
+          ((pages && pages[0]) ? pages[0] : null);
         if (p0) {
           // 0) Suspensa/banida (UI de suspensão)
           const bd = await browserHelper.detectAccountSuspended(p0).catch(()=>({ banned:false }));
@@ -6895,6 +6901,7 @@ const handlers = {
             // appeal_submitted: não retoma automação; arma monitoramento (1h) e mantém Virtus OFF.
             if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
               preflight.state = 'appeal_submitted';
+              appealDetectedInPreflight = true;
               try { await setAppealSubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
               ctrl.trabalhando = false;
               try { await stopVirtus(nome); } catch {}
@@ -7018,17 +7025,24 @@ const handlers = {
       }
 
       // ===== Fluxo original: se não caiu em nenhum estado "especial", retoma automação normal =====
-      if (!hasAppeal) {
+      // Agora que o preflight passou, navegar para o Messenger (Virtus/Robe usam essa rota).
+      try {
+        let pagesN = [];
+        try { pagesN = await ctrl.browser.pages(); } catch {}
+        if (pagesN && pagesN[0]) {
+          await pagesN[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+        }
+      } catch {}
+
+      if (!appealDetectedInPreflight) {
         if (automationAllowed(ctrl)) {
           ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
           ctrl.trabalhando = true;
         }
         try { unfreezeCooldownIfWorking(nome); } catch {}
       } else {
-        // Estado "recurso_apresentado": não retoma automação; arma monitoramento (1h) e mantém Virtus OFF.
         ctrl.trabalhando = false;
         try { await stopVirtus(nome); } catch {}
-        try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       }
 
       await snapshotStatusAndWrite();
@@ -7041,7 +7055,7 @@ const handlers = {
             ...(desired.perfis[nome] || {}),
             active: true,
             humanHold: false,
-            virtus: hasAppeal ? 'off' : 'on'
+            virtus: appealDetectedInPreflight ? 'off' : 'on'
           };
           return desired;
         });
