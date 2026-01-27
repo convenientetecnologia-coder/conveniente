@@ -1149,7 +1149,9 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     let p0 = pages && pages[0];
     let u0 = '';
     try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
-    if (!p0 || !u0 || u0 === 'about:blank') {
+    // Fluxo enterprise: NÃO criar novas abas só porque a aba 0 está em about:blank.
+    // A aba 0 é navegável e deve ser reaproveitada (senão abrimos 2+ abas no bootstrap e o sistema “desgoverna”).
+    if (!p0) {
       p0 = await ctrl.browser.newPage().catch(()=>null);
       if (p0) {
         try {
