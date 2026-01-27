@@ -1017,6 +1017,48 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
       error = (e3 && e3.message) ? String(e3.message).slice(0, 180) : String(e3).slice(0, 180);
     }
   }
+  // Pós-navegação: alguns fluxos do FB abrem modal "Você está de volta ao Facebook".
+  // Se não clicar, o sistema pode "achar" login_required/appeal por texto antigo e ficar engessado.
+  try {
+    const did = await (async () => {
+      try {
+        return await pg.evaluate(() => {
+          function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+          const txt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+          const hit =
+            txt.includes('voce esta de volta ao facebook') ||
+            txt.includes("você está de volta ao facebook") ||
+            txt.includes("sua conta nao esta mais suspensa") ||
+            txt.includes("sua conta não está mais suspensa") ||
+            txt.includes("you're back on facebook") ||
+            txt.includes('your account is no longer suspended');
+          if (!hit) return { ok: true, did: false };
+          const dialog = document.querySelector('div[role="dialog"]') || document;
+          // Preferir CTA principal
+          const btn = Array.from(dialog.querySelectorAll('[role="button"],button,a[role="button"]')).find(el => {
+            const t = norm(el.innerText || el.textContent || '');
+            const al = norm(el.getAttribute('aria-label') || '');
+            return t.includes('voltar para o facebook') || al.includes('voltar para o facebook') || t.includes('back to facebook') || al.includes('back to facebook');
+          });
+          if (btn && typeof btn.click === 'function') { btn.click(); return { ok: true, did: true, kind: 'back_to_facebook' }; }
+          // Fallback: fechar modal
+          const closeBtn = Array.from(dialog.querySelectorAll('[role="button"],button')).find(el => {
+            const al = norm(el.getAttribute('aria-label') || '');
+            const t = norm(el.innerText || el.textContent || '');
+            return al === 'fechar' || al === 'close' || t === 'fechar' || t === 'close';
+          });
+          if (closeBtn && typeof closeBtn.click === 'function') { closeBtn.click(); return { ok: true, did: true, kind: 'close' }; }
+          return { ok: true, did: false, kind: 'not_found' };
+        });
+      } catch {
+        return { ok: false, did: false, kind: 'eval_failed' };
+      }
+    })();
+    if (did && did.did) {
+      try { provisionAudit.append({ ts: Date.now(), event: `${String(tag||'monitor')}_back_to_fb_dialog`, nome: String(nome||''), ok: !!did.ok, did: true, kind: did.kind || null }); } catch {}
+      await sleep(900);
+    }
+  } catch {}
   try { if (pg && typeof pg.setCacheEnabled === 'function') await pg.setCacheEnabled(true).catch(()=>{}); } catch {}
   const durMs = Date.now() - t0;
   try {
@@ -6758,9 +6800,31 @@ const handlers = {
       ctrl.humanControl = false;
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
       try { await syncHumanOverlay(nome); } catch {}
-      // Enterprise: "Retomar trabalho" deve limpar TODO estado de falha/hold para voltar ao normal.
+      // Enterprise: "Retomar trabalho" deve limpar TODO estado antigo para reavaliar o estado real.
+      // - limpa flags de login/falha e também estados de análise (appeal/identity) para não engessar.
       try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
+      try { await clearAppealSubmittedFlag(nome); } catch {}
+      try { await clearIdentityFlags(nome); } catch {}
       try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
+      try {
+        // Limpa runtime/meta que pode manter status antigo no painel.
+        robeMeta[nome] = robeMeta[nome] || {};
+        delete robeMeta[nome].whyNotOpen;
+        delete robeMeta[nome].loginRemediateFailed;
+        delete robeMeta[nome].loginRemediateFailedReason;
+        delete robeMeta[nome].loginRequired;
+        delete robeMeta[nome].loginReason;
+        delete robeMeta[nome].appealSubmitted;
+      } catch {}
+      // "Retomar" deve remover humanHold antes do preflight (preflight pode reativar humanHold se necessário).
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {};
+          d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), humanHold: false, virtus: 'off', active: true };
+          return d;
+        });
+      } catch {}
 
       let pages2 = [];
       try { pages2 = await ctrl.browser.pages(); } catch {}
@@ -6777,8 +6841,10 @@ const handlers = {
       try { pages = await ctrl.browser.pages(); } catch {}
       if (pages && pages[0]) {
         try {
+          // Refresh + destravar modais do FB antes de navegar para o Messenger (evita falso-positivo "appeal" e loops).
           await require('./browser.js').ensureMinimizedWindowForPage(pages[0]);
           await new Promise(r => setTimeout(r, 350));
+          await reloadPageEnterprise(pages[0], { nome, tag: 'human_resume_refresh', timeoutMs: 60_000 }).catch(()=>null);
           await pages[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
         } catch {}
       }
@@ -6839,12 +6905,34 @@ const handlers = {
               return { ok: true, preflight };
             }
 
+            // identity_submitted: entra em monitor 1h (não é login/cookies falhou)
+            if (rr.includes('identity_submitted')) {
+              preflight.state = 'identity_submitted';
+              try { await setIdentitySubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
+              ctrl.trabalhando = false;
+              try { await stopVirtus(nome); } catch {}
+              await snapshotStatusAndWrite();
+              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_identity_submitted' }); } catch {}
+              logger.info('[HANDLER] human-resume preflight -> identity_submitted', { nome, reason: lr.reason || '' });
+              return { ok: true, preflight };
+            }
+            // identity_required: estado próprio (não é falha de login)
+            if (rr.includes('identity')) {
+              preflight.state = 'identity_required';
+              try { await setIdentityRequiredFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
+              ctrl.trabalhando = false;
+              try { await stopVirtus(nome); } catch {}
+              await snapshotStatusAndWrite();
+              try { await ensureHumanOverlay(nome, ctrl, { reason: 'human_resume_preflight_identity_required' }); } catch {}
+              logger.info('[HANDLER] human-resume preflight -> identity_required', { nome, reason: lr.reason || '' });
+              return { ok: true, preflight };
+            }
+
             // Non-automatable: captcha/identity/checkpoint => humano direto.
             // 2FA => exclusão automática.
             const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
             const needsHuman =
               rr.includes('captcha') ||
-              rr.includes('identity') ||
               rr.includes('checkpoint');
             if (isTwoFactor) {
               preflight.state = 'two_factor';
