@@ -3241,6 +3241,8 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
           bodyTxt.includes('confirm your identity') ||
           bodyTxt.includes('selfie') ||
           bodyTxt.includes('identidade') ||
+          bodyTxt.includes('checkpoint') ||
+          bodyTxt.includes('pessoa real') ||
           bodyTxt.includes('carregamento desse video') ||
           bodyTxt.includes('selfie de video finalizada') ||
           bodyTxt.includes('confirmacao de identidade');
@@ -3256,8 +3258,10 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
           { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
           { key: 'confirmar', words: ['confirmar', 'confirm'] },
           { key: 'enviar', words: ['enviar', 'submit'] },
+          { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vídeo', 'iniciar selfie', 'começar', 'comecar', 'start'] },
+          // "Carregar" pode aparecer desabilitado enquanto ainda existe "Continuar/Avançar" clicável.
+          // Só devemos “esperar ficar azul” se nada anterior estiver clicável.
           { key: 'carregar', words: ['carregar', 'upload'] },
-          { key: 'iniciar_selfie', words: ['iniciar selfie de video', 'iniciar selfie de vídeo'] },
           { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
           { key: 'continuar', words: ['continuar', 'continue'] },
         ];
@@ -3304,9 +3308,8 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
           } catch { return { ok: false, reason: 'hit_test_failed' }; }
         };
 
+        let bestDisabled = null;
         for (const p of priority) {
-          // Colete candidatos desta prioridade; só retorna quando achar um realmente clicável.
-          let lastDisabled = null;
           for (const el of all) {
             if (!el) continue;
             const t = textOf(el);
@@ -3316,7 +3319,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             if (!b) continue;
             // Não gerar falso positivo: só clicar se estiver habilitado E realmente clicável.
             if (isDisabled(b) || !isVisiblyClickable(b)) {
-              lastDisabled = {
+              const cand = {
                 ok: false,
                 found: p.key,
                 disabled: true,
@@ -3324,11 +3327,12 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
                 ariaDisabled: b.getAttribute('aria-disabled'),
                 tabindex: b.getAttribute('tabindex')
               };
+              if (!bestDisabled) bestDisabled = cand;
               continue;
             }
             const ht = hitTestCenter(b);
             if (!ht || !ht.ok) {
-              lastDisabled = {
+              const cand = {
                 ok: false,
                 found: p.key,
                 disabled: true,
@@ -3336,6 +3340,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
                 ariaDisabled: b.getAttribute('aria-disabled'),
                 tabindex: b.getAttribute('tabindex')
               };
+              if (!bestDisabled) bestDisabled = cand;
               continue;
             }
             return {
@@ -3347,8 +3352,8 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
               text: (b.innerText || b.textContent || '').slice(0, 80)
             };
           }
-          if (lastDisabled) return lastDisabled;
         }
+        if (bestDisabled) return bestDisabled;
         return { ok: false, error: 'no_clickable_button' };
       });
     } catch (e) {
