@@ -1223,6 +1223,92 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     // 1) LoginRequired/Identity/Appeal/Captcha
     const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
+      // 1) Messenger OK — antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
+      try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_ok', nome: String(nome||''), source: String(source||'') }); } catch {}
+
+      let robeProbe = null;
+      try {
+        const man = await manifestStore.read(nome).catch(()=>null);
+        const robeMode = (man && man.robeMode) ? String(man.robeMode) : 'itens';
+        const targetUrl = (robeMode === 'veiculos')
+          ? 'https://www.facebook.com/marketplace/create/vehicle'
+          : 'https://www.facebook.com/marketplace/create/item';
+        const flowId = newFlowId('robe_probe');
+        try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_begin', nome: String(nome||''), source: String(source||''), flowId, robeMode, targetUrl }); } catch {}
+
+        // Janela curta e segura: abre aba, valida, fecha.
+        const p = await ctrl.browser.newPage().catch(()=>null);
+        if (!p) throw new Error('robe_probe_no_newPage');
+        try { await wirePageObservers(nome, p); } catch {}
+        try { await p.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+        try { await sleep(900); } catch {}
+        try { await browserHelper.ensureFbUiUnblocked(p, nome, { reasonBase: 'bootstrap_robe_probe', allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
+        const lr2 = await browserHelper.detectLoginRequired(p).catch(()=>({ loginRequired:false }));
+        robeProbe = { ok: true, robeMode, targetUrl, lr: lr2 };
+        let u1 = ''; let t1 = '';
+        try { u1 = (typeof p.url === 'function') ? String(p.url() || '') : ''; } catch {}
+        try { t1 = (typeof p.title === 'function') ? String(await p.title().catch(()=>'')) : ''; } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'bootstrap_robe_probe_end',
+            nome: String(nome||''),
+            source: String(source||''),
+            flowId,
+            ok: true,
+            robeMode,
+            targetUrl,
+            finalUrl: String(u1||'').slice(0, 260),
+            title: String(t1||'').slice(0, 200),
+            loginRequired: !!(lr2 && lr2.loginRequired),
+            reason: String((lr2 && lr2.reason) ? lr2.reason : '').slice(0, 160)
+          });
+        } catch {}
+        try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
+      } catch (e) {
+        robeProbe = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+        try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_end', nome: String(nome||''), source: String(source||''), ok: false, error: String(robeProbe.error||'').slice(0, 180) }); } catch {}
+      }
+
+      // 2) Se o Robe probe achou bloqueio (captcha/login/identity/appeal), NÃO liberar “clear”.
+      try {
+        const lr2 = robeProbe && robeProbe.ok && robeProbe.lr ? robeProbe.lr : null;
+        if (lr2 && lr2.loginRequired === true) {
+          const rr2 = String(lr2.reason || '').toLowerCase();
+          try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_login_required', nome: String(nome||''), source: String(source||''), reason: String(lr2.reason||'').slice(0,160) }); } catch {}
+
+          if (rr2.includes('identity_submitted')) {
+            try { await setIdentitySubmittedFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+            return { ok: true, state: 'identity_submitted', reason: rr2 };
+          }
+          if (rr2.includes('identity')) {
+            try { await setIdentityRequiredFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+            // iniciar fluxo de identidade (gate+cooldown já protegem)
+            setTimeout(() => {
+              try {
+                const c = controllers.get(nome);
+                const p0 = (c && c.mainPage) ? c.mainPage : pg;
+                if (c && p0) runIdentityFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
+              } catch {}
+            }, 0);
+            return { ok: true, state: 'identity_required', reason: rr2 };
+          }
+          if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
+            try { await setAppealSubmittedFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+            try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
+            return { ok: true, state: 'appeal_submitted', reason: rr2 };
+          }
+          if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
+            try { await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+            return { ok: true, state: 'captcha_checkpoint', reason: rr2 };
+          }
+          // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
+          try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
+          return { ok: true, state: 'login_required', reason: rr2 };
+        }
+      } catch {}
+
+      // 3) Se Messenger OK + Robe OK => agora sim “clear” e liberar automação.
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_clear', nome: String(nome||''), source: String(source||'') }); } catch {}
       // Se abriu "human-only" por flag velha e já está OK, liberar automação.
       try { await clearAppealSubmittedFlag(nome); } catch {}
@@ -4255,7 +4341,8 @@ async function activateOnce(nome, source = '', operator = '') {
                   try { u0 = (p0 && typeof p0.url === 'function') ? String(p0.url() || '') : ''; } catch { u0 = ''; }
                   const isBlank = (!u0 || u0 === 'about:blank');
                   if (isBlank) {
-                    await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'facebook', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' });
+                    // Fluxo enterprise: primeiro Messenger (Virtus). Só depois validamos Facebook/Robe.
+                    await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' });
                   }
                 } catch {}
                 try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
