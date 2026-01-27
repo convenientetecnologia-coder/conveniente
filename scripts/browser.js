@@ -3337,6 +3337,38 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
             return { ok: true, x, y };
           } catch { return { ok: false, reason: 'hit_test_failed' }; }
         };
+        const isOffscreen = (el) => {
+          try {
+            const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (!r) return true;
+            const vh = Math.max(0, window.innerHeight || 0);
+            const vw = Math.max(0, window.innerWidth || 0);
+            if (!vh || !vw) return true;
+            // margem pequena: botão no rodapé pode ficar "quase visível" mas ainda fora.
+            const margin = 16;
+            const top = r.top, left = r.left, bottom = r.bottom, right = r.right;
+            return (bottom < margin) || (top > (vh - margin)) || (right < margin) || (left > (vw - margin));
+          } catch { return true; }
+        };
+        const scrollToMakeClickable = (el) => {
+          let scrolled = false;
+          let scrollReason = '';
+          try {
+            if (!el) return { scrolled: false, scrollReason: '' };
+            if (isOffscreen(el)) {
+              // Padrão do repo: behavior 'instant' (determinístico).
+              try { el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); scrolled = true; scrollReason = 'offscreen_scrollIntoView'; } catch {}
+            }
+          } catch {}
+          return { scrolled, scrollReason };
+        };
+        const scrollNudgeDown = () => {
+          try {
+            // micro-ajuste (uma rolada pequena) — útil quando o FB prende o botão no rodapé do conteúdo.
+            window.scrollBy(0, Math.max(220, (window.innerHeight || 800) * 0.25));
+            return true;
+          } catch { return false; }
+        };
 
         let bestDisabled = null;
         for (const p of priority) {
@@ -3360,7 +3392,18 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
               if (!bestDisabled) bestDisabled = cand;
               continue;
             }
-            const ht = hitTestCenter(b);
+            // 1) Auto-scroll mínimo antes do hit-test (resolve o caso do botão no rodapé).
+            const s1 = scrollToMakeClickable(b);
+            let ht = hitTestCenter(b);
+            // 2) Se ainda falhar, faz um "nudge" curto e tenta mais uma vez (no máximo 1x).
+            let nudge = false;
+            if (!ht || !ht.ok) {
+              const why0 = ht && ht.reason ? String(ht.reason) : '';
+              if (why0 === 'no_element_from_point' || why0 === 'overlay_hit') {
+                nudge = scrollNudgeDown();
+                ht = hitTestCenter(b);
+              }
+            }
             if (!ht || !ht.ok) {
               const cand = {
                 ok: false,
@@ -3368,7 +3411,10 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
                 disabled: true,
                 why: ht && ht.reason ? ht.reason : 'hit_test',
                 ariaDisabled: b.getAttribute('aria-disabled'),
-                tabindex: b.getAttribute('tabindex')
+                tabindex: b.getAttribute('tabindex'),
+                scrolled: !!(s1 && s1.scrolled),
+                scrollReason: (s1 && s1.scrollReason) ? String(s1.scrollReason) : '',
+                nudged: !!nudge
               };
               if (!bestDisabled) bestDisabled = cand;
               continue;
@@ -3379,7 +3425,10 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
               x: ht.x,
               y: ht.y,
               label: (b.getAttribute('aria-label') || '').slice(0, 80),
-              text: (b.innerText || b.textContent || '').slice(0, 80)
+              text: (b.innerText || b.textContent || '').slice(0, 80),
+              scrolled: !!(s1 && s1.scrolled),
+              scrollReason: (s1 && s1.scrollReason) ? String(s1.scrollReason) : '',
+              nudged: !!nudge
             };
           }
         }
@@ -3402,7 +3451,18 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
       // Clique real (mouse) para evitar falso "click()" sem efeito.
       try { await page.mouse.click(r.x, r.y, { delay: 28 }).catch(()=>{}); } catch {}
       await sleep(650);
-      return { ok: true, attempt, clicked: r.clicked, meta: { text: r.text || '', label: r.label || '' } };
+      return {
+        ok: true,
+        attempt,
+        clicked: r.clicked,
+        meta: {
+          text: r.text || '',
+          label: r.label || '',
+          scrolled: !!r.scrolled,
+          scrollReason: r.scrollReason || '',
+          nudged: !!r.nudged
+        }
+      };
     }
     lastErr = (r && r.error) ? String(r.error) : 'no_click';
     if (r && r.found) {

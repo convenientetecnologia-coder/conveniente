@@ -1827,7 +1827,10 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
             clicked: a && a.clicked ? String(a.clicked) : null,
             error: a && a.error ? String(a.error).slice(0, 160) : null,
             waitedMs: a && typeof a.waitedMs === 'number' ? a.waitedMs : null,
-            attempts: a && typeof a.attempts === 'number' ? a.attempts : null
+            attempts: a && typeof a.attempts === 'number' ? a.attempts : null,
+            scrolled: !!(a && a.meta && a.meta.scrolled),
+            scrollReason: (a && a.meta && a.meta.scrollReason) ? String(a.meta.scrollReason).slice(0, 80) : '',
+            nudged: !!(a && a.meta && a.meta.nudged)
           });
         } catch {}
 
