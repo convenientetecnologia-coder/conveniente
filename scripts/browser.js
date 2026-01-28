@@ -735,6 +735,64 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
   }
 }
 
+/**
+ * Militar: em modo humano, manter APENAS 1 aba.
+ * Não depende do pruneExtraWindows (que evita mexer em humano por segurança).
+ *
+ * - Escolhe uma aba para manter (prioridade: facebook.com, depois messenger.com, depois pages[0])
+ * - Fecha todas as outras (inclui about:blank)
+ * - Atualiza robeMeta[nome].numPages quando possível
+ */
+async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = null } = {}) {
+  if (!browser) return { ok: false, error: 'no_browser' };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  try {
+    const pages = await browser.pages().catch(()=>[]);
+    if (!Array.isArray(pages) || pages.length <= 1) {
+      try {
+        if (robeMeta && nome) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].numPages = Array.isArray(pages) ? pages.length : 0;
+        }
+      } catch {}
+      return { ok: true, kept: 1, closed: 0, reason: 'already_one' };
+    }
+    const safeUrl = (p) => { try { return (p && typeof p.url === 'function') ? String(p.url() || '') : ''; } catch { return ''; } };
+
+    let keep = null;
+    for (const p of pages) {
+      const u = safeUrl(p);
+      if (!u || u === 'about:blank') continue;
+      if (/facebook\.com/i.test(u)) { keep = p; break; }
+    }
+    if (!keep) {
+      for (const p of pages) {
+        const u = safeUrl(p);
+        if (!u || u === 'about:blank') continue;
+        if (/messenger\.com/i.test(u)) { keep = p; break; }
+      }
+    }
+    if (!keep) keep = pages[0];
+
+    let closed = 0;
+    for (const p of pages) {
+      if (p === keep) continue;
+      try { await p.close({ runBeforeUnload: false }).catch(()=>{}); closed++; } catch {}
+      await sleep(60);
+    }
+    try {
+      const pages2 = await browser.pages().catch(()=>[]);
+      if (robeMeta && nome) {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].numPages = Array.isArray(pages2) ? pages2.length : 0;
+      }
+    } catch {}
+    return { ok: true, kept: 1, closed };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 // END -- PRUNING PATCH
 
 // ===== Hard One-Tab Guard (evento alvo criado/destruído) =====
@@ -1528,15 +1586,73 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       // Digitar 8 8 2 5 8 4 com calma
       const digits = String(pinValue || '').trim();
       if (!digits || digits.length < 6) return { ok: false, error: 'pin_value_invalid' };
+      // Preencher também por JS (React-friendly) + eventos (alguns modais ignoram só teclado).
+      try {
+        await page.evaluate((el, val) => {
+          try {
+            const v = String(val || '');
+            try { el.focus(); } catch {}
+            const proto = el && el.constructor ? el.constructor.prototype : null;
+            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+            if (desc && typeof desc.set === 'function') desc.set.call(el, v);
+            else el.value = v;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          } catch {}
+        }, h, digits).catch(()=>{});
+      } catch {}
       for (const ch of digits) {
         try { await page.keyboard.type(String(ch), { delay: 240 }).catch(()=>{}); } catch {}
       }
 
       await sleep(420);
       // Preferir Enter (menos risco de clicar fora e fazer o modal “piscar”)
-      try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
-      await sleep(1200);
-      return { ok: true, entered: true, confirmed: (Number(round) >= 2) };
+      // Submit: tentar CTA primário do dialog; se não encontrar, usa Enter como fallback.
+      let clickedSubmit = false;
+      try {
+        clickedSubmit = await page.evaluate(() => {
+          function norm(s){
+            try { return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+            catch { return String(s||'').toLowerCase(); }
+          }
+          const dlg = document.querySelector('div[role="dialog"]') || document;
+          const btns = Array.from(dlg.querySelectorAll('button,[role="button"],a[role="button"],input[type="submit"]')).slice(0, 240);
+          const words = ['confirmar','confirm','continuar','continue','avancar','avançar','next','ok','done','concluir','finalizar','salvar','save'];
+          for (const b of btns) {
+            const disabled = (b.getAttribute('aria-disabled') === 'true') || (b.getAttribute('disabled') != null) || (String(b.getAttribute('tabindex')||'') === '-1');
+            if (disabled) continue;
+            const t = norm(b.innerText || b.value || b.textContent || '');
+            const al = norm(b.getAttribute('aria-label') || '');
+            if (!t && !al) continue;
+            if (words.some(w => t.includes(w) || al.includes(w))) { try { b.click(); return true; } catch {} }
+          }
+          return false;
+        }).catch(()=>false);
+      } catch {}
+      if (!clickedSubmit) {
+        try { await page.keyboard.press('Enter').catch(()=>{}); } catch {}
+      }
+
+      // Espera determinística: modal desaparecer / input sumir (até 12s)
+      const cleared = await page.waitForFunction(() => {
+        try {
+          const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+          const txt = norm(document.body ? (document.body.innerText || '') : '');
+          const hasPinInput =
+            !!document.querySelector('input[aria-label="PIN"][maxlength="6"]') ||
+            !!document.querySelector('input#mw-numeric-code-input-prevent-composer-focus-steal') ||
+            Array.from(document.querySelectorAll('input[type="text"][maxlength="6"],input[type="tel"][maxlength="6"]'))
+              .some(el => norm(el.getAttribute('aria-label')||'') === 'pin');
+          const pinText =
+            txt.includes('insira seu pin') ||
+            txt.includes('inserir seu pin') ||
+            (txt.includes('restaurar') && txt.includes('historico') && txt.includes('pin'));
+          return !(hasPinInput && pinText);
+        } catch { return false; }
+      }, { timeout: 12_000 }).then(()=>true).catch(()=>false);
+
+      await sleep(800);
+      return { ok: true, entered: true, submitClicked: !!clickedSubmit, cleared, confirmed: (Number(round) >= 2) };
     } catch (e) {
       return { ok: false, error: (e && e.message) || 'pin_enter_exception' };
     }
@@ -1567,10 +1683,10 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           pinLog({ event: 'pin_create_clicked', attempt });
           const t0 = Date.now();
           while (Date.now() - t0 < 12_000) {
-            const detAfterCreate = await detectMessengerPinModal(page);
+        const detAfterCreate = await detectMessengerPinModal(page);
             if (detAfterCreate.present && detAfterCreate.kind === 'pin_input' && detAfterCreate.hasPinInput) {
-              det.kind = 'pin_input';
-              det.hasPinInput = true;
+          det.kind = 'pin_input';
+          det.hasPinInput = true;
               try { pinLog({ event: 'pin_input_visible_after_create', attempt, waitMs: Date.now() - t0 }); } catch {}
               break;
             }
@@ -1592,7 +1708,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
         pinLog({ event: 'pin_enter_attempt', attempt, pin: DEFAULT_PIN });
         const enterResult = await tryEnterPin(DEFAULT_PIN, 1);
         if (enterResult.ok) {
-          pinLog({ event: 'pin_entered', attempt, pin: DEFAULT_PIN, confirmed: !!enterResult.confirmed });
+          pinLog({ event: 'pin_entered', attempt, pin: DEFAULT_PIN, confirmed: !!enterResult.confirmed, submitClicked: !!enterResult.submitClicked, clearedWaitOk: !!enterResult.cleared });
           await sleep(1500); // Aguarda processamento
           // Verifica se o modal sumiu após digitar o PIN
           const detAfter = await detectMessengerPinModal(page);
@@ -2089,7 +2205,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     // Nonce + “Continuar como...”
     await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce]' });
     const clicked = await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar]' });
-    if (!clicked) {
+      if (!clicked) {
       await resolveNonceIfPresent(p2, { logPrefix: '[CONFIG][Messenger][nonce-2]' });
       await clickContinuarComo(p2, { logPrefix: '[CONFIG][Messenger][continuar-2]' });
     }
@@ -2097,7 +2213,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     // Curador: modal do PIN (determinístico, sem GPT — GPT tende a clicar/fechar e causar loop)
     try {
       const pin1 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin]', maxTries: 4 });
-      if (!pin1.ok) {
+        if (!pin1.ok) {
         // Uma espera extra e re-tenta 1 vez (sem cliques adicionais)
         await sleep(2500);
         const pin2 = await tryDismissMessengerPinModal(p2, { logPrefix: '[CONFIG][Messenger][pin-retry]', maxTries: 2 });
@@ -2117,11 +2233,11 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
               // Se resolveu via UI unblock, ok; se não, o erro acima já aborta.
             }
           }
+          }
         }
+      } catch (e) {
+        throw e;
       }
-    } catch (e) {
-      throw e;
-    }
 
     const ui2 = await ensureFbUiUnblocked(p2, nome, { reasonBase: 'configure_msg', allowGpt: true, maxRounds: 3 }).catch(()=>null);
     if (dbg) logger.debug('[CONFIG] msg ui', { nome, ui: ui2 || null });
@@ -2934,6 +3050,30 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('voce nao pode usa-la') ||
         bodyTxt.includes('confira aqui novamente para ver o resultado');
 
+      // 5b) Fluxo "Conta restringida / pode ter sido invadida" (hacked cleanup)
+      // Exemplos reais:
+      // - "analise seus dados de login para desbloquear sua conta"
+      // - "proteja seus detalhes de login"
+      // - "agora crie uma nova senha"
+      // - "voce desbloqueou a sua conta" / "voce esta de volta ao facebook"
+      const hasHackedReview =
+        bodyTxt.includes('analise seus dados de login') ||
+        bodyTxt.includes('analisar seus dados de login') ||
+        bodyTxt.includes('proteja seus detalhes de login') ||
+        bodyTxt.includes('conta pode ter sido invadida') ||
+        bodyTxt.includes('pode ter sido invadida') ||
+        bodyTxt.includes('etapas para voltar ao facebook') ||
+        bodyTxt.includes('voltar ao facebook') && bodyTxt.includes('etapas') ||
+        bodyTxt.includes('desbloquear sua conta');
+      const hasPasswordResetRequired =
+        bodyTxt.includes('agora crie uma nova senha') ||
+        bodyTxt.includes('inserir nova senha') ||
+        bodyTxt.includes('salvar alteracoes') && bodyTxt.includes('nova senha');
+      const hasBackToFacebookUnlocked =
+        bodyTxt.includes('voce desbloqueou a sua conta') ||
+        bodyTxt.includes('voce esta de volta ao facebook') ||
+        bodyTxt.includes('voltar para o facebook') && bodyTxt.includes('voce');
+
       // 6) Confirmação de identidade em andamento (pós upload / aguardando análise)
       // IMPORTANT (ultra enterprise):
       // - NÃO confundir "Recurso em análise" (appeal_submitted) com "Identidade em análise".
@@ -2971,7 +3111,7 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('identidade') ||
         bodyTxt.includes('video selfie');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, href0, path0, title0 };
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -2987,6 +3127,9 @@ async function detectLoginRequired(page) {
     const bodyHasIdentityHints = !!(v && v.bodyHasIdentityHints);
     const hasTwoFactorText = !!(v && v.hasTwoFactorText);
     const hasAppealSubmitted = !!(v && v.hasAppealSubmitted);
+    const hasHackedReview = !!(v && v.hasHackedReview);
+    const hasPasswordResetRequired = !!(v && v.hasPasswordResetRequired);
+    const hasBackToFacebookUnlocked = !!(v && v.hasBackToFacebookUnlocked);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
@@ -3016,7 +3159,29 @@ async function detectLoginRequired(page) {
         domain,
         url: (v && v.href0) ? String(v.href0) : href,
         title,
-        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
+        evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, path }
+      };
+    }
+
+    // Fluxo hacked/password reset: tratar como estado próprio (auto-remediável).
+    if (hasPasswordResetRequired) {
+      return {
+        loginRequired: true,
+        reason: 'password_reset_required',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasPasswordResetRequired, hasHackedReview, hasBackToFacebookUnlocked, path }
+      };
+    }
+    if (hasHackedReview || hasBackToFacebookUnlocked) {
+      return {
+        loginRequired: true,
+        reason: 'hacked_review',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasHackedReview, hasBackToFacebookUnlocked, path }
       };
     }
 
@@ -3193,8 +3358,8 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
         const looksIdentity =
           hasSelfieFlowSignal &&
           (bodyTxt.includes('confirme sua identidade') ||
-            bodyTxt.includes('confirm your identity') ||
-            bodyTxt.includes('identidade') ||
+          bodyTxt.includes('confirm your identity') ||
+          bodyTxt.includes('identidade') ||
             bodyTxt.includes('confirmacao de identidade') ||
             bodyTxt.includes('confirmacao') ||
             bodyTxt.includes('confirm'));
@@ -3214,11 +3379,11 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
 
         const priority = hasUploadStage
           ? [
-              { key: 'carregar', words: ['carregar', 'upload'] },
+          { key: 'carregar', words: ['carregar', 'upload'] },
               { key: 'enviar', words: ['enviar', 'submit'] },
               { key: 'confirmar', words: ['confirmar', 'confirm'] },
               { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
-              { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+          { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
               { key: 'continuar', words: ['continuar', 'continue'] },
             ]
           : [
@@ -3230,7 +3395,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
               { key: 'confirmar', words: ['confirmar', 'confirm'] },
               { key: 'concluir', words: ['concluir', 'finalizar', 'finish', 'done'] },
               { key: 'enviar', words: ['enviar', 'submit'] },
-            ];
+        ];
         const isDisabled = (el) => {
           try {
             return (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
@@ -3415,6 +3580,130 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
     if (!firstSeenAt && elapsed > 8_000 && attempt >= minTries) break;
   }
   return { ok: false, error: `no_step_clicked:${lastErr}`.slice(0, 120), waitedMs: Date.now() - start, attempts: attempt, lastSeen };
+}
+
+/**
+ * Assistente safe para fluxo "conta restringida / pode ter sido invadida" (hacked cleanup + reset de senha).
+ * Objetivo: clicar CTAs (Começar/Avançar/Continuar/Voltar) e, quando aparecer, preencher "nova senha" e clicar "Salvar alterações".
+ */
+async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tries = 2 } = {}) {
+  const start = Date.now();
+  const budget = Math.max(2_000, Number(maxWaitMs || 0) || 0);
+  const minTries = Math.max(1, Number(tries || 0) || 0);
+  const pass = String(newPassword || '').trim();
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    if (!isFbOrMsg) return { ok: false, error: 'not_fb_or_msg' };
+  } catch {}
+
+  const attemptOnce = async () => {
+    try {
+      return await page.evaluate((pass) => {
+        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+        const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+        const looksHacked =
+          bodyTxt.includes('analise seus dados de login') ||
+          bodyTxt.includes('analisar seus dados de login') ||
+          bodyTxt.includes('proteja seus detalhes de login') ||
+          bodyTxt.includes('pode ter sido invadida') ||
+          bodyTxt.includes('conta pode ter sido invadida') ||
+          bodyTxt.includes('agora crie uma nova senha') ||
+          bodyTxt.includes('inserir nova senha') ||
+          bodyTxt.includes('voce desbloqueou a sua conta') ||
+          bodyTxt.includes('voce esta de volta ao facebook') ||
+          bodyTxt.includes('voltar para o facebook');
+        if (!looksHacked) return { ok: false, error: 'not_hacked_context' };
+
+        // 1) Se houver inputs de senha, preencher primeiro (sem clicar em outros elementos).
+        let filled = 0;
+        try {
+          const inputs = Array.from(document.querySelectorAll('input[type="password"]')).filter(el => {
+            try {
+              const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+              if (!r || r.width < 8 || r.height < 8) return false;
+              const cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+              if (!cs || cs.display === 'none' || cs.visibility === 'hidden') return false;
+              return true;
+            } catch { return false; }
+          });
+          if (pass && inputs.length) {
+            for (const el of inputs.slice(0, 2)) {
+              try {
+                el.focus();
+                el.value = '';
+                el.value = pass;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                filled++;
+              } catch {}
+            }
+          }
+        } catch {}
+
+        const scope = document.querySelector('div[role="dialog"]') || document;
+        const all = Array.from(scope.querySelectorAll('button,div[role="button"],a[role="button"],a')).slice(0, 900);
+        const isDisabled = (el) => {
+          try {
+            return (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
+          } catch { return true; }
+        };
+        const isVis = (el) => {
+          try {
+            const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            if (!r || r.width < 8 || r.height < 8) return false;
+            const cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (!cs || cs.display === 'none' || cs.visibility === 'hidden') return false;
+            if (cs.pointerEvents === 'none') return false;
+            return true;
+          } catch { return false; }
+        };
+        const txt = (el) => norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+
+        // Prioridade militar: salvar senha > voltar > avançar/continuar
+        const priority = [
+          { key: 'salvar_alteracoes', words: ['salvar alteracoes', 'save changes', 'salvar'] },
+          { key: 'voltar_para_fb', words: ['voltar para o facebook', 'back to facebook'] },
+          { key: 'comecar', words: ['comecar', 'começar', 'start'] },
+          { key: 'avancar', words: ['avancar', 'avançar', 'next'] },
+          { key: 'continuar', words: ['continuar', 'continue'] },
+        ];
+
+        for (const p of priority) {
+          for (const el of all) {
+            if (!el) continue;
+            const t = txt(el);
+            if (!t) continue;
+            if (!p.words.some(w => t.includes(w))) continue;
+            if (isDisabled(el) || !isVis(el)) continue;
+            try { el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' }); } catch {}
+            try { el.click(); } catch { continue; }
+            return { ok: true, filled, clicked: p.key, text: t.slice(0, 60) };
+          }
+        }
+        // Se não clicou nada, mas preencheu senha, consideramos progresso e aguardamos.
+        if (filled > 0) return { ok: true, filled, clicked: 'filled_password_only' };
+        return { ok: false, error: 'no_hacked_step_clicked' };
+      }, pass);
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  };
+
+  let attempt = 0;
+  let lastErr = 'none';
+  while ((Date.now() - start) < budget) {
+    attempt++;
+    const r = await attemptOnce();
+    if (r && r.ok) return { ok: true, ...r, waitedMs: Date.now() - start, attempts: attempt };
+    lastErr = r && r.error ? String(r.error) : 'error';
+    if (attempt >= minTries) {
+      // Se não clicou nada em alguns segundos, não martela.
+      if ((Date.now() - start) > 8_000) break;
+    }
+    await sleep(650);
+  }
+  return { ok: false, error: `no_hacked_step_clicked:${lastErr}`.slice(0, 120), waitedMs: Date.now() - start, attempts: attempt };
 }
 
 // ========= LOGIN (email/senha) =========
@@ -3673,6 +3962,7 @@ module.exports = {
   injectCookies,
   ensureMinimizedWindowForPage,
   pruneExtraWindows, // expose for worker (força prune)
+  pruneHumanToOneTab, // militar: modo humano => 1 aba
   getPageCount: async function (browser) {
     if (!browser) return 0;
     try { return await browser.getPageCount(); } catch { return 0; }
@@ -3708,6 +3998,7 @@ module.exports = {
   // ==== NOVOS:
   detectLoginRequired,
   identityAssistStep,
+  hackedAssistStep,
   tryLoginEmailPass,
   collectFreshCookies,
   detectAccountSuspended,

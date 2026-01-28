@@ -360,6 +360,70 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
   }
 }
 
+async function updatePasswordOnCT({ profileName, stockAccountId = null, password, source = 'password_reset' } = {}) {
+  const cfg = readCtConfig();
+  let base = String(cfg && cfg.ctBaseUrl || '').trim();
+  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
+  if (!base) {
+    try {
+      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
+      base = String(notifierBaseFromEndpoints() || '').trim();
+    } catch {}
+  }
+  base = base.replace(/\/+$/, '');
+  const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
+  const hostId = readHostIdSync();
+  const p = String(profileName || '').trim();
+  const pass = String(password || '').trim();
+  let sid = Number(stockAccountId || 0) || 0;
+  if (!base || !secret || !hostId || !p || !pass) return { ok: false, error: 'ct_config_missing' };
+
+  // Fallback: tenta capturar stockAccountId do manifest/cache
+  if (!sid) {
+    try {
+      const man = await manifestStore.read(p).catch(()=>null);
+      if (man && (man.stockAccountId || man.stock_account_id)) sid = Number(man.stockAccountId || man.stock_account_id) || 0;
+    } catch {}
+  }
+  if (!sid) {
+    try {
+      const cached = robeMeta[p] && robeMeta[p].overlayCredCache;
+      if (cached && cached.stockAccountId) sid = Number(cached.stockAccountId) || 0;
+    } catch {}
+  }
+
+  try {
+    const Aborter = global.AbortController || require('node-abort-controller');
+    const ac = new Aborter();
+    const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
+    const resp = await fetch(`${base}/api/stock/assigned/update_password_secret`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
+      body: JSON.stringify({
+        hostId,
+        profileName: p,
+        stockAccountId: sid || null,
+        password: pass,
+        by: 'auto',
+        source: String(source || 'password_reset').slice(0, 64)
+      }),
+      signal: ac.signal
+    });
+    clearTimeout(t);
+    const txt = await resp.text().catch(()=> '');
+    let j = null;
+    try { j = JSON.parse(txt); } catch { j = null; }
+    if (!j || j.ok !== true) {
+      const bodySnippet = String(txt || '').slice(0, 220);
+      const err = (j && j.error) ? String(j.error) : `http_${resp.status}`;
+      return { ok: false, error: err, details: { httpStatus: resp.status, base, bodySnippet, stockAccountId: sid || null } };
+    }
+    return { ok: true, stockAccountId: Number(j.stockAccountId || sid || 0) || null };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 async function archiveBanWithEvidenceToCT({ profileName, stockAccountId = null, reason = 'banned_detected', evidenceB64 = '', evidenceUrl = '' } = {}) {
   const cfg = readCtConfig();
   let base = String(cfg && cfg.ctBaseUrl || '').trim();
@@ -692,6 +756,37 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
     robeMeta[nome].loginRemediateFailedReason = String(reason || '').slice(0, 220);
     robeMeta[nome].whyNotOpen = 'login_remediate_failed';
   } catch {}
+
+  // Política do usuário (RM1): se marcou loginRemediateFailed, deve invocar humano automaticamente.
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {}; d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      return d;
+    });
+  } catch {}
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.trabalhando = false;
+      ctrl.humanControl = true;
+      try { await stopVirtus(nome); } catch {}
+      // Militar: modo humano => 1 aba
+      try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
+      try { await ensureHumanOverlay(nome, ctrl, { reason: `login_remediate_failed:${String(reason||'').slice(0,160)}` }); } catch {}
+      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+    }
+  } catch {}
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'human_mode_enter',
+      nome: String(nome || ''),
+      source: 'set_login_remediate_failed_flag',
+      reason: String(reason || 'login_remediate_failed').slice(0, 200)
+    });
+  } catch {}
+  try { await snapshotStatusAndWrite(); } catch {}
 }
 
 // ===== Human Overlay (HUD) =====
@@ -760,6 +855,8 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       ctrl.trabalhando = false;
       ctrl.humanControl = true;
       try { await stopVirtus(nome); } catch {}
+      // Militar: modo humano => 1 aba (economia + evita deixar 2 abas abertas em captcha)
+      try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
       try { await ensureHumanOverlay(nome, ctrl, { reason: 'captcha_checkpoint' }); } catch {}
       try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
     }
@@ -1598,6 +1695,17 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await setIdentitySubmittedFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
             return { ok: true, state: 'identity_submitted', reason: rr2 };
           }
+          if (rr2.includes('password_reset_required') || rr2.includes('hacked_review')) {
+            try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
+            setTimeout(() => {
+              try {
+                const c = controllers.get(nome);
+                const p0 = (c && c.mainPage) ? c.mainPage : pg;
+                if (c && p0) runHackedReviewFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
+              } catch {}
+            }, 0);
+            return { ok: true, state: rr2.includes('password_reset_required') ? 'password_reset_required' : 'hacked_review', reason: rr2 };
+          }
           if (rr2.includes('identity')) {
             try { await setIdentityRequiredFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
             // iniciar fluxo de identidade (gate+cooldown já protegem)
@@ -1651,6 +1759,18 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     if (rr.includes('identity_submitted')) {
       try { await setIdentitySubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
       return { ok: true, state: 'identity_submitted', reason: rr };
+    }
+    if (rr.includes('password_reset_required') || rr.includes('hacked_review')) {
+      // Fluxo hacked/password reset é auto-remediável e deve rodar imediatamente.
+      try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
+      setTimeout(() => {
+        try {
+          const c = controllers.get(nome);
+          const p = (c && c.mainPage) ? c.mainPage : pg;
+          if (c && p) runHackedReviewFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
+        } catch {}
+      }, 0);
+      return { ok: true, state: rr.includes('password_reset_required') ? 'password_reset_required' : 'hacked_review', reason: rr };
     }
     if (rr.includes('identity')) {
       try { await setIdentityRequiredFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
@@ -2317,6 +2437,187 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
+    return { ok: false, flowId: id, error: msg };
+  }
+}
+
+// ===== Hacked / Password Reset (conta restringida) — executor 24/7 =====
+const HACKED_FLOW_CFG = {
+  maxRunMs: 4 * 60 * 1000,
+  maxSteps: 10,
+  stepWaitMs: 45_000,
+  debounceMs: 20_000
+};
+
+function _genStrongPasswordEnterprise() {
+  try {
+    // Regras observadas (FB): maiúscula/minúscula/número + símbolo (ex.: @) costuma ser aceito.
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const lower = 'abcdefghijkmnopqrstuvwxyz';
+    const digits = '23456789';
+    const symbols = '@#%$&*!?';
+    const all = upper + lower + digits + symbols;
+    const pick = (s) => s[crypto.randomInt(0, s.length)];
+    const len = 20;
+    const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
+    while (chars.length < len) chars.push(pick(all));
+    // shuffle
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(0, i + 1);
+      const tmp = chars[i]; chars[i] = chars[j]; chars[j] = tmp;
+    }
+    return chars.join('');
+  } catch {
+    return `Aa2@${Date.now()}!`;
+  }
+}
+
+async function runHackedReviewFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
+  const now = Date.now();
+  const id = String(flowId || newFlowId('hacked'));
+  try {
+    if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
+    if (!pg) return { ok: false, error: 'no_page' };
+
+    robeMeta[nome] = robeMeta[nome] || {};
+    const last = Number(robeMeta[nome].hackedFlowLastAt || 0) || 0;
+    if (!force && last && (now - last) < HACKED_FLOW_CFG.debounceMs) {
+      return { ok: false, skipped: true, reason: 'debounced', sinceMs: now - last };
+    }
+    robeMeta[nome].hackedFlowLastAt = now;
+
+    // Gerar senha candidata (NÃO persiste ainda; só persiste após confirmar que o fluxo avançou/saiu do reset).
+    let pw = String(robeMeta[nome].hackedFlowCandidatePassword || '').trim();
+    if (!pw) {
+      pw = _genStrongPasswordEnterprise();
+      robeMeta[nome].hackedFlowCandidatePassword = pw;
+    }
+
+    let didAction = false;
+    let didSavePassword = false;
+    const t0 = Date.now();
+    try {
+      let url0 = '';
+      try { url0 = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'hacked_flow_begin',
+          flowId: id,
+          nome: String(nome||''),
+          source: String(source||'').slice(0, 80),
+          url: String(url0||'').slice(0, 220)
+        });
+      } catch {}
+
+      let stepIndex = 0;
+      while (true) {
+        const elapsed = Date.now() - t0;
+        if (elapsed >= HACKED_FLOW_CFG.maxRunMs) break;
+        if (stepIndex >= HACKED_FLOW_CFG.maxSteps) break;
+
+        const a = await browserHelper.hackedAssistStep(pg, { newPassword: pw, maxWaitMs: HACKED_FLOW_CFG.stepWaitMs, tries: 2 }).catch(()=>null);
+        stepIndex += 1;
+
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'hacked_flow_step',
+            flowId: id,
+            nome: String(nome||''),
+            source: String(source||'').slice(0, 80),
+            stepIndex,
+            ok: !!(a && a.ok),
+            clicked: a && a.clicked ? String(a.clicked) : null,
+            filled: a && typeof a.filled === 'number' ? a.filled : null,
+            error: a && a.error ? String(a.error).slice(0, 160) : null
+          });
+        } catch {}
+
+        if (a && a.ok) {
+          didAction = true;
+          if (String(a.clicked || '') === 'salvar_alteracoes') didSavePassword = true;
+          await sleep(1100);
+          continue;
+        }
+        break;
+      }
+
+      if (didAction) {
+        await reloadPageEnterprise(pg, { nome, tag: `hacked_flow_${String(source||'').slice(0, 28)}`, timeoutMs: 60_000 }).catch(()=>null);
+        await sleep(900);
+      }
+
+      const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
+      const rr2 = String((lr2 && lr2.reason) ? lr2.reason : '').toLowerCase();
+
+      // Se saiu do fluxo hacked/password reset, persistir senha e re-encaminhar.
+      if (!lr2 || lr2.loginRequired !== true || (!rr2.includes('hacked') && !rr2.includes('password_reset_required'))) {
+        if (didSavePassword) {
+          try {
+            await manifestStore.update(nome, (m) => {
+              m = m || {};
+              m.password = String(pw || '');
+              m.credentialsUpdatedAt = Date.now();
+              return m;
+            });
+            // cache para overlay e para evitar fetch do CT logo em seguida
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].overlayCredCache = robeMeta[nome].overlayCredCache || {};
+            robeMeta[nome].overlayCredCache.password = String(pw || '');
+            robeMeta[nome].overlayCredCache.ts = Date.now();
+          } catch {}
+
+          // Persistir no CT (stock) — requisito "salvar em tudo"
+          try {
+            const rct = await updatePasswordOnCT({ profileName: nome, password: pw, source: 'password_reset' }).catch(()=>null);
+            try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_password_persist_ct', flowId: id, nome: String(nome||''), ok: !!(rct && rct.ok), error: rct && rct.error ? String(rct.error).slice(0,160) : null, stockAccountId: rct && rct.stockAccountId ? rct.stockAccountId : null }); } catch {}
+          } catch {}
+        }
+
+        // Limpa marcador de candidato (não reaplica senha à toa).
+        try { delete robeMeta[nome].hackedFlowCandidatePassword; } catch {}
+
+        // Se virou login_form depois do reset, chama login_remediate (agora com senha atualizada).
+        if (lr2 && lr2.loginRequired === true && rr2.includes('login_form')) {
+          queueAutoLoginRemediate(nome, { reason: lr2.reason || 'login_form', source: lr2.domain || '', immediate: true });
+          try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_end', flowId: id, nome: String(nome||''), result: 'login_form_after_reset' }); } catch {}
+          return { ok: true, flowId: id, result: 'login_form_after_reset', didAction, didSavePassword };
+        }
+
+        // Clear: retoma automação.
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {}; d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+            return d;
+          });
+        } catch {}
+        setTimeout(() => { try { handlers.start_work({ nome, operator: `hacked_flow_resolved:${id}` }).catch(()=>{}); } catch {} }, 0);
+        try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_end', flowId: id, nome: String(nome||''), result: 'clear' }); } catch {}
+        return { ok: true, flowId: id, result: 'clear', didAction, didSavePassword };
+      }
+
+      // Ainda está em hacked/password reset: re-agenda mais uma tentativa (com debounce).
+      try {
+        provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_still_required', flowId: id, nome: String(nome||''), reason: rr2.slice(0,120) });
+      } catch {}
+      setTimeout(() => {
+        try {
+          const c = controllers.get(nome);
+          const p0 = (c && c.mainPage) ? c.mainPage : pg;
+          if (c && p0) runHackedReviewFlow(nome, c, p0, { source: `retry:${String(source||'')}` }).catch(()=>{});
+        } catch {}
+      }, 25_000);
+      return { ok: true, flowId: id, result: 'still_required', didAction, didSavePassword, reason: rr2 };
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
+      return { ok: false, flowId: id, error: msg };
+    }
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
     return { ok: false, flowId: id, error: msg };
   }
 }
@@ -4295,19 +4596,94 @@ async function ensureManifestValid(nome) {
       Array.isArray(man.cookies) && man.cookies.length &&
       typeof man.userDataDir === 'string' && man.userDataDir;
   }
+  function missingEssentials(man) {
+    const miss = [];
+    try { if (!man || !(typeof man.nome === 'string' && man.nome)) miss.push('nome'); } catch { miss.push('nome'); }
+    try { if (!man || !(typeof man.cidade === 'string' && man.cidade)) miss.push('cidade'); } catch { miss.push('cidade'); }
+    try { if (!man || typeof man.uaPresetId === 'undefined') miss.push('uaPresetId'); } catch { miss.push('uaPresetId'); }
+    try { if (!man || !(typeof man.uaString === 'string' && man.uaString)) miss.push('uaString'); } catch { miss.push('uaString'); }
+    try { if (!man || !(typeof man.uaCh === 'object' && man.uaCh)) miss.push('uaCh'); } catch { miss.push('uaCh'); }
+    try { if (!man || !(typeof man.fp === 'object' && man.fp)) miss.push('fp'); } catch { miss.push('fp'); }
+    try { if (!man || !(Array.isArray(man.cookies) && man.cookies.length)) miss.push('cookies'); } catch { miss.push('cookies'); }
+    try { if (!man || !(typeof man.userDataDir === 'string' && man.userDataDir)) miss.push('userDataDir'); } catch { miss.push('userDataDir'); }
+    return miss;
+  }
+
+  // 0) Tenta ler manifest do disk (pode falhar se perfis.json estiver sem userDataDir).
   let manifest = await manifestStore.read(nome).catch(()=>null);
   if (manifest && hasEssentials(manifest)) return manifest;
+
+  // 1) Autocura: garantir que perfis.json tem userDataDir (sem isso, manifestStore não consegue mapear o manifest).
+  let perfil = null;
+  let perfisArr = [];
   try {
-    const perfisArr = loadPerfisJson();
-    const perfil = perfisArr.find(p => p && p.nome === nome);
-    if (perfil && hasEssentials(perfil)) {
-      const merged = Object.assign({}, perfil, manifest || {});
-      if (merged.userDataDir && !fs.existsSync(merged.userDataDir)) {
-        fs.mkdirSync(merged.userDataDir, { recursive: true });
-      }
-      await manifestStore.update(nome, () => merged);
-      return merged;
+    perfisArr = loadPerfisJson();
+    perfil = perfisArr.find(p => p && p.nome === nome) || null;
+  } catch {}
+
+  try {
+    if (perfil && (!perfil.userDataDir || typeof perfil.userDataDir !== 'string')) {
+      const derived = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
+      perfil.userDataDir = derived;
+      try { fs.mkdirSync(derived, { recursive: true }); } catch {}
+      try { savePerfisJson(perfisArr); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'manifest_autocure_set_userDataDir', nome: String(nome||''), userDataDir: String(derived).slice(0, 260) }); } catch {}
     }
+  } catch {}
+
+  // 2) Re-tenta ler manifest após garantir mapping
+  manifest = await manifestStore.read(nome).catch(()=>manifest);
+
+  // 3) Merge parcial (enterprise): mesmo que perfil/man sejam incompletos isoladamente, o MERGE pode ser completo.
+  let merged = Object.assign({}, (perfil || {}), (manifest || {}));
+
+  // 4) Preencher userDataDir por convenção (último fallback)
+  if (!merged.userDataDir || typeof merged.userDataDir !== 'string') {
+    try {
+      merged.userDataDir = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
+      try { fs.mkdirSync(merged.userDataDir, { recursive: true }); } catch {}
+    } catch {}
+  } else {
+    try { if (merged.userDataDir && !fs.existsSync(merged.userDataDir)) fs.mkdirSync(merged.userDataDir, { recursive: true }); } catch {}
+  }
+
+  // 5) Preencher UA/FP por preset (se faltar) — sem alterar presetId se já existe.
+  try {
+    const uap = (merged.uaPresetId !== undefined && merged.uaPresetId !== null) ? String(merged.uaPresetId) : '';
+    if (uap) {
+      let preset = null;
+      try {
+        const presets = JSON.parse(fs.readFileSync(presetsPath, 'utf8'));
+        preset = Array.isArray(presets) ? presets.find(p => p && String(p.id) === uap) : null;
+      } catch {}
+      if (preset) {
+        if (!merged.uaString && preset.uaString) merged.uaString = String(preset.uaString);
+        if ((!merged.uaCh || typeof merged.uaCh !== 'object') && preset.uaCh) merged.uaCh = preset.uaCh;
+        if (!merged.fp || typeof merged.fp !== 'object') merged.fp = {};
+        merged.fp = merged.fp || {};
+        if ((!merged.fp.viewport || typeof merged.fp.viewport !== 'object') && (preset.viewport || (preset.fp && preset.fp.viewport))) {
+          merged.fp.viewport = preset.viewport || (preset.fp && preset.fp.viewport);
+        }
+        if ((merged.fp.dpr === undefined || merged.fp.dpr === null) && (preset.dpr || (preset.fp && preset.fp.dpr))) {
+          merged.fp.dpr = preset.dpr || (preset.fp && preset.fp.dpr);
+        }
+        if ((merged.fp.hardwareConcurrency === undefined || merged.fp.hardwareConcurrency === null) && (preset.hardwareConcurrency || (preset.fp && preset.fp.hardwareConcurrency))) {
+          merged.fp.hardwareConcurrency = preset.hardwareConcurrency || (preset.fp && preset.fp.hardwareConcurrency);
+        }
+      }
+    }
+  } catch {}
+
+  // 6) Se o merge ficou completo, persistir no manifest.json (via manifestStore) e devolver.
+  if (hasEssentials(merged)) {
+    try { await manifestStore.update(nome, () => merged); } catch {}
+    return merged;
+  }
+
+  // 7) Se ainda não ficou completo, logar causa (prova) e retornar null.
+  try {
+    const miss = missingEssentials(merged).slice(0, 12);
+    provisionAudit.append({ ts: Date.now(), event: 'manifest_autocure_failed', nome: String(nome||''), missing: miss.join(',') });
   } catch {}
   return null;
 }
@@ -4502,12 +4878,20 @@ async function activateOnce(nome, source = '', operator = '') {
       try { await snapshotStatusAndWrite(); } catch {}
     }
 
-    // Hardening: durante stock_provision (maintenance lock), bloquear novas aberturas,
-    // EXCETO se o operador for o dono do lock (stock_provision:<batchId>).
+    // Hardening: durante STOCK_PROVISION/admin_configure/close_all (lock global), bloquear novas aberturas,
+    // EXCETO se o operador for o dono do lock. Para login_remediate NÃO bloquear (evita engessamento global).
     try {
       const op = String(operator || '').trim();
-      const lk = provisionLock.shouldBlock(op);
-      if (lk && lk.block) {
+      const cur = provisionLock.get ? provisionLock.get() : null;
+      const active = !!(cur && cur.active);
+      const lock = active ? (cur.lock || null) : null;
+      const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
+      const kind = String(meta.kind || meta.op || '').toLowerCase();
+      const isGlobalPauseKind =
+        kind.includes('stock_provision') ||
+        kind.includes('admin_configure') ||
+        kind.includes('close_all');
+      if (active && isGlobalPauseKind && !provisionLock.ownerMatchesOperator(lock, op)) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activationHeldUntil = Date.now() + 5000;
         await reportAction(nome, 'mil_action', 'activation_hold_by_provision_lock');
@@ -5896,14 +6280,27 @@ function resolveChromeUserDataRoot() {
 }
 
 function automationAllowed(ctrl, { operator } = {}) {
-  // Hardening: durante stock_provision, bloquear automação (Robe/Virtus),
-  // mas permitir o fluxo do PRÓPRIO provisionamento quando o operador é o dono do lock.
+  // Hardening (ultra enterprise):
+  // O lock global é necessário para STOCK_PROVISION / admin_configure / close_all (pausa geral),
+  // mas NÃO pode travar o sistema inteiro durante login_remediate (que já tem lock por perfil).
+  // Caso contrário, um login_remediate longo deixa Virtus/Robe de todas as contas “engessados”.
   try {
     const op = String(operator || '').trim();
-    const lk = provisionLock.shouldBlock(op);
-    if (lk && lk.block) return false;
+    const cur = provisionLock.get ? provisionLock.get() : null;
+    const active = !!(cur && cur.active);
+    const lock = active ? (cur.lock || null) : null;
+    const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
+    const kind = String(meta.kind || meta.op || '').toLowerCase();
+    const isGlobalPauseKind =
+      kind.includes('stock_provision') ||
+      kind.includes('admin_configure') ||
+      kind.includes('close_all');
+    if (active && isGlobalPauseKind) {
+      // Só o dono do lock passa.
+      if (!provisionLock.ownerMatchesOperator(lock, op)) return false;
+    }
   } catch {
-    try { if (provisionLock.isActive()) return false; } catch {}
+    // fallback ultra-conservador: se não conseguimos ler o lock, não bloqueie (evita falso positivo de engessamento).
   }
   return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && !ctrl.trabalhando);
 }
@@ -6873,17 +7270,28 @@ const handlers = {
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        // Regra do usuário: NUNCA entrar em humano invocado automaticamente.
-        // Apenas trava automação (Virtus OFF) e registra evidência.
+        // Regra do usuário (ROBE MÃE 1): Login/Cookies falhou => humano invocado SEMPRE.
+        // Militar: entra em modo humano (hold) + Virtus OFF + 1 aba apenas.
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
             return d;
           });
         } catch {}
 
-        try { const ctrl = controllers.get(nome); if (ctrl) { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } } catch {}
+        try {
+          const ctrl = controllers.get(nome);
+          if (ctrl) {
+            ctrl.trabalhando = false;
+            ctrl.humanControl = true;
+            try { await stopVirtus(nome); } catch {}
+            // Militar: garante 1 aba em humano (economia + evita confusão).
+            try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
+            try { await ensureHumanOverlay(nome, ctrl, { reason: `login_remediate_failed:${why}` }); } catch {}
+            try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+          }
+        } catch {}
 
         // UX/telemetria: expõe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnóstico)
         try {
@@ -6891,6 +7299,15 @@ const handlers = {
           robeMeta[nome].whyNotOpen = why;
         } catch {}
 
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'human_mode_enter',
+            nome: String(nome || ''),
+            source: 'login_remediate_failfast',
+            reason: String(why || '').slice(0, 200)
+          });
+        } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
       };
 
@@ -6985,7 +7402,44 @@ const handlers = {
         const msg = (e && e.message) ? String(e.message) : String(e);
         pushStep({ step: 'quiesce_failed', error: msg });
         try { provisionLock.release({ owner: op }); } catch {}
-        // Fail fast: não injeta cookies se não conseguiu pausar/esperar busy.
+        // Militar: se falhou por busy/pause timeout (terceiros trabalhando), NÃO “culpar” a conta.
+        // Aplica backoff curto e re-tenta automaticamente; só vira humano se for erro estrutural.
+        const m0 = String(msg || '').toLowerCase();
+        const isBusyTimeout = m0.includes('busy_timeout') || m0.includes('pause_timeout');
+        if (isBusyTimeout) {
+          try {
+            const nowB = Date.now();
+            const snap = _quiesceSnapshot({ excludeNome: nome });
+            // Backoff 2–5 min (jitter) para dar tempo de sendLocks/robe terminarem.
+            const backoffMs = (2 * 60 * 1000) + Math.floor(Math.random() * (3 * 60 * 1000 + 1));
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].activationHeldUntil = nowB + backoffMs;
+            robeMeta[nome].openBackoffMs = backoffMs;
+            robeMeta[nome].whyNotOpen = 'maintenance_provision_busy';
+            try {
+              provisionAudit.append({
+                ts: nowB,
+                event: 'login_remediate_quiesce_busy_backoff_applied',
+                nome: String(nome || ''),
+                operator: op,
+                error: String(msg || '').slice(0, 180),
+                backoffMs,
+                busyNames: (snap && snap.busyNames) ? snap.busyNames.slice(0, 40) : [],
+                pauseableVirtusNames: (snap && snap.pauseableVirtusNames) ? snap.pauseableVirtusNames.slice(0, 40) : []
+              });
+            } catch {}
+            try { await snapshotStatusAndWrite(); } catch {}
+            // Retry automático (não bloqueante)
+            setTimeout(() => {
+              try {
+                // Não forçar overrideHumanHold aqui: se estava em humano, o operador “Retomar” já dispara override.
+                handlers.login_remediate({ nome, operator: `auto_quiesce_retry:${String(nome||'')}:${Date.now()}` }).catch(()=>{});
+              } catch {}
+            }, backoffMs + 1200);
+          } catch {}
+          return { ok: false, error: `quiesce_busy_backoff:${msg}`, steps, pausedVirtus, retry: true };
+        }
+        // Fail fast real: não injeta cookies se não conseguiu quiescer por erro estrutural.
         await failFastToHuman(msg);
         return { ok: false, error: `quiesce_failed:${msg}`, steps, pausedVirtus };
       }
@@ -7674,6 +8128,8 @@ const handlers = {
       }
 
       ctrl.humanControl = true;
+      // Militar: modo humano => 1 aba (economia)
+      try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
 
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
@@ -9043,12 +9499,32 @@ async function autoLoginRemediateTick() {
     const flags = await readAccountFlags(nome).catch(()=>({}));
     const lrFlag = !!(flags && flags.loginRequired === true);
     const lrFailed = !!(flags && flags.loginRemediateFailed === true);
+    const lrReason = String((flags && flags.loginReason) ? flags.loginReason : '').toLowerCase();
     const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
     const queued = !!(st && st.queued);
     const nextAt = st ? (Number(st.nextAt || 0) || 0) : 0;
 
     // Só tenta se o perfil está marcado como loginRequired (persistido) e está enfileirado (evento detectado).
     if (!lrFlag || !queued) continue;
+
+    // Militar: hacked/password_reset NÃO é fluxo de login_remediate.
+    // Em vez de gastar tentativa de cookies+senha (vai falhar), roda o hacked flow e sai.
+    if (lrReason.includes('hacked_review') || lrReason.includes('password_reset_required')) {
+      try {
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].autoLoginRemediate = robeMeta[nome].autoLoginRemediate || {};
+        robeMeta[nome].autoLoginRemediate.queued = false;
+        robeMeta[nome].autoLoginRemediate.nextAt = Math.max(robeMeta[nome].autoLoginRemediate.nextAt || 0, Date.now() + (60 * 1000));
+      } catch {}
+      setTimeout(() => {
+        try {
+          const c = controllers.get(nome);
+          const p0 = (c && c.mainPage) ? c.mainPage : null;
+          if (c && p0) runHackedReviewFlow(nome, c, p0, { source: 'auto_login_remediate_divert' }).catch(()=>{});
+        } catch {}
+      }, 0);
+      continue;
+    }
     // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
     if (lrFailed) {
       try {
@@ -9363,9 +9839,17 @@ async function nurseTick() {
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
     try {
       const lk = provisionLock.get ? provisionLock.get() : (provisionLock.isActive() ? { active: true, lock: null } : { active: false, lock: null });
-      if (lk && lk.active) {
-        const owner = lk.lock && lk.lock.owner ? String(lk.lock.owner) : null;
-        const untilMs = lk.lock && lk.lock.untilMs ? Number(lk.lock.untilMs) : 0;
+      // Regra enterprise: pausa geral só para STOCK_PROVISION / admin_configure / close_all.
+      // login_remediate NÃO deve pausar todo o servidor (senão engessa).
+      const lockObj = (lk && lk.active) ? (lk.lock || null) : null;
+      const meta = lockObj && lockObj.meta && typeof lockObj.meta === 'object' ? lockObj.meta : {};
+      const kind = String(meta.kind || meta.op || '').toLowerCase();
+      const shouldPauseAll =
+        !!(lk && lk.active) &&
+        (kind.includes('stock_provision') || kind.includes('admin_configure') || kind.includes('close_all'));
+      if (shouldPauseAll) {
+        const owner = lockObj && lockObj.owner ? String(lockObj.owner) : null;
+        const untilMs = lockObj && lockObj.untilMs ? Number(lockObj.untilMs) : 0;
         const paused = [];
         const skipped = { noVirtus: 0, human: 0, configurando: 0, robeExec: 0, sendLock: 0, other: 0 };
 
@@ -9406,7 +9890,7 @@ async function nurseTick() {
           } catch {}
         }
       } else {
-        // lock acabou: reseta para o próximo provisionamento
+        // lock inexistente OU lock de tipo não-global (ex.: login_remediate): não pausar o servidor.
         _provisionPauseLastOwner = null;
         _provisionPauseLastUntilMs = 0;
       }
@@ -10008,13 +10492,28 @@ async function nurseTick() {
             if (firstMatch) {
               try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${firstMatch.det.kind||''}`); } catch {}
               // Anti-loop: ao ver PIN_INPUT, não usar GPT (pode clicar em X/voltar e ficar “piscando”).
-              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 2 }).catch(()=>null);
+              // Regra enterprise: PIN bloqueia envio; parar Virtus antes de tentar curar.
+              try {
+                ctrl.trabalhando = false;
+                await stopVirtus(nome).catch(()=>{});
+              } catch {}
+              // Tenta mais vezes e com espera determinística (o botão/submit pode demorar).
+              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 4 }).catch(()=>null);
               // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
               robeMeta[nome].pinCooldownUntil = Date.now() + 45_000;
               const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
               if (still && still.present) {
                 // PIN_INPUT: não chamar GPT. Apenas marcar flag para humano ver, mas sem loop.
                 await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
+                // Reflete no desired: Virtus OFF enquanto o PIN estiver presente.
+                try {
+                  await fileStore.withDesiredFileLockUpdate((d) => {
+                    d = d || {};
+                    d.perfis = d.perfis || {};
+                    d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off' };
+                    return d;
+                  });
+                } catch {}
                 try {
                   const fsSync2 = require('fs');
                   const path2 = require('path');
@@ -10023,6 +10522,29 @@ async function nurseTick() {
                 } catch {}
               } else {
                 await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
+                // Se limpou o PIN, retoma automação (Virtus ON) desde que não haja outros bloqueios.
+                try {
+                  const flags = await readAccountFlags(nome).catch(()=>({}));
+                  const blocked =
+                    (flags && flags.loginRequired === true) ||
+                    (flags && flags.banned === true) ||
+                    (flags && flags.twoFactor === true) ||
+                    (flags && flags.identityRequired === true) ||
+                    (flags && flags.identitySubmitted === true) ||
+                    (flags && flags.appealSubmitted === true);
+                  if (!blocked) {
+                    await fileStore.withDesiredFileLockUpdate((d) => {
+                      d = d || {};
+                      d.perfis = d.perfis || {};
+                      const cur = d.perfis[nome] || {};
+                      d.perfis[nome] = { ...cur, active: true, virtus: 'on', humanHold: false };
+                      return d;
+                    });
+                    setTimeout(() => {
+                      try { handlers.start_work({ nome, operator: 'nurse_pin_recovered' }).catch(()=>{}); } catch {}
+                    }, 0);
+                  }
+                } catch {}
                 try {
                   const fsSync2 = require('fs');
                   const path2 = require('path');
