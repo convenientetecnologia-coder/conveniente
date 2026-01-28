@@ -934,6 +934,8 @@ module.exports = (app, workerClient, fileStore) => {
         logger.warn('Tentativa de delete perfil inexistente', { nome, error: e && e.message });
         return res.json({ ok:false, error:e.message });
       }
+      // Tombstone cedo (anti-ressurreição no boot/recovery)
+      try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'manual_delete', by: String(op||'').slice(0, 120), stage: 'begin' }); } catch {}
       // Enterprise: delete deve ser robusto — se estiver ativo, fecha automaticamente (hard close) antes de excluir.
       if (fileStore.isPerfilAtivo(nome)) {
         logger.warn('Delete solicitado para perfil ativo — tentando fechar automaticamente', { nome });
@@ -965,9 +967,20 @@ module.exports = (app, workerClient, fileStore) => {
           }
           await new Promise(r => setTimeout(r, 1200));
         }
+        // Política (2026-01-28): mesmo se falhar, NÃO manter perfil no servidor.
+        // Tentamos kill por userDataDir e seguimos com purge local para impedir reabertura/open-all.
         if (!okDeactivate) {
-          logger.error('Delete auto-close falhou — perfil continua ativo', { nome, error: lastErr || 'deactivate_failed' });
-          return res.json({ ok: false, error: `Falha ao fechar navegador automaticamente: ${lastErr || 'deactivate_failed'}` });
+          try {
+            const perfisArr = fileStore.loadPerfisJson() || [];
+            const perfil = perfisArr.find(p => p && p.nome === nome);
+            const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+            if (udir) {
+              const browserHelper = require('./browser.js');
+              try { if (browserHelper && browserHelper.killChromeProfileProcesses) browserHelper.killChromeProfileProcesses(udir); } catch {}
+              await new Promise(r => setTimeout(r, 900));
+            }
+          } catch {}
+          logger.error('Delete auto-close falhou — seguindo com purge local (anti-fantasma no perfis.json)', { nome, error: lastErr || 'deactivate_failed' });
         }
       }
       await issues.append(nome, 'admin_delete_perfil', `by=${op}`);
@@ -1068,10 +1081,9 @@ module.exports = (app, workerClient, fileStore) => {
         ct = { attempted: true, ok: false, queued: false, error: (e && e.message) ? String(e.message) : String(e) };
       }
 
-      // Se não conseguimos nem arquivar nem enfileirar, aborta a exclusão local (garantia 110%).
+      // Política (2026-01-28): CT é registro; se falhar, seguimos com purge e deixamos rastreio no tombstone.
       if (ct && ct.attempted && ct.ok !== true && ct.queued !== true) {
-        logger.error('Delete bloqueado: falha ao arquivar/enfileirar no CT', { nome, ctError: ct.error });
-        return res.json({ ok: false, error: `Falha ao enviar para Excluídas (CT): ${ct.error || 'unknown'}` });
+        logger.error('CT falhou e queue falhou durante delete — seguindo com purge local', { nome, ctError: ct.error });
       }
 
       // Tenta remover userDataDir externo de forma correta (busca perfis.json)
@@ -1117,7 +1129,18 @@ module.exports = (app, workerClient, fileStore) => {
       }
 
       logger.info('Perfil deletado com sucesso', { nome });
-      res.json({ ok: true, ct });
+      try {
+        fileStore.writeTombstone && fileStore.writeTombstone(nome, {
+          reason: 'manual_delete',
+          by: String(op||'').slice(0, 120),
+          stage: 'done',
+          ctAttempted: !!(ct && ct.attempted),
+          ctOk: !!(ct && ct.ok),
+          ctQueued: !!(ct && ct.queued),
+          ctError: ct && ct.error ? String(ct.error).slice(0, 180) : null
+        });
+      } catch {}
+      res.json({ ok: true, ct, warning: (ct && ct.ok !== true) ? 'ct_pending_or_failed' : null });
     } catch (e) {
       logger.error('Erro fatal na rota delete perfil', { rota: '/api/perfis/:nome', nome: req.params && req.params.nome, error: e && e.message }, e);
       res.json({ ok: false, error: e && e.message || String(e) });

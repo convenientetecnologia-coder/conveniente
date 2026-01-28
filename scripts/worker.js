@@ -280,67 +280,20 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
 
     // Enterprise: se o CT responder "not_found_assigned", não podemos ficar em loop infinito
     // segurando um perfil desabilitado/2FA dentro do servidor (risco de duplicidade em múltiplos hosts).
-    // Regra pedida: se não há controller e desired.active==false, remover o perfil local imediatamente.
+    // Regra pedida (2026-01-28): CT pode falhar/offline/deletado; isso NÃO bloqueia purge local.
+    // Portanto: ao receber not_found_assigned, fazemos purge local idempotente imediatamente.
     try {
       if (String(errStr || '').includes('not_found_assigned')) {
-        const nome = profileName;
-        const hasCtrl = controllers.has(nome);
-        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
-        if (!hasCtrl && !isActive && nome) {
+        const nome = String(profileName || '').trim();
+        if (nome) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_purge_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null }); } catch {}
           try {
-            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_delete_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null });
-          } catch {}
-          // Remoção local best-effort (mesma lógica do banflow)
-          try {
-            const perfisArr = loadPerfisJson();
-            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-            const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
-            if (udir && fs.existsSync(udir)) { try { fileStore.rimrafSync(udir); } catch {} }
-            // Remover do perfis.json (fonte do dashboard):
-            // 1) Preferência: IPC para o master
-            // 2) Fallback: lock+mutate direto (garantia de limpeza mesmo se IPC falhar / não-child)
-            let removedOk = false;
-            let removedErr = null;
-            try {
-              const rr2 = await perfisMasterClient.remove(nome, { reason: 'ct_archive_not_found_delete_local', caller: 'worker' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-              removedOk = !!(rr2 && rr2.ok);
-              removedErr = rr2 && rr2.error ? String(rr2.error) : null;
-            } catch (e) {
-              removedOk = false;
-              removedErr = (e && e.message) ? String(e.message) : String(e);
-            }
-            if (!removedOk) {
-              try {
-                const rr3 = fileStore.withPerfisFileLockUpdate((arr) => {
-                  const cur = Array.isArray(arr) ? arr : [];
-                  return cur.filter(p => p && p.nome !== nome);
-                }, { caller: 'worker_ct_archive_queue', reason: 'ct_archive_not_found_delete_local_fallback' });
-                removedOk = !!(rr3 && rr3.ok);
-              } catch {}
-            }
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'ct_archive_not_found_remove_perfis_result',
-                flowId: flowId || null,
-                profileName: String(nome||''),
-                ok: !!removedOk,
-                error: removedOk ? null : String(removedErr || 'remove_failed').slice(0, 200)
-              });
-            } catch {}
-          } catch {}
-          try { await fileStore.removeDesired(nome); } catch {}
-          try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
-          try {
-            const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-            if (st && Array.isArray(st.perfis)) {
-              st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-              fileStore.writeJsonAtomic(fileStore.statusPath, st);
-            }
-          } catch {}
-          try { await snapshotStatusAndWrite(); } catch {}
-          try {
-            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_deleted_local', flowId: flowId || null, profileName: String(nome||''), ok: true });
+            const pr = await purgePerfilLocalEnterprise(nome, {
+              reason: 'ct_archive_not_found_assigned',
+              flowId: flowId || newFlowId('ctq_purge'),
+              stockAccountId: sid || null
+            }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+            try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_purge_result', flowId: flowId || null, profileName: String(nome||''), ok: !!(pr && pr.ok), error: (pr && pr.ok) ? null : String(pr && pr.error || 'purge_failed').slice(0, 220) }); } catch {}
           } catch {}
         }
       }
@@ -359,6 +312,130 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
     } catch {}
   }
   return { ok: true, processed };
+}
+
+// ===== PURGE ENTERPRISE (fonte única) =====
+// Regras:
+// - detectou terminal (ban/desativada/2FA) OU delete manual/CT => fechar navegador + remover do servidor imediatamente
+// - CT é registro (retry em background), não bloqueia purge local
+async function purgePerfilLocalEnterprise(nome, { reason = 'purge', flowId = '', stockAccountId = null } = {}) {
+  const startedAt = Date.now();
+  const n = String(nome || '').trim();
+  if (!n) return { ok: false, error: 'missing_nome' };
+  const fid = String(flowId || '').trim() || newFlowId('purge');
+  const why = String(reason || 'purge').slice(0, 160);
+
+  // Tombstone cedo (evita ressuscitar em boot/recovery mesmo que o processo caia no meio)
+  try { fileStore.writeTombstone(n, { flowId: fid, reason: why, stockAccountId: stockAccountId || null, by: 'worker', stage: 'begin' }); } catch {}
+
+  // 1) Desired OFF imediatamente (anti-reopen)
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d.perfis = d.perfis || {};
+      d.perfis[n] = { ...(d.perfis[n] || {}), active: false, virtus: 'off' };
+      return d;
+    });
+  } catch {}
+
+  // 2) Descobrir userDataDir (para kill + delete)
+  let udir = '';
+  try {
+    const man0 = await manifestStore.read(n).catch(()=>null);
+    if (man0 && man0.userDataDir) udir = String(man0.userDataDir);
+  } catch {}
+  if (!udir) {
+    try {
+      const perfisArr = fileStore.loadPerfisJson() || [];
+      const p = Array.isArray(perfisArr) ? perfisArr.find(x => x && x.nome === n) : null;
+      if (p && p.userDataDir) udir = String(p.userDataDir);
+    } catch {}
+  }
+  if (!udir) {
+    try { udir = path.join(resolveChromeUserDataRoot(), 'Conveniente', n); } catch {}
+  }
+
+  // 3) Fechar navegador (graceful->force) usando handler oficial
+  let closeOk = false;
+  let closeErr = null;
+  try {
+    const dr = await handlers.deactivate({ nome: n, reason: 'auto_delete', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+    closeOk = !!(dr && dr.ok);
+    closeErr = closeOk ? null : String(dr && dr.error || 'deactivate_failed');
+  } catch (e) {
+    closeOk = false;
+    closeErr = (e && e.message) ? String(e.message) : String(e);
+  }
+
+  // 3.5) Se ainda tiver Chrome vivo, força kill e tenta mais 1x (110%)
+  if (!closeOk && udir) {
+    try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+    await sleep(900);
+    try {
+      const dr2 = await handlers.deactivate({ nome: n, reason: 'auto_delete', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+      closeOk = !!(dr2 && dr2.ok);
+      closeErr = closeOk ? null : String(dr2 && dr2.error || 'deactivate_failed');
+    } catch {}
+  }
+
+  // 4) Remover arquivos (perfis.json/desired/perfisDir/userDataDir/status)
+  // Mesmo que close falhe, ainda tentamos remover do perfis.json para impedir "Abrir tudo" reabrir.
+  let removedPerfisOk = false;
+  let removedPerfisErr = null;
+  try {
+    const rr = await perfisMasterClient.remove(n, { reason: `purge:${why}`.slice(0, 120), caller: 'worker' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+    removedPerfisOk = !!(rr && rr.ok);
+    removedPerfisErr = removedPerfisOk ? null : String(rr && rr.error || 'ipc_remove_failed');
+  } catch (e) {
+    removedPerfisOk = false;
+    removedPerfisErr = (e && e.message) ? String(e.message) : String(e);
+  }
+  if (!removedPerfisOk) {
+    try {
+      const rr2 = fileStore.withPerfisFileLockUpdate((arr) => {
+        const cur = Array.isArray(arr) ? arr : [];
+        return cur.filter(p => p && p.nome !== n);
+      }, { caller: 'worker_purge', reason: `purge_fallback:${why}`.slice(0, 180) });
+      removedPerfisOk = !!(rr2 && rr2.ok);
+    } catch {}
+  }
+
+  try { await fileStore.removeDesired(n); } catch {}
+  try { fileStore.rimrafSync(path.join(fileStore.perfisDir, n)); } catch {}
+  try { if (udir && fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
+  try {
+    const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+    if (st && Array.isArray(st.perfis)) {
+      st.perfis = st.perfis.filter(p => p && p.nome !== n);
+      fileStore.writeJsonAtomic(fileStore.statusPath, st);
+    }
+  } catch {}
+  try { await snapshotStatusAndWrite(); } catch {}
+
+  // Tombstone final (audit)
+  try {
+    fileStore.writeTombstone(n, {
+      flowId: fid,
+      reason: why,
+      stockAccountId: stockAccountId || null,
+      by: 'worker',
+      stage: 'done',
+      durationMs: Date.now() - startedAt,
+      closeOk: !!closeOk,
+      closeError: closeOk ? null : String(closeErr || '').slice(0, 220),
+      perfisRemoveOk: !!removedPerfisOk,
+      perfisRemoveError: removedPerfisOk ? null : String(removedPerfisErr || '').slice(0, 220)
+    });
+  } catch {}
+
+  return {
+    ok: true,
+    nome: n,
+    flowId: fid,
+    closeOk: !!closeOk,
+    perfisRemoveOk: !!removedPerfisOk,
+    durationMs: Date.now() - startedAt
+  };
 }
 
 async function appendLoginRemediateEvidence({ nome, operator, step, page, note } = {}) {
@@ -3324,45 +3401,25 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       } catch {}
 
       // 3) EXCLUI a conta do servidor usando o mesmo fluxo do DELETE /api/perfis/:nome (sem HTTP).
-      // Regras:
-      // - deve estar inativo aqui; se ainda estiver ativo, bloqueia (anti-fantasma).
-      // - remoção de userDataDir externo é best-effort.
+      // Regra (2026-01-28): purge local é obrigatório e idempotente (CT não bloqueia).
       try {
-        if (!closeOk) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        } else {
-        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
-        if (isActive) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
-          return { ok: false, error: 'banned_delete_blocked_still_active' };
-        }
-        // Remove userDataDir externo, perfis.json, desired e dir do perfil
+        const pr = await purgePerfilLocalEnterprise(nome, {
+          reason: `auto_banned:${String(reason||'').slice(0,80)}`,
+          flowId,
+          stockAccountId: stockAccountId || null
+        }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
         try {
-          const perfisArr = loadPerfisJson();
-          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
-          if (udir && fs.existsSync(udir)) {
-            // Aqui NÃO fazemos “kill por raiva”: se o navegador ficou vivo, o deactivate acima deveria ter falhado.
-            // Mesmo assim, remoção é best-effort e pode falhar em Windows (arquivo bloqueado).
-            try { fileStore.rimrafSync(udir); } catch {}
-          }
-          // Master-only: remover do perfis.json via IPC
-          try { await perfisMasterClient.remove(nome, { reason: 'auto_delete_banned_profile', caller: 'worker' }); } catch {}
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'auto_banned_purge_done',
+            flowId,
+            nome: String(nome||''),
+            ok: !!(pr && pr.ok),
+            error: (pr && pr.ok) ? null : String(pr && pr.error || 'purge_failed').slice(0, 180)
+          });
         } catch {}
-        try { await fileStore.removeDesired(nome); } catch {}
-        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
-        try {
-          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-          if (st && Array.isArray(st.perfis)) {
-            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-            fileStore.writeJsonAtomic(fileStore.statusPath, st);
-          }
-        } catch {}
-        try { await snapshotStatusAndWrite(); } catch {}
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: true }); } catch {}
-        }
       } catch (e) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_purge_done', flowId, nome: String(nome||''), ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
       }
 
       // 4) (compat) Se por algum motivo não conseguimos arquivar antes, tenta depois também.
@@ -3555,43 +3612,18 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         if (!ctOk) {
           const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
           try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
-          if (!stockAccountId) {
-            // Sem ID: bloqueia delete para não perder vínculo.
-            return { ok: false, error: 'ct_archive_failed_predelete' };
-          }
         }
 
-        // 4) delete local (mesmo fluxo do DELETE /api/perfis/:nome, sem HTTP)
-        if (!closeOk) {
-          // Regra: se o navegador não fechou, NÃO deletar. Mas a conta já foi arquivada no CT (Excluídas).
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
-        } else {
-        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
-        if (isActive) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
-          return { ok: false, error: 'two_factor_delete_blocked_still_active' };
-        }
+        // 4) purge local obrigatório (CT não bloqueia)
         try {
-          const perfisArr = loadPerfisJson();
-          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
-          if (udir && fs.existsSync(udir)) {
-            try { fileStore.rimrafSync(udir); } catch {}
-          }
-          // Master-only: remover do perfis.json via IPC
-          try { await perfisMasterClient.remove(nome, { reason: 'auto_delete_two_factor_profile', caller: 'worker' }); } catch {}
-        } catch {}
-        try { await fileStore.removeDesired(nome); } catch {}
-        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
-        try {
-          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-          if (st && Array.isArray(st.perfis)) {
-            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-            fileStore.writeJsonAtomic(fileStore.statusPath, st);
-          }
-        } catch {}
-        try { await snapshotStatusAndWrite(); } catch {}
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_two_factor_profile', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: true }); } catch {}
+          const pr = await purgePerfilLocalEnterprise(nome, {
+            reason: `auto_two_factor:${String(reason||'two_factor').slice(0,80)}`,
+            flowId,
+            stockAccountId: stockAccountId || null
+          }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_purge_done', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: !!(pr && pr.ok), error: (pr && pr.ok) ? null : String(pr && pr.error || 'purge_failed').slice(0,180) }); } catch {}
+        } catch (e) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_purge_done', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
         }
 
         // flags/issue: mantém comportamento anterior
@@ -3876,63 +3908,11 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             return { ok: false, error: 'two_factor_delete_blocked_browser_not_closed' };
           }
         } catch {}
-        const rr = await (async () => {
-          try {
-            // desired OFF
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
-                return d;
-              });
-            } catch {}
-
-            // browser já foi fechado acima
-            try { controllers.delete(nome); } catch {}
-            try { stopPruneLoop(nome); } catch {}
-
-            // remover userDataDir externo e perfis.json
-            try {
-              // Fonte primária: manifestStore (mais confiável que perfis.json)
-              let udirFromManifest = '';
-              try {
-                const man = await manifestStore.read(nome).catch(()=>null);
-                if (man && man.userDataDir) udirFromManifest = String(man.userDataDir);
-              } catch {}
-              const perfisArr = loadPerfisJson();
-              const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-              const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
-              if (udir) {
-                // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
-                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-                try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
-              }
-              // Master-only: remover do perfis.json via IPC
-              try { await perfisMasterClient.remove(nome, { reason: 'auto_delete_two_factor_profile', caller: 'worker' }); } catch {}
-            } catch {}
-
-            // remover desired e diretório do perfil
-            try { await fileStore.removeDesired(nome); } catch {}
-            try {
-              const dir = path.join(fileStore.perfisDir, nome);
-              try { fileStore.rimrafSync(dir); } catch {}
-            } catch {}
-
-            // limpeza status.json
-            try {
-              const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-              if (st && Array.isArray(st.perfis)) {
-                st.perfis = st.perfis.filter(p => p && p.nome !== nome);
-                fileStore.writeJsonAtomic(fileStore.statusPath, st);
-              }
-            } catch {}
-
-            try { await snapshotStatusAndWrite(); } catch {}
-            return { ok: true };
-          } catch (e) {
-            return { ok: false, error: (e && e.message) || String(e) };
-          }
-        })();
+        const rr = await purgePerfilLocalEnterprise(nome, {
+          reason: `auto_two_factor:${String(reason||'two_factor').slice(0,80)}`,
+          flowId,
+          stockAccountId: stockAccountId || null
+        }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
         try {
           provisionAudit.append({
             ts: Date.now(),
@@ -7181,6 +7161,39 @@ const handlers = {
       const pids2 = (chk2 && Array.isArray(chk2.pids)) ? chk2.pids : [];
 
       if (!pid2Ok || pids2.length || rootAliveAfter === true) {
+        // Último recurso (110%): força kill por userDataDir antes de bloquear delete.
+        // Motivo: em purge/ban/2FA, deixar Chrome vivo é exatamente o que causa “conta excluída reabrindo”.
+        try {
+          if (udir && browserHelper.killChromeProfileProcesses) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'deactivate_force_kill_userDataDir_begin',
+                nome: String(nome || ''),
+                reason: String(reason || ''),
+                userDataDir: String(udir).slice(0, 260),
+                pids: pids2.slice(0, 24)
+              });
+            } catch {}
+            try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+            await sleep(1200);
+          }
+        } catch {}
+
+        // Re-check após force kill
+        let chk3 = null;
+        try {
+          if (udir && browserHelper.getChromeProfilePidsMeta) chk3 = browserHelper.getChromeProfilePidsMeta(udir);
+          else if (udir && browserHelper.getChromeProfilePids) chk3 = { ok: true, pids: browserHelper.getChromeProfilePids(udir) || [] };
+          else chk3 = { ok: false, pids: [], error: 'pid_check_unavailable' };
+        } catch (e) {
+          chk3 = { ok: false, pids: [], error: (e && e.message) ? String(e.message).slice(0, 180) : 'pid_check_failed' };
+        }
+        const pid3Ok = !!(chk3 && chk3.ok);
+        const pids3 = (chk3 && Array.isArray(chk3.pids)) ? chk3.pids : [];
+        if (pid3Ok && !pids3.length && rootAliveAfter !== true) {
+          // ok: não bloquear
+        } else {
         try {
           provisionAudit.append({
             ts: Date.now(),
@@ -7189,9 +7202,9 @@ const handlers = {
             reason: String(reason || ''),
             policy: policy == null ? null : String(policy),
             userDataDir: udir ? String(udir).slice(0, 260) : null,
-            pidCheckOk: pid2Ok,
-            pidCheckErr: pid2Ok ? null : (chk2 && chk2.error ? String(chk2.error).slice(0, 180) : 'pid_check_failed'),
-            pids: pids2.slice(0, 24),
+            pidCheckOk: pid3Ok,
+            pidCheckErr: pid3Ok ? null : (chk3 && chk3.error ? String(chk3.error).slice(0, 180) : 'pid_check_failed'),
+            pids: pids3.slice(0, 24),
             hardClose: (hc && hc.flowId) ? {
               flowId: hc.flowId,
               durMs: hc.durMs || null,
@@ -7210,13 +7223,14 @@ const handlers = {
             man.accountFlags.pendingClose = true;
             man.accountFlags.pendingCloseAt = Date.now();
             man.accountFlags.pendingCloseReason = 'deactivate_close_incomplete';
-            man.accountFlags.pendingClosePids = pids2.slice(0, 24);
+            man.accountFlags.pendingClosePids = pids3.slice(0, 24);
             man.accountFlags.pendingCloseUserDataDir = udir ? String(udir).slice(0, 260) : null;
             return man;
           });
         } catch {}
         await snapshotStatusAndWrite();
         return { ok: false, error: 'chrome_alive_after_deactivate' };
+        }
       }
     }
   }
@@ -10545,6 +10559,43 @@ async function nurseTick() {
           const target = String(session.inFlight || '');
           // Só o worker dono do shard executa a abertura; os outros aguardam.
           if (target && (!SHARD_SET.size || inShard(target))) {
+            // Guardrail militar: perfis tombstoned/terminais nunca podem abrir no open-all.
+            // Se aparecer na fila (por perfis.json antigo ou race), purge e avança idx imediatamente.
+            try {
+              const tomb = fileStore.hasTombstone && fileStore.hasTombstone(target);
+              let terminal = false;
+              let termWhy = '';
+              if (tomb) { terminal = true; termWhy = 'tombstone'; }
+              if (!terminal) {
+                const flags = await readAccountFlags(target).catch(()=>null);
+                if (flags && flags.banned === true) { terminal = true; termWhy = 'banned'; }
+                else if (flags && flags.twoFactor === true) { terminal = true; termWhy = 'two_factor'; }
+              }
+              if (terminal) {
+                try { await purgePerfilLocalEnterprise(target, { reason: `open_all_skip_${termWhy}`.slice(0, 120), flowId: newFlowId('openall_purge') }).catch(()=>null); } catch {}
+                const stepGapMs0 = parseInt(process.env.OPEN_ALL_STEP_GAP_MS || '1400', 10);
+                try {
+                  await fileStore.withDesiredFileLockUpdate((d) => {
+                    d = d || {}; d.perfis = d.perfis || {};
+                    const s = d._openAll;
+                    if (!s || s.active !== true) return d;
+                    const idx = (Number(s.idx || 0) || 0);
+                    if (String(s.inFlight || '') === target) {
+                      s.idx = idx + 1;
+                      s.lastError = `skipped_terminal:${termWhy}`.slice(0, 180);
+                      s.nextAt = Date.now() + Math.max(300, stepGapMs0);
+                      s.inFlight = null;
+                      s.inFlightAt = 0;
+                      s.inFlightBy = null;
+                    }
+                    d._openAll = s;
+                    return d;
+                  });
+                } catch {}
+                _nurseTickRunning = false;
+                return;
+              }
+            } catch {}
             // Respeitar slots (não abrir se já está acima do cap do supervisor/worker)
             // Operator: usar o lockOwner/op da sessão para atravessar o provision_lock open_all_map.
             const openOp = String(session.lockOwner || session.op || 'open_all_24h_seq');

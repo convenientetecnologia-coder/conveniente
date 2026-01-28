@@ -281,6 +281,11 @@ try {
     if (r && r.recovered) logger.warn('[BOOT][RECOVER] perfis.json recovered from backup', r);
   } catch {}
 } catch {}
+// Militar: purge definitivo no boot — perfis tombstoned (ban/2FA/desativada/excluída) nunca podem reaparecer
+// mesmo após recovery/rebuild.
+try { fileStore.sweepTombstonesOnBoot && fileStore.sweepTombstonesOnBoot(); } catch {}
+// Militar: compat — se existiam flags terminais antigas no manifest (banned/2FA) sem tombstone, purgar também.
+try { fileStore.sweepTerminalFlagsOnBoot && fileStore.sweepTerminalFlagsOnBoot(); } catch {}
 fileStore.ensurePerfisJson();
 
 // Pausa automática de 24h em todos os perfis no boot, se ativado por env

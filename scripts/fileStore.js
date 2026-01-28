@@ -16,6 +16,7 @@ const presetsPath = path.join(dadosDir, 'ua_presets.json');
 const desiredPath = path.join(dadosDir, 'desired.json');
 const statusPath  = path.join(dadosDir, 'status.json');
 const provisionAuditPath = path.join(dadosDir, 'provision_audit.jsonl');
+const tombstonesDir = path.join(dadosDir, 'tombstones');
 
 // ManifestStore import para setPerfilFrozenUntil
 // const manifestStore = require('./manifestStore.js');
@@ -90,6 +91,184 @@ function _appendProvisionAudit(obj) {
   try {
     fs.appendFileSync(provisionAuditPath, JSON.stringify(obj) + '\n', 'utf8');
   } catch {}
+}
+
+function _ensureDirSync(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
+function _safeFilePart(s) {
+  return String(s || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 140) || 'unnamed';
+}
+
+// ===== Tombstones (perfil removido do servidor; não deve voltar) =====
+// Política enterprise:
+// - tombstone é a "fonte de verdade" local para evitar ressuscitar perfis via recoverPerfisJsonIfMissingOrEmpty
+// - CT é registro (pode falhar/offline) e NÃO bloqueia purge local
+function tombstonePathFor(nome) {
+  const n = String(nome || '').trim();
+  if (!n) return '';
+  return path.join(tombstonesDir, _safeFilePart(n) + '.json');
+}
+
+function writeTombstone(nome, data = {}) {
+  try {
+    const n = String(nome || '').trim();
+    if (!n) return { ok: false, error: 'missing_nome' };
+    _ensureDirSync(tombstonesDir);
+    const fp = tombstonePathFor(n);
+    const obj = {
+      ts: Date.now(),
+      nome: n,
+      ...(data && typeof data === 'object' ? data : {})
+    };
+    const ok = writeJsonAtomic(fp, obj);
+    try { if (ok) _appendProvisionAudit({ ts: Date.now(), event: 'tombstone_write', ok: true, nome: n, file: String(fp).slice(0, 260) }); } catch {}
+    return { ok: !!ok, file: fp };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+function hasTombstone(nome) {
+  try {
+    const fp = tombstonePathFor(nome);
+    return !!(fp && fs.existsSync(fp));
+  } catch { return false; }
+}
+
+function readTombstone(nome) {
+  try {
+    const fp = tombstonePathFor(nome);
+    if (!fp || !fs.existsSync(fp)) return null;
+    return readJsonSafe(fp, null);
+  } catch { return null; }
+}
+
+// Boot sweeper: remove perfis tombstoned do perfis.json/desired/status e apaga pastas residuais.
+function sweepTombstonesOnBoot() {
+  const startedAt = Date.now();
+  let files = [];
+  try { _ensureDirSync(tombstonesDir); } catch {}
+  try { files = fs.readdirSync(tombstonesDir).filter(f => f && f.endsWith('.json')).slice(0, 20000); } catch { files = []; }
+  const names = [];
+  for (const f of files) {
+    try {
+      const fp = path.join(tombstonesDir, f);
+      const t = readJsonSafe(fp, null);
+      const n = String(t && t.nome || '').trim();
+      if (n) names.push(n);
+    } catch {}
+  }
+  if (!names.length) return { ok: true, swept: 0, durationMs: Date.now() - startedAt };
+
+  // 1) perfis.json
+  try {
+    withPerfisFileLockUpdate((arr) => {
+      const cur = Array.isArray(arr) ? arr : [];
+      return cur.filter(p => p && p.nome && !names.includes(p.nome));
+    }, { caller: 'boot_sweep_tombstones', reason: 'tombstone_purge' });
+  } catch {}
+
+  // 2) desired.json
+  try {
+    withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d.perfis = d.perfis || {};
+      for (const n of names) {
+        try { delete d.perfis[n]; } catch {}
+      }
+      return d;
+    });
+  } catch {}
+
+  // 3) status.json
+  try {
+    const st = readJsonSafe(statusPath, null);
+    if (st && Array.isArray(st.perfis)) {
+      st.perfis = st.perfis.filter(p => p && p.nome && !names.includes(p.nome));
+      writeJsonAtomic(statusPath, st);
+    }
+  } catch {}
+
+  // 4) remover diretórios residuais (best-effort)
+  for (const n of names) {
+    try { rimrafSync(path.join(perfisDir, n)); } catch {}
+    try {
+      // Se ainda existir um userDataDir "padrão" sob Chrome\Conveniente, remove para não reconstituir perfis.json no recovery.
+      const root = _resolveChromeUserDataRoot();
+      if (root) {
+        const udir = path.join(root, 'Conveniente', n);
+        if (existsDir(udir)) rimrafSync(udir);
+      }
+    } catch {}
+  }
+
+  try { _appendProvisionAudit({ ts: Date.now(), event: 'boot_sweep_tombstones', ok: true, swept: names.length, durationMs: Date.now() - startedAt }); } catch {}
+  return { ok: true, swept: names.length, durationMs: Date.now() - startedAt };
+}
+
+// Boot sweeper: perfis com flags terminais no manifest (banned/2FA) devem ser purgados mesmo sem tombstone antigo.
+function sweepTerminalFlagsOnBoot({ limit = 5000 } = {}) {
+  const startedAt = Date.now();
+  const perfis = loadPerfisJson() || [];
+  const terminal = [];
+  for (const p of perfis.slice(0, Math.max(0, Number(limit || 0) || 5000))) {
+    try {
+      const nome = String(p && p.nome || '').trim();
+      const udir = p && p.userDataDir ? String(p.userDataDir) : '';
+      if (!nome || !udir) continue;
+      const manifestPath = path.join(udir, 'manifest.json');
+      if (!existsFile(manifestPath)) continue;
+      const man = readJsonSafe(manifestPath, null);
+      const flags = man && man.accountFlags ? man.accountFlags : null;
+      if (flags && flags.banned === true) terminal.push({ nome, why: 'banned' });
+      else if (flags && flags.twoFactor === true) terminal.push({ nome, why: 'two_factor' });
+    } catch {}
+  }
+  if (!terminal.length) return { ok: true, swept: 0, durationMs: Date.now() - startedAt };
+
+  const names = terminal.map(x => x.nome);
+  // tombstone + apagar dirs
+  for (const t of terminal) {
+    try { writeTombstone(t.nome, { reason: 'boot_terminal_flag', terminal: t.why, stage: 'begin' }); } catch {}
+    try {
+      const root = _resolveChromeUserDataRoot();
+      if (root) {
+        const udir2 = path.join(root, 'Conveniente', t.nome);
+        if (existsDir(udir2)) rimrafSync(udir2);
+      }
+    } catch {}
+    try { rimrafSync(path.join(perfisDir, t.nome)); } catch {}
+    try { writeTombstone(t.nome, { reason: 'boot_terminal_flag', terminal: t.why, stage: 'done' }); } catch {}
+  }
+
+  // perfis.json
+  try {
+    withPerfisFileLockUpdate((arr) => {
+      const cur = Array.isArray(arr) ? arr : [];
+      return cur.filter(p => p && p.nome && !names.includes(p.nome));
+    }, { caller: 'boot_sweep_terminal_flags', reason: 'terminal_flag_purge' });
+  } catch {}
+  // desired.json
+  try {
+    withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d.perfis = d.perfis || {};
+      for (const n of names) {
+        try { delete d.perfis[n]; } catch {}
+      }
+      return d;
+    });
+  } catch {}
+  // status.json
+  try {
+    const st = readJsonSafe(statusPath, null);
+    if (st && Array.isArray(st.perfis)) {
+      st.perfis = st.perfis.filter(p => p && p.nome && !names.includes(p.nome));
+      writeJsonAtomic(statusPath, st);
+    }
+  } catch {}
+
+  try { _appendProvisionAudit({ ts: Date.now(), event: 'boot_sweep_terminal_flags', ok: true, swept: terminal.length, durationMs: Date.now() - startedAt }); } catch {}
+  return { ok: true, swept: terminal.length, durationMs: Date.now() - startedAt };
 }
 
 function _hashPerfisNames(perfisArr) {
@@ -915,6 +1094,13 @@ module.exports = {
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
   resetDesiredAllOffOnBoot, getSysMetricsSnapshot, existsFile, existsDir,
   clearOpenAllOnBoot,
+  // Tombstones (perfil removido do servidor; não deve voltar)
+  tombstonesDir,
+  writeTombstone,
+  hasTombstone,
+  readTombstone,
+  sweepTombstonesOnBoot,
+  sweepTerminalFlagsOnBoot,
   // Militares:
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,
