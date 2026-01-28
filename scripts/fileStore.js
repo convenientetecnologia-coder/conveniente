@@ -790,6 +790,25 @@ function resetDesiredAllOffOnBoot() {
   });
 }
 
+//// BOOT: limpar sessão open-all pendurada ////
+// Motivo: `desired._openAll` é persistido e, após restart, o nurse pode continuar abrindo sem clique novo.
+// Política: open-all só roda quando o operador manda; após restart, não retomar automaticamente.
+function clearOpenAllOnBoot() {
+  withDesiredFileLockUpdate((desired) => {
+    ensureDesired();
+    desired = desired || {};
+    if (desired._openAll && desired._openAll.active === true) {
+      desired._openAll = {
+        ...(desired._openAll || {}),
+        active: false,
+        clearedAt: Date.now(),
+        clearedReason: 'boot_reset'
+      };
+    }
+    return desired;
+  });
+}
+
 //// MÉTRICAS DO SISTEMA (RAM, CPU%) ////
 // PATCH MILITAR: cpu.percent (global, para painel) é soma dos cpuPercent de todos perfis/Chrome do snapshot status.json dividido por cores.
 // No Windows, loadavg==0, por isso não use loadavg! 
@@ -895,6 +914,7 @@ module.exports = {
   withPerfisFileLockUpdate,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
   resetDesiredAllOffOnBoot, getSysMetricsSnapshot, existsFile, existsDir,
+  clearOpenAllOnBoot,
   // Militares:
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,
