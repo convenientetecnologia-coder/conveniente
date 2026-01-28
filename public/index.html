@@ -1039,10 +1039,11 @@
 
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
-      const [st, perfisResp] = await Promise.all([
-        safeGetStatus(),
-        safeListPerfis()
-      ]);
+      const [st, perfisResp] = await Promise.all([ safeGetStatus(), safeListPerfis() ]);
+      // Anti-flicker militar:
+      // - Se /api/perfis falhar 1 ciclo, NÃO apagar a lista; manter cache e mostrar warning.
+      const perfisOk = !!(perfisResp && perfisResp.ok === true && Array.isArray(perfisResp.perfis));
+      const statusOk = !!(st && Array.isArray(st.perfis));
 
       // ====== NOVO: sincronizar ações em massa vindas do backend (comandos remotos) ======
       try {
@@ -1075,7 +1076,10 @@
           setGlobalActionButtonsDisabled(false);
         }
       } catch {}
-      const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
+      let basePerfis = perfisOk ? perfisResp.perfis : [];
+      if ((!basePerfis || basePerfis.length === 0) && lastPerfisCache && lastPerfisCache.length > 0) {
+        basePerfis = lastPerfisCache;
+      }
       const perfisMap = new Map(basePerfis.map(p => [p.nome, Object.assign({
         active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
         ramMB: null, cpuPercent: null, numPages: null,
@@ -1084,7 +1088,7 @@
         manifestStatus: null, closingReason: null
       }, p)]));
       // Overlay de /api/status (st)
-      if (Array.isArray(st?.perfis)) {
+      if (statusOk) {
         st.perfis.forEach(o => {
           const dst = perfisMap.get(o.nome);
           if (dst) Object.assign(dst, o);
@@ -1095,7 +1099,10 @@
       const robeQueue = st?.robeQueue || [];
 
       // Banner global de aviso (warning) caso backend informe
-      const warn = st && st.warning;
+      const warn =
+        (st && st.warning) ||
+        (!perfisOk ? 'Falha temporária em /api/perfis (mantendo cache no dashboard)' : null) ||
+        (!statusOk ? 'Falha temporária em /api/status (mantendo cache no dashboard)' : null);
       if (warn) {
         let b = document.getElementById('globalWarn');
         if (!b) {
@@ -1958,17 +1965,19 @@
     // 4.4 Abertura sequencial “Abrir Todos e Iniciar 24h” com calma, respeitando CPU/RAM
     // ======================= INÍCIO ALTERAÇÃO BLOQUEIO RAM "ABRIR TODOS" ========================
     // NOVO ensureResourcesOk({ minFreeMB }) militar
-    async function ensureResourcesOk({ minFreeMB = 3072 } = {}) {
+    async function ensureResourcesOk({ minFreeMB = 3072, timeoutMs = 90000 } = {}) {
+      // Política militar: sem loops infinitos no dashboard.
+      // Se /api/sys falhar, não bloquear abertura (fallback: continua).
       const ok = await waitUntil(async () => {
         const m = await window.electronAPI.getSysMetrics().catch(()=>null);
-        if (!m || !m.mem) return false;
+        if (!m || !m.mem) return true; // não bloquear por falta de métricas
         const freeMB = m.mem.freeMB || 0;
         const cpu    = (m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0;
         const cpuOk  = (cpu === 0) ? true : (cpu <= 90);
         const memOk  = freeMB >= minFreeMB;
         return cpuOk && memOk;
-      }, { timeoutMs: 0x7fffffff, intervalMs: 1200 });
-      return ok;
+      }, { timeoutMs, intervalMs: 1200 }).catch(()=>false);
+      return !!ok;
     }
 
     // Wrapper para listar todos os perfis pela API dedicada (/api/perfis)

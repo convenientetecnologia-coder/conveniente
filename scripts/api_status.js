@@ -3,6 +3,10 @@
 
 module.exports = (app, workerClient, fileStore) => {
 const opsState = require('./opsState.js');
+// Cache militar: nunca devolver lista vazia por falha transitória de IO/lock.
+// Protege o dashboard contra "piscar" (some e volta) quando /api/perfis ou /api/status falham 1 ciclo.
+let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
+let _lastBaselineAt = 0;
 // FUTURO: endpoint /api/status será servido/encaminhado pelo Supervisor externo (será preferencialmente o status do Supervisor, não do Worker direto)
 // GET /api/status — sempre tenta worker primeiro, fallback em arquivo
 app.get('/api/status', async (req, res) => {
@@ -100,11 +104,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // Carregar baseline do perfis.json SEMPRE
   let perfisJsonRaw = [];
   try {
-    perfisJsonRaw = fileStore.loadPerfisJsonSync
-      ? fileStore.loadPerfisJsonSync()
-      : fileStore.perfisJson // pode ser cache
-      ? fileStore.perfisJson
-      : require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8') && JSON.parse(require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8'));
+    perfisJsonRaw = fileStore.loadPerfisJson ? fileStore.loadPerfisJson() : [];
   } catch(e) {
     perfisJsonRaw = [];
   }
@@ -324,8 +324,19 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 // ======= INÍCIO DA INSTRUÇÃO/ALTERAÇÃO PEDIDA =======
   // Implementação SOLICITADA — substitua toda a estrutura da rota por este bloco DO INÍCIO AO FIM!
 
-  // 1) Baseline do perfis.json SEMPRE — nunca array vazia
-  const perfisArr = fileStore.loadPerfisJson() || [];
+  // 1) Baseline do perfis.json SEMPRE — nunca array vazia (usa cache se falhar)
+  let perfisArr = [];
+  try { perfisArr = fileStore.loadPerfisJson() || []; } catch { perfisArr = []; }
+  // Se veio vazio mas já tivemos baseline recente, assume falha transitória (produção não fica realmente "0 perfis").
+  if ((!Array.isArray(perfisArr) || perfisArr.length === 0) && Array.isArray(_lastBaselinePerfis) && _lastBaselinePerfis.length > 0) {
+    warningINST = (warningINST ? warningINST + '; ' : '') + 'baseline_fallback_cache';
+    perfisArr = _lastBaselinePerfis;
+  } else {
+    if (Array.isArray(perfisArr) && perfisArr.length > 0) {
+      _lastBaselinePerfis = perfisArr;
+      _lastBaselineAt = Date.now();
+    }
+  }
   const baseMap = new Map(perfisArr.map(p => [p.nome, {
     nome: p.nome,
     label: p.label || null,
@@ -411,12 +422,13 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   // CRÍTICO: sempre baseline de perfis.json
   let perfisSkeleton = [];
   try {
-    let listaPerfis = fileStore.loadPerfisJsonSync
-      ? fileStore.loadPerfisJsonSync()
-      : fileStore.perfisJson
-      ? fileStore.perfisJson
-      : require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8') && JSON.parse(require('fs').readFileSync(fileStore.perfisJsonPath, 'utf8'));
-    perfisSkeleton = (listaPerfis || []).map(perfil => ({
+    const listaPerfis = (fileStore && typeof fileStore.loadPerfisJson === 'function')
+      ? (fileStore.loadPerfisJson() || [])
+      : [];
+    const base = (Array.isArray(listaPerfis) && listaPerfis.length > 0)
+      ? listaPerfis
+      : (Array.isArray(_lastBaselinePerfis) ? _lastBaselinePerfis : []);
+    perfisSkeleton = (base || []).map(perfil => ({
       nome: perfil.nome,
       label: perfil.label,
       cidade: perfil.cidade,
@@ -468,7 +480,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       problem: false // <<< ALTERAÇÃO AQUI (INSTRUÇÃO 2)
     }));
   } catch(e2) {
-    perfisSkeleton = [];
+    perfisSkeleton = Array.isArray(_lastBaselinePerfis) ? _lastBaselinePerfis : [];
   }
   res.json({
     perfis: perfisSkeleton,
