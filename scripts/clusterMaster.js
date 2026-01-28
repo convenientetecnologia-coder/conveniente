@@ -101,6 +101,46 @@ function createCluster() {
         pending.delete(msg.replyTo);
         return resolve(msg.data);
       }
+      // ===== perfis.json master-only writes (blindagem máxima) =====
+      // Workers NÃO escrevem perfis.json; pedem mutação ao master via IPC.
+      if (msg && msg.type === 'perfis:remove') {
+        const nome = String((msg.payload && msg.payload.nome) || '').trim();
+        const reason = String((msg.payload && msg.payload.reason) || 'worker_remove').slice(0, 180);
+        const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
+        const r = fileStore.withPerfisFileLockUpdate((arr) => {
+          return Array.isArray(arr) ? arr.filter(p => p && p.nome !== nome) : [];
+        }, { caller, reason });
+        return proc.send({ replyTo: msg.msgId, data: Object.assign({ ok: true, nome }, r) });
+      }
+      if (msg && msg.type === 'perfis:upsert') {
+        const perfil = (msg.payload && typeof msg.payload.perfil === 'object') ? msg.payload.perfil : null;
+        const nome = String(perfil && perfil.nome || '').trim();
+        const reason = String((msg.payload && msg.payload.reason) || 'worker_upsert').slice(0, 180);
+        const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
+        if (!perfil || !nome) return proc.send({ replyTo: msg.msgId, data: { ok: false, error: 'invalid_perfil' } });
+        const r = fileStore.withPerfisFileLockUpdate((arr) => {
+          const next = Array.isArray(arr) ? arr.slice() : [];
+          const i = next.findIndex(p => p && p.nome === nome);
+          if (i >= 0) next[i] = Object.assign({}, next[i], perfil);
+          else next.push(Object.assign({}, perfil));
+          return next;
+        }, { caller, reason });
+        return proc.send({ replyTo: msg.msgId, data: Object.assign({ ok: true, nome }, r) });
+      }
+      if (msg && msg.type === 'perfis:patch') {
+        const nome = String((msg.payload && msg.payload.nome) || '').trim();
+        const patch = (msg.payload && typeof msg.payload.patch === 'object') ? msg.payload.patch : null;
+        const reason = String((msg.payload && msg.payload.reason) || 'worker_patch').slice(0, 180);
+        const caller = String((msg.payload && msg.payload.caller) || `worker_${idx + 1}`).slice(0, 80);
+        if (!nome || !patch) return proc.send({ replyTo: msg.msgId, data: { ok: false, error: 'invalid_args' } });
+        const r = fileStore.withPerfisFileLockUpdate((arr) => {
+          const next = Array.isArray(arr) ? arr.slice() : [];
+          const i = next.findIndex(p => p && p.nome === nome);
+          if (i >= 0) next[i] = Object.assign({}, next[i], patch);
+          return next;
+        }, { caller, reason });
+        return proc.send({ replyTo: msg.msgId, data: Object.assign({ ok: true, nome }, r) });
+      }
       if (msg && msg.type === 'sup:reqOpen') {
         const { perfil } = msg;
         const r = supervisor.requestOpen(perfil, (msg && msg.opts) || {});

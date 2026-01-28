@@ -18,6 +18,7 @@ const reloadManager = require('./reloadManager.js');
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
+const perfisMasterClient = require('./perfisMasterClient.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
@@ -96,6 +97,12 @@ function attemptAutoRecoverPerfisJsonOnBoot() {
       return { ok: false, skipped: true, reason: 'no_profiles_found', base, dirs: dirs.length };
     }
 
+    // Blindagem: se este processo é child, NÃO escrever perfis.json diretamente.
+    // A recuperação oficial roda no boot do index.js (master).
+    if (String(process.env.IS_WORKER_CHILD || '').trim() === '1') {
+      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_skip', reason: 'worker_child_no_write', rebuiltCount: out.length, base }); } catch {}
+      return { ok: false, skipped: true, reason: 'worker_child_no_write', rebuiltCount: out.length, base };
+    }
     const wrote = fileStore.savePerfisJson(out, { allowEmpty: false });
     const ok = !!wrote;
     try {
@@ -289,8 +296,8 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
             const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
             const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
             if (udir && fs.existsSync(udir)) { try { fileStore.rimrafSync(udir); } catch {} }
-            const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-            try { savePerfisJson(arr2); } catch {}
+            // Master-only: remover do perfis.json via IPC
+            try { await perfisMasterClient.remove(nome, { reason: 'ct_archive_not_found_delete_local', caller: 'worker' }); } catch {}
           } catch {}
           try { await fileStore.removeDesired(nome); } catch {}
           try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
@@ -3225,8 +3232,8 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
             // Mesmo assim, remoção é best-effort e pode falhar em Windows (arquivo bloqueado).
             try { fileStore.rimrafSync(udir); } catch {}
           }
-          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-          try { savePerfisJson(arr2); } catch {}
+          // Master-only: remover do perfis.json via IPC
+          try { await perfisMasterClient.remove(nome, { reason: 'auto_delete_banned_profile', caller: 'worker' }); } catch {}
         } catch {}
         try { await fileStore.removeDesired(nome); } catch {}
         try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
@@ -3457,8 +3464,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           if (udir && fs.existsSync(udir)) {
             try { fileStore.rimrafSync(udir); } catch {}
           }
-          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-          try { savePerfisJson(arr2); } catch {}
+          // Master-only: remover do perfis.json via IPC
+          try { await perfisMasterClient.remove(nome, { reason: 'auto_delete_two_factor_profile', caller: 'worker' }); } catch {}
         } catch {}
         try { await fileStore.removeDesired(nome); } catch {}
         try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
@@ -3786,8 +3793,8 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
                 try { browserHelper.killChromeProfileProcesses(udir); } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
-              const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-              try { savePerfisJson(arr2); } catch {}
+              // Master-only: remover do perfis.json via IPC
+              try { await perfisMasterClient.remove(nome, { reason: 'auto_delete_two_factor_profile', caller: 'worker' }); } catch {}
             } catch {}
 
             // remover desired e diretório do perfil
@@ -4775,7 +4782,8 @@ async function ensureManifestValid(nome) {
       const derived = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
       perfil.userDataDir = derived;
       try { fs.mkdirSync(derived, { recursive: true }); } catch {}
-      try { savePerfisJson(perfisArr); } catch {}
+      // Master-only: persistir userDataDir via IPC (patch mínimo)
+      try { await perfisMasterClient.patch(nome, { userDataDir: derived }, { reason: 'manifest_autocure_set_userDataDir', caller: 'worker' }); } catch {}
       try { provisionAudit.append({ ts: Date.now(), event: 'manifest_autocure_set_userDataDir', nome: String(nome||''), userDataDir: String(derived).slice(0, 260) }); } catch {}
     }
   } catch {}
@@ -5381,14 +5389,16 @@ function sendReply(msgId, data) {
 }
 
 function loadPerfisJson() {
+  // Enterprise: NUNCA filtrar perfis.json por shard aqui.
+  // Shard deve afetar execução (controllers/queue), não o arquivo global.
   try {
-    const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
-    if (!SHARD_SET.size) return arr;
-    return arr.filter(p => p && p.nome && inShard(p.nome));
+    return fileStore.loadPerfisJson() || [];
   } catch { return []; }
 }
 function savePerfisJson(arr) {
-  try { fs.writeFileSync(perfisPath, JSON.stringify(arr, null, 2)); } catch {}
+  // Blindagem máxima: worker NÃO escreve perfis.json diretamente.
+  // Use perfisMasterClient (IPC) para mutações no processo master.
+  try { logger.warn('[PERFIS][BLOCKED] savePerfisJson called in worker; use master-only IPC'); } catch {}
 }
 
 function pickUaPreset() {
@@ -6697,7 +6707,7 @@ const handlers = {
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-    const preset = pickUaPreset();
+    const preset = fileStore.pickUaPreset();
     if (!preset) return { ok: false, error: 'UA preset esgotado.' };
 
     const cookiesArr = utils.normalizeCookies(cookies);
@@ -6723,9 +6733,8 @@ const handlers = {
     };
     try { fs.mkdirSync(perfilObj.userDataDir, { recursive: true }); } catch {}
 
-    const perfisArr = loadPerfisJson();
-    perfisArr.push(perfilObj);
-    savePerfisJson(perfisArr);
+    // Master-only: upsert no perfis.json via IPC (não inclui cookies no payload)
+    try { await perfisMasterClient.upsert(perfilObj, { reason: 'worker_criar_perfil', caller: 'worker' }); } catch {}
 
     try {
       await manifestStore.update(nome, (m) => {

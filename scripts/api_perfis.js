@@ -193,10 +193,15 @@ module.exports = (app, workerClient, fileStore) => {
         userDataDir // <- AGORA dentro do User Data do Chrome
       };
 
-      // Atualiza perfis.json
-      const perfisArr = fileStore.loadPerfisJson();
-      perfisArr.push(perfilObj);
-      fileStore.savePerfisJson(perfisArr);
+      // Atualiza perfis.json (serializado e atômico; evita corrida em cluster)
+      const wr = fileStore.withPerfisFileLockUpdate((arr) => {
+        const next = Array.isArray(arr) ? arr.slice() : [];
+        next.push(perfilObj);
+        return next;
+      }, { caller: 'api_perfis_create', reason: `create:${nome}` });
+      if (!wr || wr.ok === false) {
+        return res.json({ ok: false, error: (wr && wr.error) ? String(wr.error) : 'perfis_write_failed' });
+      }
 
       // Grava manifest.json SOMENTE no userDataDir externo
       // Ultra enterprise: gravar credenciais no manifest para permitir fluxo automático
@@ -1081,9 +1086,13 @@ module.exports = (app, workerClient, fileStore) => {
         logger.warn('Falha ao remover userDataDir externo em delete', { nome, error: e && e.message }, e);
       }
 
-      // Remove de perfis.json
-      const arr = fileStore.loadPerfisJson().filter(p => p && p.nome !== nome);
-      fileStore.savePerfisJson(arr);
+      // Remove de perfis.json (serializado e atômico; evita corrida em cluster)
+      const wr = fileStore.withPerfisFileLockUpdate((arr) => {
+        return Array.isArray(arr) ? arr.filter(p => p && p.nome !== nome) : [];
+      }, { caller: 'api_perfis_delete', reason: `delete:${nome}` });
+      if (!wr || wr.ok === false) {
+        return res.json({ ok: false, error: (wr && wr.error) ? String(wr.error) : 'perfis_write_failed' });
+      }
 
       // Remove desired.json COMPLETAMENTE
       try {
@@ -1318,9 +1327,16 @@ module.exports = (app, workerClient, fileStore) => {
         return m;
       });
 
-      // 2) Atualiza perfis.json (baseline do status e UI)
-      perfisArr[idx].cidade = String(novaCidade);
-      fileStore.savePerfisJson(perfisArr);
+      // 2) Atualiza perfis.json (baseline do status e UI) — serializado/atômico
+      const wr2 = fileStore.withPerfisFileLockUpdate((arr) => {
+        const next = Array.isArray(arr) ? arr.slice() : [];
+        const i2 = next.findIndex(p => p && p.nome === nome);
+        if (i2 >= 0) next[i2] = Object.assign({}, next[i2], { cidade: String(novaCidade) });
+        return next;
+      }, { caller: 'api_perfis_update_city', reason: `update_city:${nome}` });
+      if (!wr2 || wr2.ok === false) {
+        return res.json({ ok: false, error: (wr2 && wr2.error) ? String(wr2.error) : 'perfis_write_failed' });
+      }
 
       await issues.append(nome, 'mil_action', `admin_update_city from="${oldCidade||''}" to="${novaCidade}" by=${op}`);
 

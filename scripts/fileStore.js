@@ -92,6 +92,17 @@ function _appendProvisionAudit(obj) {
   } catch {}
 }
 
+function _hashPerfisNames(perfisArr) {
+  try {
+    const crypto = require('crypto');
+    const names = (Array.isArray(perfisArr) ? perfisArr : [])
+      .map(p => String(p && p.nome || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
+    return crypto.createHash('sha1').update(names.join('\n'), 'utf8').digest('hex');
+  } catch { return ''; }
+}
+
 function _resolveChromeUserDataRoot() {
   // Override explícito (enterprise): permite apontar para um Chrome portátil/alternativo.
   const ov = String(process.env.CONVENIENTE_CHROME_USER_DATA_ROOT || '').trim();
@@ -354,6 +365,54 @@ function savePerfisJson(arr, opts = null) {
       _appendIssuesFallbackSafe(`[system] {"ts":${Date.now()},"type":"mil_action","message":"perfis_write_failed ${(e && e.message) ? String(e.message).replace(/\"/g,'') : 'error'}","context":{"file":"${perfisPath.replace(/\\/g,'\\\\')}"}}`);
     } catch {}
     return false;
+  } finally {
+    releasePerfisLockFileSync(fd);
+  }
+}
+
+// Atualização serializada do perfis.json (melhor prática: evita corrida load->mutate->save entre processos).
+function withPerfisFileLockUpdate(mutator, meta = null) {
+  const info = (meta && typeof meta === 'object') ? meta : {};
+  const caller = String(info.caller || '').slice(0, 80) || null;
+  const reason = String(info.reason || '').slice(0, 180) || null;
+  let fd = null;
+  const startedAt = Date.now();
+  try {
+    fd = acquirePerfisLockFileSync();
+    const cur = _readPerfisJsonWithRetry({ retries: 8, delayMs: 25 });
+    const beforeLen = Array.isArray(cur) ? cur.length : 0;
+    const beforeHash = _hashPerfisNames(cur);
+    const next = (typeof mutator === 'function') ? mutator(Array.isArray(cur) ? cur : []) : cur;
+    if (!Array.isArray(next)) {
+      try { _appendProvisionAudit({ ts: Date.now(), event: 'perfis_mutate_rejected', ok: false, error: 'mutator_not_array', caller, reason, beforeLen }); } catch {}
+      return { ok: false, error: 'mutator_not_array' };
+    }
+    // Guardrail: nunca permitir []
+    if (next.length === 0 && String(process.env.PERFIS_ALLOW_EMPTY || '').trim() !== '1') {
+      try { _appendProvisionAudit({ ts: Date.now(), event: 'perfis_mutate_rejected', ok: false, error: 'empty_not_allowed', caller, reason, beforeLen }); } catch {}
+      return { ok: false, error: 'empty_not_allowed' };
+    }
+    const wrote = writeJsonAtomic(perfisPath, next);
+    const afterHash = _hashPerfisNames(next);
+    try {
+      _appendProvisionAudit({
+        ts: Date.now(),
+        event: 'perfis_mutate',
+        ok: !!wrote,
+        caller,
+        reason,
+        pid: process.pid,
+        beforeLen,
+        afterLen: next.length,
+        beforeHash: beforeHash || null,
+        afterHash: afterHash || null,
+        durationMs: Date.now() - startedAt
+      });
+    } catch {}
+    return { ok: !!wrote, beforeLen, afterLen: next.length };
+  } catch (e) {
+    try { _appendProvisionAudit({ ts: Date.now(), event: 'perfis_mutate_exception', ok: false, caller, reason, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
   } finally {
     releasePerfisLockFileSync(fd);
   }
@@ -833,6 +892,7 @@ module.exports = {
   readJsonSafe, writeJsonAtomic, ensureDesired, ensurePerfisJson,
   patchDesired, // agora async/lock
   loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
+  withPerfisFileLockUpdate,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
   resetDesiredAllOffOnBoot, getSysMetricsSnapshot, existsFile, existsDir,
   // Militares:
