@@ -1349,36 +1349,66 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
 }
 
 async function clickContinuarComo(page, { logPrefix='[messenger][continuar]', timeout = 15000 } = {}) {
-  // Seletor CSS universal para “Continuar como ...”
-  const btn = await waitAny(page, [
-    'button[type="submit"]',
-    'button[aria-label*="Continuar"]',
-    'div[role="button"][aria-label*="Continuar"]',
-    'button[aria-label*="Continue"]',
-    'div[role="button"][aria-label*="Continue"]'
-  ], { timeout, visible: true });
-
-  if (btn) {
-    try {
-      await page.evaluate(el => el.scrollIntoView({ behavior: 'instant', block: 'center' }), btn);
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
-        btn.click({ delay: 80 })
-      ]);
+  // Enterprise: NÃO clicar "qualquer submit" aqui.
+  // No Messenger, pode existir um <form id="login_form"> oculto com botão "Continuar".
+  // Aqui só podemos clicar explicitamente "Continuar como <Nome>" (ou "Continue as <Name>").
+  const t0 = Date.now();
+  const maxMs = Math.max(1000, Number(timeout || 0) || 0);
+  while ((Date.now() - t0) < maxMs) {
+    const clicked = await page.evaluate(() => {
+      const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      const isVisible = (el) => {
+        try {
+          const r = el.getBoundingClientRect();
+          if (!r || r.width < 2 || r.height < 2) return false;
+          const st = window.getComputedStyle(el);
+          if (!st || st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity || '1') < 0.05) return false;
       return true;
-    } catch (e) {
-      try { if (process.env.BROWSER_DEBUG === '1') { logger.debug(`${logPrefix} click via CSS falhou: ` + ((e && e.message) || e)); } } catch {}
+        } catch { return false; }
+      };
+      const cands = Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 240);
+      for (const el of cands) {
+        if (!el) continue;
+        const disabled = (el.getAttribute('aria-disabled') === 'true') || (el.getAttribute('disabled') != null) || (String(el.getAttribute('tabindex')||'') === '-1');
+        if (disabled) continue;
+        if (!isVisible(el)) continue;
+        const t = norm(el.innerText || el.textContent || '');
+        const al = norm(el.getAttribute('aria-label') || '');
+        if (t.includes('continuar como') || al.includes('continuar como') || t.includes('continue as') || al.includes('continue as')) {
+          try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch {}
+          el.click();
+          return true;
+        }
+      }
+      return false;
+    }).catch(() => false);
+
+    if (clicked) {
+      try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
+      return true;
     }
+    await sleep(250);
   }
+  try { if (process.env.BROWSER_DEBUG === '1') { logger.debug(`${logPrefix} nenhum 'Continuar como' detectado`); } } catch {}
+  return false;
+}
 
-  // Fallback por XPath
-  const ok = await clickByXPath(page, [
-    '//button[contains(.,"Continuar") or .//span[contains(.,"Continuar")]]',
-    '//div[@role="button"][.//span[contains(.,"Continuar")]]',
-    '//button[contains(.,"Continue") or .//span[contains(.,"Continue")]]'
-  ], { waitNav: true, timeoutNav: 15000, logPrefix });
-
-  return ok;
+// Facebook checkpoint helpers
+async function clickVoltarParaFacebook(page, { logPrefix='[fb][voltar]', timeout = 15000 } = {}) {
+  try {
+    if (!page) return false;
+    const ok = await clickByXPath(page, [
+      '//a[contains(.,"Voltar para o Facebook")]',
+      '//div[@role="button"][contains(.,"Voltar para o Facebook")]',
+      '//button[contains(.,"Voltar para o Facebook")]',
+      '//a[contains(.,"Back to Facebook")]',
+      '//div[@role="button"][contains(.,"Back to Facebook")]',
+      '//button[contains(.,"Back to Facebook")]'
+    ], { waitNav: true, timeoutNav: Math.max(5000, Number(timeout||0)||0), logPrefix });
+    return !!ok;
+  } catch {
+    return false;
+  }
 }
 
 async function detectMessengerPinModal(page) {
@@ -2268,12 +2298,26 @@ async function invocarHumano(browser, nome) {
     if (!page) return;
     // Traz foco ao navegador
     await bringWindowToFront(page);
+    // Enterprise: se já está em login/checkpoint/appeal/recover, NÃO navegar.
+    // O humano precisa ver a tela problemática atual.
+    let u0 = '';
+    try { u0 = (typeof page.url === 'function') ? (page.url() || '') : ''; } catch {}
+    const u = String(u0 || '').toLowerCase();
+    const isProblemUrl =
+      u.includes('/login') ||
+      u.includes('/checkpoint') ||
+      u.includes('/recover') ||
+      u.includes('/help/contact') ||
+      u.includes('/appeal');
+
+    if (!isProblemUrl) {
     // Vai para o painel vendedor Marketplace
     const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
     try {
       await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
       try { await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
+      }
     }
     // Garante focus de novo pós-navegação (opcional: repetir)
     await bringWindowToFront(page);
@@ -3074,6 +3118,14 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('voce esta de volta ao facebook') ||
         bodyTxt.includes('voltar para o facebook') && bodyTxt.includes('voce');
 
+      // 5c) Bug do Facebook: "Este conteúdo não está disponível no momento"
+      // Isso NÃO é um bloqueio real da conta; basta navegar para home/marketplace depois.
+      const hasContentNotAvailable =
+        bodyTxt.includes('este conteudo nao esta disponivel no momento') ||
+        bodyTxt.includes('este conteúdo não está disponível no momento') ||
+        bodyTxt.includes("this content isn't available") ||
+        bodyTxt.includes('this content is not available');
+
       // 6) Confirmação de identidade em andamento (pós upload / aguardando análise)
       // IMPORTANT (ultra enterprise):
       // - NÃO confundir "Recurso em análise" (appeal_submitted) com "Identidade em análise".
@@ -3111,7 +3163,7 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('identidade') ||
         bodyTxt.includes('video selfie');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, href0, path0, title0 };
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -3130,6 +3182,7 @@ async function detectLoginRequired(page) {
     const hasHackedReview = !!(v && v.hasHackedReview);
     const hasPasswordResetRequired = !!(v && v.hasPasswordResetRequired);
     const hasBackToFacebookUnlocked = !!(v && v.hasBackToFacebookUnlocked);
+    const hasContentNotAvailable = !!(v && v.hasContentNotAvailable);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
@@ -3151,6 +3204,18 @@ async function detectLoginRequired(page) {
       /\/checkpoint\//i.test(hrefNorm) ||
       /\/recover\//i.test(hrefNorm);
 
+    // Bug conhecido do Facebook: não deve travar automação.
+    if (hasContentNotAvailable) {
+      return {
+        loginRequired: false,
+        reason: 'content_not_available',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasContentNotAvailable, path }
+      };
+    }
+
     // 2FA sempre vence (não dá para “contornar” em outra aba)
     if (hasTwoFactorText) {
       return {
@@ -3160,6 +3225,19 @@ async function detectLoginRequired(page) {
         url: (v && v.href0) ? String(v.href0) : href,
         title,
         evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, path }
+      };
+    }
+
+    // Checkpoint "Voltar para o Facebook" (desbloqueado / de volta):
+    // exige apenas clicar em "Voltar para o Facebook" e seguir, não é login_form.
+    if (hasBackToFacebookUnlocked && !hasPasswordResetRequired && !hasHackedReview) {
+      return {
+        loginRequired: true,
+        reason: 'checkpoint_back_to_facebook',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasBackToFacebookUnlocked, path }
       };
     }
 
@@ -3988,6 +4066,7 @@ module.exports = {
   // ======= ADICIONE ESTES DOIS:
   resolveNonceIfPresent,
   clickContinuarComo,
+  clickVoltarParaFacebook,
   // ==== Messenger PIN modal (exportado p/ worker curador)
   detectMessengerPinModal,
   tryDismissMessengerPinModal,

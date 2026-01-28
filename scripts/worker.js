@@ -1970,6 +1970,16 @@ async function appealMonitorCheckNow(nome, ctrl) {
     // Refresh enterprise (com fallback + log explícito)
     await reloadPageEnterprise(pg, { nome, tag: 'appeal_monitor', timeoutMs: 45_000 }).catch(()=>null);
     await sleep(900);
+
+    // Se a página estiver em "Você está de volta ao Facebook" / "Voltar para o Facebook",
+    // isso é um checkpoint de SAÍDA. Clicamos e seguimos (senão o monitor pode ficar preso).
+    try {
+      const clickedBack = await browserHelper.clickVoltarParaFacebook(pg, { logPrefix: '[APPEAL][VOLTA]', timeout: 12000 }).catch(()=>false);
+      if (clickedBack) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'appeal_monitor_clicked_back_to_facebook', nome: String(nome||'') }); } catch {}
+        await sleep(1200);
+      }
+    } catch {}
     // Primeiro: suspensão/ban (UI dedicada). Isso evita classificar errado como "appeal".
     try {
       const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
@@ -2546,6 +2556,13 @@ async function runHackedReviewFlow(nome, ctrl, pg, { source = 'unknown', flowId 
       if (didAction) {
         await reloadPageEnterprise(pg, { nome, tag: `hacked_flow_${String(source||'').slice(0, 28)}`, timeoutMs: 60_000 }).catch(()=>null);
         await sleep(900);
+        try {
+          const clickedBack = await browserHelper.clickVoltarParaFacebook(pg, { logPrefix: '[HACKED][VOLTA]', timeout: 12000 }).catch(()=>false);
+          if (clickedBack) {
+            try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_clicked_back_to_facebook', flowId: id, nome: String(nome||'') }); } catch {}
+            await sleep(1200);
+          }
+        } catch {}
       }
 
       const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
@@ -4945,8 +4962,21 @@ async function activateOnce(nome, source = '', operator = '') {
         logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
         const manifest = await ensureManifestValid(nome);
         if (!manifest) {
-          await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
-          await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; perfil congelado 12h');
+          // Militar: "manifesto incompleto" NÃO pode virar freeze de 12h (isso engessa e mascara a causa).
+          // Em vez disso, entramos em modo humano + backoff e deixamos evidência clara do motivo.
+          try {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d = d || {}; d.perfis = d.perfis || {};
+              d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+              return d;
+            });
+          } catch {}
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            robeMeta[nome].activationHeldUntil = Date.now() + (30 * 60 * 1000);
+            robeMeta[nome].whyNotOpen = 'manifest_incomplete';
+          } catch {}
+          await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; modo humano + backoff 30min');
           if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
           return { ok:false, error: 'manifest_incomplete' };
         }
@@ -9423,6 +9453,9 @@ const AUTO_LR_CFG = {
   immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
   minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
   maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
+  // Falhas "infra" (busy_timeout / provision_lock_busy / quiesce_busy_backoff) não devem virar humano;
+  // apenas retry com backoff curto.
+  backoffBusyMs: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_BUSY_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)), // 6min
   backoffFailMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_FAIL_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)), // 45min
   totalTimeoutMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TOTAL_TIMEOUT_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)),
   stageTimeoutMs: {
@@ -9586,11 +9619,30 @@ async function autoLoginRemediateTick() {
     try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_done', nome, operator, ok: st.lastOk, error: st.lastError || null }); } catch {}
 
     if (!st.lastOk) {
-      // Persistir estado de falha (para abrir em modo humano e impedir loops automáticos)
-      try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
-      // Backoff em falha: evita loop no mesmo perfil.
-      st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
-      try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
+      const err = String(st.lastError || '').toLowerCase();
+      const infraFail =
+        err.includes('busy_timeout') ||
+        err.includes('pause_timeout') ||
+        err.includes('provision_lock_busy') ||
+        err.includes('quiesce_busy_backoff') ||
+        err.includes('maintenance_provision') ||
+        err.includes('supervisor_denied') ||
+        err.includes('supervisor_unreachable');
+
+      if (infraFail) {
+        // Militar: não culpar a conta por falha de infraestrutura/concorrência.
+        // Re-enfileira com backoff curto.
+        st.queued = true;
+        st.nextAt = Date.now() + AUTO_LR_CFG.backoffBusyMs;
+        try { await issues.append(nome, 'mil_action', `auto_login_remediate_retry_backoff ${Math.round(AUTO_LR_CFG.backoffBusyMs/60000)}min err=${st.lastError||''}`); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_infra_fail_backoff', nome, operator, error: String(st.lastError||'').slice(0,220), backoffMs: AUTO_LR_CFG.backoffBusyMs }); } catch {}
+      } else {
+        // Persistir estado de falha real (para abrir em modo humano e impedir loops automáticos)
+        try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
+        // Backoff em falha real: evita loop no mesmo perfil.
+        st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
+        try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
+      }
     } else {
       // Sucesso: limpa fila.
       st.nextAt = 0;
@@ -9958,6 +10010,50 @@ async function nurseTick() {
           (ctrl.humanControl === true || want.humanHold === true || (flagsR && flagsR.loginRemediateFailed === true));
         if (needsRecon) {
           await reconcileHumanState(nome, ctrl, { source: 'nurse' }).catch(()=>null);
+        }
+
+        // ===== Invariante militar: status "Login/Cookies falhou (humano)" / "PIN" => humano REALMENTE invocado =====
+        // Garantia: mesmo se a flag foi setada quando o navegador estava ausente (ou houve exceção),
+        // o nurse repara o estado e entra em modo humano determinístico.
+        const needHumanBecauseLoginFail = !!(flagsR && flagsR.loginRemediateFailed === true);
+        const needHumanBecausePin = !!(flagsR && flagsR.messengerPin === true);
+        if (needHumanBecauseLoginFail || needHumanBecausePin) {
+          const reason = needHumanBecausePin
+            ? `messenger_pin:${String(flagsR.messengerPinReason || '').slice(0, 120)}`
+            : `login_remediate_failed:${String(flagsR.loginRemediateFailedReason || '').slice(0, 160)}`;
+
+          // 1) desired humanHold=true (UI + persistência)
+          if (want.humanHold !== true) {
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d = d || {}; d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+                return d;
+              });
+            } catch {}
+          }
+
+          // 2) ctrl.humanControl + overlay + invocar humano (se houver browser)
+          try {
+            if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+              ctrl.trabalhando = false;
+              ctrl.humanControl = true;
+              try { await stopVirtus(nome); } catch {}
+              try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
+              try { await ensureHumanOverlay(nome, ctrl, { reason }); } catch {}
+              try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+              try { await snapshotStatusAndWrite(); } catch {}
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'human_mode_enter',
+                  nome: String(nome || ''),
+                  source: 'nurse_invariant_enforcer',
+                  reason: String(reason || '').slice(0, 220)
+                });
+              } catch {}
+            }
+          } catch {}
         }
       } catch {}
 
