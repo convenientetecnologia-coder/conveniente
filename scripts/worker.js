@@ -5389,10 +5389,13 @@ function sendReply(msgId, data) {
 }
 
 function loadPerfisJson() {
-  // Enterprise: NUNCA filtrar perfis.json por shard aqui.
-  // Shard deve afetar execução (controllers/queue), não o arquivo global.
+  // Enterprise: filtro por shard APENAS para a visão do worker (status/ações),
+  // para evitar que múltiplos workers reportem os mesmos perfis e se sobrescrevam no agregado.
+  // Importante: este filtro NÃO pode ser usado para "persistência" (worker não escreve perfis.json).
   try {
-    return fileStore.loadPerfisJson() || [];
+    const arr = fileStore.loadPerfisJson() || [];
+    if (!SHARD_SET || !SHARD_SET.size) return arr;
+    return arr.filter(p => p && p.nome && inShard(p.nome));
   } catch { return []; }
 }
 function savePerfisJson(arr) {
