@@ -926,6 +926,10 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       man.accountFlags.captchaCheckpointSource = String(source || '').slice(0, 80);
       man.accountFlags.captchaCheckpointUrl = String(url || '').slice(0, 300);
       man.accountFlags.captchaCheckpointTitle = String(title || '').slice(0, 200);
+      // Confirmação enterprise: evita falso positivo virar "humano invocado".
+      // Apenas a confirmação (call-site) deve setar isso; nurse usa para decidir invocação.
+      man.accountFlags.captchaCheckpointConfirmed = true;
+      man.accountFlags.captchaCheckpointConfirmedAt = Date.now();
       // Blindagem: captcha/checkpoint NÃO pode ficar mascarado por "login/cookies falhou".
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
@@ -943,27 +947,51 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 
   // UA+FP telemetry (captcha/checkpoint)
   try { await emitUaFpEventToCT(nome, { eventKind: 'captcha', url, title }); } catch {}
+}
 
-  // Captcha/Checkpoint: por ordem do usuário, invocar humano automaticamente.
+async function _confirmCaptchaStrong(nome, page, { source = '', firstReason = '' } = {}) {
+  const t0 = Date.now();
+  const src = String(source || '').slice(0, 80);
+  const reasons = [];
+  const evidences = [];
+  const okReason = (r) => /captcha_persona|checkpoint_captcha/i.test(String(r || ''));
   try {
-    await fileStore.withDesiredFileLockUpdate((d) => {
-      d = d || {}; d.perfis = d.perfis || {};
-      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-      return d;
+    for (let i = 0; i < 2; i++) {
+      const lr = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:false, reason:'' }));
+      const r = String(lr && lr.reason ? lr.reason : '');
+      reasons.push(r);
+      evidences.push(lr && lr.evidence ? lr.evidence : null);
+      if (!(lr && lr.loginRequired === true && okReason(r))) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'captcha_confirm_failed',
+            nome: String(nome||''),
+            source: src,
+            firstReason: String(firstReason||'').slice(0,160),
+            reasons: reasons.slice(0, 2),
+            durMs: Date.now() - t0
+          });
+        } catch {}
+        return { ok: false, reasons };
+      }
+      if (i === 0) await sleep(1600);
+    }
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e), reasons };
+  }
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'captcha_confirm_ok',
+      nome: String(nome||''),
+      source: src,
+      firstReason: String(firstReason||'').slice(0,160),
+      reasons: reasons.slice(0, 2),
+      durMs: Date.now() - t0
     });
   } catch {}
-  try {
-    const ctrl = controllers.get(nome);
-    if (ctrl) {
-      ctrl.trabalhando = false;
-      ctrl.humanControl = true;
-      try { await stopVirtus(nome); } catch {}
-      // Militar: modo humano => 1 aba (economia + evita deixar 2 abas abertas em captcha)
-      try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
-      try { await ensureHumanOverlay(nome, ctrl, { reason: 'captcha_checkpoint' }); } catch {}
-      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-    }
-  } catch {}
+  return { ok: true, reasons };
 }
 
 async function _buildHumanOverlayData(nome) {
@@ -1862,9 +1890,16 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
             return { ok: true, state: 'appeal_submitted', reason: rr2 };
           }
-          if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
-            try { await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            return { ok: true, state: 'captcha_checkpoint', reason: rr2 };
+          if (rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
+            // Política: captcha => humano, mas só se confirmado com prova forte (anti falso-positivo).
+            const cf = await _confirmCaptchaStrong(nome, p, { source: `probe:${String(source||'')}`, firstReason: rr2 }).catch(()=>({ ok:false }));
+            if (cf && cf.ok) {
+              try { await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+              return { ok: true, state: 'captcha_checkpoint', reason: rr2 };
+            }
+            // Não confirmado => não invocar humano; tratar como login_required para reavaliação.
+            try { await setLoginRequiredFlag(nome, { reason: `captcha_unconfirmed:${rr2}`, source: lr2.domain || source }); } catch {}
+            return { ok: true, state: 'login_required', reason: `captcha_unconfirmed:${rr2}` };
           }
           // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
@@ -1931,10 +1966,15 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       return { ok: true, state: 'appeal_submitted', reason: rr };
     }
-    if (rr.includes('captcha')) {
-      // Captcha: humano (política do usuário).
-      try { await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
-      return { ok: true, state: 'captcha_checkpoint', reason: rr };
+    if (rr.includes('captcha_persona') || rr.includes('checkpoint_captcha')) {
+      // Captcha: humano, mas só se confirmado com prova forte (anti falso-positivo).
+      const cf = await _confirmCaptchaStrong(nome, pg, { source: `probe:${String(source||'')}`, firstReason: rr }).catch(()=>({ ok:false }));
+      if (cf && cf.ok) {
+        try { await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+        return { ok: true, state: 'captcha_checkpoint', reason: rr };
+      }
+      try { await setLoginRequiredFlag(nome, { reason: `captcha_unconfirmed:${rr}`, source: lr.domain || source }); } catch {}
+      return { ok: true, state: 'login_required', reason: `captcha_unconfirmed:${rr}` };
     }
     if (rr.includes('checkpoint')) {
       // Checkpoint: NÃO invocar humano automaticamente (política do usuário).
@@ -4014,7 +4054,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           man.accountFlags.captchaCheckpointReason ||
           man.accountFlags.captchaCheckpointSource ||
           man.accountFlags.captchaCheckpointUrl ||
-          man.accountFlags.captchaCheckpointTitle
+          man.accountFlags.captchaCheckpointTitle ||
+          man.accountFlags.captchaCheckpointConfirmed ||
+          man.accountFlags.captchaCheckpointConfirmedAt
         ) {
           delete man.accountFlags.captchaCheckpoint;
           delete man.accountFlags.captchaCheckpointAt;
@@ -4022,6 +4064,8 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.captchaCheckpointSource;
           delete man.accountFlags.captchaCheckpointUrl;
           delete man.accountFlags.captchaCheckpointTitle;
+          delete man.accountFlags.captchaCheckpointConfirmed;
+          delete man.accountFlags.captchaCheckpointConfirmedAt;
         }
       }
       if (which.includes('identity')) {
@@ -10598,48 +10642,12 @@ async function nurseTick() {
         // Garantia: mesmo se a flag foi setada quando o navegador estava ausente (ou houve exceção),
         // o nurse repara o estado e entra em modo humano determinístico.
         const needHumanBecauseLoginFail = !!(flagsR && flagsR.loginRemediateFailed === true);
-        let needHumanBecauseCaptcha = !!(flagsR && flagsR.captchaCheckpoint === true) && /captcha/i.test(String(flagsR.captchaCheckpointReason || ''));
-
-        // Blindagem enterprise (P0 prejuízo):
-        // Se a conta está em cooldown 24h por LIMIT_POSTING, não faz sentido travar em "Modo Humano"
-        // por um captcha detectado durante tentativa de post. O Robe já está pausado; Virtus deve continuar.
-        // Evidência: várias contas ficaram com robePauseReason=limit_posting + captcha_persona -> humanHold.
-        if (needHumanBecauseCaptcha) {
-          try {
-            const man = await manifestStore.read(nome).catch(()=>null);
-            const pause = man ? String(man.robePauseReason || '') : '';
-            const until = man ? (Number(man.robeCooldownUntil || 0) || 0) : 0;
-            const longCooldown = until && until > (Date.now() + (20 * 60 * 60 * 1000)); // ~24h
-            if (pause === 'limit_posting' && longCooldown) {
-              // 1) limpar flag de captcha (senão reinvoca humano infinitamente)
-              try { await clearAccountFlags(nome, ['captchaCheckpoint']); } catch {}
-              // 2) sair do modo humano e liberar Virtus (Robe continua em cooldown via manifest)
-              try {
-                if (ctrl) {
-                  ctrl.humanControl = false;
-                  ctrl.trabalhando = false;
-                }
-              } catch {}
-              try {
-                await fileStore.withDesiredFileLockUpdate((d) => {
-                  d = d || {}; d.perfis = d.perfis || {};
-                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'on', humanHold: false };
-                  return d;
-                });
-              } catch {}
-              try {
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'captcha_deferred_due_limit_posting',
-                  nome: String(nome || ''),
-                  robePauseReason: pause,
-                  robeCooldownUntil: until
-                });
-              } catch {}
-              needHumanBecauseCaptcha = false;
-            }
-          } catch {}
-        }
+        // Captcha só é humano se for CONFIRMADO (anti falso-positivo).
+        // Compat: se flag antiga não tem confirmação, não invocar humano automaticamente.
+        const needHumanBecauseCaptcha =
+          !!(flagsR && flagsR.captchaCheckpoint === true) &&
+          !!(flagsR && flagsR.captchaCheckpointConfirmed === true) &&
+          /(captcha_persona|checkpoint_captcha)/i.test(String(flagsR.captchaCheckpointReason || ''));
         if (needHumanBecauseLoginFail || needHumanBecauseCaptcha) {
           const reason = needHumanBecauseCaptcha
             ? `captcha:${String(flagsR.captchaCheckpointReason || '').slice(0, 160)}`
