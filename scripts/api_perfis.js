@@ -1131,33 +1131,10 @@ module.exports = (app, workerClient, fileStore) => {
 
     try {
       const perfisArr = fileStore.loadPerfisJson() || [];
-      const humanOnlySet = new Set();
-
-      // 0) Pré-scan enterprise: identifica perfis que devem abrir em modo humano (PIL / estados que bloqueiam automação).
-      // Regra: se houver flags persistentes que exigem intervenção humana, NÃO inicia trabalho automaticamente.
-      // Obs.: não depende de humanHold (humanHold é usado como gate), então a decisão vem do manifest flags.
-      for (const p of perfisArr) {
-        try {
-          const nome = p && p.nome;
-          if (!nome) continue;
-          const man = await manifestStore.read(nome).catch(()=>null);
-          const f = (man && man.accountFlags && typeof man.accountFlags === 'object') ? man.accountFlags : {};
-          // Ultra enterprise: "humanOnly" aqui deve ser apenas para estados realmente bloqueantes,
-          // não para flags auto-resolvíveis (ex.: loginRemediateFailed/messengerPin podem estar presas
-          // mesmo com UI ok, e o worker reconciliador já limpa).
-          const shouldHumanOnly =
-            f.loginRequired === true ||
-            f.identityRequired === true ||
-            f.identitySubmitted === true ||
-            f.appealSubmitted === true ||
-            f.banned === true;
-          if (shouldHumanOnly) humanOnlySet.add(nome);
-        } catch {}
-      }
 
       // 1) PASSO ATÔMICO: desired.active=true para todos.
-      // Para perfis human-only: virtus OFF (abre para humano).
-      // Importante: NÃO usa humanHold como gate (humanHold impede abrir).
+      // Política (2026-01-28): abrir tudo NÃO usa flags antigas para decidir nada.
+      // Cada perfil, ao abrir, limpa flags não-terminais e revalida do zero (worker).
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
         for (const p of perfisArr) {
@@ -1166,7 +1143,7 @@ module.exports = (app, workerClient, fileStore) => {
           desired.perfis[nome] = {
             ...(desired.perfis[nome] || {}),
             active: true,
-            virtus: humanOnlySet.has(nome) ? 'off' : 'on'
+            virtus: 'on'
           };
         }
         return desired;
@@ -1175,11 +1152,7 @@ module.exports = (app, workerClient, fileStore) => {
       // LOG por perfil: bulk open
       for (const p of perfisArr) {
         try {
-          if (humanOnlySet.has(p.nome)) {
-            await issues.append(p.nome, 'mil_action', 'bulk_open_all: flags require human -> open_human_only');
-          } else {
-            await issues.append(p.nome, 'mil_action', 'bulk_open_all');
-          }
+          await issues.append(p.nome, 'mil_action', 'bulk_open_all');
         } catch {}
       }
 
@@ -1188,7 +1161,7 @@ module.exports = (app, workerClient, fileStore) => {
       // - NÃO iniciar activates em paralelo aqui.
       // A abertura real fica 100% a cargo do NURSE tick (que já tem MAX_OPEN_CONCURRENCY=1),
       // garantindo: Messenger OK -> Robe OK/erro -> próximo.
-      return res.json({ ok: true, total: perfisArr.length, humanOnly: humanOnlySet.size });
+      return res.json({ ok: true, total: perfisArr.length });
 
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });

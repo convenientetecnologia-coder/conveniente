@@ -1655,6 +1655,10 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     const pg = ctrl && ctrl.mainPage ? ctrl.mainPage : null;
     if (!pg) return { ok: false, error: 'no_main_page' };
 
+    // Política: abrir (open-all/manual) sempre limpa flags não-terminais e revalida do zero.
+    // Isso evita ficar preso em estados antigos (ex.: loginRequired/humanHold) após reinícios.
+    try { await clearNonTerminalFlagsForRecheck(nome, { by: 'system', trigger: `open:${String(source||'')}` }); } catch {}
+
     // 0) Ban/Suspensão
     try {
       const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
@@ -3992,6 +3996,23 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.messengerPinAt;
         }
       }
+      if (which.includes('captchaCheckpoint')) {
+        if (
+          man.accountFlags.captchaCheckpoint ||
+          man.accountFlags.captchaCheckpointAt ||
+          man.accountFlags.captchaCheckpointReason ||
+          man.accountFlags.captchaCheckpointSource ||
+          man.accountFlags.captchaCheckpointUrl ||
+          man.accountFlags.captchaCheckpointTitle
+        ) {
+          delete man.accountFlags.captchaCheckpoint;
+          delete man.accountFlags.captchaCheckpointAt;
+          delete man.accountFlags.captchaCheckpointReason;
+          delete man.accountFlags.captchaCheckpointSource;
+          delete man.accountFlags.captchaCheckpointUrl;
+          delete man.accountFlags.captchaCheckpointTitle;
+        }
+      }
       if (which.includes('identity')) {
         if (
           man.accountFlags.identityRequired ||
@@ -4029,6 +4050,9 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('messengerPin') && (prev && prev.messengerPin)) {
       await issues.append(nome, 'mil_action', `messenger_pin_cleared at=${new Date().toISOString()}`);
     }
+    if (which.includes('captchaCheckpoint') && (prev && prev.captchaCheckpoint)) {
+      await issues.append(nome, 'mil_action', `captcha_checkpoint_cleared at=${new Date().toISOString()}`);
+    }
     if (which.includes('identity') && (prev && (prev.identityRequired || prev.identitySubmitted))) {
       await issues.append(nome, 'mil_action', `identity_flags_cleared at=${new Date().toISOString()}`);
     }
@@ -4050,10 +4074,33 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
       delete robeMeta[nome].messengerPin;
       if (robeMeta[nome].whyNotOpen === 'messenger_pin_modal') delete robeMeta[nome].whyNotOpen;
     }
+    if (which.includes('captchaCheckpoint')) {
+      if (typeof robeMeta[nome].whyNotOpen === 'string' && robeMeta[nome].whyNotOpen.startsWith('captcha')) delete robeMeta[nome].whyNotOpen;
+    }
     if (which.includes('identity')) {
       if (typeof robeMeta[nome].whyNotOpen === 'string' && robeMeta[nome].whyNotOpen.startsWith('identity')) delete robeMeta[nome].whyNotOpen;
     }
     await snapshotStatusAndWrite();
+  } catch {}
+}
+
+// Política (2026-01-28): abrir tudo / abrir um / retomar trabalho => limpar flags não-terminais e revalidar do zero.
+// - NÃO limpa banned/twoFactor (terminais).
+// - NÃO reseta timers/cooldowns (robeCooldownUntil etc).
+async function clearNonTerminalFlagsForRecheck(nome, { by = 'system', trigger = 'open' } = {}) {
+  try {
+    try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin','captchaCheckpoint','identity']); } catch {}
+    try { await clearAppealSubmittedFlag(nome); } catch {}
+    try { await clearIdentityFlags(nome); } catch {}
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'flags_cleared_for_recheck',
+        nome: String(nome || ''),
+        by: String(by || ''),
+        trigger: String(trigger || '')
+      });
+    } catch {}
   } catch {}
 }
 
@@ -5118,11 +5165,23 @@ async function activateOnce(nome, source = '', operator = '') {
       return { ok: false, error: 'Nome ausente' };
     }
 
-    if (isFrozenNow(nome)) {
-      await reportAction(nome, 'mil_action', 'block_activate_frozen');
-      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
-      return { ok: false, error: 'account_is_frozen' };
-    }
+    // Política (2026-01-28): "congelado" é freeze de Robe/backoff, não deve bloquear abrir/retomar.
+    // Mantemos o frozenUntil para evitar thrash do Robe, mas permitimos abertura sob supervisor para revalidar.
+    try {
+      const fu = isFrozenNow(nome);
+      if (fu) {
+        let fr = '';
+        try { fr = String(robeMeta[nome]?.frozenReason || ''); } catch {}
+        // Só bloquear abertura em casos estruturais (manifest), onde abrir repetidamente é inútil.
+        const isStructural = /manifest_missing|manifest_incomplete/i.test(fr);
+        if (isStructural) {
+          await reportAction(nome, 'mil_action', `block_activate_frozen_structural reason=${fr||''}`);
+          if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+          return { ok: false, error: 'account_is_frozen' };
+        }
+        await reportAction(nome, 'mil_action', `allow_activate_while_frozen reason=${fr||''}`);
+      }
+    } catch {}
 
     const job = (async () => {
       logger.info('[WORKER][activateOnce] start', { nome, source });
@@ -8398,11 +8457,9 @@ const handlers = {
       ctrl.humanControl = false;
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
       try { await syncHumanOverlay(nome); } catch {}
-      // Enterprise: "Retomar trabalho" deve limpar TODO estado antigo para reavaliar o estado real.
-      // - limpa flags de login/falha e também estados de análise (appeal/identity) para não engessar.
-      try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
-      try { await clearAppealSubmittedFlag(nome); } catch {}
-      try { await clearIdentityFlags(nome); } catch {}
+      // Política (2026-01-28): retomar trabalho sempre limpa flags não-terminais e revalida do zero.
+      // NÃO limpa banned/twoFactor (terminais) e NÃO reseta timers/cooldowns.
+      try { await clearNonTerminalFlagsForRecheck(nome, { by: 'human', trigger: 'human-resume' }); } catch {}
       try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
       try {
         // Limpa runtime/meta que pode manter status antigo no painel.
@@ -8523,12 +8580,10 @@ const handlers = {
               return { ok: true, preflight };
             }
 
-            // Non-automatable: captcha/identity/checkpoint => humano direto.
-            // 2FA => exclusão automática.
+            // Non-automatable: captcha/checkpoint/2FA etc.
+            // Política do usuário: NÃO invocar humano automaticamente aqui; apenas manter Virtus OFF e registrar flags.
             const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
             const isCaptchaCheckpoint = rr.includes('captcha') || rr.includes('checkpoint');
-            const needsHuman =
-              rr.includes('checkpoint');
             if (isTwoFactor) {
               preflight.state = 'two_factor';
               try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
@@ -8549,21 +8604,6 @@ const handlers = {
               try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
               await snapshotStatusAndWrite();
               logger.info('[HANDLER] human-resume preflight -> captcha/checkpoint', { nome, reason: lr.reason || '' });
-              return { ok: true, preflight };
-            }
-            if (needsHuman) {
-              preflight.state = 'needs_human';
-              try { await setLoginRemediateFailedFlag(nome, { reason: lr.reason || 'login_requires_human', source: 'human_resume', stage: 'human_resume_preflight' }); } catch {}
-              try {
-                await fileStore.withDesiredFileLockUpdate((d) => {
-                  d.perfis = d.perfis || {};
-                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
-                  return d;
-                });
-              } catch {}
-              try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
-              await snapshotStatusAndWrite();
-              logger.info('[HANDLER] human-resume preflight -> needs_human', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
 
@@ -10036,7 +10076,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
 // Regra do usuário:
 // - Ao detectar a tela do Messenger "Esta página não está disponível", navegar para FB create item.
 // - Se cair em confirmação de SMS => considerar conta inutilizável (excluir + CT Excluídas).
-// - Caso contrário => congelar 12h (para evitar flapping e permitir reavaliação posterior).
+// - Caso contrário => congelar por backoff controlado (para evitar flapping e permitir reavaliação posterior).
 async function handleMessengerPageNotAvailable(nome, ctrl, pg, { source = 'unknown' } = {}) {
   const now = Date.now();
   try {
@@ -10105,11 +10145,13 @@ async function handleMessengerPageNotAvailable(nome, ctrl, pg, { source = 'unkno
       return { ok: true, action: 'autodelete_sms' };
     }
 
-    // Caso não seja SMS, congelar 12h (evita loop e dá tempo para reavaliar depois)
-    try { await freezeProfileFor(nome, 12 * 60 * 60 * 1000, 'messenger_page_not_available', 'system'); } catch {}
+    // Caso não seja SMS, aplicar backoff (evita loop e dá tempo para reavaliar depois).
+    // Política 2026-01-28: não usar 12h aqui; é agressivo e vira “conta travada” visualmente.
+    // O freeze se estende automaticamente se o problema persistir (freezeProfileFor já estende se existir).
+    try { await freezeProfileFor(nome, 30 * 60 * 1000, 'messenger_page_not_available', 'system'); } catch {}
     try { await ensureFrozenShutdown(nome, 'messenger_page_not_available'); } catch {}
-    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available -> frozen_12h'); } catch {}
-    return { ok: true, action: 'frozen_12h' };
+    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available -> frozen_30m'); } catch {}
+    return { ok: true, action: 'frozen_30m' };
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: Date.now(), event: 'messenger_page_not_available_handle_error', nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
