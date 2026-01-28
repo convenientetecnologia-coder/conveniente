@@ -42,14 +42,88 @@ function writeJsonAtomic(file, obj) {
     } finally {
       fs.closeSync(fd);
     }
-    try { fs.unlinkSync(file); } catch {}
-    try { fs.renameSync(tmp, file); }
-    catch {
-      fs.copyFileSync(tmp, file);
-      try { fs.unlinkSync(tmp); } catch {}
+    // Ultra enterprise (anti-loss): manter backup .bak e evitar janela sem arquivo.
+    const bak = file + '.bak';
+    const hadOld = fs.existsSync(file);
+    if (hadOld) {
+      try { fs.unlinkSync(bak); } catch {}
+      try { fs.copyFileSync(file, bak); } catch {}
     }
+    try { fs.unlinkSync(file); } catch {}
+    try {
+      fs.renameSync(tmp, file);
+    } catch {
+      try {
+        fs.copyFileSync(tmp, file);
+      } catch (e) {
+        // Se falhou escrever o novo, tenta restaurar backup
+        try {
+          if (hadOld && fs.existsSync(bak) && !fs.existsSync(file)) {
+            fs.copyFileSync(bak, file);
+          }
+        } catch {}
+        throw e;
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+    }
+    // Se escreveu com sucesso, cleanup best-effort do tmp e (opcional) do bak
+    try { fs.unlinkSync(tmp); } catch {}
     return true;
   } catch { return false; }
+}
+
+// ===== Recovery militar (boot) para perfis.json =====
+function _safeJsonParseFile(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+
+function _pickLatestBackupPerfisJson({ rootDir } = {}) {
+  const ROOT = rootDir || path.join(__dirname, '..');
+  const candidates = [];
+  const pushIf = (p) => {
+    try {
+      const st = fs.statSync(p);
+      if (st && st.isFile() && st.size > 2) candidates.push({ p, m: st.mtimeMs, s: st.size });
+    } catch {}
+  };
+  // 1) backups automáticos
+  try {
+    const base = path.join(ROOT, '_backup_auto');
+    if (fs.existsSync(base)) {
+      const dirs = fs.readdirSync(base).map(n => path.join(base, n)).filter(p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
+      for (const d of dirs) pushIf(path.join(d, 'dados', 'perfis.json'));
+    }
+  } catch {}
+  // 2) backup manual antigo (reset)
+  try {
+    const dirs = fs.readdirSync(ROOT).filter(n => /^_backup_local_before_reset_/i.test(n)).map(n => path.join(ROOT, n)).filter(p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
+    for (const d of dirs) pushIf(path.join(d, 'dados', 'perfis.json'));
+  } catch {}
+
+  candidates.sort((a, b) => b.m - a.m);
+  // valida conteúdo (array não-vazio)
+  for (const c of candidates) {
+    const arr = _safeJsonParseFile(c.p, null);
+    if (Array.isArray(arr) && arr.length > 0) return c.p;
+  }
+  return null;
+}
+
+function recoverPerfisJsonIfMissingOrEmpty() {
+  try {
+    const exists = fs.existsSync(perfisPath);
+    const arr = exists ? _safeJsonParseFile(perfisPath, null) : null;
+    const isEmpty = !exists || !Array.isArray(arr) || arr.length === 0;
+    if (!isEmpty) return { ok: true, recovered: false, reason: 'ok' };
+
+    const src = _pickLatestBackupPerfisJson({ rootDir: path.join(__dirname, '..') });
+    if (!src) return { ok: false, recovered: false, reason: 'no_backup_found' };
+    try { fs.copyFileSync(src, perfisPath); } catch (e) { return { ok: false, recovered: false, reason: 'copy_failed', error: (e && e.message) || String(e) }; }
+    return { ok: true, recovered: true, from: src };
+  } catch (e) {
+    return { ok: false, recovered: false, reason: 'exception', error: (e && e.message) || String(e) };
+  }
 }
 
 /** Garante desired.json (perfis) existe */
@@ -549,6 +623,7 @@ module.exports = {
   writeStatusSnapshot,
   getStatusField, writeStatusField, patchStatusField,
   getFullStatusSnapshot, updateStatusField,
+  recoverPerfisJsonIfMissingOrEmpty,
   setPerfilFrozenUntil,
   getPerfilFrozenUntil,
   // Novos helpers (APIs):

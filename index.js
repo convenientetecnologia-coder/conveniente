@@ -271,6 +271,13 @@ require('./scripts/api_stock.js')(app);
 // Troque todos os console.log por logger.info conforme checklist
 logger.info('[BOOT] Garantindo arquivos base...');
 fileStore.ensureDesired();
+// Militar: se perfis.json sumiu/zerou (crash/lock durante escrita), tente recuperar de _backup_auto antes de criar vazio.
+try {
+  const r = fileStore.recoverPerfisJsonIfMissingOrEmpty && fileStore.recoverPerfisJsonIfMissingOrEmpty();
+  try {
+    if (r && r.recovered) logger.warn('[BOOT][RECOVER] perfis.json recovered from backup', r);
+  } catch {}
+} catch {}
 fileStore.ensurePerfisJson();
 
 // Pausa automática de 24h em todos os perfis no boot, se ativado por env
