@@ -1241,6 +1241,15 @@ module.exports = (app, workerClient, fileStore) => {
       // 1) PASSO ATÔMICO: seta active:false e virtus:'off' em todos
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
+        // Se houver sessão open-all pendurada, encerrar aqui (close_all tem prioridade).
+        if (desired._openAll && desired._openAll.active === true) {
+          desired._openAll = {
+            ...(desired._openAll || {}),
+            active: false,
+            cancelledAt: Date.now(),
+            cancelledReason: 'close_all'
+          };
+        }
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;

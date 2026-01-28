@@ -2260,7 +2260,29 @@
     (function bindStopAllBtn(){
       const btn = document.getElementById('stopAllBtn');
       if (!btn) return;
-      btn.onclick = stopAllSequential;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
+        btn.disabled = true; btn.style.opacity='0.7'; btn.style.cursor='not-allowed'; btn.textContent='Fechando...';
+        setGlobalActionButtonsDisabled(true, { exclude: ['stopAllBtn'] });
+        try {
+          // Fonte de verdade: backend orquestra o close-all (provision_lock close_all + desired.active=false para todos).
+          const r = await fetch('/api/perfis/close-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_close_all' }
+          }).then(r => r.json()).catch(()=>null);
+          if (!r || r.ok === false) {
+            alert('Falha ao iniciar Fechar Todos: ' + ((r && r.error) || ''));
+          }
+          await new Promise(r => setTimeout(r, 600));
+          reloadPerfis();
+        } catch (e) {
+          alert('Erro ao iniciar Fechar Todos: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.style.opacity=''; btn.style.cursor=''; btn.textContent = btn.dataset.idleTxt || 'Fechar Todos';
+          setGlobalActionButtonsDisabled(false);
+        }
+      };
     })();
 
     // Bind do botão "Abrir Todos e Iniciar 24h"
