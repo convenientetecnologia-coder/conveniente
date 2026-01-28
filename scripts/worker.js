@@ -10598,7 +10598,48 @@ async function nurseTick() {
         // Garantia: mesmo se a flag foi setada quando o navegador estava ausente (ou houve exceção),
         // o nurse repara o estado e entra em modo humano determinístico.
         const needHumanBecauseLoginFail = !!(flagsR && flagsR.loginRemediateFailed === true);
-        const needHumanBecauseCaptcha = !!(flagsR && flagsR.captchaCheckpoint === true) && /captcha/i.test(String(flagsR.captchaCheckpointReason || ''));
+        let needHumanBecauseCaptcha = !!(flagsR && flagsR.captchaCheckpoint === true) && /captcha/i.test(String(flagsR.captchaCheckpointReason || ''));
+
+        // Blindagem enterprise (P0 prejuízo):
+        // Se a conta está em cooldown 24h por LIMIT_POSTING, não faz sentido travar em "Modo Humano"
+        // por um captcha detectado durante tentativa de post. O Robe já está pausado; Virtus deve continuar.
+        // Evidência: várias contas ficaram com robePauseReason=limit_posting + captcha_persona -> humanHold.
+        if (needHumanBecauseCaptcha) {
+          try {
+            const man = await manifestStore.read(nome).catch(()=>null);
+            const pause = man ? String(man.robePauseReason || '') : '';
+            const until = man ? (Number(man.robeCooldownUntil || 0) || 0) : 0;
+            const longCooldown = until && until > (Date.now() + (20 * 60 * 60 * 1000)); // ~24h
+            if (pause === 'limit_posting' && longCooldown) {
+              // 1) limpar flag de captcha (senão reinvoca humano infinitamente)
+              try { await clearAccountFlags(nome, ['captchaCheckpoint']); } catch {}
+              // 2) sair do modo humano e liberar Virtus (Robe continua em cooldown via manifest)
+              try {
+                if (ctrl) {
+                  ctrl.humanControl = false;
+                  ctrl.trabalhando = false;
+                }
+              } catch {}
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d = d || {}; d.perfis = d.perfis || {};
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'on', humanHold: false };
+                  return d;
+                });
+              } catch {}
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'captcha_deferred_due_limit_posting',
+                  nome: String(nome || ''),
+                  robePauseReason: pause,
+                  robeCooldownUntil: until
+                });
+              } catch {}
+              needHumanBecauseCaptcha = false;
+            }
+          } catch {}
+        }
         if (needHumanBecauseLoginFail || needHumanBecauseCaptcha) {
           const reason = needHumanBecauseCaptcha
             ? `captcha:${String(flagsR.captchaCheckpointReason || '').slice(0, 160)}`
