@@ -10241,6 +10241,9 @@ async function nurseTick() {
         if (!last || (now0 - last) > 60_000) { // no máximo 1x/min
           robeMeta.system.nurseZeroControllersSweepAt = now0;
           const desired0 = readJsonFile(desiredPath, { perfis: {} });
+          // Política (2026-01-28): se existe sessão de open-all ativa, NÃO retornar aqui.
+          // O open-all precisa justamente funcionar partindo de 0 browsers abertos.
+          const hasOpenAll = !!(desired0 && desired0._openAll && desired0._openAll.active === true);
           for (const nome of Object.keys(desired0.perfis || {})) {
             try {
               const flags = await readAccountFlags(nome).catch(()=>({}));
@@ -10264,10 +10267,15 @@ async function nurseTick() {
               }
             } catch {}
           }
+          if (hasOpenAll) {
+            // segue nurseTick completo (inclui OPEN-ALL SEQUENCER)
+          } else {
+            _nurseTickRunning = false;
+            return;
+          }
         }
       } catch {}
-      _nurseTickRunning = false;
-      return;
+      // Se não havia open-all ativo, já retornamos acima; caso contrário, continua.
     }
     // Ultra enterprise: durante provisionamento, pausar Virtus de forma controlada
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
