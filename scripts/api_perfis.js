@@ -1137,6 +1137,20 @@ module.exports = (app, workerClient, fileStore) => {
       // Cada perfil, ao abrir, limpa flags não-terminais e revalida do zero (worker).
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
+        // Sequencer global de abertura (ordem do dashboard/perfis.json):
+        // - um único perfil "inFlight" por vez, para o usuário acompanhar.
+        // - workers coordenam via desired.json (cross-process).
+        const names = perfisArr.map(p => p && p.nome).filter(Boolean);
+        desired._openAll = {
+          active: true,
+          startedAt: Date.now(),
+          idx: 0,
+          queue: names,
+          inFlight: null,
+          inFlightAt: 0,
+          inFlightBy: null,
+          op: String(op || 'bulk_open_all').slice(0, 120)
+        };
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;

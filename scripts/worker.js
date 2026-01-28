@@ -4092,6 +4092,16 @@ async function clearNonTerminalFlagsForRecheck(nome, { by = 'system', trigger = 
     try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin','captchaCheckpoint','identity']); } catch {}
     try { await clearAppealSubmittedFlag(nome); } catch {}
     try { await clearIdentityFlags(nome); } catch {}
+    // Política: não manter "congelado" para razões não-estruturais.
+    // Isso evita perfis ficarem presos como "ROBE Congelado" quando o usuário quer reavaliar do zero.
+    try {
+      const man = await manifestStore.read(nome).catch(()=>null);
+      const fr = man ? String(man.frozenReason || '') : '';
+      const structural = /manifest_missing|manifest_incomplete/i.test(fr);
+      if (man && man.frozenUntil && man.frozenUntil > Date.now() && !structural) {
+        await unfreezeProfile(nome, String(by || 'system'));
+      }
+    } catch {}
     try {
       provisionAudit.append({
         ts: Date.now(),
@@ -4981,11 +4991,24 @@ try {
       if (fs.existsSync(manifestPath)) {
         const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         if (man.frozenUntil && man.frozenUntil > Date.now()) {
-          robeMeta[p.nome] = robeMeta[p.nome] || {};
-          robeMeta[p.nome].frozenUntil = man.frozenUntil;
-          if (man.frozenReason) robeMeta[p.nome].frozenReason = man.frozenReason;
-          if (man.frozenAt) robeMeta[p.nome].frozenAt = man.frozenAt;
-          if (man.frozenSetBy) robeMeta[p.nome].frozenSetBy = man.frozenSetBy;
+          const fr = String(man.frozenReason || '');
+          const structural = /manifest_missing|manifest_incomplete/i.test(fr);
+          if (structural) {
+            robeMeta[p.nome] = robeMeta[p.nome] || {};
+            robeMeta[p.nome].frozenUntil = man.frozenUntil;
+            if (man.frozenReason) robeMeta[p.nome].frozenReason = man.frozenReason;
+            if (man.frozenAt) robeMeta[p.nome].frozenAt = man.frozenAt;
+            if (man.frozenSetBy) robeMeta[p.nome].frozenSetBy = man.frozenSetBy;
+          } else {
+            // Política (2026-01-28): não manter congelamento não-estrutural no disco.
+            try {
+              delete man.frozenUntil;
+              delete man.frozenReason;
+              delete man.frozenAt;
+              delete man.frozenSetBy;
+              writeJsonAtomic(manifestPath, man);
+            } catch {}
+          }
         }
       }
     }
@@ -10145,13 +10168,28 @@ async function handleMessengerPageNotAvailable(nome, ctrl, pg, { source = 'unkno
       return { ok: true, action: 'autodelete_sms' };
     }
 
-    // Caso não seja SMS, aplicar backoff (evita loop e dá tempo para reavaliar depois).
-    // Política 2026-01-28: não usar 12h aqui; é agressivo e vira “conta travada” visualmente.
-    // O freeze se estende automaticamente se o problema persistir (freezeProfileFor já estende se existir).
-    try { await freezeProfileFor(nome, 30 * 60 * 1000, 'messenger_page_not_available', 'system'); } catch {}
-    try { await ensureFrozenShutdown(nome, 'messenger_page_not_available'); } catch {}
-    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available -> frozen_30m'); } catch {}
-    return { ok: true, action: 'frozen_30m' };
+    // Política do usuário (2026-01-28): NÃO congelar por messenger_page_not_available.
+    // Ação: invocar humano imediatamente (hard-pause) e deixar o operador decidir.
+    try { await setLoginRequiredFlag(nome, { reason: 'messenger_page_not_available', source: 'messenger' }); } catch {}
+    try {
+      await fileStore.withDesiredFileLockUpdate((d) => {
+        d = d || {}; d.perfis = d.perfis || {};
+        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+        return d;
+      });
+    } catch {}
+    try {
+      ctrl.trabalhando = false;
+      ctrl.humanControl = true;
+      await stopVirtus(nome).catch(()=>{});
+      await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }).catch(()=>{});
+      await ensureHumanOverlay(nome, ctrl, { reason: 'messenger_page_not_available' }).catch(()=>{});
+      await browserHelper.invocarHumano(ctrl.browser, nome).catch(()=>{});
+      await snapshotStatusAndWrite().catch(()=>{});
+    } catch {}
+    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available -> invoke_human (no freeze)'); } catch {}
+    try { provisionAudit.append({ ts: Date.now(), event: 'messenger_page_not_available_invoke_human', nome: String(nome||''), source: String(source||'') }); } catch {}
+    return { ok: true, action: 'invoke_human' };
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: Date.now(), event: 'messenger_page_not_available_handle_error', nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
@@ -10321,6 +10359,105 @@ async function nurseTick() {
 
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
+
+    // ===================== OPEN-ALL SEQUENCER (ordem do dashboard) =====================
+    // Política do usuário: ao clicar "Abrir tudo", abrir em ordem e 1 por vez (sem “desordem” do cluster).
+    // Coordenação cross-process via desired.json:
+    // - desired._openAll.queue = ordem (perfis.json)
+    // - idx = próximo alvo
+    // - inFlight = alvo atual reservado (lock leve)
+    try {
+      const s0 = desired && desired._openAll && desired._openAll.active === true ? desired._openAll : null;
+      if (s0 && Array.isArray(s0.queue) && s0.queue.length) {
+        let session = null;
+        // Claim/reservar inFlight de forma atômica
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {}; d.perfis = d.perfis || {};
+            const s = d._openAll;
+            if (!s || s.active !== true || !Array.isArray(s.queue)) { session = null; return d; }
+            const now2 = Date.now();
+            // limpeza de inFlight stale (evita travar sequencer)
+            if (s.inFlight && s.inFlightAt && (now2 - Number(s.inFlightAt || 0)) > 180_000) {
+              s.inFlight = null;
+              s.inFlightAt = 0;
+              s.inFlightBy = null;
+              s.lastError = 'inFlight_stale_cleared';
+            }
+            // fim da fila
+            if ((Number(s.idx || 0) || 0) >= s.queue.length) {
+              s.active = false;
+              s.doneAt = now2;
+              s.inFlight = null;
+              s.inFlightAt = 0;
+              s.inFlightBy = null;
+              session = { ...s };
+              d._openAll = s;
+              return d;
+            }
+            if (!s.inFlight) {
+              const idx = (Number(s.idx || 0) || 0);
+              const target = String(s.queue[idx] || '');
+              if (target) {
+                s.inFlight = target;
+                s.inFlightAt = now2;
+                s.inFlightBy = `pid:${process.pid}`;
+                s.lastError = null;
+              }
+            }
+            session = { ...s };
+            d._openAll = s;
+            return d;
+          });
+        } catch {}
+
+        if (session && session.active === true && session.inFlight) {
+          const target = String(session.inFlight || '');
+          // Só o worker dono do shard executa a abertura; os outros aguardam.
+          if (target && (!SHARD_SET.size || inShard(target))) {
+            // Respeitar slots (não abrir se já está acima do cap do supervisor/worker)
+            // Importante: operator deve casar com _isBulkOpen para rodar probe (limpar flags + validar Messenger) após abrir.
+            const r = await activateOnce(target, 'nurse_open_all_seq', 'open_all_24h_seq').catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
+            const ok = !!(r && r.ok);
+            const err = r && r.error ? String(r.error) : '';
+            // Avança apenas se abriu/estava aberto, ou se falhou por algo "lógico" (não-infra).
+            // Se falhou por supervisor/ram/maintenance/kill_guard, mantém idx (retry) para preservar ordem.
+            const retryable =
+              err.includes('supervisor_denied') ||
+              err.includes('ram_insuficiente') ||
+              err.includes('maintenance_provision') ||
+              err.includes('kill_guard_until');
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d = d || {}; d.perfis = d.perfis || {};
+                const s = d._openAll;
+                if (!s || s.active !== true) return d;
+                const idx = (Number(s.idx || 0) || 0);
+                if (String(s.inFlight || '') === target) {
+                  if (ok || !retryable) {
+                    s.idx = idx + 1;
+                  } else {
+                    s.lastError = err.slice(0, 180) || 'retryable_fail';
+                  }
+                  s.inFlight = null;
+                  s.inFlightAt = 0;
+                  s.inFlightBy = null;
+                }
+                d._openAll = s;
+                return d;
+              });
+            } catch {}
+            // Não executar mais nada neste tick; mantém 1-por-vez.
+            _nurseTickRunning = false;
+            return;
+          }
+          // Não é nosso shard: só aguarda.
+          _nurseTickRunning = false;
+          return;
+        }
+      }
+    } catch {}
+    // =================== END OPEN-ALL SEQUENCER ===================
 
     // ===== PRIORIDADE ENTERPRISE: Recurso em análise (Pronto!) =====
     // Se existir qualquer perfil com appealSubmitted=true e appealNextCheckAt<=now e ainda sem controller,
