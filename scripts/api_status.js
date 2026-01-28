@@ -401,6 +401,14 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
 
   // 3) Monte array final de perfis SEMPRE do baseline (com overlay) e retorne shape original
   const perfisFinalINST = Array.from(baseMap.values());
+  // Progresso do "Abrir Todos" (sequenciador do desired.json) — para o dashboard acompanhar inFlight/idx/total.
+  let openAll = null;
+  try {
+    const d = (fileStore && typeof fileStore.readJsonSafe === 'function')
+      ? fileStore.readJsonSafe(fileStore.desiredPath, null)
+      : null;
+    openAll = d && d._openAll ? d._openAll : null;
+  } catch { openAll = null; }
   res.json({
     perfis: perfisFinalINST,
     robes: overlayINST && overlayINST.robes ? overlayINST.robes : {},
@@ -411,6 +419,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
       : (fileStore.getSysMetricsSnapshot ? fileStore.getSysMetricsSnapshot() : null),
     ops: opsState.getOps(),
     warning: warningINST,
+    openAll,
     ts: Date.now()
   });
   return;
@@ -489,7 +498,16 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     ts: Date.now(),
     error: String(e && e.message || e),
     autoMode: null,
-    sys: null
+    sys: null,
+    warning: 'status_failed',
+    openAll: (() => {
+      try {
+        const d = (fileStore && typeof fileStore.readJsonSafe === 'function')
+          ? fileStore.readJsonSafe(fileStore.desiredPath, null)
+          : null;
+        return d && d._openAll ? d._openAll : null;
+      } catch { return null; }
+    })()
   });
 }
 

@@ -1128,8 +1128,23 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/open-all-24h', async (req, res) => {
     const issues = require('./issues.js');
     const op = String(req.headers['x-operator'] || 'bulk_open_all');
+    let lockOwner = null;
 
     try {
+      // 0) Lock global: pausa Virtus/Robe durante o mapeamento (open_all_map).
+      // - Evita que login_remediate/virtus/robe rodem durante a abertura e baguncem o estado/ordem.
+      // - O nurse continua abrindo/probando 1 por vez (owner atravessa o lock).
+      lockOwner = `open_all_map:${Date.now()}`;
+      try {
+        const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 25 * 60 * 1000, meta: { kind: 'open_all_map', by: op.slice(0, 120) } });
+        if (!lk || !lk.ok) {
+          const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+          return res.json({ ok: false, error: `open_all_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
+        }
+      } catch (e) {
+        return res.json({ ok: false, error: `open_all_lock_error ${(e && e.message) || String(e)}` });
+      }
+
       const perfisArr = fileStore.loadPerfisJson() || [];
 
       // 1) PASSO ATÔMICO: desired.active=true para todos.
@@ -1149,7 +1164,9 @@ module.exports = (app, workerClient, fileStore) => {
           inFlight: null,
           inFlightAt: 0,
           inFlightBy: null,
-          op: String(op || 'bulk_open_all').slice(0, 120)
+          op: lockOwner,
+          lockOwner,
+          by: String(op || 'bulk_open_all').slice(0, 120)
         };
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
@@ -1157,7 +1174,10 @@ module.exports = (app, workerClient, fileStore) => {
           desired.perfis[nome] = {
             ...(desired.perfis[nome] || {}),
             active: true,
-            virtus: 'on'
+            // Durante mapeamento, manter Virtus pausado.
+            // O probe decide quais ficam virtus='on' (ok), mas o provision_lock segura a execução até o fim.
+            virtus: 'off',
+            humanHold: false
           };
         }
         return desired;
@@ -1175,9 +1195,11 @@ module.exports = (app, workerClient, fileStore) => {
       // - NÃO iniciar activates em paralelo aqui.
       // A abertura real fica 100% a cargo do NURSE tick (que já tem MAX_OPEN_CONCURRENCY=1),
       // garantindo: Messenger OK -> Robe OK/erro -> próximo.
-      return res.json({ ok: true, total: perfisArr.length });
+      return res.json({ ok: true, total: perfisArr.length, lockOwner });
 
     } catch (e) {
+      // Se falhou após adquirir o lock, liberar (best-effort).
+      try { if (lockOwner) provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });

@@ -1654,6 +1654,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
   try {
     const pg = ctrl && ctrl.mainPage ? ctrl.mainPage : null;
     if (!pg) return { ok: false, error: 'no_main_page' };
+    const src = String(source || '');
+    const isOpenAllMap = /open_all|open-all|bulk_open|openall/i.test(src);
 
     // Política: abrir (open-all/manual) sempre limpa flags não-terminais e revalida do zero.
     // Isso evita ficar preso em estados antigos (ex.: loginRequired/humanHold) após reinícios.
@@ -1722,9 +1724,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           return d;
         });
       } catch {}
-      setTimeout(() => {
-        try { handlers.start_work({ nome, operator: 'bulk_open_all_auto_probe' }).catch(()=>{}); } catch {}
-      }, 0);
+      // Política (2026-01-28): probe em open/open-all é APENAS mapeamento.
+      // Não iniciar start_work automaticamente aqui (isso causa login_remediate/humano fora de hora).
       return { ok: true, state: 'not_login_required' };
 
       let robeProbe = null;
@@ -1827,25 +1828,30 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           }
           if (rr2.includes('password_reset_required') || rr2.includes('hacked_review')) {
             try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
-            setTimeout(() => {
-              try {
-                const c = controllers.get(nome);
-                const p0 = (c && c.mainPage) ? c.mainPage : pg;
-                if (c && p0) runHackedReviewFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
-              } catch {}
-            }, 0);
+            if (!isOpenAllMap) {
+              setTimeout(() => {
+                try {
+                  const c = controllers.get(nome);
+                  const p0 = (c && c.mainPage) ? c.mainPage : pg;
+                  if (c && p0) runHackedReviewFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
+                } catch {}
+              }, 0);
+            }
             return { ok: true, state: rr2.includes('password_reset_required') ? 'password_reset_required' : 'hacked_review', reason: rr2 };
           }
           if (rr2.includes('identity')) {
             try { await setIdentityRequiredFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            // iniciar fluxo de identidade (gate+cooldown já protegem)
-            setTimeout(() => {
-              try {
-                const c = controllers.get(nome);
-                const p0 = (c && c.mainPage) ? c.mainPage : pg;
-                if (c && p0) runIdentityFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
-              } catch {}
-            }, 0);
+            // Política: durante open-all (mapeamento) apenas marcar; não executar fluxo agora.
+            if (!isOpenAllMap) {
+              // iniciar fluxo de identidade (gate+cooldown já protegem)
+              setTimeout(() => {
+                try {
+                  const c = controllers.get(nome);
+                  const p0 = (c && c.mainPage) ? c.mainPage : pg;
+                  if (c && p0) runIdentityFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
+                } catch {}
+              }, 0);
+            }
             return { ok: true, state: 'identity_required', reason: rr2 };
           }
           if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
@@ -1876,10 +1882,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           return d;
         });
       } catch {}
-      // Agenda start_work (sem travar activateOnce)
-      setTimeout(() => {
-        try { handlers.start_work({ nome, operator: 'bulk_open_all_auto_probe' }).catch(()=>{}); } catch {}
-      }, 0);
+      // Política (2026-01-28): não iniciar start_work automaticamente no probe.
       return { ok: true, state: 'not_login_required' };
     }
 
@@ -1893,26 +1896,31 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     if (rr.includes('password_reset_required') || rr.includes('hacked_review')) {
       // Fluxo hacked/password reset é auto-remediável e deve rodar imediatamente.
       try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
-      setTimeout(() => {
-        try {
-          const c = controllers.get(nome);
-          const p = (c && c.mainPage) ? c.mainPage : pg;
-          if (c && p) runHackedReviewFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
-        } catch {}
-      }, 0);
+      if (!isOpenAllMap) {
+        setTimeout(() => {
+          try {
+            const c = controllers.get(nome);
+            const p = (c && c.mainPage) ? c.mainPage : pg;
+            if (c && p) runHackedReviewFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
+          } catch {}
+        }, 0);
+      }
       return { ok: true, state: rr.includes('password_reset_required') ? 'password_reset_required' : 'hacked_review', reason: rr };
     }
     if (rr.includes('identity')) {
       try { await setIdentityRequiredFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
-      // Ultra enterprise: iniciar o fluxo de identidade imediatamente (sem travar activateOnce).
-      // Guardrails: gate + debounce dentro de runIdentityFlow.
-      setTimeout(() => {
-        try {
-          const c = controllers.get(nome);
-          const p = (c && c.mainPage) ? c.mainPage : pg;
-          if (c && p) runIdentityFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
-        } catch {}
-      }, 0);
+      // Durante open-all (mapeamento): apenas marcar.
+      if (!isOpenAllMap) {
+        // Ultra enterprise: iniciar o fluxo de identidade imediatamente (sem travar activateOnce).
+        // Guardrails: gate + debounce dentro de runIdentityFlow.
+        setTimeout(() => {
+          try {
+            const c = controllers.get(nome);
+            const p = (c && c.mainPage) ? c.mainPage : pg;
+            if (c && p) runIdentityFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
+          } catch {}
+        }, 0);
+      }
       return { ok: true, state: 'identity_required', reason: rr };
     }
     if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
@@ -4170,6 +4178,8 @@ function _isGlobalQuiesceKind(kindStr) {
     kind.includes('stock_provision') ||
     kind.includes('admin_configure') ||
     kind.includes('close_all') ||
+    kind.includes('open_all_map') ||
+    kind.includes('open_all') ||
     kind.includes('configure')
   );
 }
@@ -5086,7 +5096,23 @@ const activationLocks = new Map();
 async function activateOnce(nome, source = '', operator = '') {
   if (opening[nome]) return { ok: false, error: 'already_opening' };
 
+  const opTrim = String(operator || '').trim();
+  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim);
+  // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
+  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
+  const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
+  const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
+
   if (controllers.has(nome)) {
+    // Política do usuário: Abrir (bulk/manual/resume) deve limpar flags não-terminais e reavaliar
+    // MESMO com navegador já aberto (sem depender de fechar/reabrir).
+    const ctrl = controllers.get(nome);
+    if (ctrl && (_isBulkOpen || _isManualOpen)) {
+      try { await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: _isBulkOpen ? 'open_all_existing' : 'open_manual_existing' }); } catch {}
+      try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all_existing' : 'open_manual_existing' }); } catch {}
+      try { await snapshotStatusAndWrite(); } catch {}
+      return { ok: true, already: true, rechecked: true };
+    }
     return { ok: true, already: true };
   }
 
@@ -5103,12 +5129,6 @@ async function activateOnce(nome, source = '', operator = '') {
   // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
-  const opTrim = String(operator || '').trim();
-  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim);
-  // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
-  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
-  const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
-  const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
   try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
@@ -5142,10 +5162,7 @@ async function activateOnce(nome, source = '', operator = '') {
       const lock = active ? (cur.lock || null) : null;
       const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
       const kind = String(meta.kind || meta.op || '').toLowerCase();
-      const isGlobalPauseKind =
-        kind.includes('stock_provision') ||
-        kind.includes('admin_configure') ||
-        kind.includes('close_all');
+      const isGlobalPauseKind = _isGlobalQuiesceKind(kind);
       if (active && isGlobalPauseKind && !provisionLock.ownerMatchesOperator(lock, op)) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activationHeldUntil = Date.now() + 5000;
@@ -10411,13 +10428,21 @@ async function nurseTick() {
           });
         } catch {}
 
+        // Se a sessão terminou (idx>=len), liberar lock global do open_all_map (best-effort).
+        try {
+          if (session && session.active === false && (session.lockOwner || session.op)) {
+            try { provisionLock.release({ owner: String(session.lockOwner || session.op) }); } catch {}
+          }
+        } catch {}
+
         if (session && session.active === true && session.inFlight) {
           const target = String(session.inFlight || '');
           // Só o worker dono do shard executa a abertura; os outros aguardam.
           if (target && (!SHARD_SET.size || inShard(target))) {
             // Respeitar slots (não abrir se já está acima do cap do supervisor/worker)
-            // Importante: operator deve casar com _isBulkOpen para rodar probe (limpar flags + validar Messenger) após abrir.
-            const r = await activateOnce(target, 'nurse_open_all_seq', 'open_all_24h_seq').catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
+            // Operator: usar o lockOwner/op da sessão para atravessar o provision_lock open_all_map.
+            const openOp = String(session.lockOwner || session.op || 'open_all_24h_seq');
+            const r = await activateOnce(target, 'nurse_open_all_seq', openOp).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
             const ok = !!(r && r.ok);
             const err = r && r.error ? String(r.error) : '';
             // Avança apenas se abriu/estava aberto, ou se falhou por algo "lógico" (não-infra).
@@ -10446,6 +10471,14 @@ async function nurseTick() {
                 d._openAll = s;
                 return d;
               });
+            } catch {}
+            // Se acabou a fila, tentar liberar provision_lock do open_all_map (best-effort).
+            try {
+              const d2 = readJsonFile(desiredPath, { perfis: {} });
+              const s2 = d2 && d2._openAll ? d2._openAll : null;
+              if (s2 && s2.active === false && (s2.lockOwner || s2.op)) {
+                try { provisionLock.release({ owner: String(s2.lockOwner || s2.op) }); } catch {}
+              }
             } catch {}
             // Não executar mais nada neste tick; mantém 1-por-vez.
             _nurseTickRunning = false;

@@ -1099,10 +1099,38 @@
       const robeQueue = st?.robeQueue || [];
 
       // Banner global de aviso (warning) caso backend informe
-      const warn =
+      let warn =
         (st && st.warning) ||
         (!perfisOk ? 'Falha temporária em /api/perfis (mantendo cache no dashboard)' : null) ||
         (!statusOk ? 'Falha temporária em /api/status (mantendo cache no dashboard)' : null);
+
+      // Progresso do Abrir Todos (backend) — evita “perder” qual é a próxima conta.
+      try {
+        const oa = st && st.openAll ? st.openAll : null;
+        if (oa && oa.active === true && Array.isArray(oa.queue) && oa.queue.length) {
+          const total = oa.queue.length;
+          const idx = Math.max(0, Math.min(total, Number(oa.idx || 0) || 0));
+          const target = String(oa.inFlight || oa.queue[idx] || '');
+          const msg = `Abrindo (${Math.min(total, idx + 1)}/${total}) ${target ? ('— ' + target) : ''}`;
+          warn = warn ? (msg + '; ' + warn) : msg;
+          const startBtn = document.getElementById('startAllBtn');
+          if (startBtn) {
+            if (!startBtn.dataset.idleTxt) startBtn.dataset.idleTxt = startBtn.textContent;
+            startBtn.disabled = true;
+            startBtn.style.opacity = '0.7';
+            startBtn.style.cursor = 'not-allowed';
+            startBtn.textContent = total ? `Abrindo... ${idx}/${total}` : 'Abrindo...';
+          }
+        } else {
+          const startBtn = document.getElementById('startAllBtn');
+          if (startBtn && startBtn.dataset.idleTxt && !isMassActionRunning()) {
+            startBtn.disabled = false;
+            startBtn.style.opacity = '';
+            startBtn.style.cursor = '';
+            startBtn.textContent = startBtn.dataset.idleTxt;
+          }
+        }
+      } catch {}
       if (warn) {
         let b = document.getElementById('globalWarn');
         if (!b) {
@@ -1987,6 +2015,11 @@
       window.electronAPI.listPerfis = () => fetch('/api/perfis').then(r => r.json()).catch(() => null);
     }
 
+    // DEPRECATED (2026-01-28):
+    // O open-all é orquestrado no backend (POST /api/perfis/open-all-24h) para evitar:
+    // - pulo de ordem por splice no array durante o loop
+    // - startWork indevido durante mapeamento
+    // - concorrência com nurseTick/cluster
     async function startAllSequential() {
       if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
       if (stopAllLock)  { alertMassActionRunning(); return; }
@@ -2234,7 +2267,29 @@
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
       if (!btn) return;
-      btn.onclick = startAllSequential;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
+        btn.disabled = true; btn.style.opacity='0.7'; btn.style.cursor='not-allowed'; btn.textContent='Abrindo...';
+        setGlobalActionButtonsDisabled(true, { exclude: ['startAllBtn'] });
+        try {
+          // Fonte de verdade: backend orquestra o open-all (ordem do perfis.json, 1 por vez, pausa global).
+          const r = await fetch('/api/perfis/open-all-24h', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_open_all' }
+          }).then(r => r.json()).catch(()=>null);
+          if (!r || r.ok === false) {
+            alert('Falha ao iniciar Abrir Todos: ' + ((r && r.error) || ''));
+          }
+          await new Promise(r => setTimeout(r, 600));
+          reloadPerfis();
+        } catch (e) {
+          alert('Erro ao iniciar Abrir Todos: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.style.opacity=''; btn.style.cursor=''; btn.textContent = btn.dataset.idleTxt || 'Abrir Todos 24h';
+          setGlobalActionButtonsDisabled(false);
+        }
+      };
     })();
 
     // Bind do botão "Invocar Tudo"
