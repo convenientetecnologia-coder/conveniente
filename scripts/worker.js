@@ -1585,7 +1585,7 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
 
 // Anti-tela-preta (about:blank) ao abrir em modo humano:
 // Garante que exista uma aba real navegada ANTES de invocar humano/overlay.
-async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'human_entry' } = {}) {
+async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'human_entry', noFront = false } = {}) {
   try {
     if (!ctrl || !ctrl.browser) return { ok: false, error: 'no_browser' };
     const pages = await ctrl.browser.pages().catch(()=>[]);
@@ -1604,7 +1604,10 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
       }
     }
     if (!p0) return { ok: false, error: 'no_page' };
-    try { await p0.bringToFront?.().catch(()=>{}); } catch {}
+    // Política: em open-all (mapeamento), evitar trazer janela ao foco (reduz “flicker” via acesso remoto).
+    if (!noFront) {
+      try { await p0.bringToFront?.().catch(()=>{}); } catch {}
+    }
 
     const targetUrl =
       (prefer === 'messenger')
@@ -1639,7 +1642,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 // - Garante que exista uma aba navegada para que detectores consigam rodar.
 async function ensureNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'open_entry' } = {}) {
   try {
-    const r = await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer, reasonBase }).catch(()=>null);
+    const r = await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer, reasonBase, noFront: /open_all/i.test(String(reasonBase||'')) }).catch(()=>null);
     return r && r.ok ? r : { ok: false, error: (r && r.error) ? r.error : 'failed' };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
@@ -5380,7 +5383,16 @@ async function activateOnce(nome, source = '', operator = '') {
                     await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' });
                   }
                 } catch {}
-                try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
+                // Política: em open-all, o probe é obrigatório e deve bloquear avanço se o Messenger não ficou pronto.
+                // (senão abre o próximo cedo demais e “atropela” o Chrome)
+                try {
+                  const pr = await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }).catch(e => ({ ok:false, error: (e && e.message) ? String(e.message) : String(e) }));
+                  if (_isBulkOpen && (!pr || pr.ok !== true)) {
+                    throw new Error(`open_all_probe_failed:${String(pr && pr.error ? pr.error : 'probe_failed')}`);
+                  }
+                } catch (e) {
+                  if (_isBulkOpen) throw e;
+                }
               }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
@@ -10402,6 +10414,13 @@ async function nurseTick() {
             const s = d._openAll;
             if (!s || s.active !== true || !Array.isArray(s.queue)) { session = null; return d; }
             const now2 = Date.now();
+            // Governança militar: throttle entre passos (evita abrir em “rajadas”).
+            const nextAt = Number(s.nextAt || 0) || 0;
+            if (nextAt && now2 < nextAt) {
+              session = { ...s, throttled: true };
+              d._openAll = s;
+              return d;
+            }
             // limpeza de inFlight stale (evita travar sequencer)
             if (s.inFlight && s.inFlightAt && (now2 - Number(s.inFlightAt || 0)) > 180_000) {
               s.inFlight = null;
@@ -10443,6 +10462,11 @@ async function nurseTick() {
           }
         } catch {}
 
+        if (session && session.throttled === true) {
+          _nurseTickRunning = false;
+          return;
+        }
+
         if (session && session.active === true && session.inFlight) {
           const target = String(session.inFlight || '');
           // Só o worker dono do shard executa a abertura; os outros aguardam.
@@ -10459,7 +10483,11 @@ async function nurseTick() {
               err.includes('supervisor_denied') ||
               err.includes('ram_insuficiente') ||
               err.includes('maintenance_provision') ||
-              err.includes('kill_guard_until');
+              err.includes('kill_guard_until') ||
+              err.includes('open_all_probe_failed') ||
+              err.includes('messenger_marketplace_not_ready');
+            const stepGapMs = parseInt(process.env.OPEN_ALL_STEP_GAP_MS || '1400', 10);
+            const retryBackoffMs = parseInt(process.env.OPEN_ALL_RETRY_BACKOFF_MS || '6000', 10);
             try {
               await fileStore.withDesiredFileLockUpdate((d) => {
                 d = d || {}; d.perfis = d.perfis || {};
@@ -10469,8 +10497,10 @@ async function nurseTick() {
                 if (String(s.inFlight || '') === target) {
                   if (ok || !retryable) {
                     s.idx = idx + 1;
+                    s.nextAt = Date.now() + Math.max(300, stepGapMs);
                   } else {
                     s.lastError = err.slice(0, 180) || 'retryable_fail';
+                    s.nextAt = Date.now() + Math.max(800, retryBackoffMs);
                   }
                   s.inFlight = null;
                   s.inFlightAt = 0;
