@@ -3126,6 +3126,16 @@ async function detectLoginRequired(page) {
         bodyTxt.includes("this content isn't available") ||
         bodyTxt.includes('this content is not available');
 
+      // 5d) Bug/erro do Messenger: "Esta página não está disponível"
+      // Caso real: Messenger mostra tela de erro e o worker precisa checar FB /marketplace/create para inferir SMS cliff.
+      const hasPageNotAvailable =
+        bodyTxt.includes('esta pagina nao esta disponivel') ||
+        bodyTxt.includes('esta página não está disponível') ||
+        bodyTxt.includes("this page isn't available") ||
+        bodyTxt.includes('this page is not available') ||
+        bodyTxt.includes('o link que voce acessou pode estar corrompido') ||
+        bodyTxt.includes('o link que você acessou pode estar corrompido');
+
       // 6) Confirmação de identidade em andamento (pós upload / aguardando análise)
       // IMPORTANT (ultra enterprise):
       // - NÃO confundir "Recurso em análise" (appeal_submitted) com "Identidade em análise".
@@ -3163,7 +3173,7 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('identidade') ||
         bodyTxt.includes('video selfie');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, href0, path0, title0 };
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, hasPageNotAvailable, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -3183,6 +3193,7 @@ async function detectLoginRequired(page) {
     const hasPasswordResetRequired = !!(v && v.hasPasswordResetRequired);
     const hasBackToFacebookUnlocked = !!(v && v.hasBackToFacebookUnlocked);
     const hasContentNotAvailable = !!(v && v.hasContentNotAvailable);
+    const hasPageNotAvailable = !!(v && v.hasPageNotAvailable);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
@@ -3213,6 +3224,19 @@ async function detectLoginRequired(page) {
         url: (v && v.href0) ? String(v.href0) : href,
         title,
         evidence: { hasContentNotAvailable, path }
+      };
+    }
+
+    // Bug/erro do Messenger: "Esta página não está disponível"
+    // Não é login_form/captcha; requer checagem ativa no worker (FB create -> SMS cliff?).
+    if (hasPageNotAvailable) {
+      return {
+        loginRequired: true,
+        reason: 'messenger_page_not_available',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasPageNotAvailable, path }
       };
     }
 

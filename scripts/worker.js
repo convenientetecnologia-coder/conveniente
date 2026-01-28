@@ -9736,6 +9736,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
       let cleared = [];
       let setVirtusOn = false;
+      let clearedHumanControl = false;
       try {
         const flagsPrev = await readAccountFlags(nome).catch(()=>({}));
         const needsClear =
@@ -9754,12 +9755,23 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
           d = d || {};
           d.perfis = d.perfis || {};
           const cur = d.perfis[nome] || {};
-          if (cur && cur.active === true && cur.virtus === 'off') {
-            d.perfis[nome] = { ...cur, virtus: 'on', humanHold: false };
-            setVirtusOn = true;
+          if (cur && cur.active === true && (cur.virtus === 'off' || cur.humanHold === true)) {
+            const nextVirtus = (cur.virtus === 'off') ? 'on' : (cur.virtus || 'on');
+            d.perfis[nome] = { ...cur, virtus: nextVirtus, humanHold: false };
+            setVirtusOn = (cur.virtus === 'off');
           }
           return d;
         });
+      } catch {}
+
+      // IMPORTANT (desengessamento real):
+      // Se a UI está saudável, mas o controller ficou em humanControl=true, o nurse não retoma Virtus.
+      // Limpar humanControl aqui é seguro porque acabamos de provar "não é loginRequired".
+      try {
+        if (ctrl && ctrl.humanControl === true) {
+          ctrl.humanControl = false;
+          clearedHumanControl = true;
+        }
       } catch {}
 
       try {
@@ -9769,7 +9781,8 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
           nome: String(nome||''),
           url: String(safeUrl(pg)||'').slice(0,220),
           cleared,
-          setVirtusOn
+          setVirtusOn,
+          clearedHumanControl
         });
       } catch {}
       if (setVirtusOn) {
@@ -9828,6 +9841,91 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: now, event: 'human_reconcile_error', nome: String(nome||''), error: msg.slice(0,220) }); } catch {}
+    return { ok: false, error: msg };
+  }
+}
+
+// ===== Tratador enterprise: Messenger "Esta página não está disponível" =====
+// Regra do usuário:
+// - Ao detectar a tela do Messenger "Esta página não está disponível", navegar para FB create item.
+// - Se cair em confirmação de SMS => considerar conta inutilizável (excluir + CT Excluídas).
+// - Caso contrário => congelar 12h (para evitar flapping e permitir reavaliação posterior).
+async function handleMessengerPageNotAvailable(nome, ctrl, pg, { source = 'unknown' } = {}) {
+  const now = Date.now();
+  try {
+    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, skipped: 'no_browser' };
+    if (!pg) {
+      const pages = await ctrl.browser.pages().catch(()=>[]);
+      pg = (pages && pages[0]) || null;
+    }
+    if (!pg) return { ok: false, skipped: 'no_pages' };
+
+    robeMeta[nome] = robeMeta[nome] || {};
+    const cd = Number(robeMeta[nome].messengerPageNotAvailCooldownUntil || 0) || 0;
+    if (cd && cd > now) return { ok: false, skipped: 'cooldown' };
+    // cooldown curto anti-loop (a ação pode demorar a refletir)
+    robeMeta[nome].messengerPageNotAvailCooldownUntil = now + (10 * 60 * 1000);
+
+    try { provisionAudit.append({ ts: now, event: 'messenger_page_not_available_handle_begin', nome: String(nome||''), source: String(source||'') }); } catch {}
+    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available_detected -> probe_fb_create'); } catch {}
+
+    try {
+      ctrl.trabalhando = false;
+      await stopVirtus(nome).catch(()=>{});
+    } catch {}
+
+    // Navegar na MESMA aba para FB create item (checagem determinística)
+    const targetUrl = 'https://www.facebook.com/marketplace/create/item';
+    try { await pg.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+    await sleep(1400);
+
+    let urlNow = '';
+    try { urlNow = (typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch {}
+
+    const norm = (s) => {
+      try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+      catch { return String(s || '').toLowerCase(); }
+    };
+    let body = '';
+    try {
+      body = await Promise.race([
+        pg.evaluate(() => (document && document.body && (document.body.innerText || document.body.textContent)) ? String(document.body.innerText || document.body.textContent) : ''),
+        new Promise(res => setTimeout(() => res(''), 9000))
+      ]);
+    } catch {}
+
+    const b = norm(body);
+    const u = norm(urlNow);
+    const isSmsConfirm =
+      u.includes('/confirm_code') ||
+      b.includes('insira o codigo de confirmacao do sms') ||
+      b.includes('insira o codigo de confirmacao') && b.includes('sms') ||
+      (b.includes('fb-') && b.includes('reenviar sms'));
+
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'messenger_page_not_available_probe_result',
+        nome: String(nome||''),
+        url: String(urlNow||'').slice(0, 220),
+        isSmsConfirm: !!isSmsConfirm
+      });
+    } catch {}
+
+    if (isSmsConfirm) {
+      try { await issues.append(nome, 'mil_action', 'sms_confirmation_required -> autodelete'); } catch {}
+      try { await setBannedFlag(nome, { reason: 'sms_confirmation_required', snippet: 'confirm_code_sms' }); } catch {}
+      return { ok: true, action: 'autodelete_sms' };
+    }
+
+    // Caso não seja SMS, congelar 12h (evita loop e dá tempo para reavaliar depois)
+    try { await freezeProfileFor(nome, 12 * 60 * 60 * 1000, 'messenger_page_not_available', 'system'); } catch {}
+    try { await ensureFrozenShutdown(nome, 'messenger_page_not_available'); } catch {}
+    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available -> frozen_12h'); } catch {}
+    return { ok: true, action: 'frozen_12h' };
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try { provisionAudit.append({ ts: Date.now(), event: 'messenger_page_not_available_handle_error', nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
     return { ok: false, error: msg };
   }
 }
@@ -10198,19 +10296,22 @@ async function nurseTick() {
       } catch {}
 
       if (want.humanHold === true) {
-        // Overlay deve aparecer e se manter (retry periódico com debounce).
-        try {
-          if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+        // Se o navegador estiver aberto, mantém overlay e NÃO roda automação.
+        // Mas se o navegador estiver FECHADO, não podemos “engessar”: o nurse deve poder abrir (e o reconciliador limpa falso-positivo).
+        if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+          // Overlay deve aparecer e se manter (retry periódico com debounce).
+          try {
             robeMeta[nome] = robeMeta[nome] || {};
             const last = Number(robeMeta[nome].overlayNurseLastAt || 0) || 0;
             if (!last || (now - last) > 45_000) {
               robeMeta[nome].overlayNurseLastAt = now;
               await syncHumanOverlay(nome).catch(()=>{});
             }
-          }
-        } catch {}
-        await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
-        continue;
+          } catch {}
+          await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
+          continue;
+        }
+        // Sem ctrl/browser: cai no fluxo normal de abertura (want.active && !ctrl) abaixo.
       }
 
       {
@@ -10243,8 +10344,16 @@ async function nurseTick() {
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
 
-        if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) continue;
-        if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) continue;
+        if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
+          const left = Math.max(0, robeMeta[nome].activationHeldUntil - Date.now());
+          await appendIssueNurseDebounced(nome, 'mil_action', `nurse_open_deferred activationHeldUntil=${Math.round(left/1000)}s`, 'nurse_open_deferred_activationHeld');
+          continue;
+        }
+        if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
+          const left = Math.max(0, robeMeta[nome].reopenAt - Date.now());
+          await appendIssueNurseDebounced(nome, 'mil_action', `nurse_open_deferred reopenAt=${Math.round(left/1000)}s`, 'nurse_open_deferred_reopenAt');
+          continue;
+        }
 
         if (slotsInUse >= MAX_OPEN_CONCURRENCY) continue;
         slotsInUse++;
@@ -10524,6 +10633,13 @@ async function nurseTick() {
                   url: lr.url || '',
                   title: lr.title || ''
                 });
+              } catch {}
+            } else if (rr.includes('messenger_page_not_available')) {
+              // Regra militar do usuário: Messenger erro -> checar FB create item -> SMS? excluir, senão freeze 12h.
+              try {
+                if (ctrl && ctrl.browser && ctrl.browser.isConnected?.() && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true)) {
+                  await handleMessengerPageNotAvailable(nome, ctrl, (lrPage || p0), { source: 'lr_scan' }).catch(()=>null);
+                }
               } catch {}
             } else if (rr.includes('login_form')) {
               // Blindagem anti-loop: se já falhou e foi marcado, não re-tenta automaticamente.
