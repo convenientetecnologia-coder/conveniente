@@ -23,6 +23,102 @@ const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
 
 // =========================
+// AUTO-RECOVERY perfis.json (ultra enterprise)
+// =========================
+// Contexto real de incidente: perfis.json pode ficar "[]" por corrida/IO/rename window.
+// Isso derruba o painel inteiro. Este auto-heal reconstrói perfis.json a partir do Chrome User Data.
+function resolveChromeUserDataRootForRecovery() {
+  if (process.platform === 'win32') {
+    const la = process.env.LOCALAPPDATA;
+    if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+  }
+  return path.join(os.homedir(), '.config', 'google-chrome');
+}
+function readJsonSafeSync(p, fb) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fb; }
+}
+function attemptAutoRecoverPerfisJsonOnBoot() {
+  const startedAt = Date.now();
+  try {
+    const cur = (() => { try { return fileStore.loadPerfisJson(); } catch { return []; } })();
+    if (Array.isArray(cur) && cur.length > 0) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_skip', reason: 'not_empty', curLen: cur.length }); } catch {}
+      return { ok: true, skipped: true, reason: 'not_empty', curLen: cur.length };
+    }
+
+    const chromeRoot = resolveChromeUserDataRootForRecovery();
+    const base = path.join(chromeRoot, 'Conveniente');
+    if (!fs.existsSync(base)) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_skip', reason: 'chrome_dir_missing', base }); } catch {}
+      return { ok: false, skipped: true, reason: 'chrome_dir_missing', base };
+    }
+
+    const dirs = (() => {
+      try { return fs.readdirSync(base).slice(0, 5000); } catch { return []; }
+    })();
+
+    const perfis = [];
+    const errors = [];
+    for (const n of dirs) {
+      const nome = String(n || '').trim();
+      if (!nome) continue;
+      const userDataDir = path.join(base, nome);
+      let st = null;
+      try { st = fs.statSync(userDataDir); } catch { st = null; }
+      if (!st || !st.isDirectory()) continue;
+      const manifestPath = path.join(userDataDir, 'manifest.json');
+      if (!fs.existsSync(manifestPath)) continue;
+      const man = readJsonSafeSync(manifestPath, null);
+      if (!man || typeof man !== 'object') continue;
+      // se manifest.nome divergir, prioriza manifest (fonte de verdade)
+      const realName = String(man.nome || nome || '').trim();
+      if (!realName) continue;
+      perfis.push({
+        nome: realName,
+        cidade: man.cidade ? String(man.cidade) : null,
+        label: man.label ? String(man.label) : null,
+        uaPresetId: man.uaPresetId ? String(man.uaPresetId) : null,
+        userDataDir
+      });
+    }
+
+    // Dedup por nome e ordena
+    const by = new Map();
+    for (const p of perfis) {
+      const k = String(p && p.nome || '').trim();
+      if (!k) continue;
+      if (!by.has(k)) by.set(k, p);
+    }
+    const out = Array.from(by.values()).sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+    if (!out.length) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_no_profiles_found', base, dirs: dirs.length }); } catch {}
+      return { ok: false, skipped: true, reason: 'no_profiles_found', base, dirs: dirs.length };
+    }
+
+    const wrote = fileStore.savePerfisJson(out, { allowEmpty: false });
+    const ok = !!wrote;
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'perfis_autorecover_done',
+        ok,
+        durationMs: Date.now() - startedAt,
+        rebuiltCount: out.length,
+        base
+      });
+    } catch {}
+    return { ok, rebuiltCount: out.length, base };
+  } catch (e) {
+    try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_exception', error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+// Executa no boot do worker (best-effort). Não pode travar o processo.
+try { attemptAutoRecoverPerfisJsonOnBoot(); } catch {}
+
+// =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
 // =========================
 // Objetivo: prova irrefutável de que o worker carregou o código novo (e com quais envs).
