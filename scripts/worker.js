@@ -1322,7 +1322,7 @@ async function _installOverlayOnPage(nome, page) {
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida';
             else if (f.twoFactor) statusTxt = '2FA requerido (excluída)';
-            else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
+            else if (f.captchaCheckpoint) statusTxt = 'Captcha (humano)';
             else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
             else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
             else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
@@ -1432,7 +1432,8 @@ async function syncHumanOverlay(nome) {
 
 async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
   try {
-    const force = /captcha|checkpoint|invoke_human|captcha_checkpoint/i.test(String(reason || '').toLowerCase());
+    // Política do usuário: overlay/humano automático apenas para captcha e falha de login/cookies (não para checkpoint).
+    const force = /captcha|invoke_human|captcha_checkpoint/i.test(String(reason || '').toLowerCase());
     if (!HUMAN_OVERLAY_CFG.enabled && !force) {
       try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_ensure_skipped_disabled', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
       return;
@@ -1667,7 +1668,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     // 1) LoginRequired/Identity/Appeal/Captcha
     const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
-      // 1) Messenger OK — antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
+      // 1) Messenger OK — política (2026-01-28):
+      // No boot/open-all, validar APENAS Messenger. NÃO abrir aba Facebook create para "provar" Robe.
+      // O Robe valida/abre sua aba no momento do post (fila do Robe), sem concorrência no boot.
       try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_ok', nome: String(nome||''), source: String(source||'') }); } catch {}
 
       // Espera UI real do Messenger Marketplace (anti-atropelo).
@@ -1699,6 +1702,26 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           return { ok: false, error: 'messenger_marketplace_not_ready' };
         }
       } catch {}
+
+      // ===== POLÍTICA (2026-01-28): Messenger-only boot =====
+      // Se Messenger está ok, NÃO executar o probe do Robe/Facebook create no boot/open-all.
+      // Libera automação agora; o Robe fará sua própria validação quando for postar.
+      try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_skipped', nome: String(nome||''), source: String(source||'') }); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_clear', nome: String(nome||''), source: String(source||'') }); } catch {}
+      try { await clearAppealSubmittedFlag(nome); } catch {}
+      try { await clearIdentityFlags(nome); } catch {}
+      try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin']); } catch {}
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {}; d.perfis = d.perfis || {};
+          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+          return d;
+        });
+      } catch {}
+      setTimeout(() => {
+        try { handlers.start_work({ nome, operator: 'bulk_open_all_auto_probe' }).catch(()=>{}); } catch {}
+      }, 0);
+      return { ok: true, state: 'not_login_required' };
 
       let robeProbe = null;
       try {
@@ -1893,10 +1916,16 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       return { ok: true, state: 'appeal_submitted', reason: rr };
     }
-    if (rr.includes('captcha') || rr.includes('checkpoint')) {
-      // Captcha/Checkpoint: aqui SIM invoca humano automaticamente (ordem do usuário).
+    if (rr.includes('captcha')) {
+      // Captcha: humano (política do usuário).
       try { await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
       return { ok: true, state: 'captcha_checkpoint', reason: rr };
+    }
+    if (rr.includes('checkpoint')) {
+      // Checkpoint: NÃO invocar humano automaticamente (política do usuário).
+      // Trata como login_required para o pipeline decidir (login_remediate/fluxos).
+      try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
+      return { ok: true, state: 'login_required', reason: rr };
     }
 
     // login_form / outros: se for "login/cookies falhou", aqui é válido invocar humano
@@ -10305,9 +10334,12 @@ async function nurseTick() {
       // senão o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
       try {
         const flagsR = await readAccountFlags(nome).catch(()=>({}));
+        // Política do usuário: em modo humano (humanHold/humanControl), o sistema NÃO fica “olhando” o navegador.
+        // Só volta a agir quando o operador mandar retomar. Isso evita loop visual (pisca/foco) e concorrência.
         const needsRecon =
           (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) &&
-          (ctrl.humanControl === true || want.humanHold === true || (flagsR && flagsR.loginRemediateFailed === true));
+          (ctrl.humanControl !== true) &&
+          (want.humanHold !== true);
         if (needsRecon) {
           await reconcileHumanState(nome, ctrl, { source: 'nurse' }).catch(()=>null);
         }
@@ -10316,10 +10348,10 @@ async function nurseTick() {
         // Garantia: mesmo se a flag foi setada quando o navegador estava ausente (ou houve exceção),
         // o nurse repara o estado e entra em modo humano determinístico.
         const needHumanBecauseLoginFail = !!(flagsR && flagsR.loginRemediateFailed === true);
-        const needHumanBecausePin = !!(flagsR && flagsR.messengerPin === true);
-        if (needHumanBecauseLoginFail || needHumanBecausePin) {
-          const reason = needHumanBecausePin
-            ? `messenger_pin:${String(flagsR.messengerPinReason || '').slice(0, 120)}`
+        const needHumanBecauseCaptcha = !!(flagsR && flagsR.captchaCheckpoint === true) && /captcha/i.test(String(flagsR.captchaCheckpointReason || ''));
+        if (needHumanBecauseLoginFail || needHumanBecauseCaptcha) {
+          const reason = needHumanBecauseCaptcha
+            ? `captcha:${String(flagsR.captchaCheckpointReason || '').slice(0, 160)}`
             : `login_remediate_failed:${String(flagsR.loginRemediateFailedReason || '').slice(0, 160)}`;
 
           // 1) desired humanHold=true (UI + persistência)
@@ -10334,8 +10366,12 @@ async function nurseTick() {
           }
 
           // 2) ctrl.humanControl + overlay + invocar humano (se houver browser)
+          // Idempotência: se já está em humano+hold, não reinvocar (evita pisca/foco infinito).
           try {
             if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
+              if (ctrl.humanControl === true && want.humanHold === true) {
+                // já está em humano determinístico; não tocar
+              } else {
               ctrl.trabalhando = false;
               ctrl.humanControl = true;
               try { await stopVirtus(nome); } catch {}
@@ -10352,6 +10388,7 @@ async function nurseTick() {
                   reason: String(reason || '').slice(0, 220)
                 });
               } catch {}
+              }
             }
           } catch {}
         }
