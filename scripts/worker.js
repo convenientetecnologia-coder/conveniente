@@ -296,8 +296,38 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
             const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
             const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
             if (udir && fs.existsSync(udir)) { try { fileStore.rimrafSync(udir); } catch {} }
-            // Master-only: remover do perfis.json via IPC
-            try { await perfisMasterClient.remove(nome, { reason: 'ct_archive_not_found_delete_local', caller: 'worker' }); } catch {}
+            // Remover do perfis.json (fonte do dashboard):
+            // 1) Preferência: IPC para o master
+            // 2) Fallback: lock+mutate direto (garantia de limpeza mesmo se IPC falhar / não-child)
+            let removedOk = false;
+            let removedErr = null;
+            try {
+              const rr2 = await perfisMasterClient.remove(nome, { reason: 'ct_archive_not_found_delete_local', caller: 'worker' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+              removedOk = !!(rr2 && rr2.ok);
+              removedErr = rr2 && rr2.error ? String(rr2.error) : null;
+            } catch (e) {
+              removedOk = false;
+              removedErr = (e && e.message) ? String(e.message) : String(e);
+            }
+            if (!removedOk) {
+              try {
+                const rr3 = fileStore.withPerfisFileLockUpdate((arr) => {
+                  const cur = Array.isArray(arr) ? arr : [];
+                  return cur.filter(p => p && p.nome !== nome);
+                }, { caller: 'worker_ct_archive_queue', reason: 'ct_archive_not_found_delete_local_fallback' });
+                removedOk = !!(rr3 && rr3.ok);
+              } catch {}
+            }
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'ct_archive_not_found_remove_perfis_result',
+                flowId: flowId || null,
+                profileName: String(nome||''),
+                ok: !!removedOk,
+                error: removedOk ? null : String(removedErr || 'remove_failed').slice(0, 200)
+              });
+            } catch {}
           } catch {}
           try { await fileStore.removeDesired(nome); } catch {}
           try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
