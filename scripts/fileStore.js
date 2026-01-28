@@ -49,20 +49,27 @@ function writeJsonAtomic(file, obj) {
       try { fs.unlinkSync(bak); } catch {}
       try { fs.copyFileSync(file, bak); } catch {}
     }
-    try { fs.unlinkSync(file); } catch {}
+    // Evita janela longa sem arquivo: tenta swap atômico usando rename.
+    // Ordem preferida:
+    // 1) se existe arquivo antigo, renomeia para .bak (mantém algo em disco)
+    // 2) renomeia tmp -> file
+    // Se qualquer etapa falhar, tenta fallback copy+restore.
     try {
+      if (hadOld) {
+        try { fs.renameSync(file, bak); } catch {}
+      }
       fs.renameSync(tmp, file);
-    } catch {
+    } catch (e) {
       try {
         fs.copyFileSync(tmp, file);
-      } catch (e) {
+      } catch (e2) {
         // Se falhou escrever o novo, tenta restaurar backup
         try {
           if (hadOld && fs.existsSync(bak) && !fs.existsSync(file)) {
             fs.copyFileSync(bak, file);
           }
         } catch {}
-        throw e;
+        throw e2;
       } finally {
         try { fs.unlinkSync(tmp); } catch {}
       }
@@ -132,15 +139,97 @@ function ensureDesired() {
 }
 /** Garante perfis.json existe */
 function ensurePerfisJson() {
-  try { if (!fs.existsSync(perfisPath)) writeJsonAtomic(perfisPath, []); } catch {}
+  try {
+    if (!fs.existsSync(perfisPath)) {
+      // criação inicial pode ser [] (sem perfis ainda)
+      writeJsonAtomic(perfisPath, []);
+    }
+  } catch {}
 }
 
 //// PERFIS: carregar e salvar array principal ////
-function loadPerfisJson() {
-  return readJsonSafe(perfisPath, []);
+const perfisLockPath = perfisPath + '.lock';
+function _sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {}
 }
-function savePerfisJson(arr) {
-  writeJsonAtomic(perfisPath, arr || []);
+function acquirePerfisLockFileSync({ retries = 400, delayMs = 20 } = {}) {
+  let tries = 0;
+  while (tries++ < retries) {
+    try {
+      const fd = fs.openSync(perfisLockPath, 'wx');
+      return fd;
+    } catch {
+      _sleepSync(delayMs);
+    }
+  }
+  throw new Error('perfis_lock_timeout');
+}
+function releasePerfisLockFileSync(fd) {
+  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
+  try { fs.unlinkSync(perfisLockPath); } catch {}
+}
+function _readPerfisJsonWithRetry({ retries = 30, delayMs = 15 } = {}) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      // Se existe lock, aguarda um pouco antes de ler (evita ler "janela" de swap)
+      if (fs.existsSync(perfisLockPath)) {
+        _sleepSync(delayMs);
+        continue;
+      }
+      if (fs.existsSync(perfisPath)) {
+        const raw = fs.readFileSync(perfisPath, 'utf8');
+        const j = JSON.parse(raw);
+        if (Array.isArray(j)) return j;
+      }
+      // fallback: .bak
+      const bak = perfisPath + '.bak';
+      if (fs.existsSync(bak)) {
+        try {
+          const raw2 = fs.readFileSync(bak, 'utf8');
+          const j2 = JSON.parse(raw2);
+          if (Array.isArray(j2)) return j2;
+        } catch {}
+      }
+    } catch {}
+    _sleepSync(delayMs);
+  }
+  // último recurso: se não conseguiu ler, retorna [] (mas isso NÃO deve ser gravado sem permissão)
+  return [];
+}
+function loadPerfisJson() {
+  return _readPerfisJsonWithRetry({ retries: 40, delayMs: 20 });
+}
+function _appendIssuesFallbackSafe(line) {
+  try {
+    const fp = path.join(dadosDir, 'issues_fallback.log');
+    fs.appendFileSync(fp, String(line || '') + '\n', 'utf8');
+  } catch {}
+}
+function savePerfisJson(arr, opts = null) {
+  const options = (opts && typeof opts === 'object') ? opts : {};
+  const allowEmpty = (options.allowEmpty === true) || (String(process.env.PERFIS_ALLOW_EMPTY || '').trim() === '1');
+  const next = Array.isArray(arr) ? arr : [];
+  // Guardrail militar: nunca gravar [] acidentalmente em produção.
+  if (next.length === 0 && !allowEmpty) {
+    const cur = _readPerfisJsonWithRetry({ retries: 8, delayMs: 30 });
+    if (Array.isArray(cur) && cur.length > 0) {
+      _appendIssuesFallbackSafe(`[system] {"ts":${Date.now()},"type":"mil_action","message":"perfis_guardrail_blocked_empty_write curLen=${cur.length}","context":{"file":"${perfisPath.replace(/\\/g,'\\\\')}"}}`);
+      return false;
+    }
+  }
+
+  let fd = null;
+  try {
+    fd = acquirePerfisLockFileSync();
+    return writeJsonAtomic(perfisPath, next);
+  } catch (e) {
+    try {
+      _appendIssuesFallbackSafe(`[system] {"ts":${Date.now()},"type":"mil_action","message":"perfis_write_failed ${(e && e.message) ? String(e.message).replace(/\"/g,'') : 'error'}","context":{"file":"${perfisPath.replace(/\\/g,'\\\\')}"}}`);
+    } catch {}
+    return false;
+  } finally {
+    releasePerfisLockFileSync(fd);
+  }
 }
 
 //// UA PRESET: balanceado sempre que criar ////

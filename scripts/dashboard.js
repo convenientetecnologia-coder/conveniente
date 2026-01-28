@@ -11,6 +11,7 @@ const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
 const provisionAudit = require('./provisionAudit.js');
+const fileStore = require('./fileStore.js');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -1257,6 +1258,152 @@ async function execSelfUpdate(cmd) {
   }
 }
 
+// ===== NOVO: repair_perfis_json (recuperação do perfis.json) =====
+// Objetivo: reconstruir dados/perfis.json quando ele foi esvaziado por IO/race ou corrupção.
+// Fonte de verdade: Chrome User Data (LOCALAPPDATA\\Google\\Chrome\\User Data\\Conveniente\\<nome>\\manifest.json)
+function resolveChromeUserDataRoot() {
+  if (process.platform === 'win32') {
+    const la = process.env.LOCALAPPDATA;
+    if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+  }
+  return path.join(os.homedir(), '.config', 'google-chrome');
+}
+function readJsonSafeSync(p, fb) {
+  try { return JSON.parse(fsSync.readFileSync(p, 'utf8')); } catch { return fb; }
+}
+function writeJsonAtomicSync(p, obj) {
+  try {
+    const dir = path.dirname(p);
+    try { fsSync.mkdirSync(dir, { recursive: true }); } catch {}
+    const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+    fsSync.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
+    try { fsSync.renameSync(tmp, p); } catch { fsSync.copyFileSync(tmp, p); try { fsSync.unlinkSync(tmp); } catch {} }
+    return true;
+  } catch { return false; }
+}
+async function execRepairPerfisJson(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const apply = (payload.apply === true || payload.apply === 1 || String(payload.apply || '').trim() === '1');
+  const limit = Math.max(10, Math.min(5000, Number(payload.limit || 1500) || 1500));
+  const source = String(payload.source || 'chrome').trim(); // chrome|dados|both
+  const startedAt = Date.now();
+
+  const repoDir = path.join(__dirname, '..');
+  const dadosDir = path.join(repoDir, 'dados');
+  const diagDir = path.join(dadosDir, 'diag');
+  try { fsSync.mkdirSync(diagDir, { recursive: true }); } catch {}
+
+  const chromeRoot = resolveChromeUserDataRoot();
+  const chromeConvenienteDir = path.join(chromeRoot, 'Conveniente');
+  const dadosPerfisDir = path.join(dadosDir, 'perfis');
+
+  const found = new Map(); // nome -> { userDataDir, manifest, from }
+  const errors = [];
+
+  const scanChrome = () => {
+    try {
+      if (!fsSync.existsSync(chromeConvenienteDir)) {
+        errors.push({ where: 'chrome', error: 'chrome_conveniente_dir_not_found', path: chromeConvenienteDir });
+        return;
+      }
+      const dirs = fsSync.readdirSync(chromeConvenienteDir).slice(0, limit);
+      for (const n of dirs) {
+        if (!n) continue;
+        const userDataDir = path.join(chromeConvenienteDir, n);
+        let st = null;
+        try { st = fsSync.statSync(userDataDir); } catch { st = null; }
+        if (!st || !st.isDirectory()) continue;
+        const manifestPath = path.join(userDataDir, 'manifest.json');
+        if (!fsSync.existsSync(manifestPath)) continue;
+        const man = readJsonSafeSync(manifestPath, null);
+        if (!man || typeof man !== 'object') continue;
+        const nome = String(man.nome || n || '').trim();
+        if (!nome) continue;
+        if (!found.has(nome)) found.set(nome, { userDataDir, manifestPath, manifest: man, from: 'chrome' });
+      }
+    } catch (e) {
+      errors.push({ where: 'chrome', error: (e && e.message) || String(e) });
+    }
+  };
+
+  const scanDadosPerfis = () => {
+    try {
+      if (!fsSync.existsSync(dadosPerfisDir)) return;
+      const dirs = fsSync.readdirSync(dadosPerfisDir).slice(0, limit);
+      for (const n of dirs) {
+        if (!n || n === 'system') continue;
+        const p = path.join(dadosPerfisDir, n);
+        let st = null;
+        try { st = fsSync.statSync(p); } catch { st = null; }
+        if (!st || !st.isDirectory()) continue;
+        const nome = String(n).trim();
+        if (!nome) continue;
+        if (!found.has(nome)) {
+          // monta userDataDir esperado, mesmo sem manifest (pode existir e estar válido)
+          const userDataDir = path.join(chromeConvenienteDir, nome);
+          found.set(nome, { userDataDir, manifestPath: path.join(userDataDir, 'manifest.json'), manifest: null, from: 'dados' });
+        }
+      }
+    } catch (e) {
+      errors.push({ where: 'dados', error: (e && e.message) || String(e) });
+    }
+  };
+
+  if (source === 'chrome') scanChrome();
+  else if (source === 'dados') scanDadosPerfis();
+  else { scanChrome(); scanDadosPerfis(); }
+
+  const perfis = [];
+  for (const [nome, rec] of found.entries()) {
+    const man = rec.manifest;
+    perfis.push({
+      nome,
+      cidade: man && man.cidade ? String(man.cidade) : null,
+      label: man && man.label ? String(man.label) : null,
+      uaPresetId: man && man.uaPresetId ? String(man.uaPresetId) : null,
+      userDataDir: String(rec.userDataDir || '')
+    });
+  }
+  perfis.sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+
+  const preview = {
+    ok: true,
+    applied: false,
+    startedAt,
+    finishedAt: Date.now(),
+    durationMs: Date.now() - startedAt,
+    source,
+    chromeRoot,
+    chromeConvenienteDir,
+    dadosPerfisDir,
+    foundCount: perfis.length,
+    errorsCount: errors.length,
+    errors: errors.slice(0, 60),
+    sample: perfis.slice(0, 30)
+  };
+  writeJsonAtomicSync(path.join(diagDir, `perfis_repair_preview_${Date.now()}.json`), preview);
+
+  if (!apply) {
+    return { ok: true, applied: false, foundCount: perfis.length, errorsCount: errors.length, preview: { ...preview, errors: preview.errors.slice(0, 10) } };
+  }
+
+  // Apply: escreve perfis.json com lock/guardrails via fileStore (fonte de verdade para o restante do sistema).
+  const wrote = fileStore.savePerfisJson(perfis, { allowEmpty: false });
+  const applied = !!wrote && perfis.length > 0;
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'repair_perfis_json',
+      ok: applied,
+      source,
+      foundCount: perfis.length,
+      errorsCount: errors.length
+    });
+  } catch {}
+  return { ok: applied, applied, foundCount: perfis.length, errorsCount: errors.length };
+}
+
 // ===== NOVO: Configurar CT_BASE_URL + LOG_INGEST_SECRET via comando (persistente) =====
 async function execSetCtConfig(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -1457,6 +1604,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'stock_provision') { ackDetails = await execStockProvision(c); }
       else if (c.type === 'login_remediate') { ackDetails = await execLoginRemediate(c); }
       else if (c.type === 'profiles_cleanup') { ackDetails = await execProfilesCleanup(c); }
+      else if (c.type === 'repair_perfis_json') { ackDetails = await execRepairPerfisJson(c); }
       else if (c.type === 'provision_unlock') { ackDetails = await execProvisionUnlock(c); }
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
