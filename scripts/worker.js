@@ -2216,8 +2216,8 @@ async function _identityGateTryAcquire({ owner = '', nome = '' } = {}) {
         const curLease2 = Number(g.leaseUntil || 0) || 0;
         if (curLease2 && curLease2 > now) {
           denied = { why: 'leased', leaseUntil: curLease2, owner: String(g.owner || '') };
-          snap = { ...g };
-          return d;
+        snap = { ...g };
+        return d;
         }
       }
       if (curCooldown && curCooldown > now) {
@@ -2545,9 +2545,12 @@ async function runHackedReviewFlow(nome, ctrl, pg, { source = 'unknown', flowId 
         } catch {}
 
         if (a && a.ok) {
-          didAction = true;
-          if (String(a.clicked || '') === 'salvar_alteracoes') didSavePassword = true;
-          await sleep(1100);
+          const ck = String(a.clicked || '').trim();
+          const isClickAction = ['salvar_alteracoes','voltar_para_fb','comecar','avancar','continuar'].includes(ck);
+          if (isClickAction) didAction = true;
+          if (ck === 'salvar_alteracoes') didSavePassword = true;
+          // Se foi apenas preenchimento/scroll, não forçar reload; dá tempo para UI habilitar botões.
+          await sleep(isClickAction ? 1100 : 800);
           continue;
         }
         break;
@@ -3967,6 +3970,39 @@ const { execFile } = require('child_process');
 
 const supervisorClient = require('./supervisorClient.js');
 const provisionLock = require('./provisionLock.js');
+
+// ===== Global quiesce kinds (militar) =====
+// Quando qualquer operação crítica estiver rodando, o sistema deve evitar concorrência:
+// - não iniciar Robe novo
+// - não (re)iniciar Virtus de outros perfis
+function _isGlobalQuiesceKind(kindStr) {
+  const kind = String(kindStr || '').toLowerCase();
+  return (
+    kind.includes('stock_provision') ||
+    kind.includes('admin_configure') ||
+    kind.includes('close_all') ||
+    kind.includes('login_remediate') ||
+    kind.includes('configure')
+  );
+}
+
+// Robe queue deve respeitar lock global (inclusive itens já enfileirados)
+try {
+  if (robeQueue && typeof robeQueue.setPausePredicate === 'function') {
+    robeQueue.setPausePredicate(() => {
+      try {
+        const cur = provisionLock.get ? provisionLock.get() : null;
+        const active = !!(cur && cur.active);
+        const lock = active ? (cur.lock || null) : null;
+        const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
+        const kind = String(meta.kind || meta.op || '').toLowerCase();
+        return active && _isGlobalQuiesceKind(kind);
+      } catch {
+        return false;
+      }
+    });
+  }
+} catch {}
 const { getAvailableMB } = utils;
 
 const HEALTH_CFG = {
@@ -4694,8 +4730,8 @@ async function ensureManifestValid(nome) {
   // 6) Se o merge ficou completo, persistir no manifest.json (via manifestStore) e devolver.
   if (hasEssentials(merged)) {
     try { await manifestStore.update(nome, () => merged); } catch {}
-    return merged;
-  }
+      return merged;
+    }
 
   // 7) Se ainda não ficou completo, logar causa (prova) e retornar null.
   try {
@@ -6311,9 +6347,8 @@ function resolveChromeUserDataRoot() {
 
 function automationAllowed(ctrl, { operator } = {}) {
   // Hardening (ultra enterprise):
-  // O lock global é necessário para STOCK_PROVISION / admin_configure / close_all (pausa geral),
-  // mas NÃO pode travar o sistema inteiro durante login_remediate (que já tem lock por perfil).
-  // Caso contrário, um login_remediate longo deixa Virtus/Robe de todas as contas “engessados”.
+  // O lock global é necessário para operações críticas (pausa geral).
+  // Política do usuário (RM1): login_remediate/configure/stock_provision => FULL QUIESCE (Robe+Virtus).
   try {
     const op = String(operator || '').trim();
     const cur = provisionLock.get ? provisionLock.get() : null;
@@ -6321,10 +6356,7 @@ function automationAllowed(ctrl, { operator } = {}) {
     const lock = active ? (cur.lock || null) : null;
     const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
     const kind = String(meta.kind || meta.op || '').toLowerCase();
-    const isGlobalPauseKind =
-      kind.includes('stock_provision') ||
-      kind.includes('admin_configure') ||
-      kind.includes('close_all');
+    const isGlobalPauseKind = _isGlobalQuiesceKind(kind);
     if (active && isGlobalPauseKind) {
       // Só o dono do lock passa.
       if (!provisionLock.ownerMatchesOperator(lock, op)) return false;
@@ -7269,7 +7301,9 @@ const handlers = {
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       const opts = (options && typeof options === 'object') ? options : {};
       const maxHardDeactivations = Math.max(0, Number(opts.maxHardDeactivations || 2) || 2);
-      const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 120000) || 120000);
+      // Política militar: se tiver Robe/sendLock rodando, esperar terminar (sem atropelo).
+      // Ainda há um teto (30min) para evitar deadlock infinito; se estourar vira backoff+retry (infra), não culpa a conta.
+      const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 0) || (30 * 60 * 1000));
       const overrideHumanHold = (opts.overrideHumanHold === true || opts.overrideHumanHold === 1 || String(opts.overrideHumanHold || '').toLowerCase() === 'true');
       const totalTimeoutMs = Math.max(60_000, Number(opts.totalTimeoutMs || 0) || (8 * 60 * 1000));
       const stageTimeoutMs = {
@@ -9638,10 +9672,10 @@ async function autoLoginRemediateTick() {
         try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_infra_fail_backoff', nome, operator, error: String(st.lastError||'').slice(0,220), backoffMs: AUTO_LR_CFG.backoffBusyMs }); } catch {}
       } else {
         // Persistir estado de falha real (para abrir em modo humano e impedir loops automáticos)
-        try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
+      try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
         // Backoff em falha real: evita loop no mesmo perfil.
-        st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
-        try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
+      st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
+      try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
       }
     } else {
       // Sucesso: limpa fila.
@@ -9815,6 +9849,12 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       try { await setAppealSubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
       try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       return { ok: true, state: 'appeal_submitted' };
+    }
+
+    // Messenger: "Esta página não está disponível" (regra Max/SMS)
+    if (rr.includes('messenger_page_not_available')) {
+      try { await handleMessengerPageNotAvailable(nome, ctrl, pg, { source: `human_reconcile:${String(source||'')}` }); } catch {}
+      return { ok: true, state: 'messenger_page_not_available' };
     }
 
     // login_form: permitir liberar o sistema (política do cliente) com agendamento controlado
@@ -9996,7 +10036,7 @@ async function nurseTick() {
       const kind = String(meta.kind || meta.op || '').toLowerCase();
       const shouldPauseAll =
         !!(lk && lk.active) &&
-        (kind.includes('stock_provision') || kind.includes('admin_configure') || kind.includes('close_all'));
+        _isGlobalQuiesceKind(kind);
       if (shouldPauseAll) {
         const owner = lockObj && lockObj.owner ? String(lockObj.owner) : null;
         const untilMs = lockObj && lockObj.untilMs ? Number(lockObj.untilMs) : 0;
@@ -10253,9 +10293,9 @@ async function nurseTick() {
               const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
               if (!last || (now - last) > 30_000) {
                 robeMeta[nome].identityAssistLastAt = now;
-                const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
-                const pg = pages && pages[0];
-                if (pg) {
+                    const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+                    const pg = pages && pages[0];
+                    if (pg) {
                   await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
                 }
               }
@@ -10299,17 +10339,17 @@ async function nurseTick() {
         // Se o navegador estiver aberto, mantém overlay e NÃO roda automação.
         // Mas se o navegador estiver FECHADO, não podemos “engessar”: o nurse deve poder abrir (e o reconciliador limpa falso-positivo).
         if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-          // Overlay deve aparecer e se manter (retry periódico com debounce).
-          try {
+        // Overlay deve aparecer e se manter (retry periódico com debounce).
+        try {
             robeMeta[nome] = robeMeta[nome] || {};
             const last = Number(robeMeta[nome].overlayNurseLastAt || 0) || 0;
             if (!last || (now - last) > 45_000) {
               robeMeta[nome].overlayNurseLastAt = now;
               await syncHumanOverlay(nome).catch(()=>{});
-            }
-          } catch {}
-          await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
-          continue;
+          }
+        } catch {}
+        await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
+        continue;
         }
         // Sem ctrl/browser: cai no fluxo normal de abertura (want.active && !ctrl) abaixo.
       }
@@ -10768,7 +10808,7 @@ async function nurseTick() {
               // se não há PIN em nenhuma aba, limpa flag (se existir)
               await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
             }
-          }
+            }
           }
         }
       } catch {}

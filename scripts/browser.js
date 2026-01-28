@@ -3737,6 +3737,10 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
                 el.value = pass;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
+                // Alguns fluxos (FB) só habilitam o CTA no blur (equivalente a TAB).
+                try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch {}
+                try { el.blur && el.blur(); } catch {}
+                try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Tab', code: 'Tab' })); } catch {}
                 filled++;
               } catch {}
             }
@@ -3783,8 +3787,16 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
             return { ok: true, filled, clicked: p.key, text: t.slice(0, 60) };
           }
         }
-        // Se não clicou nada, mas preencheu senha, consideramos progresso e aguardamos.
+        // Se não clicou nada, mas preencheu senha, consideramos progresso (sem reload).
         if (filled > 0) return { ok: true, filled, clicked: 'filled_password_only' };
+
+        // Scroll nudge (virtualização: "Começar" pode não estar no DOM até rolar).
+        try {
+          const y0 = window.scrollY || 0;
+          window.scrollBy(0, Math.max(220, Math.floor((window.innerHeight || 800) * 0.85)));
+          const y1 = window.scrollY || 0;
+          if (y1 !== y0) return { ok: true, filled, clicked: 'scroll_nudge' };
+        } catch {}
         return { ok: false, error: 'no_hacked_step_clicked' };
       }, pass);
     } catch (e) {

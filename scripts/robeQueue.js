@@ -29,6 +29,14 @@ class RobeQueue {
     this.fila = [];            // [ { nome, cb, timestampQueue } ]
     this.executando = null;    // { nome, cb, startedAt }
     this._tickRunning = false;
+    this._pausePredicate = null;
+    this._pausedUntil = 0;
+  }
+
+  setPausePredicate(fn) {
+    // fn(): boolean — quando true, não inicia novas execuções (mantém fila intacta).
+    // Usado para quiesce global durante login_remediate/stock_provision/etc.
+    this._pausePredicate = (typeof fn === 'function') ? fn : null;
   }
 
   enqueue(nome, cb) {
@@ -87,6 +95,17 @@ class RobeQueue {
 
     setImmediate(async () => {
       try {
+        // Pause gate: não inicia novos jobs enquanto houver lock global (quiesce).
+        try {
+          const paused = !!(this._pausePredicate && this._pausePredicate());
+          if (paused) {
+            this._pausedUntil = Date.now() + 1500;
+            this._tickRunning = false;
+            setTimeout(() => { try { this.tick(); } catch {} }, 1500);
+            return;
+          }
+        } catch {}
+
         // INVARIANTE: Nunca haverá mais de uma execução ativa da Robe no sistema.
         // O tick só avança após cb finalizar.
         if (!this.executando && this.fila.length > 0) {
