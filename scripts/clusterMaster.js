@@ -7,6 +7,7 @@ const { planMemoryAndShards } = require('./memoryPlan.js');
 const fileStore = require('./fileStore.js');
 const logger = require('./logger.js');
 const supervisor = require('./supervisor.js');
+const provisionLock = require('./provisionLock.js');
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -480,6 +481,8 @@ function createCluster() {
         ts: Date.now(),
         _debug: { nodes: nodesDebug }
       };
+      // Expor lock global no status agregado (painel/CT): evita “0 trabalhando” sem explicação.
+      try { out.provisionLock = provisionLock.get(); } catch { out.provisionLock = null; }
       if (warningParts.length) out.warning = `partial nodes: ${warningParts.join('; ')}`;
       
       // ADICIONADO: grava agregado em dados/status.json antes do return out;

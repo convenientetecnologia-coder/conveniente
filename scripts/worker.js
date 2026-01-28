@@ -4084,7 +4084,6 @@ function _isGlobalQuiesceKind(kindStr) {
     kind.includes('stock_provision') ||
     kind.includes('admin_configure') ||
     kind.includes('close_all') ||
-    kind.includes('login_remediate') ||
     kind.includes('configure')
   );
 }
@@ -5996,16 +5995,22 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
 }
 
 async function robeTickGlobal() {
-  // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
+  // Hardening: durante GLOBAL QUIESCE (stock_provision/configure/close_all), pausar Robe.
+  // IMPORTANTE: login_remediate NÃO deve pausar o servidor inteiro (senão engessa).
   try {
-    if (provisionLock.isActive()) {
+    const cur = provisionLock.get ? provisionLock.get() : null;
+    const active = !!(cur && cur.active);
+    const lock = active ? (cur.lock || null) : null;
+    const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
+    const kind = String(meta.kind || meta.op || '').toLowerCase();
+    if (active && _isGlobalQuiesceKind(kind)) {
       try {
         robeTickGlobal._lastProvisionLockLogAt = robeTickGlobal._lastProvisionLockLogAt || 0;
         const now = Date.now();
         const last = Number(robeTickGlobal._lastProvisionLockLogAt || 0) || 0;
         if (!last || (now - last) > 60000) {
           robeTickGlobal._lastProvisionLockLogAt = now;
-          await milLog('mil_action', 'robeTickGlobal_skip_due_provision_lock');
+          await milLog('mil_action', `robeTickGlobal_skip_due_provision_lock kind=${kind}`);
         }
       } catch {}
       return;
@@ -7776,7 +7781,12 @@ const handlers = {
           const bd = await browserHelper.detectAccountSuspended(page).catch(()=>({ banned:false }));
           if (bd && bd.banned) {
             pushStep({ step: 'banned_detected', stage: String(stage||''), reason: bd.reason || '', snippet: (bd.snippet || '').slice(0, 420) });
-            try { await setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }); } catch {}
+            // Militar: NUNCA pode travar aqui (setBannedFlag pode fechar browser, falar com CT etc).
+            // Se der timeout/falha, ainda assim aborta o fluxo (terminal state) e o watchdog fará cleanup.
+            try {
+              const rr = await withTimeout('setBannedFlag', setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }), 30_000).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
+              pushStep({ step: 'banned_flag_set_attempt', ok: !!(rr && rr.ok !== false), error: rr && rr.error ? String(rr.error).slice(0, 160) : null });
+            } catch {}
             // IMPORTANTE (enterprise): ban/disabled NÃO é “login/cookies falhou”.
             // Aqui a ação correta é setBannedFlag() (que fecha + remove do servidor).
             // Não deve marcar loginRemediateFailed/loginRequired depois disso.
@@ -10142,6 +10152,50 @@ async function nurseTick() {
       const lockObj = (lk && lk.active) ? (lk.lock || null) : null;
       const meta = lockObj && lockObj.meta && typeof lockObj.meta === 'object' ? lockObj.meta : {};
       const kind = String(meta.kind || meta.op || '').toLowerCase();
+      // Watchdog militar: nunca permitir lock de login_remediate ficar "preso" por await travado.
+      // - se a conta já virou terminal (banned / twoFactor), force-release.
+      // - se o lock passou muito do tempo esperado, force-release (seguro pois login_remediate é idempotente e tem retry/backoff).
+      try {
+        if (lk && lk.active && lockObj && kind.includes('login_remediate')) {
+          const owner = String(lockObj.owner || '');
+          const sinceMs = Number(lockObj.sinceMs || 0) || 0;
+          const ageMs = sinceMs ? (Date.now() - sinceMs) : 0;
+          const nomeLock = meta && meta.nome ? String(meta.nome) : '';
+          robeMeta.system = robeMeta.system || {};
+          const lastAt = Number(robeMeta.system.provisionLockWatchdogLastAt || 0) || 0;
+          const lastOwner = String(robeMeta.system.provisionLockWatchdogLastOwner || '');
+          // no máximo 1x/30s por owner
+          if (!lastAt || (Date.now() - lastAt) > 30_000 || owner !== lastOwner) {
+            robeMeta.system.provisionLockWatchdogLastAt = Date.now();
+            robeMeta.system.provisionLockWatchdogLastOwner = owner;
+            let terminal = null;
+            try {
+              if (nomeLock) {
+                const flags = await readAccountFlags(nomeLock).catch(()=>({}));
+                if (flags && flags.banned === true) terminal = 'banned';
+                else if (flags && flags.twoFactor === true) terminal = 'two_factor';
+              }
+            } catch {}
+            const tooOld = ageMs > (12 * 60 * 1000); // 12min (limite militar)
+            if (terminal || tooOld) {
+              const rr = (() => { try { return provisionLock.release({ owner, force: true }); } catch (e) { return { ok:false, error:(e&&e.message)||String(e) }; } })();
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'provision_lock_watchdog_force_release',
+                  ok: !!(rr && rr.ok),
+                  released: !!(rr && rr.released),
+                  owner,
+                  kind,
+                  ageMs,
+                  terminal,
+                  nome: nomeLock || null
+                });
+              } catch {}
+            }
+          }
+        }
+      } catch {}
       const shouldPauseAll =
         !!(lk && lk.active) &&
         _isGlobalQuiesceKind(kind);
