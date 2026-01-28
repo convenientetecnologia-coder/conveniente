@@ -15,6 +15,7 @@ const perfisDir   = path.join(dadosDir, 'perfis');
 const presetsPath = path.join(dadosDir, 'ua_presets.json');
 const desiredPath = path.join(dadosDir, 'desired.json');
 const statusPath  = path.join(dadosDir, 'status.json');
+const provisionAuditPath = path.join(dadosDir, 'provision_audit.jsonl');
 
 // ManifestStore import para setPerfilFrozenUntil
 // const manifestStore = require('./manifestStore.js');
@@ -85,6 +86,94 @@ function _safeJsonParseFile(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
+function _appendProvisionAudit(obj) {
+  try {
+    fs.appendFileSync(provisionAuditPath, JSON.stringify(obj) + '\n', 'utf8');
+  } catch {}
+}
+
+function _resolveChromeUserDataRoot() {
+  // Override explícito (enterprise): permite apontar para um Chrome portátil/alternativo.
+  const ov = String(process.env.CONVENIENTE_CHROME_USER_DATA_ROOT || '').trim();
+  if (ov) return ov;
+  if (process.platform === 'win32') {
+    const la = process.env.LOCALAPPDATA;
+    if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+    // fallback win32
+    try { return path.join(require('os').homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data'); } catch {}
+  }
+  // linux/mac (best-effort)
+  try { return path.join(require('os').homedir(), '.config', 'google-chrome'); } catch {}
+  return '';
+}
+
+function _rebuildPerfisFromChromeUserData() {
+  const startedAt = Date.now();
+  const root = _resolveChromeUserDataRoot();
+  const base = root ? path.join(root, 'Conveniente') : '';
+  const out = [];
+  const errors = [];
+  try {
+    if (!base || !fs.existsSync(base)) {
+      return { ok: false, reason: 'chrome_base_missing', base, durationMs: Date.now() - startedAt, out, errors };
+    }
+    const dirs = (() => { try { return fs.readdirSync(base).slice(0, 8000); } catch { return []; } })();
+    // Preferência: manifest.json (fonte de verdade); fallback: desired.json (nome conhecido) se userDataDir existir.
+    const seen = new Map(); // nome -> {p, mtimeMs}
+    for (const d of dirs) {
+      const folderName = String(d || '').trim();
+      if (!folderName) continue;
+      const userDataDir = path.join(base, folderName);
+      let st = null;
+      try { st = fs.statSync(userDataDir); } catch { st = null; }
+      if (!st || !st.isDirectory()) continue;
+      const manifestPath = path.join(userDataDir, 'manifest.json');
+      if (!fs.existsSync(manifestPath)) continue;
+      const man = _safeJsonParseFile(manifestPath, null);
+      if (!man || typeof man !== 'object') continue;
+      const nome = String(man.nome || folderName || '').trim();
+      if (!nome) continue;
+      let mt = 0;
+      try { mt = fs.statSync(manifestPath).mtimeMs || 0; } catch { mt = 0; }
+      const p = {
+        nome,
+        cidade: man.cidade ? String(man.cidade) : null,
+        label: man.label ? String(man.label) : null,
+        uaPresetId: man.uaPresetId ? String(man.uaPresetId) : null,
+        userDataDir
+      };
+      const prev = seen.get(nome);
+      if (!prev || (mt && mt > (prev.mtimeMs || 0))) seen.set(nome, { p, mtimeMs: mt });
+    }
+
+    // Fallback enterprise: se desired.json tem nomes e a pasta existe, incluir mínimo (não inventa cidade/label).
+    try {
+      const desired = _safeJsonParseFile(desiredPath, null);
+      const keys = desired && desired.perfis && typeof desired.perfis === 'object'
+        ? Object.keys(desired.perfis).slice(0, 20000)
+        : [];
+      for (const nome0 of keys) {
+        const nome = String(nome0 || '').trim();
+        if (!nome || seen.has(nome)) continue;
+        const userDataDir = path.join(base, nome);
+        let st = null;
+        try { st = fs.statSync(userDataDir); } catch { st = null; }
+        if (!st || !st.isDirectory()) continue;
+        // Sem manifest: não inferir campos — só garante o mapeamento userDataDir.
+        seen.set(nome, { p: { nome, cidade: null, label: null, uaPresetId: null, userDataDir }, mtimeMs: 0 });
+      }
+    } catch {}
+
+    for (const { p } of seen.values()) out.push(p);
+    out.sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+    if (!out.length) return { ok: false, reason: 'no_profiles_found', base, durationMs: Date.now() - startedAt, out, errors };
+    return { ok: true, base, durationMs: Date.now() - startedAt, out, errors };
+  } catch (e) {
+    errors.push((e && e.message) ? String(e.message) : String(e));
+    return { ok: false, reason: 'exception', base, durationMs: Date.now() - startedAt, out, errors };
+  }
+}
+
 function _pickLatestBackupPerfisJson({ rootDir } = {}) {
   const ROOT = rootDir || path.join(__dirname, '..');
   const candidates = [];
@@ -125,9 +214,47 @@ function recoverPerfisJsonIfMissingOrEmpty() {
     if (!isEmpty) return { ok: true, recovered: false, reason: 'ok' };
 
     const src = _pickLatestBackupPerfisJson({ rootDir: path.join(__dirname, '..') });
-    if (!src) return { ok: false, recovered: false, reason: 'no_backup_found' };
-    try { fs.copyFileSync(src, perfisPath); } catch (e) { return { ok: false, recovered: false, reason: 'copy_failed', error: (e && e.message) || String(e) }; }
-    return { ok: true, recovered: true, from: src };
+    if (src) {
+      try {
+        fs.copyFileSync(src, perfisPath);
+        try { _appendProvisionAudit({ ts: Date.now(), event: 'perfis_recover_boot', ok: true, method: 'backup_copy', from: src }); } catch {}
+        return { ok: true, recovered: true, from: src, method: 'backup_copy' };
+      } catch (e) {
+        try { _appendProvisionAudit({ ts: Date.now(), event: 'perfis_recover_boot', ok: false, method: 'backup_copy', from: src, error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
+        // continua para tentativa via Chrome User Data
+      }
+    }
+
+    // Fallback enterprise: reconstruir do Chrome User Data\\Conveniente (fonte primária do "ativo").
+    const rebuilt = _rebuildPerfisFromChromeUserData();
+    if (rebuilt && rebuilt.ok && Array.isArray(rebuilt.out) && rebuilt.out.length > 0) {
+      const wrote = savePerfisJson(rebuilt.out, { allowEmpty: false });
+      try {
+        _appendProvisionAudit({
+          ts: Date.now(),
+          event: 'perfis_recover_boot',
+          ok: !!wrote,
+          method: 'chrome_userdata_manifest',
+          base: rebuilt.base,
+          rebuiltCount: rebuilt.out.length,
+          durationMs: rebuilt.durationMs
+        });
+      } catch {}
+      return { ok: !!wrote, recovered: !!wrote, method: 'chrome_userdata_manifest', base: rebuilt.base, rebuiltCount: rebuilt.out.length, durationMs: rebuilt.durationMs };
+    }
+
+    try {
+      _appendProvisionAudit({
+        ts: Date.now(),
+        event: 'perfis_recover_boot',
+        ok: false,
+        method: 'chrome_userdata_manifest',
+        base: rebuilt ? rebuilt.base : null,
+        reason: rebuilt ? rebuilt.reason : 'no_result',
+        durationMs: rebuilt ? rebuilt.durationMs : null
+      });
+    } catch {}
+    return { ok: false, recovered: false, reason: src ? 'backup_copy_failed_and_rebuild_failed' : 'no_backup_found', rebuild: rebuilt || null };
   } catch (e) {
     return { ok: false, recovered: false, reason: 'exception', error: (e && e.message) || String(e) };
   }
