@@ -62,6 +62,29 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // ===== Admin: restart do worker (hot reload pos self_update) =====
+  // Motivacao: self_update faz git pull no disco; sem restart, o worker continua rodando codigo antigo.
+  function _isLocal(req) {
+    try {
+      const ip = String(req.ip || (req.connection && req.connection.remoteAddress) || (req.socket && req.socket.remoteAddress) || '').trim();
+      return ip === '127.0.0.1' || ip === '::1' || ip.includes('::ffff:127.0.0.1');
+    } catch { return false; }
+  }
+  app.post('/api/admin/restart-worker', (req, res) => {
+    try {
+      if (!_isLocal(req)) return res.status(403).json({ ok: false, error: 'forbidden_not_local' });
+      if (!workerClient || typeof workerClient.forceRestartWorker !== 'function') {
+        return res.json({ ok: false, error: 'workerClient_no_forceRestartWorker' });
+      }
+      const reason = String((req.body && req.body.reason) || req.headers['x-operator'] || 'api_admin_restart_worker').slice(0, 180);
+      const r = workerClient.forceRestartWorker({ reason });
+      try { provisionAudit.append({ ts: Date.now(), event: 'admin_restart_worker', ok: !!(r && r.ok), reason }); } catch {}
+      return res.json({ ok: true, result: r || null });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   // Listar todas as contas (útil para debug/testing)
   app.get('/api/perfis', (req, res) => {
     try {

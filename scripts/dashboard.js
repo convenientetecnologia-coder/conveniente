@@ -1247,6 +1247,13 @@ async function execSelfUpdate(cmd) {
     }, 2500);
   } else if (restartRequested && !restartAllowed) {
     try { updateLogAppend({ event: 'self_update_restart_blocked', requestId, reason: 'ALLOW_SELF_UPDATE_RESTART!=1' }); } catch {}
+    // Enterprise: mesmo sem restart do processo pai, reiniciar o WORKER para carregar o cÃ³digo novo do disco.
+    try {
+      const r = await httpJson('/api/admin/restart-worker', { method: 'POST', body: { reason: `self_update_restart_blocked:${requestId}`, requestId, branch } });
+      try { updateLogAppend({ event: 'self_update_worker_restart_attempt', requestId, ok: !!(r && r.ok) }); } catch {}
+    } catch (e) {
+      try { updateLogAppend({ event: 'self_update_worker_restart_attempt', requestId, ok: false, error: String((e && e.message) || e).slice(0, 160) }); } catch {}
+    }
   }
 }
 

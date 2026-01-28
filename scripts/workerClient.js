@@ -235,8 +235,41 @@ function killWorker() {
   workerChild = null;
 }
 
+
+// ---- Restart worker (without killing parent) ----
+// Reason: after self_update (git pull) without restart, disk code changes but worker keeps old code until respawn.
+function forceRestartWorker({ reason = "" } = {}) {
+  try {
+    logger.warn("[WORKER][FORCE-RESTART] requesting worker restart", { reason: String(reason||"").slice(0,180), pid: workerChild && workerChild.pid });
+  } catch {}
+  if (!workerChild) {
+    try { forkWorker(); } catch {}
+    return { ok: true, restarted: false, pid: null, reason: "no_child" };
+  }
+  const pid = workerChild.pid;
+  try { workerChild.kill && workerChild.kill("SIGTERM"); } catch {}
+  setTimeout(() => {
+    try {
+      if (workerChild && workerChild.pid === pid) {
+        try { logger.warn("[WORKER][FORCE-RESTART] SIGKILL fallback", { reason: String(reason||"").slice(0,180), pid }); } catch {}
+        try { workerChild.kill && workerChild.kill("SIGKILL"); } catch {}
+      }
+    } catch {}
+  }, 7000);
+  return { ok: true, restarted: true, pid };
+}
+
+function getWorkerInfo() {
+  try {
+    return { ok: true, pid: (workerChild && workerChild.pid) ? workerChild.pid : null, alive: !!workerChild };
+  } catch {
+    return { ok: true, pid: null, alive: false };
+  }
+}
 module.exports = {
   fork: forkWorker,
   sendWorkerCommand,
-  kill: killWorker
+  kill: killWorker,
+  forceRestartWorker,
+  getWorkerInfo
 };
