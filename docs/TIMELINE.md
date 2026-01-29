@@ -428,3 +428,20 @@ Formato canônico (copiar/colar):
 - **Reinícios**: `conveniente` (para o host aceitar os novos tipos de comando).
 - **Rollback**: `git revert <commit>` (remove comandos; não afeta Robe/Virtus).
 - **THREAD**: `TH-2026-01-29-health-bundle-rotate-logs`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][OPS] RM4: humano precisou `git pull` (self_update não foi enviado) + validação com evidência CT
+
+- **Relato humano**: após restart no **ROBE MÃE 4**, foi necessário `git pull` manual no host (o `self_update` não foi disparado pelo GPT).
+- **Evidência (CT)**:
+  - `C:\sitechatbot\dados\commands.log`: não há `enqueue` recente de `self_update` para `825a4485-1465-4c11-aa18-52f0597b23a3` no recorte do incidente.
+  - Validação pós-restart:
+    - `health_bundle` ACK ok: `C:\sitechatbot\dados\logs\825a4485-1465-4c11-aa18-52f0597b23a3\ack_c9475bed-3a3f-4cfd-89d9-fa244e7dcb81.json`
+    - resposta do bundle: `C:\sitechatbot\dados\logs\825a4485-1465-4c11-aa18-52f0597b23a3\hb_1769726532463.json`
+    - `git_main_ref` confirma commit no disco: `00cb4b38cc1c16535a82574d697d17833f25e11e` (arquivo `git_1769726532463.json`).
+  - Fluxo `self_update` verificado (prova de que funciona via CT):
+    - comando: `self_update` cmdId `de8dd0e9-9b0d-41d2-b519-dc41bc111361` (ACK ok em `ack_de8dd0e9-...json`)
+    - `updates.jsonl` contém `requestId:"verify_self_update_1769726589134"` (via `updates_1769726606544.json`).
+- **Ação**: runbook/livro atualizados para exigir **evidência mínima** do `self_update` (enqueue/deliver/ack + ack file) e registrar exceção quando humano precisar fazer `git pull`.
+- **THREAD**: `TH-2026-01-29-rm4-manual-gitpull`

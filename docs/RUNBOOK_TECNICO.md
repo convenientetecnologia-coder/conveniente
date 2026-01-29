@@ -395,7 +395,11 @@ Regra importante:
 
 #### Como o GPT dispara `self_update` via CT (canônico)
 
-Fonte (CT): `C:\sitechatbot\index.js` endpoint `POST /api/commands/enqueue_secret` (auth por `LOG_INGEST_SECRET` via header `x-log-secret`).
+Fonte (CT): `C:\sitechatbot\index.js` endpoint `POST /api/commands/enqueue_secret`.
+
+Regras de auth (importante):
+- **Se o request for localhost no CT**: o endpoint aceita sem secret (isso existe exatamente para o humano não “ficar preso” por auth em emergências).
+- **Se o request for remoto**: precisa `x-log-secret: <LOG_INGEST_SECRET>` (não colar valor em docs/chat).
 
 Payload do `self_update` (servidor `conveniente`): `branch` (default `main`), `restart` (default **0**), `requestId` (opcional).
 
@@ -412,6 +416,17 @@ Body (JSON):
     "payload": { "branch": "main", "restart": 0, "requestId": "deploy_conveniente_YYYYMMDD_HHMM" }
   }
 ```
+
+Evidência mínima (obrigatória) para provar que o `self_update` foi enviado:
+- `C:\sitechatbot\dados\commands.log` deve conter:
+  - `event:"enqueue"` com `type:"self_update"` e `target:"<hostId>"` (ou `target:"*"`),
+  - depois `event:"deliver"` para o mesmo `hostId`,
+  - e `event:"ack"` com `ok:true/false`.
+- Por comando, o CT salva ACK em: `C:\sitechatbot\dados\logs\<hostId>\ack_<cmdId>.json`.
+
+Se o humano reportar “tive que dar git pull no host”:
+- Tratar como **falha de processo** (o `self_update` não foi enfileirado/entregue/ack).
+- O GPT deve coletar evidência acima e registrar em `TIMELINE.md` (com `hostId`, `cmdId`, paths).
 
 Notas:
 - `target="all"` vira broadcast (`*`) no CT.
