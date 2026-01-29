@@ -563,6 +563,16 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     robeMeta[nome].loginReason = reason || '';
     robeMeta[nome].loginSource = source || '';
 
+    // Regra 110%: ao marcar login_required, garantir desired.virtus='off'
+    // (evita o nurse religar Virtus automaticamente e ficar “brigando” com telas de login).
+    try {
+      await fileStore.withDesiredFileLockUpdate((d) => {
+        d = d || {}; d.perfis = d.perfis || {};
+        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+        return d;
+      });
+    } catch {}
+
     // Blindagem enterprise: se loginRequired foi detectado, Virtus NÃO pode ficar "Online".
     // Isso evita telemetria falsa (trabalhando=true) e evita loops de automação em tela de login.
     try {
