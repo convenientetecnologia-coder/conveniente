@@ -130,6 +130,17 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CROSS][DOCS][OPS] Regra: “precisa reiniciar agora?” vs “precisa reiniciar para validar”
+
+- **O que**: registrado que nem toda atualização exige restart imediato para continuar trabalhando; restart é obrigatório quando a mudança precisa estar valendo no runtime (teste/validação).
+- **Evidência**:
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (checklist: “Precisa reiniciar agora?” + regra de restart)
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md` (regra de restart)
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS] Reconstrução retroativa (~10 dias) a partir de evidências (Git/backups/recovery)
 
 - **O que**: reconstruído histórico dos últimos ~10 dias (conveniente/sitechatbot/notificador) usando Git, logs de backups e arquivos de recovery.

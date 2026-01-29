@@ -73,10 +73,12 @@ Fonte canônica dos riscos conhecidos:
 
 - [ ] Restart do(s) serviço(s) afetado(s) (ver seção “Restart / validação (padrão)” abaixo).
 - [ ] O GPT deve dizer **em português direto** (sem ambiguidades):
+  - **Precisa reiniciar agora?** sim/não (para continuar o trabalho atual)
   - **Precisa reiniciar?** sim/não
   - **Qual projeto?** `conveniente` / `sitechatbot` / `notificador`
   - **Como reinicia (humano)?** `node index.js`
   - **Por quê precisa reiniciar?** (1 frase)
+  - **O que muda se NÃO reiniciar agora?** (1 frase)
 - [ ] Validação mínima:
   - `conveniente`: `GET /health` + `GET /api/status`
   - CT: enfileirar comando simples + confirmar `ack_<cmdId>.json`
@@ -331,6 +333,11 @@ Objetivo: o humano (Cássio) **não precisa repetir instruções**. Sempre que h
 - **Humano faz**:
   - reinicia manualmente no host do `conveniente`: `node index.js`
   - responde “reiniciado” (para o GPT registrar na `docs/TIMELINE.md`)
+
+Regra importante:
+- **Nem toda mudança precisa de restart “agora”** para continuar desenvolvendo outras correções.
+- Restart é obrigatório quando você precisa que a mudança **esteja valendo no runtime** (ex.: testar “open_all/close_all” corrigido).
+- Se a próxima tarefa não depende do runtime novo, o GPT pode continuar trabalhando e o humano pode reiniciar depois (quando for validar/testar).
 
 #### Como o GPT dispara `self_update` via CT (canônico)
 

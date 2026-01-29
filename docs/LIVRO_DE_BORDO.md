@@ -29,6 +29,9 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Regra de comunicação: sempre falar “reiniciar = rodar `node index.js` de novo”, e dizer claramente **qual projeto** (conveniente/CT/notificador).
   - **Padrão sem repetição (conveniente)**: se houve mudança no `conveniente`, o GPT **já** faz `commit/push` + dispara `self_update` via CT e só avisa: **“reinicia `node index.js` no host X”**.
   - Vocabulário: quando o humano disser **“pull”**, significa **disparar `self_update` via CT** (equivalente a `git pull` no host).
+  - Regra de restart (importante): **nem toda atualização precisa de restart “agora”** para continuar trabalhando em outras mudanças.
+    - Restart é necessário quando a atualização precisa **valer no runtime** (para testar/validar o comportamento novo).
+    - Se a próxima mudança não depende disso, pode reiniciar depois.
   - O que o humano cobra do GPT: “o que mudou?”, “qual serviço reiniciar?”, “qual validação foi feita?”, “qual rollback você vai aplicar se falhar?”.
 - **Sem segredos em texto puro aqui**: este arquivo documenta **NOMES** e **ONDE CONFIGURAR** (env / `ct_config.json`), mas **não cola valores**.
 
