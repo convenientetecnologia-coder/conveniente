@@ -10730,9 +10730,24 @@ process.on('message', async (msg) => {
 });
 
 process.on('uncaughtException', (e) => {
-  try { logger.error('uncaught', { error: e && e.message || e }, e); } catch {}
-}
-);
+  try { logger.error('[FATAL][WORKER] uncaughtException', { error: e && e.message || e }, e); } catch {}
+  try {
+    // P1: política consistente. Por padrão não derruba sozinho (sem auto-restart no ambiente),
+    // mas pode ser habilitado para evitar estado corrompido.
+    if (String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1') {
+      setTimeout(() => { try { process.exit(1); } catch {} }, 800);
+    } else {
+      try { logger.warn('[FATAL][WORKER] processo continua (CONVENIENTE_FATAL_EXIT!=1). Humano deve reiniciar: node index.js'); } catch {}
+    }
+  } catch {}
+});
 process.on('unhandledRejection', (e) => {
-  try { logger.error('unhandled', { error: (e && e.message) || e }, e); } catch {}
+  try { logger.error('[FATAL][WORKER] unhandledRejection', { error: (e && e.message) || e }, e); } catch {}
+  try {
+    if (String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1') {
+      setTimeout(() => { try { process.exit(1); } catch {} }, 800);
+    } else {
+      try { logger.warn('[FATAL][WORKER] processo continua (CONVENIENTE_FATAL_EXIT!=1). Humano deve reiniciar: node index.js'); } catch {}
+    }
+  } catch {}
 });

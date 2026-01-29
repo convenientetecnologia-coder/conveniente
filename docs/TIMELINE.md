@@ -97,6 +97,22 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX] P1: handlers globais de erro (master/worker) + opção de exit
+
+- **O que**: padronizado `uncaughtException`/`unhandledRejection` no master (`index.js`) e no worker (`scripts/worker.js`), com logs consistentes e opção `CONVENIENTE_FATAL_EXIT=1` para sair (evitar “seguir vivo” corrompido).
+- **Por quê**: P1 — política de erro consistente e auditável.
+- **Evidência**:
+  - `C:\conveniente\index.js`
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (baseline env)
+- **Precisa reiniciar agora?** não (só é necessário quando você quiser que isso passe a valer no runtime).
+- **Precisa reiniciar para validar/testar?** sim, se quiser simular erro e ver o comportamento/log.
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert` do commit e (se precisar validar rollback) reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS] Checkup 3 (loops/timeouts/polling)
 
 - **O que**:

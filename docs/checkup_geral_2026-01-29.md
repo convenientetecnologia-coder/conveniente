@@ -102,7 +102,7 @@ Contexto: nas últimas semanas houve mudanças rápidas/desorganizadas e o siste
 **Onde**:
 
 - `conveniente/scripts/worker.js` tem handlers `uncaughtException` / `unhandledRejection` que **logam** (não reiniciam).
-- `conveniente/index.js` não tem handlers globais equivalentes.
+- `conveniente/index.js` não tinha handlers globais equivalentes — **corrigido** (handlers adicionados, com opção de exit via env).
 - `sitechatbot/index.js` tem handlers globais, mas atualmente loga em `console.error` e ignora alguns casos.
 
 **Risco**:
@@ -113,6 +113,8 @@ Contexto: nas últimas semanas houve mudanças rápidas/desorganizadas e o siste
 
 - padronizar política:
   - no mínimo: log consistente + marcação de “degraded” e reinício controlado quando apropriado.
+
+**Status**: ✅ **mitigado** — master e worker agora têm handlers consistentes (`CONVENIENTE_FATAL_EXIT=1` para sair; caso contrário loga e pede reinício manual).
 
 ---
 

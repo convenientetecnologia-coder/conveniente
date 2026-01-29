@@ -298,6 +298,7 @@ Observação: isso NÃO significa “inventar chaves novas”. Significa “se e
   - `LOG_TO_FILE=1`
   - `LOG_DEBUG=0` (ou `DEBUG=0`)
   - `ALLOW_SELF_UPDATE_RESTART=0` (**importante**: evita `self_update` derrubar o processo sozinho)
+  - `CONVENIENTE_FATAL_EXIT=0` (default). Se colocar `1`, o processo sai em `uncaughtException/unhandledRejection` para evitar “seguir vivo” corrompido (humano reinicia `node index.js`).
 
 - `sitechatbot`:
   - `LOG_LEVEL=INFO`

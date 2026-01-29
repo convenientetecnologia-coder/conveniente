@@ -285,3 +285,19 @@ process.on('SIGTERM', async () => {
   try { await (clusterClient && clusterClient.kill && clusterClient.kill()); } catch(e){}
   process.exit(0);
 });
+
+// P1: política consistente de erros globais (master).
+// - Por padrão NÃO mata o processo (sem auto-restart neste ambiente).
+// - Se o operador habilitar CONVENIENTE_FATAL_EXIT=1, sai com code=1 para evitar estado corrompido.
+function fatalMaster(kind, e) {
+  try { logger.error(`[FATAL][MASTER] ${kind}`, { error: (e && e.message) ? e.message : e }, e); } catch {}
+  try {
+    if (String(process.env.CONVENIENTE_FATAL_EXIT || '').trim() === '1') {
+      setTimeout(() => { try { process.exit(1); } catch {} }, 800);
+    } else {
+      try { logger.warn('[FATAL][MASTER] processo continua (CONVENIENTE_FATAL_EXIT!=1). Humano deve reiniciar: node index.js'); } catch {}
+    }
+  } catch {}
+}
+process.on('uncaughtException', (e) => fatalMaster('uncaughtException', e));
+process.on('unhandledRejection', (e) => fatalMaster('unhandledRejection', e));
