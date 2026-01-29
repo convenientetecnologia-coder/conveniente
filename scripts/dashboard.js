@@ -990,9 +990,11 @@ async function ackCommand(cmdId, ok, errorMsg, details) {
   try {
     const base = notifierBaseFromEndpoints();
     if (!base || !hostIdCache || !cmdId) return;
+    const ackDebug = String(process.env.DASHBOARD_ACK_DEBUG || '').trim() === '1';
     const controller = new (global.AbortController || require('node-abort-controller'))();
     const t = setTimeout(() => { try { controller.abort(); } catch {} }, 3000);
-    await fetch(`${base}/api/commands/ack`, {
+    const url = `${base}/api/commands/ack`;
+    const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type':'application/json' },
       body: JSON.stringify({
@@ -1003,7 +1005,38 @@ async function ackCommand(cmdId, ok, errorMsg, details) {
         details: (details && typeof details === 'object') ? details : null
       }),
       signal: controller.signal
-    }).catch(()=>{});
+    }).catch((e)=> {
+      if (ackDebug) {
+        try {
+          const p = path.join(__dirname, '..', 'dados', 'commands_ack_debug.jsonl');
+          fsSync.appendFileSync(p, JSON.stringify({
+            ts: Date.now(),
+            event: 'ack_fetch_error',
+            url,
+            hostId: hostIdCache,
+            cmdId,
+            ok: !!ok,
+            error: (e && e.message) ? String(e.message) : String(e)
+          }) + '\n');
+        } catch {}
+      }
+      return null;
+    });
+    if (ackDebug) {
+      try {
+        const p = path.join(__dirname, '..', 'dados', 'commands_ack_debug.jsonl');
+        fsSync.appendFileSync(p, JSON.stringify({
+          ts: Date.now(),
+          event: 'ack_done',
+          url,
+          hostId: hostIdCache,
+          cmdId,
+          ackOk: !!ok,
+          httpStatus: resp ? Number(resp.status || 0) : null,
+          httpOk: resp ? !!resp.ok : null
+        }) + '\n');
+      } catch {}
+    }
     clearTimeout(t);
   } catch {}
 }
