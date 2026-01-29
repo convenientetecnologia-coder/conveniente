@@ -323,8 +323,9 @@ Observação: isso NÃO significa “inventar chaves novas”. Significa “se e
 
 - `conveniente`:
   - `OPEN_CHROMIUM_ON_START=0`
-  - `LOG_TO_FILE=1`
-  - `LOG_DEBUG=0` (ou `DEBUG=0`)
+  - `LOG_TO_FILE=1` (logs em `C:\conveniente\dados\logger.log` via append)
+  - `LOG_DEBUG=0` (ou `DEBUG=0`) (por default o `logger.js` assume debug ligado)
+  - observação: `logger.log` pode crescer sem limite; monitorar tamanho e rotacionar manualmente se necessário.
   - `ALLOW_SELF_UPDATE_RESTART=0` (**importante**: evita `self_update` derrubar o processo sozinho)
   - `CONVENIENTE_FATAL_EXIT=0` (default). Se colocar `1`, o processo sai em `uncaughtException/unhandledRejection` para evitar “seguir vivo” corrompido (humano reinicia `node index.js`).
 

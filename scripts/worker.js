@@ -8294,7 +8294,14 @@ const handlers = {
       // Observabilidade enterprise: flags runtime (usadas para pausa/quiescência determinística)
       const ctrl = controllers.get(nome);
       const virtusOnline = !!(ctrl && ctrl.virtus);
-      const sendLockActive = !!(ctrl && ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active);
+      const sendLockObj = (ctrl && ctrl.browser && ctrl.browser._sendLock && typeof ctrl.browser._sendLock === 'object')
+        ? ctrl.browser._sendLock
+        : null;
+      const sendLockActive = !!(sendLockObj && sendLockObj.active);
+      const sendLockOwner = sendLockObj && sendLockObj.owner ? String(sendLockObj.owner).slice(0, 40) : null;
+      const sendLockChatId = sendLockObj && sendLockObj.chatId ? String(sendLockObj.chatId).slice(0, 80) : null;
+      const sendLockSince = (sendLockObj && typeof sendLockObj.since === 'number') ? sendLockObj.since : null;
+      const sendLockAgeMs = (sendLockSince && sendLockSince > 0) ? Math.max(0, Date.now() - sendLockSince) : null;
       const robeEmExecucao = !!(robeMeta[nome] && robeMeta[nome].emExecucao === true);
 
       perfis.push({
@@ -8306,6 +8313,10 @@ const handlers = {
         trabalhando: !!(controllers.get(nome)?.trabalhando),
         virtusOnline,
         sendLockActive,
+        sendLockOwner,
+        sendLockChatId,
+        sendLockSince,
+        sendLockAgeMs,
         robeEmExecucao,
         configurando: !!(controllers.get(nome)?.configurando),
         humanControl: !!(controllers.get(nome)?.humanControl),

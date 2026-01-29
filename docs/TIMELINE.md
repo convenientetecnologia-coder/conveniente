@@ -383,3 +383,33 @@ Formato canônico (copiar/colar):
 - **Rollback**: reverter alterações nos `.md` (não afeta runtime).
 - **THREAD**: `TH-2026-01-29-retro-timeline-2026-01-09`
 
+---
+
+#### 2026-01-29 — [CONVENIENTE][P1] Status/CT: send-lock com metadados (owner/since/chatId) para diagnóstico “busy”
+
+- **O que**: ampliado o snapshot de `perfis` no `worker.js` para incluir `sendLockOwner`, `sendLockChatId`, `sendLockSince`, `sendLockAgeMs` (além de `sendLockActive`).
+- **Por quê**: quando existe `busy_timeout`, agora dá para provar *quem* segurou o send-lock e há quanto tempo, sem achismo e sem depender de logs ad-hoc.
+- **Arquivos**: `C:\conveniente\scripts\worker.js`
+- **Reinícios**: `conveniente` (para o runtime novo expor os campos no `/api/status` e no CT).
+- **Rollback**: `git revert <commit>` (remove apenas campos extras do status; não altera fluxo Robe/Virtus).
+- **THREAD**: `TH-2026-01-29-sendlock-status-meta`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][P1] Varredura final: loops/waits de UI sem deadline (robe/virtus/browser)
+
+- **O que**: verificado que `scripts/browser.js`, `scripts/robe.js`, `scripts/robeVeiculos.js` não possuem `while(true)`/`for(;;)`; os loops críticos de UI existentes estão bounded por budget/timeout e (quando debug habilitado) já emitem logs em timeout nos helpers relevantes.
+- **Por quê**: reduzir risco de “travou para sempre” por UI/espera infinita (sem mexer em comportamento quando está saudável).
+- **Arquivos**: `C:\conveniente\scripts\browser.js`, `C:\conveniente\scripts\robe.js`, `C:\conveniente\scripts\robeVeiculos.js`
+- **Reinícios**: nenhum (apenas validação/auditoria).
+- **THREAD**: `TH-2026-01-29-ui-loop-audit`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][P2][DOCS] Baseline de logging de produção (clarificações)
+
+- **O que**: clarificado no runbook que `LOG_TO_FILE=1` escreve em `C:\conveniente\dados\logger.log` e que o `logger.js` assume debug ligado por default (recomendação: `LOG_DEBUG=0`/`DEBUG=0`), com nota de rotação manual do arquivo.
+- **Por quê**: reduzir ruído em produção e deixar o caminho de evidência/arquivos explícito.
+- **Arquivos**: `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+- **Reinícios**: nenhum (doc).
+- **THREAD**: `TH-2026-01-29-prod-logging-baseline`
