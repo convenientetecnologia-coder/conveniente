@@ -189,12 +189,27 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
           } catch {}
           // Remoção local best-effort (mesma lógica do banflow)
           try {
-            const perfisArr = loadPerfisJson();
-            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-            const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+            // CRÍTICO (cluster): NÃO usar loadPerfisJson()/savePerfisJson do worker (shard) para gravar perfis.json,
+            // senão um shard pode sobrescrever o arquivo global com um subconjunto (ou []) e "sumir tudo".
+            let udir = '';
+            try {
+              const man = await manifestStore.read(nome).catch(() => null);
+              if (man && man.userDataDir) udir = String(man.userDataDir);
+            } catch {}
+            if (!udir) {
+              try {
+                const all = fileStore.loadPerfisJson() || [];
+                const perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
+                if (perfil && perfil.userDataDir) udir = String(perfil.userDataDir);
+              } catch {}
+            }
             if (udir && fs.existsSync(udir)) { try { fileStore.rimrafSync(udir); } catch {} }
-            const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-            try { savePerfisJson(arr2); } catch {}
+            try {
+              fileStore.withPerfisFileLockUpdate(
+                (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
+                { caller: 'ct_archive_not_found_delete_local', nome }
+              );
+            } catch {}
           } catch {}
           try { await fileStore.removeDesired(nome); } catch {}
           try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
@@ -2728,16 +2743,29 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
         }
         // Remove userDataDir externo, perfis.json, desired e dir do perfil
         try {
-          const perfisArr = loadPerfisJson();
-          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+          // CRÍTICO (cluster): não sobrescrever perfis.json global usando snapshot shard do worker.
+          let udir = '';
+          try {
+            const man = await manifestStore.read(nome).catch(() => null);
+            if (man && man.userDataDir) udir = String(man.userDataDir);
+          } catch {}
+          if (!udir) {
+            try {
+              const all = fileStore.loadPerfisJson() || [];
+              const perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
+              if (perfil && perfil.userDataDir) udir = String(perfil.userDataDir);
+            } catch {}
+          }
           if (udir && fs.existsSync(udir)) {
-            // Aqui NÃO fazemos “kill por raiva”: se o navegador ficou vivo, o deactivate acima deveria ter falhado.
-            // Mesmo assim, remoção é best-effort e pode falhar em Windows (arquivo bloqueado).
+            // remoção best-effort e pode falhar em Windows (arquivo bloqueado).
             try { fileStore.rimrafSync(udir); } catch {}
           }
-          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-          try { savePerfisJson(arr2); } catch {}
+          try {
+            fileStore.withPerfisFileLockUpdate(
+              (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
+              { caller: 'auto_delete_banned_profile', nome }
+            );
+          } catch {}
         } catch {}
         try { await fileStore.removeDesired(nome); } catch {}
         try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
@@ -2962,14 +2990,28 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
           return { ok: false, error: 'two_factor_delete_blocked_still_active' };
         }
         try {
-          const perfisArr = loadPerfisJson();
-          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
-          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+          // CRÍTICO (cluster): não sobrescrever perfis.json global usando snapshot shard do worker.
+          let udir = '';
+          try {
+            const man = await manifestStore.read(nome).catch(() => null);
+            if (man && man.userDataDir) udir = String(man.userDataDir);
+          } catch {}
+          if (!udir) {
+            try {
+              const all = fileStore.loadPerfisJson() || [];
+              const perfil = Array.isArray(all) ? all.find(p => p && p.nome === nome) : null;
+              if (perfil && perfil.userDataDir) udir = String(perfil.userDataDir);
+            } catch {}
+          }
           if (udir && fs.existsSync(udir)) {
             try { fileStore.rimrafSync(udir); } catch {}
           }
-          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-          try { savePerfisJson(arr2); } catch {}
+          try {
+            fileStore.withPerfisFileLockUpdate(
+              (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
+              { caller: 'auto_delete_two_factor_profile', nome }
+            );
+          } catch {}
         } catch {}
         try { await fileStore.removeDesired(nome); } catch {}
         try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
@@ -3289,16 +3331,20 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
                 const man = await manifestStore.read(nome).catch(()=>null);
                 if (man && man.userDataDir) udirFromManifest = String(man.userDataDir);
               } catch {}
-              const perfisArr = loadPerfisJson();
-              const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+              const allPerfisArr = (() => { try { return fileStore.loadPerfisJson() || []; } catch { return []; } })();
+              const perfil = Array.isArray(allPerfisArr) ? allPerfisArr.find(p => p && p.nome === nome) : null;
               const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
               if (udir) {
                 // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
                 try { browserHelper.killChromeProfileProcesses(udir); } catch {}
                 try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
               }
-              const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
-              try { savePerfisJson(arr2); } catch {}
+              try {
+                fileStore.withPerfisFileLockUpdate(
+                  (arr) => (Array.isArray(arr) ? arr : []).filter(p => p && p.nome !== nome),
+                  { caller: 'auto_delete_two_factor_profile_strict', nome }
+                );
+              } catch {}
             } catch {}
 
             // remover desired e diretório do perfil
@@ -4770,7 +4816,15 @@ function loadPerfisJson() {
   } catch { return []; }
 }
 function savePerfisJson(arr) {
-  try { fs.writeFileSync(perfisPath, JSON.stringify(arr, null, 2)); } catch {}
+  // CRÍTICO (cluster): nunca permitir que um worker shard sobrescreva o perfis.json global.
+  // Manter esta função apenas por compatibilidade com trechos antigos (não deve ser usada para writes shard).
+  try {
+    if (SHARD_SET && SHARD_SET.size) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_write_blocked_worker_shard', shardSize: SHARD_SET.size }); } catch {}
+      return false;
+    }
+    try { return fileStore.savePerfisJson(arr); } catch { return false; }
+  } catch { return false; }
 }
 
 function pickUaPreset() {
@@ -6096,9 +6150,14 @@ const handlers = {
     };
     try { fs.mkdirSync(perfilObj.userDataDir, { recursive: true }); } catch {}
 
-    const perfisArr = loadPerfisJson();
-    perfisArr.push(perfilObj);
-    savePerfisJson(perfisArr);
+    // CRÍTICO (cluster): criar perfil deve atualizar o perfis.json GLOBAL com lock (não shard snapshot).
+    try {
+      fileStore.withPerfisFileLockUpdate((arr) => {
+        arr = Array.isArray(arr) ? arr : [];
+        arr.push(perfilObj);
+        return arr;
+      }, { caller: 'criar-perfil', nome });
+    } catch {}
 
     try {
       await manifestStore.update(nome, (m) => {
