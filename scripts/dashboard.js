@@ -651,7 +651,9 @@ async function execStockProvision(cmd) {
 
   // Hardening: lock global com TTL para isolamento total durante provisão.
   // Evita concorrência (already_opening / slot storms) e permite hard-recovery com segurança.
-  const budgetMs = Math.max(30_000, Number(process.env.STOCK_PROVISION_BUDGET_MS || (8 * 60 * 1000)) || (8 * 60 * 1000));
+  // P1 policy (humano): permitir esperar busy por mais tempo, com deadline hard (evita “reserved preso”).
+  // Default anterior (8min) era curto para ambientes com muitos perfis ativos.
+  const budgetMs = Math.max(30_000, Number(process.env.STOCK_PROVISION_BUDGET_MS || (20 * 60 * 1000)) || (20 * 60 * 1000));
   const lockOwner = `stock_provision:${batchId}`;
   const lk = provisionLock.tryAcquire({
     owner: lockOwner,
@@ -947,8 +949,9 @@ async function execStockProvision(cmd) {
         // - espera envios/postagens ativos terminarem
         // - garante Virtus pausado para os demais perfis (mínimo impacto)
         {
-          const waitBusyMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_BUSY_MS || 120000) || 120000);
-          const waitPauseMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_PAUSE_MS || 45000) || 45000);
+          // P1 policy: esperar busy mais tempo antes de falhar (o CT registra no histórico; depois o loop tenta de novo).
+          const waitBusyMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_BUSY_MS || (10 * 60 * 1000)) || (10 * 60 * 1000));
+          const waitPauseMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_PAUSE_MS || (2 * 60 * 1000)) || (2 * 60 * 1000));
           const phaseBudgetMs = Math.min(budgetLeftMs(), Math.max(20_000, waitBusyMs + waitPauseMs + 10_000));
           await waitForQuiesce({ out, phaseBudgetMs, waitBusyMs, waitPauseMs });
         }

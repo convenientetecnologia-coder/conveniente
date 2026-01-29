@@ -459,3 +459,30 @@ Formato canônico (copiar/colar):
 - **Reinícios**: `conveniente` (para o runtime novo aplicar os timeouts).
 - **Rollback**: `git revert <commit>` (retorna para timeout padrão).
 - **THREAD**: `TH-2026-01-29-stock-provision-local-timeout`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][P1] `stock_provision`: modo “esperar busy mais tempo” (budget/waitBusy defaults)
+
+- **O que**: aumentados os defaults de:
+  - `STOCK_PROVISION_BUDGET_MS` (para 20min)
+  - `STOCK_PROVISION_WAIT_BUSY_MS` (para 10min)
+  - `STOCK_PROVISION_WAIT_PAUSE_MS` (para 2min)
+- **Por quê**: alinhamento com o operador (humano): é mais seguro esperar ocupação terminar do que falhar rápido; no timeout, o histórico registra erro e o loop de guard re-tenta depois.
+- **Arquivos**: `C:\conveniente\scripts\dashboard.js`
+- **Reinícios**: `conveniente` (para runtime novo aplicar defaults).
+- **Rollback**: `git revert <commit>` (volta para defaults anteriores).
+- **THREAD**: `TH-2026-01-29-stock-provision-wait-busy-policy`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][DOCS] INBOX: banco de relatos por arquivo (1 INC por relato) + índice
+
+- **O que**: `INBOX_RELATOS_DO_HUMANO.md` permanece como “entrada”, e cada incidente triado ganha arquivo em `docs/inbox/` com índice.
+- **Por quê**: manter histórico pesquisável (“banco de relatos”) sem inflar o arquivo de entrada.
+- **Arquivos**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\inbox\INC-20260129-2100-01.md`
+- **Reinícios**: nenhum (docs).
+- **THREAD**: `TH-2026-01-29-inbox-archive-per-inc`

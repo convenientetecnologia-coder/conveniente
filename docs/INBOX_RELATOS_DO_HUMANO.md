@@ -68,39 +68,7 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 ## RAW_INPUT (colar aqui)
 
 ```text
-triagem inbox
-
-Antes das atualizações P0/P1/P2, eu estava com problemas no cadastro/provisionamento de conta (estoque).
-No “Estoque disponíveis” a conta ficava reservada mas não ia (isso em todos os servidores, como mostra no histórico).
-
-Histórico (recorte):
-
-ID	Tipo	Status	Servidor	Conta	Erro	Quando
-10630	provision_guard	concluído	—	—		29/01/2026, 20:03:02
-10629	provision_guard	concluído	—	—		29/01/2026, 19:57:01
-10628	provision_guard	concluído	—	—		29/01/2026, 19:51:01
-10627	provision_guard	concluído	—	—		29/01/2026, 19:44:57
-10626	provision_guard	concluído	—	—		29/01/2026, 19:38:57
-10625	provision_guard	concluído	—	—		29/01/2026, 19:32:56
-10624	provision_guard	concluído	—	—		29/01/2026, 19:26:56
-10623	provision_guard	concluído	—	—		29/01/2026, 19:20:55
-10622	provision_guard	concluído	—	—		29/01/2026, 19:14:55
-10621	Cadastrador (provisionar conta)	concluído	ROBE MÃE 4	#505	fail ok=0 fail=1	29/01/2026, 19:13:10
-10620	Cadastrador (provisionar conta)	falhou	ROBE MÃE 2	#504	fail ok=0 fail=1	29/01/2026, 19:12:11
-10619	Cadastrador (provisionar conta)	falhou	ROBE MÃE 1	#503	fail ok=0 fail=1	29/01/2026, 19:11:26
-10618	Cadastrador (provisionar conta)	falhou	ROBE MÃE 7	#502	fail ok=0 fail=1	29/01/2026, 19:11:11
-10617	provision_guard	concluído	—	—		29/01/2026, 19:08:41
-10616	Cadastrador (provisionar conta)	falhou	ROBE MÃE 6	#502	fail ok=0 fail=1	29/01/2026, 19:05:56
-10615	Cadastrador (provisionar conta)	falhou	ROBE MÃE 5	#502	fail ok=0 fail=1	29/01/2026, 19:02:56
-...
-10596	Cadastrador (provisionar conta)	falhou	ROBE MÃE 4	#500	stale_account_moved	29/01/2026, 18:23:08
-...
-
-Depois de todas as atualizações, eu atualizei o ROBE MÃE 4, fiz o teste e ele cadastrou uma conta.
-Não sei exatamente porque/onde destravou, mas aparentemente foi destravado.
-
-Agora queremos investigar o fluxo do começo ao fim e garantir que todos os servidores cadastram contas de forma perfeita,
-sem contas ficando presas em “reserved” e sem falhas silenciosas.
+[cole aqui o texto bruto do humano]
 ```
 
 ---
@@ -158,6 +126,11 @@ Colunas:
   - registrar audit local quando ocorrer “job não encontrado” (para nunca mais virar achismo).
 - **Precisa reiniciar agora?** não
 - **Precisa reiniciar para validar/testar?** depende (CT sim; hosts não necessariamente)
+
+Observação (organização):
+- O “RAW_INPUT” acima é **temporário** (entrada).
+- Após triagem, o incidente vira um arquivo próprio em `C:\conveniente\docs\inbox\INC-....md` e o RAW_INPUT volta a ficar vazio.
+- Índice: `C:\conveniente\docs\inbox\INDEX.md`.
 
 ## ITEM TEMPLATE (copiar/colar por item)
 
