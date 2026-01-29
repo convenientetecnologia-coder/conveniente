@@ -80,6 +80,24 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX][OPS] P1: evitar “sendLockActive preso” (Virtus libera via Browser, não via Page)
+
+- **O que**:
+  - `virtus.js`: `send-lock` agora é adquirido/liberado usando o objeto `browser` diretamente (não depende de `page.browser()`).
+  - isso evita leak do lock quando a página fecha/desconecta durante o fluxo do chat.
+- **Por quê**: evidência no CT mostra muitos perfis com `sendLockActive=true`, o que dispara `busy_timeout` e bloqueia operações críticas (provisão/locks).
+- **Evidência**:
+  - CT snapshot: `C:\sitechatbot\dados\bcf01e8d-82da-4d5d-aed0-d60305d4696d-de8717d9f1.json` (vários `sendLockActive=true`)
+  - CT ack: `C:\sitechatbot\dados\logs\bcf01e8d-82da-4d5d-aed0-d60305d4696d\ack_2f0461f7-db74-478d-a43a-0c83485abfbe.json` (`busy_timeout`)
+  - código: `C:\conveniente\scripts\virtus.js` (`acquireSendGuardBrowser`, `releaseSendGuardBrowser`)
+- **Precisa reiniciar agora?** não
+- **Precisa reiniciar para validar/testar?** sim
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert <commit>` e reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CONV][DOCS] Achado P0 (ainda não corrigido): lock não owner-safe
 
 - **O que**: identificado P0 de concorrência em lock de arquivo no `conveniente`.

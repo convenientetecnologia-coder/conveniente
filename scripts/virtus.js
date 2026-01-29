@@ -29,8 +29,20 @@ function isVirtusLocked(nome){ return VIRTUS_INPUT_LOCKS.has(nome); }
 
 // Helpers globais de send-lock/contexto
 function getBrowserFromPage(p) { try { return typeof p.browser === 'function' ? p.browser() : null; } catch { return null; } }
-async function acquireSendGuard(p, chatId) { try { const b = getBrowserFromPage(p); if (b) b._sendLock = { active: true, owner: 'virtus', chatId, since: Date.now() }; } catch {} }
-function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b && b._sendLock && b._sendLock.owner === 'virtus') b._sendLock.active = false; } catch {} }
+function acquireSendGuardBrowser(browser, chatId) {
+  try {
+    if (!browser) return;
+    browser._sendLock = { active: true, owner: 'virtus', chatId, since: Date.now() };
+  } catch {}
+}
+function acquireSendGuard(p, chatId) { try { const b = getBrowserFromPage(p); if (b) acquireSendGuardBrowser(b, chatId); } catch {} }
+function releaseSendGuardBrowser(browser) {
+  try {
+    if (!browser) return;
+    if (browser._sendLock && browser._sendLock.owner === 'virtus') browser._sendLock.active = false;
+  } catch {}
+}
+function releaseSendGuard(p) { try { const b = getBrowserFromPage(p); if (b) releaseSendGuardBrowser(b); } catch {} }
 async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
   const t0 = Date.now();
   while (true) {
@@ -1103,8 +1115,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        // Ativa send-guard imediatamente após confirmar navegação correta
-        await acquireSendGuard(p, chatId);
+        // Ativa send-guard imediatamente após confirmar navegação correta.
+        // P1 hardening: use o Browser (não a Page) para evitar leak quando a page fecha/desconecta.
+        acquireSendGuardBrowser(browser, chatId);
 
         if (await isChatBlocked(p)) {
           logger.warn('Chat bloqueado/indisponível, marcado respondido', { nome, chatId });
@@ -1240,7 +1253,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       // Garantia: nunca deixar pending zumbi
       try { await pendingDel(nome, chatId); } catch {}
       resetFail(chatId); // limpa failCounts quando fim do ciclo
-      try { releaseSendGuard(p); } catch {}
+      // P1 hardening: liberar via Browser (mesmo se a Page já morreu)
+      try { releaseSendGuardBrowser(browser); } catch {}
       if (_chatLockAcquired) {
         try { chatLock.release(nome, chatId); } catch {}
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
