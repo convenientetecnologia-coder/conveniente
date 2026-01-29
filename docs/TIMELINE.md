@@ -82,6 +82,21 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX] P1: auto-backup do `index.js` em subprocess (reduz freeze)
+
+- **O que**: o snapshot automático (`CONVENIENTE_AUTO_BACKUP_*`) deixou de rodar com IO síncrono pesado no processo principal; agora dispara um subprocesso (`scripts/autoBackupWorker.js`) para fazer o trabalho.
+- **Por quê**: P1 — reduzir latência/congelos do `conveniente` sob stress.
+- **Evidência**:
+  - `C:\conveniente\index.js` (função `startAutoBackupConveniente`)
+  - `C:\conveniente\scripts\autoBackupWorker.js`
+- **Precisa reiniciar agora?** não (só é necessário quando você quiser o benefício em runtime).
+- **Precisa reiniciar para validar/testar?** sim, se você quiser observar “menos freeze” e confirmar que `_backup_auto/_snapshots.log` continua sendo gerado.
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert` do commit e (se precisar validar rollback) reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS] Checkup 3 (loops/timeouts/polling)
 
 - **O que**:

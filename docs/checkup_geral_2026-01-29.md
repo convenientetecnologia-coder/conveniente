@@ -67,6 +67,8 @@ Contexto: nas últimas semanas houve mudanças rápidas/desorganizadas e o siste
   - opcional: rodar snapshot em processo separado
   - opcional: permitir desativar/afrouxar em produção via env (já existe `CONVENIENTE_AUTO_BACKUP_DISABLE=1`)
 
+**Status**: ✅ **mitigado** — snapshot do auto-backup agora roda em **processo separado** (subprocess), reduzindo freeze do main.
+
 ---
 
 #### P1 — risco de “espera infinita” (deadlines)
