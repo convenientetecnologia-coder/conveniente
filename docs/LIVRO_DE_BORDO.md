@@ -166,6 +166,7 @@ O servidor (`conveniente`) recebe comandos dentro da resposta do `report` (campo
 - **`hostId`**
   - **O que é**: identificador único de um servidor/nó.
   - **Onde nasce**: `conveniente` grava/usa `dados/.telemetry_hostid`.
+  - **Mapa humano ↔ hostId**: `C:\conveniente\docs\HOST_REGISTRY.md` (apelidos tipo “ROBE MÃE 2”).
   - **Onde aparece**:
     - CT/telemetria: payload do `report`
     - comandos/ACK: `sitechatbot/dados/commands.json`, `sitechatbot/dados/commands.log`
