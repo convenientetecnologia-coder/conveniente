@@ -1453,6 +1453,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
   try {
     const pg = ctrl && ctrl.mainPage ? ctrl.mainPage : null;
     if (!pg) return { ok: false, error: 'no_main_page' };
+    const src = String(source || '');
+    const isOpenAllMap = /open_all|open-all|bulk_open|openall/i.test(src);
 
     // 0) Ban/Suspensão
     try {
@@ -1467,7 +1469,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     // 1) LoginRequired/Identity/Appeal/Captcha
     const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
-      // 1) Messenger OK — antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
+      // 1) Messenger OK
       try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_ok', nome: String(nome||''), source: String(source||'') }); } catch {}
 
       // Espera UI real do Messenger Marketplace (anti-atropelo).
@@ -1500,130 +1502,12 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         }
       } catch {}
 
-      let robeProbe = null;
-      try {
-        const man = await manifestStore.read(nome).catch(()=>null);
-        const robeMode = (man && man.robeMode) ? String(man.robeMode) : 'itens';
-        const targetUrl = (robeMode === 'veiculos')
-          ? 'https://www.facebook.com/marketplace/create/vehicle'
-          : 'https://www.facebook.com/marketplace/create/item';
-        const flowId = newFlowId('robe_probe');
-        try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_begin', nome: String(nome||''), source: String(source||''), flowId, robeMode, targetUrl }); } catch {}
-
-        // Janela curta e segura: abre aba, valida pronto de verdade, fecha.
-        const tProbe0 = Date.now();
-        const p = await ctrl.browser.newPage().catch(()=>null);
-        if (!p) throw new Error('robe_probe_no_newPage');
-        try { await wirePageObservers(nome, p); } catch {}
-        // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda) — igual ao Robe.
-        try {
-          const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
-          guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 20000);
-        } catch {}
-        // PatchPage na aba 1 para consistência (coords/UA/stealth hooks)
-        try {
-          const coords = utils.getCoords((man && man.cidade) ? String(man.cidade) : '');
-          await browserHelper.patchPage(nome, p, coords).catch(()=>{});
-        } catch {}
-        const tNav0 = Date.now();
-        try { await p.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }); } catch (e) {}
-        const navDurMs = Date.now() - tNav0;
-        // Espera sinais reais de create (anti-atropelo), com timeout curto.
-        const tReady0 = Date.now();
-        let okReady = false;
-        try {
-          okReady = await p.waitForFunction((want) => {
-            try {
-              const href = String(location && location.href ? location.href : '');
-              const path = String(location && location.pathname ? location.pathname : '');
-              if (!href || href === 'about:blank') return false;
-              if (want === 'vehicle') {
-                if (!/\/marketplace\/create\/vehicle\b/i.test(path)) return false;
-              } else {
-                if (!/\/marketplace\/create\/item\b/i.test(path)) return false;
-              }
-              const hasMain = !!document.querySelector('div[role="main"]');
-              const hasFile = !!document.querySelector('input[type="file"]');
-              const hasAria = !!document.querySelector('[aria-label]');
-              return hasMain && (hasFile || hasAria);
-            } catch { return false; }
-          }, { timeout: 20000 }, (robeMode === 'veiculos') ? 'vehicle' : 'item').catch(()=>false);
-        } catch { okReady = false; }
-        const readyDurMs = Date.now() - tReady0;
-        // Não fechar instantâneo: garantir que houve tempo mínimo de validação (anti-flake visual).
-        const minHoldMs = parseInt(process.env.BOOTSTRAP_ROBE_MIN_HOLD_MS || '1800', 10);
-        const elapsed = Date.now() - tProbe0;
-        if (minHoldMs > elapsed) {
-          try { await sleep(minHoldMs - elapsed); } catch {}
-        }
-        try { await browserHelper.ensureFbUiUnblocked(p, nome, { reasonBase: 'bootstrap_robe_probe', allowGpt: true, maxRounds: 2 }).catch(()=>null); } catch {}
-        const lr2 = await browserHelper.detectLoginRequired(p).catch(()=>({ loginRequired:false }));
-        robeProbe = { ok: true, robeMode, targetUrl, lr: lr2 };
-        let u1 = ''; let t1 = '';
-        try { u1 = (typeof p.url === 'function') ? String(p.url() || '') : ''; } catch {}
-        try { t1 = (typeof p.title === 'function') ? String(await p.title().catch(()=>'')) : ''; } catch {}
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'bootstrap_robe_probe_end',
-            nome: String(nome||''),
-            source: String(source||''),
-            flowId,
-            ok: true,
-            robeMode,
-            targetUrl,
-            navDurMs,
-            readyOk: !!okReady,
-            readyDurMs,
-            finalUrl: String(u1||'').slice(0, 260),
-            title: String(t1||'').slice(0, 200),
-            loginRequired: !!(lr2 && lr2.loginRequired),
-            reason: String((lr2 && lr2.reason) ? lr2.reason : '').slice(0, 160)
-          });
-        } catch {}
-        try { await p.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
-      } catch (e) {
-        robeProbe = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
-        try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_end', nome: String(nome||''), source: String(source||''), ok: false, error: String(robeProbe.error||'').slice(0, 180) }); } catch {}
+      // Política do usuário:
+      // Durante open_all (mapeamento), validar APENAS Messenger e NÃO abrir FB create (reduz concorrência).
+      // O Robe valida/abre sua aba no momento do post (fila do Robe).
+      if (isOpenAllMap) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_skipped', nome: String(nome||''), source: String(source||'') }); } catch {}
       }
-
-      // 2) Se o Robe probe achou bloqueio (captcha/login/identity/appeal), NÃO liberar “clear”.
-      try {
-        const lr2 = robeProbe && robeProbe.ok && robeProbe.lr ? robeProbe.lr : null;
-        if (lr2 && lr2.loginRequired === true) {
-          const rr2 = String(lr2.reason || '').toLowerCase();
-          try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_login_required', nome: String(nome||''), source: String(source||''), reason: String(lr2.reason||'').slice(0,160) }); } catch {}
-
-          if (rr2.includes('identity_submitted')) {
-            try { await setIdentitySubmittedFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            return { ok: true, state: 'identity_submitted', reason: rr2 };
-          }
-          if (rr2.includes('identity')) {
-            try { await setIdentityRequiredFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            // iniciar fluxo de identidade (gate+cooldown já protegem)
-            setTimeout(() => {
-              try {
-                const c = controllers.get(nome);
-                const p0 = (c && c.mainPage) ? c.mainPage : pg;
-                if (c && p0) runIdentityFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
-              } catch {}
-            }, 0);
-            return { ok: true, state: 'identity_required', reason: rr2 };
-          }
-          if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
-            try { await setAppealSubmittedFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
-            return { ok: true, state: 'appeal_submitted', reason: rr2 };
-          }
-          if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
-            try { await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            return { ok: true, state: 'captcha_checkpoint', reason: rr2 };
-          }
-          // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
-          try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
-          return { ok: true, state: 'login_required', reason: rr2 };
-        }
-      } catch {}
 
       // 3) Se Messenger OK + Robe OK => agora sim “clear” e liberar automação.
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_clear', nome: String(nome||''), source: String(source||'') }); } catch {}
@@ -1638,10 +1522,14 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           return d;
         });
       } catch {}
-      // Agenda start_work (sem travar activateOnce)
-      setTimeout(() => {
-        try { handlers.start_work({ nome, operator: 'bulk_open_all_auto_probe' }).catch(()=>{}); } catch {}
-      }, 0);
+      // Política (2026-01-29):
+      // - Em open_all (mapeamento), NÃO iniciar trabalho automaticamente.
+      // - Em abertura normal (manual), pode iniciar trabalho.
+      if (!isOpenAllMap) {
+        setTimeout(() => {
+          try { handlers.start_work({ nome, operator: 'open_auto_probe' }).catch(()=>{}); } catch {}
+        }, 0);
+      }
       return { ok: true, state: 'not_login_required' };
     }
 
@@ -9414,6 +9302,79 @@ async function nurseTick() {
 
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
+
+    // ===================== open_all_map sequencial (política do usuário) =====================
+    // Objetivo:
+    // - Abrir 1 por vez (MAX_OPEN_CONCURRENCY=1)
+    // - Validar APENAS Messenger (probeHumanStateOnOpen source=open_all faz messenger-only)
+    // - NÃO iniciar trabalho automaticamente durante a sessão
+    // - Manter provision_lock (open_all_map) até terminar (garante Robe/Virtus pausados)
+    // Fonte de verdade da sessão: desired._openAll
+    try {
+      const sess = (desired && desired._openAll && desired._openAll.active === true) ? desired._openAll : null;
+      if (sess && Array.isArray(sess.queue) && sess.queue.length) {
+        const lockOwner = String(sess.lockOwner || sess.op || '').trim();
+        const idx = Math.max(0, Number(sess.idx || 0) || 0);
+        const queue = sess.queue.map(x => String(x||'').trim()).filter(Boolean);
+
+        // Finalizou?
+        if (idx >= queue.length) {
+          try {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d = d || {}; d._openAll = d._openAll || {};
+              d._openAll = { ...(d._openAll || {}), active: false, finishedAt: Date.now() };
+              return d;
+            }, { caller: 'worker_nurse', reason: 'open_all_done' });
+          } catch {}
+          try { if (lockOwner) provisionLock.release({ owner: lockOwner, force: true }); } catch {}
+          // Não abrir mais nada nesta rodada
+          return;
+        }
+
+        // 1 por vez: só prossegue se tiver slot
+        if (slotsInUse < MAX_OPEN_CONCURRENCY) {
+          const target = queue[idx];
+          if (target && !controllers.has(target)) {
+            slotsInUse++;
+            try {
+              // Marca inFlight (best-effort)
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d = d || {}; d._openAll = d._openAll || {};
+                  d._openAll = { ...(d._openAll || {}), inFlight: target, inFlightAt: Date.now() };
+                  return d;
+                }, { caller: 'worker_nurse', reason: `open_all_inflight:${target}` });
+              } catch {}
+
+              await reportAction(target, 'mil_action', `open_all_map_open idx=${idx+1}/${queue.length}`);
+              await activateOnce(target, 'nurse_open_all_seq', lockOwner || `open_all_map:${Date.now()}`).catch(()=>null);
+
+              const ctrl2 = controllers.get(target);
+              if (ctrl2 && ctrl2.browser) {
+                try { await ensureNonBlankEntryPage(target, ctrl2, { prefer: 'messenger', reasonBase: 'open_all_entry' }); } catch {}
+                try { await probeHumanStateOnOpen(target, ctrl2, { source: 'open_all' }); } catch {}
+              }
+
+              // Avança fila (idx++) e limpa inflight
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d = d || {}; d._openAll = d._openAll || {};
+                  const cur = d._openAll || {};
+                  const curIdx = Math.max(0, Number(cur.idx || 0) || 0);
+                  d._openAll = { ...(cur || {}), idx: curIdx + 1, inFlight: null, inFlightAt: 0 };
+                  return d;
+                }, { caller: 'worker_nurse', reason: `open_all_advance:${target}` });
+              } catch {}
+            } finally {
+              slotsInUse--;
+            }
+
+            await new Promise(r => setTimeout(r, OPEN_ACTIVATION_DELAY_MS));
+            return; // sequencial estrito
+          }
+        }
+      }
+    } catch {}
 
     // ===== PRIORIDADE ENTERPRISE: Recurso em análise (Pronto!) =====
     // Se existir qualquer perfil com appealSubmitted=true e appealNextCheckAt<=now e ainda sem controller,

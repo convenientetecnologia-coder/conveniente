@@ -1096,45 +1096,56 @@ module.exports = (app, workerClient, fileStore) => {
   app.post('/api/perfis/open-all-24h', async (req, res) => {
     const issues = require('./issues.js');
     const op = String(req.headers['x-operator'] || 'bulk_open_all');
+    let lockOwner = null;
 
     try {
       const perfisArr = fileStore.loadPerfisJson() || [];
-      const humanOnlySet = new Set();
+      // Política do usuário (2026-01-29):
+      // "Abrir Todos" é um MAPEAMENTO sequencial (1 browser por vez) para checar Messenger e marcar estados.
+      // Durante TODO o mapeamento:
+      // - Robe/Virtus devem ficar pausados (lock global)
+      // - não iniciar trabalho automaticamente
+      // - não usar pré-scan por flags antigas (fonte da verdade é a UI ao abrir)
 
-      // 0) Pré-scan enterprise: identifica perfis que devem abrir em modo humano (PIL / estados que bloqueiam automação).
-      // Regra: se houver flags persistentes que exigem intervenção humana, NÃO inicia trabalho automaticamente.
-      // Obs.: não depende de humanHold (humanHold é usado como gate), então a decisão vem do manifest flags.
-      for (const p of perfisArr) {
-        try {
-          const nome = p && p.nome;
-          if (!nome) continue;
-          const man = await manifestStore.read(nome).catch(()=>null);
-          const f = (man && man.accountFlags && typeof man.accountFlags === 'object') ? man.accountFlags : {};
-          // Ultra enterprise: "humanOnly" aqui deve ser apenas para estados realmente bloqueantes,
-          // não para flags auto-resolvíveis (ex.: loginRemediateFailed/messengerPin podem estar presas
-          // mesmo com UI ok, e o worker reconciliador já limpa).
-          const shouldHumanOnly =
-            f.loginRequired === true ||
-            f.identityRequired === true ||
-            f.identitySubmitted === true ||
-            f.appealSubmitted === true ||
-            f.banned === true;
-          if (shouldHumanOnly) humanOnlySet.add(nome);
-        } catch {}
+      // 0) Lock global: isola o host durante open_all_map (evita Virtus/Robe/login_remediate em paralelo).
+      lockOwner = `open_all_map:${Date.now()}`;
+      try {
+        const lk = provisionLock.tryAcquire({
+          owner: lockOwner,
+          ttlMs: 25 * 60 * 1000,
+          meta: { kind: 'open_all_map', by: String(op || '').slice(0, 120) }
+        });
+        if (!lk || !lk.ok) {
+          const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+          return res.json({ ok: false, error: `open_all_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
+        }
+      } catch (e) {
+        return res.json({ ok: false, error: `open_all_lock_error ${(e && e.message) || String(e)}` });
       }
 
       // 1) PASSO ATÔMICO: desired.active=true para todos.
-      // Para perfis human-only: virtus OFF (abre para humano).
-      // Importante: NÃO usa humanHold como gate (humanHold impede abrir).
+      // Durante mapeamento: Virtus OFF para todos (não trabalha), e o worker abre 1 por vez (MAX_OPEN_CONCURRENCY=1).
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
+        const names = perfisArr.map(p => p && p.nome).filter(Boolean);
+        desired._openAll = {
+          active: true,
+          startedAt: Date.now(),
+          idx: 0,
+          queue: names,
+          inFlight: null,
+          inFlightAt: 0,
+          lockOwner,
+          by: String(op || 'bulk_open_all').slice(0, 120)
+        };
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;
           desired.perfis[nome] = {
             ...(desired.perfis[nome] || {}),
             active: true,
-            virtus: humanOnlySet.has(nome) ? 'off' : 'on'
+            virtus: 'off',
+            humanHold: false
           };
         }
         return desired;
@@ -1143,11 +1154,7 @@ module.exports = (app, workerClient, fileStore) => {
       // LOG por perfil: bulk open
       for (const p of perfisArr) {
         try {
-          if (humanOnlySet.has(p.nome)) {
-            await issues.append(p.nome, 'mil_action', 'bulk_open_all: flags require human -> open_human_only');
-          } else {
-            await issues.append(p.nome, 'mil_action', 'bulk_open_all');
-          }
+          await issues.append(p.nome, 'mil_action', `open_all_map_begin owner=${lockOwner}`);
         } catch {}
       }
 
@@ -1156,9 +1163,10 @@ module.exports = (app, workerClient, fileStore) => {
       // - NÃO iniciar activates em paralelo aqui.
       // A abertura real fica 100% a cargo do NURSE tick (que já tem MAX_OPEN_CONCURRENCY=1),
       // garantindo: Messenger OK -> Robe OK/erro -> próximo.
-      return res.json({ ok: true, total: perfisArr.length, humanOnly: humanOnlySet.size });
+      return res.json({ ok: true, total: perfisArr.length, lockOwner });
 
     } catch (e) {
+      try { if (lockOwner) provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
@@ -1214,6 +1222,15 @@ module.exports = (app, workerClient, fileStore) => {
       // 1) PASSO ATÔMICO: seta active:false e virtus:'off' em todos
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
+        // Se houver sessão open-all pendurada, encerrar aqui (close_all tem prioridade).
+        if (desired._openAll && desired._openAll.active === true) {
+          desired._openAll = {
+            ...(desired._openAll || {}),
+            active: false,
+            cancelledAt: Date.now(),
+            cancelledReason: 'close_all'
+          };
+        }
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;
