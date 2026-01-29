@@ -558,9 +558,36 @@ function withPerfisFileLockUpdate(mutator, meta = null) {
   const startedAt = Date.now();
   try {
     fd = acquirePerfisLockFileSync();
-    const cur = _readPerfisJsonWithRetry({ retries: 8, delayMs: 25 });
-    const beforeLen = Array.isArray(cur) ? cur.length : 0;
-    const beforeHash = _hashPerfisNames(cur);
+    let cur = _readPerfisJsonWithRetry({ retries: 8, delayMs: 25 });
+    let beforeLen = Array.isArray(cur) ? cur.length : 0;
+    let beforeHash = _hashPerfisNames(cur);
+
+    // Auto-heal enterprise: se perfis.json veio vazio (0) mas não é permitido ficar vazio,
+    // tenta reconstruir a partir do Chrome User Data ANTES de aplicar mutações.
+    // Motivação: durante restart/IO/race/corrupção, pode haver leitura como []/inválida.
+    if (beforeLen === 0 && String(process.env.PERFIS_ALLOW_EMPTY || '').trim() !== '1') {
+      try {
+        const rebuilt = _rebuildPerfisFromChromeUserData();
+        const out = rebuilt && rebuilt.ok && Array.isArray(rebuilt.out) ? rebuilt.out : null;
+        if (out && out.length > 0) {
+          cur = out;
+          beforeLen = out.length;
+          beforeHash = _hashPerfisNames(out);
+          try {
+            _appendProvisionAudit({
+              ts: Date.now(),
+              event: 'perfis_autorepair_before_mutate',
+              ok: true,
+              caller,
+              reason,
+              rebuiltCount: out.length,
+              durationMs: Date.now() - startedAt
+            });
+          } catch {}
+        }
+      } catch {}
+    }
+
     const next = (typeof mutator === 'function') ? mutator(Array.isArray(cur) ? cur : []) : cur;
     if (!Array.isArray(next)) {
       try { _appendProvisionAudit({ ts: Date.now(), event: 'perfis_mutate_rejected', ok: false, error: 'mutator_not_array', caller, reason, beforeLen }); } catch {}

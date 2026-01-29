@@ -51,6 +51,43 @@ function isHumanCloseAll(cmd) {
   return true;
 }
 
+async function maybeRunDeferredCloseAll() {
+  try {
+    if (!deferredCloseAllCmdId) return;
+    // Ainda existe lock ativo → mantém deferido (não ACK).
+    if (provisionLock.isActive()) return;
+
+    const cmdId = deferredCloseAllCmdId;
+    const payload = deferredCloseAllPayload || null;
+    const ageMs = deferredCloseAllEnqueuedAt ? (Date.now() - deferredCloseAllEnqueuedAt) : 0;
+
+    // Limite de segurança: se ficou velho demais, ACK falha (evita inflight eterno no CT).
+    // 30min é conservador: evita executar um close_all "antigo" depois de muita coisa acontecer.
+    if (ageMs > (30 * 60 * 1000)) {
+      logger.warn('[DASH][DEFER] close_all expirou; ACK fail e limpando', { cmdId, ageMs });
+      try { await ackCommand(cmdId, false, 'close_all_deferred_expired', { deferred: true, ageMs }); } catch {}
+      deferredCloseAllCmdId = null;
+      deferredCloseAllPayload = null;
+      deferredCloseAllEnqueuedAt = 0;
+      return;
+    }
+
+    logger.warn('[DASH][DEFER] executando close_all deferido (lock liberado)', { cmdId, ageMs });
+    try {
+      await execCloseAll({ id: cmdId, type: 'close_all', payload });
+      try { await ackCommand(cmdId, true, null, { deferred: true, ageMs }); } catch {}
+    } catch (e) {
+      const msg = (e && e.message) || String(e);
+      logger.warn('[DASH][DEFER] falha ao executar close_all deferido', { cmdId, error: msg });
+      try { await ackCommand(cmdId, false, msg, { deferred: true, ageMs }); } catch {}
+    } finally {
+      deferredCloseAllCmdId = null;
+      deferredCloseAllPayload = null;
+      deferredCloseAllEnqueuedAt = 0;
+    }
+  } catch {}
+}
+
 function now() { return Date.now(); }
 function debounceWarn(msg, ms = 60000) {
   const t = now();
@@ -1539,6 +1576,188 @@ async function execStockPushAccountUpdate(cmd) {
   return r;
 }
 
+// ===== NOVO: backups locais do conveniente (rollback rápido) =====
+function _backupAutoBaseDir() {
+  try { return path.join(__dirname, '..', '_backup_auto'); } catch { return ''; }
+}
+function _safeStatSync(p) { try { return fsSync.statSync(p); } catch { return null; } }
+function _readBackupSnapshotsLog(limit = 3000) {
+  const baseDir = _backupAutoBaseDir();
+  const p = baseDir ? path.join(baseDir, '_snapshots.log') : '';
+  try {
+    if (!p || !fsSync.existsSync(p)) return { ok: true, baseDir, file: p, rows: [] };
+    const lines = String(fsSync.readFileSync(p, 'utf8') || '').split(/\r?\n/).filter(Boolean);
+    const rows = [];
+    for (const ln of lines.slice(Math.max(0, lines.length - Math.max(1, limit)))) {
+      try {
+        const j = JSON.parse(ln);
+        if (j && j.tag) rows.push(j);
+      } catch {}
+    }
+    return { ok: true, baseDir, file: p, rows };
+  } catch (e) {
+    return { ok: false, baseDir, file: p, error: (e && e.message) ? String(e.message) : String(e), rows: [] };
+  }
+}
+async function execListBackups(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const lim = Math.max(20, Math.min(5000, Number(payload.limit || 1200) || 1200));
+  const r = _readBackupSnapshotsLog(lim);
+  const dirs = [];
+  try {
+    const baseDir = _backupAutoBaseDir();
+    const st = baseDir ? _safeStatSync(baseDir) : null;
+    if (st && st.isDirectory()) {
+      const names = fsSync.readdirSync(baseDir).slice(0, 8000);
+      for (const n of names) {
+        if (!n || n === '_snapshots.log') continue;
+        const p = path.join(baseDir, n);
+        const st2 = _safeStatSync(p);
+        if (st2 && st2.isDirectory()) dirs.push({ tag: String(n), mtimeMs: Number(st2.mtimeMs || 0) || 0 });
+      }
+      dirs.sort((a, b) => String(b.tag).localeCompare(String(a.tag)));
+    }
+  } catch {}
+
+  const uniqueTags = new Map();
+  for (const row of (r.rows || [])) {
+    const tag = String(row && row.tag || '').trim();
+    if (!tag) continue;
+    if (!uniqueTags.has(tag)) uniqueTags.set(tag, { tag, ts: row.ts || null, copied: row.copied || null, source: 'log' });
+  }
+  for (const d of dirs) {
+    const tag = String(d && d.tag || '').trim();
+    if (!tag) continue;
+    if (!uniqueTags.has(tag)) uniqueTags.set(tag, { tag, ts: null, copied: null, source: 'dir', mtimeMs: d.mtimeMs || null });
+  }
+  const tags = Array.from(uniqueTags.values()).sort((a, b) => String(b.tag).localeCompare(String(a.tag)));
+
+  return {
+    ok: !!r.ok,
+    baseDir: r.baseDir || _backupAutoBaseDir() || null,
+    logFile: r.file || null,
+    logOk: !!r.ok,
+    tagsCount: tags.length,
+    tags: tags.slice(0, Math.max(20, Math.min(6000, lim)))
+  };
+}
+function _copyFileRetrySync(src, dst, { retries = 8 } = {}) {
+  try {
+    const dir = path.dirname(dst);
+    try { fsSync.mkdirSync(dir, { recursive: true }); } catch {}
+    for (let i = 0; i < retries; i++) {
+      try { fsSync.copyFileSync(src, dst); return { ok: true }; } catch (e) {
+        const code = String(e && e.code || '');
+        if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40 + i * 60); } catch {} continue; }
+        return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+      }
+    }
+    return { ok: false, error: 'copy_retry_exhausted' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+function _copyDirFlatSync(srcDir, dstDir, { exts = null, maxFiles = 2000 } = {}) {
+  const res = { ok: true, copied: 0, skipped: 0, errors: [] };
+  try {
+    const st = _safeStatSync(srcDir);
+    if (!st || !st.isDirectory()) return { ...res, ok: false, error: 'src_missing' };
+    const files = fsSync.readdirSync(srcDir).slice(0, maxFiles);
+    for (const name of files) {
+      const low = String(name || '').toLowerCase();
+      if (exts && exts.length) {
+        const ok = exts.some(e => low.endsWith(String(e).toLowerCase()));
+        if (!ok) { res.skipped++; continue; }
+      }
+      const fp = path.join(srcDir, name);
+      const st2 = _safeStatSync(fp);
+      if (!st2 || !st2.isFile()) { res.skipped++; continue; }
+      const rr = _copyFileRetrySync(fp, path.join(dstDir, name));
+      if (!rr.ok) { res.errors.push({ file: name, error: rr.error || 'copy_failed' }); }
+      else res.copied++;
+    }
+  } catch (e) {
+    return { ok: false, copied: res.copied, skipped: res.skipped, errors: res.errors, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+  res.ok = res.errors.length === 0;
+  return res;
+}
+async function execRestoreBackup(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const tag = String(payload.tag || payload.backupTag || '').trim();
+  if (!tag) throw new Error('missing_backup_tag');
+  const confirm = String(payload.confirm || '').trim().toUpperCase();
+  if (confirm !== 'YES') throw new Error('restore_backup_requires_confirm_YES');
+
+  const ROOT = path.join(__dirname, '..');
+  const baseDir = _backupAutoBaseDir();
+  const srcRoot = baseDir ? path.join(baseDir, tag) : '';
+  const st = srcRoot ? _safeStatSync(srcRoot) : null;
+  if (!st || !st.isDirectory()) throw new Error('backup_tag_not_found');
+
+  const stamp = (() => { try { return `${Date.now()}_${Math.random().toString(16).slice(2)}`; } catch { return String(Date.now()); } })();
+  const safetyDir = path.join(ROOT, '_recovery_before_restore', `${stamp}__from_${tag}`);
+  try { fsSync.mkdirSync(safetyDir, { recursive: true }); } catch {}
+
+  const copied = [];
+  const errors = [];
+  const copyOne = (rel) => {
+    try {
+      const src = path.join(srcRoot, rel);
+      const dst = path.join(ROOT, rel);
+      const st = _safeStatSync(src);
+      if (!st || !st.isFile()) return;
+      try {
+        const cur = path.join(ROOT, rel);
+        const cst = _safeStatSync(cur);
+        if (cst && cst.isFile()) _copyFileRetrySync(cur, path.join(safetyDir, rel));
+      } catch {}
+      const rr = _copyFileRetrySync(src, dst);
+      if (!rr.ok) errors.push({ rel, error: rr.error || 'copy_failed' });
+      else copied.push(rel);
+    } catch (e) {
+      errors.push({ rel, error: (e && e.message) ? String(e.message) : String(e) });
+    }
+  };
+
+  for (const rel of ['index.js', 'package.json', 'package-lock.json', 'instalar_conveniente.ps1', 'PainelConta.bat']) {
+    copyOne(rel);
+  }
+  try {
+    const rScripts = _copyDirFlatSync(path.join(srcRoot, 'scripts'), path.join(ROOT, 'scripts'), { exts: ['.js'], maxFiles: 1200 });
+    if (!rScripts.ok) errors.push({ rel: 'scripts/*', error: 'copy_dir_partial', details: rScripts });
+    const rPublic = _copyDirFlatSync(path.join(srcRoot, 'public'), path.join(ROOT, 'public'), { exts: ['.html', '.js', '.css'], maxFiles: 300 });
+    if (!rPublic.ok) errors.push({ rel: 'public/*', error: 'copy_dir_partial', details: rPublic });
+  } catch (e) {
+    errors.push({ rel: 'scripts/public', error: (e && e.message) ? String(e.message) : String(e) });
+  }
+
+  // NÃO tocar em dados/ (sagrado)
+
+  let restartWorker = null;
+  try {
+    restartWorker = await httpJson('/api/admin/restart-worker', {
+      method: 'POST',
+      body: { reason: `restore_backup:${tag}` }
+    });
+  } catch (e) {
+    restartWorker = { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+
+  return {
+    ok: errors.length === 0,
+    restored: errors.length === 0,
+    tag,
+    backupDir: srcRoot,
+    safetyDir,
+    copiedCount: copied.length,
+    copied: copied.slice(0, 60),
+    errorsCount: errors.length,
+    errors: errors.slice(0, 40),
+    restartWorker
+  };
+}
+
 // ===== NOVO: Unlock do lock global de provisão (safe recovery) =====
 async function execProvisionUnlock(cmd) {
   const before = (() => {
@@ -1608,6 +1827,8 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'provision_unlock') { ackDetails = await execProvisionUnlock(c); }
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
+      else if (c.type === 'list_backups')    { ackDetails = await execListBackups(c); }
+      else if (c.type === 'restore_backup')  { ackDetails = await execRestoreBackup(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
@@ -1682,6 +1903,9 @@ async function tick() {
     if (resp && Array.isArray(resp.commands) && resp.commands.length) {
       await applyCommands(resp.commands);
     }
+    // Se close_all ficou deferido por causa de provision_lock, executa assim que o lock liberar.
+    // (Importante: sem isso, o comando fica "inflight" no CT para sempre.)
+    await maybeRunDeferredCloseAll();
     if (process.env.DASHBOARD_DEBUG === '1') {
       logger.info(`[DASH][TICK] post finish in ${Date.now() - start}ms`);
     }
