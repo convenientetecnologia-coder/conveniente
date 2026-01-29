@@ -156,6 +156,17 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CROSS][DOCS][OPS] INBOX: análise de impacto obrigatória (callers/callees/efeitos colaterais)
+
+- **O que**: reforçado que “triagem inbox” inclui **investigação real** antes de mexer: mapear fluxo ponta a ponta e impactos (callers/callees/estados/efeitos colaterais).
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (Mapa de impacto obrigatório)
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (intake: análise de impacto)
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS][OPS] INBOX: bloco de “regras não negociáveis” (humano/GPT)
 
 - **O que**: adicionado bloco de regras não negociáveis e lista de arquivos canônicos dentro do `INBOX_RELATOS_DO_HUMANO.md` para guiar triage em chats com relato confuso.

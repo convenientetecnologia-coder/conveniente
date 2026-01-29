@@ -48,6 +48,11 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
    - o que o GPT vai mudar (arquivos)
    - precisa reiniciar agora? sim/não
    - precisa reiniciar para validar? sim/não
+4) **Obrigatório**: antes de mexer em código, fazer **análise de impacto**:
+   - quem chama / quem é chamado (callers/callees)
+   - quais arquivos/estados são tocados (desired/perfis/status/locks)
+   - quais efeitos colaterais podem acontecer (ex.: “fechar” disparar “abrir” por nurse/desired)
+   - quais riscos de regressão e como reduzir (mudança mínima + guardrails + rollback)
 
 ---
 
@@ -95,6 +100,16 @@ Colunas:
   - cmdId/requestId (se aplicável)
 - **Arquivos prováveis**:
   - `...`
+- **Mapa de impacto (obrigatório)**:
+  - **Fluxo ponta a ponta (alto nível)**: (ex.: CT → dashboard.applyCommands → endpoint → worker → arquivo/estado)
+  - **Callers** (quem chama esse fluxo):
+    - …
+  - **Callees** (o que esse fluxo aciona):
+    - …
+  - **Estados tocados**: `desired.json` / `status.json` / `perfis.json` / manifests / locks / timers
+  - **Efeitos colaterais possíveis**:
+    - “X pode religar Y” (ex.: nurse/desired/virtus)
+  - **Risco de regressão** (1 frase) + **mitigação** (1 frase)
 - **Plano (mudança mínima)**:
   - …
 - **Precisa reiniciar agora?** sim/não — por quê

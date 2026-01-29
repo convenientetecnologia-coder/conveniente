@@ -156,6 +156,10 @@ Quando o humano mandar uma mensagem grande/bagunçada com vários sintomas mistu
 - colar o texto bruto em `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT)
 - quebrar em itens separados na tabela TRIAGE (P0/P1/P2)
 - coletar evidência via CT (logs_manifest/fetch_logs/ACK), sem pedir para o humano “investigar”
+- **fazer análise de impacto antes de mexer em código**:
+  - mapear fluxo ponta a ponta (callers/callees)
+  - listar estados tocados (desired/status/perfis/locks)
+  - listar possíveis efeitos colaterais (“corrigir fechar todos” pode afetar “abrir todos”, nurse, desired, virtus/robe)
 - dizer de forma direta:
   - precisa reiniciar agora? sim/não
   - precisa reiniciar para validar? sim/não
