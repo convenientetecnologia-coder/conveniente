@@ -14,6 +14,12 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
 - **Evidência obrigatória**: sempre citar arquivo/endpoints/log keys/comando (o que torna auditável).
 - **Impacto operacional obrigatório**: sempre dizer **quais processos/nodes reiniciar** (ou “nenhum”).
 - **Rollback obrigatório**: como desfazer/voltar.
+- **Regra de melhoria contínua (obrigatória)**:
+  - Se um GPT **tentou um caminho e deu errado** e depois encontrou o **caminho certo**, ele deve:
+    - atualizar o **procedimento canônico** no `docs/RUNBOOK_TECNICO.md`, e/ou
+    - atualizar este índice (`docs/LIVRO_DE_BORDO.md`) se for regra estrutural, e/ou
+    - registrar na `docs/TIMELINE.md` se mudou comportamento/procedimento,
+    - e **subir commit** para o GitHub (para “propagar” para os próximos GPTs).
 - **Regra humana (importante)**: o humano é falho — **o GPT é o operador**.
   - O humano **não executa comandos** e **não troca arquivo manualmente**.
   - **Limite real**: o GPT **não reinicia** seus servidores remotamente.
@@ -22,6 +28,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Rollback (Git) continua sendo “feito pelo GPT” **no repositório** (`git revert` / voltar tag) — e o humano aplica reiniciando `node index.js` no(s) host(s).
   - Regra de comunicação: sempre falar “reiniciar = rodar `node index.js` de novo”, e dizer claramente **qual projeto** (conveniente/CT/notificador).
   - **Padrão sem repetição (conveniente)**: se houve mudança no `conveniente`, o GPT **já** faz `commit/push` + dispara `self_update` via CT e só avisa: **“reinicia `node index.js` no host X”**.
+  - Vocabulário: quando o humano disser **“pull”**, significa **disparar `self_update` via CT** (equivalente a `git pull` no host).
   - O que o humano cobra do GPT: “o que mudou?”, “qual serviço reiniciar?”, “qual validação foi feita?”, “qual rollback você vai aplicar se falhar?”.
 - **Sem segredos em texto puro aqui**: este arquivo documenta **NOMES** e **ONDE CONFIGURAR** (env / `ct_config.json`), mas **não cola valores**.
 

@@ -14,6 +14,9 @@ Este arquivo é o **manual de operação**. Ele não “engessa”: se você pre
   - como reverter,
   - e prazo/condição para virar canônico ou ser removido.
 
+Regra adicional (obrigatória):
+- Se um GPT fez **tentativa/erro** e descobriu o jeito certo, ele deve **promover o jeito certo para este runbook** (CANÔNICO) e registrar na `docs/TIMELINE.md` quando fizer sentido — para os próximos GPTs não repetirem erro.
+
 ---
 
 ### Checklist de release / atualização (produção real) — **CANÔNICO**
@@ -352,6 +355,7 @@ Body (JSON):
 Notas:
 - `target="all"` vira broadcast (`*`) no CT.
 - **Não usar** `restart=1` neste ambiente (sem reinício automático).
+ - Vocabulário humano: “**pull**” = disparar `self_update` (update de Git no host).
 
 ---
 
