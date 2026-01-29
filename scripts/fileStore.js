@@ -121,6 +121,74 @@ async function withDesiredFileLockUpdate(mutator) {
   }
 }
 
+// === FILE LOCK HELPERS FOR perfis.json (cluster-safe) ===
+const perfisLockPath = perfisPath + '.lock';
+function acquirePerfisLockFile({ retries = 240, delayMs = 25 } = {}) {
+  return new Promise((resolve, reject) => {
+    let tries = 0;
+    (function attempt(){
+      tries++;
+      try {
+        const fd = fs.openSync(perfisLockPath, 'wx');
+        return resolve(fd);
+      } catch {
+        if (tries >= retries) return reject(new Error('perfis_lock_timeout'));
+        setTimeout(attempt, delayMs);
+      }
+    })();
+  });
+}
+function releasePerfisLockFile(fd) {
+  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
+  try { fs.unlinkSync(perfisLockPath); } catch {}
+}
+
+/**
+ * Atualização atômica e serializada do perfis.json.
+ * Usado por api_perfis/cluster para evitar corridas (ex.: provision + UI + nurse).
+ *
+ * @param {(arr:any)=>any} mutator: recebe array atual, retorna próximo array
+ * @param {object|null} meta: { caller?, reason? } (apenas para debug)
+ * @returns {{ok:boolean, beforeLen?:number, afterLen?:number, error?:string}}
+ */
+function withPerfisFileLockUpdate(mutator, meta = null) {
+  // Nota: API é síncrona de propósito (código atual chama sem await).
+  let fd = null;
+  try {
+    // lock com backoff (sync)
+    const retries = 240;
+    const delayMs = 25;
+    let ok = false;
+    for (let i = 0; i < retries; i++) {
+      try {
+        fd = fs.openSync(perfisLockPath, 'wx');
+        ok = true;
+        break;
+      } catch {
+        // sleep sync
+        const start = Date.now();
+        while ((Date.now() - start) < delayMs) { /* busy wait curta */ }
+      }
+    }
+    if (!ok) return { ok: false, error: 'perfis_lock_timeout' };
+
+    const cur = readJsonSafe(perfisPath, []);
+    const before = Array.isArray(cur) ? cur : [];
+    const beforeLen = before.length;
+    const next = mutator ? (mutator(before) ?? before) : before;
+    const arr = Array.isArray(next) ? next : before;
+
+    const wrote = writeJsonAtomic(perfisPath, arr);
+    if (!wrote) return { ok: false, error: 'perfis_write_failed' };
+    return { ok: true, beforeLen, afterLen: arr.length };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  } finally {
+    try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
+    try { fs.unlinkSync(perfisLockPath); } catch {}
+  }
+}
+
 //// PATCH DESIRED PERFIL ////
 // PATCH DESIRED PERFIL // Lock atômico físico
 async function patchDesired(nome, patch) {
@@ -557,4 +625,5 @@ module.exports = {
   // Lock helper export
   withDesiredFileLockUpdate,
   removeDesired, // <<--------- NOVO EXPORT
+  withPerfisFileLockUpdate,
 };
