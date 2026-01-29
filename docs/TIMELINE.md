@@ -110,6 +110,15 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CROSS][DOCS][OPS] PowerShell gotchas (sem `&&`/heredoc) para commits/comandos
+
+- **O que**: registrado “jeito certo” de rodar comandos no Windows/PowerShell (ex.: não usar `&&` e não usar heredoc `<<EOF`) para evitar GPTs repetirem tentativa/erro.
+- **Evidência**: `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “Windows/PowerShell — pegadinhas operacionais”)
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS] Reconstrução retroativa (~10 dias) a partir de evidências (Git/backups/recovery)
 
 - **O que**: reconstruído histórico dos últimos ~10 dias (conveniente/sitechatbot/notificador) usando Git, logs de backups e arquivos de recovery.

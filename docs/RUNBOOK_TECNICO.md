@@ -144,6 +144,21 @@ Validação:
 
 ---
 
+### Windows/PowerShell — pegadinhas operacionais (para GPT não perder tempo)
+
+Este workspace roda no Windows com PowerShell. Algumas coisas “padrão Linux” **falham** aqui:
+
+- **Sem `&&`**: em PowerShell, usar `;` para encadear comandos.
+- **Sem heredoc `<<EOF`**: não usar `cat <<EOF` / heredoc para mensagem de commit.
+  - Jeito correto para commit com mensagem multi-linha:
+    - usar múltiplos `-m` (ex.: `git commit -m "título" -m "corpo..."`)
+- **`node -e`**: strings longas com aspas/regex podem quebrar o parse do PowerShell.
+  - Preferir `node -e "..."` com JSON simples, ou criar um script `.js` e executar `node script.js`.
+
+Regra: quando um GPT registrar um procedimento com comandos, escrever no formato PowerShell.
+
+---
+
 ### Incidente ativo (template “em tempo real”)
 
 Use este bloco quando você e o GPT estiverem investigando algo agora. Quando fechar:
