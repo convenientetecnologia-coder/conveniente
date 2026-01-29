@@ -271,21 +271,6 @@ require('./scripts/api_stock.js')(app);
 // Troque todos os console.log por logger.info conforme checklist
 logger.info('[BOOT] Garantindo arquivos base...');
 fileStore.ensureDesired();
-// Militar: não retomar "Abrir Todos" automaticamente após restart.
-// Se existia uma sessão open-all pendurada em desired.json, limpa no boot.
-try { fileStore.clearOpenAllOnBoot && fileStore.clearOpenAllOnBoot(); } catch {}
-// Militar: se perfis.json sumiu/zerou (crash/lock durante escrita), tente recuperar de _backup_auto antes de criar vazio.
-try {
-  const r = fileStore.recoverPerfisJsonIfMissingOrEmpty && fileStore.recoverPerfisJsonIfMissingOrEmpty();
-  try {
-    if (r && r.recovered) logger.warn('[BOOT][RECOVER] perfis.json recovered from backup', r);
-  } catch {}
-} catch {}
-// Militar: purge definitivo no boot — perfis tombstoned (ban/2FA/desativada/excluída) nunca podem reaparecer
-// mesmo após recovery/rebuild.
-try { fileStore.sweepTombstonesOnBoot && fileStore.sweepTombstonesOnBoot(); } catch {}
-// Militar: compat — se existiam flags terminais antigas no manifest (banned/2FA) sem tombstone, purgar também.
-try { fileStore.sweepTerminalFlagsOnBoot && fileStore.sweepTerminalFlagsOnBoot(); } catch {}
 fileStore.ensurePerfisJson();
 
 // Pausa automática de 24h em todos os perfis no boot, se ativado por env

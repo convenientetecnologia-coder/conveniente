@@ -18,112 +18,9 @@ const reloadManager = require('./reloadManager.js');
 const issues = require('./issues.js');
 const manifestStore = require('./manifestStore.js');
 const fileStore = require('./fileStore.js');
-const perfisMasterClient = require('./perfisMasterClient.js');
 const gptFallback = require('./gptFallback.js');
 const provisionAudit = require('./provisionAudit.js');
 const { readCtConfig } = require('./ctConfig.js');
-
-// =========================
-// AUTO-RECOVERY perfis.json (ultra enterprise)
-// =========================
-// Contexto real de incidente: perfis.json pode ficar "[]" por corrida/IO/rename window.
-// Isso derruba o painel inteiro. Este auto-heal reconstrói perfis.json a partir do Chrome User Data.
-function resolveChromeUserDataRootForRecovery() {
-  if (process.platform === 'win32') {
-    const la = process.env.LOCALAPPDATA;
-    if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
-    return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
-  }
-  return path.join(os.homedir(), '.config', 'google-chrome');
-}
-function readJsonSafeSync(p, fb) {
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fb; }
-}
-function attemptAutoRecoverPerfisJsonOnBoot() {
-  const startedAt = Date.now();
-  try {
-    const cur = (() => { try { return fileStore.loadPerfisJson(); } catch { return []; } })();
-    if (Array.isArray(cur) && cur.length > 0) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_skip', reason: 'not_empty', curLen: cur.length }); } catch {}
-      return { ok: true, skipped: true, reason: 'not_empty', curLen: cur.length };
-    }
-
-    const chromeRoot = resolveChromeUserDataRootForRecovery();
-    const base = path.join(chromeRoot, 'Conveniente');
-    if (!fs.existsSync(base)) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_skip', reason: 'chrome_dir_missing', base }); } catch {}
-      return { ok: false, skipped: true, reason: 'chrome_dir_missing', base };
-    }
-
-    const dirs = (() => {
-      try { return fs.readdirSync(base).slice(0, 5000); } catch { return []; }
-    })();
-
-    const perfis = [];
-    const errors = [];
-    for (const n of dirs) {
-      const nome = String(n || '').trim();
-      if (!nome) continue;
-      const userDataDir = path.join(base, nome);
-      let st = null;
-      try { st = fs.statSync(userDataDir); } catch { st = null; }
-      if (!st || !st.isDirectory()) continue;
-      const manifestPath = path.join(userDataDir, 'manifest.json');
-      if (!fs.existsSync(manifestPath)) continue;
-      const man = readJsonSafeSync(manifestPath, null);
-      if (!man || typeof man !== 'object') continue;
-      // se manifest.nome divergir, prioriza manifest (fonte de verdade)
-      const realName = String(man.nome || nome || '').trim();
-      if (!realName) continue;
-      perfis.push({
-        nome: realName,
-        cidade: man.cidade ? String(man.cidade) : null,
-        label: man.label ? String(man.label) : null,
-        uaPresetId: man.uaPresetId ? String(man.uaPresetId) : null,
-        userDataDir
-      });
-    }
-
-    // Dedup por nome e ordena
-    const by = new Map();
-    for (const p of perfis) {
-      const k = String(p && p.nome || '').trim();
-      if (!k) continue;
-      if (!by.has(k)) by.set(k, p);
-    }
-    const out = Array.from(by.values()).sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
-    if (!out.length) {
-      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_no_profiles_found', base, dirs: dirs.length }); } catch {}
-      return { ok: false, skipped: true, reason: 'no_profiles_found', base, dirs: dirs.length };
-    }
-
-    // Blindagem: se este processo é child, NÃO escrever perfis.json diretamente.
-    // A recuperação oficial roda no boot do index.js (master).
-    if (String(process.env.IS_WORKER_CHILD || '').trim() === '1') {
-      try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_skip', reason: 'worker_child_no_write', rebuiltCount: out.length, base }); } catch {}
-      return { ok: false, skipped: true, reason: 'worker_child_no_write', rebuiltCount: out.length, base };
-    }
-    const wrote = fileStore.savePerfisJson(out, { allowEmpty: false });
-    const ok = !!wrote;
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'perfis_autorecover_done',
-        ok,
-        durationMs: Date.now() - startedAt,
-        rebuiltCount: out.length,
-        base
-      });
-    } catch {}
-    return { ok, rebuiltCount: out.length, base };
-  } catch (e) {
-    try { provisionAudit.append({ ts: Date.now(), event: 'perfis_autorecover_exception', error: (e && e.message) ? String(e.message) : String(e) }); } catch {}
-    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
-  }
-}
-
-// Executa no boot do worker (best-effort). Não pode travar o processo.
-try { attemptAutoRecoverPerfisJsonOnBoot(); } catch {}
 
 // =========================
 // BUILD/BOOT EVIDENCE (ultra enterprise)
@@ -280,20 +177,37 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
 
     // Enterprise: se o CT responder "not_found_assigned", não podemos ficar em loop infinito
     // segurando um perfil desabilitado/2FA dentro do servidor (risco de duplicidade em múltiplos hosts).
-    // Regra pedida (2026-01-28): CT pode falhar/offline/deletado; isso NÃO bloqueia purge local.
-    // Portanto: ao receber not_found_assigned, fazemos purge local idempotente imediatamente.
+    // Regra pedida: se não há controller e desired.active==false, remover o perfil local imediatamente.
     try {
       if (String(errStr || '').includes('not_found_assigned')) {
-        const nome = String(profileName || '').trim();
-        if (nome) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_purge_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null }); } catch {}
+        const nome = profileName;
+        const hasCtrl = controllers.has(nome);
+        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
+        if (!hasCtrl && !isActive && nome) {
           try {
-            const pr = await purgePerfilLocalEnterprise(nome, {
-              reason: 'ct_archive_not_found_assigned',
-              flowId: flowId || newFlowId('ctq_purge'),
-              stockAccountId: sid || null
-            }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-            try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_purge_result', flowId: flowId || null, profileName: String(nome||''), ok: !!(pr && pr.ok), error: (pr && pr.ok) ? null : String(pr && pr.error || 'purge_failed').slice(0, 220) }); } catch {}
+            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_proceed_delete_local', flowId: flowId || null, profileName: String(nome||''), stockAccountId: sid || null });
+          } catch {}
+          // Remoção local best-effort (mesma lógica do banflow)
+          try {
+            const perfisArr = loadPerfisJson();
+            const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+            const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+            if (udir && fs.existsSync(udir)) { try { fileStore.rimrafSync(udir); } catch {} }
+            const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+            try { savePerfisJson(arr2); } catch {}
+          } catch {}
+          try { await fileStore.removeDesired(nome); } catch {}
+          try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
+          try {
+            const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+            if (st && Array.isArray(st.perfis)) {
+              st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+              fileStore.writeJsonAtomic(fileStore.statusPath, st);
+            }
+          } catch {}
+          try { await snapshotStatusAndWrite(); } catch {}
+          try {
+            provisionAudit.append({ ts: Date.now(), event: 'ct_archive_not_found_deleted_local', flowId: flowId || null, profileName: String(nome||''), ok: true });
           } catch {}
         }
       }
@@ -312,130 +226,6 @@ async function processCtArchiveQueue({ limit = 3 } = {}) {
     } catch {}
   }
   return { ok: true, processed };
-}
-
-// ===== PURGE ENTERPRISE (fonte única) =====
-// Regras:
-// - detectou terminal (ban/desativada/2FA) OU delete manual/CT => fechar navegador + remover do servidor imediatamente
-// - CT é registro (retry em background), não bloqueia purge local
-async function purgePerfilLocalEnterprise(nome, { reason = 'purge', flowId = '', stockAccountId = null } = {}) {
-  const startedAt = Date.now();
-  const n = String(nome || '').trim();
-  if (!n) return { ok: false, error: 'missing_nome' };
-  const fid = String(flowId || '').trim() || newFlowId('purge');
-  const why = String(reason || 'purge').slice(0, 160);
-
-  // Tombstone cedo (evita ressuscitar em boot/recovery mesmo que o processo caia no meio)
-  try { fileStore.writeTombstone(n, { flowId: fid, reason: why, stockAccountId: stockAccountId || null, by: 'worker', stage: 'begin' }); } catch {}
-
-  // 1) Desired OFF imediatamente (anti-reopen)
-  try {
-    await fileStore.withDesiredFileLockUpdate((d) => {
-      d = d || {};
-      d.perfis = d.perfis || {};
-      d.perfis[n] = { ...(d.perfis[n] || {}), active: false, virtus: 'off' };
-      return d;
-    });
-  } catch {}
-
-  // 2) Descobrir userDataDir (para kill + delete)
-  let udir = '';
-  try {
-    const man0 = await manifestStore.read(n).catch(()=>null);
-    if (man0 && man0.userDataDir) udir = String(man0.userDataDir);
-  } catch {}
-  if (!udir) {
-    try {
-      const perfisArr = fileStore.loadPerfisJson() || [];
-      const p = Array.isArray(perfisArr) ? perfisArr.find(x => x && x.nome === n) : null;
-      if (p && p.userDataDir) udir = String(p.userDataDir);
-    } catch {}
-  }
-  if (!udir) {
-    try { udir = path.join(resolveChromeUserDataRoot(), 'Conveniente', n); } catch {}
-  }
-
-  // 3) Fechar navegador (graceful->force) usando handler oficial
-  let closeOk = false;
-  let closeErr = null;
-  try {
-    const dr = await handlers.deactivate({ nome: n, reason: 'auto_delete', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-    closeOk = !!(dr && dr.ok);
-    closeErr = closeOk ? null : String(dr && dr.error || 'deactivate_failed');
-  } catch (e) {
-    closeOk = false;
-    closeErr = (e && e.message) ? String(e.message) : String(e);
-  }
-
-  // 3.5) Se ainda tiver Chrome vivo, força kill e tenta mais 1x (110%)
-  if (!closeOk && udir) {
-    try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-    await sleep(900);
-    try {
-      const dr2 = await handlers.deactivate({ nome: n, reason: 'auto_delete', policy: null }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-      closeOk = !!(dr2 && dr2.ok);
-      closeErr = closeOk ? null : String(dr2 && dr2.error || 'deactivate_failed');
-    } catch {}
-  }
-
-  // 4) Remover arquivos (perfis.json/desired/perfisDir/userDataDir/status)
-  // Mesmo que close falhe, ainda tentamos remover do perfis.json para impedir "Abrir tudo" reabrir.
-  let removedPerfisOk = false;
-  let removedPerfisErr = null;
-  try {
-    const rr = await perfisMasterClient.remove(n, { reason: `purge:${why}`.slice(0, 120), caller: 'worker' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-    removedPerfisOk = !!(rr && rr.ok);
-    removedPerfisErr = removedPerfisOk ? null : String(rr && rr.error || 'ipc_remove_failed');
-  } catch (e) {
-    removedPerfisOk = false;
-    removedPerfisErr = (e && e.message) ? String(e.message) : String(e);
-  }
-  if (!removedPerfisOk) {
-    try {
-      const rr2 = fileStore.withPerfisFileLockUpdate((arr) => {
-        const cur = Array.isArray(arr) ? arr : [];
-        return cur.filter(p => p && p.nome !== n);
-      }, { caller: 'worker_purge', reason: `purge_fallback:${why}`.slice(0, 180) });
-      removedPerfisOk = !!(rr2 && rr2.ok);
-    } catch {}
-  }
-
-  try { await fileStore.removeDesired(n); } catch {}
-  try { fileStore.rimrafSync(path.join(fileStore.perfisDir, n)); } catch {}
-  try { if (udir && fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
-  try {
-    const st = fileStore.readJsonSafe(fileStore.statusPath, null);
-    if (st && Array.isArray(st.perfis)) {
-      st.perfis = st.perfis.filter(p => p && p.nome !== n);
-      fileStore.writeJsonAtomic(fileStore.statusPath, st);
-    }
-  } catch {}
-  try { await snapshotStatusAndWrite(); } catch {}
-
-  // Tombstone final (audit)
-  try {
-    fileStore.writeTombstone(n, {
-      flowId: fid,
-      reason: why,
-      stockAccountId: stockAccountId || null,
-      by: 'worker',
-      stage: 'done',
-      durationMs: Date.now() - startedAt,
-      closeOk: !!closeOk,
-      closeError: closeOk ? null : String(closeErr || '').slice(0, 220),
-      perfisRemoveOk: !!removedPerfisOk,
-      perfisRemoveError: removedPerfisOk ? null : String(removedPerfisErr || '').slice(0, 220)
-    });
-  } catch {}
-
-  return {
-    ok: true,
-    nome: n,
-    flowId: fid,
-    closeOk: !!closeOk,
-    perfisRemoveOk: !!removedPerfisOk,
-    durationMs: Date.now() - startedAt
-  };
 }
 
 async function appendLoginRemediateEvidence({ nome, operator, step, page, note } = {}) {
@@ -570,70 +360,6 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
   }
 }
 
-async function updatePasswordOnCT({ profileName, stockAccountId = null, password, source = 'password_reset' } = {}) {
-  const cfg = readCtConfig();
-  let base = String(cfg && cfg.ctBaseUrl || '').trim();
-  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
-  if (!base) {
-    try {
-      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
-      base = String(notifierBaseFromEndpoints() || '').trim();
-    } catch {}
-  }
-  base = base.replace(/\/+$/, '');
-  const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
-  const hostId = readHostIdSync();
-  const p = String(profileName || '').trim();
-  const pass = String(password || '').trim();
-  let sid = Number(stockAccountId || 0) || 0;
-  if (!base || !secret || !hostId || !p || !pass) return { ok: false, error: 'ct_config_missing' };
-
-  // Fallback: tenta capturar stockAccountId do manifest/cache
-  if (!sid) {
-    try {
-      const man = await manifestStore.read(p).catch(()=>null);
-      if (man && (man.stockAccountId || man.stock_account_id)) sid = Number(man.stockAccountId || man.stock_account_id) || 0;
-    } catch {}
-  }
-  if (!sid) {
-    try {
-      const cached = robeMeta[p] && robeMeta[p].overlayCredCache;
-      if (cached && cached.stockAccountId) sid = Number(cached.stockAccountId) || 0;
-    } catch {}
-  }
-
-  try {
-    const Aborter = global.AbortController || require('node-abort-controller');
-    const ac = new Aborter();
-    const t = setTimeout(() => { try { ac.abort(); } catch {} }, 12000);
-    const resp = await fetch(`${base}/api/stock/assigned/update_password_secret`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
-      body: JSON.stringify({
-        hostId,
-        profileName: p,
-        stockAccountId: sid || null,
-        password: pass,
-        by: 'auto',
-        source: String(source || 'password_reset').slice(0, 64)
-      }),
-      signal: ac.signal
-    });
-    clearTimeout(t);
-    const txt = await resp.text().catch(()=> '');
-    let j = null;
-    try { j = JSON.parse(txt); } catch { j = null; }
-    if (!j || j.ok !== true) {
-      const bodySnippet = String(txt || '').slice(0, 220);
-      const err = (j && j.error) ? String(j.error) : `http_${resp.status}`;
-      return { ok: false, error: err, details: { httpStatus: resp.status, base, bodySnippet, stockAccountId: sid || null } };
-    }
-    return { ok: true, stockAccountId: Number(j.stockAccountId || sid || 0) || null };
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || String(e) };
-  }
-}
-
 async function archiveBanWithEvidenceToCT({ profileName, stockAccountId = null, reason = 'banned_detected', evidenceB64 = '', evidenceUrl = '' } = {}) {
   const cfg = readCtConfig();
   let base = String(cfg && cfg.ctBaseUrl || '').trim();
@@ -713,101 +439,6 @@ function _shouldEmitUaFp(nome, kind, windowMs) {
     return true;
   } catch {
     return false;
-  }
-}
-
-// =========================
-// UA+FP presets -> CT (lista canônica 1..N, ex.: 89)
-// =========================
-const UA_PRESETS_PATH = path.join(__dirname, '..', 'dados', 'ua_presets.json');
-let _uafpPresetsLastHash = '';
-let _uafpPresetsLastSentAt = 0;
-
-function _readUaPresetsSlim() {
-  try {
-    if (!fs.existsSync(UA_PRESETS_PATH)) return { ok: false, error: 'ua_presets_not_found' };
-    const raw = fs.readFileSync(UA_PRESETS_PATH, 'utf8');
-    const arr = JSON.parse(String(raw || '[]'));
-    if (!Array.isArray(arr)) return { ok: false, error: 'ua_presets_invalid' };
-    const slim = arr.map(p => ({
-      id: p && p.id ? String(p.id) : '',
-      label: p && p.label ? String(p.label) : '',
-      uaString: p && p.uaString ? String(p.uaString) : '',
-      viewport: (p && p.viewport && typeof p.viewport === 'object') ? { width: Number(p.viewport.width||0)||0, height: Number(p.viewport.height||0)||0 } : null,
-      dpr: (p && p.dpr !== undefined && p.dpr !== null) ? Number(p.dpr) : null,
-      hardwareConcurrency: (p && p.hardwareConcurrency !== undefined && p.hardwareConcurrency !== null) ? Number(p.hardwareConcurrency) : null
-    })).filter(p => p.id);
-    slim.sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    return { ok: true, presets: slim };
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || String(e) };
-  }
-}
-
-function _hashJson(obj) {
-  try {
-    const s = JSON.stringify(obj);
-    return crypto.createHash('sha1').update(s).digest('hex');
-  } catch {
-    return '';
-  }
-}
-
-async function emitUaFpPresetsToCT({ force = false, reason = 'periodic' } = {}) {
-  const cfg = readCtConfig();
-  let base = String(cfg && cfg.ctBaseUrl || '').trim();
-  if (!base) base = String(process.env.CT_BASE_URL || process.env.CT_URL || '').trim();
-  if (!base) {
-    try {
-      const { notifierBaseFromEndpoints } = require('./notifierEndpoints');
-      base = String(notifierBaseFromEndpoints() || '').trim();
-    } catch {}
-  }
-  base = base.replace(/\/+$/, '');
-  const secret = String((cfg && cfg.logIngestSecret) ? cfg.logIngestSecret : (process.env.LOG_INGEST_SECRET || '')).trim();
-  const hostId = readHostIdSync();
-  if (!base || !secret || !hostId) return { ok: false, skipped: true, reason: 'ct_config_missing' };
-
-  const rr = _readUaPresetsSlim();
-  if (!rr.ok) return { ok: false, skipped: true, reason: rr.error || 'ua_presets_read_fail' };
-  const presets = rr.presets || [];
-  if (!presets.length) return { ok: false, skipped: true, reason: 'ua_presets_empty' };
-
-  const hash = _hashJson(presets);
-  const now = Date.now();
-  const minIntervalMs = 6 * 60 * 60 * 1000; // 6h
-  if (!force) {
-    if (hash && _uafpPresetsLastHash && hash === _uafpPresetsLastHash && (now - _uafpPresetsLastSentAt) < minIntervalMs) {
-      return { ok: true, skipped: true, reason: 'unchanged' };
-    }
-    if (_uafpPresetsLastSentAt > 0 && (now - _uafpPresetsLastSentAt) < (60 * 1000)) {
-      return { ok: true, skipped: true, reason: 'cooldown_60s' };
-    }
-  }
-
-  try {
-    const Aborter = global.AbortController || require('node-abort-controller');
-    const ac = new Aborter();
-    const t = setTimeout(() => { try { ac.abort(); } catch {} }, 20000);
-    const resp = await fetch(`${base}/api/stock/uafp_presets_secret`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Log-Secret': secret },
-      body: JSON.stringify({ hostId, sourceHash: hash || null, reason: String(reason||'').slice(0, 60), presets }),
-      signal: ac.signal
-    });
-    clearTimeout(t);
-    const txt = await resp.text().catch(()=> '');
-    let j = null;
-    try { j = JSON.parse(txt); } catch { j = null; }
-    if (!j || j.ok !== true) {
-      const err = (j && j.error) ? String(j.error) : `http_${resp.status}`;
-      return { ok: false, error: err, details: { httpStatus: resp.status, bodySnippet: String(txt||'').slice(0, 200) } };
-    }
-    _uafpPresetsLastHash = hash || _uafpPresetsLastHash;
-    _uafpPresetsLastSentAt = now;
-    return { ok: true, upserted: j.upserted || null };
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || String(e) };
   }
 }
 
@@ -966,37 +597,6 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
     robeMeta[nome].loginRemediateFailedReason = String(reason || '').slice(0, 220);
     robeMeta[nome].whyNotOpen = 'login_remediate_failed';
   } catch {}
-
-  // Política do usuário (RM1): se marcou loginRemediateFailed, deve invocar humano automaticamente.
-  try {
-    await fileStore.withDesiredFileLockUpdate((d) => {
-      d = d || {}; d.perfis = d.perfis || {};
-      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-      return d;
-    });
-  } catch {}
-  try {
-    const ctrl = controllers.get(nome);
-    if (ctrl) {
-      ctrl.trabalhando = false;
-      ctrl.humanControl = true;
-      try { await stopVirtus(nome); } catch {}
-      // Militar: modo humano => 1 aba
-      try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
-      try { await ensureHumanOverlay(nome, ctrl, { reason: `login_remediate_failed:${String(reason||'').slice(0,160)}` }); } catch {}
-      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-    }
-  } catch {}
-  try {
-    provisionAudit.append({
-      ts: Date.now(),
-      event: 'human_mode_enter',
-      nome: String(nome || ''),
-      source: 'set_login_remediate_failed_flag',
-      reason: String(reason || 'login_remediate_failed').slice(0, 200)
-    });
-  } catch {}
-  try { await snapshotStatusAndWrite(); } catch {}
 }
 
 // ===== Human Overlay (HUD) =====
@@ -1033,10 +633,6 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       man.accountFlags.captchaCheckpointSource = String(source || '').slice(0, 80);
       man.accountFlags.captchaCheckpointUrl = String(url || '').slice(0, 300);
       man.accountFlags.captchaCheckpointTitle = String(title || '').slice(0, 200);
-      // Confirmação enterprise: evita falso positivo virar "humano invocado".
-      // Apenas a confirmação (call-site) deve setar isso; nurse usa para decidir invocação.
-      man.accountFlags.captchaCheckpointConfirmed = true;
-      man.accountFlags.captchaCheckpointConfirmedAt = Date.now();
       // Blindagem: captcha/checkpoint NÃO pode ficar mascarado por "login/cookies falhou".
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
@@ -1054,51 +650,25 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 
   // UA+FP telemetry (captcha/checkpoint)
   try { await emitUaFpEventToCT(nome, { eventKind: 'captcha', url, title }); } catch {}
-}
 
-async function _confirmCaptchaStrong(nome, page, { source = '', firstReason = '' } = {}) {
-  const t0 = Date.now();
-  const src = String(source || '').slice(0, 80);
-  const reasons = [];
-  const evidences = [];
-  const okReason = (r) => /captcha_persona|checkpoint_captcha/i.test(String(r || ''));
+  // Captcha/Checkpoint: por ordem do usuário, invocar humano automaticamente.
   try {
-    for (let i = 0; i < 2; i++) {
-      const lr = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:false, reason:'' }));
-      const r = String(lr && lr.reason ? lr.reason : '');
-      reasons.push(r);
-      evidences.push(lr && lr.evidence ? lr.evidence : null);
-      if (!(lr && lr.loginRequired === true && okReason(r))) {
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'captcha_confirm_failed',
-            nome: String(nome||''),
-            source: src,
-            firstReason: String(firstReason||'').slice(0,160),
-            reasons: reasons.slice(0, 2),
-            durMs: Date.now() - t0
-          });
-        } catch {}
-        return { ok: false, reasons };
-      }
-      if (i === 0) await sleep(1600);
-    }
-  } catch (e) {
-    return { ok: false, error: (e && e.message) ? String(e.message) : String(e), reasons };
-  }
-  try {
-    provisionAudit.append({
-      ts: Date.now(),
-      event: 'captcha_confirm_ok',
-      nome: String(nome||''),
-      source: src,
-      firstReason: String(firstReason||'').slice(0,160),
-      reasons: reasons.slice(0, 2),
-      durMs: Date.now() - t0
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {}; d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+      return d;
     });
   } catch {}
-  return { ok: true, reasons };
+  try {
+    const ctrl = controllers.get(nome);
+    if (ctrl) {
+      ctrl.trabalhando = false;
+      ctrl.humanControl = true;
+      try { await stopVirtus(nome); } catch {}
+      try { await ensureHumanOverlay(nome, ctrl, { reason: 'captcha_checkpoint' }); } catch {}
+      try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
+    }
+  } catch {}
 }
 
 async function _buildHumanOverlayData(nome) {
@@ -1457,7 +1027,7 @@ async function _installOverlayOnPage(nome, page) {
             let statusTxt = '';
             if (f.banned) statusTxt = 'Conta suspensa/banida';
             else if (f.twoFactor) statusTxt = '2FA requerido (excluída)';
-            else if (f.captchaCheckpoint) statusTxt = 'Captcha (humano)';
+            else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
             else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
             else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
             else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
@@ -1567,8 +1137,7 @@ async function syncHumanOverlay(nome) {
 
 async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
   try {
-    // Política do usuário: overlay/humano automático apenas para captcha e falha de login/cookies (não para checkpoint).
-    const force = /captcha|invoke_human|captcha_checkpoint/i.test(String(reason || '').toLowerCase());
+    const force = /captcha|checkpoint|invoke_human|captcha_checkpoint/i.test(String(reason || '').toLowerCase());
     if (!HUMAN_OVERLAY_CFG.enabled && !force) {
       try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_ensure_skipped_disabled', nome: String(nome || ''), reason: String(reason || '').slice(0, 120) }); } catch {}
       return;
@@ -1720,7 +1289,7 @@ async function reloadPageEnterprise(pg, { nome = '', tag = 'monitor', timeoutMs 
 
 // Anti-tela-preta (about:blank) ao abrir em modo humano:
 // Garante que exista uma aba real navegada ANTES de invocar humano/overlay.
-async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'human_entry', noFront = false } = {}) {
+async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'human_entry' } = {}) {
   try {
     if (!ctrl || !ctrl.browser) return { ok: false, error: 'no_browser' };
     const pages = await ctrl.browser.pages().catch(()=>[]);
@@ -1739,10 +1308,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
       }
     }
     if (!p0) return { ok: false, error: 'no_page' };
-    // Política: em open-all (mapeamento), evitar trazer janela ao foco (reduz “flicker” via acesso remoto).
-    if (!noFront) {
-      try { await p0.bringToFront?.().catch(()=>{}); } catch {}
-    }
+    try { await p0.bringToFront?.().catch(()=>{}); } catch {}
 
     const targetUrl =
       (prefer === 'messenger')
@@ -1777,7 +1343,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 // - Garante que exista uma aba navegada para que detectores consigam rodar.
 async function ensureNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reasonBase = 'open_entry' } = {}) {
   try {
-    const r = await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer, reasonBase, noFront: /open_all/i.test(String(reasonBase||'')) }).catch(()=>null);
+    const r = await ensureHumanNonBlankEntryPage(nome, ctrl, { prefer, reasonBase }).catch(()=>null);
     return r && r.ok ? r : { ok: false, error: (r && r.error) ? r.error : 'failed' };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
@@ -1792,12 +1358,6 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
   try {
     const pg = ctrl && ctrl.mainPage ? ctrl.mainPage : null;
     if (!pg) return { ok: false, error: 'no_main_page' };
-    const src = String(source || '');
-    const isOpenAllMap = /open_all|open-all|bulk_open|openall/i.test(src);
-
-    // Política: abrir (open-all/manual) sempre limpa flags não-terminais e revalida do zero.
-    // Isso evita ficar preso em estados antigos (ex.: loginRequired/humanHold) após reinícios.
-    try { await clearNonTerminalFlagsForRecheck(nome, { by: 'system', trigger: `open:${String(source||'')}` }); } catch {}
 
     // 0) Ban/Suspensão
     try {
@@ -1812,9 +1372,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     // 1) LoginRequired/Identity/Appeal/Captcha
     const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
-      // 1) Messenger OK — política (2026-01-28):
-      // No boot/open-all, validar APENAS Messenger. NÃO abrir aba Facebook create para "provar" Robe.
-      // O Robe valida/abre sua aba no momento do post (fila do Robe), sem concorrência no boot.
+      // 1) Messenger OK — antes de liberar trabalho, checar Robe (Facebook create) em uma aba curta e fechar.
       try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_ok', nome: String(nome||''), source: String(source||'') }); } catch {}
 
       // Espera UI real do Messenger Marketplace (anti-atropelo).
@@ -1846,25 +1404,6 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           return { ok: false, error: 'messenger_marketplace_not_ready' };
         }
       } catch {}
-
-      // ===== POLÍTICA (2026-01-28): Messenger-only boot =====
-      // Se Messenger está ok, NÃO executar o probe do Robe/Facebook create no boot/open-all.
-      // Libera automação agora; o Robe fará sua própria validação quando for postar.
-      try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_skipped', nome: String(nome||''), source: String(source||'') }); } catch {}
-      try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_clear', nome: String(nome||''), source: String(source||'') }); } catch {}
-      try { await clearAppealSubmittedFlag(nome); } catch {}
-      try { await clearIdentityFlags(nome); } catch {}
-      try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin']); } catch {}
-      try {
-        await fileStore.withDesiredFileLockUpdate((d) => {
-          d = d || {}; d.perfis = d.perfis || {};
-          d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
-          return d;
-        });
-      } catch {}
-      // Política (2026-01-28): probe em open/open-all é APENAS mapeamento.
-      // Não iniciar start_work automaticamente aqui (isso causa login_remediate/humano fora de hora).
-      return { ok: true, state: 'not_login_required' };
 
       let robeProbe = null;
       try {
@@ -1964,32 +1503,16 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await setIdentitySubmittedFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
             return { ok: true, state: 'identity_submitted', reason: rr2 };
           }
-          if (rr2.includes('password_reset_required') || rr2.includes('hacked_review')) {
-            try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
-            if (!isOpenAllMap) {
-              setTimeout(() => {
-                try {
-                  const c = controllers.get(nome);
-                  const p0 = (c && c.mainPage) ? c.mainPage : pg;
-                  if (c && p0) runHackedReviewFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
-                } catch {}
-              }, 0);
-            }
-            return { ok: true, state: rr2.includes('password_reset_required') ? 'password_reset_required' : 'hacked_review', reason: rr2 };
-          }
           if (rr2.includes('identity')) {
             try { await setIdentityRequiredFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            // Política: durante open-all (mapeamento) apenas marcar; não executar fluxo agora.
-            if (!isOpenAllMap) {
-              // iniciar fluxo de identidade (gate+cooldown já protegem)
-              setTimeout(() => {
-                try {
-                  const c = controllers.get(nome);
-                  const p0 = (c && c.mainPage) ? c.mainPage : pg;
-                  if (c && p0) runIdentityFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
-                } catch {}
-              }, 0);
-            }
+            // iniciar fluxo de identidade (gate+cooldown já protegem)
+            setTimeout(() => {
+              try {
+                const c = controllers.get(nome);
+                const p0 = (c && c.mainPage) ? c.mainPage : pg;
+                if (c && p0) runIdentityFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}` }).catch(()=>{});
+              } catch {}
+            }, 0);
             return { ok: true, state: 'identity_required', reason: rr2 };
           }
           if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
@@ -1997,16 +1520,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
             return { ok: true, state: 'appeal_submitted', reason: rr2 };
           }
-          if (rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
-            // Política: captcha => humano, mas só se confirmado com prova forte (anti falso-positivo).
-            const cf = await _confirmCaptchaStrong(nome, p, { source: `probe:${String(source||'')}`, firstReason: rr2 }).catch(()=>({ ok:false }));
-            if (cf && cf.ok) {
-              try { await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-              return { ok: true, state: 'captcha_checkpoint', reason: rr2 };
-            }
-            // Não confirmado => não invocar humano; tratar como login_required para reavaliação.
-            try { await setLoginRequiredFlag(nome, { reason: `captcha_unconfirmed:${rr2}`, source: lr2.domain || source }); } catch {}
-            return { ok: true, state: 'login_required', reason: `captcha_unconfirmed:${rr2}` };
+          if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
+            try { await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+            return { ok: true, state: 'captcha_checkpoint', reason: rr2 };
           }
           // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
@@ -2027,7 +1543,10 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           return d;
         });
       } catch {}
-      // Política (2026-01-28): não iniciar start_work automaticamente no probe.
+      // Agenda start_work (sem travar activateOnce)
+      setTimeout(() => {
+        try { handlers.start_work({ nome, operator: 'bulk_open_all_auto_probe' }).catch(()=>{}); } catch {}
+      }, 0);
       return { ok: true, state: 'not_login_required' };
     }
 
@@ -2038,34 +1557,17 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       try { await setIdentitySubmittedFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
       return { ok: true, state: 'identity_submitted', reason: rr };
     }
-    if (rr.includes('password_reset_required') || rr.includes('hacked_review')) {
-      // Fluxo hacked/password reset é auto-remediável e deve rodar imediatamente.
-      try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
-      if (!isOpenAllMap) {
-        setTimeout(() => {
-          try {
-            const c = controllers.get(nome);
-            const p = (c && c.mainPage) ? c.mainPage : pg;
-            if (c && p) runHackedReviewFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
-          } catch {}
-        }, 0);
-      }
-      return { ok: true, state: rr.includes('password_reset_required') ? 'password_reset_required' : 'hacked_review', reason: rr };
-    }
     if (rr.includes('identity')) {
       try { await setIdentityRequiredFlag(nome, { source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
-      // Durante open-all (mapeamento): apenas marcar.
-      if (!isOpenAllMap) {
-        // Ultra enterprise: iniciar o fluxo de identidade imediatamente (sem travar activateOnce).
-        // Guardrails: gate + debounce dentro de runIdentityFlow.
-        setTimeout(() => {
-          try {
-            const c = controllers.get(nome);
-            const p = (c && c.mainPage) ? c.mainPage : pg;
-            if (c && p) runIdentityFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
-          } catch {}
-        }, 0);
-      }
+      // Ultra enterprise: iniciar o fluxo de identidade imediatamente (sem travar activateOnce).
+      // Guardrails: gate + debounce dentro de runIdentityFlow.
+      setTimeout(() => {
+        try {
+          const c = controllers.get(nome);
+          const p = (c && c.mainPage) ? c.mainPage : pg;
+          if (c && p) runIdentityFlow(nome, c, p, { source: `probe:${String(source||'')}` }).catch(()=>{});
+        } catch {}
+      }, 0);
       return { ok: true, state: 'identity_required', reason: rr };
     }
     if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
@@ -2073,21 +1575,10 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       return { ok: true, state: 'appeal_submitted', reason: rr };
     }
-    if (rr.includes('captcha_persona') || rr.includes('checkpoint_captcha')) {
-      // Captcha: humano, mas só se confirmado com prova forte (anti falso-positivo).
-      const cf = await _confirmCaptchaStrong(nome, pg, { source: `probe:${String(source||'')}`, firstReason: rr }).catch(()=>({ ok:false }));
-      if (cf && cf.ok) {
-        try { await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
-        return { ok: true, state: 'captcha_checkpoint', reason: rr };
-      }
-      try { await setLoginRequiredFlag(nome, { reason: `captcha_unconfirmed:${rr}`, source: lr.domain || source }); } catch {}
-      return { ok: true, state: 'login_required', reason: `captcha_unconfirmed:${rr}` };
-    }
-    if (rr.includes('checkpoint')) {
-      // Checkpoint: NÃO invocar humano automaticamente (política do usuário).
-      // Trata como login_required para o pipeline decidir (login_remediate/fluxos).
-      try { await setLoginRequiredFlag(nome, { reason: lr.reason || rr, source: lr.domain || source }); } catch {}
-      return { ok: true, state: 'login_required', reason: rr };
+    if (rr.includes('captcha') || rr.includes('checkpoint')) {
+      // Captcha/Checkpoint: aqui SIM invoca humano automaticamente (ordem do usuário).
+      try { await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
+      return { ok: true, state: 'captcha_checkpoint', reason: rr };
     }
 
     // login_form / outros: se for "login/cookies falhou", aqui é válido invocar humano
@@ -2264,16 +1755,6 @@ async function appealMonitorCheckNow(nome, ctrl) {
     // Refresh enterprise (com fallback + log explícito)
     await reloadPageEnterprise(pg, { nome, tag: 'appeal_monitor', timeoutMs: 45_000 }).catch(()=>null);
     await sleep(900);
-
-    // Se a página estiver em "Você está de volta ao Facebook" / "Voltar para o Facebook",
-    // isso é um checkpoint de SAÍDA. Clicamos e seguimos (senão o monitor pode ficar preso).
-    try {
-      const clickedBack = await browserHelper.clickVoltarParaFacebook(pg, { logPrefix: '[APPEAL][VOLTA]', timeout: 12000 }).catch(()=>false);
-      if (clickedBack) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'appeal_monitor_clicked_back_to_facebook', nome: String(nome||'') }); } catch {}
-        await sleep(1200);
-      }
-    } catch {}
     // Primeiro: suspensão/ban (UI dedicada). Isso evita classificar errado como "appeal".
     try {
       const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
@@ -2510,8 +1991,8 @@ async function _identityGateTryAcquire({ owner = '', nome = '' } = {}) {
         const curLease2 = Number(g.leaseUntil || 0) || 0;
         if (curLease2 && curLease2 > now) {
           denied = { why: 'leased', leaseUntil: curLease2, owner: String(g.owner || '') };
-        snap = { ...g };
-        return d;
+          snap = { ...g };
+          return d;
         }
       }
       if (curCooldown && curCooldown > now) {
@@ -2741,197 +2222,6 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
-    return { ok: false, flowId: id, error: msg };
-  }
-}
-
-// ===== Hacked / Password Reset (conta restringida) — executor 24/7 =====
-const HACKED_FLOW_CFG = {
-  maxRunMs: 4 * 60 * 1000,
-  maxSteps: 10,
-  stepWaitMs: 45_000,
-  debounceMs: 20_000
-};
-
-function _genStrongPasswordEnterprise() {
-  try {
-    // Regras observadas (FB): maiúscula/minúscula/número + símbolo (ex.: @) costuma ser aceito.
-    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-    const lower = 'abcdefghijkmnopqrstuvwxyz';
-    const digits = '23456789';
-    const symbols = '@#%$&*!?';
-    const all = upper + lower + digits + symbols;
-    const pick = (s) => s[crypto.randomInt(0, s.length)];
-    const len = 20;
-    const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
-    while (chars.length < len) chars.push(pick(all));
-    // shuffle
-    for (let i = chars.length - 1; i > 0; i--) {
-      const j = crypto.randomInt(0, i + 1);
-      const tmp = chars[i]; chars[i] = chars[j]; chars[j] = tmp;
-    }
-    return chars.join('');
-  } catch {
-    return `Aa2@${Date.now()}!`;
-  }
-}
-
-async function runHackedReviewFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
-  const now = Date.now();
-  const id = String(flowId || newFlowId('hacked'));
-  try {
-    if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
-    if (!pg) return { ok: false, error: 'no_page' };
-
-    robeMeta[nome] = robeMeta[nome] || {};
-    const last = Number(robeMeta[nome].hackedFlowLastAt || 0) || 0;
-    if (!force && last && (now - last) < HACKED_FLOW_CFG.debounceMs) {
-      return { ok: false, skipped: true, reason: 'debounced', sinceMs: now - last };
-    }
-    robeMeta[nome].hackedFlowLastAt = now;
-
-    // Gerar senha candidata (NÃO persiste ainda; só persiste após confirmar que o fluxo avançou/saiu do reset).
-    let pw = String(robeMeta[nome].hackedFlowCandidatePassword || '').trim();
-    if (!pw) {
-      pw = _genStrongPasswordEnterprise();
-      robeMeta[nome].hackedFlowCandidatePassword = pw;
-    }
-
-    let didAction = false;
-    let didSavePassword = false;
-    const t0 = Date.now();
-    try {
-      let url0 = '';
-      try { url0 = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
-      try {
-        provisionAudit.append({
-          ts: Date.now(),
-          event: 'hacked_flow_begin',
-          flowId: id,
-          nome: String(nome||''),
-          source: String(source||'').slice(0, 80),
-          url: String(url0||'').slice(0, 220)
-        });
-      } catch {}
-
-      let stepIndex = 0;
-      while (true) {
-        const elapsed = Date.now() - t0;
-        if (elapsed >= HACKED_FLOW_CFG.maxRunMs) break;
-        if (stepIndex >= HACKED_FLOW_CFG.maxSteps) break;
-
-        const a = await browserHelper.hackedAssistStep(pg, { newPassword: pw, maxWaitMs: HACKED_FLOW_CFG.stepWaitMs, tries: 2 }).catch(()=>null);
-        stepIndex += 1;
-
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'hacked_flow_step',
-            flowId: id,
-            nome: String(nome||''),
-            source: String(source||'').slice(0, 80),
-            stepIndex,
-            ok: !!(a && a.ok),
-            clicked: a && a.clicked ? String(a.clicked) : null,
-            filled: a && typeof a.filled === 'number' ? a.filled : null,
-            error: a && a.error ? String(a.error).slice(0, 160) : null
-          });
-        } catch {}
-
-        if (a && a.ok) {
-          const ck = String(a.clicked || '').trim();
-          const isClickAction = ['salvar_alteracoes','voltar_para_fb','comecar','avancar','continuar'].includes(ck);
-          if (isClickAction) didAction = true;
-          if (ck === 'salvar_alteracoes') didSavePassword = true;
-          // Se foi apenas preenchimento/scroll, não forçar reload; dá tempo para UI habilitar botões.
-          await sleep(isClickAction ? 1100 : 800);
-          continue;
-        }
-        break;
-      }
-
-      if (didAction) {
-        await reloadPageEnterprise(pg, { nome, tag: `hacked_flow_${String(source||'').slice(0, 28)}`, timeoutMs: 60_000 }).catch(()=>null);
-        await sleep(900);
-        try {
-          const clickedBack = await browserHelper.clickVoltarParaFacebook(pg, { logPrefix: '[HACKED][VOLTA]', timeout: 12000 }).catch(()=>false);
-          if (clickedBack) {
-            try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_clicked_back_to_facebook', flowId: id, nome: String(nome||'') }); } catch {}
-            await sleep(1200);
-          }
-        } catch {}
-      }
-
-      const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
-      const rr2 = String((lr2 && lr2.reason) ? lr2.reason : '').toLowerCase();
-
-      // Se saiu do fluxo hacked/password reset, persistir senha e re-encaminhar.
-      if (!lr2 || lr2.loginRequired !== true || (!rr2.includes('hacked') && !rr2.includes('password_reset_required'))) {
-        if (didSavePassword) {
-          try {
-            await manifestStore.update(nome, (m) => {
-              m = m || {};
-              m.password = String(pw || '');
-              m.credentialsUpdatedAt = Date.now();
-              return m;
-            });
-            // cache para overlay e para evitar fetch do CT logo em seguida
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].overlayCredCache = robeMeta[nome].overlayCredCache || {};
-            robeMeta[nome].overlayCredCache.password = String(pw || '');
-            robeMeta[nome].overlayCredCache.ts = Date.now();
-          } catch {}
-
-          // Persistir no CT (stock) — requisito "salvar em tudo"
-          try {
-            const rct = await updatePasswordOnCT({ profileName: nome, password: pw, source: 'password_reset' }).catch(()=>null);
-            try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_password_persist_ct', flowId: id, nome: String(nome||''), ok: !!(rct && rct.ok), error: rct && rct.error ? String(rct.error).slice(0,160) : null, stockAccountId: rct && rct.stockAccountId ? rct.stockAccountId : null }); } catch {}
-          } catch {}
-        }
-
-        // Limpa marcador de candidato (não reaplica senha à toa).
-        try { delete robeMeta[nome].hackedFlowCandidatePassword; } catch {}
-
-        // Se virou login_form depois do reset, chama login_remediate (agora com senha atualizada).
-        if (lr2 && lr2.loginRequired === true && rr2.includes('login_form')) {
-          queueAutoLoginRemediate(nome, { reason: lr2.reason || 'login_form', source: lr2.domain || '', immediate: true });
-          try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_end', flowId: id, nome: String(nome||''), result: 'login_form_after_reset' }); } catch {}
-          return { ok: true, flowId: id, result: 'login_form_after_reset', didAction, didSavePassword };
-        }
-
-        // Clear: retoma automação.
-        try {
-          await fileStore.withDesiredFileLockUpdate((d) => {
-            d = d || {}; d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
-            return d;
-          });
-        } catch {}
-        setTimeout(() => { try { handlers.start_work({ nome, operator: `hacked_flow_resolved:${id}` }).catch(()=>{}); } catch {} }, 0);
-        try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_end', flowId: id, nome: String(nome||''), result: 'clear' }); } catch {}
-        return { ok: true, flowId: id, result: 'clear', didAction, didSavePassword };
-      }
-
-      // Ainda está em hacked/password reset: re-agenda mais uma tentativa (com debounce).
-      try {
-        provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_still_required', flowId: id, nome: String(nome||''), reason: rr2.slice(0,120) });
-      } catch {}
-      setTimeout(() => {
-        try {
-          const c = controllers.get(nome);
-          const p0 = (c && c.mainPage) ? c.mainPage : pg;
-          if (c && p0) runHackedReviewFlow(nome, c, p0, { source: `retry:${String(source||'')}` }).catch(()=>{});
-        } catch {}
-      }, 25_000);
-      return { ok: true, flowId: id, result: 'still_required', didAction, didSavePassword, reason: rr2 };
-    } catch (e) {
-      const msg = (e && e.message) ? String(e.message) : String(e);
-      try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
-      return { ok: false, flowId: id, error: msg };
-    }
-  } catch (e) {
-    const msg = (e && e.message) ? String(e.message) : String(e);
-    try { provisionAudit.append({ ts: Date.now(), event: 'hacked_flow_error', flowId: id, nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
     return { ok: false, flowId: id, error: msg };
   }
 }
@@ -3401,25 +2691,45 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       } catch {}
 
       // 3) EXCLUI a conta do servidor usando o mesmo fluxo do DELETE /api/perfis/:nome (sem HTTP).
-      // Regra (2026-01-28): purge local é obrigatório e idempotente (CT não bloqueia).
+      // Regras:
+      // - deve estar inativo aqui; se ainda estiver ativo, bloqueia (anti-fantasma).
+      // - remoção de userDataDir externo é best-effort.
       try {
-        const pr = await purgePerfilLocalEnterprise(nome, {
-          reason: `auto_banned:${String(reason||'').slice(0,80)}`,
-          flowId,
-          stockAccountId: stockAccountId || null
-        }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+        if (!closeOk) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
+        } else {
+        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
+        if (isActive) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
+          return { ok: false, error: 'banned_delete_blocked_still_active' };
+        }
+        // Remove userDataDir externo, perfis.json, desired e dir do perfil
         try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'auto_banned_purge_done',
-            flowId,
-            nome: String(nome||''),
-            ok: !!(pr && pr.ok),
-            error: (pr && pr.ok) ? null : String(pr && pr.error || 'purge_failed').slice(0, 180)
-          });
+          const perfisArr = loadPerfisJson();
+          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+          if (udir && fs.existsSync(udir)) {
+            // Aqui NÃO fazemos “kill por raiva”: se o navegador ficou vivo, o deactivate acima deveria ter falhado.
+            // Mesmo assim, remoção é best-effort e pode falhar em Windows (arquivo bloqueado).
+            try { fileStore.rimrafSync(udir); } catch {}
+          }
+          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+          try { savePerfisJson(arr2); } catch {}
         } catch {}
+        try { await fileStore.removeDesired(nome); } catch {}
+        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
+        try {
+          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+          if (st && Array.isArray(st.perfis)) {
+            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+            fileStore.writeJsonAtomic(fileStore.statusPath, st);
+          }
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: true }); } catch {}
+        }
       } catch (e) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_banned_purge_done', flowId, nome: String(nome||''), ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_banned_profile', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
       }
 
       // 4) (compat) Se por algum motivo não conseguimos arquivar antes, tenta depois também.
@@ -3612,18 +2922,43 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
         if (!ctOk) {
           const q = queueCtArchive({ stockAccountId: stockAccountId || (rr && rr.stockAccountId) || null, profileName: nome, reason: `two_factor:${String(reason||'two_factor').slice(0,80)}`, evidencePath, evidenceUrl: url, flowId });
           try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queued', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null, ok: !!(q && q.ok), file: q && q.file ? String(q.file).slice(0,260) : null, error: q && q.ok ? null : String(q && q.error || 'queue_failed').slice(0,180) }); } catch {}
+          if (!stockAccountId) {
+            // Sem ID: bloqueia delete para não perder vínculo.
+            return { ok: false, error: 'ct_archive_failed_predelete' };
+          }
         }
 
-        // 4) purge local obrigatório (CT não bloqueia)
+        // 4) delete local (mesmo fluxo do DELETE /api/perfis/:nome, sem HTTP)
+        if (!closeOk) {
+          // Regra: se o navegador não fechou, NÃO deletar. Mas a conta já foi arquivada no CT (Excluídas).
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_skipped_browser_not_closed', flowId, nome: String(nome||''), stockAccountId: stockAccountId || null }); } catch {}
+        } else {
+        const isActive = (() => { try { return fileStore.isPerfilAtivo(nome); } catch { return false; } })();
+        if (isActive) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_delete_blocked_still_active', flowId, nome: String(nome||'') }); } catch {}
+          return { ok: false, error: 'two_factor_delete_blocked_still_active' };
+        }
         try {
-          const pr = await purgePerfilLocalEnterprise(nome, {
-            reason: `auto_two_factor:${String(reason||'two_factor').slice(0,80)}`,
-            flowId,
-            stockAccountId: stockAccountId || null
-          }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_purge_done', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: !!(pr && pr.ok), error: (pr && pr.ok) ? null : String(pr && pr.error || 'purge_failed').slice(0,180) }); } catch {}
-        } catch (e) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_two_factor_purge_done', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: false, error: String(e && e.message || e).slice(0,180) }); } catch {}
+          const perfisArr = loadPerfisJson();
+          const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+          const udir = perfil && perfil.userDataDir ? String(perfil.userDataDir) : '';
+          if (udir && fs.existsSync(udir)) {
+            try { fileStore.rimrafSync(udir); } catch {}
+          }
+          const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+          try { savePerfisJson(arr2); } catch {}
+        } catch {}
+        try { await fileStore.removeDesired(nome); } catch {}
+        try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
+        try {
+          const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+          if (st && Array.isArray(st.perfis)) {
+            st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+            fileStore.writeJsonAtomic(fileStore.statusPath, st);
+          }
+        } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_delete_two_factor_profile', nome: String(nome||''), flowId, stockAccountId: stockAccountId || null, ok: true }); } catch {}
         }
 
         // flags/issue: mantém comportamento anterior
@@ -3908,11 +3243,63 @@ async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = 
             return { ok: false, error: 'two_factor_delete_blocked_browser_not_closed' };
           }
         } catch {}
-        const rr = await purgePerfilLocalEnterprise(nome, {
-          reason: `auto_two_factor:${String(reason||'two_factor').slice(0,80)}`,
-          flowId,
-          stockAccountId: stockAccountId || null
-        }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+        const rr = await (async () => {
+          try {
+            // desired OFF
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: false, virtus: 'off' };
+                return d;
+              });
+            } catch {}
+
+            // browser já foi fechado acima
+            try { controllers.delete(nome); } catch {}
+            try { stopPruneLoop(nome); } catch {}
+
+            // remover userDataDir externo e perfis.json
+            try {
+              // Fonte primária: manifestStore (mais confiável que perfis.json)
+              let udirFromManifest = '';
+              try {
+                const man = await manifestStore.read(nome).catch(()=>null);
+                if (man && man.userDataDir) udirFromManifest = String(man.userDataDir);
+              } catch {}
+              const perfisArr = loadPerfisJson();
+              const perfil = Array.isArray(perfisArr) ? perfisArr.find(p => p && p.nome === nome) : null;
+              const udir = udirFromManifest || (perfil && perfil.userDataDir ? String(perfil.userDataDir) : '');
+              if (udir) {
+                // Browser deve estar fechado. Mesmo assim: se sobrar órfão, força kill aqui (último recurso) antes do rimraf.
+                try { browserHelper.killChromeProfileProcesses(udir); } catch {}
+                try { if (fs.existsSync(udir)) fileStore.rimrafSync(udir); } catch {}
+              }
+              const arr2 = Array.isArray(perfisArr) ? perfisArr.filter(p => p && p.nome !== nome) : [];
+              try { savePerfisJson(arr2); } catch {}
+            } catch {}
+
+            // remover desired e diretório do perfil
+            try { await fileStore.removeDesired(nome); } catch {}
+            try {
+              const dir = path.join(fileStore.perfisDir, nome);
+              try { fileStore.rimrafSync(dir); } catch {}
+            } catch {}
+
+            // limpeza status.json
+            try {
+              const st = fileStore.readJsonSafe(fileStore.statusPath, null);
+              if (st && Array.isArray(st.perfis)) {
+                st.perfis = st.perfis.filter(p => p && p.nome !== nome);
+                fileStore.writeJsonAtomic(fileStore.statusPath, st);
+              }
+            } catch {}
+
+            try { await snapshotStatusAndWrite(); } catch {}
+            return { ok: true };
+          } catch (e) {
+            return { ok: false, error: (e && e.message) || String(e) };
+          }
+        })();
         try {
           provisionAudit.append({
             ts: Date.now(),
@@ -4057,27 +3444,6 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.messengerPinAt;
         }
       }
-      if (which.includes('captchaCheckpoint')) {
-        if (
-          man.accountFlags.captchaCheckpoint ||
-          man.accountFlags.captchaCheckpointAt ||
-          man.accountFlags.captchaCheckpointReason ||
-          man.accountFlags.captchaCheckpointSource ||
-          man.accountFlags.captchaCheckpointUrl ||
-          man.accountFlags.captchaCheckpointTitle ||
-          man.accountFlags.captchaCheckpointConfirmed ||
-          man.accountFlags.captchaCheckpointConfirmedAt
-        ) {
-          delete man.accountFlags.captchaCheckpoint;
-          delete man.accountFlags.captchaCheckpointAt;
-          delete man.accountFlags.captchaCheckpointReason;
-          delete man.accountFlags.captchaCheckpointSource;
-          delete man.accountFlags.captchaCheckpointUrl;
-          delete man.accountFlags.captchaCheckpointTitle;
-          delete man.accountFlags.captchaCheckpointConfirmed;
-          delete man.accountFlags.captchaCheckpointConfirmedAt;
-        }
-      }
       if (which.includes('identity')) {
         if (
           man.accountFlags.identityRequired ||
@@ -4115,9 +3481,6 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
     if (which.includes('messengerPin') && (prev && prev.messengerPin)) {
       await issues.append(nome, 'mil_action', `messenger_pin_cleared at=${new Date().toISOString()}`);
     }
-    if (which.includes('captchaCheckpoint') && (prev && prev.captchaCheckpoint)) {
-      await issues.append(nome, 'mil_action', `captcha_checkpoint_cleared at=${new Date().toISOString()}`);
-    }
     if (which.includes('identity') && (prev && (prev.identityRequired || prev.identitySubmitted))) {
       await issues.append(nome, 'mil_action', `identity_flags_cleared at=${new Date().toISOString()}`);
     }
@@ -4139,43 +3502,10 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
       delete robeMeta[nome].messengerPin;
       if (robeMeta[nome].whyNotOpen === 'messenger_pin_modal') delete robeMeta[nome].whyNotOpen;
     }
-    if (which.includes('captchaCheckpoint')) {
-      if (typeof robeMeta[nome].whyNotOpen === 'string' && robeMeta[nome].whyNotOpen.startsWith('captcha')) delete robeMeta[nome].whyNotOpen;
-    }
     if (which.includes('identity')) {
       if (typeof robeMeta[nome].whyNotOpen === 'string' && robeMeta[nome].whyNotOpen.startsWith('identity')) delete robeMeta[nome].whyNotOpen;
     }
     await snapshotStatusAndWrite();
-  } catch {}
-}
-
-// Política (2026-01-28): abrir tudo / abrir um / retomar trabalho => limpar flags não-terminais e revalidar do zero.
-// - NÃO limpa banned/twoFactor (terminais).
-// - NÃO reseta timers/cooldowns (robeCooldownUntil etc).
-async function clearNonTerminalFlagsForRecheck(nome, { by = 'system', trigger = 'open' } = {}) {
-  try {
-    try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin','captchaCheckpoint','identity']); } catch {}
-    try { await clearAppealSubmittedFlag(nome); } catch {}
-    try { await clearIdentityFlags(nome); } catch {}
-    // Política: não manter "congelado" para razões não-estruturais.
-    // Isso evita perfis ficarem presos como "ROBE Congelado" quando o usuário quer reavaliar do zero.
-    try {
-      const man = await manifestStore.read(nome).catch(()=>null);
-      const fr = man ? String(man.frozenReason || '') : '';
-      const structural = /manifest_missing|manifest_incomplete/i.test(fr);
-      if (man && man.frozenUntil && man.frozenUntil > Date.now() && !structural) {
-        await unfreezeProfile(nome, String(by || 'system'));
-      }
-    } catch {}
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'flags_cleared_for_recheck',
-        nome: String(nome || ''),
-        by: String(by || ''),
-        trigger: String(trigger || '')
-      });
-    } catch {}
   } catch {}
 }
 
@@ -4224,40 +3554,6 @@ const { execFile } = require('child_process');
 
 const supervisorClient = require('./supervisorClient.js');
 const provisionLock = require('./provisionLock.js');
-
-// ===== Global quiesce kinds (militar) =====
-// Quando qualquer operação crítica estiver rodando, o sistema deve evitar concorrência:
-// - não iniciar Robe novo
-// - não (re)iniciar Virtus de outros perfis
-function _isGlobalQuiesceKind(kindStr) {
-  const kind = String(kindStr || '').toLowerCase();
-  return (
-    kind.includes('stock_provision') ||
-    kind.includes('admin_configure') ||
-    kind.includes('close_all') ||
-    kind.includes('open_all_map') ||
-    kind.includes('open_all') ||
-    kind.includes('configure')
-  );
-}
-
-// Robe queue deve respeitar lock global (inclusive itens já enfileirados)
-try {
-  if (robeQueue && typeof robeQueue.setPausePredicate === 'function') {
-    robeQueue.setPausePredicate(() => {
-      try {
-        const cur = provisionLock.get ? provisionLock.get() : null;
-        const active = !!(cur && cur.active);
-        const lock = active ? (cur.lock || null) : null;
-        const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
-        const kind = String(meta.kind || meta.op || '').toLowerCase();
-        return active && _isGlobalQuiesceKind(kind);
-      } catch {
-        return false;
-      }
-    });
-  }
-} catch {}
 const { getAvailableMB } = utils;
 
 const HEALTH_CFG = {
@@ -4904,95 +4200,19 @@ async function ensureManifestValid(nome) {
       Array.isArray(man.cookies) && man.cookies.length &&
       typeof man.userDataDir === 'string' && man.userDataDir;
   }
-  function missingEssentials(man) {
-    const miss = [];
-    try { if (!man || !(typeof man.nome === 'string' && man.nome)) miss.push('nome'); } catch { miss.push('nome'); }
-    try { if (!man || !(typeof man.cidade === 'string' && man.cidade)) miss.push('cidade'); } catch { miss.push('cidade'); }
-    try { if (!man || typeof man.uaPresetId === 'undefined') miss.push('uaPresetId'); } catch { miss.push('uaPresetId'); }
-    try { if (!man || !(typeof man.uaString === 'string' && man.uaString)) miss.push('uaString'); } catch { miss.push('uaString'); }
-    try { if (!man || !(typeof man.uaCh === 'object' && man.uaCh)) miss.push('uaCh'); } catch { miss.push('uaCh'); }
-    try { if (!man || !(typeof man.fp === 'object' && man.fp)) miss.push('fp'); } catch { miss.push('fp'); }
-    try { if (!man || !(Array.isArray(man.cookies) && man.cookies.length)) miss.push('cookies'); } catch { miss.push('cookies'); }
-    try { if (!man || !(typeof man.userDataDir === 'string' && man.userDataDir)) miss.push('userDataDir'); } catch { miss.push('userDataDir'); }
-    return miss;
-  }
-
-  // 0) Tenta ler manifest do disk (pode falhar se perfis.json estiver sem userDataDir).
   let manifest = await manifestStore.read(nome).catch(()=>null);
   if (manifest && hasEssentials(manifest)) return manifest;
-
-  // 1) Autocura: garantir que perfis.json tem userDataDir (sem isso, manifestStore não consegue mapear o manifest).
-  let perfil = null;
-  let perfisArr = [];
   try {
-    perfisArr = loadPerfisJson();
-    perfil = perfisArr.find(p => p && p.nome === nome) || null;
-  } catch {}
-
-  try {
-    if (perfil && (!perfil.userDataDir || typeof perfil.userDataDir !== 'string')) {
-      const derived = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
-      perfil.userDataDir = derived;
-      try { fs.mkdirSync(derived, { recursive: true }); } catch {}
-      // Master-only: persistir userDataDir via IPC (patch mínimo)
-      try { await perfisMasterClient.patch(nome, { userDataDir: derived }, { reason: 'manifest_autocure_set_userDataDir', caller: 'worker' }); } catch {}
-      try { provisionAudit.append({ ts: Date.now(), event: 'manifest_autocure_set_userDataDir', nome: String(nome||''), userDataDir: String(derived).slice(0, 260) }); } catch {}
-    }
-  } catch {}
-
-  // 2) Re-tenta ler manifest após garantir mapping
-  manifest = await manifestStore.read(nome).catch(()=>manifest);
-
-  // 3) Merge parcial (enterprise): mesmo que perfil/man sejam incompletos isoladamente, o MERGE pode ser completo.
-  let merged = Object.assign({}, (perfil || {}), (manifest || {}));
-
-  // 4) Preencher userDataDir por convenção (último fallback)
-  if (!merged.userDataDir || typeof merged.userDataDir !== 'string') {
-    try {
-      merged.userDataDir = path.join(resolveChromeUserDataRoot(), 'Conveniente', String(nome || '').trim());
-      try { fs.mkdirSync(merged.userDataDir, { recursive: true }); } catch {}
-    } catch {}
-  } else {
-    try { if (merged.userDataDir && !fs.existsSync(merged.userDataDir)) fs.mkdirSync(merged.userDataDir, { recursive: true }); } catch {}
-  }
-
-  // 5) Preencher UA/FP por preset (se faltar) — sem alterar presetId se já existe.
-  try {
-    const uap = (merged.uaPresetId !== undefined && merged.uaPresetId !== null) ? String(merged.uaPresetId) : '';
-    if (uap) {
-      let preset = null;
-      try {
-        const presets = JSON.parse(fs.readFileSync(presetsPath, 'utf8'));
-        preset = Array.isArray(presets) ? presets.find(p => p && String(p.id) === uap) : null;
-      } catch {}
-      if (preset) {
-        if (!merged.uaString && preset.uaString) merged.uaString = String(preset.uaString);
-        if ((!merged.uaCh || typeof merged.uaCh !== 'object') && preset.uaCh) merged.uaCh = preset.uaCh;
-        if (!merged.fp || typeof merged.fp !== 'object') merged.fp = {};
-        merged.fp = merged.fp || {};
-        if ((!merged.fp.viewport || typeof merged.fp.viewport !== 'object') && (preset.viewport || (preset.fp && preset.fp.viewport))) {
-          merged.fp.viewport = preset.viewport || (preset.fp && preset.fp.viewport);
-        }
-        if ((merged.fp.dpr === undefined || merged.fp.dpr === null) && (preset.dpr || (preset.fp && preset.fp.dpr))) {
-          merged.fp.dpr = preset.dpr || (preset.fp && preset.fp.dpr);
-        }
-        if ((merged.fp.hardwareConcurrency === undefined || merged.fp.hardwareConcurrency === null) && (preset.hardwareConcurrency || (preset.fp && preset.fp.hardwareConcurrency))) {
-          merged.fp.hardwareConcurrency = preset.hardwareConcurrency || (preset.fp && preset.fp.hardwareConcurrency);
-        }
+    const perfisArr = loadPerfisJson();
+    const perfil = perfisArr.find(p => p && p.nome === nome);
+    if (perfil && hasEssentials(perfil)) {
+      const merged = Object.assign({}, perfil, manifest || {});
+      if (merged.userDataDir && !fs.existsSync(merged.userDataDir)) {
+        fs.mkdirSync(merged.userDataDir, { recursive: true });
       }
-    }
-  } catch {}
-
-  // 6) Se o merge ficou completo, persistir no manifest.json (via manifestStore) e devolver.
-  if (hasEssentials(merged)) {
-    try { await manifestStore.update(nome, () => merged); } catch {}
+      await manifestStore.update(nome, () => merged);
       return merged;
     }
-
-  // 7) Se ainda não ficou completo, logar causa (prova) e retornar null.
-  try {
-    const miss = missingEssentials(merged).slice(0, 12);
-    provisionAudit.append({ ts: Date.now(), event: 'manifest_autocure_failed', nome: String(nome||''), missing: miss.join(',') });
   } catch {}
   return null;
 }
@@ -5058,24 +4278,11 @@ try {
       if (fs.existsSync(manifestPath)) {
         const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         if (man.frozenUntil && man.frozenUntil > Date.now()) {
-          const fr = String(man.frozenReason || '');
-          const structural = /manifest_missing|manifest_incomplete/i.test(fr);
-          if (structural) {
-            robeMeta[p.nome] = robeMeta[p.nome] || {};
-            robeMeta[p.nome].frozenUntil = man.frozenUntil;
-            if (man.frozenReason) robeMeta[p.nome].frozenReason = man.frozenReason;
-            if (man.frozenAt) robeMeta[p.nome].frozenAt = man.frozenAt;
-            if (man.frozenSetBy) robeMeta[p.nome].frozenSetBy = man.frozenSetBy;
-          } else {
-            // Política (2026-01-28): não manter congelamento não-estrutural no disco.
-            try {
-              delete man.frozenUntil;
-              delete man.frozenReason;
-              delete man.frozenAt;
-              delete man.frozenSetBy;
-              writeJsonAtomic(manifestPath, man);
-            } catch {}
-          }
+          robeMeta[p.nome] = robeMeta[p.nome] || {};
+          robeMeta[p.nome].frozenUntil = man.frozenUntil;
+          if (man.frozenReason) robeMeta[p.nome].frozenReason = man.frozenReason;
+          if (man.frozenAt) robeMeta[p.nome].frozenAt = man.frozenAt;
+          if (man.frozenSetBy) robeMeta[p.nome].frozenSetBy = man.frozenSetBy;
         }
       }
     }
@@ -5153,23 +4360,7 @@ const activationLocks = new Map();
 async function activateOnce(nome, source = '', operator = '') {
   if (opening[nome]) return { ok: false, error: 'already_opening' };
 
-  const opTrim = String(operator || '').trim();
-  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim);
-  // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
-  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
-  const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
-  const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
-
   if (controllers.has(nome)) {
-    // Política do usuário: Abrir (bulk/manual/resume) deve limpar flags não-terminais e reavaliar
-    // MESMO com navegador já aberto (sem depender de fechar/reabrir).
-    const ctrl = controllers.get(nome);
-    if (ctrl && (_isBulkOpen || _isManualOpen)) {
-      try { await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: _isBulkOpen ? 'open_all_existing' : 'open_manual_existing' }); } catch {}
-      try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all_existing' : 'open_manual_existing' }); } catch {}
-      try { await snapshotStatusAndWrite(); } catch {}
-      return { ok: true, already: true, rechecked: true };
-    }
     return { ok: true, already: true };
   }
 
@@ -5186,6 +4377,12 @@ async function activateOnce(nome, source = '', operator = '') {
   // Enterprise rule (2026-01): NUNCA abrir já em "humano invocado" só por humanHold.
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
+  const opTrim = String(operator || '').trim();
+  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim);
+  // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
+  // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
+  const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
+  const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
   try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
@@ -5210,17 +4407,12 @@ async function activateOnce(nome, source = '', operator = '') {
       try { await snapshotStatusAndWrite(); } catch {}
     }
 
-    // Hardening: durante STOCK_PROVISION/admin_configure/close_all (lock global), bloquear novas aberturas,
-    // EXCETO se o operador for o dono do lock. Para login_remediate NÃO bloquear (evita engessamento global).
+    // Hardening: durante stock_provision (maintenance lock), bloquear novas aberturas,
+    // EXCETO se o operador for o dono do lock (stock_provision:<batchId>).
     try {
       const op = String(operator || '').trim();
-      const cur = provisionLock.get ? provisionLock.get() : null;
-      const active = !!(cur && cur.active);
-      const lock = active ? (cur.lock || null) : null;
-      const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
-      const kind = String(meta.kind || meta.op || '').toLowerCase();
-      const isGlobalPauseKind = _isGlobalQuiesceKind(kind);
-      if (active && isGlobalPauseKind && !provisionLock.ownerMatchesOperator(lock, op)) {
+      const lk = provisionLock.shouldBlock(op);
+      if (lk && lk.block) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].activationHeldUntil = Date.now() + 5000;
         await reportAction(nome, 'mil_action', 'activation_hold_by_provision_lock');
@@ -5262,23 +4454,11 @@ async function activateOnce(nome, source = '', operator = '') {
       return { ok: false, error: 'Nome ausente' };
     }
 
-    // Política (2026-01-28): "congelado" é freeze de Robe/backoff, não deve bloquear abrir/retomar.
-    // Mantemos o frozenUntil para evitar thrash do Robe, mas permitimos abertura sob supervisor para revalidar.
-    try {
-      const fu = isFrozenNow(nome);
-      if (fu) {
-        let fr = '';
-        try { fr = String(robeMeta[nome]?.frozenReason || ''); } catch {}
-        // Só bloquear abertura em casos estruturais (manifest), onde abrir repetidamente é inútil.
-        const isStructural = /manifest_missing|manifest_incomplete/i.test(fr);
-        if (isStructural) {
-          await reportAction(nome, 'mil_action', `block_activate_frozen_structural reason=${fr||''}`);
-          if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
-          return { ok: false, error: 'account_is_frozen' };
-        }
-        await reportAction(nome, 'mil_action', `allow_activate_while_frozen reason=${fr||''}`);
-      }
-    } catch {}
+    if (isFrozenNow(nome)) {
+      await reportAction(nome, 'mil_action', 'block_activate_frozen');
+      if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
+      return { ok: false, error: 'account_is_frozen' };
+    }
 
     const job = (async () => {
       logger.info('[WORKER][activateOnce] start', { nome, source });
@@ -5286,21 +4466,8 @@ async function activateOnce(nome, source = '', operator = '') {
         logger.info('[WORKER][activateOnce] start nome=' + nome + ' source=' + source);
         const manifest = await ensureManifestValid(nome);
         if (!manifest) {
-          // Militar: "manifesto incompleto" NÃO pode virar freeze de 12h (isso engessa e mascara a causa).
-          // Em vez disso, entramos em modo humano + backoff e deixamos evidência clara do motivo.
-          try {
-            await fileStore.withDesiredFileLockUpdate((d) => {
-              d = d || {}; d.perfis = d.perfis || {};
-              d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-              return d;
-            });
-          } catch {}
-          try {
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].activationHeldUntil = Date.now() + (30 * 60 * 1000);
-            robeMeta[nome].whyNotOpen = 'manifest_incomplete';
-          } catch {}
-          await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; modo humano + backoff 30min');
+          await freezeProfileFor(nome, 12*60*60*1000, 'manifest_incomplete', 'system');
+          await reportAction(nome, 'robe_error', 'manifest incompleto na ativação; perfil congelado 12h');
           if (_supervisorSlotGranted) { try { await supervisorClient.notifyOpened(nome, 'err'); } catch {} }
           return { ok:false, error: 'manifest_incomplete' };
         }
@@ -5437,16 +4604,7 @@ async function activateOnce(nome, source = '', operator = '') {
                     await ensureNonBlankEntryPage(nome, ctrl, { prefer: 'messenger', reasonBase: _isBulkOpen ? 'open_all_entry' : 'open_manual_entry' });
                   }
                 } catch {}
-                // Política: em open-all, o probe é obrigatório e deve bloquear avanço se o Messenger não ficou pronto.
-                // (senão abre o próximo cedo demais e “atropela” o Chrome)
-                try {
-                  const pr = await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }).catch(e => ({ ok:false, error: (e && e.message) ? String(e.message) : String(e) }));
-                  if (_isBulkOpen && (!pr || pr.ok !== true)) {
-                    throw new Error(`open_all_probe_failed:${String(pr && pr.error ? pr.error : 'probe_failed')}`);
-                  }
-                } catch (e) {
-                  if (_isBulkOpen) throw e;
-                }
+                try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
               }
             maybeStartPruneLoop(nome, ctrl.browser, ctrl.mainPage);
             try {
@@ -5582,19 +4740,14 @@ function sendReply(msgId, data) {
 }
 
 function loadPerfisJson() {
-  // Enterprise: filtro por shard APENAS para a visão do worker (status/ações),
-  // para evitar que múltiplos workers reportem os mesmos perfis e se sobrescrevam no agregado.
-  // Importante: este filtro NÃO pode ser usado para "persistência" (worker não escreve perfis.json).
   try {
-    const arr = fileStore.loadPerfisJson() || [];
-    if (!SHARD_SET || !SHARD_SET.size) return arr;
+    const arr = JSON.parse(fs.readFileSync(perfisPath, 'utf8'));
+    if (!SHARD_SET.size) return arr;
     return arr.filter(p => p && p.nome && inShard(p.nome));
   } catch { return []; }
 }
 function savePerfisJson(arr) {
-  // Blindagem máxima: worker NÃO escreve perfis.json diretamente.
-  // Use perfisMasterClient (IPC) para mutações no processo master.
-  try { logger.warn('[PERFIS][BLOCKED] savePerfisJson called in worker; use master-only IPC'); } catch {}
+  try { fs.writeFileSync(perfisPath, JSON.stringify(arr, null, 2)); } catch {}
 }
 
 function pickUaPreset() {
@@ -6189,22 +5342,16 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
 }
 
 async function robeTickGlobal() {
-  // Hardening: durante GLOBAL QUIESCE (stock_provision/configure/close_all), pausar Robe.
-  // IMPORTANTE: login_remediate NÃO deve pausar o servidor inteiro (senão engessa).
+  // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
   try {
-    const cur = provisionLock.get ? provisionLock.get() : null;
-    const active = !!(cur && cur.active);
-    const lock = active ? (cur.lock || null) : null;
-    const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
-    const kind = String(meta.kind || meta.op || '').toLowerCase();
-    if (active && _isGlobalQuiesceKind(kind)) {
+    if (provisionLock.isActive()) {
       try {
         robeTickGlobal._lastProvisionLockLogAt = robeTickGlobal._lastProvisionLockLogAt || 0;
         const now = Date.now();
         const last = Number(robeTickGlobal._lastProvisionLockLogAt || 0) || 0;
         if (!last || (now - last) > 60000) {
           robeTickGlobal._lastProvisionLockLogAt = now;
-          await milLog('mil_action', `robeTickGlobal_skip_due_provision_lock kind=${kind}`);
+          await milLog('mil_action', 'robeTickGlobal_skip_due_provision_lock');
         }
       } catch {}
       return;
@@ -6654,23 +5801,14 @@ function resolveChromeUserDataRoot() {
 }
 
 function automationAllowed(ctrl, { operator } = {}) {
-  // Hardening (ultra enterprise):
-  // O lock global é necessário para operações críticas (pausa geral).
-  // Política do usuário (RM1): login_remediate/configure/stock_provision => FULL QUIESCE (Robe+Virtus).
+  // Hardening: durante stock_provision, bloquear automação (Robe/Virtus),
+  // mas permitir o fluxo do PRÓPRIO provisionamento quando o operador é o dono do lock.
   try {
     const op = String(operator || '').trim();
-    const cur = provisionLock.get ? provisionLock.get() : null;
-    const active = !!(cur && cur.active);
-    const lock = active ? (cur.lock || null) : null;
-    const meta = lock && lock.meta && typeof lock.meta === 'object' ? lock.meta : {};
-    const kind = String(meta.kind || meta.op || '').toLowerCase();
-    const isGlobalPauseKind = _isGlobalQuiesceKind(kind);
-    if (active && isGlobalPauseKind) {
-      // Só o dono do lock passa.
-      if (!provisionLock.ownerMatchesOperator(lock, op)) return false;
-    }
+    const lk = provisionLock.shouldBlock(op);
+    if (lk && lk.block) return false;
   } catch {
-    // fallback ultra-conservador: se não conseguimos ler o lock, não bloqueie (evita falso positivo de engessamento).
+    try { if (provisionLock.isActive()) return false; } catch {}
   }
   return !!(ctrl && !ctrl.humanControl && !ctrl.configurando && !ctrl.trabalhando);
 }
@@ -6909,7 +6047,7 @@ const handlers = {
     let nome = utils.slugify(cidade) + '-' + Date.now();
     while (fs.existsSync(path.join(perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-    const preset = fileStore.pickUaPreset();
+    const preset = pickUaPreset();
     if (!preset) return { ok: false, error: 'UA preset esgotado.' };
 
     const cookiesArr = utils.normalizeCookies(cookies);
@@ -6935,8 +6073,9 @@ const handlers = {
     };
     try { fs.mkdirSync(perfilObj.userDataDir, { recursive: true }); } catch {}
 
-    // Master-only: upsert no perfis.json via IPC (não inclui cookies no payload)
-    try { await perfisMasterClient.upsert(perfilObj, { reason: 'worker_criar_perfil', caller: 'worker' }); } catch {}
+    const perfisArr = loadPerfisJson();
+    perfisArr.push(perfilObj);
+    savePerfisJson(perfisArr);
 
     try {
       await manifestStore.update(nome, (m) => {
@@ -7161,39 +6300,6 @@ const handlers = {
       const pids2 = (chk2 && Array.isArray(chk2.pids)) ? chk2.pids : [];
 
       if (!pid2Ok || pids2.length || rootAliveAfter === true) {
-        // Último recurso (110%): força kill por userDataDir antes de bloquear delete.
-        // Motivo: em purge/ban/2FA, deixar Chrome vivo é exatamente o que causa “conta excluída reabrindo”.
-        try {
-          if (udir && browserHelper.killChromeProfileProcesses) {
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'deactivate_force_kill_userDataDir_begin',
-                nome: String(nome || ''),
-                reason: String(reason || ''),
-                userDataDir: String(udir).slice(0, 260),
-                pids: pids2.slice(0, 24)
-              });
-            } catch {}
-            try { browserHelper.killChromeProfileProcesses(udir); } catch {}
-            await sleep(1200);
-          }
-        } catch {}
-
-        // Re-check após force kill
-        let chk3 = null;
-        try {
-          if (udir && browserHelper.getChromeProfilePidsMeta) chk3 = browserHelper.getChromeProfilePidsMeta(udir);
-          else if (udir && browserHelper.getChromeProfilePids) chk3 = { ok: true, pids: browserHelper.getChromeProfilePids(udir) || [] };
-          else chk3 = { ok: false, pids: [], error: 'pid_check_unavailable' };
-        } catch (e) {
-          chk3 = { ok: false, pids: [], error: (e && e.message) ? String(e.message).slice(0, 180) : 'pid_check_failed' };
-        }
-        const pid3Ok = !!(chk3 && chk3.ok);
-        const pids3 = (chk3 && Array.isArray(chk3.pids)) ? chk3.pids : [];
-        if (pid3Ok && !pids3.length && rootAliveAfter !== true) {
-          // ok: não bloquear
-        } else {
         try {
           provisionAudit.append({
             ts: Date.now(),
@@ -7202,9 +6308,9 @@ const handlers = {
             reason: String(reason || ''),
             policy: policy == null ? null : String(policy),
             userDataDir: udir ? String(udir).slice(0, 260) : null,
-            pidCheckOk: pid3Ok,
-            pidCheckErr: pid3Ok ? null : (chk3 && chk3.error ? String(chk3.error).slice(0, 180) : 'pid_check_failed'),
-            pids: pids3.slice(0, 24),
+            pidCheckOk: pid2Ok,
+            pidCheckErr: pid2Ok ? null : (chk2 && chk2.error ? String(chk2.error).slice(0, 180) : 'pid_check_failed'),
+            pids: pids2.slice(0, 24),
             hardClose: (hc && hc.flowId) ? {
               flowId: hc.flowId,
               durMs: hc.durMs || null,
@@ -7223,14 +6329,13 @@ const handlers = {
             man.accountFlags.pendingClose = true;
             man.accountFlags.pendingCloseAt = Date.now();
             man.accountFlags.pendingCloseReason = 'deactivate_close_incomplete';
-            man.accountFlags.pendingClosePids = pids3.slice(0, 24);
+            man.accountFlags.pendingClosePids = pids2.slice(0, 24);
             man.accountFlags.pendingCloseUserDataDir = udir ? String(udir).slice(0, 260) : null;
             return man;
           });
         } catch {}
         await snapshotStatusAndWrite();
         return { ok: false, error: 'chrome_alive_after_deactivate' };
-        }
       }
     }
   }
@@ -7642,9 +6747,7 @@ const handlers = {
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       const opts = (options && typeof options === 'object') ? options : {};
       const maxHardDeactivations = Math.max(0, Number(opts.maxHardDeactivations || 2) || 2);
-      // Política militar: se tiver Robe/sendLock rodando, esperar terminar (sem atropelo).
-      // Ainda há um teto (30min) para evitar deadlock infinito; se estourar vira backoff+retry (infra), não culpa a conta.
-      const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 0) || (30 * 60 * 1000));
+      const waitBusyMs = Math.max(0, Number(opts.waitBusyMs || 120000) || 120000);
       const overrideHumanHold = (opts.overrideHumanHold === true || opts.overrideHumanHold === 1 || String(opts.overrideHumanHold || '').toLowerCase() === 'true');
       const totalTimeoutMs = Math.max(60_000, Number(opts.totalTimeoutMs || 0) || (8 * 60 * 1000));
       const stageTimeoutMs = {
@@ -7675,28 +6778,17 @@ const handlers = {
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        // Regra do usuário (ROBE MÃE 1): Login/Cookies falhou => humano invocado SEMPRE.
-        // Militar: entra em modo humano (hold) + Virtus OFF + 1 aba apenas.
+        // Regra do usuário: NUNCA entrar em humano invocado automaticamente.
+        // Apenas trava automação (Virtus OFF) e registra evidência.
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
             return d;
           });
         } catch {}
 
-        try {
-          const ctrl = controllers.get(nome);
-          if (ctrl) {
-            ctrl.trabalhando = false;
-            ctrl.humanControl = true;
-            try { await stopVirtus(nome); } catch {}
-            // Militar: garante 1 aba em humano (economia + evita confusão).
-            try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
-            try { await ensureHumanOverlay(nome, ctrl, { reason: `login_remediate_failed:${why}` }); } catch {}
-            try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-          }
-        } catch {}
+        try { const ctrl = controllers.get(nome); if (ctrl) { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } } catch {}
 
         // UX/telemetria: expõe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnóstico)
         try {
@@ -7704,15 +6796,6 @@ const handlers = {
           robeMeta[nome].whyNotOpen = why;
         } catch {}
 
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'human_mode_enter',
-            nome: String(nome || ''),
-            source: 'login_remediate_failfast',
-            reason: String(why || '').slice(0, 200)
-          });
-        } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
       };
 
@@ -7807,44 +6890,7 @@ const handlers = {
         const msg = (e && e.message) ? String(e.message) : String(e);
         pushStep({ step: 'quiesce_failed', error: msg });
         try { provisionLock.release({ owner: op }); } catch {}
-        // Militar: se falhou por busy/pause timeout (terceiros trabalhando), NÃO “culpar” a conta.
-        // Aplica backoff curto e re-tenta automaticamente; só vira humano se for erro estrutural.
-        const m0 = String(msg || '').toLowerCase();
-        const isBusyTimeout = m0.includes('busy_timeout') || m0.includes('pause_timeout');
-        if (isBusyTimeout) {
-          try {
-            const nowB = Date.now();
-            const snap = _quiesceSnapshot({ excludeNome: nome });
-            // Backoff 2–5 min (jitter) para dar tempo de sendLocks/robe terminarem.
-            const backoffMs = (2 * 60 * 1000) + Math.floor(Math.random() * (3 * 60 * 1000 + 1));
-            robeMeta[nome] = robeMeta[nome] || {};
-            robeMeta[nome].activationHeldUntil = nowB + backoffMs;
-            robeMeta[nome].openBackoffMs = backoffMs;
-            robeMeta[nome].whyNotOpen = 'maintenance_provision_busy';
-            try {
-              provisionAudit.append({
-                ts: nowB,
-                event: 'login_remediate_quiesce_busy_backoff_applied',
-                nome: String(nome || ''),
-                operator: op,
-                error: String(msg || '').slice(0, 180),
-                backoffMs,
-                busyNames: (snap && snap.busyNames) ? snap.busyNames.slice(0, 40) : [],
-                pauseableVirtusNames: (snap && snap.pauseableVirtusNames) ? snap.pauseableVirtusNames.slice(0, 40) : []
-              });
-            } catch {}
-            try { await snapshotStatusAndWrite(); } catch {}
-            // Retry automático (não bloqueante)
-            setTimeout(() => {
-              try {
-                // Não forçar overrideHumanHold aqui: se estava em humano, o operador “Retomar” já dispara override.
-                handlers.login_remediate({ nome, operator: `auto_quiesce_retry:${String(nome||'')}:${Date.now()}` }).catch(()=>{});
-              } catch {}
-            }, backoffMs + 1200);
-          } catch {}
-          return { ok: false, error: `quiesce_busy_backoff:${msg}`, steps, pausedVirtus, retry: true };
-        }
-        // Fail fast real: não injeta cookies se não conseguiu quiescer por erro estrutural.
+        // Fail fast: não injeta cookies se não conseguiu pausar/esperar busy.
         await failFastToHuman(msg);
         return { ok: false, error: `quiesce_failed:${msg}`, steps, pausedVirtus };
       }
@@ -8009,12 +7055,7 @@ const handlers = {
           const bd = await browserHelper.detectAccountSuspended(page).catch(()=>({ banned:false }));
           if (bd && bd.banned) {
             pushStep({ step: 'banned_detected', stage: String(stage||''), reason: bd.reason || '', snippet: (bd.snippet || '').slice(0, 420) });
-            // Militar: NUNCA pode travar aqui (setBannedFlag pode fechar browser, falar com CT etc).
-            // Se der timeout/falha, ainda assim aborta o fluxo (terminal state) e o watchdog fará cleanup.
-            try {
-              const rr = await withTimeout('setBannedFlag', setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }), 30_000).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
-              pushStep({ step: 'banned_flag_set_attempt', ok: !!(rr && rr.ok !== false), error: rr && rr.error ? String(rr.error).slice(0, 160) : null });
-            } catch {}
+            try { await setBannedFlag(nome, { reason: bd.reason || 'banned', snippet: bd.snippet || '' }); } catch {}
             // IMPORTANTE (enterprise): ban/disabled NÃO é “login/cookies falhou”.
             // Aqui a ação correta é setBannedFlag() (que fecha + remove do servidor).
             // Não deve marcar loginRemediateFailed/loginRequired depois disso.
@@ -8538,8 +7579,6 @@ const handlers = {
       }
 
       ctrl.humanControl = true;
-      // Militar: modo humano => 1 aba (economia)
-      try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
 
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
@@ -8597,9 +7636,11 @@ const handlers = {
       ctrl.humanControl = false;
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
       try { await syncHumanOverlay(nome); } catch {}
-      // Política (2026-01-28): retomar trabalho sempre limpa flags não-terminais e revalida do zero.
-      // NÃO limpa banned/twoFactor (terminais) e NÃO reseta timers/cooldowns.
-      try { await clearNonTerminalFlagsForRecheck(nome, { by: 'human', trigger: 'human-resume' }); } catch {}
+      // Enterprise: "Retomar trabalho" deve limpar TODO estado antigo para reavaliar o estado real.
+      // - limpa flags de login/falha e também estados de análise (appeal/identity) para não engessar.
+      try { await clearAccountFlags(nome, ['loginRequired','banned','loginRemediateFailed','messengerPin']); } catch {}
+      try { await clearAppealSubmittedFlag(nome); } catch {}
+      try { await clearIdentityFlags(nome); } catch {}
       try { if (ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome]; } catch {}
       try {
         // Limpa runtime/meta que pode manter status antigo no painel.
@@ -8720,10 +7761,12 @@ const handlers = {
               return { ok: true, preflight };
             }
 
-            // Non-automatable: captcha/checkpoint/2FA etc.
-            // Política do usuário: NÃO invocar humano automaticamente aqui; apenas manter Virtus OFF e registrar flags.
+            // Non-automatable: captcha/identity/checkpoint => humano direto.
+            // 2FA => exclusão automática.
             const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
             const isCaptchaCheckpoint = rr.includes('captcha') || rr.includes('checkpoint');
+            const needsHuman =
+              rr.includes('checkpoint');
             if (isTwoFactor) {
               preflight.state = 'two_factor';
               try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
@@ -8744,6 +7787,21 @@ const handlers = {
               try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
               await snapshotStatusAndWrite();
               logger.info('[HANDLER] human-resume preflight -> captcha/checkpoint', { nome, reason: lr.reason || '' });
+              return { ok: true, preflight };
+            }
+            if (needsHuman) {
+              preflight.state = 'needs_human';
+              try { await setLoginRemediateFailedFlag(nome, { reason: lr.reason || 'login_requires_human', source: 'human_resume', stage: 'human_resume_preflight' }); } catch {}
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d.perfis = d.perfis || {};
+                  d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+                  return d;
+                });
+              } catch {}
+              try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
+              await snapshotStatusAndWrite();
+              logger.info('[HANDLER] human-resume preflight -> needs_human', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
 
@@ -9814,9 +8872,6 @@ const AUTO_LR_CFG = {
   immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
   minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
   maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
-  // Falhas "infra" (busy_timeout / provision_lock_busy / quiesce_busy_backoff) não devem virar humano;
-  // apenas retry com backoff curto.
-  backoffBusyMs: Math.max(30_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_BUSY_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)), // 6min
   backoffFailMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_FAIL_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)), // 45min
   totalTimeoutMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TOTAL_TIMEOUT_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)),
   stageTimeoutMs: {
@@ -9893,32 +8948,12 @@ async function autoLoginRemediateTick() {
     const flags = await readAccountFlags(nome).catch(()=>({}));
     const lrFlag = !!(flags && flags.loginRequired === true);
     const lrFailed = !!(flags && flags.loginRemediateFailed === true);
-    const lrReason = String((flags && flags.loginReason) ? flags.loginReason : '').toLowerCase();
     const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
     const queued = !!(st && st.queued);
     const nextAt = st ? (Number(st.nextAt || 0) || 0) : 0;
 
     // Só tenta se o perfil está marcado como loginRequired (persistido) e está enfileirado (evento detectado).
     if (!lrFlag || !queued) continue;
-
-    // Militar: hacked/password_reset NÃO é fluxo de login_remediate.
-    // Em vez de gastar tentativa de cookies+senha (vai falhar), roda o hacked flow e sai.
-    if (lrReason.includes('hacked_review') || lrReason.includes('password_reset_required')) {
-      try {
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].autoLoginRemediate = robeMeta[nome].autoLoginRemediate || {};
-        robeMeta[nome].autoLoginRemediate.queued = false;
-        robeMeta[nome].autoLoginRemediate.nextAt = Math.max(robeMeta[nome].autoLoginRemediate.nextAt || 0, Date.now() + (60 * 1000));
-      } catch {}
-      setTimeout(() => {
-        try {
-          const c = controllers.get(nome);
-          const p0 = (c && c.mainPage) ? c.mainPage : null;
-          if (c && p0) runHackedReviewFlow(nome, c, p0, { source: 'auto_login_remediate_divert' }).catch(()=>{});
-        } catch {}
-      }, 0);
-      continue;
-    }
     // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
     if (lrFailed) {
       try {
@@ -9980,30 +9015,11 @@ async function autoLoginRemediateTick() {
     try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_done', nome, operator, ok: st.lastOk, error: st.lastError || null }); } catch {}
 
     if (!st.lastOk) {
-      const err = String(st.lastError || '').toLowerCase();
-      const infraFail =
-        err.includes('busy_timeout') ||
-        err.includes('pause_timeout') ||
-        err.includes('provision_lock_busy') ||
-        err.includes('quiesce_busy_backoff') ||
-        err.includes('maintenance_provision') ||
-        err.includes('supervisor_denied') ||
-        err.includes('supervisor_unreachable');
-
-      if (infraFail) {
-        // Militar: não culpar a conta por falha de infraestrutura/concorrência.
-        // Re-enfileira com backoff curto.
-        st.queued = true;
-        st.nextAt = Date.now() + AUTO_LR_CFG.backoffBusyMs;
-        try { await issues.append(nome, 'mil_action', `auto_login_remediate_retry_backoff ${Math.round(AUTO_LR_CFG.backoffBusyMs/60000)}min err=${st.lastError||''}`); } catch {}
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_infra_fail_backoff', nome, operator, error: String(st.lastError||'').slice(0,220), backoffMs: AUTO_LR_CFG.backoffBusyMs }); } catch {}
-      } else {
-        // Persistir estado de falha real (para abrir em modo humano e impedir loops automáticos)
+      // Persistir estado de falha (para abrir em modo humano e impedir loops automáticos)
       try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
-        // Backoff em falha real: evita loop no mesmo perfil.
+      // Backoff em falha: evita loop no mesmo perfil.
       st.nextAt = Date.now() + AUTO_LR_CFG.backoffFailMs;
       try { await issues.append(nome, 'mil_action', `auto_login_remediate_backoff ${Math.round(AUTO_LR_CFG.backoffFailMs/60000)}min err=${st.lastError||''}`); } catch {}
-      }
     } else {
       // Sucesso: limpa fila.
       st.nextAt = 0;
@@ -10097,7 +9113,6 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
       let cleared = [];
       let setVirtusOn = false;
-      let clearedHumanControl = false;
       try {
         const flagsPrev = await readAccountFlags(nome).catch(()=>({}));
         const needsClear =
@@ -10116,23 +9131,12 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
           d = d || {};
           d.perfis = d.perfis || {};
           const cur = d.perfis[nome] || {};
-          if (cur && cur.active === true && (cur.virtus === 'off' || cur.humanHold === true)) {
-            const nextVirtus = (cur.virtus === 'off') ? 'on' : (cur.virtus || 'on');
-            d.perfis[nome] = { ...cur, virtus: nextVirtus, humanHold: false };
-            setVirtusOn = (cur.virtus === 'off');
+          if (cur && cur.active === true && cur.virtus === 'off') {
+            d.perfis[nome] = { ...cur, virtus: 'on', humanHold: false };
+            setVirtusOn = true;
           }
           return d;
         });
-      } catch {}
-
-      // IMPORTANT (desengessamento real):
-      // Se a UI está saudável, mas o controller ficou em humanControl=true, o nurse não retoma Virtus.
-      // Limpar humanControl aqui é seguro porque acabamos de provar "não é loginRequired".
-      try {
-        if (ctrl && ctrl.humanControl === true) {
-          ctrl.humanControl = false;
-          clearedHumanControl = true;
-        }
       } catch {}
 
       try {
@@ -10142,8 +9146,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
           nome: String(nome||''),
           url: String(safeUrl(pg)||'').slice(0,220),
           cleared,
-          setVirtusOn,
-          clearedHumanControl
+          setVirtusOn
         });
       } catch {}
       if (setVirtusOn) {
@@ -10178,12 +9181,6 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
       return { ok: true, state: 'appeal_submitted' };
     }
 
-    // Messenger: "Esta página não está disponível" (regra Max/SMS)
-    if (rr.includes('messenger_page_not_available')) {
-      try { await handleMessengerPageNotAvailable(nome, ctrl, pg, { source: `human_reconcile:${String(source||'')}` }); } catch {}
-      return { ok: true, state: 'messenger_page_not_available' };
-    }
-
     // login_form: permitir liberar o sistema (política do cliente) com agendamento controlado
     if (rr.includes('login_form') && HUMAN_RECONCILE_CFG.allowScheduleLoginRemediate) {
       const lastSch = Number(robeMeta[nome].humanReconcileLastScheduleAt || 0) || 0;
@@ -10208,108 +9205,6 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: now, event: 'human_reconcile_error', nome: String(nome||''), error: msg.slice(0,220) }); } catch {}
-    return { ok: false, error: msg };
-  }
-}
-
-// ===== Tratador enterprise: Messenger "Esta página não está disponível" =====
-// Regra do usuário:
-// - Ao detectar a tela do Messenger "Esta página não está disponível", navegar para FB create item.
-// - Se cair em confirmação de SMS => considerar conta inutilizável (excluir + CT Excluídas).
-// - Caso contrário => congelar por backoff controlado (para evitar flapping e permitir reavaliação posterior).
-async function handleMessengerPageNotAvailable(nome, ctrl, pg, { source = 'unknown' } = {}) {
-  const now = Date.now();
-  try {
-    if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, skipped: 'no_browser' };
-    if (!pg) {
-      const pages = await ctrl.browser.pages().catch(()=>[]);
-      pg = (pages && pages[0]) || null;
-    }
-    if (!pg) return { ok: false, skipped: 'no_pages' };
-
-    robeMeta[nome] = robeMeta[nome] || {};
-    const cd = Number(robeMeta[nome].messengerPageNotAvailCooldownUntil || 0) || 0;
-    if (cd && cd > now) return { ok: false, skipped: 'cooldown' };
-    // cooldown curto anti-loop (a ação pode demorar a refletir)
-    robeMeta[nome].messengerPageNotAvailCooldownUntil = now + (10 * 60 * 1000);
-
-    try { provisionAudit.append({ ts: now, event: 'messenger_page_not_available_handle_begin', nome: String(nome||''), source: String(source||'') }); } catch {}
-    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available_detected -> probe_fb_create'); } catch {}
-
-    try {
-      ctrl.trabalhando = false;
-      await stopVirtus(nome).catch(()=>{});
-    } catch {}
-
-    // Navegar na MESMA aba para FB create item (checagem determinística)
-    const targetUrl = 'https://www.facebook.com/marketplace/create/item';
-    try { await pg.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-    await sleep(1400);
-
-    let urlNow = '';
-    try { urlNow = (typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch {}
-
-    const norm = (s) => {
-      try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
-      catch { return String(s || '').toLowerCase(); }
-    };
-    let body = '';
-    try {
-      body = await Promise.race([
-        pg.evaluate(() => (document && document.body && (document.body.innerText || document.body.textContent)) ? String(document.body.innerText || document.body.textContent) : ''),
-        new Promise(res => setTimeout(() => res(''), 9000))
-      ]);
-    } catch {}
-
-    const b = norm(body);
-    const u = norm(urlNow);
-    const isSmsConfirm =
-      u.includes('/confirm_code') ||
-      b.includes('insira o codigo de confirmacao do sms') ||
-      b.includes('insira o codigo de confirmacao') && b.includes('sms') ||
-      (b.includes('fb-') && b.includes('reenviar sms'));
-
-    try {
-      provisionAudit.append({
-        ts: Date.now(),
-        event: 'messenger_page_not_available_probe_result',
-        nome: String(nome||''),
-        url: String(urlNow||'').slice(0, 220),
-        isSmsConfirm: !!isSmsConfirm
-      });
-    } catch {}
-
-    if (isSmsConfirm) {
-      try { await issues.append(nome, 'mil_action', 'sms_confirmation_required -> autodelete'); } catch {}
-      try { await setBannedFlag(nome, { reason: 'sms_confirmation_required', snippet: 'confirm_code_sms' }); } catch {}
-      return { ok: true, action: 'autodelete_sms' };
-    }
-
-    // Política do usuário (2026-01-28): NÃO congelar por messenger_page_not_available.
-    // Ação: invocar humano imediatamente (hard-pause) e deixar o operador decidir.
-    try { await setLoginRequiredFlag(nome, { reason: 'messenger_page_not_available', source: 'messenger' }); } catch {}
-    try {
-      await fileStore.withDesiredFileLockUpdate((d) => {
-        d = d || {}; d.perfis = d.perfis || {};
-        d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-        return d;
-      });
-    } catch {}
-    try {
-      ctrl.trabalhando = false;
-      ctrl.humanControl = true;
-      await stopVirtus(nome).catch(()=>{});
-      await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }).catch(()=>{});
-      await ensureHumanOverlay(nome, ctrl, { reason: 'messenger_page_not_available' }).catch(()=>{});
-      await browserHelper.invocarHumano(ctrl.browser, nome).catch(()=>{});
-      await snapshotStatusAndWrite().catch(()=>{});
-    } catch {}
-    try { await issues.append(nome, 'mil_action', 'messenger_page_not_available -> invoke_human (no freeze)'); } catch {}
-    try { provisionAudit.append({ ts: Date.now(), event: 'messenger_page_not_available_invoke_human', nome: String(nome||''), source: String(source||'') }); } catch {}
-    return { ok: true, action: 'invoke_human' };
-  } catch (e) {
-    const msg = (e && e.message) ? String(e.message) : String(e);
-    try { provisionAudit.append({ ts: Date.now(), event: 'messenger_page_not_available_handle_error', nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
     return { ok: false, error: msg };
   }
 }
@@ -10341,9 +9236,6 @@ async function nurseTick() {
         if (!last || (now0 - last) > 60_000) { // no máximo 1x/min
           robeMeta.system.nurseZeroControllersSweepAt = now0;
           const desired0 = readJsonFile(desiredPath, { perfis: {} });
-          // Política (2026-01-28): se existe sessão de open-all ativa, NÃO retornar aqui.
-          // O open-all precisa justamente funcionar partindo de 0 browsers abertos.
-          const hasOpenAll = !!(desired0 && desired0._openAll && desired0._openAll.active === true);
           for (const nome of Object.keys(desired0.perfis || {})) {
             try {
               const flags = await readAccountFlags(nome).catch(()=>({}));
@@ -10367,75 +9259,18 @@ async function nurseTick() {
               }
             } catch {}
           }
-          if (hasOpenAll) {
-            // segue nurseTick completo (inclui OPEN-ALL SEQUENCER)
-          } else {
-            _nurseTickRunning = false;
-            return;
-          }
         }
       } catch {}
-      // Se não havia open-all ativo, já retornamos acima; caso contrário, continua.
+      _nurseTickRunning = false;
+      return;
     }
     // Ultra enterprise: durante provisionamento, pausar Virtus de forma controlada
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
     try {
       const lk = provisionLock.get ? provisionLock.get() : (provisionLock.isActive() ? { active: true, lock: null } : { active: false, lock: null });
-      // Regra enterprise: pausa geral só para STOCK_PROVISION / admin_configure / close_all.
-      // login_remediate NÃO deve pausar todo o servidor (senão engessa).
-      const lockObj = (lk && lk.active) ? (lk.lock || null) : null;
-      const meta = lockObj && lockObj.meta && typeof lockObj.meta === 'object' ? lockObj.meta : {};
-      const kind = String(meta.kind || meta.op || '').toLowerCase();
-      // Watchdog militar: nunca permitir lock de login_remediate ficar "preso" por await travado.
-      // - se a conta já virou terminal (banned / twoFactor), force-release.
-      // - se o lock passou muito do tempo esperado, force-release (seguro pois login_remediate é idempotente e tem retry/backoff).
-      try {
-        if (lk && lk.active && lockObj && kind.includes('login_remediate')) {
-          const owner = String(lockObj.owner || '');
-          const sinceMs = Number(lockObj.sinceMs || 0) || 0;
-          const ageMs = sinceMs ? (Date.now() - sinceMs) : 0;
-          const nomeLock = meta && meta.nome ? String(meta.nome) : '';
-          robeMeta.system = robeMeta.system || {};
-          const lastAt = Number(robeMeta.system.provisionLockWatchdogLastAt || 0) || 0;
-          const lastOwner = String(robeMeta.system.provisionLockWatchdogLastOwner || '');
-          // no máximo 1x/30s por owner
-          if (!lastAt || (Date.now() - lastAt) > 30_000 || owner !== lastOwner) {
-            robeMeta.system.provisionLockWatchdogLastAt = Date.now();
-            robeMeta.system.provisionLockWatchdogLastOwner = owner;
-            let terminal = null;
-            try {
-              if (nomeLock) {
-                const flags = await readAccountFlags(nomeLock).catch(()=>({}));
-                if (flags && flags.banned === true) terminal = 'banned';
-                else if (flags && flags.twoFactor === true) terminal = 'two_factor';
-              }
-            } catch {}
-            const tooOld = ageMs > (12 * 60 * 1000); // 12min (limite militar)
-            if (terminal || tooOld) {
-              const rr = (() => { try { return provisionLock.release({ owner, force: true }); } catch (e) { return { ok:false, error:(e&&e.message)||String(e) }; } })();
-              try {
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'provision_lock_watchdog_force_release',
-                  ok: !!(rr && rr.ok),
-                  released: !!(rr && rr.released),
-                  owner,
-                  kind,
-                  ageMs,
-                  terminal,
-                  nome: nomeLock || null
-                });
-              } catch {}
-            }
-          }
-        }
-      } catch {}
-      const shouldPauseAll =
-        !!(lk && lk.active) &&
-        _isGlobalQuiesceKind(kind);
-      if (shouldPauseAll) {
-        const owner = lockObj && lockObj.owner ? String(lockObj.owner) : null;
-        const untilMs = lockObj && lockObj.untilMs ? Number(lockObj.untilMs) : 0;
+      if (lk && lk.active) {
+        const owner = lk.lock && lk.lock.owner ? String(lk.lock.owner) : null;
+        const untilMs = lk.lock && lk.lock.untilMs ? Number(lk.lock.untilMs) : 0;
         const paused = [];
         const skipped = { noVirtus: 0, human: 0, configurando: 0, robeExec: 0, sendLock: 0, other: 0 };
 
@@ -10476,7 +9311,7 @@ async function nurseTick() {
           } catch {}
         }
       } else {
-        // lock inexistente OU lock de tipo não-global (ex.: login_remediate): não pausar o servidor.
+        // lock acabou: reseta para o próximo provisionamento
         _provisionPauseLastOwner = null;
         _provisionPauseLastUntilMs = 0;
       }
@@ -10484,176 +9319,6 @@ async function nurseTick() {
 
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
-
-    // ===================== OPEN-ALL SEQUENCER (ordem do dashboard) =====================
-    // Política do usuário: ao clicar "Abrir tudo", abrir em ordem e 1 por vez (sem “desordem” do cluster).
-    // Coordenação cross-process via desired.json:
-    // - desired._openAll.queue = ordem (perfis.json)
-    // - idx = próximo alvo
-    // - inFlight = alvo atual reservado (lock leve)
-    try {
-      const s0 = desired && desired._openAll && desired._openAll.active === true ? desired._openAll : null;
-      if (s0 && Array.isArray(s0.queue) && s0.queue.length) {
-        let session = null;
-        // Claim/reservar inFlight de forma atômica
-        try {
-          await fileStore.withDesiredFileLockUpdate((d) => {
-            d = d || {}; d.perfis = d.perfis || {};
-            const s = d._openAll;
-            if (!s || s.active !== true || !Array.isArray(s.queue)) { session = null; return d; }
-            const now2 = Date.now();
-            // Governança militar: throttle entre passos (evita abrir em “rajadas”).
-            const nextAt = Number(s.nextAt || 0) || 0;
-            if (nextAt && now2 < nextAt) {
-              session = { ...s, throttled: true };
-              d._openAll = s;
-              return d;
-            }
-            // limpeza de inFlight stale (evita travar sequencer)
-            if (s.inFlight && s.inFlightAt && (now2 - Number(s.inFlightAt || 0)) > 180_000) {
-              s.inFlight = null;
-              s.inFlightAt = 0;
-              s.inFlightBy = null;
-              s.lastError = 'inFlight_stale_cleared';
-            }
-            // fim da fila
-            if ((Number(s.idx || 0) || 0) >= s.queue.length) {
-              s.active = false;
-              s.doneAt = now2;
-              s.inFlight = null;
-              s.inFlightAt = 0;
-              s.inFlightBy = null;
-              session = { ...s };
-              d._openAll = s;
-              return d;
-            }
-            if (!s.inFlight) {
-              const idx = (Number(s.idx || 0) || 0);
-              const target = String(s.queue[idx] || '');
-              if (target) {
-                s.inFlight = target;
-                s.inFlightAt = now2;
-                s.inFlightBy = `pid:${process.pid}`;
-                s.lastError = null;
-              }
-            }
-            session = { ...s };
-            d._openAll = s;
-            return d;
-          });
-        } catch {}
-
-        // Se a sessão terminou (idx>=len), liberar lock global do open_all_map (best-effort).
-        try {
-          if (session && session.active === false && (session.lockOwner || session.op)) {
-            try { provisionLock.release({ owner: String(session.lockOwner || session.op) }); } catch {}
-          }
-        } catch {}
-
-        if (session && session.throttled === true) {
-          _nurseTickRunning = false;
-          return;
-        }
-
-        if (session && session.active === true && session.inFlight) {
-          const target = String(session.inFlight || '');
-          // Só o worker dono do shard executa a abertura; os outros aguardam.
-          if (target && (!SHARD_SET.size || inShard(target))) {
-            // Guardrail militar: perfis tombstoned/terminais nunca podem abrir no open-all.
-            // Se aparecer na fila (por perfis.json antigo ou race), purge e avança idx imediatamente.
-            try {
-              const tomb = fileStore.hasTombstone && fileStore.hasTombstone(target);
-              let terminal = false;
-              let termWhy = '';
-              if (tomb) { terminal = true; termWhy = 'tombstone'; }
-              if (!terminal) {
-                const flags = await readAccountFlags(target).catch(()=>null);
-                if (flags && flags.banned === true) { terminal = true; termWhy = 'banned'; }
-                else if (flags && flags.twoFactor === true) { terminal = true; termWhy = 'two_factor'; }
-              }
-              if (terminal) {
-                try { await purgePerfilLocalEnterprise(target, { reason: `open_all_skip_${termWhy}`.slice(0, 120), flowId: newFlowId('openall_purge') }).catch(()=>null); } catch {}
-                const stepGapMs0 = parseInt(process.env.OPEN_ALL_STEP_GAP_MS || '1400', 10);
-                try {
-                  await fileStore.withDesiredFileLockUpdate((d) => {
-                    d = d || {}; d.perfis = d.perfis || {};
-                    const s = d._openAll;
-                    if (!s || s.active !== true) return d;
-                    const idx = (Number(s.idx || 0) || 0);
-                    if (String(s.inFlight || '') === target) {
-                      s.idx = idx + 1;
-                      s.lastError = `skipped_terminal:${termWhy}`.slice(0, 180);
-                      s.nextAt = Date.now() + Math.max(300, stepGapMs0);
-                      s.inFlight = null;
-                      s.inFlightAt = 0;
-                      s.inFlightBy = null;
-                    }
-                    d._openAll = s;
-                    return d;
-                  });
-                } catch {}
-                _nurseTickRunning = false;
-                return;
-              }
-            } catch {}
-            // Respeitar slots (não abrir se já está acima do cap do supervisor/worker)
-            // Operator: usar o lockOwner/op da sessão para atravessar o provision_lock open_all_map.
-            const openOp = String(session.lockOwner || session.op || 'open_all_24h_seq');
-            const r = await activateOnce(target, 'nurse_open_all_seq', openOp).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
-            const ok = !!(r && r.ok);
-            const err = r && r.error ? String(r.error) : '';
-            // Avança apenas se abriu/estava aberto, ou se falhou por algo "lógico" (não-infra).
-            // Se falhou por supervisor/ram/maintenance/kill_guard, mantém idx (retry) para preservar ordem.
-            const retryable =
-              err.includes('supervisor_denied') ||
-              err.includes('ram_insuficiente') ||
-              err.includes('maintenance_provision') ||
-              err.includes('kill_guard_until') ||
-              err.includes('open_all_probe_failed') ||
-              err.includes('messenger_marketplace_not_ready');
-            const stepGapMs = parseInt(process.env.OPEN_ALL_STEP_GAP_MS || '1400', 10);
-            const retryBackoffMs = parseInt(process.env.OPEN_ALL_RETRY_BACKOFF_MS || '6000', 10);
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d = d || {}; d.perfis = d.perfis || {};
-                const s = d._openAll;
-                if (!s || s.active !== true) return d;
-                const idx = (Number(s.idx || 0) || 0);
-                if (String(s.inFlight || '') === target) {
-                  if (ok || !retryable) {
-                    s.idx = idx + 1;
-                    s.nextAt = Date.now() + Math.max(300, stepGapMs);
-                  } else {
-                    s.lastError = err.slice(0, 180) || 'retryable_fail';
-                    s.nextAt = Date.now() + Math.max(800, retryBackoffMs);
-                  }
-                  s.inFlight = null;
-                  s.inFlightAt = 0;
-                  s.inFlightBy = null;
-                }
-                d._openAll = s;
-                return d;
-              });
-            } catch {}
-            // Se acabou a fila, tentar liberar provision_lock do open_all_map (best-effort).
-            try {
-              const d2 = readJsonFile(desiredPath, { perfis: {} });
-              const s2 = d2 && d2._openAll ? d2._openAll : null;
-              if (s2 && s2.active === false && (s2.lockOwner || s2.op)) {
-                try { provisionLock.release({ owner: String(s2.lockOwner || s2.op) }); } catch {}
-              }
-            } catch {}
-            // Não executar mais nada neste tick; mantém 1-por-vez.
-            _nurseTickRunning = false;
-            return;
-          }
-          // Não é nosso shard: só aguarda.
-          _nurseTickRunning = false;
-          return;
-        }
-      }
-    } catch {}
-    // =================== END OPEN-ALL SEQUENCER ===================
 
     // ===== PRIORIDADE ENTERPRISE: Recurso em análise (Pronto!) =====
     // Se existir qualquer perfil com appealSubmitted=true e appealNextCheckAt<=now e ainda sem controller,
@@ -10709,68 +9374,11 @@ async function nurseTick() {
       // senão o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
       try {
         const flagsR = await readAccountFlags(nome).catch(()=>({}));
-        // Política do usuário: em modo humano (humanHold/humanControl), o sistema NÃO fica “olhando” o navegador.
-        // Só volta a agir quando o operador mandar retomar. Isso evita loop visual (pisca/foco) e concorrência.
         const needsRecon =
           (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) &&
-          (ctrl.humanControl !== true) &&
-          (want.humanHold !== true);
+          (ctrl.humanControl === true || want.humanHold === true || (flagsR && flagsR.loginRemediateFailed === true));
         if (needsRecon) {
           await reconcileHumanState(nome, ctrl, { source: 'nurse' }).catch(()=>null);
-        }
-
-        // ===== Invariante militar: status "Login/Cookies falhou (humano)" / "PIN" => humano REALMENTE invocado =====
-        // Garantia: mesmo se a flag foi setada quando o navegador estava ausente (ou houve exceção),
-        // o nurse repara o estado e entra em modo humano determinístico.
-        const needHumanBecauseLoginFail = !!(flagsR && flagsR.loginRemediateFailed === true);
-        // Captcha só é humano se for CONFIRMADO (anti falso-positivo).
-        // Compat: se flag antiga não tem confirmação, não invocar humano automaticamente.
-        const needHumanBecauseCaptcha =
-          !!(flagsR && flagsR.captchaCheckpoint === true) &&
-          !!(flagsR && flagsR.captchaCheckpointConfirmed === true) &&
-          /(captcha_persona|checkpoint_captcha)/i.test(String(flagsR.captchaCheckpointReason || ''));
-        if (needHumanBecauseLoginFail || needHumanBecauseCaptcha) {
-          const reason = needHumanBecauseCaptcha
-            ? `captcha:${String(flagsR.captchaCheckpointReason || '').slice(0, 160)}`
-            : `login_remediate_failed:${String(flagsR.loginRemediateFailedReason || '').slice(0, 160)}`;
-
-          // 1) desired humanHold=true (UI + persistência)
-          if (want.humanHold !== true) {
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d = d || {}; d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: true };
-                return d;
-              });
-            } catch {}
-          }
-
-          // 2) ctrl.humanControl + overlay + invocar humano (se houver browser)
-          // Idempotência: se já está em humano+hold, não reinvocar (evita pisca/foco infinito).
-          try {
-            if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-              if (ctrl.humanControl === true && want.humanHold === true) {
-                // já está em humano determinístico; não tocar
-              } else {
-              ctrl.trabalhando = false;
-              ctrl.humanControl = true;
-              try { await stopVirtus(nome); } catch {}
-              try { await browserHelper.pruneHumanToOneTab(ctrl.browser, { nome, ctrl, robeMeta }); } catch {}
-              try { await ensureHumanOverlay(nome, ctrl, { reason }); } catch {}
-              try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
-              try { await snapshotStatusAndWrite(); } catch {}
-              try {
-                provisionAudit.append({
-                  ts: Date.now(),
-                  event: 'human_mode_enter',
-                  nome: String(nome || ''),
-                  source: 'nurse_invariant_enforcer',
-                  reason: String(reason || '').slice(0, 220)
-                });
-              } catch {}
-              }
-            }
-          } catch {}
         }
       } catch {}
 
@@ -10872,9 +9480,9 @@ async function nurseTick() {
               const last = Number(robeMeta[nome].identityAssistLastAt || 0) || 0;
               if (!last || (now - last) > 30_000) {
                 robeMeta[nome].identityAssistLastAt = now;
-                    const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
-                    const pg = pages && pages[0];
-                    if (pg) {
+                const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+                const pg = pages && pages[0];
+                if (pg) {
                   await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
                 }
               }
@@ -10915,22 +9523,19 @@ async function nurseTick() {
       } catch {}
 
       if (want.humanHold === true) {
-        // Se o navegador estiver aberto, mantém overlay e NÃO roda automação.
-        // Mas se o navegador estiver FECHADO, não podemos “engessar”: o nurse deve poder abrir (e o reconciliador limpa falso-positivo).
-        if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
         // Overlay deve aparecer e se manter (retry periódico com debounce).
         try {
+          if (ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
             robeMeta[nome] = robeMeta[nome] || {};
             const last = Number(robeMeta[nome].overlayNurseLastAt || 0) || 0;
             if (!last || (now - last) > 45_000) {
               robeMeta[nome].overlayNurseLastAt = now;
               await syncHumanOverlay(nome).catch(()=>{});
+            }
           }
         } catch {}
         await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_skip_human_hold', 'nurse_skip_human_hold');
         continue;
-        }
-        // Sem ctrl/browser: cai no fluxo normal de abertura (want.active && !ctrl) abaixo.
       }
 
       {
@@ -10963,16 +9568,8 @@ async function nurseTick() {
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
 
-        if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
-          const left = Math.max(0, robeMeta[nome].activationHeldUntil - Date.now());
-          await appendIssueNurseDebounced(nome, 'mil_action', `nurse_open_deferred activationHeldUntil=${Math.round(left/1000)}s`, 'nurse_open_deferred_activationHeld');
-          continue;
-        }
-        if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
-          const left = Math.max(0, robeMeta[nome].reopenAt - Date.now());
-          await appendIssueNurseDebounced(nome, 'mil_action', `nurse_open_deferred reopenAt=${Math.round(left/1000)}s`, 'nurse_open_deferred_reopenAt');
-          continue;
-        }
+        if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) continue;
+        if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) continue;
 
         if (slotsInUse >= MAX_OPEN_CONCURRENCY) continue;
         slotsInUse++;
@@ -11253,13 +9850,6 @@ async function nurseTick() {
                   title: lr.title || ''
                 });
               } catch {}
-            } else if (rr.includes('messenger_page_not_available')) {
-              // Regra militar do usuário: Messenger erro -> checar FB create item -> SMS? excluir, senão freeze 12h.
-              try {
-                if (ctrl && ctrl.browser && ctrl.browser.isConnected?.() && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true)) {
-                  await handleMessengerPageNotAvailable(nome, ctrl, (lrPage || p0), { source: 'lr_scan' }).catch(()=>null);
-                }
-              } catch {}
             } else if (rr.includes('login_form')) {
               // Blindagem anti-loop: se já falhou e foi marcado, não re-tenta automaticamente.
               try {
@@ -11323,28 +9913,13 @@ async function nurseTick() {
             if (firstMatch) {
               try { await issues.append(nome, 'mil_action', `messenger_pin_seen kind=${firstMatch.det.kind||''}`); } catch {}
               // Anti-loop: ao ver PIN_INPUT, não usar GPT (pode clicar em X/voltar e ficar “piscando”).
-              // Regra enterprise: PIN bloqueia envio; parar Virtus antes de tentar curar.
-              try {
-                ctrl.trabalhando = false;
-                await stopVirtus(nome).catch(()=>{});
-              } catch {}
-              // Tenta mais vezes e com espera determinística (o botão/submit pode demorar).
-              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 4 }).catch(()=>null);
+              await browserHelper.tryDismissMessengerPinModal(firstMatch.pg, { logPrefix: '[NURSE][PIN]', maxTries: 2 }).catch(()=>null);
               // Cooldown pós tentativa: dá tempo do Messenger processar e evita re-tentativa imediata.
               robeMeta[nome].pinCooldownUntil = Date.now() + 45_000;
               const still = await browserHelper.detectMessengerPinModal(firstMatch.pg).catch(()=>({ present:false }));
               if (still && still.present) {
                 // PIN_INPUT: não chamar GPT. Apenas marcar flag para humano ver, mas sem loop.
                 await setMessengerPinFlag(nome, { reason: still.kind || 'messenger_pin_modal', source: 'nurse' });
-                // Reflete no desired: Virtus OFF enquanto o PIN estiver presente.
-                try {
-                  await fileStore.withDesiredFileLockUpdate((d) => {
-                    d = d || {};
-                    d.perfis = d.perfis || {};
-                    d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off' };
-                    return d;
-                  });
-                } catch {}
                 try {
                   const fsSync2 = require('fs');
                   const path2 = require('path');
@@ -11353,29 +9928,6 @@ async function nurseTick() {
                 } catch {}
               } else {
                 await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
-                // Se limpou o PIN, retoma automação (Virtus ON) desde que não haja outros bloqueios.
-                try {
-                  const flags = await readAccountFlags(nome).catch(()=>({}));
-                  const blocked =
-                    (flags && flags.loginRequired === true) ||
-                    (flags && flags.banned === true) ||
-                    (flags && flags.twoFactor === true) ||
-                    (flags && flags.identityRequired === true) ||
-                    (flags && flags.identitySubmitted === true) ||
-                    (flags && flags.appealSubmitted === true);
-                  if (!blocked) {
-                    await fileStore.withDesiredFileLockUpdate((d) => {
-                      d = d || {};
-                      d.perfis = d.perfis || {};
-                      const cur = d.perfis[nome] || {};
-                      d.perfis[nome] = { ...cur, active: true, virtus: 'on', humanHold: false };
-                      return d;
-                    });
-                    setTimeout(() => {
-                      try { handlers.start_work({ nome, operator: 'nurse_pin_recovered' }).catch(()=>{}); } catch {}
-                    }, 0);
-                  }
-                } catch {}
                 try {
                   const fsSync2 = require('fs');
                   const path2 = require('path');
@@ -11387,7 +9939,7 @@ async function nurseTick() {
               // se não há PIN em nenhuma aba, limpa flag (se existir)
               await clearAccountFlags(nome, ['messengerPin']).catch(()=>{});
             }
-            }
+          }
           }
         }
       } catch {}
@@ -11701,10 +10253,6 @@ setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
 setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickMs);
 setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);
-
-// UA+FP presets sync -> CT (mantém lista completa 1..N mesmo quando uso=0)
-setTimeout(() => { emitUaFpPresetsToCT({ force: true, reason: 'boot' }).catch(()=>{}); }, 15000);
-setInterval(() => { emitUaFpPresetsToCT({ force: false, reason: 'interval' }).catch(()=>{}); }, 6 * 60 * 60 * 1000);
 
 // Inicializa reloadManager após todos os sistemas estarem prontos
 reloadManager.startReloadManager(controllers, robeMeta);

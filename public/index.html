@@ -1039,11 +1039,10 @@
 
     // ----------- ENUMERAÇÃO DAS CONTAS (perfis.forEach ao invés do loop original) -------------
     async function reloadPerfis() {
-      const [st, perfisResp] = await Promise.all([ safeGetStatus(), safeListPerfis() ]);
-      // Anti-flicker militar:
-      // - Se /api/perfis falhar 1 ciclo, NÃO apagar a lista; manter cache e mostrar warning.
-      const perfisOk = !!(perfisResp && perfisResp.ok === true && Array.isArray(perfisResp.perfis));
-      const statusOk = !!(st && Array.isArray(st.perfis));
+      const [st, perfisResp] = await Promise.all([
+        safeGetStatus(),
+        safeListPerfis()
+      ]);
 
       // ====== NOVO: sincronizar ações em massa vindas do backend (comandos remotos) ======
       try {
@@ -1076,10 +1075,7 @@
           setGlobalActionButtonsDisabled(false);
         }
       } catch {}
-      let basePerfis = perfisOk ? perfisResp.perfis : [];
-      if ((!basePerfis || basePerfis.length === 0) && lastPerfisCache && lastPerfisCache.length > 0) {
-        basePerfis = lastPerfisCache;
-      }
+      const basePerfis = Array.isArray(perfisResp?.perfis) ? perfisResp.perfis : [];
       const perfisMap = new Map(basePerfis.map(p => [p.nome, Object.assign({
         active: false, trabalhando: false, configurando: false, humanControl: false, issuesCount: 0,
         ramMB: null, cpuPercent: null, numPages: null,
@@ -1088,7 +1084,7 @@
         manifestStatus: null, closingReason: null
       }, p)]));
       // Overlay de /api/status (st)
-      if (statusOk) {
+      if (Array.isArray(st?.perfis)) {
         st.perfis.forEach(o => {
           const dst = perfisMap.get(o.nome);
           if (dst) Object.assign(dst, o);
@@ -1099,38 +1095,7 @@
       const robeQueue = st?.robeQueue || [];
 
       // Banner global de aviso (warning) caso backend informe
-      let warn =
-        (st && st.warning) ||
-        (!perfisOk ? 'Falha temporária em /api/perfis (mantendo cache no dashboard)' : null) ||
-        (!statusOk ? 'Falha temporária em /api/status (mantendo cache no dashboard)' : null);
-
-      // Progresso do Abrir Todos (backend) — evita “perder” qual é a próxima conta.
-      try {
-        const oa = st && st.openAll ? st.openAll : null;
-        if (oa && oa.active === true && Array.isArray(oa.queue) && oa.queue.length) {
-          const total = oa.queue.length;
-          const idx = Math.max(0, Math.min(total, Number(oa.idx || 0) || 0));
-          const target = String(oa.inFlight || oa.queue[idx] || '');
-          const msg = `Abrindo (${Math.min(total, idx + 1)}/${total}) ${target ? ('— ' + target) : ''}`;
-          warn = warn ? (msg + '; ' + warn) : msg;
-          const startBtn = document.getElementById('startAllBtn');
-          if (startBtn) {
-            if (!startBtn.dataset.idleTxt) startBtn.dataset.idleTxt = startBtn.textContent;
-            startBtn.disabled = true;
-            startBtn.style.opacity = '0.7';
-            startBtn.style.cursor = 'not-allowed';
-            startBtn.textContent = total ? `Abrindo... ${idx}/${total}` : 'Abrindo...';
-          }
-        } else {
-          const startBtn = document.getElementById('startAllBtn');
-          if (startBtn && startBtn.dataset.idleTxt && !isMassActionRunning()) {
-            startBtn.disabled = false;
-            startBtn.style.opacity = '';
-            startBtn.style.cursor = '';
-            startBtn.textContent = startBtn.dataset.idleTxt;
-          }
-        }
-      } catch {}
+      const warn = st && st.warning;
       if (warn) {
         let b = document.getElementById('globalWarn');
         if (!b) {
@@ -1993,19 +1958,17 @@
     // 4.4 Abertura sequencial “Abrir Todos e Iniciar 24h” com calma, respeitando CPU/RAM
     // ======================= INÍCIO ALTERAÇÃO BLOQUEIO RAM "ABRIR TODOS" ========================
     // NOVO ensureResourcesOk({ minFreeMB }) militar
-    async function ensureResourcesOk({ minFreeMB = 3072, timeoutMs = 90000 } = {}) {
-      // Política militar: sem loops infinitos no dashboard.
-      // Se /api/sys falhar, não bloquear abertura (fallback: continua).
+    async function ensureResourcesOk({ minFreeMB = 3072 } = {}) {
       const ok = await waitUntil(async () => {
         const m = await window.electronAPI.getSysMetrics().catch(()=>null);
-        if (!m || !m.mem) return true; // não bloquear por falta de métricas
+        if (!m || !m.mem) return false;
         const freeMB = m.mem.freeMB || 0;
         const cpu    = (m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0;
         const cpuOk  = (cpu === 0) ? true : (cpu <= 90);
         const memOk  = freeMB >= minFreeMB;
         return cpuOk && memOk;
-      }, { timeoutMs, intervalMs: 1200 }).catch(()=>false);
-      return !!ok;
+      }, { timeoutMs: 0x7fffffff, intervalMs: 1200 });
+      return ok;
     }
 
     // Wrapper para listar todos os perfis pela API dedicada (/api/perfis)
@@ -2015,11 +1978,6 @@
       window.electronAPI.listPerfis = () => fetch('/api/perfis').then(r => r.json()).catch(() => null);
     }
 
-    // DEPRECATED (2026-01-28):
-    // O open-all é orquestrado no backend (POST /api/perfis/open-all-24h) para evitar:
-    // - pulo de ordem por splice no array durante o loop
-    // - startWork indevido durante mapeamento
-    // - concorrência com nurseTick/cluster
     async function startAllSequential() {
       if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
       if (stopAllLock)  { alertMassActionRunning(); return; }
@@ -2260,69 +2218,14 @@
     (function bindStopAllBtn(){
       const btn = document.getElementById('stopAllBtn');
       if (!btn) return;
-      btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
-        if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
-        btn.disabled = true; btn.style.opacity='0.7'; btn.style.cursor='not-allowed'; btn.textContent='Fechando...';
-        setGlobalActionButtonsDisabled(true, { exclude: ['stopAllBtn'] });
-        try {
-          // Fonte de verdade: backend orquestra o close-all (provision_lock close_all + desired.active=false para todos).
-          const r = await fetch('/api/perfis/close-all', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_close_all' }
-          }).then(r => r.json()).catch(()=>null);
-          if (!r || r.ok === false) {
-            alert('Falha ao iniciar Fechar Todos: ' + ((r && r.error) || ''));
-          }
-          await new Promise(r => setTimeout(r, 600));
-          reloadPerfis();
-        } catch (e) {
-          alert('Erro ao iniciar Fechar Todos: ' + (e && e.message || e));
-        } finally {
-          btn.disabled = false; btn.style.opacity=''; btn.style.cursor=''; btn.textContent = btn.dataset.idleTxt || 'Fechar Todos';
-          setGlobalActionButtonsDisabled(false);
-        }
-      };
-    })();
-
-    // Política do usuário: atualizar/recarregar o dashboard deve CANCELAR o close_all em andamento.
-    // Isso permite “desistir no meio do caminho” sem precisar de botão extra.
-    (function cancelCloseAllOnDashboardLoad(){
-      try {
-        fetch('/api/perfis/close-all/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_dashboard_load' }
-        }).catch(()=>{});
-      } catch {}
+      btn.onclick = stopAllSequential;
     })();
 
     // Bind do botão "Abrir Todos e Iniciar 24h"
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
       if (!btn) return;
-      btn.onclick = async () => {
-        if (isMassActionRunning()) { alertMassActionRunning(); return; }
-        if (!btn.dataset.idleTxt) btn.dataset.idleTxt = btn.textContent;
-        btn.disabled = true; btn.style.opacity='0.7'; btn.style.cursor='not-allowed'; btn.textContent='Abrindo...';
-        setGlobalActionButtonsDisabled(true, { exclude: ['startAllBtn'] });
-        try {
-          // Fonte de verdade: backend orquestra o open-all (ordem do perfis.json, 1 por vez, pausa global).
-          const r = await fetch('/api/perfis/open-all-24h', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_open_all' }
-          }).then(r => r.json()).catch(()=>null);
-          if (!r || r.ok === false) {
-            alert('Falha ao iniciar Abrir Todos: ' + ((r && r.error) || ''));
-          }
-          await new Promise(r => setTimeout(r, 600));
-          reloadPerfis();
-        } catch (e) {
-          alert('Erro ao iniciar Abrir Todos: ' + (e && e.message || e));
-        } finally {
-          btn.disabled = false; btn.style.opacity=''; btn.style.cursor=''; btn.textContent = btn.dataset.idleTxt || 'Abrir Todos 24h';
-          setGlobalActionButtonsDisabled(false);
-        }
-      };
+      btn.onclick = startAllSequential;
     })();
 
     // Bind do botão "Invocar Tudo"
