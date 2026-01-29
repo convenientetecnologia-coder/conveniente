@@ -63,6 +63,23 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX][OPS] P1: `stock_provision` com evidência de “busy_timeout” (busyDetails/pauseableDetails)
+
+- **O que**:
+  - ampliado snapshot de quiescência do `stock_provision` para incluir `busyDetails` e `pauseableVirtusDetails` (flags reais por perfil).
+  - erro de timeout agora inclui `sample=` com nomes para diagnóstico rápido no CT.
+- **Por quê**: logs do CT mostraram `stock_provision` falhando com `busy_timeout count=21` sem contexto do “por quê” cada perfil estava ocupado.
+- **Evidência**:
+  - CT: `C:\sitechatbot\dados\logs\bcf01e8d-82da-4d5d-aed0-d60305d4696d\ack_2f0461f7-db74-478d-a43a-0c83485abfbe.json`
+  - código: `C:\conveniente\scripts\dashboard.js` (`execStockProvision` → `computeQuiesceSnapshot`)
+- **Precisa reiniciar agora?** não
+- **Precisa reiniciar para validar/testar?** sim
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert <commit>` e reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CONV][DOCS] Achado P0 (ainda não corrigido): lock não owner-safe
 
 - **O que**: identificado P0 de concorrência em lock de arquivo no `conveniente`.

@@ -737,8 +737,28 @@ async function execStockProvision(cmd) {
       activeCount: active.length,
       busyCount: busy.length,
       busyNames: busy.map(p => String(p.nome)).slice(0, 40),
+      // P1: evidência para “busy_timeout” (sem achismo)
+      busyDetails: busy.map(p => ({
+        nome: String(p && p.nome || ''),
+        trabalhando: p && p.trabalhando === true,
+        configurando: p && p.configurando === true,
+        humanControl: p && p.humanControl === true,
+        sendLockActive: p && p.sendLockActive === true,
+        robeEmExecucao: p && p.robeEmExecucao === true,
+        virtusOnline: p && p.virtusOnline === true
+      })).slice(0, 40),
       pauseableVirtusCount: pauseableVirtus.length,
       pauseableVirtusNames: pauseableVirtus.map(p => String(p.nome)).slice(0, 40),
+      // P1: evidência do que ainda está “pausável” (para debug de pause_timeout)
+      pauseableVirtusDetails: pauseableVirtus.map(p => ({
+        nome: String(p && p.nome || ''),
+        trabalhando: p && p.trabalhando === true,
+        configurando: p && p.configurando === true,
+        humanControl: p && p.humanControl === true,
+        sendLockActive: p && p.sendLockActive === true,
+        robeEmExecucao: p && p.robeEmExecucao === true,
+        virtusOnline: p && p.virtusOnline === true
+      })).slice(0, 40),
       virtusOnlineCount: virtusOnline.length
     };
   }
@@ -768,11 +788,11 @@ async function execStockProvision(cmd) {
       }
       const st2 = await getStatusSnapshot();
       const snap2 = computeQuiesceSnapshot(st2);
-      push({ step: 'quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames });
-      audit({ event: 'stock_provision_quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames });
+      push({ step: 'quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames, busyDetails: snap2.busyDetails });
+      audit({ event: 'stock_provision_quiesce_busy_done', ok: snap2.busyCount <= 0, busyCount: snap2.busyCount, busyNames: snap2.busyNames, busyDetails: snap2.busyDetails });
       if (snap2.busyCount > 0) {
         // Regra enterprise: NÃO prosseguir se não conseguiu garantir quiescência.
-        throw new Error(`busy_timeout count=${snap2.busyCount}`);
+        throw new Error(`busy_timeout count=${snap2.busyCount} sample=${snap2.busyNames.slice(0, 8).join(',')}`);
       }
     }
 
@@ -787,11 +807,11 @@ async function execStockProvision(cmd) {
       }
       const st3 = await getStatusSnapshot();
       const snap3 = computeQuiesceSnapshot(st3);
-      push({ step: 'quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, virtusOnlineCount: snap3.virtusOnlineCount });
-      audit({ event: 'stock_provision_quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, virtusOnlineCount: snap3.virtusOnlineCount });
+      push({ step: 'quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, pauseableVirtusDetails: snap3.pauseableVirtusDetails, virtusOnlineCount: snap3.virtusOnlineCount });
+      audit({ event: 'stock_provision_quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, pauseableVirtusDetails: snap3.pauseableVirtusDetails, virtusOnlineCount: snap3.virtusOnlineCount });
       if (snap3.pauseableVirtusCount > 0) {
         // Regra enterprise: NÃO prosseguir se não conseguiu pausar Virtus "pausáveis".
-        throw new Error(`pause_timeout count=${snap3.pauseableVirtusCount}`);
+        throw new Error(`pause_timeout count=${snap3.pauseableVirtusCount} sample=${snap3.pauseableVirtusNames.slice(0, 8).join(',')}`);
       }
     }
 
