@@ -53,6 +53,10 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
    - quais arquivos/estados são tocados (desired/perfis/status/locks)
    - quais efeitos colaterais podem acontecer (ex.: “fechar” disparar “abrir” por nurse/desired)
    - quais riscos de regressão e como reduzir (mudança mínima + guardrails + rollback)
+5) **Obrigatório**: antes de investigar “do zero”, olhar o **passado** (evitar repetir erro / achar regressão):
+   - `C:\conveniente\docs\TIMELINE.md` (entradas relacionadas)
+   - `C:\conveniente\docs\checkups\file_timeline\INDEX_*.md` (qual arquivo é hotspot)
+   - se o sintoma parece regressão: procurar commits recentes nos arquivos-alvo (o GPT faz isso)
 
 ---
 
@@ -110,6 +114,10 @@ Colunas:
   - **Efeitos colaterais possíveis**:
     - “X pode religar Y” (ex.: nurse/desired/virtus)
   - **Risco de regressão** (1 frase) + **mitigação** (1 frase)
+- **Histórico relacionado (obrigatório)**:
+  - **Timeline**: cite as entradas relevantes de `docs/TIMELINE.md` (data + título).
+  - **Hotspots/arquivos**: cite quais arquivos aparecem no `docs/checkups/file_timeline/` e por quê.
+  - **Hipótese de regressão**: “isso pode ter começado após mudança X” (com evidência).
 - **Plano (mudança mínima)**:
   - …
 - **Precisa reiniciar agora?** sim/não — por quê

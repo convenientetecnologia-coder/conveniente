@@ -167,6 +167,17 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CROSS][DOCS][OPS] INBOX: “olhar o histórico primeiro” (timeline + file_timeline)
+
+- **O que**: padronizado que triagem inbox inclui checar histórico (TIMELINE + file_timeline/hotspots) para detectar regressão e evitar repetir erro.
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (Histórico relacionado obrigatório)
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (intake: olhar histórico)
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS][OPS] INBOX: bloco de “regras não negociáveis” (humano/GPT)
 
 - **O que**: adicionado bloco de regras não negociáveis e lista de arquivos canônicos dentro do `INBOX_RELATOS_DO_HUMANO.md` para guiar triage em chats com relato confuso.

@@ -160,6 +160,9 @@ Quando o humano mandar uma mensagem grande/bagunçada com vários sintomas mistu
   - mapear fluxo ponta a ponta (callers/callees)
   - listar estados tocados (desired/status/perfis/locks)
   - listar possíveis efeitos colaterais (“corrigir fechar todos” pode afetar “abrir todos”, nurse, desired, virtus/robe)
+- **olhar o histórico antes de reinventar a roda**:
+  - checar `C:\conveniente\docs\TIMELINE.md` por entradas relacionadas (e por regressões)
+  - checar `C:\conveniente\docs\checkups\file_timeline\INDEX_*.md` + hotspots para achar os arquivos certos rapidamente
 - dizer de forma direta:
   - precisa reiniciar agora? sim/não
   - precisa reiniciar para validar? sim/não
