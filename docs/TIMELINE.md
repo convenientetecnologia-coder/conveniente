@@ -413,3 +413,18 @@ Formato canônico (copiar/colar):
 - **Arquivos**: `C:\conveniente\docs\RUNBOOK_TECNICO.md`
 - **Reinícios**: nenhum (doc).
 - **THREAD**: `TH-2026-01-29-prod-logging-baseline`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][P2] CT: `health_bundle` + `rotate_logs` (coleta rápida + rotação de `logger.log`)
+
+- **O que**:
+  - adicionado comando `health_bundle` (1 requestId → resumo de status + manifest do allowlist; tails opt-in).
+  - adicionado comando `rotate_logs` (rotaciona `logger.log` para `dados/logs/` e mantém N arquivos).
+- **Por quê**: acelerar investigação (menos “ida e volta”) e evitar crescimento infinito do `dados/logger.log`.
+- **Arquivos**:
+  - `C:\conveniente\scripts\dashboard.js`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+- **Reinícios**: `conveniente` (para o host aceitar os novos tipos de comando).
+- **Rollback**: `git revert <commit>` (remove comandos; não afeta Robe/Virtus).
+- **THREAD**: `TH-2026-01-29-health-bundle-rotate-logs`

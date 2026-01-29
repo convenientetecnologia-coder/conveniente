@@ -242,6 +242,30 @@ Próximo passo:
 - **Preferir**: `fetch_logs` por keys (allowlist no servidor).
 - **Quando precisar de filtro**: `fetch_logs_query` com `patterns` (substring).
 
+#### 3.1) Health bundle (P2) — coleta rápida “1 comando” (status + manifest)
+
+Objetivo: acelerar investigações sem “adivinhar” paths e sem precisar pedir várias coletas.
+
+- **Comando CT**: `health_bundle`
+  - **Payload**:
+    - `requestId` (obrigatório)
+    - `includeTail` (opcional, default `false`) — **cuidado**: tail pode conter dados sensíveis
+    - `tailLines` (opcional, default `400` quando `includeTail=true`)
+  - **Resultado**: escreve no CT em `sitechatbot/dados/logs/<hostId>/<requestId>.json` via `/api/logs/ingest` com:
+    - `health_summary` (JSON com contagens e amostras de perfis busy)
+    - `health_manifest` (JSON com bytes/mtimeMs das keys allowlisted)
+    - opcionalmente `tail_logger`/`tail_issues_fallback`
+
+#### 3.2) Rotação de logs (P2) — evitar crescimento infinito do `logger.log`
+
+- **Comando CT**: `rotate_logs`
+  - **Payload**:
+    - `keys` (opcional, default `["logger"]`) — keys do allowlist do servidor
+    - `keep` (opcional, default `30`) — quantos arquivos antigos manter
+  - **Efeito**:
+    - rotaciona para `C:\conveniente\dados\logs\<key>.<YYYYMMDD-HHMMSS>.log`
+    - recria o arquivo original vazio (para continuar append)
+
 #### 4) Lock de provisão preso (maintenance_provision)
 
 - **Verificar**:

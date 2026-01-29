@@ -1235,6 +1235,75 @@ function tailFileGrep(filePath, { patterns = [], maxBytes = 10_000_000, maxMatch
     return { ok:false, error: (e && e.message) || String(e), filePath };
   }
 }
+
+function safeMkdirp(dir) {
+  try { if (!dir) return; fsSync.mkdirSync(dir, { recursive: true }); } catch {}
+}
+function rotateFileBestEffort(filePath, { destDir, baseName, maxRetries = 8 } = {}) {
+  try {
+    if (!filePath) return { ok:false, error:'missing_filePath' };
+    if (!fsSync.existsSync(filePath)) return { ok:false, error:'not_found', filePath };
+    const st = fsSync.statSync(filePath);
+    const size = Number(st.size || 0) || 0;
+    if (size <= 0) return { ok:false, error:'empty', filePath, bytes: 0 };
+
+    const dir = destDir || path.join(__dirname, '..', 'dados', 'logs');
+    safeMkdirp(dir);
+    const ts = new Date();
+    const stamp =
+      String(ts.getFullYear()) +
+      String(ts.getMonth() + 1).padStart(2, '0') +
+      String(ts.getDate()).padStart(2, '0') + '-' +
+      String(ts.getHours()).padStart(2, '0') +
+      String(ts.getMinutes()).padStart(2, '0') +
+      String(ts.getSeconds()).padStart(2, '0');
+    const bn = String(baseName || path.basename(filePath) || 'log').replace(/[^\w.\-]+/g, '_');
+    const destPath = path.join(dir, `${bn}.${stamp}.log`);
+
+    let lastErr = null;
+    for (let i = 0; i < Math.max(1, Number(maxRetries || 0) || 0); i++) {
+      try {
+        fsSync.renameSync(filePath, destPath);
+        // Recria o arquivo vazio para o próximo append (sem depender de abrir/fechar).
+        try { fsSync.writeFileSync(filePath, '', { encoding: 'utf8' }); } catch {}
+        return { ok:true, filePath, destPath, bytes: size };
+      } catch (e) {
+        lastErr = e;
+        // Windows: rename pode falhar se alguém estiver escrevendo exatamente no momento; retry curto.
+        try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80 + (i * 40)); } catch {}
+      }
+    }
+    return { ok:false, error: (lastErr && lastErr.message) ? String(lastErr.message) : 'rename_failed', filePath, destPath, bytes: size };
+  } catch (e) {
+    return { ok:false, error: (e && e.message) || String(e), filePath };
+  }
+}
+function pruneOldLogs(dir, { prefix = '', keep = 20 } = {}) {
+  try {
+    const k = Math.max(1, Math.min(200, Number(keep || 0) || 0));
+    if (!fsSync.existsSync(dir)) return { ok:true, deleted: 0 };
+    const items = fsSync.readdirSync(dir).map(name => ({ name, full: path.join(dir, name) }));
+    const filtered = items.filter(x => {
+      if (!x || !x.name) return false;
+      if (prefix && !String(x.name).startsWith(prefix)) return false;
+      return String(x.name).toLowerCase().endsWith('.log');
+    });
+    const withStat = filtered.map(x => {
+      try {
+        const st = fsSync.statSync(x.full);
+        return { ...x, mtimeMs: Number(st.mtimeMs || 0) || 0 };
+      } catch { return { ...x, mtimeMs: 0 }; }
+    }).sort((a, b) => (b.mtimeMs - a.mtimeMs));
+    const toDelete = withStat.slice(k);
+    let deleted = 0;
+    for (const f of toDelete) {
+      try { fsSync.rmSync(f.full, { force: true }); deleted++; } catch {}
+    }
+    return { ok:true, deleted };
+  } catch (e) {
+    return { ok:false, error: (e && e.message) || String(e) };
+  }
+}
 async function postLogsToNotifier({ requestId, items }) {
   const base = notifierBaseFromEndpoints();
   if (!base) throw new Error('notifier_base_unavailable');
@@ -1321,6 +1390,90 @@ async function execLogsManifest(cmd) {
     }
   }
   await postLogsToNotifier({ requestId, items });
+}
+
+async function execHealthBundle(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const requestId = String(payload.requestId || '').trim();
+  const includeTail = (payload.includeTail === true || payload.includeTail === 1 || payload.includeTail === '1' || String(payload.includeTail || '').toLowerCase() === 'true');
+  const tailLines = Math.max(50, Math.min(2500, Number(payload.tailLines || 400) || 400));
+  if (!requestId) throw new Error('missing_requestId');
+
+  const allow = logsAllowlist();
+  const status = await readAggregatedStatus().catch(() => ({}));
+  const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
+  const active = perfis.filter(p => p && p.nome && p.active === true);
+  const busy = active.filter(p => (p.sendLockActive === true) || (p.robeEmExecucao === true));
+  const summary = {
+    ts: Date.now(),
+    hostId: hostIdCache || null,
+    hostname: (os && os.hostname) ? os.hostname() : '',
+    activeCount: active.length,
+    busyCount: busy.length,
+    busyNames: busy.map(p => String(p.nome)).slice(0, 40),
+    busyDetails: busy.map(p => ({
+      nome: String(p && p.nome || ''),
+      sendLockActive: p && p.sendLockActive === true,
+      sendLockOwner: (p && p.sendLockOwner) ? String(p.sendLockOwner) : null,
+      sendLockAgeMs: (typeof (p && p.sendLockAgeMs) === 'number') ? p.sendLockAgeMs : null,
+      robeEmExecucao: p && p.robeEmExecucao === true
+    })).slice(0, 40),
+    sys: (status && status.sys) ? status.sys : null,
+    _debug: (status && status._debug) ? status._debug : null
+  };
+
+  // Manifest compacto (1 item) para não estourar o limite de 12 itens do CT.
+  const manifest = [];
+  for (const key of Object.keys(allow)) {
+    const fp = allow[key];
+    try {
+      if (!fp || !fsSync.existsSync(fp)) {
+        manifest.push({ key, ok:false, error:'not_found', filePath: fp || null, bytes: 0, mtimeMs: null });
+      } else {
+        const st = fsSync.statSync(fp);
+        manifest.push({ key, ok:true, filePath: fp, bytes: Number(st.size || 0) || 0, mtimeMs: Number(st.mtimeMs || 0) || null });
+      }
+    } catch (e) {
+      manifest.push({ key, ok:false, error: (e && e.message) || String(e), filePath: fp || null, bytes: 0, mtimeMs: null });
+    }
+  }
+
+  const items = [
+    { key: 'health_summary', ok: true, bytes: 0, lines: 0, truncated: false, text: JSON.stringify(summary, null, 2) },
+    { key: 'health_manifest', ok: true, bytes: 0, lines: 0, truncated: false, text: JSON.stringify(manifest, null, 2) }
+  ];
+
+  // Por segurança, tails são opt-in (pode conter dados sensíveis).
+  if (includeTail) {
+    for (const key of ['logger', 'issues_fallback']) {
+      const fp = allow[key];
+      if (!fp) continue;
+      const r = tailFileLines(fp, tailLines);
+      items.push({ key: `tail_${key}`, ...r });
+    }
+  }
+  await postLogsToNotifier({ requestId, items: items.slice(0, 12) });
+}
+
+async function execRotateLogs(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const keep = Math.max(1, Math.min(200, Number(payload.keep || 30) || 30));
+  const keys = Array.isArray(payload.keys) ? payload.keys.map(x => String(x||'').trim()).filter(Boolean) : ['logger'];
+  const allow = logsAllowlist();
+  const dir = path.join(__dirname, '..', 'dados', 'logs');
+  safeMkdirp(dir);
+
+  const results = [];
+  for (const key of keys.slice(0, 8)) {
+    const fp = allow[key];
+    if (!fp) { results.push({ key, ok:false, error:'not_allowed' }); continue; }
+    const r = rotateFileBestEffort(fp, { destDir: dir, baseName: `${key}` });
+    results.push({ key, ...r });
+    try { pruneOldLogs(dir, { prefix: `${key}.`, keep }); } catch {}
+  }
+  const okCount = results.filter(r => r && r.ok).length;
+  const failCount = results.length - okCount;
+  return { ok: failCount === 0, keep, okCount, failCount, results };
 }
 
 // ===== Update massivo (self_update = git pull) =====
@@ -1593,7 +1746,9 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
+      else if (c.type === 'health_bundle')    { await execHealthBundle(c); }
       else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
+      else if (c.type === 'rotate_logs')      { ackDetails = await execRotateLogs(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
