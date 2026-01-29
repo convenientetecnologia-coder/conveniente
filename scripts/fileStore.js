@@ -6,6 +6,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const utils = require('./utils.js'); // slugify, etc.
 
 //// Constantes de caminhos globais ////
@@ -103,17 +104,51 @@ function pickUaPreset() {
   } catch { return null; }
 }
 
+// === lock helpers (owner-safe) ===
+const _sleepBuf = new SharedArrayBuffer(4);
+const _sleepI32 = new Int32Array(_sleepBuf);
+function sleepMsSync(ms) {
+  // Preferir não gastar CPU. Ainda é blocking (sync), mas evita busy-wait.
+  try { Atomics.wait(_sleepI32, 0, 0, ms); }
+  catch {
+    const start = Date.now();
+    while ((Date.now() - start) < ms) { /* fallback */ }
+  }
+}
+function writeLockMetaBestEffort(fd, lockPath) {
+  try {
+    const meta = { pid: process.pid, ts: Date.now(), token: crypto.randomUUID() };
+    fs.writeFileSync(fd, JSON.stringify(meta), 'utf8');
+    try { fs.fsyncSync(fd); } catch {}
+  } catch {}
+  try { fs.fsyncSync(fd); } catch {}
+}
+function tryRecoverStaleLockBestEffort(lockPath, staleMs) {
+  if (!staleMs || staleMs <= 0) return false;
+  try {
+    const st = fs.statSync(lockPath);
+    const ageMs = Date.now() - Number(st.mtimeMs || 0);
+    if (ageMs > staleMs) {
+      try { fs.unlinkSync(lockPath); return true; } catch {}
+    }
+  } catch {}
+  return false;
+}
+
 // === FILE LOCK HELPERS FOR desired.json ===
 const desiredLockPath = desiredPath + '.lock';
-function acquireDesiredLockFile({ retries = 120, delayMs = 20 } = {}) {
+function acquireDesiredLockFile({ retries = 120, delayMs = 20, staleMs = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
     let tries = 0;
     (function attempt(){
       tries++;
       try {
         const fd = fs.openSync(desiredLockPath, 'wx');
+        writeLockMetaBestEffort(fd, desiredLockPath);
         return resolve(fd);
       } catch {
+        // Best-effort: se o lock ficou “morto” (crash), tenta recuperar.
+        tryRecoverStaleLockBestEffort(desiredLockPath, staleMs);
         if (tries >= retries) return reject(new Error('desired_lock_timeout'));
         setTimeout(attempt, delayMs);
       }
@@ -121,8 +156,12 @@ function acquireDesiredLockFile({ retries = 120, delayMs = 20 } = {}) {
   });
 }
 function releaseDesiredLockFile(fd) {
-  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
-  try { fs.unlinkSync(desiredLockPath); } catch {}
+  const acquired = (typeof fd === 'number');
+  try { if (acquired) fs.closeSync(fd); } catch {}
+  // CRÍTICO (P0): só remover lock se este processo adquiriu.
+  if (acquired) {
+    try { fs.unlinkSync(desiredLockPath); } catch {}
+  }
 }
 async function withDesiredFileLockUpdate(mutator) {
   let fd = null;
@@ -139,15 +178,17 @@ async function withDesiredFileLockUpdate(mutator) {
 
 // === FILE LOCK HELPERS FOR perfis.json (cluster-safe) ===
 const perfisLockPath = perfisPath + '.lock';
-function acquirePerfisLockFile({ retries = 240, delayMs = 25 } = {}) {
+function acquirePerfisLockFile({ retries = 240, delayMs = 25, staleMs = 120_000 } = {}) {
   return new Promise((resolve, reject) => {
     let tries = 0;
     (function attempt(){
       tries++;
       try {
         const fd = fs.openSync(perfisLockPath, 'wx');
+        writeLockMetaBestEffort(fd, perfisLockPath);
         return resolve(fd);
       } catch {
+        tryRecoverStaleLockBestEffort(perfisLockPath, staleMs);
         if (tries >= retries) return reject(new Error('perfis_lock_timeout'));
         setTimeout(attempt, delayMs);
       }
@@ -155,8 +196,12 @@ function acquirePerfisLockFile({ retries = 240, delayMs = 25 } = {}) {
   });
 }
 function releasePerfisLockFile(fd) {
-  try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
-  try { fs.unlinkSync(perfisLockPath); } catch {}
+  const acquired = (typeof fd === 'number');
+  try { if (acquired) fs.closeSync(fd); } catch {}
+  // CRÍTICO (P0): só remover lock se este processo adquiriu.
+  if (acquired) {
+    try { fs.unlinkSync(perfisLockPath); } catch {}
+  }
 }
 
 /**
@@ -174,16 +219,17 @@ function withPerfisFileLockUpdate(mutator, meta = null) {
     // lock com backoff (sync)
     const retries = 240;
     const delayMs = 25;
+    const staleMs = 120_000;
     let ok = false;
     for (let i = 0; i < retries; i++) {
       try {
         fd = fs.openSync(perfisLockPath, 'wx');
+        writeLockMetaBestEffort(fd, perfisLockPath);
         ok = true;
         break;
       } catch {
-        // sleep sync
-        const start = Date.now();
-        while ((Date.now() - start) < delayMs) { /* busy wait curta */ }
+        tryRecoverStaleLockBestEffort(perfisLockPath, staleMs);
+        sleepMsSync(delayMs);
       }
     }
     if (!ok) return { ok: false, error: 'perfis_lock_timeout' };
@@ -200,8 +246,7 @@ function withPerfisFileLockUpdate(mutator, meta = null) {
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
   } finally {
-    try { if (typeof fd === 'number') fs.closeSync(fd); } catch {}
-    try { fs.unlinkSync(perfisLockPath); } catch {}
+    releasePerfisLockFile(fd);
   }
 }
 
