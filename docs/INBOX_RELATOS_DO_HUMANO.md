@@ -12,6 +12,32 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 
 ---
 
+## Regras não negociáveis (resumo)
+
+- **Sou humano**: eu só reinicio processos no servidor com `node index.js` e confirmo “reiniciado”. Eu não coleto logs manualmente, não rodo comandos, não copio/colo evidência.
+- **Você é o operador técnico**: você edita código, cria comandos, coleta logs via CT, registra docs, faz commit/push.
+- **Sempre diga no início**:
+  - **Precisa reiniciar?** sim/não
+  - **Qual projeto?** conveniente / sitechatbot / notificador
+  - **Como reiniciar (humano)?** `node index.js`
+  - **Por quê?** (1 frase)
+- **Sem achismo**: qualquer decisão importante tem que citar evidência (arquivo/path, log key, cmdId/requestId, endpoint).
+- **Sem segredos**: nunca colar valores de secrets em chat/docs (apenas nomes/onde configurar).
+- **Windows/PowerShell**: não usar `&&` nem heredoc `<<EOF` (usar `;` e `git commit -m ... -m ...`).
+- **Melhoria contínua**: se você errou e depois acertou, você atualiza RUNBOOK/LIVRO/TIMELINE e sobe commit pro GitHub.
+- **Padrão conveniente**: se mexeu no conveniente, você já faz commit/push + dispara `self_update` e só pede o restart.
+
+### Arquivos canônicos (use sempre)
+
+- `C:\conveniente\docs\LIVRO_DE_BORDO.md`
+- `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+- `C:\conveniente\docs\TIMELINE.md`
+- `C:\conveniente\docs\checkups\README.md`
+- `C:\conveniente\docs\checkups\TEMPLATE_CHECKUP.md`
+- `C:\conveniente\docs\checkup_geral_2026-01-29.md`
+
+---
+
 ### Como usar (passo a passo)
 
 1) **Colar o texto bruto** do humano em “RAW_INPUT”.

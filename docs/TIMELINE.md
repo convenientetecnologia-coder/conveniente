@@ -125,6 +125,15 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CROSS][DOCS][OPS] INBOX: bloco de “regras não negociáveis” (humano/GPT)
+
+- **O que**: adicionado bloco de regras não negociáveis e lista de arquivos canônicos dentro do `INBOX_RELATOS_DO_HUMANO.md` para guiar triage em chats com relato confuso.
+- **Evidência**: `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS] Checkup 3 (loops/timeouts/polling)
 
 - **O que**:
