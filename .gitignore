@@ -38,3 +38,8 @@ _backup_local_before_reset_*/
 dados/**/*.tmp
 dados/**/*.lock
 
+
+_manual_backup_before_rollback/
+
+# Auditorias/artefatos operacionais locais (não versionar)
+dados/_ops_audit/

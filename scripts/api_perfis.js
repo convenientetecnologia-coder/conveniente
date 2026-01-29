@@ -930,9 +930,13 @@ module.exports = (app, workerClient, fileStore) => {
         logger.warn('Tentativa de delete perfil sem nome', { nome });
         return res.json({ ok: false, error: 'nome ausente' });
       }
-      try { assertPerfilExists(fileStore, nome); } catch(e) {
-        logger.warn('Tentativa de delete perfil inexistente', { nome, error: e && e.message });
-        return res.json({ ok:false, error:e.message });
+      // Enterprise: DELETE precisa ser IDEMPOTENTE.
+      // Se o perfil não existir localmente, isso já é "sucesso" — evita re-tries infinitos do CT (delete_perfis).
+      // Mesmo assim, escrevemos tombstone para impedir ressuscitar via recovery/rebuild de userDataDir.
+      try { assertPerfilExists(fileStore, nome); } catch (e) {
+        logger.warn('Tentativa de delete perfil inexistente (idempotente)', { nome, error: e && e.message });
+        try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'delete_missing_idempotent', by: String(op || '').slice(0, 120), stage: 'already_missing' }); } catch {}
+        return res.json({ ok: true, alreadyDeleted: true, nome });
       }
       // Tombstone cedo (anti-ressurreição no boot/recovery)
       try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'manual_delete', by: String(op||'').slice(0, 120), stage: 'begin' }); } catch {}

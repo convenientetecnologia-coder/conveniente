@@ -66,7 +66,23 @@ function loadPerfisJson() {
   return readJsonSafe(perfisPath, []);
 }
 function savePerfisJson(arr) {
-  writeJsonAtomic(perfisPath, arr || []);
+  // Guardrail militar: nunca permitir gravar [] por acidente (wipe total).
+  // Para permitir explicitamente (caso extremo), setar PERFIS_ALLOW_EMPTY=1.
+  const next = Array.isArray(arr) ? arr : (arr ? [arr] : []);
+  if (next.length === 0 && String(process.env.PERFIS_ALLOW_EMPTY || '').trim() !== '1') {
+    try {
+      // mantém o arquivo atual e só loga (evita "sumiu tudo" pós-deploy/crash)
+      console.error('[GUARD][perfis.json] tentativa de gravar array vazio BLOQUEADA (PERFIS_ALLOW_EMPTY!=1)');
+    } catch {}
+    return false;
+  }
+  try {
+    // Backup rápido best-effort antes de sobrescrever (para recuperação manual).
+    if (fs.existsSync(perfisPath)) {
+      try { fs.copyFileSync(perfisPath, perfisPath + '.bak_last'); } catch {}
+    }
+  } catch {}
+  return writeJsonAtomic(perfisPath, next);
 }
 
 //// UA PRESET: balanceado sempre que criar ////
