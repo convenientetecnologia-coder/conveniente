@@ -74,7 +74,7 @@ Contexto: nas últimas semanas houve mudanças rápidas/desorganizadas e o siste
 **Onde**:
 
 - `conveniente/scripts/dashboard.js`
-  - `ensureFreeMB(minMB)` faz `while(true)` esperando RAM/CPU atingirem o alvo (sem deadline).
+  - `ensureFreeMB(minMB)` fazia `while(true)` esperando RAM/CPU atingirem o alvo (sem deadline) — **corrigido**: agora tem `timeoutMs` + logs de progresso + erro explícito no timeout.
   - Observação: no código atual, **não foi encontrado call-site** para `ensureFreeMB` (parece helper legado), mas o padrão é perigoso e pode voltar a ser usado por engano.
 - `conveniente/scripts/browser.js`
   - existem `while(true)` em rotinas de UI que dependem de “achar e clicar”; devem sempre ter timeout/guardrail interno.

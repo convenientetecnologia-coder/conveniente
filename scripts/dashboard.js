@@ -311,15 +311,42 @@ async function httpJson(path, { method='GET', body=null, headers=null, rawBody=n
   });
   return res.json();
 }
-async function ensureFreeMB(minMB = 3072) {
+async function ensureFreeMB(minMB = 3072, {
+  timeoutMs = 120_000,
+  pollMs = 1200,
+  maxCpuPercent = 90,
+  logEveryMs = 15_000
+} = {}) {
+  // P1 guardrail: nunca esperar infinito.
+  const t0 = Date.now();
+  let lastLogAt = 0;
   while (true) {
+    let free = 0;
+    let cpu = 0;
     try {
       const m = await httpJson('/api/sys');
-      const free = (m && m.mem && m.mem.freeMB) || 0;
-      const cpu  = (m && m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0;
-      if (free >= minMB && (cpu === 0 || cpu <= 90)) return;
+      free = (m && m.mem && m.mem.freeMB) || 0;
+      cpu  = (m && m.cpu && typeof m.cpu.percent === 'number') ? m.cpu.percent : 0;
+      if (free >= minMB && (cpu === 0 || cpu <= maxCpuPercent)) return;
     } catch {}
-    await sleep(1200);
+
+    const elapsed = Date.now() - t0;
+    if (timeoutMs > 0 && elapsed >= timeoutMs) {
+      throw new Error(`ensureFreeMB_timeout:min=${minMB}:free=${free}:cpu=${cpu}:waitedMs=${elapsed}`);
+    }
+    if ((Date.now() - lastLogAt) >= logEveryMs) {
+      lastLogAt = Date.now();
+      try {
+        logger.warn('[DASH][ensureFreeMB] aguardando RAM/CPU', {
+          minMB,
+          freeMB: free,
+          cpuPercent: cpu,
+          waitedMs: elapsed,
+          timeoutMs
+        });
+      } catch {}
+    }
+    await sleep(Math.max(250, Number(pollMs || 0) || 1200));
   }
 }
 async function execCloseAll() {

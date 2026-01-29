@@ -69,6 +69,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX] P1: deadline/logs no `ensureFreeMB` (sem espera infinita)
+
+- **O que**: `ensureFreeMB()` no `conveniente/scripts/dashboard.js` deixou de esperar infinito; agora tem `timeoutMs`, logs de progresso e erro explícito no timeout.
+- **Por quê**: regra canônica P1: nenhuma espera pode ser infinita.
+- **Evidência**: `C:\conveniente\scripts\dashboard.js` (função `ensureFreeMB`).
+- **Precisa reiniciar agora?** não (mudança preventiva; só “vale” no runtime após restart).
+- **Precisa reiniciar para validar/testar?** sim, se você quiser testar `ensureFreeMB` em runtime.
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert` do commit e (se precisar validar rollback) reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS] Checkup 3 (loops/timeouts/polling)
 
 - **O que**:
