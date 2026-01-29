@@ -149,6 +149,22 @@ Validação:
 
 ---
 
+### Intake de “texto bomba” do humano (CANÔNICO)
+
+Quando o humano mandar uma mensagem grande/bagunçada com vários sintomas misturados, o GPT deve:
+
+- colar o texto bruto em `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (RAW_INPUT)
+- quebrar em itens separados na tabela TRIAGE (P0/P1/P2)
+- coletar evidência via CT (logs_manifest/fetch_logs/ACK), sem pedir para o humano “investigar”
+- dizer de forma direta:
+  - precisa reiniciar agora? sim/não
+  - precisa reiniciar para validar? sim/não
+  - qual projeto e como (`node index.js`)
+
+Motivo: isso impede o GPT de “misturar problemas” e evita que um texto confuso vire mudança errada.
+
+---
+
 ### Windows/PowerShell — pegadinhas operacionais (para GPT não perder tempo)
 
 Este workspace roda no Windows com PowerShell. Algumas coisas “padrão Linux” **falham** aqui:

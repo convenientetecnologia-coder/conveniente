@@ -45,6 +45,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Visão geral (o que é cada projeto) — **este arquivo**
   - Runbook (operar/restart/diagnóstico) — `docs/RUNBOOK_TECNICO.md`
   - Timeline (mudanças) — `docs/TIMELINE.md`
+  - **Inbox de relatos do humano (intake/triage)** — `docs/INBOX_RELATOS_DO_HUMANO.md`
   - Checkups (relatórios) — `docs/checkups/`
 
 ---

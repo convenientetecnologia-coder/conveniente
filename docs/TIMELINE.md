@@ -113,6 +113,18 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CROSS][DOCS][OPS] Inbox canônica para “texto bomba” do humano (triage P0/P1/P2)
+
+- **O que**: criado canal canônico para intake/triage de relatos desorganizados do humano (colagem do texto bruto + decomposição em itens + P0/P1/P2 + evidência).
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md` (seção “Intake de texto bomba do humano”)
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md` (link no índice)
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS] Checkup 3 (loops/timeouts/polling)
 
 - **O que**:
