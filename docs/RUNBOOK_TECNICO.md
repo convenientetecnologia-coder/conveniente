@@ -163,6 +163,11 @@ Quando o humano mandar uma mensagem grande/bagunçada com vários sintomas mistu
 - **olhar o histórico antes de reinventar a roda**:
   - checar `C:\conveniente\docs\TIMELINE.md` por entradas relacionadas (e por regressões)
   - checar `C:\conveniente\docs\checkups\file_timeline\INDEX_*.md` + hotspots para achar os arquivos certos rapidamente
+- **perguntas obrigatórias (alinhamento)**, item-a-item:
+  - “como deveria ser?” (comportamento esperado)
+  - “qual é o critério de sucesso?” (validação objetiva)
+  - “qual é a prioridade (P0/P1/P2) na visão do humano?”
+  - “precisa reiniciar agora ou pode ser depois?” (pra não travar o trabalho)
 - dizer de forma direta:
   - precisa reiniciar agora? sim/não
   - precisa reiniciar para validar? sim/não

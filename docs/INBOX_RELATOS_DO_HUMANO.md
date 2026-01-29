@@ -57,6 +57,11 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
    - `C:\conveniente\docs\TIMELINE.md` (entradas relacionadas)
    - `C:\conveniente\docs\checkups\file_timeline\INDEX_*.md` (qual arquivo é hotspot)
    - se o sintoma parece regressão: procurar commits recentes nos arquivos-alvo (o GPT faz isso)
+6) **Obrigatório**: antes de corrigir, fazer **perguntas item-a-item** (alinhamento humano):
+   - “como deveria ser?” (comportamento esperado)
+   - “qual é o critério de sucesso?” (como validar)
+   - “isso é P0/P1/P2 pra você?” (impacto)
+   - “precisa disso hoje (agora) ou pode ser depois?” (prioridade)
 
 ---
 
@@ -94,6 +99,8 @@ Colunas:
 - **P**: P?
 - **Sistema**: conveniente / sitechatbot / notificador
 - **Sintoma (humano)**:
+- **Como deveria ser (humano)**:
+- **Critério de sucesso (humano)**: (ex.: “clicou → em X segundos tudo fechado e nada reabre por Y segundos”)
 - **Reprodução (se existir)**: (passos simples)
 - **Hipóteses (GPT)**:
   - H1:

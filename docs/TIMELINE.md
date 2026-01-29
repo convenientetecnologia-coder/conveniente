@@ -178,6 +178,26 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CROSS][DOCS][OPS] INBOX: perguntas obrigatórias (como deveria ser / sucesso)
+
+- **O que**: triagem inbox agora exige perguntas item-a-item (“como deveria ser”, “critério de sucesso”, prioridade) antes de qualquer correção.
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
+#### 2026-01-29 — [CROSS][DOCS][OPS] Host registry (apelidos ↔ hostId)
+
+- **O que**: criado registro canônico para mapear apelidos humanos (“robe mae 2”) para `hostId` e facilitar coleta de logs via CT.
+- **Evidência**: `C:\conveniente\docs\HOST_REGISTRY.md`
+- **Reinícios**: nenhum (somente documentação).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+
+---
+
 #### 2026-01-29 — [CROSS][DOCS][OPS] INBOX: bloco de “regras não negociáveis” (humano/GPT)
 
 - **O que**: adicionado bloco de regras não negociáveis e lista de arquivos canônicos dentro do `INBOX_RELATOS_DO_HUMANO.md` para guiar triage em chats com relato confuso.

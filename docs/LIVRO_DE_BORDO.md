@@ -46,6 +46,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Runbook (operar/restart/diagnóstico) — `docs/RUNBOOK_TECNICO.md`
   - Timeline (mudanças) — `docs/TIMELINE.md`
   - **Inbox de relatos do humano (intake/triage)** — `docs/INBOX_RELATOS_DO_HUMANO.md`
+  - **Host registry (apelidos ↔ hostId)** — `docs/HOST_REGISTRY.md`
   - Checkups (relatórios) — `docs/checkups/`
 
 ---
