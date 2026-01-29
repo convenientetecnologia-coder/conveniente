@@ -299,17 +299,53 @@ async function tryAllEndpoints(payload) {
 
 // === Helpers/execução de comandos remotos (inserido acima de tick()) ===
 async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-async function httpJson(path, { method='GET', body=null, headers=null, rawBody=null } = {}) {
+async function httpJson(path, { method='GET', body=null, headers=null, rawBody=null, timeoutMs=0, retries=0 } = {}) {
   const hasBody = !(rawBody == null) || !(body == null);
   const h = Object.assign({}, (headers && typeof headers === 'object') ? headers : {});
-  const sendBody = (rawBody != null) ? rawBody : (body != null ? JSON.stringify(body) : null);
+  let sendBody = null;
+  if (rawBody != null) {
+    sendBody = rawBody;
+  } else if (body != null) {
+    try { sendBody = JSON.stringify(body); }
+    catch (e) { throw new Error('httpJson_body_stringify_failed:' + ((e && e.message) || String(e))); }
+  }
   if (hasBody && !h['Content-Type'] && !h['content-type']) h['Content-Type'] = 'application/json';
-  const res = await fetch(`http://127.0.0.1:${httpPort}${path}`, {
-    method,
-    headers: Object.keys(h).length ? h : undefined,
-    body: sendBody
-  });
-  return res.json();
+
+  // P1 hardening: nunca deixar fetch “pendurado” (gera ACK `fetch failed` opaco no CT).
+  const tms = Math.max(1000, Number(timeoutMs || process.env.DASHBOARD_LOCAL_HTTP_TIMEOUT_MS || 8000) || 8000);
+  const maxAttempts = Math.max(1, (Number(retries || 0) || 0) + 1);
+  const urls = [
+    `http://127.0.0.1:${httpPort}${path}`,
+    `http://localhost:${httpPort}${path}`
+  ];
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (const url of urls) {
+      try {
+        const res = await timeoutFetch(url, {
+          timeoutMs: tms,
+          method,
+          headers: Object.keys(h).length ? h : undefined,
+          body: sendBody
+        });
+        const txt = await res.text().catch(() => '');
+        if (!res || !res.ok) {
+          const status = res ? Number(res.status || 0) : 0;
+          throw new Error(`http_${status || 'no_status'}:${String(txt || '').slice(0, 200)}`);
+        }
+        if (!txt) return {};
+        try { return JSON.parse(txt); }
+        catch (e) {
+          throw new Error(`json_parse_failed:${((e && e.message) || String(e))}:${String(txt).slice(0, 160)}`);
+        }
+      } catch (e) {
+        lastErr = new Error(`local_http_failed:${String(method || 'GET').toUpperCase()}:${url}:timeoutMs=${tms}:err=${(e && e.message) || String(e)}`);
+      }
+    }
+    if (attempt < maxAttempts) await sleep(250 * attempt);
+  }
+  throw lastErr || new Error(`local_http_failed:${String(method || 'GET').toUpperCase()}:${path}`);
 }
 async function ensureFreeMB(minMB = 3072, {
   timeoutMs = 120_000,
@@ -349,10 +385,18 @@ async function ensureFreeMB(minMB = 3072, {
     await sleep(Math.max(250, Number(pollMs || 0) || 1200));
   }
 }
-async function execCloseAll() {
+async function execCloseAll(cmd) {
   // NÃO engolir erro: se o servidor estiver desatualizado (sem endpoint canônico),
   // o ACK precisa refletir falha para o notificador mostrar claramente.
-  const r = await httpJson('/api/perfis/close-all', { method: 'POST' });
+  const cmdId = (cmd && cmd.id) ? String(cmd.id).trim() : '';
+  const operator = `dashboard_cmd_close_all:${cmdId || Date.now()}`;
+  const closeTimeoutMs = Math.max(60_000, Number(process.env.CLOSE_ALL_HTTP_TIMEOUT_MS || (15 * 60 * 1000)) || (15 * 60 * 1000));
+  const r = await httpJson('/api/perfis/close-all', {
+    method: 'POST',
+    headers: { 'x-operator': operator },
+    timeoutMs: closeTimeoutMs,
+    retries: 1
+  });
   if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'close_all_failed');
 }
 // ===== INÍCIO ALTERAÇÃO =====

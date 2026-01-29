@@ -46,6 +46,23 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX][OPS] P1: `close_all` com timeout/retry e erro explícito (sem “fetch failed” opaco)
+
+- **O que**:
+  - endurecido `httpJson()` no `dashboard.js` com timeout (AbortController) + retry leve + mensagem com URL/timeout.
+  - `close_all` via comando agora usa timeout maior (até 15min) e seta `x-operator` com `cmdId` para rastreio.
+- **Por quê**: logs do CT mostraram `close_all` falhando com `ackError: fetch failed` (erro opaco, sem contexto).
+- **Evidência**:
+  - CT: `C:\sitechatbot\dados\logs\bcf01e8d-82da-4d5d-aed0-d60305d4696d\ack_f941b889-b8d2-4823-a64e-4c507bc9df37.json`
+  - código: `C:\conveniente\scripts\dashboard.js` (`httpJson`, `execCloseAll`)
+- **Precisa reiniciar agora?** não (dá para continuar atualizando).
+- **Precisa reiniciar para validar/testar?** sim (para o host aplicar a mudança).
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert <commit>` e reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CONV][DOCS] Achado P0 (ainda não corrigido): lock não owner-safe
 
 - **O que**: identificado P0 de concorrência em lock de arquivo no `conveniente`.
