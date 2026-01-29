@@ -445,3 +445,17 @@ Formato canônico (copiar/colar):
     - `updates.jsonl` contém `requestId:"verify_self_update_1769726589134"` (via `updates_1769726606544.json`).
 - **Ação**: runbook/livro atualizados para exigir **evidência mínima** do `self_update` (enqueue/deliver/ack + ack file) e registrar exceção quando humano precisar fazer `git pull`.
 - **THREAD**: `TH-2026-01-29-rm4-manual-gitpull`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][P1] `stock_provision`: alinhar timeout HTTP local com `login_remediate` (evita abort 8s)
+
+- **O que**: `execStockProvision` agora passa `timeoutMs` explícito (maior) nos steps longos (`activate` e principalmente `login_remediate`).
+- **Por quê**: evidência real mostrou `login_remediate` abortando por timeout HTTP local de ~8s, apesar do worker usar `totalTimeoutMs=8min`, gerando falhas em massa do provision.
+- **Evidência (CT)**:
+  - RM2: `busy_timeout` (host ocupado) em `ack_20580076-ce15-4ff6-a54f-580afd80aeed.json` (step `quiesce_busy_done` com `busyCount=23`).
+  - RM4: `login_remediate_fail` repetido com `timeoutMs=8000` em `ack_b69aa71e-714f-43eb-a48c-421dc4ca60df.json`.
+- **Arquivos**: `C:\conveniente\scripts\dashboard.js`
+- **Reinícios**: `conveniente` (para o runtime novo aplicar os timeouts).
+- **Rollback**: `git revert <commit>` (retorna para timeout padrão).
+- **THREAD**: `TH-2026-01-29-stock-provision-local-timeout`

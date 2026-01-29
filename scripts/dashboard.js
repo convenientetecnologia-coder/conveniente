@@ -958,6 +958,7 @@ async function execStockProvision(cmd) {
           const r = await httpJson('/api/perfis', {
             method: 'POST',
             headers: { 'x-operator': lockOwner },
+            timeoutMs: Math.max(15_000, Math.min(90_000, budgetLeftMs() + 10_000)),
             // Ultra enterprise: persiste login/senha no manifest já na criação, para permitir fluxo
             // automático "cookies -> login+senha" sem depender de clique em "retomar trabalho".
             body: { cidade: city, cookies, login, password, stockAccountId }
@@ -975,7 +976,12 @@ async function execStockProvision(cmd) {
         // 2) set label (interno)
         if (label) {
           await runStep('set_label', async () => {
-            const r2 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/label`, { method: 'PATCH', headers: { 'x-operator': lockOwner }, body: { novoLabel: label } });
+            const r2 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/label`, {
+              method: 'PATCH',
+              headers: { 'x-operator': lockOwner },
+              timeoutMs: Math.max(10_000, Math.min(60_000, budgetLeftMs() + 10_000)),
+              body: { novoLabel: label }
+            });
             if (!r2 || r2.ok === false) throw new Error((r2 && r2.error) ? String(r2.error) : 'set_label_failed');
             return r2;
           });
@@ -983,7 +989,11 @@ async function execStockProvision(cmd) {
 
         // 3) set robe mode (categoria)
         await runStep('set_robe_mode', async () => {
-          const r3 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/robe-mode`, { method: 'POST', body: { mode: robeMode } });
+          const r3 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/robe-mode`, {
+            method: 'POST',
+            timeoutMs: Math.max(10_000, Math.min(60_000, budgetLeftMs() + 10_000)),
+            body: { mode: robeMode }
+          });
           if (!r3 || r3.ok === false) throw new Error((r3 && r3.error) ? String(r3.error) : 'set_robe_mode_failed');
           return r3;
         });
@@ -1002,7 +1012,12 @@ async function execStockProvision(cmd) {
 
         // 4) activate
         await runStep('activate', async () => {
-          const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, { method: 'POST', headers: { 'x-operator': lockOwner }, body: {} });
+          const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
+            method: 'POST',
+            headers: { 'x-operator': lockOwner },
+            timeoutMs: Math.max(20_000, Math.min(3 * 60 * 1000, budgetLeftMs() + 20_000)),
+            body: {}
+          });
           if (!r4 || r4.ok === false) throw new Error((r4 && r4.error) ? String(r4.error) : 'activate_failed');
           return r4;
         });
@@ -1012,9 +1027,14 @@ async function execStockProvision(cmd) {
         // login_remediate = cookies -> login/senha -> detecção -> (sucesso) desired active+virtus on
         // Isso elimina divergência de comportamento e o ciclo "fechou/reabriu" observado.
         await runStep('login_remediate', async () => {
+          // P0/P1 hardening: esse endpoint pode levar minutos (totalTimeoutMs do worker).
+          // O timeout HTTP local default (~8s) é curto demais e gera aborts falsos.
+          const longTimeoutMs = Math.max(60_000, Math.min(12 * 60 * 1000, budgetLeftMs() + 30_000));
           const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
             method: 'POST',
             headers: { 'x-operator': lockOwner },
+            timeoutMs: longTimeoutMs,
+            retries: 0,
             body: {
               // defaults do worker já são bons; só garantimos pós-sucesso: startAfterSuccess=true
               totalTimeoutMs: 8 * 60 * 1000,
