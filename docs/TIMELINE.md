@@ -110,6 +110,24 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX] P1: logs/guardrails em waits de UI (browser/virtus)
+
+- **O que**:
+  - `browser.js`: `waitAny()` agora loga timeout quando `BROWSER_DEBUG=1`.
+  - `browser.js`: loop de `identityAssistStep` ficou explicitamente bounded por budget/minTries (sem `while(true)`).
+  - `virtus.js`: `assertOnChat` loga timeout quando `VIRTUS_DEBUG=1` (só em timeout).
+- **Por quê**: P1 — reduzir “travou e não sei onde” e garantir que waits sejam sempre bounded.
+- **Evidência**:
+  - `C:\conveniente\scripts\browser.js`
+  - `C:\conveniente\scripts\virtus.js`
+- **Precisa reiniciar agora?** não
+- **Precisa reiniciar para validar/testar?** sim, se quiser observar logs em runtime.
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert` do commit e (se precisar validar rollback) reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CONV][FIX] P1: handlers globais de erro (master/worker) + opção de exit
 
 - **O que**: padronizado `uncaughtException`/`unhandledRejection` no master (`index.js`) e no worker (`scripts/worker.js`), com logs consistentes e opção `CONVENIENTE_FATAL_EXIT=1` para sair (evitar “seguir vivo” corrompido).

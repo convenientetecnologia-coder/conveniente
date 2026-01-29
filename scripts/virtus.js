@@ -39,7 +39,16 @@ async function assertOnChat(p, chatId, { timeoutMs = 0 } = {}) {
       catch { return false; }
     }, chatId).catch(() => false);
     if (ok) return true;
-    if (!timeoutMs || (Date.now() - t0) >= timeoutMs) return false;
+    if (!timeoutMs) return false;
+    const elapsed = Date.now() - t0;
+    if (elapsed >= timeoutMs) {
+      try {
+        if (VIRTUS_DETAILED_DEBUG) {
+          logger.warn('[VIRTUS] assertOnChat timeout', { chatId: String(chatId || '').slice(0, 80), timeoutMs, waitedMs: elapsed });
+        }
+      } catch {}
+      return false;
+    }
     await sleep(120);
   }
 }

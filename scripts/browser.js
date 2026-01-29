@@ -1276,6 +1276,14 @@ async function waitAny(page, selectors, { timeout = 15000, visible = true } = {}
     }
     await sleep(200);
   }
+  try {
+    if (process.env.BROWSER_DEBUG === '1') {
+      logger.warn('[BROWSER][waitAny] timeout', {
+        timeoutMs: timeout,
+        selectors: Array.isArray(selectors) ? selectors.slice(0, 8) : []
+      });
+    }
+  } catch {}
   return null;
 }
 
@@ -3649,7 +3657,8 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
   let lastErr = '';
   let firstSeenAt = 0;
   let lastSeen = null;
-  while (true) {
+  // Loop bounded por budget/minTries (P1: sem espera infinita)
+  while (((Date.now() - start) < budget) || (attempt < minTries)) {
     attempt += 1;
     const r = await pickAndClick();
     if (r && r.ok && typeof r.x === 'number' && typeof r.y === 'number') {
