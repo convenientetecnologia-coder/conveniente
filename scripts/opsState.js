@@ -15,7 +15,16 @@ function getOps() {
 function begin(key, meta = {}) {
   const k = String(key || '').trim();
   if (!k) return;
-  OPS.set(k, { running: true, startedAt: now(), updatedAt: now(), endedAt: null, ...meta });
+  OPS.set(k, {
+    running: true,
+    startedAt: now(),
+    updatedAt: now(),
+    endedAt: null,
+    cancelRequested: false,
+    cancelRequestedAt: 0,
+    cancelReason: null,
+    ...meta
+  });
 }
 
 function update(key, patch = {}) {
@@ -39,5 +48,32 @@ function finish(key, patch = {}) {
   }, 120000).unref?.();
 }
 
-module.exports = { getOps, begin, update, finish };
+function requestCancel(key, { reason = '' } = {}) {
+  const k = String(key || '').trim();
+  if (!k) return { ok: false, error: 'missing_key' };
+  const cur = OPS.get(k) || { running: false, startedAt: 0, updatedAt: now(), endedAt: null };
+  const next = {
+    ...cur,
+    cancelRequested: true,
+    cancelRequestedAt: now(),
+    cancelReason: String(reason || '').slice(0, 180) || null
+  };
+  OPS.set(k, next);
+  return { ok: true, key: k, cancelRequestedAt: next.cancelRequestedAt, cancelReason: next.cancelReason };
+}
+
+function isCancelRequested(key) {
+  const k = String(key || '').trim();
+  if (!k) return false;
+  const cur = OPS.get(k);
+  return !!(cur && cur.cancelRequested === true);
+}
+
+function get(key) {
+  const k = String(key || '').trim();
+  if (!k) return null;
+  return OPS.get(k) || null;
+}
+
+module.exports = { getOps, begin, update, finish, requestCancel, isCancelRequested, get };
 

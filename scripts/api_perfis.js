@@ -1166,6 +1166,17 @@ module.exports = (app, workerClient, fileStore) => {
   // ========== ENDPOINT CANÔNICO: fechar todos (robusto) ==========
   // Fecha TODOS os navegadores (active=false) de forma sequencial, com retries leves.
   // Importante: isso é usado tanto pelo painel quanto por comandos remotos (`close_all`).
+  app.post('/api/perfis/close-all/cancel', async (req, res) => {
+    try {
+      const by = String(req.headers && (req.headers['x-operator'] || req.headers['X-Operator']) || 'unknown').slice(0, 180);
+      const rr = opsState.requestCancel('close_all', { reason: `ui_refresh_cancel:${by}` });
+      try { provisionAudit.append({ ts: Date.now(), event: 'close_all_cancel_requested', by, ok: !!(rr && rr.ok), reason: rr && rr.cancelReason ? rr.cancelReason : null }); } catch {}
+      return res.json({ ok: true, result: rr || null });
+    } catch (e) {
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
   app.post('/api/perfis/close-all', async (req, res) => {
     const issues = require('./issues.js');
     const lockOwner = `close_all:${Date.now()}`;
@@ -1182,6 +1193,9 @@ module.exports = (app, workerClient, fileStore) => {
       // Enterprise: durante close_all, bloquear reaberturas automáticas (nurseTick) e qualquer activate concorrente.
       // Reusa o provisionLock (cross-process) para garantir isolamento real.
       try {
+        // Prioridade máxima: se existir lock ativo (ex.: open_all_map/login_remediate),
+        // o close_all deve PREEMPTAR (o usuário quer “fechar agora”).
+        try { provisionLock.release({ force: true }); } catch {}
         const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 12 * 60 * 1000, meta: { op: 'close_all' } });
         if (!lk || !lk.ok) {
           const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
@@ -1217,6 +1231,10 @@ module.exports = (app, workerClient, fileStore) => {
       let okCount = 0;
       let failCount = 0;
       for (const p of perfisArr) {
+        if (opsState.isCancelRequested('close_all')) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'close_all_cancelled_midway', by, lockOwner, done: results.length, ok: okCount, fail: failCount }); } catch {}
+          break;
+        }
         const nome = p && p.nome;
         if (!nome) continue;
         let okDeactivate = false;
@@ -1242,8 +1260,9 @@ module.exports = (app, workerClient, fileStore) => {
       }
 
       try { await issues.append('system', 'mil_action', `bulk_close_all total=${perfisArr.length} ok=${okCount} fail=${failCount}`); } catch {}
-      opsState.finish('close_all', { total: perfisArr.length, done: results.length, ok: okCount, fail: failCount, current: null, success: failCount === 0 });
-      return res.json({ ok: failCount === 0, total: perfisArr.length, okCount, failCount, results });
+      const cancelled = opsState.isCancelRequested('close_all');
+      opsState.finish('close_all', { total: perfisArr.length, done: results.length, ok: okCount, fail: failCount, current: null, success: (!cancelled && failCount === 0), cancelled: !!cancelled });
+      return res.json({ ok: (!cancelled && failCount === 0), cancelled: !!cancelled, total: perfisArr.length, done: results.length, okCount, failCount, results });
     } catch (e) {
       try { opsState.finish('close_all', { success: false, error: (e && e.message) || String(e), current: null }); } catch {}
       return res.json({ ok: false, error: (e && e.message) || String(e) });
