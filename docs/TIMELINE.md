@@ -97,6 +97,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-29 — [CONV][FIX] P1: auto-backup evita snapshots concorrentes (lock)
+
+- **O que**: adicionado lock no worker de backup para impedir snapshots concorrentes quando um snapshot demora mais que o intervalo (e stale recovery).
+- **Por quê**: reduzir IO/carga e evitar “pile-up” de backups.
+- **Evidência**: `C:\conveniente\scripts\autoBackupWorker.js` (lock `_snapshot_running.lock`).
+- **Precisa reiniciar agora?** não
+- **Precisa reiniciar para validar/testar?** sim, se quiser observar o comportamento em runtime.
+- **Qual projeto?** conveniente
+- **Como reiniciar (humano)?** `node index.js`
+- **Rollback**: `git revert` do commit e (se precisar validar rollback) reiniciar `node index.js`.
+
+---
+
 #### 2026-01-29 — [CONV][FIX] P1: handlers globais de erro (master/worker) + opção de exit
 
 - **O que**: padronizado `uncaughtException`/`unhandledRejection` no master (`index.js`) e no worker (`scripts/worker.js`), com logs consistentes e opção `CONVENIENTE_FATAL_EXIT=1` para sair (evitar “seguir vivo” corrompido).

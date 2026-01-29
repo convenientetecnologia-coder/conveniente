@@ -82,75 +82,121 @@ function copyDirFlat(ROOT, curOutDir, relDir, { exts = [".js"], maxFiles = 400 }
   }
 }
 
+function acquireRunLock(baseDir, { staleMs = 15 * 60 * 1000 } = {}) {
+  // Impede snapshots concorrentes (P1).
+  // Se existir e estiver velho, tenta recuperar.
+  const lockPath = path.join(baseDir, "_snapshot_running.lock");
+  ensureDir(baseDir);
+  try {
+    const fd = fs.openSync(lockPath, "wx");
+    try {
+      const meta = { pid: process.pid, ts: Date.now() };
+      try { fs.writeFileSync(fd, JSON.stringify(meta), "utf8"); } catch {}
+      try { fs.fsyncSync(fd); } catch {}
+    } catch {}
+    return { ok: true, lockPath, fd };
+  } catch {
+    // stale recovery best-effort
+    try {
+      const st = safeStat(lockPath);
+      const ageMs = st ? (Date.now() - Number(st.mtimeMs || 0)) : 0;
+      if (st && staleMs > 0 && ageMs > staleMs) {
+        try { fs.unlinkSync(lockPath); } catch {}
+        const fd2 = fs.openSync(lockPath, "wx");
+        try {
+          const meta = { pid: process.pid, ts: Date.now(), recovered: true };
+          try { fs.writeFileSync(fd2, JSON.stringify(meta), "utf8"); } catch {}
+          try { fs.fsyncSync(fd2); } catch {}
+        } catch {}
+        return { ok: true, lockPath, fd: fd2, recovered: true };
+      }
+    } catch {}
+    return { ok: false, lockPath, error: "already_running" };
+  }
+}
+
+function releaseRunLock(lock) {
+  try { if (lock && typeof lock.fd === "number") fs.closeSync(lock.fd); } catch {}
+  try { if (lock && lock.lockPath) fs.unlinkSync(lock.lockPath); } catch {}
+}
+
 function runOnce({ ROOT, keep }) {
   const baseDir = path.join(ROOT, "_backup_auto");
-  const tag = tsTag();
-  const curOutDir = path.join(baseDir, tag);
-  ensureDir(curOutDir);
-
-  // Arquivos raiz importantes
-  const files = [
-    "index.js",
-    "package.json",
-    "package-lock.json",
-    "instalar_conveniente.ps1",
-    "PainelConta.bat"
-  ];
-
-  let copied = 0;
-  for (const rel of files) {
-    const src = path.join(ROOT, rel);
-    if (!safeStat(src)) continue;
-    if (copyFileRetry(src, path.join(curOutDir, rel))) copied++;
+  const lock = acquireRunLock(baseDir, { staleMs: Math.max(60_000, Number(process.env.CONVENIENTE_AUTO_BACKUP_LOCK_STALE_MS || 900_000) || 900_000) });
+  if (!lock || lock.ok !== true) {
+    return { ok: false, skipped: true, reason: "snapshot_already_running" };
   }
-
-  // Código (sem node_modules)
-  copied += copyDirFlat(ROOT, curOutDir, "scripts", { exts: [".js"], maxFiles: 600 });
-  copied += copyDirFlat(ROOT, curOutDir, "public", { exts: [".html", ".js", ".css"], maxFiles: 120 });
-
-  // Config/estado crítico (pequeno)
-  const dadosFiles = [
-    path.join("dados", "desired.json"),
-    path.join("dados", "perfis.json"),
-    path.join("dados", "status.json"),
-    path.join("dados", "supervisor_state.json"),
-    path.join("dados", "ct_config.json"),
-    path.join("dados", "cidades.json"),
-    path.join("dados", "cidades_coords.json"),
-    path.join("dados", "ua_presets.json"),
-    path.join("dados", "localizacoes.json"),
-    path.join("dados", "atendimento.json")
-  ];
-  for (const rel of dadosFiles) {
-    const src = path.join(ROOT, rel);
-    if (!safeStat(src)) continue;
-    if (copyFileRetry(src, path.join(curOutDir, rel))) copied++;
-  }
-
-  // Issues do sistema (se existir)
   try {
-    const iss = path.join(ROOT, "dados", "perfis", "system", "issues.json");
-    if (safeStat(iss) && copyFileRetry(iss, path.join(curOutDir, "dados", "perfis", "system", "issues.json"))) copied++;
-  } catch {}
+    const tag = tsTag();
+    const curOutDir = path.join(baseDir, tag);
+    ensureDir(curOutDir);
 
-  // Retenção (mantém os mais recentes)
-  try {
-    ensureDir(baseDir);
-    const dirs = fs.readdirSync(baseDir)
-      .map(n => ({ n, p: path.join(baseDir, n) }))
-      .filter(x => safeStat(x.p) && safeStat(x.p).isDirectory())
-      .sort((a, b) => String(b.n).localeCompare(String(a.n)));
-    for (const d of dirs.slice(keep)) {
-      try { fs.rmSync(d.p, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 }); } catch {}
+    // Arquivos raiz importantes
+    const files = [
+      "index.js",
+      "package.json",
+      "package-lock.json",
+      "instalar_conveniente.ps1",
+      "PainelConta.bat"
+    ];
+
+    let copied = 0;
+    for (const rel of files) {
+      const src = path.join(ROOT, rel);
+      if (!safeStat(src)) continue;
+      if (copyFileRetry(src, path.join(curOutDir, rel))) copied++;
     }
-  } catch {}
 
-  try {
-    fs.appendFileSync(path.join(baseDir, "_snapshots.log"),
-      JSON.stringify({ ts: Date.now(), tag, copied, mode: "subprocess" }) + "\n");
-  } catch {}
+    // Código (sem node_modules)
+    copied += copyDirFlat(ROOT, curOutDir, "scripts", { exts: [".js"], maxFiles: 600 });
+    copied += copyDirFlat(ROOT, curOutDir, "public", { exts: [".html", ".js", ".css"], maxFiles: 120 });
 
-  return { ok: true, tag, copied };
+    // Config/estado crítico (pequeno)
+    const dadosFiles = [
+      path.join("dados", "desired.json"),
+      path.join("dados", "perfis.json"),
+      path.join("dados", "status.json"),
+      path.join("dados", "supervisor_state.json"),
+      path.join("dados", "ct_config.json"),
+      path.join("dados", "cidades.json"),
+      path.join("dados", "cidades_coords.json"),
+      path.join("dados", "ua_presets.json"),
+      path.join("dados", "localizacoes.json"),
+      path.join("dados", "atendimento.json")
+    ];
+    for (const rel of dadosFiles) {
+      const src = path.join(ROOT, rel);
+      if (!safeStat(src)) continue;
+      if (copyFileRetry(src, path.join(curOutDir, rel))) copied++;
+    }
+
+    // Issues do sistema (se existir)
+    try {
+      const iss = path.join(ROOT, "dados", "perfis", "system", "issues.json");
+      if (safeStat(iss) && copyFileRetry(iss, path.join(curOutDir, "dados", "perfis", "system", "issues.json"))) copied++;
+    } catch {}
+
+    // Retenção (mantém os mais recentes)
+    try {
+      ensureDir(baseDir);
+      const dirs = fs.readdirSync(baseDir)
+        .map(n => ({ n, p: path.join(baseDir, n) }))
+        .filter(x => safeStat(x.p) && safeStat(x.p).isDirectory())
+        .sort((a, b) => String(b.n).localeCompare(String(a.n)));
+      for (const d of dirs.slice(keep)) {
+        try { fs.rmSync(d.p, { recursive: true, force: true, maxRetries: 30, retryDelay: 200 }); } catch {}
+      }
+    } catch {}
+
+    try {
+      fs.appendFileSync(path.join(baseDir, "_snapshots.log"),
+        JSON.stringify({ ts: Date.now(), tag, copied, mode: "subprocess" }) + "\n");
+    } catch {}
+
+    return { ok: true, tag, copied };
+  } finally {
+    try { releaseRunLock(lock); } catch {}
+  }
 }
 
 function main() {
