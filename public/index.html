@@ -2285,6 +2285,17 @@
       };
     })();
 
+    // Política do usuário: atualizar/recarregar o dashboard deve CANCELAR o close_all em andamento.
+    // Isso permite “desistir no meio do caminho” sem precisar de botão extra.
+    (function cancelCloseAllOnDashboardLoad(){
+      try {
+        fetch('/api/perfis/close-all/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_dashboard_load' }
+        }).catch(()=>{});
+      } catch {}
+    })();
+
     // Bind do botão "Abrir Todos e Iniciar 24h"
     (function bindStartAllBtn(){
       const btn = document.getElementById('startAllBtn');
