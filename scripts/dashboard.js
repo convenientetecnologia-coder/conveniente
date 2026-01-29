@@ -1641,6 +1641,66 @@ async function execListBackups(cmd) {
     tags: tags.slice(0, Math.max(20, Math.min(6000, lim)))
   };
 }
+
+function _isValidBackupTag(tag) {
+  // formato gerado pelo backup auto: YYYYMMDD_HHMMSS
+  return /^\d{8}_\d{6}$/.test(String(tag || '').trim());
+}
+function _readTextFileLimited(filePath, maxBytes = 2_500_000) {
+  try {
+    if (!fsSync.existsSync(filePath)) return { ok: false, error: 'not_found', filePath, bytes: 0, truncated: false, text: null };
+    const st = fsSync.statSync(filePath);
+    const size = Number(st.size || 0) || 0;
+    const lim = Math.max(10_000, Math.min(15_000_000, Number(maxBytes || 0) || 2_500_000));
+    const readBytes = Math.min(lim, size);
+    const buf = fsSync.readFileSync(filePath);
+    // Se o arquivo for gigante, truncar por bytes (mantém início para diff)
+    const slice = (buf.length > readBytes) ? buf.subarray(0, readBytes) : buf;
+    const text = slice.toString('utf8');
+    return { ok: true, filePath, bytes: readBytes, truncated: (size > readBytes), text };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e), filePath, bytes: 0, truncated: false, text: null };
+  }
+}
+
+async function execBackupExportFiles(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const tag = String(payload.tag || '').trim();
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  const maxBytes = Math.max(50_000, Math.min(15_000_000, Number(payload.maxBytes || 2_500_000) || 2_500_000));
+  if (!tag) throw new Error('missing_tag');
+  if (!_isValidBackupTag(tag)) throw new Error('invalid_tag');
+  if (!files.length) throw new Error('missing_files');
+  if (files.length > 12) throw new Error('too_many_files'); // limita payload/ACK
+
+  const baseDir = _backupAutoBaseDir();
+  const srcRoot = path.join(baseDir, tag);
+  const st = _safeStatSync(srcRoot);
+  if (!st || !st.isDirectory()) throw new Error('backup_tag_not_found');
+
+  const items = [];
+  for (const f of files) {
+    const rel = String((f && (f.rel || f.path || f.file)) || '').trim();
+    if (!rel) { items.push({ ok: false, error: 'missing_rel', rel: null }); continue; }
+    // Hard security: impedir path traversal
+    const safeRel = rel.replace(/\//g, '\\');
+    if (safeRel.includes('..') || safeRel.startsWith('\\') || /^[a-zA-Z]:/.test(safeRel)) {
+      items.push({ ok: false, error: 'invalid_rel', rel });
+      continue;
+    }
+    const fp = path.join(srcRoot, safeRel);
+    const r = _readTextFileLimited(fp, maxBytes);
+    items.push({ rel: safeRel, ...r });
+  }
+
+  return {
+    ok: items.every(x => x && x.ok),
+    baseDir,
+    tag,
+    filesCount: items.length,
+    items
+  };
+}
 function _copyFileRetrySync(src, dst, { retries = 8 } = {}) {
   try {
     const dir = path.dirname(dst);
@@ -1829,6 +1889,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
       else if (c.type === 'list_backups')    { ackDetails = await execListBackups(c); }
       else if (c.type === 'restore_backup')  { ackDetails = await execRestoreBackup(c); }
+      else if (c.type === 'backup_export_files') { ackDetails = await execBackupExportFiles(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
