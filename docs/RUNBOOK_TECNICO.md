@@ -149,6 +149,47 @@ Validação:
 
 ---
 
+### CT (sitechatbot) — Dashboard **Servidores**: catálogo de estados/flags (CANÔNICO)
+
+Objetivo: o menu **Servidores** é fonte de verdade operacional. O operador precisa ver “qual host, qual problema, o que fazer”, sem “Desconhecido” genérico.
+
+#### 1) Estados finais (mutuamente exclusivos) — `accountsAgg`
+
+Fonte: CT `/servers` calcula agregados por host a partir de `status.perfis[]` do snapshot e do classificador:
+- `C:\sitechatbot\convenientetecnologia\lib\fbAccountState.js`
+
+Chaves canônicas:
+- `captcha` (Captcha/Checkpoint)
+- `login` (Tela de login)
+- `session` (Sessão expirada)
+- `two_factor` (2FA)
+- `identity` (Identidade)
+- `consent` (Consentimento)
+- `login_other` (**Outros (login)** — obrigatório exibir o `loginReason` técnico para auditoria)
+- `limit_exceeded` (Limite excedido — via Robe)
+- `banned` (Banida/suspensa)
+- `ok` (OK)
+
+Observação:
+- `lr_total` existe no backend como **AGREGADO** (soma dos subtipos), mas **não é estado final** e não deve ser somado junto com os subtipos.
+
+#### 2) Flags operacionais (não exclusivas) — `flagsAgg`
+
+Essas flags existem para guiar ação humana (ex.: “ir no host e resolver no browser”).
+
+Chaves canônicas (CT `/servers`):
+- `human_invoked`: conta perfis com `humanControl=true` **ou** `humanHold=true`
+- `messenger_pin`: perfis com `messengerPin=true`
+- `problem`: perfis com `problem=true`
+- `virtus_offline`: perfis com `virtusOnline=false`
+- `login_required`: perfis com `loginRequired=true`
+- `login_reasons_top`: top 8 `loginReason` (array `{ reason, count }`) para explicar `login_other` sem payload gigante
+
+Regras:
+- O CT só retorna `accountsAgg/flagsAgg` quando o snapshot está fresco (`onlineRaw=true`) para evitar contagem enganosa em OFFLINE/stale.
+
+---
+
 ### Intake de “texto bomba” do humano (CANÔNICO)
 
 Quando o humano mandar uma mensagem grande/bagunçada com vários sintomas misturados, o GPT deve:
