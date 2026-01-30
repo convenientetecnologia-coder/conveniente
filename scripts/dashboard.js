@@ -1234,6 +1234,8 @@ function logsAllowlist() {
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),
+    // Governor RAM/light/full monitoring (1/min) — para análise 48h via CT fetch_logs
+    governor_snapshots: path.join(base, 'governor_snapshots.jsonl'),
     migrations: path.join(base, 'migrations.jsonl'),
     updates: path.join(base, 'updates.jsonl'),
     // Evidência de versão (para auditoria E2E): prova qual commit está no disco
