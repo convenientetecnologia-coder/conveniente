@@ -1167,7 +1167,40 @@ module.exports = (app, workerClient, fileStore) => {
         const ttl0 = Math.max(60_000, Number(process.env.OPEN_ALL_LOCK_TTL_MS || (2 * 60 * 1000)) || (2 * 60 * 1000));
         const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: ttl0, meta: { kind: 'open_all_map', by: op.slice(0, 120) } });
         if (!lk || !lk.ok) {
-          const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+          const curLock = lk && lk.lock ? lk.lock : null;
+          const curOwner = curLock && curLock.owner ? String(curLock.owner) : '';
+          const curKind = (curLock && curLock.meta && curLock.meta.kind) ? String(curLock.meta.kind) : '';
+          const isOpenAllLock = !!(curOwner && /^open_all_map:/i.test(curOwner)) || (curKind === 'open_all_map');
+
+          // Idempotência enterprise: se já existe um open_all em andamento, NÃO devolver erro.
+          // Isso evita “nada aconteceu” + 2º clique virar falha.
+          if (lk && lk.error === 'busy' && isOpenAllLock && curOwner) {
+            try {
+              const desiredNow = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || {};
+              const oa = (desiredNow && desiredNow._openAll && typeof desiredNow._openAll === 'object') ? desiredNow._openAll : null;
+              const oaActive = !!(oa && oa.active === true);
+              const oaOwner = oa ? String(oa.lockOwner || oa.op || '') : '';
+              if (oaActive && oaOwner && oaOwner === curOwner) {
+                return res.json({
+                  ok: true,
+                  alreadyRunning: true,
+                  lockOwner: curOwner,
+                  sinceMs: Number(curLock && curLock.sinceMs || 0) || 0,
+                  untilMs: Number(curLock && curLock.untilMs || 0) || 0
+                });
+              }
+
+              // Stale recovery (safe): lock open_all_map existe mas desired._openAll não está ativo
+              // (ou aponta para outro owner) => liberar e tentar novamente 1x.
+              try { provisionLock.release({ force: true }); } catch {}
+              const lk2 = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: ttl0, meta: { kind: 'open_all_map', by: op.slice(0, 120) } });
+              if (!lk2 || !lk2.ok) {
+                const curOwner2 = lk2 && lk2.lock && lk2.lock.owner ? String(lk2.lock.owner) : curOwner;
+                return res.json({ ok: false, error: `open_all_lock_busy${curOwner2 ? ` owner=${curOwner2}` : ''}` });
+              }
+            } catch {}
+          }
+
           return res.json({ ok: false, error: `open_all_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
         }
       } catch (e) {

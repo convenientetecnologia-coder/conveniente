@@ -209,6 +209,22 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 // Boot sequencial: bootstrap -> cluster -> listen
 (async () => {
   await maybeBootstrapService();
+  // Política definida (triagem inbox): após restart, começar fechado.
+  // Para abrir, operador deve clicar “Abrir Todos” (ou abrir perfil manualmente).
+  // Escape hatch: set CONVENIENTE_START_CLOSED_ON_BOOT=0 para desativar.
+  try {
+    const startClosedOnBoot = String(process.env.CONVENIENTE_START_CLOSED_ON_BOOT || '1').trim() !== '0';
+    if (startClosedOnBoot) {
+      logger.info('[BOOT] Política start-closed ATIVA: resetando desired.active=false para todos (aguardando clique).');
+      const r = await fileStore.resetDesiredAllOffOnBoot({ reason: 'triagem_inbox_policy_manual_start' });
+      if (r && r.ok === true) logger.info('[BOOT] start-closed aplicado', { changed: r.changed });
+      else logger.warn('[BOOT] start-closed falhou (best-effort)', { error: r && r.error ? r.error : 'unknown' });
+    } else {
+      logger.warn('[BOOT] Política start-closed DESATIVADA (CONVENIENTE_START_CLOSED_ON_BOOT=0).');
+    }
+  } catch (e) {
+    logger.warn('[BOOT] start-closed exceção (best-effort)', { error: (e && e.message) || String(e) });
+  }
   await bootCluster();
 
   // Start server — faça o binding em 127.0.0.1

@@ -547,27 +547,48 @@ function isPerfilAtivo(nome) {
   } catch { return false; }
 }
 
-//// RESETAR desired TODOS OFF ao boot //// 
-function resetDesiredAllOffOnBoot() {
-  // ATUALIZADO: lock
-  withDesiredFileLockUpdate(desired => {
-    ensureDesired();
+//// RESETAR desired TODOS OFF ao boot ////
+async function resetDesiredAllOffOnBoot({ reason = 'boot_start_closed' } = {}) {
+  // Importante: precisa ser awaited no boot para não haver corrida com workers lendo desired.json.
+  // Também não deve estourar unhandled rejection (lock timeout) => try/catch.
+  try {
     const perfisArr = loadPerfisJson();
-    desired.perfis = desired.perfis || {};
-    for (const p of perfisArr) {
-      if (!p || !p.nome) continue;
-      const nome = p.nome;
-      desired.perfis[nome] = {
-        ...(desired.perfis[nome] || {}),
-        active: false,
-        virtus: 'off',
-        configureOnce: false,
-        robePlay: false,
-        invokeHuman: false
-      };
-    }
-    return desired;
-  });
+    const r = await withDesiredFileLockUpdate((desired) => {
+      ensureDesired();
+      desired = desired || {};
+      desired.perfis = desired.perfis || {};
+      let changed = 0;
+      for (const p of (perfisArr || [])) {
+        if (!p || !p.nome) continue;
+        const nome = p.nome;
+        const cur = desired.perfis[nome] || {};
+        const next = {
+          ...cur,
+          active: false,
+          virtus: 'off',
+          configureOnce: false,
+          robePlay: false,
+          invokeHuman: false
+        };
+        desired.perfis[nome] = next;
+        if (cur.active !== false || String(cur.virtus || '') !== 'off') changed++;
+      }
+      // Cancela open_all pendente (política: nunca auto-abrir após restart).
+      try {
+        if (desired._openAll && desired._openAll.active === true) {
+          desired._openAll = { ...(desired._openAll || {}), active: false, doneAt: Date.now(), lastError: 'boot_reset' };
+        }
+      } catch {}
+      desired._boot = { ...(desired._boot || {}), ts: Date.now(), reason: String(reason || '').slice(0, 120) };
+      desired._bootStartClosed = true;
+      desired._bootStartClosedAt = Date.now();
+      desired._bootStartClosedReason = String(reason || '').slice(0, 160);
+      return Object.assign(desired, { _bootStartClosedChanged: changed });
+    });
+    return { ok: true, changed: Number(r && r._bootStartClosedChanged || 0) || 0 };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
 }
 
 //// MÉTRICAS DO SISTEMA (RAM, CPU%) ////

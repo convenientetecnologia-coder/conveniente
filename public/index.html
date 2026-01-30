@@ -1999,6 +1999,11 @@
           body: JSON.stringify({})
         }).then(x => x.json()).catch(()=>null);
         if (!r || r.ok !== true) throw new Error((r && r.error) ? String(r.error) : 'open_all_failed');
+        // Idempotente: se já está rodando, não tratar como falha (evita “2º clique = erro”).
+        // Feedback pro humano: o 2º clique costuma vir da sensação de “não aconteceu nada”.
+        if (r && r.alreadyRunning === true) {
+          try { alert('Abrir Todos já está em andamento (modo seguro). Vou atualizar o painel.'); } catch {}
+        }
         // Deixa rodar em background; o painel acompanha por status.
         await new Promise(r => setTimeout(r, 500));
         reloadPerfis();

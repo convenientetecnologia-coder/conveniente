@@ -77,20 +77,68 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 
 Colunas:
 - **id**: `INC-YYYYMMDD-HHMM-XX`
+- **arquivo**: link para `docs/inbox/INC-....md`
 - **P**: P0/P1/P2
 - **sistema**: conveniente / sitechatbot / notificador
 - **sintoma (humano)**: 1 frase
 - **hipótese (GPT)**: 1 frase
 - **evidência**: logs keys / cmdId / requestId / endpoint
-- **status**: new / need_evidence / in_progress / blocked / done
+- **state do INC (rígido)**: `new` / `need_alignment` / `need_evidence` / `in_progress` / `done` / `cancelled`
+- **rollout**: `not_deployed` / `deployed_partial` / `deployed` / `needs_restart` / `manual_step_required`
+- **validation**: `not_run` / `passed` / `failed`
 - **precisa reiniciar agora?** sim/não
 - **precisa reiniciar p/ validar?** sim/não
 
-| id | P | sistema | sintoma (humano) | hipótese (GPT) | evidência | status | reiniciar agora? | reiniciar p/ validar? |
-|---|---|---|---|---|---|---|---|---|
-| INC-YYYYMMDD-HHMM-01 | P1 | conveniente | … | … | logs_manifest + fetch_logs(keys=…) | need_evidence | não | sim |
-| INC-20260129-2100-01 | P1 | sitechatbot+conveniente | conta do estoque fica “reserved” mas não provisiona (falhas em massa) | hook do CT não atualiza job/solta reserva (ex.: busca por command_id limitada) e/ou falta de evidência no ACK | CT DB (jobs/accounts) + ack files + provision_audit.jsonl | in_progress | não | não |
-| INC-20260129-2058-02 | P1 | conveniente | close_all lento/reabre; open_all concorre; auto-open no boot | nurse/desired/autoMode abrindo durante close_all; UI chamando endpoint antigo; governança faltando | provision_audit(query close_all/open_all/nurse) + status snapshot | in_progress | não | sim |
+| id | arquivo | P | sistema | sintoma (humano) | hipótese (GPT) | evidência | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| INC-YYYYMMDD-HHMM-01 | `docs/inbox/in_progress/INC-YYYYMMDD-HHMM-01.md` | P1 | conveniente | … | … | logs_manifest + fetch_logs(keys=…) | need_evidence | not_deployed | not_run | não | sim |
+| INC-20260130-0001-01 | `docs/inbox/done/INC-20260130-0001-01.md` | P0 | conveniente | Abrir Todos: 2º clique dava open_all_lock_busy | endpoint não era idempotente; faltava feedback; stale lock precisava auto-recover | painel alert + payload alreadyRunning + lockOwner | done | not_deployed | not_run | não | sim |
+| INC-20260129-2100-01 | `docs/inbox/done/INC-20260129-2100-01.md` | P1 | sitechatbot+conveniente | conta do estoque fica “reserved” mas não provisiona (falhas em massa) | timeouts+busy+ACK lookup limitado; hardening+fallback | CT DB + ack files + provision_audit.jsonl | done | deployed_partial | not_run | não | sim |
+| INC-20260129-2058-02 | `docs/inbox/done/INC-20260129-2058-02.md` | P0 | conveniente | Fechar Todos reabre/lento; sobra navegador | painel fechava sem zerar desired.active; nurse reabria | provision_audit(close_all_*) + status snapshot | done | needs_restart | not_run | sim | sim |
+| INC-20260129-2058-03 | `docs/inbox/done/INC-20260129-2058-03.md` | P1 | conveniente | Abrir Todos concorre/trava; auto-open no boot | open_all sequencial (nurse) + start-closed no boot (sem auto-open) | provision_audit(open_all*) + desired/status | done | needs_restart | not_run | sim | sim |
+| INC-20260129-2058-04 | `docs/inbox/in_progress/INC-20260129-2058-04.md` | P1 | conveniente | Governança de concorrência (login/identity/open/ram) | faltam limites/políticas explícitas; precisa governor/slots por tipo | status + métricas + logs de negação | need_alignment | not_deployed | not_run | não | não |
+
+### Política ultra-rígida (enterprise) — como o INBOX funciona
+
+Regra do jogo: **INBOX é um sistema de tickets** (não um chat). Cada relato vira ticket(s) e cada ticket vira um arquivo `INC-...md`.
+
+1) **1 texto → N itens → N arquivos**
+   - Sempre que o humano mandar “triagem inbox” (textão ou não), o GPT:
+     - cola no `RAW_INPUT`
+     - quebra em itens
+     - para cada item cria um `docs/inbox/INC-...md` separado
+     - registra cada item na tabela `TRIAGE` com link para o arquivo.
+
+2) **WIP limit = 1 (um por vez)**
+   - Só pode existir **1** item com state `in_progress` por vez.
+   - Se houver vários itens, o GPT escolhe 1 (por P0/P1 e impacto) e **só muda de item quando o anterior estiver `done`**.
+
+3) **Status único e rastreável (sem achismo)**
+   - **state do INC**:
+     - `new`: criado, ainda não alinhado.
+     - `need_alignment`: faltam perguntas (“como deveria ser” / “critério de sucesso”).
+     - `need_evidence`: precisa coletar logs/CT antes de mexer.
+     - `in_progress`: investigando/alterando (WIP=1).
+     - `done`: o GPT já fez o melhor trabalho possível (código/docs/deploy se aplicável). Pode faltar restart/teste — isso vai em `rollout/validation`, não aqui.
+     - `cancelled`: descartado conscientemente (com justificativa).
+   - **rollout/validation**:
+     - rollout `needs_restart` NÃO impede `done`; apenas indica que “a prescrição ainda não foi aplicada em runtime”.
+     - validation `not_run` é normal; se der ruim depois, isso vira **novo INC** (novo relato), referenciando este.
+
+4) **Evolução contínua dentro do arquivo do INC**
+   - O arquivo `INC-...md` deve ser “vivo”: toda evidência nova, descoberta, decisão, e patch aplicado entra ali.
+   - Quando fecha (`done`), o arquivo fica como “postmortem”/histórico.
+
+5) **Fechamento (modelo “médico”)**
+   - Para marcar `done`, basta: o GPT entregou a melhor solução possível (código/docs e, quando possível, deploy).
+   - Restart/teste não bloqueiam `done`: viram `rollout=needs_restart` e `validation=not_run`.
+   - Se o problema persistir/voltar: cria-se um **novo** INC (novo relato), citando o INC anterior como histórico.
+
+6) **Organização por pastas (status físico)**
+   - Ao criar um INC: salvar em `docs/inbox/in_progress/INC-...md`
+   - Ao marcar `done`: mover para `docs/inbox/done/INC-...md` (mesmo que rollout/validation estejam pendentes)
+   - Ao marcar `cancelled`: mover para `docs/inbox/cancelled/INC-...md`
+   - O `docs/inbox/INDEX.md` e a tabela `TRIAGE` devem apontar para o caminho correto (sem link quebrado).
 
 ---
 
