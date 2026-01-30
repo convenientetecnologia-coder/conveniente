@@ -649,23 +649,48 @@ async function execStockProvision(cmd) {
   if (!batchId) throw new Error('missing_batchId');
   if (!actions.length) throw new Error('missing_actions');
 
+  const tBatch0 = Date.now();
+  const sleepMs = (ms) => new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)));
+
   // Hardening: lock global com TTL para isolamento total durante provisão.
   // Evita concorrência (already_opening / slot storms) e permite hard-recovery com segurança.
   // P1 policy (humano): permitir esperar busy por mais tempo, com deadline hard (evita “reserved preso”).
   // Default anterior (8min) era curto para ambientes com muitos perfis ativos.
   const budgetMs = Math.max(30_000, Number(process.env.STOCK_PROVISION_BUDGET_MS || (20 * 60 * 1000)) || (20 * 60 * 1000));
   const lockOwner = `stock_provision:${batchId}`;
-  const lk = provisionLock.tryAcquire({
-    owner: lockOwner,
-    ttlMs: Math.max(9 * 60 * 1000, budgetMs + (2 * 60 * 1000)),
-    meta: { kind: 'stock_provision', batchId, cmdId: String(cmd && cmd.id || '') || null }
-  });
-  if (!lk || !lk.ok) {
+  // P0 hardening (2026-01-30): se provision_lock estiver ocupado, NÃO falhar imediato.
+  // Esperar até ficar livre (dentro do budget) — evita “conta liberada mas não cadastrou”.
+  let lk = null;
+  let lockAttempts = 0;
+  while (true) {
+    lockAttempts++;
+    lk = provisionLock.tryAcquire({
+      owner: lockOwner,
+      ttlMs: Math.max(9 * 60 * 1000, budgetMs + (2 * 60 * 1000)),
+      meta: { kind: 'stock_provision', batchId, cmdId: String(cmd && cmd.id || '') || null }
+    });
+    if (lk && lk.ok) break;
     const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
-    throw new Error(`provision_lock_busy${curOwner ? ` owner=${curOwner}` : ''}`);
+    const waitedMs = Date.now() - tBatch0;
+    try {
+      provisionAudit.append({
+        event: 'stock_provision_wait_provision_lock',
+        cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+        batchId,
+        attempt: lockAttempts,
+        waitedMs,
+        curOwner: curOwner || null
+      });
+    } catch {}
+    if (waitedMs >= budgetMs) {
+      throw new Error(`provision_lock_busy${curOwner ? ` owner=${curOwner}` : ''} waitedMs=${waitedMs} attempts=${lockAttempts}`);
+    }
+    // Backoff leve para não martelar o lock file.
+    const base = [800, 1200, 2000, 3000, 5000][Math.min(4, Math.max(0, lockAttempts - 1))];
+    const jitter = Math.floor(Math.random() * 350);
+    await sleepMs(Math.min(base + jitter, Math.max(250, budgetMs - waitedMs)));
   }
 
-  const tBatch0 = Date.now();
   // Política ultra enterprise:
   // - durante provisão, o 1GB/node é "emprestável" (Robe/Virtus ficam controlados)
   // - então o headroom mínimo vira: 2GB (host) + pico de cookies (~1.5GB)
