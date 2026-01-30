@@ -25,4 +25,5 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 | INC-20260129-2058-03 | P1 | done | needs_restart | not_run | Abrir Todos 24h: concorrência/medo de clicar; auto-open no boot | `done/INC-20260129-2058-03.md` |
 | INC-20260129-2058-04 | P1 | done | needs_restart | not_run | Governança: controle de concorrência (login_required/identity/open/ram) | `done/INC-20260129-2058-04.md` |
 | INC-20260129-2340-01 | P1 | done | needs_restart | not_run | Abrir Todos: fica preso em 26/28; sem progresso; não libera Robe/Virtus | `done/INC-20260129-2340-01.md` |
+| INC-20260130-0005-01 | P1 | done | needs_restart | not_run | Invocar Humano: botões no HUD (fechar/pause24h/excluir) + garantir isolamento do navegador humano | `done/INC-20260130-0005-01.md` |
 

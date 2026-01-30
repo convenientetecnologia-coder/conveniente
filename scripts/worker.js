@@ -797,6 +797,87 @@ async function _installOverlayOnPage(nome, page) {
       }
     }
 
+    // Ações do HUD (enterprise): fechar navegador / pause robe 24h / excluir conta.
+    // Importante: o HUD roda no browser, mas as ações rodam no Node via exposeFunction (sem CORS).
+    try {
+      await page.exposeFunction('__ctHumanOverlayCloseBrowser', async () => {
+        const startedAt = Date.now();
+        try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'close_browser' }); } catch {}
+        try {
+          // Política alinhada: não forçar desired.active=false (permite reabrir depois conforme desired atual).
+          // Manter preserveDesired evita efeitos colaterais agressivos; o sistema decide reabrir conforme desired/nurse.
+          const r = await handlers.deactivate({ nome, reason: 'human_overlay_close', policy: 'preserveDesired' }).catch(e => ({ ok:false, error: (e && e.message) || String(e) }));
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'close_browser', ok: !!(r && r.ok), error: r && r.error ? String(r.error).slice(0, 180) : null, durationMs: Date.now() - startedAt }); } catch {}
+          return r && typeof r === 'object' ? r : { ok: false, error: 'close_browser_failed' };
+        } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'close_browser', ok: false, error: msg.slice(0, 180), durationMs: Date.now() - startedAt }); } catch {}
+          return { ok: false, error: msg };
+        }
+      });
+    } catch {}
+
+    try {
+      await page.exposeFunction('__ctHumanOverlayRobe24h', async () => {
+        const startedAt = Date.now();
+        try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'robe_24h' }); } catch {}
+        try {
+          const manifestStore = require('./manifestStore.js');
+          const plus24 = 24 * 60 * 60 * 1000;
+          await manifestStore.update(nome, man => {
+            const now = Date.now();
+            man = man || {};
+            man.robeCooldownUntil = now + plus24;
+            man.robeCooldownRemainingMs = 0;
+            man.robePauseReason = 'manual';
+            return man;
+          });
+          try { issues.append(nome, 'admin_robe24h_request', 'by=human_overlay'); } catch {}
+          try { await syncHumanOverlay(nome); } catch {}
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'robe_24h', ok: true, error: null, durationMs: Date.now() - startedAt }); } catch {}
+          return { ok: true };
+        } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'robe_24h', ok: false, error: msg.slice(0, 180), durationMs: Date.now() - startedAt }); } catch {}
+          return { ok: false, error: msg };
+        }
+      });
+    } catch {}
+
+    try {
+      await page.exposeFunction('__ctHumanOverlayDeleteAccount', async () => {
+        const startedAt = Date.now();
+        try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'delete_account' }); } catch {}
+        try {
+          // Reutiliza o endpoint canônico de delete (inclui: fechar se ativo + CT estoque excluídas + purge local).
+          const base = `http://127.0.0.1:${parseInt(process.env.PORT || '8088', 10) || 8088}`;
+          const url = `${base}/api/perfis/${encodeURIComponent(String(nome || '').trim())}`;
+          const Aborter = global.AbortController || require('node-abort-controller');
+          const ac = new Aborter();
+          const t = setTimeout(() => { try { ac.abort(); } catch {} }, 180000);
+          const resp = await fetch(url, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json', 'x-operator': 'human_overlay' },
+            signal: ac.signal
+          }).catch(e => ({ ok:false, _err: e }));
+          clearTimeout(t);
+          if (resp && resp.ok) {
+            const j = await resp.json().catch(()=>null);
+            const ok = !!(j && j.ok === true);
+            try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'delete_account', ok, error: ok ? null : String((j && j.error) ? j.error : 'delete_failed').slice(0, 180), durationMs: Date.now() - startedAt }); } catch {}
+            return j || { ok: false, error: 'delete_failed' };
+          }
+          const emsg = (resp && resp._err && resp._err.message) ? String(resp._err.message) : `http_${resp && resp.status ? resp.status : 0}`;
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'delete_account', ok: false, error: emsg.slice(0, 180), durationMs: Date.now() - startedAt }); } catch {}
+          return { ok: false, error: emsg };
+        } catch (e) {
+          const msg = (e && e.message) ? String(e.message) : String(e);
+          try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_action_done', nome: String(nome || ''), action: 'delete_account', ok: false, error: msg.slice(0, 180), durationMs: Date.now() - startedAt }); } catch {}
+          return { ok: false, error: msg };
+        }
+      });
+    } catch {}
+
     // Canal de log do overlay (provas de clique em Copiar/Retomar/Mover/Minimizar).
     try {
       await page.exposeFunction('__ctHumanOverlayLog', async (evt) => {
@@ -888,7 +969,10 @@ async function _installOverlayOnPage(nome, page) {
                     <button id="copyLogin">Copiar login</button>
                     <button id="copyPass">Copiar senha</button>
                     <button class="primary" id="resume">Retomar trabalho</button>
-                    <button class="danger" id="hide">Fechar</button>
+                    <button id="robe24h" title="Pausar Robe por 24h (não retoma automação)">Robe 24h</button>
+                    <button id="closeBrowser" title="Fecha este navegador (não altera desired.active)">Fechar navegador</button>
+                    <button class="danger" id="deleteAcc" title="Excluir conta (fecha + purge local + CT estoque excluídas)">Excluir conta</button>
+                    <button class="danger" id="hide" title="Ocultar o painel">Ocultar painel</button>
                   </div>
                   <div class="hint" id="hint"></div>
                 </div>
@@ -1009,6 +1093,64 @@ async function _installOverlayOnPage(nome, page) {
             $('hide')?.addEventListener('click', () => {
               try { host.style.display = 'none'; } catch {}
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'hide' }); } catch {}
+            });
+            $('robe24h')?.addEventListener('click', async () => {
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'robe_24h_click' }); } catch {}
+              try { $('hint').textContent = 'Aplicando Robe 24h...'; } catch {}
+              try { $('robe24h').disabled = true; } catch {}
+              try {
+                if (typeof window.__ctHumanOverlayRobe24h === 'function') {
+                  const r = await window.__ctHumanOverlayRobe24h();
+                  try { $('hint').textContent = (r && r.ok) ? 'Robe 24h aplicado.' : ('Falha ao aplicar Robe 24h: ' + String((r && r.error) ? r.error : 'unknown')); } catch {}
+                } else {
+                  try { $('hint').textContent = 'Falha: binding Robe 24h indisponível. Aguarde resincronização.'; } catch {}
+                }
+              } catch (e) {
+                try { $('hint').textContent = 'Falha ao aplicar Robe 24h.'; } catch {}
+              }
+              try { $('robe24h').disabled = false; } catch {}
+            });
+            $('closeBrowser')?.addEventListener('click', async () => {
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'close_browser_click' }); } catch {}
+              try { $('hint').textContent = 'Fechando navegador...'; } catch {}
+              try { $('closeBrowser').disabled = true; } catch {}
+              try {
+                if (typeof window.__ctHumanOverlayCloseBrowser === 'function') {
+                  const r = await window.__ctHumanOverlayCloseBrowser();
+                  try { $('hint').textContent = (r && r.ok) ? 'Navegador fechado.' : ('Falha ao fechar navegador: ' + String((r && r.error) ? r.error : 'unknown')); } catch {}
+                } else {
+                  try { $('hint').textContent = 'Falha: binding fechar navegador indisponível. Aguarde resincronização.'; } catch {}
+                }
+              } catch {
+                try { $('hint').textContent = 'Falha ao fechar navegador.'; } catch {}
+              }
+              try { $('closeBrowser').disabled = false; } catch {}
+            });
+            $('deleteAcc')?.addEventListener('click', async () => {
+              try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'delete_account_click' }); } catch {}
+              // Dupla confirmação (ultra enterprise): exige digitar EXCLUIR.
+              try {
+                const ok1 = confirm('Excluir conta: isso vai fechar o navegador, remover do servidor e enviar pro CT (estoque excluídas). Continuar?');
+                if (!ok1) return;
+                const typed = prompt('Digite EXCLUIR para confirmar:');
+                if (String(typed || '').trim().toUpperCase() !== 'EXCLUIR') {
+                  try { $('hint').textContent = 'Exclusão cancelada (confirmação inválida).'; } catch {}
+                  return;
+                }
+              } catch {}
+              try { $('hint').textContent = 'Excluindo conta...'; } catch {}
+              try { $('deleteAcc').disabled = true; } catch {}
+              try {
+                if (typeof window.__ctHumanOverlayDeleteAccount === 'function') {
+                  const r = await window.__ctHumanOverlayDeleteAccount();
+                  try { $('hint').textContent = (r && r.ok) ? 'Conta excluída com sucesso.' : ('Falha ao excluir conta: ' + String((r && r.error) ? r.error : 'unknown')); } catch {}
+                } else {
+                  try { $('hint').textContent = 'Falha: binding excluir conta indisponível. Aguarde resincronização.'; } catch {}
+                }
+              } catch {
+                try { $('hint').textContent = 'Falha ao excluir conta.'; } catch {}
+              }
+              try { $('deleteAcc').disabled = false; } catch {}
             });
             $('resume')?.addEventListener('click', async () => {
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'resume_click' }); } catch {}
