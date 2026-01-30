@@ -68,7 +68,16 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 ## RAW_INPUT (colar aqui)
 
 ```text
-[cole aqui o texto bruto do humano]
+triagem inbox
+
+robe mae 3 ta online (acessei o servidor agora), mas no CT ele ta marcando offline:
+- no dashboard de servidores
+- e no estoque -> servidores
+
+quero primeiro entender 100% como funciona:
+- como gera hostId
+- se hostId muda (quando/por quê)
+- de quanto em quanto tempo os servidores enviam dados (/report)
 ```
 
 ---
@@ -92,6 +101,7 @@ Colunas:
 | id | arquivo | P | sistema | sintoma (humano) | hipótese (GPT) | evidência | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | INC-YYYYMMDD-HHMM-01 | `docs/inbox/in_progress/INC-YYYYMMDD-HHMM-01.md` | P1 | conveniente | … | … | logs_manifest + fetch_logs(keys=…) | need_evidence | not_deployed | not_run | não | sim |
+| INC-20260130-0905-01 | `docs/inbox/in_progress/INC-20260130-0905-01.md` | P0 | sitechatbot+conveniente | RM3 aparece OFFLINE no CT (servidores + estoque) mas o host está acessível | CT não recebeu `/report` recente (snapshot `receivedAt` velho) **ou** UI está mostrando “ghost” | CT snapshot: `C:\sitechatbot\dados\5d7c3309-...-30b3fe928b.json`; regra CT `/servers` (computedOnline por `receivedAt`) | need_evidence | not_deployed | not_run | não | não |
 | INC-20260130-0128-01 | `docs/inbox/done/INC-20260130-0128-01.md` | P0 | conveniente | Abrir Todos não iniciava com 0 browsers | nurseTick fazia early-return quando controllers=0 mesmo com desired.active/_openAll | CT: desired active=28/28 + controllersCount=0; fix commit 035fa92 | done | deployed | passed | não | sim |
 | INC-20260130-0001-01 | `docs/inbox/done/INC-20260130-0001-01.md` | P0 | conveniente | Abrir Todos: 2º clique dava open_all_lock_busy | endpoint não era idempotente; faltava feedback; stale lock precisava auto-recover | painel alert + payload alreadyRunning + lockOwner | done | not_deployed | not_run | não | sim |
 | INC-20260129-2100-01 | `docs/inbox/done/INC-20260129-2100-01.md` | P1 | sitechatbot+conveniente | conta do estoque fica “reserved” mas não provisiona (falhas em massa) | timeouts+busy+ACK lookup limitado; hardening+fallback | CT DB + ack files + provision_audit.jsonl | done | deployed_partial | not_run | não | sim |

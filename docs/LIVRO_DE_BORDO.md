@@ -167,6 +167,8 @@ O servidor (`conveniente`) recebe comandos dentro da resposta do `report` (campo
 - **`hostId`**
   - **O que é**: identificador único de um servidor/nó.
   - **Onde nasce**: `conveniente` grava/usa `dados/.telemetry_hostid`.
+  - **Quando muda**: não muda com restart do processo; só muda se `C:\conveniente\dados\.telemetry_hostid` for apagado/ausente e o `conveniente` recriar.
+  - **Cadência de telemetria**: o `conveniente` envia `POST /report` por padrão a cada `DASHBOARD_INTERVAL_MS` (default 30s) via `scripts/dashboard.js`.
   - **Mapa humano ↔ hostId**: `C:\conveniente\docs\HOST_REGISTRY.md` (apelidos tipo “ROBE MÃE 2”).
   - **Onde aparece**:
     - CT/telemetria: payload do `report`

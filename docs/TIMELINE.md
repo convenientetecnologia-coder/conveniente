@@ -31,6 +31,22 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-30 — [CROSS][DOCS][OPS] INBOX: novo INC para “CT mostra OFFLINE falso” (RM3) + clarificações hostId/telemetria
+
+- **O que**:
+  - Criado `INC-20260130-0905-01` (RM3 marcado OFFLINE no CT embora host esteja acessível) para investigação com evidência.
+  - Registrado no `INBOX_RELATOS_DO_HUMANO.md` e no `docs/inbox/INDEX.md`.
+  - Clarificado no `LIVRO_DE_BORDO.md` que `hostId` não muda com restart; e que a telemetria `/report` é enviada em loop (default 30s).
+- **Por quê**: eliminar achismo (“máquina online” vs “CT recebendo `/report`”) e tornar o estado auditável antes de qualquer refactor.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260130-0905-01.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md`
+- **Reinícios**: nenhum (somente docs/triagem).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+- **THREAD**: `TH-2026-01-30-ct-offline-triage`
+
 #### 2026-01-29 — [CROSS][DOCS] Organização inicial do conhecimento (bootstrap)
 
 - **O que**:
