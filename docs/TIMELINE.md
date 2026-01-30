@@ -47,6 +47,16 @@ Formato canônico (copiar/colar):
 - **Rollback**: reverter alterações nos `.md` (não afeta runtime).
 - **THREAD**: `TH-2026-01-30-ct-offline-triage`
 
+#### 2026-01-30 — [CONV][CT][DOCS][OPS] Auditoria estrutural: conveniente + integração CT
+
+- **O que**:
+  - Criado checkup de auditoria estrutural do `conveniente` + integração com CT, com mapa de módulos e riscos P1/P2.
+  - Registrado plano de desengessamento (sem mudança de runtime nesta rodada).
+- **Por quê**: pedido explícito de auditoria “ultra detalhada” para orientar correções sem achismo.
+- **Evidência**: `C:\conveniente\docs\checkups\checkup_2026-01-30_auditoria_conveniente_ct.md`
+- **Reinícios**: nenhum (documentação).
+- **Rollback**: reverter o arquivo `.md` (não afeta runtime).
+
 #### 2026-01-30 — [CT][CROSS][FIX][OPS] Servidores (CT): remover “Desconhecido” e expor flags acionáveis (Humano invocado + Outros (login))
 
 - **O que**:
