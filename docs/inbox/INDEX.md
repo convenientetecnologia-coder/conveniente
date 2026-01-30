@@ -27,4 +27,5 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 | INC-20260129-2340-01 | P1 | done | needs_restart | not_run | Abrir Todos: fica preso em 26/28; sem progresso; não libera Robe/Virtus | `done/INC-20260129-2340-01.md` |
 | INC-20260130-0005-01 | P1 | done | needs_restart | not_run | Invocar Humano: botões no HUD (fechar/pause24h/excluir) + garantir isolamento do navegador humano | `done/INC-20260130-0005-01.md` |
 | INC-20260130-0023-01 | P0 | done | needs_restart | not_run | RM3: estoque liberou conta, mas cadastro/provision falhou | `done/INC-20260130-0023-01.md` |
+| INC-20260130-0047-01 | P1 | done | not_applicable | not_applicable | RM4: entender “modo leve/full” (slowmode) — regras/motivos/mecanismos/impactos | `done/INC-20260130-0047-01.md` |
 

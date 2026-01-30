@@ -101,6 +101,7 @@ Colunas:
 | INC-20260129-2340-01 | `docs/inbox/done/INC-20260129-2340-01.md` | P1 | conveniente | Abrir Todos abre só 26/28; fica parado; sem progresso; não libera Robe/Virtus | pending “impossíveis” por RAM mantinham keepalive do open_all_map; Virtus ficava pausado indefinidamente | CT: fetch_logs(status+desired+provision_audit) (RM4) requestId=0ea405...; perfis faltantes + pause_tick | done | needs_restart | not_run | não | sim |
 | INC-20260130-0005-01 | `docs/inbox/done/INC-20260130-0005-01.md` | P1 | conveniente | Invocar Humano: melhorar mini painel (HUD) com ações úteis (fechar/pause24h/excluir) | HUD via exposeFunction; botões chamam fluxos canônicos; humanControl isola o navegador | provision_audit(human_overlay_action_*) + teste em RM4 | done | needs_restart | not_run | não | sim |
 | INC-20260130-0023-01 | `docs/inbox/done/INC-20260130-0023-01.md` | P0 | conveniente+sitechatbot | RM3 recebeu conta do estoque mas não cadastrou | falha no stock_provision por provision_lock_busy (lock de human_reconcile_login_form) | CT: cmdId+ack (ae137...) + self_update ack (07ea...) | done | needs_restart | not_run | sim | sim |
+| INC-20260130-0047-01 | `docs/inbox/done/INC-20260130-0047-01.md` | P1 | conveniente | RM4: sistema fica em “modo leve” (slowmode) | governor autoMode: sai de full só se freeMB>=3072 e lag<=exit; light pausa robeTickGlobal e deixa Virtus mais lento | CT status snapshot (RM4) + código worker/virtus | done | not_applicable | not_applicable | não | não |
 
 ### Política ultra-rígida (enterprise) — como o INBOX funciona
 
