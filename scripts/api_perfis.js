@@ -616,6 +616,9 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/invoke-human chamada', { nome });
     const op = String(req.headers['x-operator'] || 'unknown');
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H1',location:'api_perfis.js:invoke-human:entry',message:'invoke-human request received',data:{nome:String(nome||''),op,ip:String(req.ip||'')},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) {
       logger.warn('Tentativa de invoke-human em perfil inexistente ou inválido', { nome, error: e && e.message });
@@ -625,6 +628,9 @@ module.exports = (app, workerClient, fileStore) => {
     try {
       const resp = await workerClient.sendWorkerCommand('invoke_human', { nome });
       logger.info('Comando invoke_human disparado', { nome });
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H2',location:'api_perfis.js:invoke-human:resp',message:'invoke-human worker response',data:{nome:String(nome||''),ok:!!(resp&&resp.ok),error:String((resp&&resp.error)||'')},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return res.json(resp);
     } catch (e) {
       logger.error('Erro fatal na rota invoke_human', { nome, rota: '/api/perfis/:nome/invoke-human', error: e && e.message }, e);
@@ -800,6 +806,9 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/human-resume chamada', { nome });
     const op = String(req.headers['x-operator'] || 'unknown');
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H1',location:'api_perfis.js:human-resume:entry',message:'human-resume request received',data:{nome:String(nome||''),op,ip:String(req.ip||'')},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) {
       logger.warn('Tentativa de human-resume para perfil inexistente ou inválido', { nome, error: e && e.message });
@@ -811,9 +820,15 @@ module.exports = (app, workerClient, fileStore) => {
       const resp = await workerClient.sendWorkerCommand('human-resume', { nome }, { timeoutMs: 60000 }).catch(()=>null);
       if (!resp || resp.ok !== true) {
         logger.error('Falha em human-resume para perfil', { nome, error: (resp && resp.error) || 'human_resume_failed' });
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H2',location:'api_perfis.js:human-resume:resp',message:'human-resume worker response (fail)',data:{nome:String(nome||''),ok:false,error:String((resp&&resp.error)||'human_resume_failed')},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         return res.json({ ok: false, error: (resp && resp.error) || 'human_resume_failed' });
       }
       logger.info('Human resume aplicado', { nome });
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H2',location:'api_perfis.js:human-resume:resp',message:'human-resume worker response (ok)',data:{nome:String(nome||''),ok:true},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return res.json({ ok: true });
     } catch (e) {
       logger.error('Erro fatal na rota human-resume', { nome, rota: '/api/perfis/:nome/human-resume', error: e && e.message }, e);

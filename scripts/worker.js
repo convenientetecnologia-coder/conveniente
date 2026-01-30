@@ -8055,6 +8055,9 @@ const handlers = {
       logger.info('[HANDLER] invoke_human chamada', { nome });
 
       const ctrl = controllers.get(nome);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:invoke_human:entry',message:'invoke_human handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl),configurando:!!(ctrl&&ctrl.configurando)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
       const robes = robeMeta[nome] || {};
@@ -8101,7 +8104,16 @@ const handlers = {
       await browserHelper.invocarHumano(ctrl.browser, nome);
 
       try { freezeCooldownIfNotWorking(nome); } catch {}
-      try { await ensureHumanOverlay(nome, ctrl, { reason: 'invoke_human' }); } catch {}
+      try {
+        await ensureHumanOverlay(nome, ctrl, { reason: 'invoke_human' });
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay ok',data:{nome:String(nome||''),humanControl:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      } catch (e) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay error',data:{nome:String(nome||''),error:String((e&&e.message)||e)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
 
       await snapshotStatusAndWrite();
 
@@ -8115,6 +8127,9 @@ const handlers = {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
       const ctrl = controllers.get(nome);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:human-resume:entry',message:'human-resume handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
       // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
