@@ -3976,8 +3976,10 @@ function _pruneWindow(arr, ms) {
 }
 
 const AUTO_CFG = {
-  MEM_ENTER_MB: 2048,
-  MEM_EXIT_MB: 3072,
+  // Governor (light/full) — configurável por env para tuning em produção:
+  // Política (2026-01-30): entrar em light quando < 2GB (reserva do servidor) e sair quando >= 2GB.
+  MEM_ENTER_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_ENTER_MB || '2048', 10) || 2048),
+  MEM_EXIT_MB: Math.max(256, parseInt(process.env.CT_GOV_MEM_EXIT_MB || '2048', 10) || 2048),
   CPU_ENTER: 85,
   CPU_EXIT: 70,
   EMA_ALPHA_CPU: 0.30,
@@ -3985,7 +3987,10 @@ const AUTO_CFG = {
   HOT_TICKS: 3,
   COOL_TICKS: 3,
   MIN_HOLD_MS: 45000,
-  ROBE_LIGHT_MIN_SPACING_MS: 60000,
+  // Em light, Robe NÃO pode parar, apenas reduzir pressão.
+  ROBE_LIGHT_MIN_SPACING_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ROBE_LIGHT_MIN_SPACING_MS || '60000', 10) || 60000),
+  // Quantos Robes no máximo enfileirar por tick em light (0 => não enfileira).
+  ROBE_LIGHT_MAX_ENQUEUE_PER_TICK: Math.max(0, parseInt(process.env.CT_GOV_ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || '1', 10) || 1),
   RAM_KILL_MB: 1600,
   RAM_WARN_MB: 700
 };
@@ -4016,16 +4021,17 @@ const TARGET_ALIVE = parseInt(process.env.TARGET_ALIVE || '0', 10);
 // Sinal de saturação SEM WMI: event-loop lag (ms)
 // - Quando o loop trava, o sistema “se perde” (timers atrasam, navegação falha, about:blank se acumula).
 // - Este é o gatilho enterprise para backpressure antes de quebrar.
-const LOOPLAG_ENTER_MS = parseInt(process.env.CT_LOOPLAG_ENTER_MS || '250', 10);
-const LOOPLAG_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_EXIT_MS  || '120', 10);
-const LOOPLAG_MAX_ENTER_MS = parseInt(process.env.CT_LOOPLAG_MAX_ENTER_MS || '1500', 10);
-const LOOPLAG_MAX_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_MAX_EXIT_MS  || '600', 10);
+// Defaults mais conservadores (menos sensível) — ainda configurável por env.
+const LOOPLAG_ENTER_MS = parseInt(process.env.CT_LOOPLAG_ENTER_MS || '400', 10);
+const LOOPLAG_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_EXIT_MS  || '200', 10);
+const LOOPLAG_MAX_ENTER_MS = parseInt(process.env.CT_LOOPLAG_MAX_ENTER_MS || '2000', 10);
+const LOOPLAG_MAX_EXIT_MS  = parseInt(process.env.CT_LOOPLAG_MAX_EXIT_MS  || '900', 10);
 const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '2000', 10);
 
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
-  light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
+  light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0, lastRamReliefAt: 0 }
 };
 
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
@@ -4086,6 +4092,53 @@ async function governorTick() {
         try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
       }
     }
+
+    // Recuperação leve (best-effort) quando está em light e RAM está muito baixa:
+    // fecha 1 perfil não-crítico para aliviar pressão (rate-limited).
+    try {
+      const enabled = String(process.env.CT_GOV_LIGHT_RAM_RELIEF_ENABLED || '1').trim() !== '0';
+      const minIntervalMs = Math.max(30_000, parseInt(process.env.CT_GOV_LIGHT_RAM_RELIEF_MIN_INTERVAL_MS || '120000', 10) || 120000);
+      const thresholdMB = Math.max(256, parseInt(process.env.CT_GOV_LIGHT_RAM_RELIEF_BELOW_MB || String(AUTO_CFG.RAM_KILL_MB), 10) || AUTO_CFG.RAM_KILL_MB);
+      if (enabled && autoMode.mode === 'light' && freeMB > 0 && freeMB < thresholdMB) {
+        const last = Number(autoMode.light && autoMode.light.lastRamReliefAt || 0) || 0;
+        if (!last || (now - last) >= minIntervalMs) {
+          // Escolhe um candidato “menos crítico”: não em execução/humano/config, preferir não-trabalhando, maior RAM.
+          const alive = Array.from(controllers.keys());
+          const candidates = alive.map(n => {
+            const ctrl = controllers.get(n);
+            const rm = robeMeta[n] || {};
+            return {
+              n,
+              ramMB: (typeof rm.ramMB === 'number') ? rm.ramMB : -1,
+              trabalhando: !!(ctrl && ctrl.trabalhando),
+              configurando: !!(ctrl && ctrl.configurando),
+              humanControl: !!(ctrl && ctrl.humanControl),
+              robeExec: !!(rm && rm.emExecucao),
+              sendLock: !!(rm && rm.sendLockActive)
+            };
+          }).filter(c =>
+            c && c.n &&
+            !c.configurando &&
+            !c.humanControl &&
+            !c.robeExec &&
+            !c.sendLock &&
+            c.ramMB >= 0
+          ).sort((a, b) => {
+            if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
+            return (Number(b.ramMB || 0) || 0) - (Number(a.ramMB || 0) || 0);
+          });
+          const pick = candidates[0];
+          if (pick && pick.n) {
+            autoMode.light.lastRamReliefAt = now;
+            try { await milLog('mil_action', `governor_light_ram_relief_deactivate nome=${pick.n} ramMB=${pick.ramMB} freeMB=${freeMB}`); } catch {}
+            try { await handlers.deactivate({ nome: pick.n, reason: 'governor_light_ram_relief', policy: 'preserveDesired' }); } catch {}
+          } else {
+            autoMode.light.lastRamReliefAt = now;
+            try { await milLog('mil_action', `governor_light_ram_relief_skip no_candidate freeMB=${freeMB}`); } catch {}
+          }
+        }
+      }
+    } catch {}
   } catch {}
 }
 
@@ -5647,19 +5700,35 @@ async function robeTickGlobal() {
       return;
     }
   } catch {}
-  // Virtus-first: em modo lento (CPU/loop lag), o Robe pode pausar para manter atendimento.
-  if (autoMode && autoMode.mode && autoMode.mode !== 'full') {
+  // Em light: NÃO pode pausar Robe por completo. Apenas reduzir pressão (throttle).
+  const isLight = !!(autoMode && autoMode.mode && autoMode.mode !== 'full');
+  let lightMaxEnqueue = null;
+  if (isLight) {
     try {
       autoMode.light = autoMode.light || {};
-      autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
       const now = Date.now();
-      const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
-      if (!lastLog || (now - lastLog) > 60000) {
-        autoMode.light._lastRobeSkipLogAt = now;
-        await milLog('mil_action', `robeTickGlobal_skip_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''}`);
+      const nextAt = Number(autoMode.light.nextRobeEnqueueAt || 0) || 0;
+      lightMaxEnqueue = Number(AUTO_CFG.ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || 0) || 0;
+      if (lightMaxEnqueue <= 0) {
+        autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
+        const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
+        if (!lastLog || (now - lastLog) > 60000) {
+          autoMode.light._lastRobeSkipLogAt = now;
+          await milLog('mil_action', `robeTickGlobal_skip_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} policy=max0`);
+        }
+        return;
       }
+      if (nextAt && now < nextAt) {
+        autoMode.light.robeSkipped = Number(autoMode.light.robeSkipped || 0) + 1;
+        const lastLog = Number(autoMode.light._lastRobeSkipLogAt || 0) || 0;
+        if (!lastLog || (now - lastLog) > 60000) {
+          autoMode.light._lastRobeSkipLogAt = now;
+          await milLog('mil_action', `robeTickGlobal_throttle_due_slowmode mode=${autoMode.mode} reason=${autoMode.reason || ''} nextAt=${nextAt}`);
+        }
+        return;
+      }
+      autoMode.light.nextRobeEnqueueAt = now + AUTO_CFG.ROBE_LIGHT_MIN_SPACING_MS;
     } catch {}
-    return;
   }
 
   const perfisArr = loadPerfisJson();
@@ -5686,6 +5755,7 @@ async function robeTickGlobal() {
   }));
   const prontos = prontosArr.filter(Boolean);
 
+  let enqCount = 0;
   for (const nome of prontos) {
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser) continue;
@@ -5786,6 +5856,8 @@ async function robeTickGlobal() {
             estado: 'idle',
             cooldownSec: await normalizeCooldown(nome)
           });
+    enqCount++;
+    if (isLight && lightMaxEnqueue != null && enqCount >= lightMaxEnqueue) break;
         }
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
