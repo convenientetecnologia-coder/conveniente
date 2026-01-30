@@ -486,3 +486,26 @@ Formato canônico (copiar/colar):
   - `C:\conveniente\docs\inbox\INC-20260129-2100-01.md`
 - **Reinícios**: nenhum (docs).
 - **THREAD**: `TH-2026-01-29-inbox-archive-per-inc`
+
+---
+
+#### 2026-01-29 — [CONVENIENTE][P1] Abrir/Fechar (painel): “Fechar Todos” não pode reabrir; “Abrir Todos 24h” modo seguro + lock renovável
+
+- **Sintoma (humano)**: clicar “Fechar Todos” era lento e “brigava” com o sistema (reabria durante o fechamento); “Abrir Todos” gerava concorrência/travamentos e às vezes parecia abrir sozinho após restart.
+- **Causa raiz**:
+  - Painel fazia `deactivate` perfil-a-perfil sem o passo atômico `desired.active=false` para todos → `nurseTick` via `desired.active=true` e podia reabrir.
+- **Correções**:
+  - Painel passou a chamar endpoints canônicos:
+    - `POST /api/perfis/close-all` (modo seguro; corta reabertura via desired)
+    - `POST /api/perfis/open-all-24h` (modo seguro)
+  - `open-all-24h`: TTL do `provision_lock` virou **curto e renovável** (`OPEN_ALL_LOCK_TTL_MS`, default 2min) com keepalive por shard no `nurseTick`, e finalização automática ao expirar.
+  - `provision_lock.meta.kind`: `stock_provision` não pausa Virtus globalmente; pausa só em `open_all_map`/`close_all`.
+- **Evidência (CT)**:
+  - RM4 `provision_audit`: eventos `close_all_api_called` + `worker_hard_close_*` confirmam endpoint canônico.
+- **Arquivos**:
+  - `C:\conveniente\public\index.html`
+  - `C:\conveniente\scripts\api_perfis.js`
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\scripts\dashboard.js`
+- **Reinícios**: `conveniente` (para runtime novo aplicar).
+- **THREAD**: `TH-2026-01-29-open-close-all-governance`

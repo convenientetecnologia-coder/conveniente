@@ -90,6 +90,7 @@ Colunas:
 |---|---|---|---|---|---|---|---|---|
 | INC-YYYYMMDD-HHMM-01 | P1 | conveniente | … | … | logs_manifest + fetch_logs(keys=…) | need_evidence | não | sim |
 | INC-20260129-2100-01 | P1 | sitechatbot+conveniente | conta do estoque fica “reserved” mas não provisiona (falhas em massa) | hook do CT não atualiza job/solta reserva (ex.: busca por command_id limitada) e/ou falta de evidência no ACK | CT DB (jobs/accounts) + ack files + provision_audit.jsonl | in_progress | não | não |
+| INC-20260129-2058-02 | P1 | conveniente | close_all lento/reabre; open_all concorre; auto-open no boot | nurse/desired/autoMode abrindo durante close_all; UI chamando endpoint antigo; governança faltando | provision_audit(query close_all/open_all/nurse) + status snapshot | in_progress | não | sim |
 
 ---
 

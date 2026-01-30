@@ -1163,7 +1163,9 @@ module.exports = (app, workerClient, fileStore) => {
       // - O nurse continua abrindo/probando 1 por vez (owner atravessa o lock).
       lockOwner = `open_all_map:${Date.now()}`;
       try {
-        const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 25 * 60 * 1000, meta: { kind: 'open_all_map', by: op.slice(0, 120) } });
+        // TTL curto e renovável: workers fazem keepalive enquanto houver perfis do shard a abrir.
+        const ttl0 = Math.max(60_000, Number(process.env.OPEN_ALL_LOCK_TTL_MS || (2 * 60 * 1000)) || (2 * 60 * 1000));
+        const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: ttl0, meta: { kind: 'open_all_map', by: op.slice(0, 120) } });
         if (!lk || !lk.ok) {
           const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
           return res.json({ ok: false, error: `open_all_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
@@ -1264,7 +1266,7 @@ module.exports = (app, workerClient, fileStore) => {
         // Prioridade máxima: se existir lock ativo (ex.: open_all_map/login_remediate),
         // o close_all deve PREEMPTAR (o usuário quer “fechar agora”).
         try { provisionLock.release({ force: true }); } catch {}
-        const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 12 * 60 * 1000, meta: { op: 'close_all' } });
+        const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 12 * 60 * 1000, meta: { kind: 'close_all', by: String(by || '').slice(0, 120) } });
         if (!lk || !lk.ok) {
           const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
           return res.json({ ok: false, error: `close_all_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });

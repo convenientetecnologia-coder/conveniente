@@ -1979,67 +1979,35 @@
     }
 
     async function startAllSequential() {
+      // Militar/enterprise: o painel NÃO deve abrir navegador perfil-a-perfil em paralelo com o nurse.
+      // Isso cria concorrência e “sensação de caos”.
+      //
+      // O fluxo canônico é: /api/perfis/open-all-24h
+      // - seta desired de forma atômica (active=true, virtus=off)
+      // - inicia lock de mapeamento (open_all_map)
+      // - os workers fazem a abertura 1 por vez com probe (Messenger first) e classificação (login/captcha/identity)
       if (startAllLock) { alert('Abertura em massa já está em andamento.'); return; }
       if (stopAllLock)  { alertMassActionRunning(); return; }
       startAllLock = true;
       setGlobalActionButtonsDisabled(true);
       const startBtn = document.getElementById('startAllBtn');
-      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Iniciando...'; }
+      if (startBtn) { startBtn.disabled = true; startBtn.style.opacity = '0.7'; startBtn.style.cursor = 'not-allowed'; startBtn.textContent = 'Abrindo (modo seguro)...'; }
       try {
-        // ALTERAÇÃO: usar /api/perfis para enumerar TODOS os perfis cadastrados
-        let perfis = [];
-        const lp = await window.electronAPI.listPerfis();
-        if (lp && lp.ok && Array.isArray(lp.perfis)) {
-          perfis = lp.perfis;
-        } else {
-          // fallback caso /api/perfis indisponível (dev/edge/backward)
-          const st = await window.electronAPI.getStatus();
-          perfis = st?.perfis || [];
-        }
-        // Ordem: como retornado por /api/perfis
-        for (let i = 0; i < perfis.length; i++) {
-          const p = perfis[i];
-          // Re-checa status a cada iteração (robusto)
-          try {
-            await ensureResourcesOk({ minFreeMB: 3072 }); // ALTERAÇÃO: SEMPRE usa 3GB militar
-
-            // Ativar navegador se necessário
-            if (!p.active) {
-              await window.electronAPI.activate(p.nome);
-              // Espera ficar ativo
-              await waitUntil(async () => {
-                const st2 = await window.electronAPI.getStatus();
-                const cur = (st2.perfis || []).find(x => x.nome === p.nome);
-                return cur && cur.active;
-              }, { timeoutMs: 60000, intervalMs: 400 });
-              // Pausa pequena entre aberturas
-              await sleep(1500);
-            }
-
-            // Start work (Virtus/24h)
-            await window.electronAPI.startWork(p.nome);
-            // Aguarda “trabalhando” refletir (tolerante)
-            await waitUntil(async () => {
-              const st3 = await window.electronAPI.getStatus();
-              const cur = (st3.perfis || []).find(x => x.nome === p.nome);
-              return cur && cur.trabalhando;
-            }, { timeoutMs: 30000, intervalMs: 400 });
-
-            // Resgata lista atualizada para próximo ciclo via /api/perfis (NÃO usar /api/status)
-            const lpNext = await window.electronAPI.listPerfis();
-            const nextList = Array.isArray(lpNext) ? lpNext : (lpNext && Array.isArray(lpNext.perfis) ? lpNext.perfis : []);
-            perfis.splice(0, perfis.length, ...(nextList || []));
-          } catch (e) {
-            console.warn('[StartAll] Falha em', p && p.nome, e && e.message || e);
-          }
-        }
+        const r = await fetch('/api/perfis/open-all-24h', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_open_all' },
+          body: JSON.stringify({})
+        }).then(x => x.json()).catch(()=>null);
+        if (!r || r.ok !== true) throw new Error((r && r.error) ? String(r.error) : 'open_all_failed');
+        // Deixa rodar em background; o painel acompanha por status.
+        await new Promise(r => setTimeout(r, 500));
+        reloadPerfis();
       } catch (e) {
-        alert('Falha na sequência: ' + (e && e.message || e));
+        alert('Falha ao iniciar Abrir Todos (modo seguro): ' + (e && e.message || e));
       } finally {
-        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir 24h'; }
+        if (startBtn) { startBtn.disabled = false; startBtn.style.opacity = ''; startBtn.style.cursor = ''; startBtn.textContent = 'Abrir Todos 24h'; }
         setGlobalActionButtonsDisabled(false);
         startAllLock = false;
-        reloadPerfis();
       }
     }
     // ======================= FIM ALTERAÇÃO BLOQUEIO RAM "ABRIR TODOS" ========================
@@ -2124,89 +2092,31 @@
 
     // 4.4) Fechar todos em PARALELO com limite de concorrência (RÁPIDO e CONFIÁVEL)
     async function stopAllSequential() {
+      // Militar/enterprise: o painel NÃO deve “brigar” com o nurse fechando perfil-a-perfil
+      // (o nurse reabre porque desired.active continua true).
+      //
+      // O fluxo canônico é: /api/perfis/close-all
+      // - PASSO ATÔMICO: desired.active=false para todos (corta reaberturas)
+      // - Loop robusto: deactivate com retry e hard-close
       if (stopAllLock) { alert('Fechamento em massa já está em andamento.'); return; }
       if (startAllLock) { alertMassActionRunning(); return; }
       stopAllLock = true;
       setGlobalActionButtonsDisabled(true);
       const stopBtn = document.getElementById('stopAllBtn');
-      if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando...'; }
-
-      function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-
-      async function gatherActives() {
-        const st = await window.electronAPI.getStatus().catch(()=>null);
-        const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
-        return arr.filter(p => p && p.nome && p.active === true).map(p => ({ nome: p.nome }));
-      }
-
+      if (stopBtn) { stopBtn.disabled = true; stopBtn.style.opacity = '0.7'; stopBtn.style.cursor = 'not-allowed'; stopBtn.textContent = 'Fechando (modo seguro)...'; }
       try {
-        // PASSO 1 — Coleta inicial de ativos (active: true)
-        let ativos = await gatherActives();
-        const totalInicial = ativos.length;
-        let closed = 0, failed = 0;
-
-        if (totalInicial === 0) {
-          if (stopBtn) stopBtn.textContent = 'Fechar Todos';
-          stopAllLock = false;
-          setGlobalActionButtonsDisabled(false);
-          return;
+        const r = await fetch('/api/perfis/close-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_close_all' },
+          body: JSON.stringify({})
+        }).then(x => x.json()).catch(()=>null);
+        if (!r || r.ok !== true) {
+          const err = (r && r.cancelled) ? 'close_all_cancelled' : ((r && r.error) ? String(r.error) : 'close_all_failed');
+          throw new Error(err);
         }
-
-        // PASSO 2 — 1ª passada sequencial: fecha todos encontrados como ativos
-        for (const { nome } of ativos) {
-          try {
-            const r = await window.electronAPI.deactivate(nome);
-            if (!r || r.ok !== true) {
-              failed++;
-            } else {
-              closed++;
-            }
-          } catch (e) {
-            failed++;
-            console.warn('[Fechar todos] falha ao fechar', nome, e && e.message || e);
-          }
-          if (stopBtn) stopBtn.textContent = `Fechando... ${closed + failed}/${totalInicial}`;
-          await sleep(80);
-        }
-
-        // Pausa curta para estabilização de estados
-        await sleep(1200);
-
-        // PASSO 3 — 2ª passada (revarredura): fecha os que eventualmente permaneceram ativos
-        let rem = await gatherActives();
-        if (rem.length > 0) {
-          for (const { nome } of rem) {
-            try {
-              const r = await window.electronAPI.deactivate(nome);
-              if (!r || r.ok !== true) {
-                failed++;
-              } else {
-                closed++;
-              }
-            } catch (e) {
-              failed++;
-              console.warn('[Fechar todos][retry] falha ao fechar', nome, e && e.message || e);
-            }
-            if (stopBtn) stopBtn.textContent = `Fechando... ${closed + failed}/${totalInicial}`;
-            await sleep(100);
-          }
-        }
-
-        // PASSO 4 — Verificação final: quantos permanecem ativos?
-        const aindaAtivos = await gatherActives();
-        if (aindaAtivos.length > 0) {
-          console.warn('[Fechar todos] perfis ainda ativos após 2 passadas:', aindaAtivos.map(x => x.nome));
-          alert('Atenção: ' + aindaAtivos.length + ' perfil(is) ainda está(ão) ativo(s). Execute novamente para forçar o fechamento.');
-        } else {
-          console.log('[Fechar todos] Concluído. Encerrados:', closed, 'Falhas:', failed);
-        }
-
-        await sleep(600);
         reloadPerfis();
-
       } catch (e) {
-        console.error('[Fechar todos] Erro crítico', e && e.message || e, e);
-        alert('Falha ao fechar todos: ' + (e && e.message || e));
+        alert('Falha ao fechar todos (modo seguro): ' + (e && e.message || e));
       } finally {
         if (stopBtn) { stopBtn.disabled = false; stopBtn.style.opacity = ''; stopBtn.style.cursor = ''; stopBtn.textContent = 'Fechar Todos'; }
         setGlobalActionButtonsDisabled(false);

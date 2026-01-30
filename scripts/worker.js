@@ -4447,7 +4447,12 @@ async function activateOnce(nome, source = '', operator = '') {
   // humanHold é apenas um "cache" de estado anterior; ao abrir, sempre revalidamos do zero.
   let _humanHoldAtStart = false;
   const opTrim = String(operator || '').trim();
-  const _isBulkOpen = /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim);
+  // Open-all pode chegar com operator=lockOwner (para bypass do provision_lock). Então:
+  // - detecta bulk-open por operator OU por source.
+  const srcTrim = String(source || '').trim();
+  const _isBulkOpen =
+    /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim) ||
+    /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(srcTrim);
   // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
   // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
   const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
@@ -9357,13 +9362,29 @@ async function nurseTick() {
       _nurseTickRunning = false;
       return;
     }
-    // Ultra enterprise: durante provisionamento, pausar Virtus de forma controlada
+    // Ultra enterprise: durante operações globais, pausar Virtus de forma controlada
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
+    // Importante (2026-01-29): NÃO pausar Virtus globalmente durante stock_provision.
+    // Stock provision só pode "mexer em RAM" (deactivate_for_ram) sem parar o robô inteiro.
+    let provisionLockSnap = null;
     try {
       const lk = provisionLock.get ? provisionLock.get() : (provisionLock.isActive() ? { active: true, lock: null } : { active: false, lock: null });
+      provisionLockSnap = lk;
       if (lk && lk.active) {
         const owner = lk.lock && lk.lock.owner ? String(lk.lock.owner) : null;
         const untilMs = lk.lock && lk.lock.untilMs ? Number(lk.lock.untilMs) : 0;
+        const kind = (lk.lock && lk.lock.meta && lk.lock.meta.kind) ? String(lk.lock.meta.kind) : '';
+        const shouldPauseVirtus =
+          kind === 'open_all_map' ||
+          kind === 'close_all' ||
+          // compat retroativa (locks antigos sem meta.kind)
+          (!kind && owner && /^(open_all_map:|close_all:)/i.test(owner));
+
+        if (!shouldPauseVirtus) {
+          // Não pausar virtus para outros locks (ex.: stock_provision).
+          _provisionPauseLastOwner = null;
+          _provisionPauseLastUntilMs = 0;
+        } else {
         const paused = [];
         const skipped = { noVirtus: 0, human: 0, configurando: 0, robeExec: 0, sendLock: 0, other: 0 };
 
@@ -9395,6 +9416,7 @@ async function nurseTick() {
               ts: now,
               event: 'provision_lock_virtus_pause_tick',
               owner,
+              kind: kind || null,
               untilMs,
               controllers: controllers.size,
               pausedCount: paused.length,
@@ -9402,6 +9424,7 @@ async function nurseTick() {
               skipped
             });
           } catch {}
+        }
         }
       } else {
         // lock acabou: reseta para o próximo provisionamento
@@ -9412,6 +9435,62 @@ async function nurseTick() {
 
     const now = Date.now();
     const desired = readJsonFile(desiredPath, { perfis: {} });
+
+    // ===== OPEN-ALL (sequência) — manter lock vivo e finalizar automaticamente =====
+    // Modelo:
+    // - /api/perfis/open-all-24h cria desired._openAll.active=true e segura provision_lock (kind=open_all_map).
+    // - Enquanto existirem perfis do shard para abrir, cada worker mantém o TTL vivo (reentrante).
+    // - Quando todos os shards terminarem (ninguém mais renova), o lock expira sozinho.
+    // - Ao detectar expiração, finalizamos desired._openAll e religamos virtus para perfis que não estão em humanHold.
+    try {
+      const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
+      const oaActive = !!(oa && oa.active === true);
+      const oaOwner = oa ? String(oa.lockOwner || oa.op || '') : '';
+      const lkActive = !!(provisionLockSnap && provisionLockSnap.active);
+      const lkOwner = provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.owner ? String(provisionLockSnap.lock.owner) : '';
+      const lkKind = (provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.meta && provisionLockSnap.lock.meta.kind)
+        ? String(provisionLockSnap.lock.meta.kind)
+        : '';
+
+      // Finalizar: openAll ativo, mas lock já expirou/foi removido => concluir e reativar virtus (safe).
+      if (oaActive && (!lkActive || !oaOwner || lkOwner !== oaOwner)) {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {}; d.perfis = d.perfis || {};
+          d._openAll = d._openAll || {};
+          d._openAll.active = false;
+          d._openAll.doneAt = Date.now();
+          d._openAll.lastError = d._openAll.lastError || null;
+          // Regra do humano: ao concluir o open-all, liberar Virtus para quem NÃO está em humanHold.
+          for (const n of Object.keys(d.perfis || {})) {
+            const cur = d.perfis[n] || {};
+            if (cur && cur.active === true && cur.humanHold !== true && String(cur.virtus || '') === 'off') {
+              d.perfis[n] = { ...cur, virtus: 'on' };
+            }
+          }
+          return d;
+        });
+        try { provisionAudit.append({ ts: Date.now(), event: 'open_all_finalize', ok: true, hadLock: lkActive, lockOwner: lkOwner || null }); } catch {}
+      }
+
+      // Keepalive: se openAll ativo e este shard ainda tem perfis a abrir, estender TTL do lock.
+      if (oaActive && lkActive && oaOwner && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)))) {
+        let pending = 0;
+        try {
+          for (const n of Object.keys(desired.perfis || {})) {
+            if (!n) continue;
+            if (SHARD_SET.size && !inShard(n)) continue;
+            const want = desired.perfis[n] || {};
+            if (want.active === true && !controllers.has(n)) { pending++; }
+          }
+        } catch {}
+        if (pending > 0) {
+          try {
+            // TTL pequeno e renovável => lock cai rápido quando todos terminarem.
+            provisionLock.tryAcquire({ owner: oaOwner, ttlMs: 120000, meta: { kind: 'open_all_keepalive', pending } });
+          } catch {}
+        }
+      }
+    } catch {}
 
     // ===== PRIORIDADE ENTERPRISE: Recurso em análise (Pronto!) =====
     // Se existir qualquer perfil com appealSubmitted=true e appealNextCheckAt<=now e ainda sem controller,
@@ -9669,7 +9748,27 @@ async function nurseTick() {
         try {
           await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
           try {
-            const r = await activateOnce(nome, 'nurse_auto');
+            // Se existe um open-all ativo sob provision_lock (kind=open_all_map),
+            // a abertura precisa:
+            // - bypass do lock (operator = lockOwner)
+            // - entrar em "bulk-open mode" (source contém open_all_24h)
+            let r = null;
+            try {
+              const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
+              const oaActive = !!(oa && oa.active === true);
+              const oaOwner = oa ? String(oa.lockOwner || oa.op || '') : '';
+              const lkActive = !!(provisionLockSnap && provisionLockSnap.active);
+              const lkOwner = provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.owner ? String(provisionLockSnap.lock.owner) : '';
+              const lkKind = (provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.meta && provisionLockSnap.lock.meta.kind)
+                ? String(provisionLockSnap.lock.meta.kind)
+                : '';
+              const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
+              r = useOpenAll
+                ? await activateOnce(nome, 'open_all_24h', oaOwner)
+                : await activateOnce(nome, 'nurse_auto');
+            } catch {
+              r = await activateOnce(nome, 'nurse_auto');
+            }
             if (!r || !r.ok) {
               const err = (r && r.error) || '';
               if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {

@@ -658,7 +658,7 @@ async function execStockProvision(cmd) {
   const lk = provisionLock.tryAcquire({
     owner: lockOwner,
     ttlMs: Math.max(9 * 60 * 1000, budgetMs + (2 * 60 * 1000)),
-    meta: { batchId, cmdId: String(cmd && cmd.id || '') || null }
+    meta: { kind: 'stock_provision', batchId, cmdId: String(cmd && cmd.id || '') || null }
   });
   if (!lk || !lk.ok) {
     const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
