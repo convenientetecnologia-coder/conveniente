@@ -8058,7 +8058,10 @@ const handlers = {
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:invoke_human:entry',message:'invoke_human handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl),configurando:!!(ctrl&&ctrl.configurando)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        try { await issues.append(nome, 'invoke_human_failed', 'browser_not_connected'); } catch {}
+        return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      }
 
       const robes = robeMeta[nome] || {};
       if (robes.emExecucao) {
@@ -8070,6 +8073,7 @@ const handlers = {
       }
 
       ctrl.humanControl = true;
+      try { await issues.append(nome, 'invoke_human_set', 'humanControl=true'); } catch {}
 
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
@@ -8109,10 +8113,12 @@ const handlers = {
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay ok',data:{nome:String(nome||''),humanControl:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
         // #endregion
+        try { await issues.append(nome, 'invoke_human_overlay_ok', 'ok'); } catch {}
       } catch (e) {
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay error',data:{nome:String(nome||''),error:String((e&&e.message)||e)},timestamp:Date.now()})}).catch(()=>{});
         // #endregion
+        try { await issues.append(nome, 'invoke_human_overlay_err', String((e && e.message) || e).slice(0, 120)); } catch {}
       }
 
       await snapshotStatusAndWrite();
@@ -8130,7 +8136,10 @@ const handlers = {
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:human-resume:entry',message:'human-resume handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        try { await issues.append(nome, 'human_resume_failed', 'browser_not_connected'); } catch {}
+        return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
+      }
 
       // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
       // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
@@ -8208,7 +8217,8 @@ const handlers = {
           // 0) Suspensa/banida (UI de suspensão)
           const bd = await browserHelper.detectAccountSuspended(p0).catch(()=>({ banned:false }));
           if (bd && bd.banned) {
-            preflight = { ok: true, state: 'banned', reason: String(bd.reason || 'suspended_ui') };
+        preflight = { ok: true, state: 'banned', reason: String(bd.reason || 'suspended_ui') };
+        try { await issues.append(nome, 'human_resume_preflight', `state=banned reason=${preflight.reason}`); } catch {}
             try { await setBannedFlag(nome, { reason: String(bd.reason || 'suspended_ui'), snippet: String(bd.snippet || '') }); } catch {}
             try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
             try {
@@ -8233,6 +8243,7 @@ const handlers = {
             // appeal_submitted: não retoma automação; arma monitoramento (1h) e mantém Virtus OFF.
             if (rr.includes('appeal_submitted') || rr.includes('appeal')) {
               preflight.state = 'appeal_submitted';
+              try { await issues.append(nome, 'human_resume_preflight', `state=appeal_submitted reason=${String(lr.reason||'')}`); } catch {}
               appealDetectedInPreflight = true;
               try { await setAppealSubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
               ctrl.trabalhando = false;
@@ -8246,6 +8257,7 @@ const handlers = {
             // identity_submitted: entra em monitor 1h (não é login/cookies falhou)
             if (rr.includes('identity_submitted')) {
               preflight.state = 'identity_submitted';
+              try { await issues.append(nome, 'human_resume_preflight', `state=identity_submitted reason=${String(lr.reason||'')}`); } catch {}
               try { await setIdentitySubmittedFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
               ctrl.trabalhando = false;
               try { await stopVirtus(nome); } catch {}
@@ -8256,6 +8268,7 @@ const handlers = {
             // identity_required: estado próprio (não é falha de login)
             if (rr.includes('identity')) {
               preflight.state = 'identity_required';
+              try { await issues.append(nome, 'human_resume_preflight', `state=identity_required reason=${String(lr.reason||'')}`); } catch {}
               try { await setIdentityRequiredFlag(nome, { source: lr.domain || '', url: lr.url || '', title: lr.title || '' }); } catch {}
               ctrl.trabalhando = false;
               try { await stopVirtus(nome); } catch {}
@@ -8272,6 +8285,7 @@ const handlers = {
               rr.includes('checkpoint');
             if (isTwoFactor) {
               preflight.state = 'two_factor';
+              try { await issues.append(nome, 'human_resume_preflight', `state=two_factor reason=${String(lr.reason||'')}`); } catch {}
               try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
               await snapshotStatusAndWrite();
               logger.info('[HANDLER] human-resume preflight -> two_factor', { nome, reason: lr.reason || '' });
@@ -8280,6 +8294,7 @@ const handlers = {
             if (isCaptchaCheckpoint) {
               // Captcha/Checkpoint é um estado próprio: NÃO marcar como "login/cookies falhou".
               preflight.state = 'captcha_checkpoint';
+              try { await issues.append(nome, 'human_resume_preflight', `state=captcha_checkpoint reason=${String(lr.reason||'')}`); } catch {}
               try {
                 await fileStore.withDesiredFileLockUpdate((d) => {
                   d.perfis = d.perfis || {};
@@ -8294,6 +8309,7 @@ const handlers = {
             }
             if (needsHuman) {
               preflight.state = 'needs_human';
+              try { await issues.append(nome, 'human_resume_preflight', `state=needs_human reason=${String(lr.reason||'')}`); } catch {}
               try { await setLoginRemediateFailedFlag(nome, { reason: lr.reason || 'login_requires_human', source: 'human_resume', stage: 'human_resume_preflight' }); } catch {}
               try {
                 await fileStore.withDesiredFileLockUpdate((d) => {
@@ -8352,6 +8368,7 @@ const handlers = {
         }
       } catch (e) {
         preflight = { ok: false, state: 'error', reason: (e && e.message) ? String(e.message) : String(e) };
+        try { await issues.append(nome, 'human_resume_preflight', `state=error reason=${String(preflight.reason||'')}`); } catch {}
       }
 
       if (scheduledLoginRemediate) {
