@@ -23,7 +23,9 @@ const { readCtConfig } = require('./ctConfig');
 
 let timer = null;
 let inFlight = false;
+let pending = false;
 let lastWarnAt = 0;
+let lastTickDoneAt = 0;
 
 // ===== ALTERAÇÃO INÍCIO: adicionado hostIdCache ===========
 let hostIdCache = null;
@@ -1843,14 +1845,30 @@ async function applyCommands(cmds = []) {
 }
 // ===== ALTERAÇÃO FIM ===============================================
 
-async function tick() {
+async function tick(reason = 'interval') {
   if (process.env.DASHBOARD_DEBUG === '1') {
     logger.info('[DASH][TICK] start: ' + new Date().toISOString());
   }
   const start = Date.now();
 
-  if (inFlight) return; // anti-overlap
+  // Enterprise: NUNCA "pular" envio silenciosamente.
+  // Se um tick estiver em voo, marcamos pending e rodamos um tick extra assim que terminar (last-wins).
+  if (inFlight) {
+    pending = true;
+    // log rate-limited para auditoria (evita sumir telemetria por "skip")
+    try {
+      tick._lastInFlightSkipLogAt = tick._lastInFlightSkipLogAt || 0;
+      const nowTs = Date.now();
+      const last = Number(tick._lastInFlightSkipLogAt || 0) || 0;
+      if (!last || (nowTs - last) > 60000) {
+        tick._lastInFlightSkipLogAt = nowTs;
+        logger.warn('[DASH][TICK] inFlight=true -> pending=1 (will run after current finishes)', { reason: String(reason || ''), sinceLastDoneMs: lastTickDoneAt ? (nowTs - lastTickDoneAt) : null });
+      }
+    } catch {}
+    return;
+  }
   inFlight = true;
+  pending = false;
   try {
     // ===== ALTERAÇÃO: obter [status, hostId] e atualizar hostIdCache =====
     const [status, hostId] = await Promise.all([readAggregatedStatus(), getOrCreateHostId()]);
@@ -1896,15 +1914,29 @@ async function tick() {
     debounceWarn('Falha ao enviar status: ' + m);
   } finally {
     inFlight = false;
+    lastTickDoneAt = Date.now();
+    // Se alguém marcou pending durante a execução, roda imediatamente (sem esperar INTERVAL_MS).
+    if (pending) {
+      pending = false;
+      try { setImmediate(() => { tick('pending').catch(() => {}); }); } catch {}
+      return;
+    }
+    // Loop "após concluir": agenda próximo tick só depois de concluir este.
+    // Isso evita concorrência e garante que não existe "cancelamento" de envio por overlap.
+    if (timer !== null) {
+      try { if (timer) clearTimeout(timer); } catch {}
+      try { timer = setTimeout(() => { tick('interval').catch(() => {}); }, INTERVAL_MS); } catch {}
+    }
   }
 }
 
 function startDashboardMonitor() {
   if (timer) return;
-  tick().catch(() => {});
-  timer = setInterval(() => { tick().catch(() => {}); }, INTERVAL_MS);
+  // Marca como "ativo" antes do primeiro tick, para permitir agendamento no finally.
+  timer = 0;
+  tick('boot').catch(() => {});
 
-  const stop = () => { try { clearInterval(timer); } catch {} timer = null; };
+  const stop = () => { try { if (timer) clearTimeout(timer); } catch {} timer = null; };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   process.once('exit', stop);
