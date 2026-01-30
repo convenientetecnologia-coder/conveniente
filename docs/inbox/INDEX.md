@@ -18,7 +18,7 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 
 | id | P | state | rollout | validation | título | arquivo |
 |---|---|---|---|---|---|---|
-| INC-20260130-0905-01 | P0 | need_evidence | not_deployed | not_run | CT marca RM3 OFFLINE mas host está acessível (Servidores + Estoque) | `in_progress/INC-20260130-0905-01.md` |
+| INC-20260130-0905-01 | P0 | cancelled | not_deployed | not_run | CT marca RM3 OFFLINE mas host está acessível (Servidores + Estoque) | `cancelled/INC-20260130-0905-01.md` |
 | INC-20260130-0128-01 | P0 | done | deployed | passed | Abrir Todos não iniciava com 0 browsers (nurseTick early-return) | `done/INC-20260130-0128-01.md` |
 | INC-20260130-0001-01 | P0 | done | not_deployed | not_run | Abrir Todos: 2º clique dava open_all_lock_busy (lock idempotência) | `done/INC-20260130-0001-01.md` |
 | INC-20260129-2100-01 | P1 | done | deployed_partial | not_run | Estoque: “reserved mas não vai” (provision / stock_provision) | `done/INC-20260129-2100-01.md` |

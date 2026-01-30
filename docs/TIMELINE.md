@@ -39,13 +39,26 @@ Formato canônico (copiar/colar):
   - Clarificado no `LIVRO_DE_BORDO.md` que `hostId` não muda com restart; e que a telemetria `/report` é enviada em loop (default 30s).
 - **Por quê**: eliminar achismo (“máquina online” vs “CT recebendo `/report`”) e tornar o estado auditável antes de qualquer refactor.
 - **Evidência**:
-  - `C:\conveniente\docs\inbox\in_progress\INC-20260130-0905-01.md`
+  - `C:\conveniente\docs\inbox\cancelled\INC-20260130-0905-01.md` (movido para cancelled)
   - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
   - `C:\conveniente\docs\inbox\INDEX.md`
   - `C:\conveniente\docs\LIVRO_DE_BORDO.md`
 - **Reinícios**: nenhum (somente docs/triagem).
 - **Rollback**: reverter alterações nos `.md` (não afeta runtime).
 - **THREAD**: `TH-2026-01-30-ct-offline-triage`
+
+#### 2026-01-30 — [CROSS][DOCS][OPS] INBOX: cancelar INC-20260130-0905-01 (RM3 OFFLINE falso) a pedido do humano
+
+- **O que**:
+  - Marcado `INC-20260130-0905-01` como `cancelled` e movido para `docs/inbox/cancelled/`.
+  - Atualizados índices (`docs/inbox/INDEX.md` e `INBOX_RELATOS_DO_HUMANO.md`) para não deixar link quebrado.
+- **Por quê**: cancelado a pedido do humano (decisão consciente).
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\cancelled\INC-20260130-0905-01.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+- **Reinícios**: nenhum (somente docs).
+- **Rollback**: `git revert <commit>` (não afeta runtime).
 
 #### 2026-01-29 — [CROSS][DOCS] Organização inicial do conhecimento (bootstrap)
 
