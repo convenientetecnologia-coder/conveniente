@@ -5945,8 +5945,6 @@ async function robeTickGlobal() {
             estado: 'idle',
             cooldownSec: await normalizeCooldown(nome)
           });
-    enqCount++;
-    if (isLight && lightMaxEnqueue != null && enqCount >= lightMaxEnqueue) break;
         }
       } catch (e) {
         robeUpdateMeta(nome, { estado: 'erro', cooldownSec: await normalizeCooldown(nome) });
@@ -5996,6 +5994,8 @@ async function robeTickGlobal() {
     });
 
     robeUpdateMeta(nome, { emFila: true });
+    enqCount++;
+    if (isLight && lightMaxEnqueue != null && enqCount >= lightMaxEnqueue) break;
   }
 
   for (const n of Object.keys(robeMeta)) {
