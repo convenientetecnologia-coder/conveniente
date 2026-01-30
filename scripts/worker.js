@@ -52,6 +52,8 @@ const CT_ARCHIVE_QUEUE_DIR = path.join(DATA_DIR, 'ct_archive_queue');
 const CT_ARCHIVE_QUEUE_PENDING_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'pending');
 const CT_ARCHIVE_QUEUE_DONE_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'done');
 const CT_ARCHIVE_EVID_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'evidence');
+const GOV_SNAP_JSONL = path.join(DATA_DIR, 'governor_snapshots.jsonl');
+const GOV_SNAP_LEADER_LOCK = path.join(DATA_DIR, '_governor_snapshot_leader.lock');
 
 function ensureDirSync(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
 function safeFilePart(s) {
@@ -65,6 +67,73 @@ function appendJsonl(fp, obj) {
     ensureDirSync(path.dirname(fp));
     fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
   } catch {}
+}
+
+function _readJsonSafe(fp, fallback = null) {
+  try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { return fallback; }
+}
+
+function _tryBecomeGovSnapshotLeader() {
+  const now = Date.now();
+  const ttlMs = Math.max(30_000, parseInt(process.env.CT_GOV_SNAPSHOT_LEADER_TTL_MS || String(2 * 60 * 1000), 10) || (2 * 60 * 1000));
+  try {
+    ensureDirSync(path.dirname(GOV_SNAP_LEADER_LOCK));
+    if (fs.existsSync(GOV_SNAP_LEADER_LOCK)) {
+      try {
+        const st = fs.statSync(GOV_SNAP_LEADER_LOCK);
+        const ageMs = now - Number(st.mtimeMs || 0);
+        if (ageMs > ttlMs) {
+          // stale leader: tentar tomar posse
+          try { fs.unlinkSync(GOV_SNAP_LEADER_LOCK); } catch {}
+        } else {
+          return false;
+        }
+      } catch {
+        // se não der pra stat, tenta tomar posse
+        try { fs.unlinkSync(GOV_SNAP_LEADER_LOCK); } catch {}
+      }
+    }
+    const fd = fs.openSync(GOV_SNAP_LEADER_LOCK, 'wx');
+    try {
+      const hostId = readHostIdSync();
+      const obj = { ts: now, hostId: hostId || null, pid: process.pid, leader: true };
+      fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
+      try { fs.fsyncSync(fd); } catch {}
+    } finally {
+      try { fs.closeSync(fd); } catch {}
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function _isGovSnapshotLeader() {
+  try {
+    if (!fs.existsSync(GOV_SNAP_LEADER_LOCK)) return false;
+    const st = fs.statSync(GOV_SNAP_LEADER_LOCK);
+    const ttlMs = Math.max(30_000, parseInt(process.env.CT_GOV_SNAPSHOT_LEADER_TTL_MS || String(2 * 60 * 1000), 10) || (2 * 60 * 1000));
+    const ageMs = Date.now() - Number(st.mtimeMs || 0);
+    if (ageMs > ttlMs) return false;
+    const j = _readJsonSafe(GOV_SNAP_LEADER_LOCK, null);
+    if (!j || j.pid !== process.pid) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function _touchGovSnapshotLeader() {
+  try {
+    if (!_isGovSnapshotLeader()) return false;
+    const now = Date.now();
+    const hostId = readHostIdSync();
+    const obj = { ts: now, hostId: hostId || null, pid: process.pid, leader: true };
+    fs.writeFileSync(GOV_SNAP_LEADER_LOCK, JSON.stringify(obj, null, 2), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function newFlowId(prefix = 'flow') {
@@ -3993,10 +4062,7 @@ const AUTO_CFG = {
   ROBE_LIGHT_MAX_ENQUEUE_PER_TICK: Math.max(0, parseInt(process.env.CT_GOV_ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || '1', 10) || 1),
   // Confirmações por tempo (evita “piscar” e evita entrar em light por flutuação).
   ENTER_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ENTER_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000)),
-  EXIT_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_EXIT_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000)),
-  LIGHT_MAX_MS: Math.max(60_000, parseInt(process.env.CT_GOV_LIGHT_MAX_MS || String(30 * 60 * 1000), 10) || (30 * 60 * 1000)),
-  HARD_RESET_ENABLED: String(process.env.CT_GOV_HARD_RESET_ENABLED || '1').trim() !== '0',
-  HARD_RESET_COOLDOWN_MS: Math.max(10 * 60 * 1000, parseInt(process.env.CT_GOV_HARD_RESET_COOLDOWN_MS || String(6 * 60 * 60 * 1000), 10) || (6 * 60 * 60 * 1000))
+  EXIT_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_EXIT_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000))
 };
 
 const ramPolicy = require('./ramPolicy.js');
@@ -4038,7 +4104,6 @@ const autoMode = {
   // pressureSince/recoveredSince implementam a janela de confirmação (5min).
   pressureSince: 0,
   recoveredSince: 0,
-  hardReset: { active: false, phase: '', startedAt: 0, cooldownUntil: 0, savedActiveNames: [], memHighSince: 0 },
   light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
 };
 
@@ -4073,10 +4138,10 @@ async function governorTick() {
 
     const memLow = (freeMB > 0 && freeMB < AUTO_CFG.MEM_ENTER_MB);
     const memHigh = (freeMB > 0 && freeMB >= AUTO_CFG.MEM_EXIT_MB);
-    const lagHot = (lag.meanMs >= LOOPLAG_ENTER_MS) || (lag.maxMs >= LOOPLAG_MAX_ENTER_MS);
-    const lagCool = (lag.meanMs <= LOOPLAG_EXIT_MS) && (lag.maxMs <= LOOPLAG_MAX_EXIT_MS);
-    const pressureNow = memLow || lagHot;
-    const recoveredNow = memHigh; // política: full/light definido primariamente por RAM (2GB)
+    // Política (triagem 2026-01-30): modo leve/full definido por RAM.
+    // Lag continua sendo observado (telemetria), mas NÃO deve causar mudança de modo sozinho.
+    const pressureNow = memLow;
+    const recoveredNow = memHigh;
 
     // Janela de confirmação (5min) para entrar/sair.
     if (pressureNow) {
@@ -4090,113 +4155,12 @@ async function governorTick() {
       autoMode.recoveredSince = 0;
     }
 
-    // Hard reset total: só se ficar muito tempo em light sem recuperar.
-    // Importante: NÃO é fechamento gradual; é “tudo ou nada”.
-    try {
-      if (AUTO_CFG.HARD_RESET_ENABLED && autoMode.mode === 'light' && !autoMode.hardReset.active) {
-        const coolUntil = Number(autoMode.hardReset.cooldownUntil || 0) || 0;
-        if (!coolUntil || now >= coolUntil) {
-          const ageMs = now - Number(autoMode.since || now);
-          if (ageMs >= AUTO_CFG.LIGHT_MAX_MS && !recoveredNow) {
-            autoMode.hardReset.active = true;
-            autoMode.hardReset.phase = 'closing';
-            autoMode.hardReset.startedAt = now;
-            autoMode.hardReset.memHighSince = 0;
-            // snapshot do desired.active para restaurar depois
-            try {
-              const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
-              const saved = [];
-              for (const n of Object.keys((desiredSnap && desiredSnap.perfis) || {})) {
-                const w = desiredSnap.perfis[n] || {};
-                if (w && w.active === true) saved.push(String(n));
-              }
-              autoMode.hardReset.savedActiveNames = saved.slice(0, 400);
-            } catch { autoMode.hardReset.savedActiveNames = []; }
-            try { await milLog('mil_action', `governor_hard_reset_begin ageMs=${ageMs} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
-            // 1) Desliga desired.active para todos (evita reabertura durante o reset)
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d = d || {}; d.perfis = d.perfis || {};
-                d._governorHardReset = {
-                  active: true,
-                  phase: 'closing',
-                  startedAt: now,
-                  savedActiveNames: (autoMode.hardReset.savedActiveNames || []).slice(0, 400),
-                  note: 'auto_hard_reset_after_light_timeout'
-                };
-                for (const n of Object.keys(d.perfis || {})) {
-                  const cur = d.perfis[n] || {};
-                  d.perfis[n] = { ...cur, active: false, virtus: 'off' };
-                }
-                return d;
-              }).catch(()=>null);
-            } catch {}
-          }
-        }
-      }
-    } catch {}
-
-    // Executa o hard reset: fecha todos (sem gradual) e depois restaura desired quando estabilizar.
-    try {
-      if (autoMode.hardReset && autoMode.hardReset.active) {
-        const phase = String(autoMode.hardReset.phase || '');
-        if (phase === 'closing') {
-          // Fecha todos os controllers deste worker; os demais workers também fecharão pelo desired.active=false.
-          for (const nome of Array.from(controllers.keys())) {
-            try { await handlers.deactivate({ nome, reason: 'governor_hard_reset', policy: 'preserveDesired' }); } catch {}
-          }
-          if (controllers.size === 0) {
-            autoMode.hardReset.phase = 'waiting_recover';
-            autoMode.hardReset.memHighSince = 0;
-            try { await milLog('mil_action', `governor_hard_reset_closed freeMB=${freeMB}`); } catch {}
-          }
-          // durante reset, não alternar modos
-          return;
-        }
-        if (phase === 'waiting_recover') {
-          if (memHigh) {
-            if (!autoMode.hardReset.memHighSince) autoMode.hardReset.memHighSince = now;
-          } else {
-            autoMode.hardReset.memHighSince = 0;
-          }
-          const okStable = autoMode.hardReset.memHighSince && (now - autoMode.hardReset.memHighSince) >= AUTO_CFG.EXIT_CONFIRM_MS;
-          if (okStable) {
-            // restaura desired.active para os perfis que estavam ativos antes
-            const saved = (autoMode.hardReset.savedActiveNames || []).slice(0, 400);
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d = d || {}; d.perfis = d.perfis || {};
-                for (const n of saved) {
-                  const cur = d.perfis[n] || {};
-                  d.perfis[n] = { ...cur, active: true, virtus: 'on' };
-                }
-                if (d._governorHardReset && d._governorHardReset.active === true) {
-                  d._governorHardReset = { ...(d._governorHardReset || {}), active: false, phase: 'done', doneAt: now };
-                }
-                return d;
-              }).catch(()=>null);
-            } catch {}
-            autoMode.hardReset.active = false;
-            autoMode.hardReset.phase = 'done';
-            autoMode.hardReset.cooldownUntil = now + AUTO_CFG.HARD_RESET_COOLDOWN_MS;
-            autoMode.since = now;
-            autoMode.mode = 'full';
-            autoMode.reason = 'hard_reset_recovered';
-            autoMode.pressureSince = 0;
-            autoMode.recoveredSince = 0;
-            try { await milLog('mil_action', `governor_hard_reset_restore done saved=${saved.length} freeMB=${freeMB}`); } catch {}
-          }
-          return;
-        }
-      }
-    } catch {}
-
     // Troca normal full/light baseada em janela de confirmação.
     if (autoMode.mode === 'full') {
       if (autoMode.pressureSince && (now - autoMode.pressureSince) >= AUTO_CFG.ENTER_CONFIRM_MS && _canSwitch()) {
         autoMode.mode = 'light';
         autoMode.since = now;
-        autoMode.reason = memLow ? 'mem_low' : 'loop_lag';
+        autoMode.reason = 'mem_low';
         try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
       }
     } else {
@@ -4206,7 +4170,7 @@ async function governorTick() {
         autoMode.reason = 'recovered';
         autoMode.pressureSince = 0;
         autoMode.recoveredSince = 0;
-        try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs} lagCool=${lagCool?'1':'0'}`); } catch {}
+        try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
       }
     }
   } catch {}
@@ -4631,6 +4595,61 @@ setInterval(memorySweep, 10 * 60 * 1000);
 
 // Governor (NORMAL/SLOW) — roda sempre, ultra leve (sem WMI)
 setInterval(() => { governorTick().catch(()=>{}); }, GOVERNOR_TICK_MS);
+
+function governorSnapshotTick() {
+  const enabled = String(process.env.CT_GOV_SNAPSHOT_ENABLED || '1').trim() !== '0';
+  if (!enabled) return;
+
+  // Leader election simples (1 writer por host) para evitar duplicar snapshots por shard.
+  if (!_isGovSnapshotLeader()) _tryBecomeGovSnapshotLeader();
+  if (!_isGovSnapshotLeader()) return;
+  _touchGovSnapshotLeader();
+
+  const now = Date.now();
+  const hostId = readHostIdSync();
+  const freeMB = getAvailableMB();
+  const mu = (() => { try { return process.memoryUsage(); } catch { return null; } })();
+  const rssMB = mu && mu.rss ? Math.round(mu.rss / (1024 * 1024)) : null;
+  const heapUsedMB = mu && mu.heapUsed ? Math.round(mu.heapUsed / (1024 * 1024)) : null;
+
+  let desiredActive = null;
+  let desiredTotal = null;
+  try {
+    const d = readJsonFile(desiredPath, { perfis: {} });
+    const perfis = (d && d.perfis) ? d.perfis : {};
+    desiredTotal = Object.keys(perfis).length;
+    let a = 0;
+    for (const n of Object.keys(perfis)) {
+      const w = perfis[n] || {};
+      if (w && w.active === true) a++;
+    }
+    desiredActive = a;
+  } catch {}
+
+  appendJsonl(GOV_SNAP_JSONL, {
+    ts: now,
+    hostId: hostId || null,
+    pid: process.pid,
+    shardSize: (typeof SHARD_SET !== 'undefined' && SHARD_SET && SHARD_SET.size) ? SHARD_SET.size : 0,
+    mode: String(autoMode && autoMode.mode || 'unknown'),
+    reason: String(autoMode && autoMode.reason || ''),
+    since: Number(autoMode && autoMode.since || 0) || 0,
+    freeMB,
+    lagMeanMs: Number(autoMode && autoMode.eventLoopLagMs || 0) || 0,
+    lagMaxMs: Number(autoMode && autoMode.eventLoopLagMaxMs || 0) || 0,
+    rssMB,
+    heapUsedMB,
+    controllers: (typeof controllers !== 'undefined' && controllers && typeof controllers.size === 'number') ? controllers.size : null,
+    desiredTotal,
+    desiredActive,
+    buildId: (typeof BUILD_INFO !== 'undefined' && BUILD_INFO && BUILD_INFO.buildId) ? String(BUILD_INFO.buildId).slice(0, 220) : null
+  });
+}
+
+// Snapshot 1/min (48h = ~2880 linhas) — leve, append-only.
+const GOV_SNAPSHOT_INTERVAL_MS = Math.max(10_000, parseInt(process.env.CT_GOV_SNAPSHOT_INTERVAL_MS || String(60 * 1000), 10) || (60 * 1000));
+setInterval(() => { try { governorSnapshotTick(); } catch {} }, GOV_SNAPSHOT_INTERVAL_MS);
+setTimeout(() => { try { governorSnapshotTick(); } catch {} }, 5000);
 
 function killGuardActive(nome) {
   return robeMeta[nome]?.killGuardUntil && robeMeta[nome].killGuardUntil > Date.now();
