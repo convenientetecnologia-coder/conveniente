@@ -1044,6 +1044,47 @@
         safeListPerfis()
       ]);
 
+      // ====== NOVO: progresso do "Abrir Todos" (openAll) vindo do backend ======
+      try {
+        const oa = st && st.openAll ? st.openAll : null;
+        const startBtn = document.getElementById('startAllBtn');
+        if (startBtn) {
+          if (oa && oa.active === true && Array.isArray(oa.queue) && oa.queue.length) {
+            // Progresso: conta quantos nomes do queue estão active=true
+            const perfisArr = Array.isArray(st && st.perfis) ? st.perfis : [];
+            const byNome = new Map(perfisArr.map(p => [p.nome, p]));
+            let opened = 0;
+            for (const n of oa.queue) {
+              const p = byNome.get(n);
+              if (p && p.active) opened++;
+            }
+            const total = oa.queue.length;
+            startBtn.disabled = true;
+            startBtn.style.opacity = '0.7';
+            startBtn.style.cursor = 'not-allowed';
+            startBtn.textContent = `Abrindo (modo seguro)... ${opened}/${total}`;
+            startBtn.title = (oa.lastError ? ('OpenAll: ' + String(oa.lastError)) : '') + (oa.lastOpened ? (` | último: ${oa.lastOpened}`) : '');
+          } else {
+            // Se acabou e foi parcial, avisar 1x por doneAt (sem spam).
+            const doneAt = oa && typeof oa.doneAt === 'number' ? oa.doneAt : 0;
+            if (doneAt && doneAt !== (window.__lastOpenAllDoneAt || 0)) {
+              window.__lastOpenAllDoneAt = doneAt;
+              if (oa && oa.lastError === 'partial_ram') {
+                const opened = (typeof oa.partialOpened === 'number') ? oa.partialOpened : null;
+                const total = (typeof oa.partialTotal === 'number') ? oa.partialTotal : null;
+                try { alert(`Abrir Todos concluído (parcial por RAM). ${opened!=null&&total!=null?`${opened}/${total}`:'Veja detalhes no painel.'}`); } catch {}
+              }
+            }
+            // Estado normal
+            startBtn.disabled = false;
+            startBtn.style.opacity = '';
+            startBtn.style.cursor = '';
+            startBtn.textContent = 'Abrir Todos 24h';
+            startBtn.title = '';
+          }
+        }
+      } catch {}
+
       // ====== NOVO: sincronizar ações em massa vindas do backend (comandos remotos) ======
       try {
         const op = st && st.ops && st.ops.close_all ? st.ops.close_all : null;

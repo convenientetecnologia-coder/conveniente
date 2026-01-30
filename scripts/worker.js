@@ -9246,6 +9246,16 @@ let _provisionPauseLastLogAt = 0;
 let _provisionPauseLastOwner = null;
 let _provisionPauseLastUntilMs = 0;
 
+// Open-all: política para não “travar o servidor” quando faltar recurso para abrir 100%.
+// Se ficar parado por RAM/supervisor por tempo suficiente, finaliza como "sucesso parcial"
+// (sem loop infinito e sem manter Virtus pausado indefinidamente).
+const OPEN_ALL_PARTIAL_CFG = {
+  enabled: String(process.env.OPEN_ALL_PARTIAL_ENABLED || '1').trim() !== '0',
+  minAgeMs: Math.max(10_000, Number(process.env.OPEN_ALL_PARTIAL_MIN_AGE_MS || 60_000) || 60_000),
+  stallMs: Math.max(15_000, Number(process.env.OPEN_ALL_PARTIAL_STALL_MS || 120_000) || 120_000),
+  denyWindowMs: Math.max(5_000, Number(process.env.OPEN_ALL_PARTIAL_DENY_WINDOW_MS || 45_000) || 45_000)
+};
+
 // ===== Reconciliador de estado (modo humano) =====
 // Problema real observado em produção (RM4): perfis ficam "engessados" com flags antigas
 // (ex.: loginRemediateFailed) mesmo quando a UI mudou para identidade/ban/login_form.
@@ -9595,14 +9605,100 @@ async function nurseTick() {
       // Keepalive: se openAll ativo e este shard ainda tem perfis a abrir, estender TTL do lock.
       if (oaActive && lkActive && oaOwner && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)))) {
         let pending = 0;
+        let pendingNames = [];
+        let ramDeniedPending = [];
+        let stalledSince = 0;
         try {
           for (const n of Object.keys(desired.perfis || {})) {
             if (!n) continue;
             if (SHARD_SET.size && !inShard(n)) continue;
             const want = desired.perfis[n] || {};
-            if (want.active === true && !controllers.has(n)) { pending++; }
+            if (want.active === true && !controllers.has(n)) {
+              pending++;
+              pendingNames.push(String(n));
+            }
           }
         } catch {}
+
+        // Heurística enterprise (P1): se está "preso" abrindo e os pendentes só recebem negação por RAM/supervisor,
+        // finaliza como sucesso parcial para liberar o servidor (Virtus/Robe).
+        try {
+          if (OPEN_ALL_PARTIAL_CFG.enabled && pending > 0) {
+            const now = Date.now();
+            const startedAt = Number(oa && oa.startedAt || 0) || 0;
+            const lastProgressAt = Number(oa && oa.lastProgressAt || 0) || 0;
+            stalledSince = lastProgressAt || startedAt || now;
+
+            for (const n of (pendingNames || [])) {
+              const rm = robeMeta[n] || {};
+              const deniedAt = Number(rm.lastOpenDeniedAt || 0) || 0;
+              const deniedReason = String(rm.lastOpenDeniedReason || '').toLowerCase();
+              const recent = deniedAt && (now - deniedAt) <= OPEN_ALL_PARTIAL_CFG.denyWindowMs;
+              const isRamish =
+                deniedReason.includes('ram_insuficiente_para_ativar') ||
+                deniedReason.includes('supervisor_denied:ram_low') ||
+                deniedReason.includes('supervisor_denied:slots') ||
+                deniedReason.includes('headroom_below_min_after_open');
+              if (recent && isRamish) ramDeniedPending.push(String(n));
+            }
+
+            const ageOk = startedAt && (now - startedAt) >= OPEN_ALL_PARTIAL_CFG.minAgeMs;
+            const stalledOk = stalledSince && (now - stalledSince) >= OPEN_ALL_PARTIAL_CFG.stallMs;
+            if (ageOk && stalledOk && ramDeniedPending.length === pendingNames.length) {
+              // Finaliza e "desliga" desired.active para os que não abriram por limitação (evita loop infinito).
+              try {
+                await fileStore.withDesiredFileLockUpdate((d) => {
+                  d = d || {}; d.perfis = d.perfis || {};
+                  d._openAll = d._openAll || {};
+                  const total = Array.isArray(d._openAll.queue) ? d._openAll.queue.length : 0;
+                  let opened = 0;
+                  try {
+                    for (const qn of (d._openAll.queue || [])) {
+                      if (controllers.has(qn)) opened++;
+                    }
+                  } catch {}
+                  d._openAll.active = false;
+                  d._openAll.doneAt = Date.now();
+                  d._openAll.lastError = 'partial_ram';
+                  d._openAll.partial = true;
+                  d._openAll.partialSkipped = (ramDeniedPending || []).slice(0, 60);
+                  d._openAll.partialReason = 'ram_or_supervisor_denied';
+                  d._openAll.partialOpened = opened;
+                  d._openAll.partialTotal = total;
+                  // Desliga desired.active dos que ficaram impossíveis agora (para não continuar tentando em loop).
+                  for (const nn of (ramDeniedPending || [])) {
+                    const cur = d.perfis[nn] || {};
+                    d.perfis[nn] = { ...cur, active: false, virtus: 'off' };
+                  }
+                  // Libera Virtus para quem ficou ativo e não está em humanHold.
+                  for (const n of Object.keys(d.perfis || {})) {
+                    const cur = d.perfis[n] || {};
+                    if (cur && cur.active === true && cur.humanHold !== true && String(cur.virtus || '') === 'off') {
+                      d.perfis[n] = { ...cur, virtus: 'on' };
+                    }
+                  }
+                  return d;
+                });
+              } catch {}
+              try { provisionLock.release({ owner: oaOwner, force: false }); } catch {}
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'open_all_finalize_partial',
+                  ok: true,
+                  reason: 'partial_ram',
+                  pending,
+                  pendingNames: (pendingNames || []).slice(0, 60),
+                  skipped: (ramDeniedPending || []).slice(0, 60)
+                });
+              } catch {}
+              // Não faça keepalive se finalizamos agora.
+              pending = 0;
+              pendingNames = [];
+            }
+          }
+        } catch {}
+
         if (pending > 0) {
           try {
             // TTL pequeno e renovável => lock cai rápido quando todos terminarem.
@@ -9891,6 +9987,11 @@ async function nurseTick() {
             }
             if (!r || !r.ok) {
               const err = (r && r.error) || '';
+              try {
+                robeMeta[nome] = robeMeta[nome] || {};
+                robeMeta[nome].lastOpenDeniedAt = Date.now();
+                robeMeta[nome].lastOpenDeniedReason = String(err || '').slice(0, 220);
+              } catch {}
               if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
 
@@ -9911,6 +10012,28 @@ async function nurseTick() {
             } else {
               // NOVO: Backoff fixo de 3s ao invés de 15s
               if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
+              // Progresso do open-all: marca avanço para evitar "stall detector" falso.
+              try {
+                const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
+                const oaActive = !!(oa && oa.active === true);
+                const oaOwner = oa ? String(oa.lockOwner || oa.op || '') : '';
+                const lkActive = !!(provisionLockSnap && provisionLockSnap.active);
+                const lkOwner = provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.owner ? String(provisionLockSnap.lock.owner) : '';
+                const lkKind = (provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.meta && provisionLockSnap.lock.meta.kind)
+                  ? String(provisionLockSnap.lock.meta.kind)
+                  : '';
+                const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
+                if (useOpenAll) {
+                  await fileStore.withDesiredFileLockUpdate((d) => {
+                    d = d || {}; d._openAll = d._openAll || {};
+                    if (d._openAll && d._openAll.active === true) {
+                      d._openAll.lastProgressAt = Date.now();
+                      d._openAll.lastOpened = String(nome || '').slice(0, 120);
+                    }
+                    return d;
+                  }).catch(()=>null);
+                }
+              } catch {}
               logger.info('[NURSE] activateOnce ok', { nome });
             }
           } catch { }
