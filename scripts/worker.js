@@ -9357,14 +9357,31 @@ async function nurseTick() {
         try { provisionAudit.append({ ts: Date.now(), event: 'ct_archive_queue_tick', ok: !!(qr && qr.ok), processed: (qr && qr.processed !== undefined) ? qr.processed : null }); } catch {}
       }
     } catch {}
+    // Importante (P0, 2026-01-30): o nurse NÃO pode "dormir" quando há intenção de abrir.
+    // Open-all e abertura manual começam com controllers=0.
+    // Otimização permitida: só reduzir trabalho quando NÃO existe nenhum desired.active=true e _openAll não está ativo.
+    let desired0 = null;
+    try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch { desired0 = { perfis: {} }; }
+    const hasOpenIntent = (() => {
+      try {
+        const oa = desired0 && desired0._openAll && typeof desired0._openAll === 'object' ? desired0._openAll : null;
+        if (oa && oa.active === true) return true;
+        for (const n of Object.keys((desired0 && desired0.perfis) || {})) {
+          const w = desired0.perfis[n] || {};
+          if (w && w.active === true) return true;
+        }
+      } catch {}
+      return false;
+    })();
+
     if (controllers.size === 0) {
+      // Ainda fazemos o sweep leve (ban/2FA) 1x/min.
       try {
         robeMeta.system = robeMeta.system || {};
         const last = Number(robeMeta.system.nurseZeroControllersSweepAt || 0) || 0;
         if (!last || (now0 - last) > 60_000) { // no máximo 1x/min
           robeMeta.system.nurseZeroControllersSweepAt = now0;
-          const desired0 = readJsonFile(desiredPath, { perfis: {} });
-          for (const nome of Object.keys(desired0.perfis || {})) {
+          for (const nome of Object.keys((desired0 && desired0.perfis) || {})) {
             try {
               const flags = await readAccountFlags(nome).catch(()=>({}));
               // Ban já marcado => tentar excluir (best-effort, idempotente)
@@ -9389,8 +9406,13 @@ async function nurseTick() {
           }
         }
       } catch {}
-      _nurseTickRunning = false;
-      return;
+
+      // Se NÃO há intenção de abrir, pode sair cedo (economia).
+      if (!hasOpenIntent) {
+        _nurseTickRunning = false;
+        return;
+      }
+      // Se há intenção de abrir, continua para o fluxo completo (vai abrir).
     }
     // Ultra enterprise: durante operações globais, pausar Virtus de forma controlada
     // (não interromper envio em andamento; não mexer em perfis em config/humano/robe ativo).
@@ -9464,7 +9486,7 @@ async function nurseTick() {
     } catch {}
 
     const now = Date.now();
-    const desired = readJsonFile(desiredPath, { perfis: {} });
+    const desired = desired0 || readJsonFile(desiredPath, { perfis: {} });
 
     // ===== OPEN-ALL (sequência) — manter lock vivo e finalizar automaticamente =====
     // Modelo:
