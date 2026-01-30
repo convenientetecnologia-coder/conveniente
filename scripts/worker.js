@@ -7013,8 +7013,8 @@ const handlers = {
           const pages = await ctrl.browser.pages().catch(()=>[]);
           for (const pg of (pages || []).slice(0, 8)) {
             const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
-            if (det && det.loginRequired) {
-              if (!best || reasonPriority(det.reason) > reasonPriority(best.reason)) {
+              if (det && det.loginRequired) {
+                if (!best || reasonPriority(det.reason) > reasonPriority(best.reason)) {
                 best = det;
                 bestPage = pg;
               }
