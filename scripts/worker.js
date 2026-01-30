@@ -3991,8 +3991,12 @@ const AUTO_CFG = {
   ROBE_LIGHT_MIN_SPACING_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ROBE_LIGHT_MIN_SPACING_MS || '60000', 10) || 60000),
   // Quantos Robes no máximo enfileirar por tick em light (0 => não enfileira).
   ROBE_LIGHT_MAX_ENQUEUE_PER_TICK: Math.max(0, parseInt(process.env.CT_GOV_ROBE_LIGHT_MAX_ENQUEUE_PER_TICK || '1', 10) || 1),
-  RAM_KILL_MB: 1600,
-  RAM_WARN_MB: 700
+  // Confirmações por tempo (evita “piscar” e evita entrar em light por flutuação).
+  ENTER_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_ENTER_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000)),
+  EXIT_CONFIRM_MS: Math.max(10_000, parseInt(process.env.CT_GOV_EXIT_CONFIRM_MS || String(5 * 60 * 1000), 10) || (5 * 60 * 1000)),
+  LIGHT_MAX_MS: Math.max(60_000, parseInt(process.env.CT_GOV_LIGHT_MAX_MS || String(30 * 60 * 1000), 10) || (30 * 60 * 1000)),
+  HARD_RESET_ENABLED: String(process.env.CT_GOV_HARD_RESET_ENABLED || '1').trim() !== '0',
+  HARD_RESET_COOLDOWN_MS: Math.max(10 * 60 * 1000, parseInt(process.env.CT_GOV_HARD_RESET_COOLDOWN_MS || String(6 * 60 * 60 * 1000), 10) || (6 * 60 * 60 * 1000))
 };
 
 const ramPolicy = require('./ramPolicy.js');
@@ -4031,7 +4035,11 @@ const GOVERNOR_TICK_MS = parseInt(process.env.CT_GOVERNOR_TICK_MS || '2000', 10)
 const autoMode = {
   mode: 'full', since: Date.now(), reason: 'supervisor_controlled',
   cpuEma: null, freeEmaMB: null, hot: 0, cool: 0, lastEval: 0,
-  light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0, lastRamReliefAt: 0 }
+  // pressureSince/recoveredSince implementam a janela de confirmação (5min).
+  pressureSince: 0,
+  recoveredSince: 0,
+  hardReset: { active: false, phase: '', startedAt: 0, cooldownUntil: 0, savedActiveNames: [], memHighSince: 0 },
+  light: { activationHeld: 0, robeSkipped: 0, nextRobeEnqueueAt: 0 }
 };
 
 function _ema(prev, value, alpha) { return prev == null ? value : (alpha*value + (1-alpha)*prev); }
@@ -4063,82 +4071,144 @@ async function governorTick() {
     autoMode.eventLoopLagMaxMs = lag.maxMs;
     autoMode.freeEmaMB = _ema(autoMode.freeEmaMB, freeMB, AUTO_CFG.EMA_ALPHA_MEM);
 
-    const hotNow =
-      (freeMB > 0 && freeMB <= AUTO_CFG.MEM_ENTER_MB) ||
-      (lag.meanMs >= LOOPLAG_ENTER_MS) ||
-      (lag.maxMs >= LOOPLAG_MAX_ENTER_MS);
-    const coolNow =
-      (freeMB > 0 && freeMB >= AUTO_CFG.MEM_EXIT_MB) &&
-      (lag.meanMs <= LOOPLAG_EXIT_MS) &&
-      (lag.maxMs <= LOOPLAG_MAX_EXIT_MS);
+    const memLow = (freeMB > 0 && freeMB < AUTO_CFG.MEM_ENTER_MB);
+    const memHigh = (freeMB > 0 && freeMB >= AUTO_CFG.MEM_EXIT_MB);
+    const lagHot = (lag.meanMs >= LOOPLAG_ENTER_MS) || (lag.maxMs >= LOOPLAG_MAX_ENTER_MS);
+    const lagCool = (lag.meanMs <= LOOPLAG_EXIT_MS) && (lag.maxMs <= LOOPLAG_MAX_EXIT_MS);
+    const pressureNow = memLow || lagHot;
+    const recoveredNow = memHigh; // política: full/light definido primariamente por RAM (2GB)
 
-    if (hotNow) { autoMode.hot = Math.min(20, (autoMode.hot || 0) + 1); autoMode.cool = 0; }
-    else if (coolNow) { autoMode.cool = Math.min(20, (autoMode.cool || 0) + 1); autoMode.hot = 0; }
-
-    if (autoMode.mode === 'full') {
-      if (autoMode.hot >= AUTO_CFG.HOT_TICKS && _canSwitch()) {
-        autoMode.mode = 'light';
-        autoMode.since = now;
-        autoMode.reason = (freeMB > 0 && freeMB <= AUTO_CFG.MEM_ENTER_MB) ? 'mem_low' : 'loop_lag';
-        try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
-      }
+    // Janela de confirmação (5min) para entrar/sair.
+    if (pressureNow) {
+      if (!autoMode.pressureSince) autoMode.pressureSince = now;
     } else {
-      if (autoMode.cool >= AUTO_CFG.COOL_TICKS && _canSwitch()) {
-        autoMode.mode = 'full';
-        autoMode.since = now;
-        autoMode.reason = 'recovered';
-        autoMode.hot = 0;
-        autoMode.cool = 0;
-        try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
-      }
+      autoMode.pressureSince = 0;
+    }
+    if (recoveredNow) {
+      if (!autoMode.recoveredSince) autoMode.recoveredSince = now;
+    } else {
+      autoMode.recoveredSince = 0;
     }
 
-    // Recuperação leve (best-effort) quando está em light e RAM está muito baixa:
-    // fecha 1 perfil não-crítico para aliviar pressão (rate-limited).
+    // Hard reset total: só se ficar muito tempo em light sem recuperar.
+    // Importante: NÃO é fechamento gradual; é “tudo ou nada”.
     try {
-      const enabled = String(process.env.CT_GOV_LIGHT_RAM_RELIEF_ENABLED || '1').trim() !== '0';
-      const minIntervalMs = Math.max(30_000, parseInt(process.env.CT_GOV_LIGHT_RAM_RELIEF_MIN_INTERVAL_MS || '120000', 10) || 120000);
-      const thresholdMB = Math.max(256, parseInt(process.env.CT_GOV_LIGHT_RAM_RELIEF_BELOW_MB || String(AUTO_CFG.RAM_KILL_MB), 10) || AUTO_CFG.RAM_KILL_MB);
-      if (enabled && autoMode.mode === 'light' && freeMB > 0 && freeMB < thresholdMB) {
-        const last = Number(autoMode.light && autoMode.light.lastRamReliefAt || 0) || 0;
-        if (!last || (now - last) >= minIntervalMs) {
-          // Escolhe um candidato “menos crítico”: não em execução/humano/config, preferir não-trabalhando, maior RAM.
-          const alive = Array.from(controllers.keys());
-          const candidates = alive.map(n => {
-            const ctrl = controllers.get(n);
-            const rm = robeMeta[n] || {};
-            return {
-              n,
-              ramMB: (typeof rm.ramMB === 'number') ? rm.ramMB : -1,
-              trabalhando: !!(ctrl && ctrl.trabalhando),
-              configurando: !!(ctrl && ctrl.configurando),
-              humanControl: !!(ctrl && ctrl.humanControl),
-              robeExec: !!(rm && rm.emExecucao),
-              sendLock: !!(rm && rm.sendLockActive)
-            };
-          }).filter(c =>
-            c && c.n &&
-            !c.configurando &&
-            !c.humanControl &&
-            !c.robeExec &&
-            !c.sendLock &&
-            c.ramMB >= 0
-          ).sort((a, b) => {
-            if (a.trabalhando !== b.trabalhando) return (a.trabalhando ? 1 : -1) - (b.trabalhando ? 1 : -1);
-            return (Number(b.ramMB || 0) || 0) - (Number(a.ramMB || 0) || 0);
-          });
-          const pick = candidates[0];
-          if (pick && pick.n) {
-            autoMode.light.lastRamReliefAt = now;
-            try { await milLog('mil_action', `governor_light_ram_relief_deactivate nome=${pick.n} ramMB=${pick.ramMB} freeMB=${freeMB}`); } catch {}
-            try { await handlers.deactivate({ nome: pick.n, reason: 'governor_light_ram_relief', policy: 'preserveDesired' }); } catch {}
-          } else {
-            autoMode.light.lastRamReliefAt = now;
-            try { await milLog('mil_action', `governor_light_ram_relief_skip no_candidate freeMB=${freeMB}`); } catch {}
+      if (AUTO_CFG.HARD_RESET_ENABLED && autoMode.mode === 'light' && !autoMode.hardReset.active) {
+        const coolUntil = Number(autoMode.hardReset.cooldownUntil || 0) || 0;
+        if (!coolUntil || now >= coolUntil) {
+          const ageMs = now - Number(autoMode.since || now);
+          if (ageMs >= AUTO_CFG.LIGHT_MAX_MS && !recoveredNow) {
+            autoMode.hardReset.active = true;
+            autoMode.hardReset.phase = 'closing';
+            autoMode.hardReset.startedAt = now;
+            autoMode.hardReset.memHighSince = 0;
+            // snapshot do desired.active para restaurar depois
+            try {
+              const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
+              const saved = [];
+              for (const n of Object.keys((desiredSnap && desiredSnap.perfis) || {})) {
+                const w = desiredSnap.perfis[n] || {};
+                if (w && w.active === true) saved.push(String(n));
+              }
+              autoMode.hardReset.savedActiveNames = saved.slice(0, 400);
+            } catch { autoMode.hardReset.savedActiveNames = []; }
+            try { await milLog('mil_action', `governor_hard_reset_begin ageMs=${ageMs} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
+            // 1) Desliga desired.active para todos (evita reabertura durante o reset)
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d = d || {}; d.perfis = d.perfis || {};
+                d._governorHardReset = {
+                  active: true,
+                  phase: 'closing',
+                  startedAt: now,
+                  savedActiveNames: (autoMode.hardReset.savedActiveNames || []).slice(0, 400),
+                  note: 'auto_hard_reset_after_light_timeout'
+                };
+                for (const n of Object.keys(d.perfis || {})) {
+                  const cur = d.perfis[n] || {};
+                  d.perfis[n] = { ...cur, active: false, virtus: 'off' };
+                }
+                return d;
+              }).catch(()=>null);
+            } catch {}
           }
         }
       }
     } catch {}
+
+    // Executa o hard reset: fecha todos (sem gradual) e depois restaura desired quando estabilizar.
+    try {
+      if (autoMode.hardReset && autoMode.hardReset.active) {
+        const phase = String(autoMode.hardReset.phase || '');
+        if (phase === 'closing') {
+          // Fecha todos os controllers deste worker; os demais workers também fecharão pelo desired.active=false.
+          for (const nome of Array.from(controllers.keys())) {
+            try { await handlers.deactivate({ nome, reason: 'governor_hard_reset', policy: 'preserveDesired' }); } catch {}
+          }
+          if (controllers.size === 0) {
+            autoMode.hardReset.phase = 'waiting_recover';
+            autoMode.hardReset.memHighSince = 0;
+            try { await milLog('mil_action', `governor_hard_reset_closed freeMB=${freeMB}`); } catch {}
+          }
+          // durante reset, não alternar modos
+          return;
+        }
+        if (phase === 'waiting_recover') {
+          if (memHigh) {
+            if (!autoMode.hardReset.memHighSince) autoMode.hardReset.memHighSince = now;
+          } else {
+            autoMode.hardReset.memHighSince = 0;
+          }
+          const okStable = autoMode.hardReset.memHighSince && (now - autoMode.hardReset.memHighSince) >= AUTO_CFG.EXIT_CONFIRM_MS;
+          if (okStable) {
+            // restaura desired.active para os perfis que estavam ativos antes
+            const saved = (autoMode.hardReset.savedActiveNames || []).slice(0, 400);
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d = d || {}; d.perfis = d.perfis || {};
+                for (const n of saved) {
+                  const cur = d.perfis[n] || {};
+                  d.perfis[n] = { ...cur, active: true, virtus: 'on' };
+                }
+                if (d._governorHardReset && d._governorHardReset.active === true) {
+                  d._governorHardReset = { ...(d._governorHardReset || {}), active: false, phase: 'done', doneAt: now };
+                }
+                return d;
+              }).catch(()=>null);
+            } catch {}
+            autoMode.hardReset.active = false;
+            autoMode.hardReset.phase = 'done';
+            autoMode.hardReset.cooldownUntil = now + AUTO_CFG.HARD_RESET_COOLDOWN_MS;
+            autoMode.since = now;
+            autoMode.mode = 'full';
+            autoMode.reason = 'hard_reset_recovered';
+            autoMode.pressureSince = 0;
+            autoMode.recoveredSince = 0;
+            try { await milLog('mil_action', `governor_hard_reset_restore done saved=${saved.length} freeMB=${freeMB}`); } catch {}
+          }
+          return;
+        }
+      }
+    } catch {}
+
+    // Troca normal full/light baseada em janela de confirmação.
+    if (autoMode.mode === 'full') {
+      if (autoMode.pressureSince && (now - autoMode.pressureSince) >= AUTO_CFG.ENTER_CONFIRM_MS && _canSwitch()) {
+        autoMode.mode = 'light';
+        autoMode.since = now;
+        autoMode.reason = memLow ? 'mem_low' : 'loop_lag';
+        try { await milLog('mil_action', `governor_enter_slow reason=${autoMode.reason} freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs}`); } catch {}
+      }
+    } else {
+      if (autoMode.recoveredSince && (now - autoMode.recoveredSince) >= AUTO_CFG.EXIT_CONFIRM_MS && _canSwitch()) {
+        autoMode.mode = 'full';
+        autoMode.since = now;
+        autoMode.reason = 'recovered';
+        autoMode.pressureSince = 0;
+        autoMode.recoveredSince = 0;
+        try { await milLog('mil_action', `governor_exit_slow freeMB=${freeMB} lagMeanMs=${lag.meanMs} lagMaxMs=${lag.maxMs} lagCool=${lagCool?'1':'0'}`); } catch {}
+      }
+    }
   } catch {}
 }
 
