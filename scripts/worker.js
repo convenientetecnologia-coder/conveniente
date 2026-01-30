@@ -2115,6 +2115,39 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
     if (!force && last && (now - last) < IDENTITY_FLOW_CFG.debounceMs) {
       return { ok: false, skipped: true, reason: 'debounced', sinceMs: now - last };
     }
+
+    // Governança (cross-process): limita identidade simultânea no host (evita explosão).
+    // Importante: NÃO trava — se não houver permit, retorna busy e o nurse/retry tenta mais tarde.
+    let _govPermitToken = null;
+    try {
+      const pr = await supervisorClient.requestPermit('identity_flow', nome, {
+        operator: `identity_flow:${String(nome || '').trim()}:${id}`,
+        ttlMs: Math.min((IDENTITY_FLOW_CFG.maxRunMs + 60_000), (15 * 60 * 1000))
+      }).catch(()=>null);
+      if (!pr || pr.ok !== true || !pr.token) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'identity_flow_governor_denied',
+            flowId: id,
+            nome: String(nome||''),
+            source: String(source||'').slice(0, 80),
+            reason: pr && pr.error ? String(pr.error) : 'unknown',
+            inUse: pr && typeof pr.inUse === 'number' ? pr.inUse : null,
+            max: pr && typeof pr.max === 'number' ? pr.max : null,
+            retryAfterMs: pr && typeof pr.retryAfterMs === 'number' ? pr.retryAfterMs : null
+          });
+        } catch {}
+        return { ok: false, denied: true, flowId: id, error: 'governor_busy' };
+      }
+      _govPermitToken = pr.token;
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_governor_exception', flowId: id, nome: String(nome||''), error: msg.slice(0, 200) }); } catch {}
+      return { ok: false, flowId: id, error: `governor_exception:${msg}` };
+    }
+
+    // Debounce “consumido” só após conseguir governança (senão vira starvation).
     robeMeta[nome].identityFlowLastAt = now;
 
     const owner = `pid:${process.pid}`;
@@ -2133,6 +2166,8 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
           owner: g && g.owner ? String(g.owner) : null
         });
       } catch {}
+      // Se gate negou, devolve permit (não é erro; só concorrência por perfil)
+      try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: 'gate_denied' }).catch(()=>{}); } catch {}
       return { ok: false, denied: true, flowId: id };
     }
 
@@ -2256,6 +2291,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
       return { ok: true, flowId: id, result: 'other_login_required', didAction, actions: actionKinds };
     } finally {
       await _identityGateRelease({ owner, nome, didAction, actionKind: actionKinds.join(',') }).catch(()=>{});
+      try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: didAction ? 'ok' : 'noop' }).catch(()=>{}); } catch {}
     }
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
@@ -6875,6 +6911,36 @@ const handlers = {
         collectCookies: Math.max(20_000, Number(opts.collectCookiesTimeoutMs || 0) || 90_000)
       };
 
+      // Governança (cross-process): impede múltiplos login_remediate em paralelo no host.
+      // Importante: NÃO trava — se não houver permit, devolve busy e o caller faz retry/backoff.
+      let _govPermitToken = null;
+      try {
+        const pr = await supervisorClient.requestPermit('login_remediate', nome, {
+          operator: op,
+          ttlMs: Math.min((totalTimeoutMs + 60_000), (15 * 60 * 1000))
+        }).catch(()=>null);
+        if (!pr || pr.ok !== true || !pr.token) {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'login_remediate_governor_denied',
+              nome: String(nome || ''),
+              operator: op,
+              reason: pr && pr.error ? String(pr.error) : 'unknown',
+              inUse: pr && typeof pr.inUse === 'number' ? pr.inUse : null,
+              max: pr && typeof pr.max === 'number' ? pr.max : null,
+              retryAfterMs: pr && typeof pr.retryAfterMs === 'number' ? pr.retryAfterMs : null
+            });
+          } catch {}
+          return { ok: false, error: 'governor_busy', governor: pr || null };
+        }
+        _govPermitToken = pr.token;
+      } catch (e) {
+        const msg = (e && e.message) ? String(e.message) : String(e);
+        try { provisionAudit.append({ ts: Date.now(), event: 'login_remediate_governor_exception', nome: String(nome || ''), operator: op, error: msg.slice(0, 200) }); } catch {}
+        return { ok: false, error: `governor_exception:${msg}` };
+      }
+
       const snapPolicy = ramPolicy.snapshotPolicy();
       const minFreeMB = snapPolicy.reserveProvisionMB;
 
@@ -7673,6 +7739,8 @@ const handlers = {
         } catch {}
         // 7) libera lock global sempre (mesmo com returns/erros)
         try { provisionLock.release({ owner: op }); } catch {}
+        // Governança: libera permit sempre (anti-leak)
+        try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: 'done' }).catch(()=>{}); } catch {}
       }
     });
   },

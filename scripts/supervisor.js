@@ -89,6 +89,122 @@ let cooldownPerAcc = new Map(); // perfil => timestamp until
 /** Estado dos perfis ativos atualmente */
 let ativos = new Map(); // nomePerfil => {openAt, status, ramAntes, ...}
 
+// ===== Governança enterprise por tipo de fluxo (permits) =====
+// Objetivo: impedir explosão de concorrência em flows pesados (login_remediate/identity_flow)
+// SEM travar o sistema: se não houver permit, responde busy e o caller decide retry/backoff.
+const GOV_CFG = {
+  max: {
+    login_remediate: Math.max(0, parseInt(process.env.GOV_MAX_LOGIN_REMEDIATE || '1', 10) || 1),
+    identity_flow: Math.max(0, parseInt(process.env.GOV_MAX_IDENTITY_FLOW || '1', 10) || 1)
+  },
+  // TTL anti-leak: se um worker morrer e não liberar, o supervisor recupera.
+  leaseTtlMs: Math.max(30_000, parseInt(process.env.GOV_PERMIT_LEASE_TTL_MS || String(15 * 60 * 1000), 10) || (15 * 60 * 1000)),
+  // Backoff sugerido para caller (não é imposto)
+  defaultRetryAfterMs: Math.max(1000, parseInt(process.env.GOV_PERMIT_RETRY_AFTER_MS || '5000', 10) || 5000)
+};
+
+// token -> { token, kind, perfil, operator, sinceMs, ttlMs }
+const permitLeases = new Map();
+
+function _permitInUseCount(kind) {
+  let n = 0;
+  for (const it of permitLeases.values()) if (it && it.kind === kind) n++;
+  return n;
+}
+
+function _permitSnapshot() {
+  const byKind = {};
+  const leases = [];
+  for (const it of permitLeases.values()) {
+    if (!it || !it.kind) continue;
+    byKind[it.kind] = (byKind[it.kind] || 0) + 1;
+    leases.push({
+      kind: it.kind,
+      perfil: it.perfil || null,
+      operator: it.operator || null,
+      sinceMs: it.sinceMs || 0,
+      ttlMs: it.ttlMs || 0,
+      token: it.token
+    });
+  }
+  return { byKind, leases };
+}
+
+function requestPermit({ kind, perfil, operator, ttlMs } = {}) {
+  try {
+    const k = String(kind || '').trim();
+    if (!k) return { ok: false, error: 'invalid_kind' };
+    const max = (GOV_CFG.max && Number.isFinite(GOV_CFG.max[k])) ? GOV_CFG.max[k] : 0;
+    if (max <= 0) return { ok: false, error: 'disabled', kind: k };
+
+    const inUse = _permitInUseCount(k);
+    if (inUse >= max) {
+      pushEvent({ type: 'permit_denied', kind: k, perfil: String(perfil || '').slice(0, 120), operator: String(operator || '').slice(0, 120), inUse, max });
+      return { ok: false, error: 'busy', kind: k, inUse, max, retryAfterMs: GOV_CFG.defaultRetryAfterMs };
+    }
+
+    const token = `permit:${k}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const lease = {
+      token,
+      kind: k,
+      perfil: perfil ? String(perfil).slice(0, 120) : '',
+      operator: operator ? String(operator).slice(0, 180) : '',
+      sinceMs: Date.now(),
+      ttlMs: Math.max(10_000, Math.min(Number(ttlMs || 0) || GOV_CFG.leaseTtlMs, GOV_CFG.leaseTtlMs))
+    };
+    permitLeases.set(token, lease);
+    pushEvent({ type: 'permit_granted', kind: k, perfil: lease.perfil, operator: lease.operator, token });
+    return { ok: true, kind: k, token, inUse: inUse + 1, max, ttlMs: lease.ttlMs };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+function releasePermit({ token, kind, perfil, result } = {}) {
+  try {
+    const tok = String(token || '').trim();
+    if (tok) {
+      const it = permitLeases.get(tok);
+      if (it) {
+        permitLeases.delete(tok);
+        pushEvent({ type: 'permit_released', kind: it.kind, perfil: it.perfil || null, operator: it.operator || null, token: tok, result: result || null });
+        return { ok: true };
+      }
+      return { ok: false, error: 'not_found' };
+    }
+    // Fallback: libera por (kind+perfil) se token não foi preservado no caller.
+    const k = String(kind || '').trim();
+    const p = String(perfil || '').trim();
+    if (!k || !p) return { ok: false, error: 'invalid_args' };
+    for (const [t, it] of permitLeases.entries()) {
+      if (it && it.kind === k && String(it.perfil || '') === p) {
+        permitLeases.delete(t);
+        pushEvent({ type: 'permit_released', kind: k, perfil: p, operator: it.operator || null, token: t, result: result || null });
+        return { ok: true };
+      }
+    }
+    return { ok: false, error: 'not_found' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+// TTL reclaim anti-leak
+setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const [t, it] of permitLeases.entries()) {
+      if (!it) { permitLeases.delete(t); continue; }
+      const age = now - (Number(it.sinceMs || 0) || 0);
+      const ttl = Number(it.ttlMs || 0) || GOV_CFG.leaseTtlMs;
+      if (age > ttl) {
+        permitLeases.delete(t);
+        pushEvent({ type: 'permit_reclaimed_ttl', kind: it.kind, perfil: it.perfil || null, operator: it.operator || null, token: t, ageMs: age, ttlMs: ttl });
+      }
+    }
+  } catch {}
+}, 5000);
+
 // TTL reclaim de slots abertos que não chamaram notifyOpened
 setInterval(() => {
   const now = Date.now();
@@ -301,6 +417,7 @@ function sendTelemetria(evt) {
 /** Consulta estado e eventos do supervisor */
 // Era GET /status
 function getStatus() {
+  const permits = _permitSnapshot();
   return {
     ok: true,
     supervisor: {
@@ -316,7 +433,12 @@ function getStatus() {
       nextProbeAt: state.nextProbeAt,
       reclaimedSlots: eventStream.filter(evt => evt.type === 'slot_reclaimed_ttl').length,
       probeSuccess: eventStream.filter(evt => evt.type === 'probe_succeeded').length,
-      probeFail: eventStream.filter(evt => evt.type === 'probe_failed').length
+      probeFail: eventStream.filter(evt => evt.type === 'probe_failed').length,
+      permits: {
+        inUseByKind: permits.byKind,
+        maxByKind: GOV_CFG.max,
+        leases: permits.leases.slice(0, 60)
+      }
     },
     eventos: eventStream.slice(-100)
   };
@@ -377,6 +499,8 @@ setInterval(reconcileSlots, 2000);
 module.exports = {
   requestOpen,
   notifyOpened,
+  requestPermit,
+  releasePermit,
   sendTelemetria,
   getStatus,
   getRam,

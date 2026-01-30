@@ -147,9 +147,22 @@ function createCluster() {
         const r = supervisor.requestOpen(perfil, (msg && msg.opts) || {});
         return proc.send({ replyTo: msg.msgId, data: r });
       }
+      if (msg && msg.type === 'sup:reqPermit') {
+        const kind = msg && msg.kind ? String(msg.kind) : '';
+        const perfil = msg && msg.perfil ? String(msg.perfil) : '';
+        const opts = (msg && msg.opts && typeof msg.opts === 'object') ? msg.opts : {};
+        const r = supervisor.requestPermit({ kind, perfil, operator: opts.operator || '', ttlMs: opts.ttlMs });
+        return proc.send({ replyTo: msg.msgId, data: r });
+      }
       if (msg && msg.type === 'sup:notifyOpened') {
         const { perfil, result } = msg;
         const r = supervisor.notifyOpened(perfil, result);
+        return proc.send({ replyTo: msg.msgId, data: r });
+      }
+      if (msg && msg.type === 'sup:releasePermit') {
+        const token = msg && msg.token ? String(msg.token) : '';
+        const opts = (msg && msg.opts && typeof msg.opts === 'object') ? msg.opts : {};
+        const r = supervisor.releasePermit({ token, result: opts.result || null });
         return proc.send({ replyTo: msg.msgId, data: r });
       }
       if (msg && msg.type === 'sup:getStatus') {

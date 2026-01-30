@@ -23,5 +23,5 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 | INC-20260129-2100-01 | P1 | done | deployed_partial | not_run | Estoque: “reserved mas não vai” (provision / stock_provision) | `done/INC-20260129-2100-01.md` |
 | INC-20260129-2058-02 | P0 | done | needs_restart | not_run | Fechar Todos: reabre durante fechamento; lento; sobra navegador | `done/INC-20260129-2058-02.md` |
 | INC-20260129-2058-03 | P1 | done | needs_restart | not_run | Abrir Todos 24h: concorrência/medo de clicar; auto-open no boot | `done/INC-20260129-2058-03.md` |
-| INC-20260129-2058-04 | P1 | need_alignment | not_deployed | not_run | Governança: controle de concorrência (login_required/identity/open/ram) | `in_progress/INC-20260129-2058-04.md` |
+| INC-20260129-2058-04 | P1 | done | not_deployed | not_run | Governança: controle de concorrência (login_required/identity/open/ram) | `done/INC-20260129-2058-04.md` |
 

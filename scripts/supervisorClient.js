@@ -33,6 +33,74 @@ function localKillGuardActive(perfil) {
 
 function newMsgId(){ return Math.random().toString(36).slice(2); }
 
+// ===== Governança por tipo (permits) =====
+async function requestPermit(kind, perfil, opts = {}) {
+  const k = String(kind || '').trim();
+  const p = String(perfil || '').trim();
+  const o = (opts && typeof opts === 'object') ? opts : {};
+  if (!k) return { ok: false, error: 'invalid_kind' };
+  if (!isChild) {
+    try {
+      const supervisor = require('./supervisor.js');
+      return supervisor.requestPermit({ kind: k, perfil: p, operator: o.operator || '', ttlMs: o.ttlMs });
+    } catch (e) {
+      logger.warn('[supervisorClient] requestPermit erro:', { error: e && e.message || e });
+      return { ok: false, error: e && e.message || e };
+    }
+  }
+  return new Promise((resolve) => {
+    const msgId = newMsgId();
+    const onMsg = (m) => {
+      if (m && m.replyTo === msgId) {
+        try { process.off('message', onMsg); } catch {}
+        resolve(m.data);
+      }
+    };
+    try { process.on('message', onMsg); } catch {}
+    try { process.send({ type: 'sup:reqPermit', kind: k, perfil: p, opts: o, msgId }); } catch(e) {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'ipc_send_failed' });
+    }
+    setTimeout(() => {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'timeout' });
+    }, 15000);
+  });
+}
+
+async function releasePermit(token, opts = {}) {
+  const t = String(token || '').trim();
+  const o = (opts && typeof opts === 'object') ? opts : {};
+  if (!t) return { ok: false, error: 'invalid_token' };
+  if (!isChild) {
+    try {
+      const supervisor = require('./supervisor.js');
+      return supervisor.releasePermit({ token: t, result: o.result || null });
+    } catch (e) {
+      logger.warn('[supervisorClient] releasePermit erro:', { error: e && e.message || e });
+      return { ok: false, error: e && e.message || e };
+    }
+  }
+  return new Promise((resolve) => {
+    const msgId = newMsgId();
+    const onMsg = (m) => {
+      if (m && m.replyTo === msgId) {
+        try { process.off('message', onMsg); } catch {}
+        resolve(m.data);
+      }
+    };
+    try { process.on('message', onMsg); } catch {}
+    try { process.send({ type: 'sup:releasePermit', token: t, opts: o, msgId }); } catch(e) {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'ipc_send_failed' });
+    }
+    setTimeout(() => {
+      try { process.off('message', onMsg); } catch {}
+      resolve({ ok:false, error:'timeout' });
+    }, 15000);
+  });
+}
+
 async function requestOpen(perfil, url, opts = {}) {
   if (localKillGuardActive(perfil)) {
     return { ok: false, error: 'kill_guard_until', msg: 'Abertura de slot negada por kill_guard_until' };
@@ -158,6 +226,8 @@ async function resetSupervisor(url) {
 }
 
 module.exports = {
+  requestPermit,
+  releasePermit,
   requestOpen,
   notifyOpened,
   sendTelemetria,
