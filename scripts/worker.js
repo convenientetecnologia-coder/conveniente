@@ -4481,16 +4481,46 @@ async function activateOnce(nome, source = '', operator = '') {
       try { await snapshotStatusAndWrite(); } catch {}
     }
 
-    // Hardening: durante stock_provision (maintenance lock), bloquear novas aberturas,
-    // EXCETO se o operador for o dono do lock (stock_provision:<batchId>).
+    // Hardening: durante locks que realmente precisam "congelar abertura", bloquear novas aberturas.
+    // Importante (2026-01-30): `open_all_map` NÃO pode bloquear aberturas — ele existe justamente para abrir.
+    // Ele só deve pausar Virtus/Robe (governança) e bloquear fluxos pesados, mas não impedir abrir navegador.
     try {
       const op = String(operator || '').trim();
-      const lk = provisionLock.shouldBlock(op);
-      if (lk && lk.block) {
-        robeMeta[nome] = robeMeta[nome] || {};
-        robeMeta[nome].activationHeldUntil = Date.now() + 5000;
-        await reportAction(nome, 'mil_action', 'activation_hold_by_provision_lock');
-        return { ok: false, error: 'maintenance_provision' };
+      const cur = provisionLock.get();
+      if (cur && cur.active && cur.lock) {
+        const owner = cur.lock && cur.lock.owner ? String(cur.lock.owner) : '';
+        const kind = (cur.lock && cur.lock.meta && cur.lock.meta.kind) ? String(cur.lock.meta.kind) : '';
+        const isOpenAll =
+          kind === 'open_all_map' ||
+          (owner && /^open_all_map:/i.test(owner));
+        const shouldBlockOpen =
+          kind === 'stock_provision' ||
+          kind === 'close_all' ||
+          (owner && /^stock_provision:/i.test(owner)) ||
+          (owner && /^close_all:/i.test(owner)) ||
+          (owner && /^admin_configure:/i.test(owner));
+
+        if (shouldBlockOpen && !provisionLock.ownerMatchesOperator(cur.lock, op)) {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].activationHeldUntil = Date.now() + 5000;
+          await reportAction(nome, 'mil_action', 'activation_hold_by_provision_lock');
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'activate_blocked_by_provision_lock',
+              nome: String(nome || ''),
+              operator: op || null,
+              lockOwner: owner || null,
+              kind: kind || null
+            });
+          } catch {}
+          return { ok: false, error: 'maintenance_provision' };
+        }
+
+        // open_all_map não bloqueia abertura (mesmo com operator diferente).
+        if (isOpenAll) {
+          // noop
+        }
       }
     } catch {}
 

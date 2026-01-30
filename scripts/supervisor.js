@@ -161,14 +161,36 @@ function canProbe() {
 function podeAbrirNovoSlot(perfil, opts = {}) {
   const now = Date.now();
   const freeMB = getFreeMB();
-  // Hardening: durante stock_provision (maintenance lock), NÃO permitir novas aberturas.
-  // Isso evita "explosão" de reaberturas e concorrência no meio do cadastro.
+  // Hardening: durante locks que realmente precisam "congelar abertura", NÃO permitir novas aberturas.
+  // Importante (2026-01-30): `open_all_map` NÃO pode bloquear aberturas — ele existe justamente para abrir.
+  // Ele só deve pausar Virtus/Robe (governança) e bloquear fluxos pesados, mas não impedir abrir navegador.
   try {
     const operator = String(opts && opts.operator || '').trim();
     const lk = provisionLock.get();
-    if (lk && lk.active && !provisionLock.ownerMatchesOperator(lk.lock, operator)) {
-      pushEvent({ type: "denied", reason: "maintenance_provision", perfil, owner: lk.lock && lk.lock.owner, operator, untilMs: lk.lock && lk.lock.untilMs });
-      return { ok: false, reason: "maintenance_provision", msg: "Abertura bloqueada: provisionamento em andamento" };
+    if (lk && lk.active && lk.lock) {
+      const owner = lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
+      const kind = (lk.lock && lk.lock.meta && lk.lock.meta.kind) ? String(lk.lock.meta.kind) : '';
+      const isOpenAll =
+        kind === 'open_all_map' ||
+        (owner && /^open_all_map:/i.test(owner));
+      const shouldBlockOpen =
+        // Bloqueios que devem impedir abertura:
+        kind === 'stock_provision' ||
+        kind === 'close_all' ||
+        (owner && /^stock_provision:/i.test(owner)) ||
+        (owner && /^close_all:/i.test(owner)) ||
+        // Compat: admin_configure também isola abertura para evitar corrida durante injeção
+        (owner && /^admin_configure:/i.test(owner));
+
+      if (shouldBlockOpen && !provisionLock.ownerMatchesOperator(lk.lock, operator)) {
+        pushEvent({ type: "denied", reason: "maintenance_provision", perfil, owner, operator, untilMs: lk.lock && lk.lock.untilMs, kind: kind || null });
+        return { ok: false, reason: "maintenance_provision", msg: "Abertura bloqueada: manutenção/provisionamento em andamento" };
+      }
+
+      // open_all_map não bloqueia abertura (mesmo com operator diferente).
+      if (isOpenAll) {
+        // noop
+      }
     }
   } catch {}
   // Checagem de RAM
