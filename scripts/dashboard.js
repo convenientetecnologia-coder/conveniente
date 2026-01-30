@@ -837,8 +837,26 @@ async function execStockProvision(cmd) {
       push({ step: 'quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, pauseableVirtusDetails: snap3.pauseableVirtusDetails, virtusOnlineCount: snap3.virtusOnlineCount });
       audit({ event: 'stock_provision_quiesce_pause_done', ok: snap3.pauseableVirtusCount <= 0, pauseableVirtusCount: snap3.pauseableVirtusCount, pauseableVirtusNames: snap3.pauseableVirtusNames, pauseableVirtusDetails: snap3.pauseableVirtusDetails, virtusOnlineCount: snap3.virtusOnlineCount });
       if (snap3.pauseableVirtusCount > 0) {
-        // Regra enterprise: NÃO prosseguir se não conseguiu pausar Virtus "pausáveis".
-        throw new Error(`pause_timeout count=${snap3.pauseableVirtusCount} sample=${snap3.pauseableVirtusNames.slice(0, 8).join(',')}`);
+        // P0 policy (2026-01-30): cadastro NÃO pode falhar por não conseguir "pausar Virtus".
+        // Virtus pode continuar rodando; se faltar RAM, o fluxo já tem hardRecoverRam()/ensureFreeMBWithin().
+        // Mantemos a telemetria para auditoria, mas seguimos (best-effort).
+        try {
+          push({
+            step: 'quiesce_pause_best_effort',
+            ok: true,
+            note: 'pause_timeout_ignored_best_effort',
+            pauseableVirtusCount: snap3.pauseableVirtusCount,
+            sample: snap3.pauseableVirtusNames.slice(0, 8)
+          });
+        } catch {}
+        audit({
+          event: 'stock_provision_quiesce_pause_best_effort',
+          ok: true,
+          note: 'pause_timeout_ignored_best_effort',
+          pauseableVirtusCount: snap3.pauseableVirtusCount,
+          pauseableVirtusNames: snap3.pauseableVirtusNames,
+          virtusOnlineCount: snap3.virtusOnlineCount
+        });
       }
     }
 

@@ -28,4 +28,5 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 | INC-20260130-0005-01 | P1 | done | needs_restart | not_run | Invocar Humano: botões no HUD (fechar/pause24h/excluir) + garantir isolamento do navegador humano | `done/INC-20260130-0005-01.md` |
 | INC-20260130-0023-01 | P0 | done | needs_restart | not_run | RM3: estoque liberou conta, mas cadastro/provision falhou | `done/INC-20260130-0023-01.md` |
 | INC-20260130-0047-01 | P1 | done | not_applicable | not_applicable | RM4: entender “modo leve/full” (slowmode) — regras/motivos/mecanismos/impactos | `done/INC-20260130-0047-01.md` |
+| INC-20260130-0103-01 | P0 | need_evidence | not_deployed | not_run | CT estoque/servidores “liberar” solta cooldown do Robe em massa + RM3 não cadastra | `in_progress/INC-20260130-0103-01.md` |
 
