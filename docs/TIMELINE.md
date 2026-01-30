@@ -47,6 +47,28 @@ Formato canônico (copiar/colar):
 - **Rollback**: reverter alterações nos `.md` (não afeta runtime).
 - **THREAD**: `TH-2026-01-30-ct-offline-triage`
 
+#### 2026-01-30 — [CT][CROSS][FIX][OPS] Servidores (CT): remover “Desconhecido” e expor flags acionáveis (Humano invocado + Outros (login))
+
+- **O que**:
+  - Estado `unknown` virou **`login_other`** (label humano: **Outros (login)**), mantendo `loginReason` para auditoria.
+  - CT `/servers` passou a expor `flagsAgg` (ex.: `human_invoked`, `login_reasons_top`) para o dashboard ser fonte de verdade operacional.
+  - UI “Servidores” removeu pill “Desconhecido” e passou a mostrar **Humano invocado** + **Outros (login)** (com tooltip de `loginReason` top).
+  - UI “contas-facebook-contas” alinhada para `login_other` (sem “Desconhecido”).
+- **Por quê**: o operador usa “Servidores” para decidir qual host ir; “Desconhecido” não é acionável e quebra a confiabilidade do painel.
+- **Evidência**:
+  - `C:\sitechatbot\convenientetecnologia\lib\fbAccountState.js`
+  - `C:\sitechatbot\index.js` (`GET /servers` → `accountsAgg` + `flagsAgg`)
+  - `C:\sitechatbot\public\index.html`
+  - `C:\sitechatbot\convenientetecnologia\public\contas-facebook-contas.html`
+  - Snapshot exemplo (motivo real): `C:\sitechatbot\dados\5d7c3309-...-30b3fe928b.json` contém `loginReason:"probe_failed"`
+- **Reinícios**:
+  - **CT (`sitechatbot`)**: **sim** — humano reinicia no host do CT com `node index.js`
+  - **conveniente (hosts)**: **não** (mudança é no CT/UI; docs do conveniente foram atualizadas via git)
+- **Rollback**:
+  - CT: restaurar arquivos via `C:\sitechatbot\_backup_auto_root\...` + reiniciar `node index.js`
+  - conveniente: `git revert 976c6ef` (somente docs)
+- **THREAD**: `TH-2026-01-30-ct-servers-states-flags`
+
 #### 2026-01-30 — [CROSS][DOCS][OPS] INBOX: cancelar INC-20260130-0905-01 (RM3 OFFLINE falso) a pedido do humano
 
 - **O que**:

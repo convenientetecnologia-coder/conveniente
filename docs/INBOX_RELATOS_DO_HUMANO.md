@@ -68,19 +68,7 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 ## RAW_INPUT (colar aqui)
 
 ```text
-triagem inbox
-
-CT > menu Servidores: estados/contadores não estão 110% confiáveis.
-
-Sintoma principal:
-- No CT (dashboard Servidores), aparece estado "Desconhecido" e isso não ajuda em nada.
-
-Objetivo operacional:
-- O usuário usa o menu Servidores como fonte de verdade para decidir em qual servidor ir.
-- Precisa mostrar estados/flags de forma perfeita e acionável (ex.: "ROBE MÃE 2 tem 5 humano invocado", "ROBE MÃE 3 tem 1 captcha").
-
-Pedido:
-- Verificar todos os estados que existem, organizar e exibir perfeitamente (quase em tempo real) no CT.
+(vazio — relato triado; ver arquivos em `docs/inbox/`)
 ```
 
 ---
@@ -105,7 +93,7 @@ Colunas:
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | INC-YYYYMMDD-HHMM-01 | `docs/inbox/in_progress/INC-YYYYMMDD-HHMM-01.md` | P1 | conveniente | … | … | logs_manifest + fetch_logs(keys=…) | need_evidence | not_deployed | not_run | não | sim |
 | INC-20260130-0905-01 | `docs/inbox/cancelled/INC-20260130-0905-01.md` | P0 | sitechatbot+conveniente | RM3 aparece OFFLINE no CT (servidores + estoque) mas o host está acessível | CT não recebeu `/report` recente (snapshot `receivedAt` velho) **ou** UI está mostrando “ghost” | CT snapshot: `C:\sitechatbot\dados\5d7c3309-...-30b3fe928b.json`; regra CT `/servers` (computedOnline por `receivedAt`) | cancelled | not_deployed | not_run | não | não |
-| INC-20260130-1521-01 | `docs/inbox/in_progress/INC-20260130-1521-01.md` | P0 | sitechatbot+conveniente | CT/Servidores mostra "Desconhecido" e contadores de flags (captcha/humano invocado/login/limite) não são 110% acionáveis | o CT está colapsando razões de `loginRequired` em `unknown` (ex.: `probe_failed`) e não expõe catálogo/diagnóstico/flags de forma explícita | evidência: `C:\sitechatbot\convenientetecnologia\lib\fbAccountState.js` + snapshots `C:\sitechatbot\dados\*.json` com `loginReason:"probe_failed"` | in_progress | not_deployed | not_run | não | sim |
+| INC-20260130-1521-01 | `docs/inbox/done/INC-20260130-1521-01.md` | P0 | sitechatbot+conveniente | CT/Servidores mostra "Desconhecido" e contadores de flags (captcha/humano invocado/login/limite) não são 110% acionáveis | o CT estava colapsando razões de `loginRequired` em `unknown` (ex.: `probe_failed`) e não expunha flags operacionais no `/servers` | evidência: CT files `C:\sitechatbot\convenientetecnologia\lib\fbAccountState.js`, `C:\sitechatbot\index.js`, `C:\sitechatbot\public\index.html` | done | manual_step_required | not_run | não | sim |
 | INC-20260130-0128-01 | `docs/inbox/done/INC-20260130-0128-01.md` | P0 | conveniente | Abrir Todos não iniciava com 0 browsers | nurseTick fazia early-return quando controllers=0 mesmo com desired.active/_openAll | CT: desired active=28/28 + controllersCount=0; fix commit 035fa92 | done | deployed | passed | não | sim |
 | INC-20260130-0001-01 | `docs/inbox/done/INC-20260130-0001-01.md` | P0 | conveniente | Abrir Todos: 2º clique dava open_all_lock_busy | endpoint não era idempotente; faltava feedback; stale lock precisava auto-recover | painel alert + payload alreadyRunning + lockOwner | done | not_deployed | not_run | não | sim |
 | INC-20260129-2100-01 | `docs/inbox/done/INC-20260129-2100-01.md` | P1 | sitechatbot+conveniente | conta do estoque fica “reserved” mas não provisiona (falhas em massa) | timeouts+busy+ACK lookup limitado; hardening+fallback | CT DB + ack files + provision_audit.jsonl | done | deployed_partial | not_run | não | sim |
