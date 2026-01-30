@@ -29,5 +29,5 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 | INC-20260130-0023-01 | P0 | done | needs_restart | not_run | RM3: estoque liberou conta, mas cadastro/provision falhou | `done/INC-20260130-0023-01.md` |
 | INC-20260130-0047-01 | P1 | done | not_applicable | not_applicable | RM4: entender “modo leve/full” (slowmode) — regras/motivos/mecanismos/impactos | `done/INC-20260130-0047-01.md` |
 | INC-20260130-0103-01 | P0 | done | needs_restart | not_run | CT estoque/servidores “liberar” solta cooldown do Robe em massa + RM3 não cadastra | `done/INC-20260130-0103-01.md` |
-| INC-20260130-0148-01 | P1 | in_progress | not_deployed | not_run | Governor light/full: thresholds (RAM/lag), não pausar Robe, recuperação leve | `in_progress/INC-20260130-0148-01.md` |
+| INC-20260130-0148-01 | P1 | done | needs_restart | not_run | Governor light/full: thresholds (RAM/lag), não pausar Robe, recuperação leve | `done/INC-20260130-0148-01.md` |
 
