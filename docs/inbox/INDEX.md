@@ -32,5 +32,5 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 | INC-20260130-0148-01 | P1 | done | needs_restart | not_run | Governor light/full: thresholds (RAM/lag), não pausar Robe, recuperação leve | `done/INC-20260130-0148-01.md` |
 | INC-20260130-0205-01 | P0 | done | needs_restart | not_run | Governor light/full: janelas 5min/30min, sem fechar 1 navegador, hard reset total | `done/INC-20260130-0205-01.md` |
 | INC-20260130-0227-01 | P0 | done | needs_restart | not_run | Crash no boot: `Illegal break statement` em `robeTickGlobal` | `done/INC-20260130-0227-01.md` |
-| INC-20260130-0219-01 | P0 | in_progress | not_deployed | not_run | Governor light/full: somente RAM + snapshot 1/min por 48h | `in_progress/INC-20260130-0219-01.md` |
+| INC-20260130-0219-01 | P0 | done | deployed_partial | not_run | Governor light/full: somente RAM + snapshot 1/min por 48h | `done/INC-20260130-0219-01.md` |
 

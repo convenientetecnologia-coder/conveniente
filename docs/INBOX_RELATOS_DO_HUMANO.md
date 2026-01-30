@@ -106,7 +106,7 @@ Colunas:
 | INC-20260130-0148-01 | `docs/inbox/done/INC-20260130-0148-01.md` | P1 | conveniente | Governor light/full: thresholds e comportamento | entrar/sair por 2GB; ajustar lag; light não “mata” Robe; recovery leve com rate limit | worker.js autoMode (env CT_GOV_*) + commits+acks | done | needs_restart | not_run | não | sim |
 | INC-20260130-0205-01 | `docs/inbox/done/INC-20260130-0205-01.md` | P0 | conveniente | Governor light/full: evitar escadinha e resetar de forma correta | janelas 5min/30min + hard reset total; sem fechar 1 navegador | commit d8a3abc + self_update acks | done | needs_restart | not_run | não | sim |
 | INC-20260130-0227-01 | `docs/inbox/done/INC-20260130-0227-01.md` | P0 | conveniente | Crash no boot após restart | `Illegal break statement` em `scripts/worker.js` | log do boot + commit f243902 | done | needs_restart | not_run | não | sim |
-| INC-20260130-0219-01 | `docs/inbox/in_progress/INC-20260130-0219-01.md` | P0 | conveniente | Governor: somente RAM + telemetria 48h | remover reset/fechar/abrir; snapshot RAM+modo 1/min | worker.js + governor_snapshots.jsonl | in_progress | not_deployed | not_run | não | sim |
+| INC-20260130-0219-01 | `docs/inbox/done/INC-20260130-0219-01.md` | P0 | conveniente | Governor: somente RAM + telemetria 48h | RAM-only + snapshots 1/min; sem reset/fechar/abrir | commits 3e32a40/afc019a + coleta RM5 via fetch_logs | done | deployed_partial | not_run | não | sim |
 
 ### Política ultra-rígida (enterprise) — como o INBOX funciona
 
