@@ -2512,29 +2512,83 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
             continue;
           }
 
-          // Captcha: não resolve OCR aqui (placeholder). Só tenta:
-          // - focar input (pronto para digitar)
-          // - se "Continuar" estiver habilitado (ex.: humano já digitou), clicar
-          // - caso contrário, reload e revalidar
+          // Captcha: resolver com Groq OCR (ultra enterprise melhor do mundo)
           if (r.includes('captcha_persona') || r.includes('checkpoint_captcha')) {
             const cap = await browserHelper.detectCaptchaChallenge(pg).catch(()=>({ ok:false, present:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_probe', nome: String(nome||''), operator, attempt, present: !!cap.present, hasPrompt: !!cap.hasPrompt, hasInput: !!cap.hasInput, continueDisabled: cap.continueDisabled }); } catch {}
-            await browserHelper.focusCaptchaInput(pg).catch(()=>null);
-
-            // === OCR placeholder (não implementar aqui) ===
-            // const ocrText = await yourGroqOcrFunction(cap.imgSrc, { nome, operator, attempt });
-            // if (ocrText) await browserHelper.fillCaptchaAndContinue(pg, { text: ocrText });
-
-            // Se o botão estiver habilitado, tenta clicar; senão reload.
-            if (cap && cap.present && cap.continueDisabled === false) {
-              const clk2 = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 6000 }).catch(()=>({ ok:false }));
-              try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_click_continue', nome: String(nome||''), operator, attempt, ok: !!(clk2 && clk2.ok) }); } catch {}
-              await sleep(1200);
+            
+            if (!cap || !cap.present) {
+              // Captcha não detectado: reload e revalidar
+              try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null); } catch {}
+              await sleep(900);
               continue;
             }
-            try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null); } catch {}
-            await sleep(900);
-            continue;
+
+            // Tentar resolver com Groq OCR
+            const ocrResult = await browserHelper.solveCaptchaWithGroq(pg, { nome, operator, attempt }).catch(()=>({ ok: false, error: 'ocr_exception' }));
+            try { 
+              provisionAudit.append({ 
+                ts: Date.now(), 
+                event: 'captcha_flow_ocr_attempt', 
+                nome: String(nome||''), 
+                operator, 
+                attempt, 
+                ok: !!ocrResult.ok, 
+                error: ocrResult && ocrResult.error ? String(ocrResult.error).slice(0, 120) : null,
+                hasText: !!(ocrResult && ocrResult.text),
+                textLength: ocrResult && ocrResult.text ? String(ocrResult.text).length : 0
+              }); 
+            } catch {}
+
+            if (ocrResult && ocrResult.ok && ocrResult.text) {
+              // OCR sucesso: digitar texto e verificar se botão ficou azul
+              const fillResult = await browserHelper.fillCaptchaAndContinue(pg, { text: ocrResult.text, maxWaitMs: 12000 }).catch(()=>({ ok: false, error: 'fill_failed' }));
+              try { 
+                provisionAudit.append({ 
+                  ts: Date.now(), 
+                  event: 'captcha_flow_fill_attempt', 
+                  nome: String(nome||''), 
+                  operator, 
+                  attempt, 
+                  ok: !!fillResult.ok, 
+                  error: fillResult && fillResult.error ? String(fillResult.error).slice(0, 120) : null
+                }); 
+              } catch {}
+
+              if (fillResult && fillResult.ok) {
+                // Sucesso: texto digitado e botão clicado
+                await sleep(1500);
+                // Revalidar para ver se captcha foi resolvido
+                continue;
+              } else {
+                // Texto digitado mas botão não ficou azul (imagem mudou ou texto errado)
+                // Reload para pegar nova imagem na próxima tentativa
+                try { 
+                  provisionAudit.append({ 
+                    ts: Date.now(), 
+                    event: 'captcha_flow_reload_after_fill_fail', 
+                    nome: String(nome||''), 
+                    operator, 
+                    attempt 
+                  }); 
+                } catch {}
+                try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload_after_fill', timeoutMs: 45_000 }).catch(()=>null); } catch {}
+                await sleep(1200);
+                continue;
+              }
+            } else {
+              // OCR falhou: se botão já estiver habilitado (humano digitou), clicar; senão reload
+              if (cap && cap.continueDisabled === false) {
+                const clk2 = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 6000 }).catch(()=>({ ok:false }));
+                try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_click_continue', nome: String(nome||''), operator, attempt, ok: !!(clk2 && clk2.ok) }); } catch {}
+                await sleep(1200);
+                continue;
+              }
+              // Reload para pegar nova imagem
+              try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null); } catch {}
+              await sleep(900);
+              continue;
+            }
           }
 
           // Outro motivo: não insistir aqui.

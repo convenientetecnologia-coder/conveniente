@@ -8,6 +8,7 @@ const { execFileSync } = require('child_process');
 const utils = require('./utils.js');
 const logger = require('./logger.js');
 const gptFallback = require('./gptFallback.js');
+const { readGroqConfig } = require('./groqConfig.js');
 
 puppeteer.use(StealthPlugin());
 
@@ -3594,6 +3595,179 @@ async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
   }
 }
 
+/**
+ * Resolve captcha usando Groq OCR (ultra enterprise melhor do mundo).
+ * Extrai a imagem do captcha, envia para Groq API, processa resposta e retorna texto limpo.
+ */
+async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 1 } = {}) {
+  try {
+    // 1. Detectar captcha e extrair URL da imagem
+    const cap = await detectCaptchaChallenge(page).catch(()=>({ ok: false, present: false }));
+    if (!cap || !cap.ok || !cap.present || !cap.imgSrc) {
+      return { ok: false, error: 'captcha_not_detected', details: cap };
+    }
+
+    const imgSrc = String(cap.imgSrc || '').trim();
+    if (!imgSrc || !imgSrc.includes('/captcha/tfbimage/')) {
+      return { ok: false, error: 'invalid_img_src', imgSrc };
+    }
+
+    // 2. Ler configuração Groq
+    const groqCfg = readGroqConfig();
+    if (!groqCfg || !groqCfg.groqApiKey || !groqCfg.groqModel) {
+      return { ok: false, error: 'groq_config_missing', hasKey: !!groqCfg?.groqApiKey, hasModel: !!groqCfg?.groqModel };
+    }
+
+    // 3. Baixar imagem usando puppeteer (mais confiável que fetch para imagens do Facebook)
+    let imageBase64 = null;
+    try {
+      // Usa evaluate para baixar a imagem via canvas (evita CORS)
+      // Busca a imagem pelo src completo ou parcial
+      imageBase64 = await page.evaluate(async (src) => {
+        try {
+          // Tenta encontrar a imagem pelo src completo primeiro
+          let img = document.querySelector(`img[src="${src}"]`);
+          // Se não encontrar, tenta pelo src parcial
+          if (!img) {
+            const srcParts = src.split('/captcha/tfbimage/');
+            if (srcParts.length > 1) {
+              const partial = srcParts[1].split('?')[0];
+              img = document.querySelector(`img[src*="${partial}"]`);
+            }
+          }
+          // Última tentativa: qualquer img com /captcha/tfbimage/
+          if (!img) {
+            img = document.querySelector('img[src*="/captcha/tfbimage/"]');
+          }
+          if (!img) return null;
+          
+          // Cria canvas para converter imagem em base64
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          canvas.width = img.naturalWidth || img.width || 300;
+          canvas.height = img.naturalHeight || img.height || 100;
+          
+          // Aguarda imagem carregar
+          await new Promise((resolve, reject) => {
+            if (img.complete) {
+              resolve();
+            } else {
+              img.onload = resolve;
+              img.onerror = reject;
+              setTimeout(reject, 5000);
+            }
+          });
+          
+          ctx.drawImage(img, 0, 0);
+          return canvas.toDataURL('image/png').split(',')[1]; // Remove data:image/png;base64,
+        } catch (e) {
+          return null;
+        }
+      }, imgSrc).catch(()=>null);
+
+      // Fallback: se canvas falhar, tenta baixar via fetch (com cookies da página)
+      if (!imageBase64) {
+        const response = await page.evaluate(async (src) => {
+          try {
+            const res = await fetch(src, { credentials: 'include' });
+            if (!res.ok) return null;
+            const blob = await res.blob();
+            return new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                const base64 = reader.result.split(',')[1];
+                resolve(base64);
+              };
+              reader.onerror = () => resolve(null);
+              reader.readAsDataURL(blob);
+            });
+          } catch (e) {
+            return null;
+          }
+        }, imgSrc).catch(()=>null);
+        imageBase64 = response;
+      }
+    } catch (e) {
+      return { ok: false, error: 'image_download_failed', details: (e && e.message) ? String(e.message) : String(e) };
+    }
+
+    if (!imageBase64) {
+      return { ok: false, error: 'image_base64_failed' };
+    }
+
+    // 4. Chamar Groq API
+    try {
+      const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${groqCfg.groqApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: groqCfg.groqModel,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Extract ONLY the text from this captcha image. Return ONLY the text characters, nothing else. No explanations, no comments, no additional text. Just the text from the image.'
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:image/png;base64,${imageBase64}`
+                  }
+                }
+              ]
+            }
+          ],
+          max_tokens: 50,
+          temperature: 0.1
+        })
+      });
+
+      if (!groqResponse.ok) {
+        const errorText = await groqResponse.text().catch(()=>'');
+        return { ok: false, error: 'groq_api_error', status: groqResponse.status, details: errorText.slice(0, 200) };
+      }
+
+      const groqData = await groqResponse.json().catch(()=>null);
+      if (!groqData || !groqData.choices || !Array.isArray(groqData.choices) || !groqData.choices[0]) {
+        return { ok: false, error: 'groq_invalid_response', data: groqData };
+      }
+
+      const rawText = String(groqData.choices[0].message?.content || '').trim();
+      if (!rawText) {
+        return { ok: false, error: 'groq_empty_response' };
+      }
+
+      // 5. Processar resposta: extrair apenas o texto (remove comentários, explicações, etc.)
+      // Groq pode retornar coisas como "The text is: ABC123" ou "ABC123" ou "Text: ABC123"
+      // Precisamos extrair apenas os caracteres do captcha
+      let cleanText = rawText
+        .replace(/^(text|the text|text is|text:|the text is:|answer|answer is|answer:)\s*/i, '')
+        .replace(/\s*(text|the text|text is|text:|the text is:|answer|answer is|answer:)\s*$/i, '')
+        .replace(/^["']|["']$/g, '')
+        .trim();
+
+      // Remove qualquer coisa que não seja alfanumérica (mantém apenas letras e números)
+      // Mas preserva espaços se houver (alguns captchas têm espaços)
+      cleanText = cleanText.replace(/[^\w\s]/g, '').trim();
+
+      if (!cleanText || cleanText.length < 2) {
+        return { ok: false, error: 'groq_text_too_short', rawText: rawText.slice(0, 100), cleanText };
+      }
+
+      return { ok: true, text: cleanText, rawText: rawText.slice(0, 100) };
+    } catch (e) {
+      return { ok: false, error: 'groq_request_exception', details: (e && e.message) ? String(e.message) : String(e) };
+    }
+  } catch (e) {
+    return { ok: false, error: 'solve_captcha_exception', details: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 
 /**
  * Assistente safe para fluxo de identidade (selfie/vídeo).
@@ -4297,6 +4471,7 @@ module.exports = {
   detectCaptchaChallenge,
   focusCaptchaInput,
   fillCaptchaAndContinue,
+  solveCaptchaWithGroq,
   identityAssistStep,
   hackedAssistStep,
   tryLoginEmailPass,
