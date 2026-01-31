@@ -3599,7 +3599,21 @@ async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
   try {
     // Foco garantido
     await focusCaptchaInput(page).catch(()=>null);
-    // Digitar por evaluate para reduzir bugs de foco; mas manter simples.
+    // IMPORTANT (ultra enterprise):
+    // Em retries, o Facebook pode manter o texto anterior no input.
+    // Se não limpar, o próximo OCR "concatena" e garante erro.
+    await page.evaluate(() => {
+      try {
+        const input = document.querySelector('input[type="text"]');
+        if (!input) return;
+        // Select-all + clear (compatível com React-controlled inputs)
+        try { input.focus(); } catch {}
+        try { input.value = ''; } catch {}
+        try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch {}
+        try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
+      } catch {}
+    }).catch(()=>null);
+    // Digitar com delay leve para reduzir flake de foco
     await page.type('input[type="text"]', t, { delay: 60 }).catch(()=>null);
     // Aguarda habilitar e clica
     const startedAt = Date.now();
