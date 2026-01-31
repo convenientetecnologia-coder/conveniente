@@ -10439,6 +10439,11 @@ async function nurseTick() {
         if (slotsInUse >= MAX_OPEN_CONCURRENCY) continue;
         slotsInUse++;
         try {
+          let _flags = null;
+          try { _flags = await readAccountFlags(nome).catch(()=>null); } catch {}
+          if (_flags && _flags.appealSubmitted === true) {
+            try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_pending_appeal', nome: String(nome||''), appealNextCheckAt: Number(_flags.appealNextCheckAt || 0) || 0 }); } catch {}
+          }
           await reportAction(nome, 'nurse_restart', 'desired ativo porém controller ausente — tentando ativar');
           try {
             // Se existe um open-all ativo sob provision_lock (kind=open_all_map),
@@ -10456,14 +10461,17 @@ async function nurseTick() {
                 ? String(provisionLockSnap.lock.meta.kind)
                 : '';
               const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
+              try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: useOpenAll ? 'open_all_24h' : 'nurse_auto', oaActive: !!oaActive, lkActive: !!lkActive, lkKind: lkKind || null }); } catch {}
               r = useOpenAll
                 ? await activateOnce(nome, 'open_all_24h', oaOwner)
                 : await activateOnce(nome, 'nurse_auto');
             } catch {
+              try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: 'nurse_auto', oaActive: false, lkActive: false, lkKind: null }); } catch {}
               r = await activateOnce(nome, 'nurse_auto');
             }
             if (!r || !r.ok) {
               const err = (r && r.error) || '';
+              try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_denied', nome: String(nome||''), error: String(err || '').slice(0, 160) }); } catch {}
               try {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].lastOpenDeniedAt = Date.now();
