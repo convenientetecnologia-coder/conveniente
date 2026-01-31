@@ -930,6 +930,17 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
             imgSrcKnown: !!curImgSrc
           });
         } catch {}
+        // Se a causa é falta de config Groq no host, isso é auto-corrigível via handshake CT.
+        // Não devemos invocar humano nem consumir as 5 tentativas "em loop" aqui.
+        if (!ocr || ocr.ok !== true) {
+          const oerr = ocr && ocr.error ? String(ocr.error) : '';
+          if (String(oerr).toLowerCase() === 'groq_config_missing') {
+            try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_abort_groq_config_missing', nome: String(nome||''), flowId: id, attempt }); } catch {}
+            try { await setLoginRequiredFlag(nome, { reason: 'groq_config_missing', source: 'captcha_flow' }).catch(()=>{}); } catch {}
+            try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'abort_groq_config_missing' }).catch(()=>{}); } catch {}
+            return { ok: false, error: 'groq_config_missing', flowId: id };
+          }
+        }
         if (ocr && ocr.ok && ocr.text) {
           const fill = await browserHelper.fillCaptchaAndContinue(pg, { text: ocr.text, maxWaitMs: 12000 }).catch(()=>({ ok:false, error:'fill_failed' }));
           try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_fill_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!fill.ok, error: fill && fill.error ? String(fill.error).slice(0,120) : null }); } catch {}
