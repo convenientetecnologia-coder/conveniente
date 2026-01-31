@@ -68,7 +68,42 @@ Objetivo: quando o humano mandar um texto grande/bagunçado com “mil problemas
 ## RAW_INPUT (colar aqui)
 
 ```text
-(vazio — relato triado; ver arquivos em `docs/inbox/`)
+triagem inbox
+
+URGENTE
+
+ROBE MÃE 3: no CT está com "trabalhando 0".
+
+Perguntas:
+- por que ele está assim?
+- está travado?
+- tem a ver com modo leve?
+
+Pedido:
+- verificar com logs ultra detalhados enterprise e provar o motivo agora.
+
+---
+
+triagem inbox
+
+precisamos investigar no ROBE MÃE 3 com logs:
+
+- dificuldade no "invocar humano": cliquei em invocar humano e **não está indo o painel** que abre junto com o invocar humano
+- botão **"retomar trabalho" não está retomando trabalho**
+- isso prejudica o sistema: tem contas com messenger+facebook ok, mas o sistema marca **login requerido** e **virtus offline**
+- depois de um tempo o retomar trabalho funcionou, mas está "travado/estranho"
+
+Pedido:
+- investigar modo ultra enterprise no código e nos logs **por que isso acontece**
+- primeiro entender/provar; depois (aprovado) decidir se muda ou não
+
+---
+
+triagem inbox (2026-01-30):
+
+- ao clicar **Abrir Todos** ou abrir conta, deveria zerar flags para reavaliar estado real; flags antigas podem engessar
+- após **Retomar trabalho**, se Messenger estiver em login/senha, deveria re-detectar e repetir cookies→login→humano; parece engessado
+- HUD do **modo humano** some ao navegar (demora a reaparecer)
 ```
 
 ---
@@ -94,6 +129,9 @@ Colunas:
 | INC-YYYYMMDD-HHMM-01 | `docs/inbox/in_progress/INC-YYYYMMDD-HHMM-01.md` | P1 | conveniente | … | … | logs_manifest + fetch_logs(keys=…) | need_evidence | not_deployed | not_run | não | sim |
 | INC-20260130-0905-01 | `docs/inbox/cancelled/INC-20260130-0905-01.md` | P0 | sitechatbot+conveniente | RM3 aparece OFFLINE no CT (servidores + estoque) mas o host está acessível | CT não recebeu `/report` recente (snapshot `receivedAt` velho) **ou** UI está mostrando “ghost” | CT snapshot: `C:\sitechatbot\dados\5d7c3309-...-30b3fe928b.json`; regra CT `/servers` (computedOnline por `receivedAt`) | cancelled | not_deployed | not_run | não | não |
 | INC-20260130-1521-01 | `docs/inbox/done/INC-20260130-1521-01.md` | P0 | sitechatbot+conveniente | CT/Servidores mostra "Desconhecido" e contadores de flags (captcha/humano invocado/login/limite) não são 110% acionáveis | o CT estava colapsando razões de `loginRequired` em `unknown` (ex.: `probe_failed`) e não expunha flags operacionais no `/servers` | evidência: CT files `C:\sitechatbot\convenientetecnologia\lib\fbAccountState.js`, `C:\sitechatbot\index.js`, `C:\sitechatbot\public\index.html` | done | manual_step_required | not_run | não | sim |
+| INC-20260130-1544-01 | `docs/inbox/in_progress/INC-20260130-1544-01.md` | P0 | conveniente+sitechatbot | RM3: “invocar humano” não abre painel/HUD e “retomar trabalho” parece não retomar; além de variações 0→4→6 trabalhando no CT | pode ser (a) fluxo de humano/retomar com pré-check que agenda login_remediate (efeito tardio), (b) `loginRequired=probe_failed` (falso positivo) mantendo virtus off, (c) falha de overlay/hud, ou (d) telemetria degradada | evidência: CT logs requestId `rm3_hud_20260130_161238`, `rm3_desired_20260130_161417`, `rm3_issues_q_20260130_161659`, `rm3_pa_q_20260130_161656` + snapshot `C:\sitechatbot\dados\5d7c3309-...-30b3fe928b.json` | in_progress | not_deployed | not_run | não | sim |
+| INC-20260130-2015-02 | `docs/inbox/in_progress/INC-20260130-2015-02.md` | P2 | conveniente | Abrir Todos deveria zerar flags para reavaliar estado real | flags antigas podem segurar login/virtus em estado incorreto (suspeita) | coletar `status` + `desired` + `login_required_events` antes/depois de open_all | need_evidence | not_deployed | not_run | não | não |
+| INC-20260130-2015-03 | `docs/inbox/in_progress/INC-20260130-2015-03.md` | P2 | conveniente | HUD humano some ao navegar e demora a reaparecer | overlay não persistindo em SPA/navegação (suspeita) | `provision_audit` com `human_overlay_sync` (hostVisible=false) | need_evidence | not_deployed | not_run | não | não |
 | INC-20260130-0128-01 | `docs/inbox/done/INC-20260130-0128-01.md` | P0 | conveniente | Abrir Todos não iniciava com 0 browsers | nurseTick fazia early-return quando controllers=0 mesmo com desired.active/_openAll | CT: desired active=28/28 + controllersCount=0; fix commit 035fa92 | done | deployed | passed | não | sim |
 | INC-20260130-0001-01 | `docs/inbox/done/INC-20260130-0001-01.md` | P0 | conveniente | Abrir Todos: 2º clique dava open_all_lock_busy | endpoint não era idempotente; faltava feedback; stale lock precisava auto-recover | painel alert + payload alreadyRunning + lockOwner | done | not_deployed | not_run | não | sim |
 | INC-20260129-2100-01 | `docs/inbox/done/INC-20260129-2100-01.md` | P1 | sitechatbot+conveniente | conta do estoque fica “reserved” mas não provisiona (falhas em massa) | timeouts+busy+ACK lookup limitado; hardening+fallback | CT DB + ack files + provision_audit.jsonl | done | deployed_partial | not_run | não | sim |
