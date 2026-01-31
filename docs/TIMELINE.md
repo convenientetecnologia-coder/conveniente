@@ -46,6 +46,17 @@ Formato canônico (copiar/colar):
 - **Reinícios**: `conveniente` (hosts) — humano reinicia com `node index.js`.
 - **Rollback**: `git revert 2c9abe9` e reiniciar `node index.js`.
 
+#### 2026-01-31 — [CONV][FIX][OPS] Identidade: remover cooldown do gate global (evita engessamento após captcha)
+
+- **O que**:
+  - `IDENTITY_GATE.cooldownMinMs` e `cooldownMaxMs` zerados para permitir sequência imediata de fluxos de identidade (ainda 1 por vez no host).
+- **Por quê**: evidência mostrou `identity_flow_gate_denied` por cooldown, travando contas na tela de identidade após captcha.
+- **Evidência**:
+  - `C:\conveniente\scripts\worker.js` (IDENTITY_GATE)
+  - RM7 `provision_audit`: eventos `identity_gate_denied why=cooldown` + `identity_flow_gate_denied` (fetch `rm7_fetch_identity_stuck_1769899549740.json`)
+- **Reinícios**: `conveniente` (hosts) — humano reinicia com `node index.js`.
+- **Rollback**: reverter commit desta mudança e reiniciar `node index.js`.
+
 #### 2026-01-31 — [CONV][FIX][OPS] Captcha: tratar pre-screen "Confirme que você é humano" + 3 tentativas antes de invocar humano (sem OCR implementado)
 
 - **O que**:

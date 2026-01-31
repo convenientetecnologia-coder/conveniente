@@ -2523,15 +2523,15 @@ const IDENTITY_CFG = {
 
 // Identity Gate (ultra enterprise):
 // - garante que apenas 1 fluxo de identidade "avance botões" por vez (global no host)
-// - após qualquer ação (clique), aplica cooldown randomizado de 5–10min antes de permitir outra
+// - após qualquer ação (clique), NÃO aplica cooldown (apenas 1 por vez)
 // - o timer de identidadeSubmitted (1h) é independente e "corre solto"
 const IDENTITY_GATE = {
   // Requisito operacional (ROBE MÃE 5): evitar câmera "em uso" e travamentos.
   // Identidade deve rodar 1 por vez por host, com cooldown RANDOMIZADO 10–30min entre execuções.
   // Semântica desejada: o timer “corre livre”. Se não houver identidade, nada acontece;
   // quando aparecer uma, só roda se cooldown já expirou.
-  cooldownMinMs: 10 * 60 * 1000,
-  cooldownMaxMs: 30 * 60 * 1000,
+  cooldownMinMs: 0,
+  cooldownMaxMs: 0,
   // O botão "Carregar" pode levar 20–120s para habilitar; manter lease maior evita expirar durante a espera.
   leaseMs: 4 * 60 * 1000 // lease curto o suficiente p/ evitar deadlock, longo o suficiente p/ completar a etapa
 };
