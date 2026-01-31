@@ -31,6 +31,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-31 — [CONV][FIX][OPS] Captcha: tratar pre-screen “Confirme que você é humano” + 3 tentativas antes de invocar humano (sem OCR implementado)
+
+- **O que**:
+  - `detectLoginRequired` passou a detectar `captcha_persona_pre_screen` (tela “confirme que você é humano para usar sua conta”) com sinais anti-falso-positivo.
+  - Adicionados helpers em `scripts/browser.js` para clicar “Continuar”, detectar captcha (imagem+input) e preparar foco do input (sem OCR).
+  - `login_remediate` e `runIdentityFlow` agora fazem **3 tentativas** (pre-screen click + captcha revalidar/click-se-habilitado/reload) antes de invocar humano.
+- **Por quê**: evitar falso positivo e evitar “invocar humano imediato” quando dá para avançar pelo menos o “Continuar” e revalidar o estado.
+- **Evidência**:
+  - `C:\conveniente\scripts\browser.js` (`captcha_persona_pre_screen`, `clickContinueByLabel`, `detectCaptchaChallenge`)
+  - `C:\conveniente\scripts\worker.js` (eventos `captcha_flow_*`, `captcha_requires_human_after_3_tries`)
+- **Reinícios**: `conveniente` (hosts) — humano reinicia com `node index.js`.
+- **Rollback**: `git revert` do commit desta mudança e reiniciar `node index.js`.
+
 #### 2026-01-31 — [CROSS][CONV][CT][FEAT][OPS] Groq config: host auto-solicita e CT envia `set_groq_config` (persistente em `dados/groq_config.json`)
 
 - **O que**:

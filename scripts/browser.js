@@ -3053,6 +3053,36 @@ async function detectLoginRequired(page) {
       const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
       // HARDEN: também usa body.innerText, porque às vezes o texto está fora do recorte inicial
       const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+      const hasCaptchaPromptText =
+        bodyTxt.includes('digite o texto da imagem') ||
+        bodyTxt.includes('type the text from the image') ||
+        bodyTxt.includes('enter the text from the image');
+      const hasCaptchaImg = !!document.querySelector('img[src*="/captcha/tfbimage/"]');
+      const hasCaptchaInput = !!document.querySelector('input[type="text"]');
+      const hasContinueBtn = (() => {
+        try {
+          const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1200);
+          for (const el of candidates) {
+            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+            const txt = norm(el.innerText || el.textContent || '');
+            if (aria === 'continuar' || txt === 'continuar') return true;
+          }
+        } catch {}
+        return false;
+      })();
+      const hasHumanConfirmText =
+        bodyTxt.includes('confirme que voce e humano para usar sua conta') ||
+        bodyTxt.includes('confirme que voce e humano') && bodyTxt.includes('para usar sua conta') ||
+        bodyTxt.includes('confirm that you are human') ||
+        bodyTxt.includes('confirm you are human');
+      // Pre-screen: "confirme que você é humano para usar sua conta" + botão Continuar,
+      // mas ainda NÃO é o captcha (sem imagem/input/prompt).
+      const hasHumanConfirmPreScreen =
+        hasHumanConfirmText &&
+        hasContinueBtn &&
+        !hasCaptchaPromptText &&
+        !hasCaptchaImg &&
+        !hasCaptchaInput;
       const hasPersonaTextRaw =
         h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person')) ||
         bodyTxt.includes('confirme que voce e uma pessoa') ||
@@ -3181,7 +3211,7 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('identidade') ||
         bodyTxt.includes('video selfie');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, hasPageNotAvailable, href0, path0, title0 };
+      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, hasPageNotAvailable, hasHumanConfirmPreScreen, hasCaptchaPromptText, hasCaptchaImg, hasCaptchaInput, hasContinueBtn, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -3202,6 +3232,11 @@ async function detectLoginRequired(page) {
     const hasBackToFacebookUnlocked = !!(v && v.hasBackToFacebookUnlocked);
     const hasContentNotAvailable = !!(v && v.hasContentNotAvailable);
     const hasPageNotAvailable = !!(v && v.hasPageNotAvailable);
+    const hasHumanConfirmPreScreen = !!(v && v.hasHumanConfirmPreScreen);
+    const hasCaptchaPromptText = !!(v && v.hasCaptchaPromptText);
+    const hasCaptchaImg = !!(v && v.hasCaptchaImg);
+    const hasCaptchaInput = !!(v && v.hasCaptchaInput);
+    const hasContinueBtn = !!(v && v.hasContinueBtn);
     const title = (v && v.title0) ? String(v.title0) : '';
     const titleNorm = (() => {
       try {
@@ -3232,6 +3267,33 @@ async function detectLoginRequired(page) {
         url: (v && v.href0) ? String(v.href0) : href,
         title,
         evidence: { hasContentNotAvailable, path }
+      };
+    }
+
+    // Pré-captcha: "Confirme que você é humano" (antes do captcha).
+    // Regra enterprise: tratar como loginRequired e encaminhar para fluxo de clique "Continuar".
+    if (hasHumanConfirmPreScreen) {
+      return {
+        loginRequired: true,
+        reason: 'captcha_persona_pre_screen',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasHumanConfirmPreScreen, hasContinueBtn, hasCaptchaPromptText, hasCaptchaImg, hasCaptchaInput, path }
+      };
+    }
+
+    // Captcha clássico (imagem+texto). Não é automatizável por padrão (o placeholder OCR fica no worker).
+    // Mantemos motivo "captcha_persona" quando o texto "pessoa" existe; mas se o captcha estiver explícito,
+    // também deixamos evidência forte para reduzir falso positivo.
+    if (hasCaptchaPromptText && hasCaptchaImg && hasCaptchaInput) {
+      return {
+        loginRequired: true,
+        reason: 'captcha_persona',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { hasCaptchaPromptText, hasCaptchaImg, hasCaptchaInput, hasContinueBtn, path }
       };
     }
 
@@ -3423,6 +3485,115 @@ async function detectLoginRequired(page) {
   // não podemos concluir "liberado". Mantemos como loginRequired=true para evitar ações erradas.
   return { loginRequired: true, reason: 'probe_failed' };
 }
+
+// ==== CAPTCHA/CONFIRME-HUMANO HELPERS (SEM OCR IMPLEMENTADO) ====
+
+async function clickContinueByLabel(page, { maxWaitMs = 10_000 } = {}) {
+  try {
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(1500, Number(maxWaitMs || 0) || 0);
+    while (Date.now() < deadline) {
+      const r = await page.evaluate(() => {
+        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+        const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
+        const pick = () => {
+          for (const el of candidates) {
+            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+            const txt = norm(el.innerText || el.textContent || '');
+            if (aria === 'continuar' || txt === 'continuar') return el;
+          }
+          return null;
+        };
+        const el = pick();
+        if (!el) return { ok: false, error: 'continue_not_found' };
+        // heurística “clicável”
+        const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
+        const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
+        const disabled = (ariaDisabled === 'true') || (tabIndex === '-1');
+        // clicar mesmo se disabled=false; se disabled=true, retornamos info e não clicamos
+        if (disabled) return { ok: false, error: 'continue_disabled', ariaDisabled, tabIndex };
+        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+        try { el.click(); } catch {}
+        return { ok: true };
+      }).catch(()=>null);
+      if (r && r.ok) return { ok: true };
+      // Se está disabled, não adianta martelar; deixa caller decidir (ex.: captcha precisa texto).
+      if (r && String(r.error||'').includes('disabled')) return { ok: false, error: String(r.error), details: r };
+      await new Promise(r => setTimeout(r, 450));
+    }
+    return { ok: false, error: 'timeout' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+async function detectCaptchaChallenge(page) {
+  try {
+    const v = await page.evaluate(() => {
+      function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+      const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+      const hasPrompt = bodyTxt.includes('digite o texto da imagem') || bodyTxt.includes('type the text from the image');
+      const img = document.querySelector('img[src*="/captcha/tfbimage/"]');
+      const imgSrc = img && img.getAttribute ? String(img.getAttribute('src') || '') : '';
+      const input = document.querySelector('input[type="text"]');
+      const hasInput = !!input;
+      const btns = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
+      let continueDisabled = null;
+      for (const el of btns) {
+        const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+        const txt = norm(el.innerText || el.textContent || '');
+        if (aria === 'continuar' || txt === 'continuar') {
+          const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
+          const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
+          continueDisabled = (ariaDisabled === 'true') || (tabIndex === '-1');
+          break;
+        }
+      }
+      return { hasPrompt, imgSrc, hasInput, continueDisabled };
+    });
+    return { ok: true, present: !!(v && v.hasPrompt && v.imgSrc && v.hasInput), ...(v || {}) };
+  } catch (e) {
+    return { ok: false, present: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+async function focusCaptchaInput(page) {
+  try {
+    const r = await page.evaluate(() => {
+      const input = document.querySelector('input[type="text"]');
+      if (!input) return { ok: false, error: 'input_not_found' };
+      try { input.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
+      try { input.focus(); } catch {}
+      try { input.click(); } catch {}
+      return { ok: true };
+    });
+    return r && r.ok ? { ok: true } : { ok: false, error: (r && r.error) ? String(r.error) : 'unknown' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
+  const t = String(text || '').trim();
+  if (!t) return { ok: false, error: 'empty_text' };
+  try {
+    // Foco garantido
+    await focusCaptchaInput(page).catch(()=>null);
+    // Digitar por evaluate para reduzir bugs de foco; mas manter simples.
+    await page.type('input[type="text"]', t, { delay: 60 }).catch(()=>null);
+    // Aguarda habilitar e clica
+    const startedAt = Date.now();
+    while ((Date.now() - startedAt) < Math.max(1000, Number(maxWaitMs||0)||0)) {
+      const r = await clickContinueByLabel(page, { maxWaitMs: 800 }).catch(()=>null);
+      if (r && r.ok) return { ok: true };
+      await new Promise(r => setTimeout(r, 350));
+    }
+    return { ok: false, error: 'continue_not_clickable_after_type' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 
 /**
  * Assistente safe para fluxo de identidade (selfie/vídeo).
@@ -4121,6 +4292,11 @@ module.exports = {
   installAboutBlankKiller,
   // ==== NOVOS:
   detectLoginRequired,
+  // ==== CAPTCHA/CONFIRME-HUMANO (SEM OCR IMPLEMENTADO):
+  clickContinueByLabel,
+  detectCaptchaChallenge,
+  focusCaptchaInput,
+  fillCaptchaAndContinue,
   identityAssistStep,
   hackedAssistStep,
   tryLoginEmailPass,

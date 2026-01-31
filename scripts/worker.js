@@ -2474,10 +2474,103 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
       }
 
       const rr2 = String(lr2.reason || '').toLowerCase();
-      if (rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
+      if (rr2.includes('captcha_persona_pre_screen') || rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
+        // Novo fluxo (sem OCR): tentar 3 vezes antes de invocar humano.
+        // Objetivo: clicar "Continuar" no pre-screen e, no captcha, só invocar humano após 3 tentativas.
+        const operator = `identity_flow_captcha:${id}`;
+        try {
+          // Estado seguro imediato (não pode ficar Virtus/Robe rodando).
+          try { await stopVirtus(nome); } catch {}
+          try { if (ctrl) ctrl.trabalhando = false; } catch {}
+          try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].pauseReason = 'captcha_flow'; } catch {}
+          try {
+            await fileStore.withDesiredFileLockUpdate((d) => {
+              d.perfis = d.perfis || {};
+              d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off' };
+              return d;
+            });
+          } catch {}
+        } catch {}
+
+        let lastLr = lr2;
+        let ok = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_attempt', nome: String(nome||''), operator, source: String(source||'').slice(0,80), attempt, reason: String((lastLr && lastLr.reason) || rr2).slice(0,80) });
+          } catch {}
+
+          // Re-probe a cada tentativa (evita operar em estado velho)
+          lastLr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
+          if (!lastLr || lastLr.loginRequired !== true) { ok = true; break; }
+          const r = String(lastLr.reason || '').toLowerCase();
+
+          if (r.includes('captcha_persona_pre_screen')) {
+            // Pre-screen: clicar Continuar (se habilitado).
+            const clk = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 8000 }).catch(()=>({ ok:false, error:'click_failed' }));
+            try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_click', nome: String(nome||''), operator, attempt, ok: !!clk.ok, error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
+            await sleep(1100);
+            continue;
+          }
+
+          // Captcha: não resolve OCR aqui (placeholder). Só tenta:
+          // - focar input (pronto para digitar)
+          // - se "Continuar" estiver habilitado (ex.: humano já digitou), clicar
+          // - caso contrário, reload e revalidar
+          if (r.includes('captcha_persona') || r.includes('checkpoint_captcha')) {
+            const cap = await browserHelper.detectCaptchaChallenge(pg).catch(()=>({ ok:false, present:false }));
+            try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_probe', nome: String(nome||''), operator, attempt, present: !!cap.present, hasPrompt: !!cap.hasPrompt, hasInput: !!cap.hasInput, continueDisabled: cap.continueDisabled }); } catch {}
+            await browserHelper.focusCaptchaInput(pg).catch(()=>null);
+
+            // === OCR placeholder (não implementar aqui) ===
+            // const ocrText = await yourGroqOcrFunction(cap.imgSrc, { nome, operator, attempt });
+            // if (ocrText) await browserHelper.fillCaptchaAndContinue(pg, { text: ocrText });
+
+            // Se o botão estiver habilitado, tenta clicar; senão reload.
+            if (cap && cap.present && cap.continueDisabled === false) {
+              const clk2 = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 6000 }).catch(()=>({ ok:false }));
+              try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_click_continue', nome: String(nome||''), operator, attempt, ok: !!(clk2 && clk2.ok) }); } catch {}
+              await sleep(1200);
+              continue;
+            }
+            try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null); } catch {}
+            await sleep(900);
+            continue;
+          }
+
+          // Outro motivo: não insistir aqui.
+          break;
+        }
+
+        if (ok) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_end', nome: String(nome||''), operator, result: 'cleared' }); } catch {}
+          // Reclassifica normal
+          const lr3 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+          if (!lr3 || lr3.loginRequired !== true) {
+            try { await clearIdentityFlags(nome); } catch {}
+            try {
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d = d || {}; d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
+                return d;
+              });
+            } catch {}
+            setTimeout(() => { try { handlers.start_work({ nome, operator: `captcha_flow_resolved:${id}` }).catch(()=>{}); } catch {} }, 0);
+            return { ok: true, flowId: id, result: 'captcha_cleared', didAction, actions: actionKinds };
+          }
+        }
+
+        // Falhou após 3 tentativas => invoca humano (final)
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_end', nome: String(nome||''), operator, result: 'invoke_human' }); } catch {}
         await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: String(lr2.domain||'') || 'facebook', url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
-        try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'captcha_checkpoint', reason: rr2.slice(0,160) }); } catch {}
-        return { ok: true, flowId: id, result: 'captcha_checkpoint', didAction, actions: actionKinds };
+        try {
+          const c2 = controllers.get(nome);
+          if (c2) {
+            c2.humanControl = true;
+            c2.trabalhando = false;
+          }
+        } catch {}
+        try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: `captcha_after_3_tries:${String(rr2).slice(0,60)}` }); } catch {}
+        return { ok: false, flowId: id, result: 'captcha_requires_human', didAction, actions: actionKinds };
       }
       if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
         await setAppealSubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
@@ -7603,8 +7696,68 @@ const handlers = {
         if (bad) {
           pushStep({ step: 'non_automatable_login_state', lrMessenger, lrFacebook });
           const why = String((lrMessenger && lrMessenger.reason) || (lrFacebook && lrFacebook.reason) || 'login_requires_human');
-          await failFastToHuman(why);
-          return { ok: false, error: why, steps, closedForRam, pausedVirtus };
+
+          // Novo fluxo (pedido do usuário): se for captcha/pre-screen, NÃO invocar humano imediatamente.
+          // Tentamos 3 vezes (sem OCR implementado aqui) e só então invoca humano.
+          const whyNorm = String(why || '').toLowerCase();
+          if (whyNorm.includes('captcha_persona_pre_screen') || whyNorm.includes('captcha_persona') || whyNorm.includes('checkpoint_captcha')) {
+            pushStep({ step: 'captcha_flow_begin', reason: why });
+            let page = null;
+            try {
+              const pages = await ctrl.browser.pages().catch(()=>[]);
+              page = (pages && pages[0]) ? pages[0] : null;
+            } catch {}
+            if (page) {
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                pushStep({ step: 'captcha_flow_attempt', attempt });
+                const lrNow = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
+                if (!lrNow || lrNow.loginRequired !== true) { pushStep({ step: 'captcha_flow_cleared' }); break; }
+                const r = String(lrNow.reason || '').toLowerCase();
+                if (r.includes('captcha_persona_pre_screen')) {
+                  const clk = await browserHelper.clickContinueByLabel(page, { maxWaitMs: 8000 }).catch(()=>({ ok:false, error:'click_failed' }));
+                  pushStep({ step: 'captcha_pre_screen_click', attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error) : null });
+                  await sleep(1100);
+                  continue;
+                }
+                if (r.includes('captcha_persona') || r.includes('checkpoint_captcha')) {
+                  const cap = await browserHelper.detectCaptchaChallenge(page).catch(()=>({ ok:false, present:false }));
+                  pushStep({ step: 'captcha_screen_probe', attempt, present: !!cap.present, continueDisabled: cap.continueDisabled });
+                  await browserHelper.focusCaptchaInput(page).catch(()=>null);
+
+                  // === OCR placeholder (não implementar aqui) ===
+                  // const ocrText = await yourGroqOcrFunction(cap.imgSrc, { nome, operator: op, attempt });
+                  // if (ocrText) await browserHelper.fillCaptchaAndContinue(page, { text: ocrText });
+
+                  if (cap && cap.present && cap.continueDisabled === false) {
+                    const clk2 = await browserHelper.clickContinueByLabel(page, { maxWaitMs: 6000 }).catch(()=>({ ok:false }));
+                    pushStep({ step: 'captcha_click_continue_enabled', attempt, ok: !!(clk2 && clk2.ok) });
+                    await sleep(1200);
+                    continue;
+                  }
+                  await reloadPageEnterprise(page, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null);
+                  await sleep(900);
+                  continue;
+                }
+                break;
+              }
+              const lrAfter = await browserHelper.detectLoginRequired(page).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
+              if (!lrAfter || lrAfter.loginRequired !== true) {
+                // liberou — segue
+              } else {
+                const still = String(lrAfter.reason || why).toLowerCase();
+                pushStep({ step: 'captcha_flow_invoke_human_after_3_tries', reason: still });
+                await failFastToHuman(`captcha_requires_human_after_3_tries:${still.slice(0,80)}`);
+                return { ok: false, error: still, steps, closedForRam, pausedVirtus };
+              }
+            } else {
+              // sem page => fallback para humano (não dá para tentar)
+              await failFastToHuman(why);
+              return { ok: false, error: why, steps, closedForRam, pausedVirtus };
+            }
+          } else {
+            await failFastToHuman(why);
+            return { ok: false, error: why, steps, closedForRam, pausedVirtus };
+          }
         }
 
         try {
