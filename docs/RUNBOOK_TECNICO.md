@@ -370,6 +370,25 @@ Checklist para qualquer “espera” nova:
 
 ---
 
+### Nota operacional (CANÔNICO) — “só 1 conta vai” em login_remediate (fila/governor)
+
+Sintoma típico:
+- Após **Retomar trabalho** em 2 perfis, só 1 executa login/cookies; o outro fica em `loginRequired` “parado”.
+
+Causa raiz (comum):
+- o segundo fluxo caiu em `governor_busy` (permit max=1) e enfileirou retry, mas o `autoLoginRemediateTick` pode pular se o perfil estiver `configurando=true` (ex.: ainda em provision/abas).
+
+Mitigação (fix aplicado em 2026-01-31):
+- o retry marcado como `force=true` pode avançar mesmo com `configurando=true` quando `queued && nextAt<=now` e não há `provisionLock` ativo; `humanControl` continua sendo hard-stop.
+
+Evidência/diagnóstico:
+- `fetch_logs` key `provision_audit` e procurar:
+  - `login_remediate_governor_denied` / `login_remediate_governor_retry_queued`
+  - `auto_lr_tick_override_configurando`
+  - `auto_login_remediate_begin`
+
+---
+
 ### Postura sobre “keys” (para não virar fonte de bug)
 
 Objetivo do projeto neste estágio: **confiabilidade interna**. Segurança “externa” não é prioridade agora.

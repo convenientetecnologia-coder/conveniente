@@ -31,6 +31,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-31 — [CONV][FIX][OPS] RM3: fila atômica para retry (governor_busy) não travar em `configurando=true`
+
+- **O que**:
+  - `queueAutoLoginRemediate(...force=true)` agora persiste `autoLoginRemediate.force` (para retries).
+  - `autoLoginRemediateTick` pode avançar a fila mesmo com `ctrl.configurando=true` **somente** quando o item está `queued && force && nextAt<=now` e não há `provisionLock` ativo (mantendo `humanControl` como hard-stop).
+  - Removidas instrumentações temporárias de debug (`127.0.0.1:7242/ingest/...`) após validação.
+- **Por quê**: o retry existia, mas era pulado por `configurando=true`, causando “só 1 conta vai” / engessamento.
+- **Evidência**:
+  - `C:\conveniente\scripts\worker.js` (`autoLoginRemediateTick`, `queueAutoLoginRemediate`)
+  - RM3 `provision_audit` no CT: `C:\sitechatbot\dados\logs\5d7c3309-8581-4a50-a421-e6cbb52d8070\rm3_pa_tail_verify_20260131_01.json`
+- **Reinícios**: `conveniente` (hosts afetados) — humano reinicia com `node index.js` quando for testar/validar runtime novo.
+- **Rollback**: `git revert d1d84f8` e reiniciar `node index.js`.
+
 #### 2026-01-30 — [CONV][FIX][OPS] Retomar trabalho: retry imediato quando governor ocupado
 
 - **O que**:

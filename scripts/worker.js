@@ -1786,11 +1786,6 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           const prev = d.perfis[nome] || {};
           // Em open_all: NÃO ligar Virtus automaticamente (mantém estado do desired/open_all_map).
           const nextVirtus = _isOpenAll ? (prev.virtus || 'off') : 'on';
-          if (_isOpenAll) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_open_all_priority_1',hypothesisId:'H3',location:'worker.js:probeHumanStateOnOpen:open_all_skip_start',message:'open_all keeps virtus state (no auto start)',data:{nome:String(nome||''),prevVirtus:String(prev.virtus||''),nextVirtus:String(nextVirtus||''),source:String(source||'')},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
-          }
           d.perfis[nome] = { ...prev, active: true, humanHold: false, virtus: nextVirtus };
           return d;
         });
@@ -8106,9 +8101,6 @@ const handlers = {
       logger.info('[HANDLER] invoke_human chamada', { nome });
 
       const ctrl = controllers.get(nome);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:invoke_human:entry',message:'invoke_human handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl),configurando:!!(ctrl&&ctrl.configurando)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { await issues.append(nome, 'invoke_human_failed', 'browser_not_connected'); } catch {}
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
@@ -8169,15 +8161,9 @@ const handlers = {
       try { freezeCooldownIfNotWorking(nome); } catch {}
       try {
         await ensureHumanOverlay(nome, ctrl, { reason: 'invoke_human' });
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay ok',data:{nome:String(nome||''),humanControl:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         try { await issues.append(nome, 'invoke_human_overlay_ok', 'ok'); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'invoke_human_overlay_ok', nome: String(nome || '') }); } catch {}
       } catch (e) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay error',data:{nome:String(nome||''),error:String((e&&e.message)||e)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         try { await issues.append(nome, 'invoke_human_overlay_err', String((e && e.message) || e).slice(0, 120)); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'invoke_human_overlay_err', nome: String(nome || ''), error: String((e && e.message) || e).slice(0, 160) }); } catch {}
       }
@@ -8195,17 +8181,8 @@ const handlers = {
 
       const ctrl = controllers.get(nome);
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_entry', nome: String(nome||''), ctrlExists: !!ctrl, browserConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.()) }); } catch {}
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:human-resume:entry',message:'human-resume handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H1',location:'worker.js:human-resume:entry2',message:'human-resume entry (extended)',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl),humanHoldBefore:!!(ctrl&&ctrl.humanHold)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_no_browser', nome: String(nome||'') }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H2',location:'worker.js:human-resume:no_browser',message:'human-resume blocked: browser not connected',data:{nome:String(nome||'')},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         try { await issues.append(nome, 'human_resume_failed', 'browser_not_connected'); } catch {}
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
@@ -8214,9 +8191,6 @@ const handlers = {
       // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H3',location:'worker.js:human-resume:flags_before',message:'flags before clear',data:{nome:String(nome||''),flags:{loginRequired:!!flagsBefore.loginRequired,loginRemediateFailed:!!flagsBefore.loginRemediateFailed,appealSubmitted:!!flagsBefore.appealSubmitted,identityRequired:!!flagsBefore.identityRequired}},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       ctrl.humanControl = false;
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
@@ -8287,9 +8261,6 @@ const handlers = {
           (pages && pages.find(p => /facebook\.com/i.test(safeUrl(p)) )) ||
           ((pages && pages[0]) ? pages[0] : null);
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_preflight_page', nome: String(nome||''), url: String(safeUrl(p0)||''), pagesCount: Array.isArray(pages) ? pages.length : 0 }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H4',location:'worker.js:human-resume:preflight_page',message:'preflight page selected',data:{nome:String(nome||''),url:String(safeUrl(p0)||''),pagesCount:Array.isArray(pages)?pages.length:0},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         if (p0) {
           // 0) Suspensa/banida (UI de suspensão)
           const bd = await browserHelper.detectAccountSuspended(p0).catch(()=>({ banned:false }));
@@ -8313,9 +8284,6 @@ const handlers = {
           // 1) Login required / captcha / identity / appeal_submitted etc.
           const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_preflight_lr', nome: String(nome||''), loginRequired: !!(lr && lr.loginRequired), reason: String(lr && lr.reason || ''), domain: String(lr && lr.domain || ''), url: String(lr && lr.url || safeUrl(p0) || '') }); } catch {}
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H4',location:'worker.js:human-resume:preflight_lr',message:'preflight detectLoginRequired',data:{nome:String(nome||''),loginRequired:!!(lr&&lr.loginRequired),reason:String(lr&&lr.reason||''),domain:String(lr&&lr.domain||''),evidence:lr&&lr.evidence?{hasPersonaText:!!lr.evidence.hasPersonaText,hasCheckpointText:!!lr.evidence.hasCheckpointText,hasIdentityText:!!lr.evidence.hasIdentityText,hasTwoFactorText:!!lr.evidence.hasTwoFactorText,hasRoyal:!!lr.evidence.hasRoyal,hasInputs:!!lr.evidence.hasInputs}:{}},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           if (lr && lr.loginRequired) {
             const rr = String(lr.reason || '').toLowerCase();
             preflight = { ok: true, state: 'login_required', reason: String(lr.reason || '') };
@@ -8485,9 +8453,6 @@ const handlers = {
           try {
             const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_lr', nome: String(nome||''), loginRequired: !!(lrPost && lrPost.loginRequired), reason: String(lrPost && lrPost.reason || ''), domain: String(lrPost && lrPost.domain || ''), url: String(lrPost && lrPost.url || '') }); } catch {}
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H5',location:'worker.js:human-resume:post_nav_lr',message:'post-nav detectLoginRequired',data:{nome:String(nome||''),loginRequired:!!(lrPost&&lrPost.loginRequired),reason:String(lrPost&&lrPost.reason||''),domain:String(lrPost&&lrPost.domain||''),evidence:lrPost&&lrPost.evidence?{hasPersonaText:!!lrPost.evidence.hasPersonaText,hasCheckpointText:!!lrPost.evidence.hasCheckpointText,hasIdentityText:!!lrPost.evidence.hasIdentityText,hasTwoFactorText:!!lrPost.evidence.hasTwoFactorText,hasRoyal:!!lrPost.evidence.hasRoyal,hasInputs:!!lrPost.evidence.hasInputs}:{}},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
             if (lrPost && lrPost.loginRequired) {
               const rrPost = String(lrPost.reason || '').toLowerCase();
               if (rrPost === 'login_form' || rrPost === 'login_required') {
@@ -8503,30 +8468,18 @@ const handlers = {
                 try { await stopVirtus(nome); } catch {}
                 try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_schedule_login_remediate', nome: String(nome||''), reason: String(lrPost && lrPost.reason || ''), source: String(lrPost && lrPost.domain || '') }); } catch {}
                 const opPost = `human_resume_post_nav:${String(nome || '').trim()}:${Date.now()}`;
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H1',location:'worker.js:human-resume:post_nav_schedule',message:'post-nav scheduled login_remediate',data:{nome:String(nome||''),operator:String(opPost||''),reason:String(lrPost&&lrPost.reason||''),source:String(lrPost&&lrPost.domain||'')},timestamp:Date.now()})}).catch(()=>{});
-                // #endregion
                 try {
                   handlers.login_remediate({ nome, operator: opPost, options: { overrideHumanHold: true } })
                     .then((res) => {
                       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_result', nome: String(nome||''), operator: String(opPost||''), ok: !!(res && res.ok), error: String(res && res.error || '') }); } catch {}
-                      // #region agent log
-                      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H2',location:'worker.js:human-resume:post_nav_result',message:'post-nav login_remediate result',data:{nome:String(nome||''),operator:String(opPost||''),error:String(res&&res.error||''),ok:!!(res&&res.ok)},timestamp:Date.now()})}).catch(()=>{});
-                      // #endregion
                       const err = String(res && res.error || '');
                       if (err === 'governor_busy' || err === 'busy') {
                         const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume_post_nav', immediate: true, force: true });
                         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_retry_queued', nome: String(nome||''), operator: String(opPost||''), queued: !!queued, error: err }); } catch {}
-                        // #region agent log
-                        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H3',location:'worker.js:human-resume:post_nav_retry',message:'post-nav queued retry after governor busy',data:{nome:String(nome||''),operator:String(opPost||''),queued:!!queued,error:err},timestamp:Date.now()})}).catch(()=>{});
-                        // #endregion
                       }
                     })
                     .catch((err) => {
                       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_error', nome: String(nome||''), operator: String(opPost||''), error: String(err && err.message || err || '') }); } catch {}
-                      // #region agent log
-                      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H2',location:'worker.js:human-resume:post_nav_result',message:'post-nav login_remediate threw',data:{nome:String(nome||''),operator:String(opPost||''),error:String(err&&err.message||err||'')},timestamp:Date.now()})}).catch(()=>{});
-                      // #endregion
                     });
                 } catch {}
                 await snapshotStatusAndWrite();
@@ -9626,9 +9579,6 @@ async function autoLoginRemediateTick() {
   try {
     if (provisionLock.isActive()) {
       try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_blocked', reason: 'provision_lock' }); } catch {}
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H1',location:'worker.js:autoLoginRemediateTick:provision_lock',message:'auto_login_remediate_tick blocked by provisionLock',data:{active:true},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       return;
     }
   } catch {}
@@ -9639,15 +9589,8 @@ async function autoLoginRemediateTick() {
   let best = null;
   for (const [nome, ctrl] of controllers.entries()) {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
-    const _dbgNome = (nome === 'campo_grande-1769119224052' || nome === 'porto_alegre-1769132611438');
     // humanControl: SEMPRE respeitar (humano invocado = pausa total).
     if (ctrl.humanControl === true) {
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'human_or_config', humanControl: true, configurando: !!ctrl.configurando }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H2',location:'worker.js:autoLoginRemediateTick:skip_human_or_config',message:'auto_login_remediate_tick skip: humanControl/configurando',data:{nome:String(nome||''),humanControl:true,configurando:!!ctrl.configurando},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
       continue;
     }
 
@@ -9664,48 +9607,23 @@ async function autoLoginRemediateTick() {
         if (queued0 && force0 && nextAt0 && nextAt0 <= now) {
           if (!provisionLock.isActive()) allowOverride = true;
         }
-        if (_dbgNome) {
-          try { provisionAudit.append({ ts: now, event: 'auto_lr_tick_configurando_check', nome: String(nome||''), configurando: true, queued: queued0, force: force0, nextAt: nextAt0, allowOverride: !!allowOverride }); } catch {}
+        if (allowOverride) {
+          try { provisionAudit.append({ ts: now, event: 'auto_lr_tick_override_configurando', nome: String(nome||''), reason: 'force_queued_ready' }); } catch {}
         }
       } catch {}
       if (!allowOverride) {
-        if (_dbgNome) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'human_or_config', humanControl: false, configurando: true }); } catch {}
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H2',location:'worker.js:autoLoginRemediateTick:skip_human_or_config',message:'auto_login_remediate_tick skip: humanControl/configurando',data:{nome:String(nome||''),humanControl:false,configurando:true},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
-        }
         continue;
       }
-      try { provisionAudit.append({ ts: now, event: 'auto_lr_tick_override_configurando', nome: String(nome||''), reason: 'force_queued_ready' }); } catch {}
     }
     if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'send_lock' }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H3',location:'worker.js:autoLoginRemediateTick:skip_send_lock',message:'auto_login_remediate_tick skip: browser sendLock',data:{nome:String(nome||''),sendLock:true},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
       continue;
     }
     if (robeMeta[nome] && robeMeta[nome].emExecucao === true) {
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'robe_em_execucao' }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H4',location:'worker.js:autoLoginRemediateTick:skip_em_execucao',message:'auto_login_remediate_tick skip: robe emExecucao',data:{nome:String(nome||'')},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
       continue;
     }
 
     const want = desired && desired.perfis ? desired.perfis[nome] : null;
     if (want && want.humanHold === true) {
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'desired_human_hold' }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H5',location:'worker.js:autoLoginRemediateTick:skip_human_hold',message:'auto_login_remediate_tick skip: desired.humanHold',data:{nome:String(nome||''),humanHold:true},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
       continue;
     }
 
@@ -9718,12 +9636,6 @@ async function autoLoginRemediateTick() {
 
     // Só tenta se o perfil está marcado como loginRequired (persistido) e está enfileirado (evento detectado).
     if (!lrFlag || !queued) {
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'not_ready', lrFlag: !!lrFlag, queued: !!queued, nextAt: Number(nextAt||0)||0 }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H6',location:'worker.js:autoLoginRemediateTick:skip_not_ready',message:'auto_login_remediate_tick skip: lrFlag/queued false',data:{nome:String(nome||''),lrFlag:!!lrFlag,queued:!!queued,nextAt:Number(nextAt||0)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
       continue;
     }
     // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
@@ -9735,32 +9647,14 @@ async function autoLoginRemediateTick() {
         robeMeta[nome].autoLoginRemediate.nextAt = Math.max(robeMeta[nome].autoLoginRemediate.nextAt || 0, Date.now() + (6 * 60 * 60 * 1000));
       } catch {}
       try { issues.append(nome, 'mil_action', 'auto_login_remediate_skip(loginRemediateFailed=true)').catch(()=>{}); } catch {}
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'login_remediate_failed' }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H7',location:'worker.js:autoLoginRemediateTick:skip_lr_failed',message:'auto_login_remediate_tick skip: loginRemediateFailed',data:{nome:String(nome||''),lrFailed:true},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
       continue;
     }
     if (nextAt && nextAt > now) {
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'next_at_future', nextAt: Number(nextAt||0)||0, now: Number(now||0)||0 }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H8',location:'worker.js:autoLoginRemediateTick:skip_next_at',message:'auto_login_remediate_tick skip: nextAt in future',data:{nome:String(nome||''),nextAt:Number(nextAt||0),now:Number(now||0)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
       continue;
     }
 
     if (!best || nextAt < best.nextAt) {
       best = { nome, nextAt: nextAt || now };
-      if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_candidate', nome: String(nome||''), nextAt: Number(nextAt||0)||0 }); } catch {}
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H9',location:'worker.js:autoLoginRemediateTick:best_candidate',message:'auto_login_remediate_tick candidate selected',data:{nome:String(nome||''),nextAt:Number(nextAt||0)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-      }
     }
   }
 
@@ -10511,9 +10405,6 @@ async function nurseTick() {
         const flags = await readAccountFlags(nome).catch(()=>({}));
         if (flags && flags.appealSubmitted === true) {
           try { provisionAudit.append({ ts: Date.now(), event: 'appeal_submitted_guard', nome: String(nome||''), nextAt: Number(flags.appealNextCheckAt || 0) || 0, hasCtrl: !!ctrl }); } catch {}
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_appeal_open_1',hypothesisId:'H1',location:'worker.js:nurse:appeal_submitted',message:'appealSubmitted found in nurse loop',data:{nome:String(nome||''),ctrl:!!ctrl,nextAt:Number(flags.appealNextCheckAt||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           // Garantia ultra enterprise: nunca manter Virtus rodando em appealSubmitted.
           try {
             if (ctrl) {
@@ -10531,16 +10422,10 @@ async function nurseTick() {
               await snapshotStatusAndWrite().catch(()=>{});
             } else {
               try { provisionAudit.append({ ts: Date.now(), event: 'appeal_ready_no_ctrl', nome: String(nome||''), nextAt: Number(nextAt || 0) || 0 }); } catch {}
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_appeal_open_1',hypothesisId:'H2',location:'worker.js:nurse:appeal_ready_no_ctrl',message:'appeal ready but no controller (nurse continues)',data:{nome:String(nome||''),nextAt:Number(nextAt||0)||0},timestamp:Date.now()})}).catch(()=>{});
-              // #endregion
             }
           } else {
             await appendIssueNurseDebounced(nome, 'mil_action', 'appeal_monitor_waiting', 'appeal_monitor_waiting');
             try { provisionAudit.append({ ts: Date.now(), event: 'appeal_waiting', nome: String(nome||''), nextAt: Number(nextAt || 0) || 0 }); } catch {}
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_appeal_open_1',hypothesisId:'H3',location:'worker.js:nurse:appeal_waiting',message:'appeal waiting, skipping automation',data:{nome:String(nome||''),nextAt:Number(nextAt||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
           }
           // Enquanto estiver em appealSubmitted, NÃO rodar automação normal (Robe/Virtus).
           continue;
@@ -10594,15 +10479,9 @@ async function nurseTick() {
         if (isFrozenNow(nome)) continue;
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_open_all_priority_1',hypothesisId:'H1',location:'worker.js:nurse:skip_activationHeldUntil',message:'nurse skip open due to activationHeldUntil',data:{nome:String(nome||''),activationHeldUntil:Number(robeMeta[nome]?.activationHeldUntil||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           continue;
         }
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_open_all_priority_1',hypothesisId:'H2',location:'worker.js:nurse:skip_reopenAt',message:'nurse skip open due to reopenAt',data:{nome:String(nome||''),reopenAt:Number(robeMeta[nome]?.reopenAt||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           continue;
         }
 
