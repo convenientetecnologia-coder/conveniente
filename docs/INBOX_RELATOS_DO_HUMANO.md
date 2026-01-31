@@ -104,6 +104,13 @@ triagem inbox (2026-01-30):
 - ao clicar **Abrir Todos** ou abrir conta, deveria zerar flags para reavaliar estado real; flags antigas podem engessar
 - após **Retomar trabalho**, se Messenger estiver em login/senha, deveria re-detectar e repetir cookies→login→humano; parece engessado
 - HUD do **modo humano** some ao navegar (demora a reaparecer)
+
+---
+
+triagem inbox (2026-01-30):
+
+- após Retomar trabalho, contas `campo_grande-1769119224052` e `porto_alegre-1769132611438` ficam sem flag e presas na tela de login
+- conta `blumenau-1769748927066` abre em “confirme que você é humano”; após clicar “Continuar” manualmente aparece captcha/ checkpoint; sistema deveria antecipar o clique “Continuar” e só então invocar humano
 ```
 
 ---
@@ -132,6 +139,7 @@ Colunas:
 | INC-20260130-1544-01 | `docs/inbox/in_progress/INC-20260130-1544-01.md` | P0 | conveniente+sitechatbot | RM3: “invocar humano” não abre painel/HUD e “retomar trabalho” parece não retomar; além de variações 0→4→6 trabalhando no CT | pode ser (a) fluxo de humano/retomar com pré-check que agenda login_remediate (efeito tardio), (b) `loginRequired=probe_failed` (falso positivo) mantendo virtus off, (c) falha de overlay/hud, ou (d) telemetria degradada | evidência: CT logs requestId `rm3_hud_20260130_161238`, `rm3_desired_20260130_161417`, `rm3_issues_q_20260130_161659`, `rm3_pa_q_20260130_161656` + snapshot `C:\sitechatbot\dados\5d7c3309-...-30b3fe928b.json` | in_progress | not_deployed | not_run | não | sim |
 | INC-20260130-2015-02 | `docs/inbox/in_progress/INC-20260130-2015-02.md` | P2 | conveniente | Abrir Todos deveria zerar flags para reavaliar estado real | flags antigas podem segurar login/virtus em estado incorreto (suspeita) | coletar `status` + `desired` + `login_required_events` antes/depois de open_all | need_evidence | not_deployed | not_run | não | não |
 | INC-20260130-2015-03 | `docs/inbox/in_progress/INC-20260130-2015-03.md` | P2 | conveniente | HUD humano some ao navegar e demora a reaparecer | overlay não persistindo em SPA/navegação (suspeita) | `provision_audit` com `human_overlay_sync` (hostVisible=false) | need_evidence | not_deployed | not_run | não | não |
+| INC-20260130-2235-04 | `docs/inbox/in_progress/INC-20260130-2235-04.md` | P1 | conveniente | “Confirme que você é humano”: precisava clicar “Continuar” automaticamente antes de captcha | fluxo de detecção/login_required não cobre essa tela intermediária ou não dispara auto-click | `provision_audit` + `login_required_events` (profiles `blumenau-1769748927066`, `caxias_do_sul-1769748234162`) | need_evidence | not_deployed | not_run | não | não |
 | INC-20260130-0128-01 | `docs/inbox/done/INC-20260130-0128-01.md` | P0 | conveniente | Abrir Todos não iniciava com 0 browsers | nurseTick fazia early-return quando controllers=0 mesmo com desired.active/_openAll | CT: desired active=28/28 + controllersCount=0; fix commit 035fa92 | done | deployed | passed | não | sim |
 | INC-20260130-0001-01 | `docs/inbox/done/INC-20260130-0001-01.md` | P0 | conveniente | Abrir Todos: 2º clique dava open_all_lock_busy | endpoint não era idempotente; faltava feedback; stale lock precisava auto-recover | painel alert + payload alreadyRunning + lockOwner | done | not_deployed | not_run | não | sim |
 | INC-20260129-2100-01 | `docs/inbox/done/INC-20260129-2100-01.md` | P1 | sitechatbot+conveniente | conta do estoque fica “reserved” mas não provisiona (falhas em massa) | timeouts+busy+ACK lookup limitado; hardening+fallback | CT DB + ack files + provision_audit.jsonl | done | deployed_partial | not_run | não | sim |

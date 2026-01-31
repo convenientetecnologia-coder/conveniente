@@ -23,6 +23,7 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 | INC-20260130-1544-01 | P0 | in_progress | needs_restart | not_run | RM3: “trabalhando 0” no CT (urgente) | `in_progress/INC-20260130-1544-01.md` |
 | INC-20260130-2015-02 | P2 | need_evidence | not_deployed | not_run | Abrir Todos deveria zerar flags para reavaliar estado real | `in_progress/INC-20260130-2015-02.md` |
 | INC-20260130-2015-03 | P2 | need_evidence | not_deployed | not_run | HUD humano some ao navegar e demora a reaparecer | `in_progress/INC-20260130-2015-03.md` |
+| INC-20260130-2235-04 | P1 | need_evidence | not_deployed | not_run | “Confirme que você é humano” precisa auto-click | `in_progress/INC-20260130-2235-04.md` |
 | INC-20260130-0128-01 | P0 | done | deployed | passed | Abrir Todos não iniciava com 0 browsers (nurseTick early-return) | `done/INC-20260130-0128-01.md` |
 | INC-20260130-0001-01 | P0 | done | not_deployed | not_run | Abrir Todos: 2º clique dava open_all_lock_busy (lock idempotência) | `done/INC-20260130-0001-01.md` |
 | INC-20260129-2100-01 | P1 | done | deployed_partial | not_run | Estoque: “reserved mas não vai” (provision / stock_provision) | `done/INC-20260129-2100-01.md` |

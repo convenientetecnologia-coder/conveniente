@@ -8175,7 +8175,13 @@ const handlers = {
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:human-resume:entry',message:'human-resume handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H1',location:'worker.js:human-resume:entry2',message:'human-resume entry (extended)',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl),humanHoldBefore:!!(ctrl&&ctrl.humanHold)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H2',location:'worker.js:human-resume:no_browser',message:'human-resume blocked: browser not connected',data:{nome:String(nome||'')},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         try { await issues.append(nome, 'human_resume_failed', 'browser_not_connected'); } catch {}
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
@@ -8183,6 +8189,9 @@ const handlers = {
       // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
       // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H3',location:'worker.js:human-resume:flags_before',message:'flags before clear',data:{nome:String(nome||''),flags:{loginRequired:!!flagsBefore.loginRequired,loginRemediateFailed:!!flagsBefore.loginRemediateFailed,appealSubmitted:!!flagsBefore.appealSubmitted,identityRequired:!!flagsBefore.identityRequired}},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       ctrl.humanControl = false;
       // UX enterprise: ao retomar (mesmo que depois volte a humano), ocultar overlay imediatamente e ressincronizar no final.
@@ -8253,6 +8262,9 @@ const handlers = {
           (pages && pages.find(p => /facebook\.com/i.test(safeUrl(p)) )) ||
           ((pages && pages[0]) ? pages[0] : null);
         try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_preflight_page', nome: String(nome||''), url: String(safeUrl(p0)||''), pagesCount: Array.isArray(pages) ? pages.length : 0 }); } catch {}
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H4',location:'worker.js:human-resume:preflight_page',message:'preflight page selected',data:{nome:String(nome||''),url:String(safeUrl(p0)||''),pagesCount:Array.isArray(pages)?pages.length:0},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         if (p0) {
           // 0) Suspensa/banida (UI de suspensão)
           const bd = await browserHelper.detectAccountSuspended(p0).catch(()=>({ banned:false }));
@@ -8276,6 +8288,9 @@ const handlers = {
           // 1) Login required / captcha / identity / appeal_submitted etc.
           const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
           try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_preflight_lr', nome: String(nome||''), loginRequired: !!(lr && lr.loginRequired), reason: String(lr && lr.reason || ''), domain: String(lr && lr.domain || ''), url: String(lr && lr.url || safeUrl(p0) || '') }); } catch {}
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H4',location:'worker.js:human-resume:preflight_lr',message:'preflight detectLoginRequired',data:{nome:String(nome||''),loginRequired:!!(lr&&lr.loginRequired),reason:String(lr&&lr.reason||''),domain:String(lr&&lr.domain||''),evidence:lr&&lr.evidence?{hasPersonaText:!!lr.evidence.hasPersonaText,hasCheckpointText:!!lr.evidence.hasCheckpointText,hasIdentityText:!!lr.evidence.hasIdentityText,hasTwoFactorText:!!lr.evidence.hasTwoFactorText,hasRoyal:!!lr.evidence.hasRoyal,hasInputs:!!lr.evidence.hasInputs}:{}},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           if (lr && lr.loginRequired) {
             const rr = String(lr.reason || '').toLowerCase();
             preflight = { ok: true, state: 'login_required', reason: String(lr.reason || '') };
@@ -8444,6 +8459,9 @@ const handlers = {
           try {
             const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
             try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_lr', nome: String(nome||''), loginRequired: !!(lrPost && lrPost.loginRequired), reason: String(lrPost && lrPost.reason || ''), domain: String(lrPost && lrPost.domain || ''), url: String(lrPost && lrPost.url || '') }); } catch {}
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H5',location:'worker.js:human-resume:post_nav_lr',message:'post-nav detectLoginRequired',data:{nome:String(nome||''),loginRequired:!!(lrPost&&lrPost.loginRequired),reason:String(lrPost&&lrPost.reason||''),domain:String(lrPost&&lrPost.domain||''),evidence:lrPost&&lrPost.evidence?{hasPersonaText:!!lrPost.evidence.hasPersonaText,hasCheckpointText:!!lrPost.evidence.hasCheckpointText,hasIdentityText:!!lrPost.evidence.hasIdentityText,hasTwoFactorText:!!lrPost.evidence.hasTwoFactorText,hasRoyal:!!lrPost.evidence.hasRoyal,hasInputs:!!lrPost.evidence.hasInputs}:{}},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
           } catch {}
         }
       } catch {}
