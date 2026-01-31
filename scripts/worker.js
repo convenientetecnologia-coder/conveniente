@@ -2660,6 +2660,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
   const now = Date.now();
   const id = String(flowId || newFlowId('identity'));
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'identity-stuck-1',hypothesisId:'H5',location:'worker.js:runIdentityFlow:entry',message:'identity_flow_entry',data:{nome:String(nome||''),source:String(source||''),force:!!force,humanControl:!!(ctrl&&ctrl.humanControl),hasPage:!!pg,connected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected&&ctrl.browser.isConnected())},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
     // Regra do lead: invocou humano => sistema NÃO trabalha.
@@ -2682,6 +2685,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
     robeMeta[nome] = robeMeta[nome] || {};
     const last = Number(robeMeta[nome].identityFlowLastAt || 0) || 0;
     if (!force && last && (now - last) < IDENTITY_FLOW_CFG.debounceMs) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'identity-stuck-1',hypothesisId:'H4',location:'worker.js:runIdentityFlow:debounce',message:'identity_flow_debounced',data:{nome:String(nome||''),source:String(source||''),sinceMs:now-last,debounceMs:IDENTITY_FLOW_CFG.debounceMs},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return { ok: false, skipped: true, reason: 'debounced', sinceMs: now - last };
     }
 
@@ -2693,6 +2699,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
         operator: `identity_flow:${String(nome || '').trim()}:${id}`,
         ttlMs: Math.min((IDENTITY_FLOW_CFG.maxRunMs + 60_000), (15 * 60 * 1000))
       }).catch(()=>null);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'identity-stuck-1',hypothesisId:'H1',location:'worker.js:runIdentityFlow:governor',message:'identity_flow_governor_result',data:{nome:String(nome||''),ok:!!(pr&&pr.ok),error:pr&&pr.error?String(pr.error):null,inUse:pr&&typeof pr.inUse==='number'?pr.inUse:null,max:pr&&typeof pr.max==='number'?pr.max:null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (!pr || pr.ok !== true || !pr.token) {
         try {
           provisionAudit.append({
@@ -2722,6 +2731,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
     const owner = `pid:${process.pid}`;
     const g = await _identityGateTryAcquire({ owner, nome }).catch(()=>null);
     if (!g || !g.ok) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'identity-stuck-1',hypothesisId:'H2',location:'worker.js:runIdentityFlow:gate',message:'identity_flow_gate_denied',data:{nome:String(nome||''),why:g&&g.why?String(g.why):null,leaseUntil:g&&g.leaseUntil?g.leaseUntil:null,owner:g&&g.owner?String(g.owner):null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       try {
         provisionAudit.append({
           ts: Date.now(),
@@ -2815,6 +2827,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
 
       // Reclassificar e encaminhar para o pipeline certo.
       const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'identity-stuck-1',hypothesisId:'H3',location:'worker.js:runIdentityFlow:postclassify',message:'identity_flow_postclassify',data:{nome:String(nome||''),didAction:!!didAction,reason:lr2&&lr2.loginRequired?String(lr2.reason||''):'',loginRequired:!!(lr2&&lr2.loginRequired)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (!lr2 || lr2.loginRequired !== true) {
         // Liberou: limpa flags de identidade e retoma (se desejado).
         try { await clearIdentityFlags(nome); } catch {}
@@ -10811,6 +10826,9 @@ async function nurseTick() {
                 const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
                 const pg = pages && pages[0];
                 if (pg) {
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'identity-stuck-1',hypothesisId:'H5',location:'worker.js:nurse:identity_required',message:'nurse_identity_schedule',data:{nome:String(nome||''),humanControl:!!(ctrl&&ctrl.humanControl),hasPage:!!pg,now},timestamp:Date.now()})}).catch(()=>{});
+                  // #endregion
                   await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
                 }
               }
