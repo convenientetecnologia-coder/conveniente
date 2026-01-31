@@ -1824,10 +1824,43 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
       return { ok: true, state: 'appeal_submitted', reason: rr };
     }
-    if (rr.includes('captcha') || rr.includes('checkpoint')) {
-      // Captcha/Checkpoint: aqui SIM invoca humano automaticamente (ordem do usuário).
-      try { await setCaptchaCheckpointFlag(nome, { reason: rr || 'captcha_checkpoint', source: lr.domain || source, url: lr.url || '', title: lr.title || '' }); } catch {}
-      return { ok: true, state: 'captcha_checkpoint', reason: rr };
+    // Captcha (pré-screen/captcha clássico): NÃO invocar humano imediatamente.
+    // Regra do lead (2026-01-31): pre-screen deve auto-clicar "Continuar"; captcha deve tentar o fluxo (3 tentativas)
+    // antes de cair em humano.
+    if (rr.includes('captcha_persona_pre_screen') || rr.includes('captcha_persona') || rr.includes('checkpoint_captcha')) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_captcha_flow_begin', nome: String(nome||''), source: String(source||''), reason: rr.slice(0, 160) }); } catch {}
+      // Estado seguro imediato (não pode ficar Virtus/Robe rodando)
+      try {
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {}; d.perfis = d.perfis || {};
+          const prev = d.perfis[nome] || {};
+          d.perfis[nome] = { ...prev, active: true, virtus: 'off', humanHold: false };
+          return d;
+        });
+      } catch {}
+      try { if (ctrl) ctrl.trabalhando = false; } catch {}
+      try { await stopVirtus(nome); } catch {}
+
+      // Se for pre-screen, tentar clicar "Continuar" uma vez e re-probe (sem delay artificial).
+      if (rr.includes('captcha_persona_pre_screen')) {
+        const clk = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 9000 }).catch(()=>({ ok:false, error:'click_failed' }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_pre_screen_click', nome: String(nome||''), source: String(source||''), ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
+      }
+
+      // Reclassificar e encaminhar para o fluxo que já tem 3 tentativas (inclui OCR no captcha).
+      const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
+      const rr2 = String((lr2 && lr2.reason) ? lr2.reason : rr).toLowerCase();
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_captcha_flow_schedule', nome: String(nome||''), source: String(source||''), reason: rr2.slice(0,160) }); } catch {}
+      try {
+        const c = controllers.get(nome) || ctrl;
+        const p = (c && c.mainPage) ? c.mainPage : pg;
+        if (c && p) {
+          runIdentityFlow(nome, c, p, { source: `probe_captcha:${String(source||'')}`, force: true }).catch(()=>{});
+        }
+      } catch {}
+      // Expor estado sem engessar (humano só será invocado no final do runIdentityFlow se falhar).
+      try { await setLoginRequiredFlag(nome, { reason: rr2 || rr || 'captcha', source: lr.domain || source }); } catch {}
+      return { ok: true, state: 'captcha_flow_scheduled', reason: rr2 };
     }
 
     // login_form / outros: se for "login/cookies falhou", aqui é válido invocar humano
