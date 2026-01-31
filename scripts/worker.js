@@ -9599,6 +9599,7 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
     st.nextAt = when;
     st.reason = String(reason || '').slice(0, 80);
     st.source = String(source || '').slice(0, 80);
+    st.force = !!force;
     st.enqueuedAt = now;
     try {
       provisionAudit.append({
@@ -9639,14 +9640,44 @@ async function autoLoginRemediateTick() {
   for (const [nome, ctrl] of controllers.entries()) {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
     const _dbgNome = (nome === 'campo_grande-1769119224052' || nome === 'porto_alegre-1769132611438');
-    if (ctrl.humanControl === true || ctrl.configurando === true) {
+    // humanControl: SEMPRE respeitar (humano invocado = pausa total).
+    if (ctrl.humanControl === true) {
       if (_dbgNome) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'human_or_config', humanControl: !!ctrl.humanControl, configurando: !!ctrl.configurando }); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'human_or_config', humanControl: true, configurando: !!ctrl.configurando }); } catch {}
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H2',location:'worker.js:autoLoginRemediateTick:skip_human_or_config',message:'auto_login_remediate_tick skip: humanControl/configurando',data:{nome:String(nome||''),humanControl:!!ctrl.humanControl,configurando:!!ctrl.configurando},timestamp:Date.now()})}).catch(()=>{});
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H2',location:'worker.js:autoLoginRemediateTick:skip_human_or_config',message:'auto_login_remediate_tick skip: humanControl/configurando',data:{nome:String(nome||''),humanControl:true,configurando:!!ctrl.configurando},timestamp:Date.now()})}).catch(()=>{});
         // #endregion
       }
       continue;
+    }
+
+    // configurando: normalmente pula (evita conflito com provision/abas),
+    // mas se o enqueue foi force=true (ex.: governor_busy) e o item já está "ready",
+    // permitimos avançar a fila (a serialização REAL é do governor/provisionLock).
+    if (ctrl.configurando === true) {
+      let allowOverride = false;
+      try {
+        const st0 = (robeMeta[nome] && robeMeta[nome].autoLoginRemediate) ? robeMeta[nome].autoLoginRemediate : null;
+        const queued0 = !!(st0 && st0.queued);
+        const nextAt0 = Number(st0 && st0.nextAt || 0) || 0;
+        const force0 = !!(st0 && st0.force);
+        if (queued0 && force0 && nextAt0 && nextAt0 <= now) {
+          if (!provisionLock.isActive()) allowOverride = true;
+        }
+        if (_dbgNome) {
+          try { provisionAudit.append({ ts: now, event: 'auto_lr_tick_configurando_check', nome: String(nome||''), configurando: true, queued: queued0, force: force0, nextAt: nextAt0, allowOverride: !!allowOverride }); } catch {}
+        }
+      } catch {}
+      if (!allowOverride) {
+        if (_dbgNome) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'auto_lr_tick_skip', nome: String(nome||''), reason: 'human_or_config', humanControl: false, configurando: true }); } catch {}
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H2',location:'worker.js:autoLoginRemediateTick:skip_human_or_config',message:'auto_login_remediate_tick skip: humanControl/configurando',data:{nome:String(nome||''),humanControl:false,configurando:true},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
+        }
+        continue;
+      }
+      try { provisionAudit.append({ ts: now, event: 'auto_lr_tick_override_configurando', nome: String(nome||''), reason: 'force_queued_ready' }); } catch {}
     }
     if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
       if (_dbgNome) {
