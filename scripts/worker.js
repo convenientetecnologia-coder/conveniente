@@ -8252,6 +8252,9 @@ const handlers = {
         const p0 =
           (pages && pages.find(p => /facebook\.com/i.test(safeUrl(p)) )) ||
           ((pages && pages[0]) ? pages[0] : null);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_probe_2',hypothesisId:'H1',location:'worker.js:human-resume:preflight_page',message:'preflight page selected',data:{nome:String(nome||''),url:String(safeUrl(p0)||''),pagesCount:Array.isArray(pages)?pages.length:0},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         if (p0) {
           // 0) Suspensa/banida (UI de suspensão)
           const bd = await browserHelper.detectAccountSuspended(p0).catch(()=>({ banned:false }));
@@ -8274,6 +8277,9 @@ const handlers = {
 
           // 1) Login required / captcha / identity / appeal_submitted etc.
           const lr = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_probe_2',hypothesisId:'H1',location:'worker.js:human-resume:preflight_lr',message:'preflight detectLoginRequired',data:{nome:String(nome||''),loginRequired:!!(lr&&lr.loginRequired),reason:String(lr&&lr.reason||''),domain:String(lr&&lr.domain||''),url:String(lr&&lr.url||safeUrl(p0)||'')},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           if (lr && lr.loginRequired) {
             const rr = String(lr.reason || '').toLowerCase();
             preflight = { ok: true, state: 'login_required', reason: String(lr.reason || '') };
@@ -8392,6 +8398,9 @@ const handlers = {
             try { await stopVirtus(nome); } catch {}
 
             scheduledLoginRemediate = true;
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_probe_2',hypothesisId:'H2',location:'worker.js:human-resume:schedule_login_remediate',message:'scheduled login_remediate from preflight',data:{nome:String(nome||''),reason:String(lr&&lr.reason||''),source:String(lr&&lr.domain||'')},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
             const op2 = `human_resume:${String(nome || '').trim()}:${Date.now()}`;
             try {
               provisionAudit.append({
@@ -8438,6 +8447,15 @@ const handlers = {
         try { pagesN = await ctrl.browser.pages(); } catch {}
         if (pagesN && pagesN[0]) {
           await pagesN[0].goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{});
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_probe_2',hypothesisId:'H3',location:'worker.js:human-resume:post_nav',message:'post-navigate messenger',data:{nome:String(nome||''),url:String((pagesN[0]&&pagesN[0].url&&pagesN[0].url())||'')},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
+          try {
+            const lrPost = await browserHelper.detectLoginRequired(pagesN[0]).catch(()=>({ loginRequired:false }));
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_probe_2',hypothesisId:'H3',location:'worker.js:human-resume:post_nav_lr',message:'post-navigate detectLoginRequired',data:{nome:String(nome||''),loginRequired:!!(lrPost&&lrPost.loginRequired),reason:String(lrPost&&lrPost.reason||''),domain:String(lrPost&&lrPost.domain||''),url:String(lrPost&&lrPost.url||'')},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+          } catch {}
         }
       } catch {}
 
