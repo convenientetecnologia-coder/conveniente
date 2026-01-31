@@ -8172,6 +8172,7 @@ const handlers = {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
       const ctrl = controllers.get(nome);
+      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_entry', nome: String(nome||''), ctrlExists: !!ctrl, browserConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.()) }); } catch {}
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H3',location:'worker.js:human-resume:entry',message:'human-resume handler entry',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
@@ -8179,6 +8180,7 @@ const handlers = {
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H1',location:'worker.js:human-resume:entry2',message:'human-resume entry (extended)',data:{nome:String(nome||''),ctrlExists:!!ctrl,browserConnected:!!(ctrl&&ctrl.browser&&ctrl.browser.isConnected?.()),humanControlBefore:!!(ctrl&&ctrl.humanControl),humanHoldBefore:!!(ctrl&&ctrl.humanHold)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_no_browser', nome: String(nome||'') }); } catch {}
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H2',location:'worker.js:human-resume:no_browser',message:'human-resume blocked: browser not connected',data:{nome:String(nome||'')},timestamp:Date.now()})}).catch(()=>{});
         // #endregion
@@ -8189,6 +8191,7 @@ const handlers = {
       // IMPORTANTE: não usar flags antigas (appeal/identity) para decidir automação.
       // "Retomar trabalho" é um comando humano para REAVALIAR o estado real do navegador.
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
+      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H3',location:'worker.js:human-resume:flags_before',message:'flags before clear',data:{nome:String(nome||''),flags:{loginRequired:!!flagsBefore.loginRequired,loginRemediateFailed:!!flagsBefore.loginRemediateFailed,appealSubmitted:!!flagsBefore.appealSubmitted,identityRequired:!!flagsBefore.identityRequired}},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
@@ -8443,6 +8446,7 @@ const handlers = {
       }
 
       if (scheduledLoginRemediate) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_scheduled_login_remediate', nome: String(nome||''), reason: String(preflight && preflight.reason || '') }); } catch {}
         await snapshotStatusAndWrite();
         // desired é setado para virtus=off acima; login_remediate vai resolver e reativar se der certo.
         logger.info('[HANDLER] human-resume ok (login_remediate scheduled)', { nome, preflight });
