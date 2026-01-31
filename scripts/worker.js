@@ -1695,8 +1695,37 @@ async function ensureNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reason
 // Retorna { ok, state, reason }
 async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {}) {
   try {
-    const pg = ctrl && ctrl.mainPage ? ctrl.mainPage : null;
-    if (!pg) return { ok: false, error: 'no_main_page' };
+    // Ultra enterprise: em alguns boots o ctrl.mainPage pode ainda não estar setado (race).
+    // Não podemos "ficar cego" e pular o probe — isso causa o sintoma "às vezes clica Continuar, às vezes não".
+    let pg = (ctrl && ctrl.mainPage) ? ctrl.mainPage : null;
+    if (!pg) {
+      try {
+        const pages = (ctrl && ctrl.browser) ? await ctrl.browser.pages().catch(()=>[]) : [];
+        const safeUrl = (p) => { try { return (p && typeof p.url === 'function') ? String(p.url() || '') : ''; } catch { return ''; } };
+        const pick = () => {
+          for (const p of (pages || []).slice(0, 8)) {
+            const u = safeUrl(p);
+            if (/facebook\.com|messenger\.com/i.test(u)) return p;
+          }
+          return (pages && pages[0]) || null;
+        };
+        pg = pick();
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'open_human_probe_pick_fallback',
+            nome: String(nome||''),
+            source: String(source||''),
+            pagesCount: Array.isArray(pages) ? pages.length : 0,
+            pickedUrl: pg ? safeUrl(pg).slice(0, 240) : null
+          });
+        } catch {}
+      } catch {}
+    }
+    if (!pg) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_no_page', nome: String(nome||''), source: String(source||'') }); } catch {}
+      return { ok: false, error: 'no_page' };
+    }
     const _src = String(source || '');
     const _isOpenAll = /open_all/i.test(_src);
 
