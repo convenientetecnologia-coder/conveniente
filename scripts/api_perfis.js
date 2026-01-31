@@ -806,6 +806,7 @@ module.exports = (app, workerClient, fileStore) => {
     const nome = req.params.nome;
     logger.info('POST /api/perfis/:nome/human-resume chamada', { nome });
     const op = String(req.headers['x-operator'] || 'unknown');
+    try { provisionAudit.append({ ts: Date.now(), event: 'api_human_resume_entry', nome: String(nome||''), op: op || null }); } catch {}
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H1',location:'api_perfis.js:human-resume:entry',message:'human-resume request received',data:{nome:String(nome||''),op,ip:String(req.ip||'')},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
@@ -820,12 +821,14 @@ module.exports = (app, workerClient, fileStore) => {
       const resp = await workerClient.sendWorkerCommand('human-resume', { nome }, { timeoutMs: 60000 }).catch(()=>null);
       if (!resp || resp.ok !== true) {
         logger.error('Falha em human-resume para perfil', { nome, error: (resp && resp.error) || 'human_resume_failed' });
+        try { provisionAudit.append({ ts: Date.now(), event: 'api_human_resume_resp', nome: String(nome||''), ok: false, error: String((resp && resp.error) || 'human_resume_failed') }); } catch {}
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H2',location:'api_perfis.js:human-resume:resp',message:'human-resume worker response (fail)',data:{nome:String(nome||''),ok:false,error:String((resp&&resp.error)||'human_resume_failed')},timestamp:Date.now()})}).catch(()=>{});
         // #endregion
         return res.json({ ok: false, error: (resp && resp.error) || 'human_resume_failed' });
       }
       logger.info('Human resume aplicado', { nome });
+      try { provisionAudit.append({ ts: Date.now(), event: 'api_human_resume_resp', nome: String(nome||''), ok: true }); } catch {}
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H2',location:'api_perfis.js:human-resume:resp',message:'human-resume worker response (ok)',data:{nome:String(nome||''),ok:true},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
