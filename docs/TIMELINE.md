@@ -31,6 +31,24 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-31 — [CROSS][CONV][CT][FEAT][OPS] Groq config: host auto-solicita e CT envia `set_groq_config` (persistente em `dados/groq_config.json`)
+
+- **O que**:
+  - Host (`conveniente`) passou a sinalizar `needsGroqConfig=true` quando faltar config e a aceitar comando `set_groq_config` para persistir em `C:\conveniente\dados\groq_config.json` (ignorado no git).
+  - CT (`sitechatbot`) passou a enfileirar `set_groq_config` quando receber `/report` com `needsGroqConfig=true`, lendo `GROQ_API_KEY` e `GROQ_MODEL` do ambiente (modelo tem default).
+- **Por quê**: permitir que cada host faça requisição própria ao Groq sem depender de `.env` no host e sem operação manual por host.
+- **Evidência**:
+  - `C:\conveniente\scripts\groqConfig.js`
+  - `C:\conveniente\scripts\dashboard.js`
+  - `C:\conveniente\.gitignore`
+  - `C:\sitechatbot\index.js` (bloco AUTO-CONFIG GROQ no handler `/report`)
+  - `C:\sitechatbot\convenientetecnologia\ct.env` (GROQ_MODEL)
+- **Reinícios**:
+  - `sitechatbot` (CT) — humano reinicia com `node index.js`
+  - `conveniente` (hosts) — humano reinicia com `node index.js`
+- **Rollback**: `git revert` do(s) commit(s) deste item e reiniciar `node index.js`.
+- **THREAD**: `TH-2026-01-31-groq-config`
+
 #### 2026-01-31 — [CONV][FIX][OPS] RM3: fila atômica para retry (governor_busy) não travar em `configurando=true`
 
 - **O que**:

@@ -11,6 +11,7 @@ const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
 const provisionAudit = require('./provisionAudit.js');
+const { readGroqConfig, writeGroqConfig } = require('./groqConfig');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -1621,6 +1622,16 @@ async function execSetCtConfig(cmd) {
   return { ok: true };
 }
 
+// ===== NOVO: Config Groq (API key/model) via comando (persistente) =====
+async function execSetGroqConfig(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const groqApiKey = (payload.groqApiKey !== undefined) ? String(payload.groqApiKey || '').trim() : undefined;
+  const groqModel = (payload.groqModel !== undefined) ? String(payload.groqModel || '').trim() : undefined;
+  const r = writeGroqConfig({ groqApiKey, groqModel });
+  if (!r || r.ok !== true) throw new Error('set_groq_config_failed');
+  return { ok: true };
+}
+
 // ===== NOVO: Exportar perfis para o estoque =====
 async function execStockExportProfiles(cmd) {
   try {
@@ -1818,6 +1829,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
       else if (c.type === 'health_bundle')    { await execHealthBundle(c); }
       else if (c.type === 'set_ct_config')    { ackDetails = await execSetCtConfig(c); }
+      else if (c.type === 'set_groq_config')  { ackDetails = await execSetGroqConfig(c); }
       else if (c.type === 'rotate_logs')      { ackDetails = await execRotateLogs(c); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); }
       else { throw new Error('unknown_command:' + String(c.type)); }
@@ -1883,12 +1895,20 @@ async function tick(reason = 'interval') {
     // Verifica se precisa solicitar config (ctBaseUrl ou logIngestSecret ausentes)
     const cfg = readCtConfig();
     const needsConfig = !cfg.ctBaseUrl || !cfg.logIngestSecret;
+    // Verifica se precisa solicitar config Groq (API key/model ausentes)
+    const groqCfg = readGroqConfig();
+    const envGroqKey = String(process.env.GROQ_API_KEY || '').trim();
+    const envGroqModel = String(process.env.GROQ_MODEL || '').trim();
+    const needsGroqConfig =
+      !(envGroqKey || (groqCfg && groqCfg.groqApiKey)) ||
+      !(envGroqModel || (groqCfg && groqCfg.groqModel));
 
     const payload = {
       hostname: quick.system.hostname,
       hostId,
       sentAt: now(),
       needsConfig: needsConfig, // Flag para CT saber que precisa enviar set_ct_config
+      needsGroqConfig: needsGroqConfig, // Flag para CT saber que precisa enviar set_groq_config
       host: {
         // RAM total do servidor (para capacidade no notificador)
         totalMemGB: (quick && quick.system && typeof quick.system.totalMB === 'number')

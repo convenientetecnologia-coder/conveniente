@@ -18,6 +18,7 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 
 | id | P | state | rollout | validation | título | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260131-0000-01 | P1 | new | not_deployed | not_run | Confirme humano (pre-captcha) ultra robusto + 3 tentativas antes de invocar humano (sem resolver captcha agora) | `in_progress/INC-20260131-0000-01.md` |
 | INC-20260130-0905-01 | P0 | cancelled | not_deployed | not_run | CT marca RM3 OFFLINE mas host está acessível (Servidores + Estoque) | `cancelled/INC-20260130-0905-01.md` |
 | INC-20260130-1521-01 | P0 | done | manual_step_required | not_run | CT/Servidores mostra “Desconhecido” e precisa virar fonte de verdade operacional (flags + estados acionáveis) | `done/INC-20260130-1521-01.md` |
 | INC-20260130-1544-01 | P0 | done | deployed | passed | RM3: “trabalhando 0” no CT (urgente) | `done/INC-20260130-1544-01.md` |
