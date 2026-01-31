@@ -775,6 +775,9 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
 const CAPTCHA_FLOW_CFG = {
   maxTries: Math.max(1, Number(process.env.CAPTCHA_MAX_TRIES || 5) || 5)
 };
+const CAPTCHA_PACING_CFG = {
+  minStableMs: Math.max(200, Number(process.env.CAPTCHA_MIN_STABLE_MS || 1500) || 1500)
+};
 
 // Mutex in-process: 1 captcha flow por host (fallback quando supervisor permits não estão habilitados).
 let _captchaFlowRunning = false;
@@ -946,7 +949,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
           try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_fill_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!fill.ok, error: fill && fill.error ? String(fill.error).slice(0,120) : null }); } catch {}
           // Aguarda transição REAL (imagem trocar ou sair do captcha) antes da próxima tentativa.
           try {
-            const w = await browserHelper.waitForCaptchaTurnover(pg, { previousImgSrc: curImgSrc || lastImgSrc, timeoutMs: 15_000, minStableMs: 700 }).catch(()=>null);
+            const w = await browserHelper.waitForCaptchaTurnover(pg, { previousImgSrc: curImgSrc || lastImgSrc, timeoutMs: 15_000, minStableMs: CAPTCHA_PACING_CFG.minStableMs }).catch(()=>null);
             provisionAudit.append({
               ts: Date.now(),
               event: 'captcha_flow_wait_turnover',
@@ -956,7 +959,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
               ok: !!(w && w.ok),
               present: w ? !!w.present : null,
               finalImgChanged: w && w.finalImgSrc ? (String(w.finalImgSrc||'') !== String(curImgSrc||'')) : null,
-              minStableMs: w && typeof w.minStableMs === 'number' ? w.minStableMs : 700
+              minStableMs: w && typeof w.minStableMs === 'number' ? w.minStableMs : CAPTCHA_PACING_CFG.minStableMs
             });
           } catch {}
           // Usa o src final (se disponível) como base para a próxima tentativa

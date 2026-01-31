@@ -3594,8 +3594,9 @@ async function focusCaptchaInput(page) {
 }
 
 async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
-  // IMPORTANT: captcha deve ser digitado sem espaços/linhas.
-  const t = String(text || '').replace(/\s+/g, '').trim();
+  // IMPORTANT (regra do lead): captcha atual é sempre 6 números.
+  // Não aceitamos letras nem espaços.
+  const t = String(text || '').replace(/\D+/g, '').trim();
   if (!t) return { ok: false, error: 'empty_text' };
   try {
     // Foco garantido
@@ -3827,9 +3828,9 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
               content: [
                 {
                   type: 'text',
-                  // Ultra enterprise: saída deve vir "crua", SEM espaços.
-                  // Se houver dúvida, retornar string vazia.
-                  text: 'Extract ONLY the captcha text from the image. Return ONLY the characters, with NO spaces, NO punctuation, NO quotes, NO extra words. If unsure, return empty.'
+                  // Regra do lead (jan/2026): captcha atual é sempre 6 dígitos (0-9).
+                  // Se não conseguir ler com 110% certeza, retornar vazio.
+                  text: 'Read this captcha and return ONLY the 6 digits (0-9). Output exactly 6 digits, no spaces, no letters, no punctuation, no extra text. If unsure, return empty.'
                 },
                 {
                   type: 'image_url',
@@ -3871,17 +3872,16 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
         .replace(/^["']|["']$/g, '')
         .trim();
 
-      // Regra do usuário: SEM espaços. Mantém apenas A-Z e 0-9.
-      cleanText = cleanText
-        .replace(/\s+/g, '')
-        .replace(/[^a-zA-Z0-9]/g, '')
-        .trim();
+      // Regra do lead: somente dígitos. Se vier lixo misturado (letras/palavras),
+      // extraímos os dígitos e usamos os 6 primeiros (padrão atual do captcha).
+      const digits = String(cleanText || '').replace(/\D+/g, '');
+      const used = digits.length >= 6 ? digits.slice(0, 6) : '';
 
-      if (!cleanText || cleanText.length < 3) {
-        return { ok: false, error: 'groq_text_too_short', meta: { rawLength: rawTrim.length, rawHadWhitespace, cleanedLength: cleanText.length } };
+      if (!used || used.length !== 6) {
+        return { ok: false, error: 'groq_not_6_digits', meta: { rawLength: rawTrim.length, rawHadWhitespace, digitsLength: digits.length } };
       }
 
-      return { ok: true, text: cleanText, meta: { rawLength: rawTrim.length, rawHadWhitespace, cleanedLength: cleanText.length, imgSrc: imgSrc.slice(0, 120) } };
+      return { ok: true, text: used, meta: { rawLength: rawTrim.length, rawHadWhitespace, digitsLength: digits.length, usedLength: used.length, imgSrc: imgSrc.slice(0, 120) } };
     } catch (e) {
       return { ok: false, error: 'groq_request_exception', details: (e && e.message) ? String(e.message) : String(e) };
     }
