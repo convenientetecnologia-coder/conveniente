@@ -4778,6 +4778,9 @@ async function activateOnce(nome, source = '', operator = '') {
   const _isBulkOpen =
     /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(opTrim) ||
     /(bulk_open_all|open_all_24h|open-all-24h|abrir_tudo|abrir tudo)/i.test(srcTrim);
+  if (_isBulkOpen && String(nome || '') === 'caxias_do_sul-1769748234162') {
+    try { provisionAudit.append({ ts: Date.now(), event: 'open_all_activate_once_enter', nome: String(nome||''), source: String(source||''), operator: String(operator||'') }); } catch {}
+  }
   // Ultra enterprise: aberturas via UI podem chegar como operator vazio/unknown.
   // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
   const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
@@ -8492,18 +8495,21 @@ const handlers = {
                 try {
                   handlers.login_remediate({ nome, operator: opPost, options: { overrideHumanHold: true } })
                     .then((res) => {
+                      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_result', nome: String(nome||''), operator: String(opPost||''), ok: !!(res && res.ok), error: String(res && res.error || '') }); } catch {}
                       // #region agent log
                       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H2',location:'worker.js:human-resume:post_nav_result',message:'post-nav login_remediate result',data:{nome:String(nome||''),operator:String(opPost||''),error:String(res&&res.error||''),ok:!!(res&&res.ok)},timestamp:Date.now()})}).catch(()=>{});
                       // #endregion
                       const err = String(res && res.error || '');
                       if (err === 'governor_busy' || err === 'busy') {
                         const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume_post_nav', immediate: true, force: true });
+                        try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_retry_queued', nome: String(nome||''), operator: String(opPost||''), queued: !!queued, error: err }); } catch {}
                         // #region agent log
                         fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H3',location:'worker.js:human-resume:post_nav_retry',message:'post-nav queued retry after governor busy',data:{nome:String(nome||''),operator:String(opPost||''),queued:!!queued,error:err},timestamp:Date.now()})}).catch(()=>{});
                         // #endregion
                       }
                     })
                     .catch((err) => {
+                      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_error', nome: String(nome||''), operator: String(opPost||''), error: String(err && err.message || err || '') }); } catch {}
                       // #region agent log
                       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H2',location:'worker.js:human-resume:post_nav_result',message:'post-nav login_remediate threw',data:{nome:String(nome||''),operator:String(opPost||''),error:String(err&&err.message||err||'')},timestamp:Date.now()})}).catch(()=>{});
                       // #endregion
@@ -10388,6 +10394,7 @@ async function nurseTick() {
       try {
         const flags = await readAccountFlags(nome).catch(()=>({}));
         if (flags && flags.appealSubmitted === true) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'appeal_submitted_guard', nome: String(nome||''), nextAt: Number(flags.appealNextCheckAt || 0) || 0, hasCtrl: !!ctrl }); } catch {}
           // #region agent log
           fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_appeal_open_1',hypothesisId:'H1',location:'worker.js:nurse:appeal_submitted',message:'appealSubmitted found in nurse loop',data:{nome:String(nome||''),ctrl:!!ctrl,nextAt:Number(flags.appealNextCheckAt||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
           // #endregion
@@ -10407,12 +10414,14 @@ async function nurseTick() {
               await appealMonitorCheckNow(nome, ctrl).catch(()=>null);
               await snapshotStatusAndWrite().catch(()=>{});
             } else {
+              try { provisionAudit.append({ ts: Date.now(), event: 'appeal_ready_no_ctrl', nome: String(nome||''), nextAt: Number(nextAt || 0) || 0 }); } catch {}
               // #region agent log
               fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_appeal_open_1',hypothesisId:'H2',location:'worker.js:nurse:appeal_ready_no_ctrl',message:'appeal ready but no controller (nurse continues)',data:{nome:String(nome||''),nextAt:Number(nextAt||0)||0},timestamp:Date.now()})}).catch(()=>{});
               // #endregion
             }
           } else {
             await appendIssueNurseDebounced(nome, 'mil_action', 'appeal_monitor_waiting', 'appeal_monitor_waiting');
+            try { provisionAudit.append({ ts: Date.now(), event: 'appeal_waiting', nome: String(nome||''), nextAt: Number(nextAt || 0) || 0 }); } catch {}
             // #region agent log
             fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_appeal_open_1',hypothesisId:'H3',location:'worker.js:nurse:appeal_waiting',message:'appeal waiting, skipping automation',data:{nome:String(nome||''),nextAt:Number(nextAt||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
             // #endregion
