@@ -2475,6 +2475,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
 
       const rr2 = String(lr2.reason || '').toLowerCase();
       if (rr2.includes('captcha_persona_pre_screen') || rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
+        // #region agent log (debug)
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H2',location:'conveniente/scripts/worker.js:runIdentityFlow:captcha_branch',message:'runIdentityFlow entered captcha branch',data:{nome:String(nome||''),source:String(source||'').slice(0,80),reason:String(lr2.reason||''),url:String(lr2.url||'').slice(0,220),title:String(lr2.title||'').slice(0,120),humanControl:!!(ctrl&&ctrl.humanControl),humanHold:!!(ctrl&&ctrl.humanHold)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         // Novo fluxo (sem OCR): tentar 3 vezes antes de invocar humano.
         // Objetivo: clicar "Continuar" no pre-screen e, no captcha, só invocar humano após 3 tentativas.
         const operator = `identity_flow_captcha:${id}`;
@@ -2508,6 +2511,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
             // Pre-screen: clicar Continuar (se habilitado).
             const clk = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 8000 }).catch(()=>({ ok:false, error:'click_failed' }));
             try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_click', nome: String(nome||''), operator, attempt, ok: !!clk.ok, error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
+            // #region agent log (debug)
+            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H3',location:'conveniente/scripts/worker.js:runIdentityFlow:pre_screen_click',message:'pre-screen clickContinueByLabel result',data:{nome:String(nome||''),attempt,ok:!!(clk&&clk.ok),error:clk&&clk.error?String(clk.error).slice(0,120):null},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
             await sleep(1100);
             continue;
           }
@@ -7439,6 +7445,9 @@ const handlers = {
       };
       const failFastToHuman = async (reason) => {
         const why = String(reason || 'login_remediate_failed');
+        // #region agent log (debug)
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H2',location:'conveniente/scripts/worker.js:login_remediate:failFastToHuman',message:'login_remediate failFastToHuman called',data:{nome:String(nome||''),operator:String(op||'').slice(0,80),why:String(why||'').slice(0,120),stack:(()=>{try{const s=(new Error()).stack||'';return String(s).split('\n').slice(0,3).join(' | ').slice(0,320);}catch{return '';}})()},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         try {
           await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
         } catch {}

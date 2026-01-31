@@ -3274,6 +3274,9 @@ async function detectLoginRequired(page) {
     // Pré-captcha: "Confirme que você é humano" (antes do captcha).
     // Regra enterprise: tratar como loginRequired e encaminhar para fluxo de clique "Continuar".
     if (hasHumanConfirmPreScreen) {
+      // #region agent log (debug)
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H1',location:'conveniente/scripts/browser.js:detectLoginRequired:pre_screen',message:'detectLoginRequired classified pre-screen',data:{domain,url:(v&&v.href0)?String(v.href0):href,title:String(title||'').slice(0,120),path:String(path||'').slice(0,120),hasHumanConfirmPreScreen,hasContinueBtn,hasCaptchaPromptText,hasCaptchaImg,hasCaptchaInput},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return {
         loginRequired: true,
         reason: 'captcha_persona_pre_screen',
@@ -3288,6 +3291,9 @@ async function detectLoginRequired(page) {
     // Mantemos motivo "captcha_persona" quando o texto "pessoa" existe; mas se o captcha estiver explícito,
     // também deixamos evidência forte para reduzir falso positivo.
     if (hasCaptchaPromptText && hasCaptchaImg && hasCaptchaInput) {
+      // #region agent log (debug)
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H1',location:'conveniente/scripts/browser.js:detectLoginRequired:captcha',message:'detectLoginRequired classified captcha_persona',data:{domain,url:(v&&v.href0)?String(v.href0):href,title:String(title||'').slice(0,120),path:String(path||'').slice(0,120),hasCaptchaPromptText,hasCaptchaImg,hasCaptchaInput,hasContinueBtn},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return {
         loginRequired: true,
         reason: 'captcha_persona',
@@ -3517,11 +3523,24 @@ async function clickContinueByLabel(page, { maxWaitMs = 10_000 } = {}) {
         try { el.click(); } catch {}
         return { ok: true };
       }).catch(()=>null);
-      if (r && r.ok) return { ok: true };
+      if (r && r.ok) {
+        // #region agent log (debug)
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H3',location:'conveniente/scripts/browser.js:clickContinueByLabel:ok',message:'clickContinueByLabel clicked',data:{elapsedMs:Date.now()-startedAt},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        return { ok: true };
+      }
       // Se está disabled, não adianta martelar; deixa caller decidir (ex.: captcha precisa texto).
-      if (r && String(r.error||'').includes('disabled')) return { ok: false, error: String(r.error), details: r };
+      if (r && String(r.error||'').includes('disabled')) {
+        // #region agent log (debug)
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H3',location:'conveniente/scripts/browser.js:clickContinueByLabel:disabled',message:'clickContinueByLabel found disabled',data:{elapsedMs:Date.now()-startedAt,details:r||null},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        return { ok: false, error: String(r.error), details: r };
+      }
       await new Promise(r => setTimeout(r, 450));
     }
+    // #region agent log (debug)
+    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H3',location:'conveniente/scripts/browser.js:clickContinueByLabel:timeout',message:'clickContinueByLabel timeout',data:{maxWaitMs:Number(maxWaitMs||0)||0},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     return { ok: false, error: 'timeout' };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
