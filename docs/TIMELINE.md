@@ -41,6 +41,16 @@ Formato canônico (copiar/colar):
 - **Reinícios**: `conveniente` no RM3 (node index.js).
 - **Rollback**: reverter commit `fix: honor human mode + login form` + retry governor (ou `git revert` do último commit).
 
+#### 2026-01-30 — [CONV][FIX][OPS] Open-all/manual limpa flags de login antes do re-probe
+
+- **O que**:
+  - Na abertura (open_all/manual), limpa flags de login (`loginRequired`, `loginRemediateFailed`, `messengerPin`) e registra evento.
+  - Revalidação real continua via `probeHumanStateOnOpen`.
+- **Por quê**: evitar UI “presa” com flags antigas e garantir reavaliação do estado atual.
+- **Evidência**: `C:\conveniente\scripts\worker.js` (eventos `open_clear_login_flags*`).
+- **Reinícios**: `conveniente` no RM3 (node index.js).
+- **Rollback**: reverter commit do ajuste de open flags.
+
 #### 2026-01-30 — [CROSS][DOCS][OPS] INBOX: novo INC para “CT mostra OFFLINE falso” (RM3) + clarificações hostId/telemetria
 
 - **O que**:

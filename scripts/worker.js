@@ -4777,6 +4777,23 @@ async function activateOnce(nome, source = '', operator = '') {
   // Isso NÃO pode impedir o pós-probe (senão identidade/login ficam “parados”).
   const _isUnknownOpen = (!opTrim || opTrim.toLowerCase() === 'unknown');
   const _isManualOpen = _isUnknownOpen || /(^admin|^ui|manual|user|humano|human)/i.test(opTrim);
+  // Regra do usuário: ao abrir (open_all/manual), limpar flags de login para revalidar estado real.
+  if (_isBulkOpen || _isManualOpen) {
+    try {
+      const flagsPrev = await readAccountFlags(nome).catch(()=>({}));
+      const had = {
+        loginRequired: !!(flagsPrev && flagsPrev.loginRequired),
+        loginRemediateFailed: !!(flagsPrev && flagsPrev.loginRemediateFailed),
+        messengerPin: !!(flagsPrev && flagsPrev.messengerPin)
+      };
+      if (had.loginRequired || had.loginRemediateFailed || had.messengerPin) {
+        await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin']).catch(()=>{});
+        try { provisionAudit.append({ ts: Date.now(), event: 'open_clear_login_flags', nome: String(nome||''), source: String(source||''), had }); } catch {}
+      } else {
+        try { provisionAudit.append({ ts: Date.now(), event: 'open_clear_login_flags_skip', nome: String(nome||''), source: String(source||''), had }); } catch {}
+      }
+    } catch {}
+  }
   try {
     if (SHARD_SET.size && !inShard(nome)) {
       await reportAction(nome, 'mil_action', 'activate_skip_wrong_shard');
