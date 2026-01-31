@@ -8481,8 +8481,28 @@ const handlers = {
                 try { await stopVirtus(nome); } catch {}
                 try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_schedule_login_remediate', nome: String(nome||''), reason: String(lrPost && lrPost.reason || ''), source: String(lrPost && lrPost.domain || '') }); } catch {}
                 const opPost = `human_resume_post_nav:${String(nome || '').trim()}:${Date.now()}`;
+                // #region agent log
+                fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H1',location:'worker.js:human-resume:post_nav_schedule',message:'post-nav scheduled login_remediate',data:{nome:String(nome||''),operator:String(opPost||''),reason:String(lrPost&&lrPost.reason||''),source:String(lrPost&&lrPost.domain||'')},timestamp:Date.now()})}).catch(()=>{});
+                // #endregion
                 try {
-                  handlers.login_remediate({ nome, operator: opPost, options: { overrideHumanHold: true } }).catch(()=>null);
+                  handlers.login_remediate({ nome, operator: opPost, options: { overrideHumanHold: true } })
+                    .then((res) => {
+                      // #region agent log
+                      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H2',location:'worker.js:human-resume:post_nav_result',message:'post-nav login_remediate result',data:{nome:String(nome||''),operator:String(opPost||''),error:String(res&&res.error||''),ok:!!(res&&res.ok)},timestamp:Date.now()})}).catch(()=>{});
+                      // #endregion
+                      const err = String(res && res.error || '');
+                      if (err === 'governor_busy' || err === 'busy') {
+                        const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume_post_nav', immediate: true, force: true });
+                        // #region agent log
+                        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H3',location:'worker.js:human-resume:post_nav_retry',message:'post-nav queued retry after governor busy',data:{nome:String(nome||''),operator:String(opPost||''),queued:!!queued,error:err},timestamp:Date.now()})}).catch(()=>{});
+                        // #endregion
+                      }
+                    })
+                    .catch((err) => {
+                      // #region agent log
+                      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_3',hypothesisId:'H2',location:'worker.js:human-resume:post_nav_result',message:'post-nav login_remediate threw',data:{nome:String(nome||''),operator:String(opPost||''),error:String(err&&err.message||err||'')},timestamp:Date.now()})}).catch(()=>{});
+                      // #endregion
+                    });
                 } catch {}
                 await snapshotStatusAndWrite();
                 return { ok: true, scheduledLoginRemediate: true, preflight: { ok: true, state: 'login_required_post_nav', reason: String(lrPost.reason || '') } };
