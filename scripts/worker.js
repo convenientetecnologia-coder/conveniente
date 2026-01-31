@@ -10808,6 +10808,42 @@ async function nurseTick() {
         }
       } catch {}
 
+      // Captcha/Checkpoint (pré-screen ou captcha clássico):
+      // Ultra enterprise: não pode ficar "parado" na tela. Se já está marcado como captcha, o nurse agenda o captcha flow.
+      // Guardrails: 1) não roda em humanControl/humanHold; 2) debounce 30s por perfil; 3) governança do próprio flow.
+      try {
+        const flagsC = await readAccountFlags(nome).catch(()=>({}));
+        if (flagsC && flagsC.loginRequired === true) {
+          const rr = String(flagsC.loginReason || flagsC.reason || '').toLowerCase();
+          const isCaptcha =
+            rr.includes('captcha_persona_pre_screen') ||
+            rr.includes('captcha_persona') ||
+            rr.includes('checkpoint_captcha') ||
+            rr.includes('captcha') ||
+            rr.includes('checkpoint');
+          if (isCaptcha) {
+            if (ctrl && ctrl.browser && ctrl.browser.isConnected?.() && ctrl.humanControl !== true && want.humanHold !== true) {
+              robeMeta[nome] = robeMeta[nome] || {};
+              const last = Number(robeMeta[nome].captchaAssistLastAt || 0) || 0;
+              if (!last || (now - last) > 30_000) {
+                robeMeta[nome].captchaAssistLastAt = now;
+                const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
+                const pg = (pages && pages[0]) || ctrl.mainPage || null;
+                if (pg) {
+                  try { provisionAudit.append({ ts: now, event: 'nurse_captcha_flow_schedule', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
+                  runCaptchaFlow(nome, ctrl, pg, { source: 'nurse_captcha_login_required', force: true }).catch(()=>{});
+                } else {
+                  try { provisionAudit.append({ ts: now, event: 'nurse_captcha_flow_no_page', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
+                }
+              } else {
+                await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_captcha_debounced', 'nurse_captcha_debounced');
+              }
+            }
+            continue;
+          }
+        }
+      } catch {}
+
       // Monitoramento: recurso/apelação submetida (após "Retomar trabalho")
       try {
         const flags = await readAccountFlags(nome).catch(()=>({}));
