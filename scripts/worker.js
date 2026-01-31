@@ -1786,6 +1786,11 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           const prev = d.perfis[nome] || {};
           // Em open_all: NÃO ligar Virtus automaticamente (mantém estado do desired/open_all_map).
           const nextVirtus = _isOpenAll ? (prev.virtus || 'off') : 'on';
+          if (_isOpenAll) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_open_all_priority_1',hypothesisId:'H3',location:'worker.js:probeHumanStateOnOpen:open_all_skip_start',message:'open_all keeps virtus state (no auto start)',data:{nome:String(nome||''),prevVirtus:String(prev.virtus||''),nextVirtus:String(nextVirtus||''),source:String(source||'')},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+          }
           d.perfis[nome] = { ...prev, active: true, humanHold: false, virtus: nextVirtus };
           return d;
         });
@@ -10453,8 +10458,18 @@ async function nurseTick() {
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
 
-        if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) continue;
-        if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) continue;
+        if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_open_all_priority_1',hypothesisId:'H1',location:'worker.js:nurse:skip_activationHeldUntil',message:'nurse skip open due to activationHeldUntil',data:{nome:String(nome||''),activationHeldUntil:Number(robeMeta[nome]?.activationHeldUntil||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
+          continue;
+        }
+        if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_open_all_priority_1',hypothesisId:'H2',location:'worker.js:nurse:skip_reopenAt',message:'nurse skip open due to reopenAt',data:{nome:String(nome||''),reopenAt:Number(robeMeta[nome]?.reopenAt||0)||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
+          continue;
+        }
 
         if (slotsInUse >= MAX_OPEN_CONCURRENCY) continue;
         slotsInUse++;
