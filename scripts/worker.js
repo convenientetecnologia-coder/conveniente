@@ -9608,7 +9608,14 @@ async function autoLoginRemediateTick() {
   if (!AUTO_LR_CFG.enabled) return;
   if (_autoLoginRemediateRunning) return;
   // Não competir com provisionamento/manual configure em andamento: evita alternância de lock
-  try { if (provisionLock.isActive()) return; } catch {}
+  try {
+    if (provisionLock.isActive()) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H1',location:'worker.js:autoLoginRemediateTick:provision_lock',message:'auto_login_remediate_tick blocked by provisionLock',data:{active:true},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      return;
+    }
+  } catch {}
 
   const desired = readJsonFile(desiredPath, { perfis: {} });
   const now = Date.now();
@@ -9616,12 +9623,41 @@ async function autoLoginRemediateTick() {
   let best = null;
   for (const [nome, ctrl] of controllers.entries()) {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
-    if (ctrl.humanControl === true || ctrl.configurando === true) continue;
-    if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) continue;
-    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) continue;
+    const _dbgNome = (nome === 'campo_grande-1769119224052' || nome === 'porto_alegre-1769132611438');
+    if (ctrl.humanControl === true || ctrl.configurando === true) {
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H2',location:'worker.js:autoLoginRemediateTick:skip_human_or_config',message:'auto_login_remediate_tick skip: humanControl/configurando',data:{nome:String(nome||''),humanControl:!!ctrl.humanControl,configurando:!!ctrl.configurando},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
+      continue;
+    }
+    if (ctrl.browser && ctrl.browser._sendLock && ctrl.browser._sendLock.active) {
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H3',location:'worker.js:autoLoginRemediateTick:skip_send_lock',message:'auto_login_remediate_tick skip: browser sendLock',data:{nome:String(nome||''),sendLock:true},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
+      continue;
+    }
+    if (robeMeta[nome] && robeMeta[nome].emExecucao === true) {
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H4',location:'worker.js:autoLoginRemediateTick:skip_em_execucao',message:'auto_login_remediate_tick skip: robe emExecucao',data:{nome:String(nome||'')},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
+      continue;
+    }
 
     const want = desired && desired.perfis ? desired.perfis[nome] : null;
-    if (want && want.humanHold === true) continue;
+    if (want && want.humanHold === true) {
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H5',location:'worker.js:autoLoginRemediateTick:skip_human_hold',message:'auto_login_remediate_tick skip: desired.humanHold',data:{nome:String(nome||''),humanHold:true},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
+      continue;
+    }
 
     const flags = await readAccountFlags(nome).catch(()=>({}));
     const lrFlag = !!(flags && flags.loginRequired === true);
@@ -9631,7 +9667,14 @@ async function autoLoginRemediateTick() {
     const nextAt = st ? (Number(st.nextAt || 0) || 0) : 0;
 
     // Só tenta se o perfil está marcado como loginRequired (persistido) e está enfileirado (evento detectado).
-    if (!lrFlag || !queued) continue;
+    if (!lrFlag || !queued) {
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H6',location:'worker.js:autoLoginRemediateTick:skip_not_ready',message:'auto_login_remediate_tick skip: lrFlag/queued false',data:{nome:String(nome||''),lrFlag:!!lrFlag,queued:!!queued,nextAt:Number(nextAt||0)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
+      continue;
+    }
     // Blindagem anti-loop: se já falhou (cookies+login) recentemente e foi marcado, NÃO tenta de novo automaticamente.
     if (lrFailed) {
       try {
@@ -9641,11 +9684,30 @@ async function autoLoginRemediateTick() {
         robeMeta[nome].autoLoginRemediate.nextAt = Math.max(robeMeta[nome].autoLoginRemediate.nextAt || 0, Date.now() + (6 * 60 * 60 * 1000));
       } catch {}
       try { issues.append(nome, 'mil_action', 'auto_login_remediate_skip(loginRemediateFailed=true)').catch(()=>{}); } catch {}
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H7',location:'worker.js:autoLoginRemediateTick:skip_lr_failed',message:'auto_login_remediate_tick skip: loginRemediateFailed',data:{nome:String(nome||''),lrFailed:true},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
       continue;
     }
-    if (nextAt && nextAt > now) continue;
+    if (nextAt && nextAt > now) {
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H8',location:'worker.js:autoLoginRemediateTick:skip_next_at',message:'auto_login_remediate_tick skip: nextAt in future',data:{nome:String(nome||''),nextAt:Number(nextAt||0),now:Number(now||0)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
+      continue;
+    }
 
-    if (!best || nextAt < best.nextAt) best = { nome, nextAt: nextAt || now };
+    if (!best || nextAt < best.nextAt) {
+      best = { nome, nextAt: nextAt || now };
+      if (_dbgNome) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_auto_lr_tick_1',hypothesisId:'H9',location:'worker.js:autoLoginRemediateTick:best_candidate',message:'auto_login_remediate_tick candidate selected',data:{nome:String(nome||''),nextAt:Number(nextAt||0)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
+    }
   }
 
   if (!best) return;
