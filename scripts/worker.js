@@ -7264,17 +7264,29 @@ const handlers = {
         try {
           await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
         } catch {}
-        // Regra do usuário: NUNCA entrar em humano invocado automaticamente.
-        // Apenas trava automação (Virtus OFF) e registra evidência.
+        const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity/.test(String(why || '').toLowerCase());
+        // Regra do usuário: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
             d.perfis = d.perfis || {};
-            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: shouldInvoke ? true : false };
             return d;
           });
         } catch {}
 
-        try { const ctrl = controllers.get(nome); if (ctrl) { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } } catch {}
+        try {
+          const ctrl = controllers.get(nome);
+          if (ctrl) {
+            ctrl.trabalhando = false;
+            if (shouldInvoke) ctrl.humanControl = true;
+            try { await stopVirtus(nome); } catch {}
+          }
+        } catch {}
+
+        if (shouldInvoke) {
+          try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: `fail_fast:${why.slice(0,80)}` }); } catch {}
+          try { provisionAudit.append({ ts: Date.now(), event: 'fail_fast_invoke_human', nome: String(nome||''), reason: why.slice(0, 160) }); } catch {}
+        }
 
         // UX/telemetria: expõe o motivo como whyNotOpen (mesmo com browser aberto, ajuda a UI/diagnóstico)
         try {
@@ -9641,6 +9653,8 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
   try {
     if (!HUMAN_RECONCILE_CFG.enabled) return { ok: false, skipped: 'disabled' };
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, skipped: 'no_browser' };
+    // Em modo humano, não reconcilia nem agenda automações.
+    if (ctrl && ctrl.humanControl === true) return { ok: false, skipped: 'human_control' };
     robeMeta[nome] = robeMeta[nome] || {};
     const last = Number(robeMeta[nome].humanReconcileLastAt || 0) || 0;
     if (last && (now - last) < HUMAN_RECONCILE_CFG.minIntervalMs) return { ok: false, skipped: 'throttle' };
@@ -9678,7 +9692,31 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     } catch {}
 
     // 2) LoginRequired/Identity/Appeal
-    const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+    // Detectar login_required em qualquer aba relevante (Messenger/Facebook).
+    const reasonPriority = (r) => {
+      const s = String(r || '').toLowerCase();
+      if (s.includes('identity')) return 5;
+      if (s.includes('captcha')) return 4;
+      if (s.includes('checkpoint')) return 3;
+      if (s.includes('login_form')) return 2;
+      return 1;
+    };
+    let lr = null;
+    let lrPage = pg;
+    try {
+      for (const p of (pages || []).slice(0, HUMAN_RECONCILE_CFG.maxPagesScan)) {
+        const u = safeUrl(p);
+        if (!/(facebook|messenger)\.com/i.test(u)) continue;
+        const det = await browserHelper.detectLoginRequired(p).catch(()=>null);
+        if (det && det.loginRequired) {
+          if (!lr || reasonPriority(det.reason) > reasonPriority(lr.reason)) {
+            lr = det;
+            lrPage = p;
+          }
+        }
+      }
+    } catch {}
+    if (!lr) lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
       // Estado real mudou: browser está ok, mas flags antigas podem ter ficado presas (ex.: loginRemediateFailed).
       // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
