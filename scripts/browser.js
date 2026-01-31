@@ -3594,7 +3594,8 @@ async function focusCaptchaInput(page) {
 }
 
 async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
-  const t = String(text || '').trim();
+  // IMPORTANT: captcha deve ser digitado sem espaços/linhas.
+  const t = String(text || '').replace(/\s+/g, '').trim();
   if (!t) return { ok: false, error: 'empty_text' };
   try {
     // Foco garantido
@@ -3613,16 +3614,69 @@ async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
         try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch {}
       } catch {}
     }).catch(()=>null);
-    // Digitar com delay leve para reduzir flake de foco
+    // Digitar com delay leve (um char por vez) para reduzir flake e permitir React atualizar estado do botão.
     await page.type('input[type="text"]', t, { delay: 60 }).catch(()=>null);
-    // Aguarda habilitar e clica
-    const startedAt = Date.now();
-    while ((Date.now() - startedAt) < Math.max(1000, Number(maxWaitMs||0)||0)) {
-      const r = await clickContinueByLabel(page, { maxWaitMs: 800 }).catch(()=>null);
-      if (r && r.ok) return { ok: true };
-      await new Promise(r => setTimeout(r, 350));
-    }
-    return { ok: false, error: 'continue_not_clickable_after_type' };
+
+    // Espera condição REAL: botão "Continuar" habilitar (sem sleeps artificiais).
+    const budget = Math.max(1200, Number(maxWaitMs||0)||0);
+    const enabled = await page.waitForFunction(() => {
+      try {
+        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+        const candidates = Array.from(document.querySelectorAll('[role=\"button\"],button,a')).slice(0, 1600);
+        for (const el of candidates) {
+          const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+          const txt = norm(el.innerText || el.textContent || '');
+          if (aria === 'continuar' || txt === 'continuar') {
+            const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
+            const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
+            const disabled = (ariaDisabled === 'true') || (tabIndex === '-1');
+            return !disabled;
+          }
+        }
+        return false;
+      } catch { return false; }
+    }, { timeout: budget }).then(()=>true).catch(()=>false);
+
+    if (!enabled) return { ok: false, error: 'continue_still_disabled_after_type' };
+
+    const r = await clickContinueByLabel(page, { maxWaitMs: Math.min(2500, budget) }).catch(()=>null);
+    if (r && r.ok) return { ok: true };
+    return { ok: false, error: r && r.error ? String(r.error) : 'continue_click_failed' };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
+async function waitForCaptchaTurnover(page, { previousImgSrc = '', timeoutMs = 15_000 } = {}) {
+  const prev = String(previousImgSrc || '').trim();
+  const budget = Math.max(1500, Number(timeoutMs||0)||0);
+  try {
+    const ok = await page.waitForFunction((p) => {
+      try {
+        const img = document.querySelector('img[src*=\"/captcha/tfbimage/\"]');
+        // Se sumiu, saímos do contexto de captcha (ou avançou para outra etapa).
+        if (!img) return true;
+        const src = String(img.getAttribute('src') || img.src || '');
+        // Se mudou e já carregou, o captcha virou (pronto para nova tentativa).
+        const loaded = !!(img.complete && (img.naturalWidth || 0) > 0);
+        if (p && src && src !== p && loaded) return true;
+        return false;
+      } catch { return false; }
+    }, { timeout: budget }, prev).then(()=>true).catch(()=>false);
+
+    let finalSrc = '';
+    let present = false;
+    try {
+      const v = await page.evaluate(() => {
+        const img = document.querySelector('img[src*=\"/captcha/tfbimage/\"]');
+        const src = img ? String(img.getAttribute('src') || img.src || '') : '';
+        return { present: !!img, src };
+      }).catch(()=>({ present:false, src:'' }));
+      present = !!(v && v.present);
+      finalSrc = v && v.src ? String(v.src) : '';
+    } catch {}
+
+    return { ok: !!ok, present, previousImgSrc: prev, finalImgSrc: finalSrc };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
   }
@@ -3632,7 +3686,7 @@ async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
  * Resolve captcha usando Groq OCR (ultra enterprise melhor do mundo).
  * Extrai a imagem do captcha, envia para Groq API, processa resposta e retorna texto limpo.
  */
-async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 1 } = {}) {
+async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 1, previousImgSrc = '' } = {}) {
   try {
     // 1. Detectar captcha e extrair URL da imagem
     const cap = await detectCaptchaChallenge(page).catch(()=>({ ok: false, present: false }));
@@ -3644,6 +3698,22 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
     if (!imgSrc || !imgSrc.includes('/captcha/tfbimage/')) {
       return { ok: false, error: 'invalid_img_src', imgSrc };
     }
+
+    // Esperar imagem REAL estar carregada (evita OCR em imagem “meio atualizando”).
+    // Se previousImgSrc foi informado, esperar virar para uma imagem diferente.
+    const prev = String(previousImgSrc || '').trim();
+    const imgReady = await page.waitForFunction((p) => {
+      try {
+        const img = document.querySelector('img[src*=\"/captcha/tfbimage/\"]');
+        if (!img) return false;
+        const src = String(img.getAttribute('src') || img.src || '');
+        const loaded = !!(img.complete && (img.naturalWidth || 0) > 0);
+        if (!loaded) return false;
+        if (p && src && src === p) return false;
+        return true;
+      } catch { return false; }
+    }, { timeout: 12_000 }, prev).then(()=>true).catch(()=>false);
+    if (!imgReady) return { ok: false, error: 'captcha_image_not_ready', imgSrc, hasPrev: !!prev };
 
     // 2. Ler configuração Groq
     const groqCfg = readGroqConfig();
@@ -3744,7 +3814,9 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
               content: [
                 {
                   type: 'text',
-                  text: 'Extract ONLY the text from this captcha image. Return ONLY the text characters, nothing else. No explanations, no comments, no additional text. Just the text from the image.'
+                  // Ultra enterprise: saída deve vir "crua", SEM espaços.
+                  // Se houver dúvida, retornar string vazia.
+                  text: 'Extract ONLY the captcha text from the image. Return ONLY the characters, with NO spaces, NO punctuation, NO quotes, NO extra words. If unsure, return empty.'
                 },
                 {
                   type: 'image_url',
@@ -3756,7 +3828,7 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
             }
           ],
           max_tokens: 50,
-          temperature: 0.1
+          temperature: 0
         })
       });
 
@@ -3770,7 +3842,7 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
         return { ok: false, error: 'groq_invalid_response', data: groqData };
       }
 
-      const rawText = String(groqData.choices[0].message?.content || '').trim();
+      const rawText = String(groqData.choices[0].message?.content || '');
       if (!rawText) {
         return { ok: false, error: 'groq_empty_response' };
       }
@@ -3778,21 +3850,25 @@ async function solveCaptchaWithGroq(page, { nome = '', operator = '', attempt = 
       // 5. Processar resposta: extrair apenas o texto (remove comentários, explicações, etc.)
       // Groq pode retornar coisas como "The text is: ABC123" ou "ABC123" ou "Text: ABC123"
       // Precisamos extrair apenas os caracteres do captcha
-      let cleanText = rawText
+      const rawTrim = String(rawText || '').trim();
+      const rawHadWhitespace = /\s/.test(rawTrim);
+      let cleanText = rawTrim
         .replace(/^(text|the text|text is|text:|the text is:|answer|answer is|answer:)\s*/i, '')
         .replace(/\s*(text|the text|text is|text:|the text is:|answer|answer is|answer:)\s*$/i, '')
         .replace(/^["']|["']$/g, '')
         .trim();
 
-      // Remove qualquer coisa que não seja alfanumérica (mantém apenas letras e números)
-      // Mas preserva espaços se houver (alguns captchas têm espaços)
-      cleanText = cleanText.replace(/[^\w\s]/g, '').trim();
+      // Regra do usuário: SEM espaços. Mantém apenas A-Z e 0-9.
+      cleanText = cleanText
+        .replace(/\s+/g, '')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .trim();
 
-      if (!cleanText || cleanText.length < 2) {
-        return { ok: false, error: 'groq_text_too_short', rawText: rawText.slice(0, 100), cleanText };
+      if (!cleanText || cleanText.length < 3) {
+        return { ok: false, error: 'groq_text_too_short', meta: { rawLength: rawTrim.length, rawHadWhitespace, cleanedLength: cleanText.length } };
       }
 
-      return { ok: true, text: cleanText, rawText: rawText.slice(0, 100) };
+      return { ok: true, text: cleanText, meta: { rawLength: rawTrim.length, rawHadWhitespace, cleanedLength: cleanText.length, imgSrc: imgSrc.slice(0, 120) } };
     } catch (e) {
       return { ok: false, error: 'groq_request_exception', details: (e && e.message) ? String(e.message) : String(e) };
     }
@@ -4504,6 +4580,7 @@ module.exports = {
   detectCaptchaChallenge,
   focusCaptchaInput,
   fillCaptchaAndContinue,
+  waitForCaptchaTurnover,
   solveCaptchaWithGroq,
   identityAssistStep,
   hackedAssistStep,

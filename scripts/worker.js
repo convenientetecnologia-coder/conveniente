@@ -784,6 +784,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
   const startedAt = Date.now();
   const id = String(flowId || newFlowId('captcha'));
   let _locked = false;
+  let lastImgSrc = '';
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
@@ -882,14 +883,38 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       if (lastReason.includes('captcha_persona') || lastReason.includes('checkpoint_captcha')) {
         const cap = await browserHelper.detectCaptchaChallenge(pg).catch(()=>({ ok:false, present:false }));
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_probe', nome: String(nome||''), flowId: id, attempt, present: !!cap.present, continueDisabled: cap.continueDisabled }); } catch {}
-        const ocr = await browserHelper.solveCaptchaWithGroq(pg, { nome, operator: `captcha_flow:${id}`, attempt }).catch(()=>({ ok:false, error:'ocr_exception' }));
-        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_ocr_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!ocr.ok, error: ocr && ocr.error ? String(ocr.error).slice(0,120) : null, hasText: !!(ocr && ocr.text), textLength: ocr && ocr.text ? String(ocr.text).length : 0 }); } catch {}
+        const curImgSrc = (cap && cap.imgSrc) ? String(cap.imgSrc || '').slice(0, 220) : '';
+        const ocr = await browserHelper.solveCaptchaWithGroq(pg, { nome, operator: `captcha_flow:${id}`, attempt, previousImgSrc: lastImgSrc }).catch(()=>({ ok:false, error:'ocr_exception' }));
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'captcha_flow_ocr_attempt',
+            nome: String(nome||''),
+            flowId: id,
+            attempt,
+            ok: !!ocr.ok,
+            error: ocr && ocr.error ? String(ocr.error).slice(0,120) : null,
+            hasText: !!(ocr && ocr.text),
+            textLength: ocr && ocr.text ? String(ocr.text).length : 0,
+            rawLength: (ocr && ocr.meta && typeof ocr.meta.rawLength === 'number') ? ocr.meta.rawLength : null,
+            rawHadWhitespace: (ocr && ocr.meta && typeof ocr.meta.rawHadWhitespace === 'boolean') ? ocr.meta.rawHadWhitespace : null,
+            cleanedLength: (ocr && ocr.meta && typeof ocr.meta.cleanedLength === 'number') ? ocr.meta.cleanedLength : null,
+            imgSrcKnown: !!curImgSrc
+          });
+        } catch {}
         if (ocr && ocr.ok && ocr.text) {
           const fill = await browserHelper.fillCaptchaAndContinue(pg, { text: ocr.text, maxWaitMs: 12000 }).catch(()=>({ ok:false, error:'fill_failed' }));
           try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_fill_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!fill.ok, error: fill && fill.error ? String(fill.error).slice(0,120) : null }); } catch {}
+          // Aguarda transição REAL (imagem trocar ou sair do captcha) antes da próxima tentativa.
+          try {
+            const w = await browserHelper.waitForCaptchaTurnover(pg, { previousImgSrc: curImgSrc || lastImgSrc, timeoutMs: 15_000 }).catch(()=>null);
+            provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_wait_turnover', nome: String(nome||''), flowId: id, attempt, ok: !!(w && w.ok), present: w ? !!w.present : null });
+          } catch {}
+          lastImgSrc = curImgSrc || lastImgSrc;
           continue;
         }
         // Se OCR não deu texto, apenas segue para próxima tentativa (reload/reprobe já acontece pelo próprio FB / ou próximos loops).
+        lastImgSrc = curImgSrc || lastImgSrc;
         continue;
       }
     }
