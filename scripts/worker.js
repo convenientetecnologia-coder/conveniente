@@ -8466,6 +8466,28 @@ const handlers = {
             // #region agent log
             fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_human_resume_flow_2',hypothesisId:'H5',location:'worker.js:human-resume:post_nav_lr',message:'post-nav detectLoginRequired',data:{nome:String(nome||''),loginRequired:!!(lrPost&&lrPost.loginRequired),reason:String(lrPost&&lrPost.reason||''),domain:String(lrPost&&lrPost.domain||''),evidence:lrPost&&lrPost.evidence?{hasPersonaText:!!lrPost.evidence.hasPersonaText,hasCheckpointText:!!lrPost.evidence.hasCheckpointText,hasIdentityText:!!lrPost.evidence.hasIdentityText,hasTwoFactorText:!!lrPost.evidence.hasTwoFactorText,hasRoyal:!!lrPost.evidence.hasRoyal,hasInputs:!!lrPost.evidence.hasInputs}:{}},timestamp:Date.now()})}).catch(()=>{});
             // #endregion
+            if (lrPost && lrPost.loginRequired) {
+              const rrPost = String(lrPost.reason || '').toLowerCase();
+              if (rrPost === 'login_form' || rrPost === 'login_required') {
+                try { await setLoginRequiredFlag(nome, { reason: lrPost.reason || 'login_form', source: lrPost.domain || 'messenger' }); } catch {}
+                try {
+                  await fileStore.withDesiredFileLockUpdate((d) => {
+                    d.perfis = d.perfis || {};
+                    d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'off' };
+                    return d;
+                  });
+                } catch {}
+                try { ctrl.trabalhando = false; } catch {}
+                try { await stopVirtus(nome); } catch {}
+                try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_schedule_login_remediate', nome: String(nome||''), reason: String(lrPost && lrPost.reason || ''), source: String(lrPost && lrPost.domain || '') }); } catch {}
+                const opPost = `human_resume_post_nav:${String(nome || '').trim()}:${Date.now()}`;
+                try {
+                  handlers.login_remediate({ nome, operator: opPost, options: { overrideHumanHold: true } }).catch(()=>null);
+                } catch {}
+                await snapshotStatusAndWrite();
+                return { ok: true, scheduledLoginRemediate: true, preflight: { ok: true, state: 'login_required_post_nav', reason: String(lrPost.reason || '') } };
+              }
+            }
           } catch {}
         }
       } catch {}
