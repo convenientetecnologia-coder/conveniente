@@ -906,6 +906,14 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       }
 
       if (lastReason.includes('captcha_persona_pre_screen')) {
+        const wait = await browserHelper.waitForContinueEnabled(pg, { timeoutMs: 20_000 }).catch(()=>({ ok:false, error:'wait_failed' }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_wait', nome: String(nome||''), flowId: id, attempt, ok: !!(wait && wait.ok), error: wait && wait.error ? String(wait.error).slice(0,120) : null }); } catch {}
+        if (!(wait && wait.ok)) {
+          // Não invocar humano aqui: pre-screen pode ficar "cinza" por alguns segundos.
+          // Deixa o nurse re-agendar com debounce.
+          try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'pre_screen_disabled' }).catch(()=>{}); } catch {}
+          return { ok: false, error: 'pre_screen_disabled', flowId: id };
+        }
         const clk = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 9000 }).catch(()=>({ ok:false, error:'click_failed' }));
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_click', nome: String(nome||''), flowId: id, attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
         continue;
@@ -977,6 +985,12 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
     }
 
     // Falhou após N tentativas => entrar em humano (agora sim).
+    // EXCEÇÃO: pre-screen não deve cair em humano; retorna para o nurse re-tentar.
+    if (lastReason && lastReason.includes('captcha_persona_pre_screen')) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_no_human', nome: String(nome||''), flowId: id }); } catch {}
+      try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'pre_screen_no_human' }).catch(()=>{}); } catch {}
+      return { ok: false, error: 'pre_screen_disabled', flowId: id };
+    }
     try { await setCaptchaCheckpointFlag(nome, { reason: lastReason || 'captcha_checkpoint', source: String(source||'').slice(0,80), url: '', title: '' }); } catch {}
     try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_invoke_human', nome: String(nome||''), flowId: id, tries: CAPTCHA_FLOW_CFG.maxTries, reason: String(lastReason||'').slice(0,120) }); } catch {}
     await enterHumanMode(nome, controllers.get(nome) || ctrl, { reason: `captcha_after_${CAPTCHA_FLOW_CFG.maxTries}_tries:${String(lastReason||'captcha').slice(0,80)}` });

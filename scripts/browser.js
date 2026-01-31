@@ -3547,6 +3547,32 @@ async function clickContinueByLabel(page, { maxWaitMs = 10_000 } = {}) {
   }
 }
 
+async function waitForContinueEnabled(page, { timeoutMs = 20_000 } = {}) {
+  const budget = Math.max(1500, Number(timeoutMs || 0) || 0);
+  try {
+    const ok = await page.waitForFunction(() => {
+      try {
+        function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+        const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
+        for (const el of candidates) {
+          const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
+          const txt = norm(el.innerText || el.textContent || '');
+          if (aria === 'continuar' || txt === 'continuar') {
+            const ariaDisabled = (el.getAttribute && el.getAttribute('aria-disabled')) ? String(el.getAttribute('aria-disabled')) : '';
+            const tabIndex = (el.getAttribute && el.getAttribute('tabindex')) ? String(el.getAttribute('tabindex')) : '';
+            const disabled = (ariaDisabled === 'true') || (tabIndex === '-1');
+            return !disabled;
+          }
+        }
+        return false;
+      } catch { return false; }
+    }, { timeout: budget }).then(()=>true).catch(()=>false);
+    return { ok: !!ok };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
+  }
+}
+
 async function detectCaptchaChallenge(page) {
   try {
     const v = await page.evaluate(() => {
@@ -4590,6 +4616,7 @@ module.exports = {
   detectLoginRequired,
   // ==== CAPTCHA/CONFIRME-HUMANO (SEM OCR IMPLEMENTADO):
   clickContinueByLabel,
+  waitForContinueEnabled,
   detectCaptchaChallenge,
   focusCaptchaInput,
   fillCaptchaAndContinue,
