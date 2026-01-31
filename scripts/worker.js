@@ -716,6 +716,10 @@ function _overlayReasonFromFlags(flags) {
   } catch { return 'human_mode'; }
 }
 
+// IMPORTANT (debug-mode / ultra enterprise):
+// setCaptchaCheckpointFlag NÃO deve invocar humano automaticamente.
+// Ela só registra flags persistentes (evidência do estado). A decisão de entrar em modo humano
+// deve ser do "flow" (ex.: após N tentativas) para evitar "paranoia".
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
   try {
     await manifestStore.update(nome, (man) => {
@@ -744,8 +748,9 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 
   // UA+FP telemetry (captcha/checkpoint)
   try { await emitUaFpEventToCT(nome, { eventKind: 'captcha', url, title }); } catch {}
+}
 
-  // Captcha/Checkpoint: por ordem do usuário, invocar humano automaticamente.
+async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
   try {
     await fileStore.withDesiredFileLockUpdate((d) => {
       d = d || {}; d.perfis = d.perfis || {};
@@ -754,15 +759,113 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
     });
   } catch {}
   try {
-    const ctrl = controllers.get(nome);
     if (ctrl) {
       ctrl.trabalhando = false;
       ctrl.humanControl = true;
       try { await stopVirtus(nome); } catch {}
-      try { await ensureHumanOverlay(nome, ctrl, { reason: 'captcha_checkpoint' }); } catch {}
+      try { await ensureHumanOverlay(nome, ctrl, { reason }); } catch {}
+      // Bring-to-front/human prompt (best-effort)
       try { await browserHelper.invocarHumano(ctrl.browser, nome); } catch {}
     }
   } catch {}
+  try { provisionAudit.append({ ts: Date.now(), event: 'enter_human_mode', nome: String(nome||''), reason: String(reason||'').slice(0, 140) }); } catch {}
+}
+
+// ===== Captcha flow (OCR + retries) =====
+const CAPTCHA_FLOW_CFG = {
+  maxTries: Math.max(1, Number(process.env.CAPTCHA_MAX_TRIES || 5) || 5)
+};
+
+async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
+  const startedAt = Date.now();
+  const id = String(flowId || newFlowId('captcha'));
+  try {
+    if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
+    if (!pg) return { ok: false, error: 'no_page' };
+    // Se humano está no controle, não operar.
+    if (ctrl && ctrl.humanControl === true) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
+      return { ok: false, skipped: true, reason: 'human_control' };
+    }
+
+    // Governança por tipo: 1 captcha por host (mas não bloqueia identity/login).
+    let _govToken = null;
+    try {
+      const pr = await supervisorClient.requestPermit('captcha_flow', nome, {
+        operator: `captcha_flow:${String(nome||'').trim()}:${id}`,
+        ttlMs: Math.min((6 * 60 * 1000), (15 * 60 * 1000))
+      }).catch(()=>null);
+      if (!pr || pr.ok !== true || !pr.token) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_governor_denied', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), reason: pr && pr.error ? String(pr.error) : 'unknown', retryAfterMs: pr && pr.retryAfterMs ? pr.retryAfterMs : null }); } catch {}
+        return { ok: false, denied: true, error: 'governor_busy' };
+      }
+      _govToken = pr.token;
+    } catch (e) {
+      const msg = (e && e.message) ? String(e.message) : String(e);
+      try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_governor_exception', nome: String(nome||''), flowId: id, error: msg.slice(0, 200) }); } catch {}
+      return { ok: false, error: `governor_exception:${msg}` };
+    }
+
+    try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_begin', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), maxTries: CAPTCHA_FLOW_CFG.maxTries }); } catch {}
+
+    // Estado seguro imediato (não pode ficar Virtus/Robe rodando)
+    try {
+      await fileStore.withDesiredFileLockUpdate((d) => {
+        d = d || {}; d.perfis = d.perfis || {};
+        const prev = d.perfis[nome] || {};
+        d.perfis[nome] = { ...prev, active: true, virtus: 'off', humanHold: false };
+        return d;
+      });
+    } catch {}
+    try { ctrl.trabalhando = false; } catch {}
+    try { await stopVirtus(nome); } catch {}
+
+    let lastReason = '';
+    for (let attempt = 1; attempt <= CAPTCHA_FLOW_CFG.maxTries; attempt++) {
+      const lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
+      if (!lr || lr.loginRequired !== true) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_cleared', nome: String(nome||''), flowId: id, attempt }); } catch {}
+        // liberou => retoma
+        setTimeout(() => { try { handlers.start_work({ nome, operator: `captcha_flow_resolved:${id}` }).catch(()=>{}); } catch {} }, 0);
+        try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'cleared' }).catch(()=>{}); } catch {}
+        return { ok: true, result: 'cleared', flowId: id };
+      }
+
+      lastReason = String(lr.reason || '').toLowerCase();
+      try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_attempt', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), attempt, reason: lastReason.slice(0,120) }); } catch {}
+
+      if (lastReason.includes('captcha_persona_pre_screen')) {
+        const clk = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 9000 }).catch(()=>({ ok:false, error:'click_failed' }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_click', nome: String(nome||''), flowId: id, attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
+        continue;
+      }
+
+      if (lastReason.includes('captcha_persona') || lastReason.includes('checkpoint_captcha')) {
+        const cap = await browserHelper.detectCaptchaChallenge(pg).catch(()=>({ ok:false, present:false }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_probe', nome: String(nome||''), flowId: id, attempt, present: !!cap.present, continueDisabled: cap.continueDisabled }); } catch {}
+        const ocr = await browserHelper.solveCaptchaWithGroq(pg, { nome, operator: `captcha_flow:${id}`, attempt }).catch(()=>({ ok:false, error:'ocr_exception' }));
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_ocr_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!ocr.ok, error: ocr && ocr.error ? String(ocr.error).slice(0,120) : null, hasText: !!(ocr && ocr.text), textLength: ocr && ocr.text ? String(ocr.text).length : 0 }); } catch {}
+        if (ocr && ocr.ok && ocr.text) {
+          const fill = await browserHelper.fillCaptchaAndContinue(pg, { text: ocr.text, maxWaitMs: 12000 }).catch(()=>({ ok:false, error:'fill_failed' }));
+          try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_fill_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!fill.ok, error: fill && fill.error ? String(fill.error).slice(0,120) : null }); } catch {}
+          continue;
+        }
+        // Se OCR não deu texto, apenas segue para próxima tentativa (reload/reprobe já acontece pelo próprio FB / ou próximos loops).
+        continue;
+      }
+    }
+
+    // Falhou após N tentativas => entrar em humano (agora sim).
+    try { await setCaptchaCheckpointFlag(nome, { reason: lastReason || 'captcha_checkpoint', source: String(source||'').slice(0,80), url: '', title: '' }); } catch {}
+    try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_invoke_human', nome: String(nome||''), flowId: id, tries: CAPTCHA_FLOW_CFG.maxTries, reason: String(lastReason||'').slice(0,120) }); } catch {}
+    await enterHumanMode(nome, controllers.get(nome) || ctrl, { reason: `captcha_after_${CAPTCHA_FLOW_CFG.maxTries}_tries:${String(lastReason||'captcha').slice(0,80)}` });
+    try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'invoke_human' }).catch(()=>{}); } catch {}
+    return { ok: false, error: 'captcha_requires_human', flowId: id };
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_exception', nome: String(nome||''), flowId: id, error: msg.slice(0, 200) }); } catch {}
+    return { ok: false, error: `captcha_flow_exception:${msg}` };
+  }
 }
 
 async function _buildHumanOverlayData(nome) {
@@ -1764,9 +1867,16 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }); } catch {}
             return { ok: true, state: 'appeal_submitted', reason: rr2 };
           }
+          // Captcha: NÃO invocar humano aqui. Agenda o captcha flow (governança própria + N tentativas).
           if (rr2.includes('captcha') || rr2.includes('checkpoint')) {
-            try { await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
-            return { ok: true, state: 'captcha_checkpoint', reason: rr2 };
+            try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_captcha_flow_schedule', nome: String(nome||''), source: String(source||''), reason: rr2.slice(0,160) }); } catch {}
+            try {
+              const c = controllers.get(nome);
+              const p0 = (c && c.mainPage) ? c.mainPage : pg;
+              if (c && p0) runCaptchaFlow(nome, c, p0, { source: `bootstrap_robe_probe:${String(source||'')}`, force: true }).catch(()=>{});
+            } catch {}
+            try { await setLoginRequiredFlag(nome, { reason: rr2 || 'captcha', source: lr2.domain || source }); } catch {}
+            return { ok: true, state: 'captcha_flow_scheduled', reason: rr2 };
           }
           // login_form / outros: marca loginRequired e deixa pipeline tratar (login_remediate/humano conforme regras já existentes)
           try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
@@ -2353,6 +2463,22 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
+    // Regra do lead: invocou humano => sistema NÃO trabalha.
+    if (ctrl && ctrl.humanControl === true) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80) }); } catch {}
+      return { ok: false, skipped: true, reason: 'human_control' };
+    }
+
+    // Roteamento: se já estamos em captcha, não consumir governança de identidade.
+    // (captcha tem governança própria e pode rodar em paralelo com identity_flow de outros perfis)
+    try {
+      const lr0 = await browserHelper.detectLoginRequired(pg).catch(()=>null);
+      const rr0 = (lr0 && lr0.loginRequired) ? String(lr0.reason || '').toLowerCase() : '';
+      if (rr0.includes('captcha_persona_pre_screen') || rr0.includes('captcha_persona') || rr0.includes('checkpoint_captcha')) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_routed_to_captcha_flow', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), reason: rr0.slice(0,160) }); } catch {}
+        return await runCaptchaFlow(nome, ctrl, pg, { source: `routed_from_identity:${String(source||'').slice(0,60)}`, force: true }).catch(()=>({ ok:false, error:'captcha_flow_failed' }));
+      }
+    } catch {}
 
     robeMeta[nome] = robeMeta[nome] || {};
     const last = Number(robeMeta[nome].identityFlowLastAt || 0) || 0;
@@ -2508,162 +2634,9 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
 
       const rr2 = String(lr2.reason || '').toLowerCase();
       if (rr2.includes('captcha_persona_pre_screen') || rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
-        // #region agent log (debug)
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H2',location:'conveniente/scripts/worker.js:runIdentityFlow:captcha_branch',message:'runIdentityFlow entered captcha branch',data:{nome:String(nome||''),source:String(source||'').slice(0,80),reason:String(lr2.reason||''),url:String(lr2.url||'').slice(0,220),title:String(lr2.title||'').slice(0,120),humanControl:!!(ctrl&&ctrl.humanControl),humanHold:!!(ctrl&&ctrl.humanHold)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-        // Novo fluxo (sem OCR): tentar 3 vezes antes de invocar humano.
-        // Objetivo: clicar "Continuar" no pre-screen e, no captcha, só invocar humano após 3 tentativas.
-        const operator = `identity_flow_captcha:${id}`;
-        try {
-          // Estado seguro imediato (não pode ficar Virtus/Robe rodando).
-          try { await stopVirtus(nome); } catch {}
-          try { if (ctrl) ctrl.trabalhando = false; } catch {}
-          try { robeMeta[nome] = robeMeta[nome] || {}; robeMeta[nome].pauseReason = 'captcha_flow'; } catch {}
-          try {
-            await fileStore.withDesiredFileLockUpdate((d) => {
-              d.perfis = d.perfis || {};
-              d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off' };
-              return d;
-            });
-          } catch {}
-        } catch {}
-
-        let lastLr = lr2;
-        let ok = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_attempt', nome: String(nome||''), operator, source: String(source||'').slice(0,80), attempt, reason: String((lastLr && lastLr.reason) || rr2).slice(0,80) });
-          } catch {}
-
-          // Re-probe a cada tentativa (evita operar em estado velho)
-          lastLr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:true, reason:'probe_failed' }));
-          if (!lastLr || lastLr.loginRequired !== true) { ok = true; break; }
-          const r = String(lastLr.reason || '').toLowerCase();
-
-          if (r.includes('captcha_persona_pre_screen')) {
-            // Pre-screen: clicar Continuar (se habilitado).
-            const clk = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 8000 }).catch(()=>({ ok:false, error:'click_failed' }));
-            try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_click', nome: String(nome||''), operator, attempt, ok: !!clk.ok, error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
-            // #region agent log (debug)
-            fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H3',location:'conveniente/scripts/worker.js:runIdentityFlow:pre_screen_click',message:'pre-screen clickContinueByLabel result',data:{nome:String(nome||''),attempt,ok:!!(clk&&clk.ok),error:clk&&clk.error?String(clk.error).slice(0,120):null},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
-            await sleep(1100);
-            continue;
-          }
-
-          // Captcha: resolver com Groq OCR (ultra enterprise melhor do mundo)
-          if (r.includes('captcha_persona') || r.includes('checkpoint_captcha')) {
-            const cap = await browserHelper.detectCaptchaChallenge(pg).catch(()=>({ ok:false, present:false }));
-            try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_probe', nome: String(nome||''), operator, attempt, present: !!cap.present, hasPrompt: !!cap.hasPrompt, hasInput: !!cap.hasInput, continueDisabled: cap.continueDisabled }); } catch {}
-            
-            if (!cap || !cap.present) {
-              // Captcha não detectado: reload e revalidar
-              try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null); } catch {}
-              await sleep(900);
-              continue;
-            }
-
-            // Tentar resolver com Groq OCR
-            const ocrResult = await browserHelper.solveCaptchaWithGroq(pg, { nome, operator, attempt }).catch(()=>({ ok: false, error: 'ocr_exception' }));
-            try { 
-              provisionAudit.append({ 
-                ts: Date.now(), 
-                event: 'captcha_flow_ocr_attempt', 
-                nome: String(nome||''), 
-                operator, 
-                attempt, 
-                ok: !!ocrResult.ok, 
-                error: ocrResult && ocrResult.error ? String(ocrResult.error).slice(0, 120) : null,
-                hasText: !!(ocrResult && ocrResult.text),
-                textLength: ocrResult && ocrResult.text ? String(ocrResult.text).length : 0
-              }); 
-            } catch {}
-
-            if (ocrResult && ocrResult.ok && ocrResult.text) {
-              // OCR sucesso: digitar texto e verificar se botão ficou azul
-              const fillResult = await browserHelper.fillCaptchaAndContinue(pg, { text: ocrResult.text, maxWaitMs: 12000 }).catch(()=>({ ok: false, error: 'fill_failed' }));
-              try { 
-                provisionAudit.append({ 
-                  ts: Date.now(), 
-                  event: 'captcha_flow_fill_attempt', 
-                  nome: String(nome||''), 
-                  operator, 
-                  attempt, 
-                  ok: !!fillResult.ok, 
-                  error: fillResult && fillResult.error ? String(fillResult.error).slice(0, 120) : null
-                }); 
-              } catch {}
-
-              if (fillResult && fillResult.ok) {
-                // Sucesso: texto digitado e botão clicado
-                await sleep(1500);
-                // Revalidar para ver se captcha foi resolvido
-                continue;
-              } else {
-                // Texto digitado mas botão não ficou azul (imagem mudou ou texto errado)
-                // Reload para pegar nova imagem na próxima tentativa
-                try { 
-                  provisionAudit.append({ 
-                    ts: Date.now(), 
-                    event: 'captcha_flow_reload_after_fill_fail', 
-                    nome: String(nome||''), 
-                    operator, 
-                    attempt 
-                  }); 
-                } catch {}
-                try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload_after_fill', timeoutMs: 45_000 }).catch(()=>null); } catch {}
-                await sleep(1200);
-                continue;
-              }
-            } else {
-              // OCR falhou: se botão já estiver habilitado (humano digitou), clicar; senão reload
-              if (cap && cap.continueDisabled === false) {
-                const clk2 = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 6000 }).catch(()=>({ ok:false }));
-                try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_captcha_click_continue', nome: String(nome||''), operator, attempt, ok: !!(clk2 && clk2.ok) }); } catch {}
-                await sleep(1200);
-                continue;
-              }
-              // Reload para pegar nova imagem
-              try { await reloadPageEnterprise(pg, { nome, tag: 'captcha_flow_reload', timeoutMs: 45_000 }).catch(()=>null); } catch {}
-              await sleep(900);
-              continue;
-            }
-          }
-
-          // Outro motivo: não insistir aqui.
-          break;
-        }
-
-        if (ok) {
-          try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_end', nome: String(nome||''), operator, result: 'cleared' }); } catch {}
-          // Reclassifica normal
-          const lr3 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
-          if (!lr3 || lr3.loginRequired !== true) {
-            try { await clearIdentityFlags(nome); } catch {}
-            try {
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d = d || {}; d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, humanHold: false, virtus: 'on' };
-                return d;
-              });
-            } catch {}
-            setTimeout(() => { try { handlers.start_work({ nome, operator: `captcha_flow_resolved:${id}` }).catch(()=>{}); } catch {} }, 0);
-            return { ok: true, flowId: id, result: 'captcha_cleared', didAction, actions: actionKinds };
-          }
-        }
-
-        // Falhou após 3 tentativas => invoca humano (final)
-        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_end', nome: String(nome||''), operator, result: 'invoke_human' }); } catch {}
-        await setCaptchaCheckpointFlag(nome, { reason: rr2 || 'captcha_checkpoint', source: String(lr2.domain||'') || 'facebook', url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
-        try {
-          const c2 = controllers.get(nome);
-          if (c2) {
-            c2.humanControl = true;
-            c2.trabalhando = false;
-          }
-        } catch {}
-        try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: `captcha_after_3_tries:${String(rr2).slice(0,60)}` }); } catch {}
-        return { ok: false, flowId: id, result: 'captcha_requires_human', didAction, actions: actionKinds };
+        // Encaminha para o captcha flow (governança própria + 5 tentativas por padrão).
+        // Importante: NÃO invocar humano aqui; o captcha flow é o único responsável por invocar humano após N tentativas.
+        return await runCaptchaFlow(nome, ctrl, pg, { source: `routed_post_identity:${String(source||'').slice(0,60)}`, force: true }).catch(()=>({ ok:false, error:'captcha_flow_failed' }));
       }
       if (rr2.includes('appeal_submitted') || rr2.includes('appeal')) {
         await setAppealSubmittedFlag(nome, { source: String(lr2.domain||''), url: lr2.url || '', title: lr2.title || '' }).catch(()=>{});
