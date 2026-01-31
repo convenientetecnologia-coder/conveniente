@@ -31,6 +31,16 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-01-30 — [CONV][FIX][OPS] Retomar trabalho: retry imediato quando governor ocupado
+
+- **O que**:
+  - Adicionado retry imediato (forçado) do `login_remediate` quando o governor está ocupado em `human-resume`.
+  - Log de evidência `login_remediate_governor_retry_queued` para rastrear a re-fila.
+- **Por quê**: evitar “engessamento” após Retomar trabalho quando outro login_remediate está em andamento.
+- **Evidência**: `C:\conveniente\scripts\worker.js` (human-resume + auto_login_remediate queue)
+- **Reinícios**: `conveniente` no RM3 (node index.js).
+- **Rollback**: reverter commit `fix: honor human mode + login form` + retry governor (ou `git revert` do último commit).
+
 #### 2026-01-30 — [CROSS][DOCS][OPS] INBOX: novo INC para “CT mostra OFFLINE falso” (RM3) + clarificações hostId/telemetria
 
 - **O que**:

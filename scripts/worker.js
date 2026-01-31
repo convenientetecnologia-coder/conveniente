@@ -8391,6 +8391,11 @@ const handlers = {
                   nome,
                   operator: op2,
                   options: { overrideHumanHold: true }
+                }).then((res) => {
+                  if (res && res.error === 'governor_busy') {
+                    const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume', immediate: true, force: true });
+                    try { provisionAudit.append({ ts: Date.now(), event: 'login_remediate_governor_retry_queued', nome: String(nome||''), operator: op2, queued: !!queued }); } catch {}
+                  }
                 }).catch(()=>null);
               } catch {}
             }, 0);
@@ -9454,7 +9459,7 @@ function _pruneWindow(arr, winMs) {
   return a.filter(ts => ts && (now - ts) <= winMs);
 }
 
-function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false } = {}) {
+function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false, force = false } = {}) {
   try {
     if (!AUTO_LR_CFG.enabled) return false;
     if (!nome) return false;
@@ -9471,11 +9476,11 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
     }
 
     const last = Number(st.lastStartAt || 0) || 0;
-    const earliest = last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0;
+    const earliest = force ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
     const when = Math.max(
       now + (immediate ? AUTO_LR_CFG.immediateDelayMs : 2500),
       earliest,
-      Number(st.nextAt || 0) || 0
+      force ? 0 : (Number(st.nextAt || 0) || 0)
     );
     st.queued = true;
     st.nextAt = when;
@@ -9490,7 +9495,8 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
         reason: String(reason || '').slice(0, 120),
         source: String(source || '').slice(0, 80),
         nextAt: when,
-        immediate: !!immediate
+        immediate: !!immediate,
+        force: !!force
       });
     } catch {}
     return true;
