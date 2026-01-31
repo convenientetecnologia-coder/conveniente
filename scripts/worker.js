@@ -946,10 +946,25 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
           try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_fill_attempt', nome: String(nome||''), flowId: id, attempt, ok: !!fill.ok, error: fill && fill.error ? String(fill.error).slice(0,120) : null }); } catch {}
           // Aguarda transição REAL (imagem trocar ou sair do captcha) antes da próxima tentativa.
           try {
-            const w = await browserHelper.waitForCaptchaTurnover(pg, { previousImgSrc: curImgSrc || lastImgSrc, timeoutMs: 15_000 }).catch(()=>null);
-            provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_wait_turnover', nome: String(nome||''), flowId: id, attempt, ok: !!(w && w.ok), present: w ? !!w.present : null });
+            const w = await browserHelper.waitForCaptchaTurnover(pg, { previousImgSrc: curImgSrc || lastImgSrc, timeoutMs: 15_000, minStableMs: 700 }).catch(()=>null);
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'captcha_flow_wait_turnover',
+              nome: String(nome||''),
+              flowId: id,
+              attempt,
+              ok: !!(w && w.ok),
+              present: w ? !!w.present : null,
+              finalImgChanged: w && w.finalImgSrc ? (String(w.finalImgSrc||'') !== String(curImgSrc||'')) : null,
+              minStableMs: w && typeof w.minStableMs === 'number' ? w.minStableMs : 700
+            });
           } catch {}
-          lastImgSrc = curImgSrc || lastImgSrc;
+          // Usa o src final (se disponível) como base para a próxima tentativa
+          try {
+            const w2 = await browserHelper.detectCaptchaChallenge(pg).catch(()=>null);
+            if (w2 && w2.imgSrc) lastImgSrc = String(w2.imgSrc || '');
+            else lastImgSrc = curImgSrc || lastImgSrc;
+          } catch { lastImgSrc = curImgSrc || lastImgSrc; }
           continue;
         }
         // Se OCR não deu texto, apenas segue para próxima tentativa (reload/reprobe já acontece pelo próprio FB / ou próximos loops).

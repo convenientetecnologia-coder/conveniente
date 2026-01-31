@@ -3647,22 +3647,35 @@ async function fillCaptchaAndContinue(page, { text, maxWaitMs = 12_000 } = {}) {
   }
 }
 
-async function waitForCaptchaTurnover(page, { previousImgSrc = '', timeoutMs = 15_000 } = {}) {
+async function waitForCaptchaTurnover(page, { previousImgSrc = '', timeoutMs = 15_000, minStableMs = 700 } = {}) {
   const prev = String(previousImgSrc || '').trim();
   const budget = Math.max(1500, Number(timeoutMs||0)||0);
+  const stable = Math.max(0, Number(minStableMs||0)||0);
   try {
-    const ok = await page.waitForFunction((p) => {
+    const ok = await page.waitForFunction((p, stableMs) => {
       try {
+        // Mantém um mini-estado em window para detectar "estabilizou" (sem depender de sleeps externos)
+        const now = Date.now();
         const img = document.querySelector('img[src*=\"/captcha/tfbimage/\"]');
-        // Se sumiu, saímos do contexto de captcha (ou avançou para outra etapa).
-        if (!img) return true;
+        if (!img) return true; // saiu do captcha
         const src = String(img.getAttribute('src') || img.src || '');
-        // Se mudou e já carregou, o captcha virou (pronto para nova tentativa).
         const loaded = !!(img.complete && (img.naturalWidth || 0) > 0);
-        if (p && src && src !== p && loaded) return true;
-        return false;
+        // Se temos um previousImgSrc, não aceitamos enquanto for a mesma imagem.
+        if (p && src && src === p) return false;
+        if (!loaded) return false;
+        const st = window.__ctCaptchaStable = window.__ctCaptchaStable || { lastSrc: '', lastChangeAt: 0 };
+        if (st.lastSrc !== src) {
+          st.lastSrc = src;
+          st.lastChangeAt = now;
+          return false;
+        }
+        // Só libera quando o src ficou estável por stableMs (reduz "atropelo" entre tentativas)
+        if (stableMs > 0) {
+          return (now - Number(st.lastChangeAt || 0)) >= stableMs;
+        }
+        return true;
       } catch { return false; }
-    }, { timeout: budget }, prev).then(()=>true).catch(()=>false);
+    }, { timeout: budget }, prev, stable).then(()=>true).catch(()=>false);
 
     let finalSrc = '';
     let present = false;
@@ -3676,7 +3689,7 @@ async function waitForCaptchaTurnover(page, { previousImgSrc = '', timeoutMs = 1
       finalSrc = v && v.src ? String(v.src) : '';
     } catch {}
 
-    return { ok: !!ok, present, previousImgSrc: prev, finalImgSrc: finalSrc };
+    return { ok: !!ok, present, previousImgSrc: prev, finalImgSrc: finalSrc, minStableMs: stable };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
   }
