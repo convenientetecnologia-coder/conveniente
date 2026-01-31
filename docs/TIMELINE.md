@@ -31,7 +31,22 @@ Formato canônico (copiar/colar):
 
 ---
 
-#### 2026-01-31 — [CONV][FIX][OPS] Captcha: tratar pre-screen “Confirme que você é humano” + 3 tentativas antes de invocar humano (sem OCR implementado)
+#### 2026-01-31 — [CONV][FEAT][OPS] Captcha: implementa OCR Groq para resolver captchas automaticamente (ultra enterprise melhor do mundo)
+
+- **O que**:
+  - Adicionada função `solveCaptchaWithGroq` em `scripts/browser.js` que extrai imagem do captcha via canvas, chama Groq API e processa resposta para retornar texto limpo.
+  - Integrado OCR no fluxo de 3 tentativas em `runIdentityFlow`: extrai imagem, chama Groq, digita texto, verifica se botão "Continuar" ficou azul.
+  - Se botão não ficar azul após digitar: reload para pegar nova imagem e tenta novamente (até 3 vezes).
+  - Processamento robusto da resposta Groq: remove comentários/explicações e extrai apenas o texto do captcha.
+- **Por quê**: automatizar resolução de captchas usando Groq OCR para reduzir necessidade de intervenção humana.
+- **Evidência**:
+  - `C:\conveniente\scripts\browser.js` (`solveCaptchaWithGroq`, logs `captcha_flow_ocr_attempt`, `captcha_flow_fill_attempt`)
+  - `C:\conveniente\scripts\worker.js` (integração OCR no loop de 3 tentativas)
+  - Commit: `2c9abe9` (feat: implementa OCR Groq para resolver captchas)
+- **Reinícios**: `conveniente` (hosts) — humano reinicia com `node index.js`.
+- **Rollback**: `git revert 2c9abe9` e reiniciar `node index.js`.
+
+#### 2026-01-31 — [CONV][FIX][OPS] Captcha: tratar pre-screen "Confirme que você é humano" + 3 tentativas antes de invocar humano (sem OCR implementado)
 
 - **O que**:
   - `detectLoginRequired` passou a detectar `captcha_persona_pre_screen` (tela “confirme que você é humano para usar sua conta”) com sinais anti-falso-positivo.
