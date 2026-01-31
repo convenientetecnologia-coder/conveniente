@@ -7260,6 +7260,20 @@ const handlers = {
               retryAfterMs: pr && typeof pr.retryAfterMs === 'number' ? pr.retryAfterMs : null
             });
           } catch {}
+          // P0: Se o governor negar por busy, o fluxo pode ficar "engessado" por conta do
+          // min_interval do human_reconcile. Então enfileiramos retry no autoLoginRemediateTick.
+          try {
+            const r = String((pr && pr.error) || '').toLowerCase();
+            if (r === 'busy' || r.includes('busy') || r.includes('governor_busy')) {
+              const queued = queueAutoLoginRemediate(nome, {
+                reason: 'governor_busy',
+                source: 'login_remediate',
+                immediate: true,
+                force: true
+              });
+              try { provisionAudit.append({ ts: Date.now(), event: 'login_remediate_governor_retry_queued', nome: String(nome || ''), operator: op, queued: !!queued }); } catch {}
+            }
+          } catch {}
           return { ok: false, error: 'governor_busy', governor: pr || null };
         }
         _govPermitToken = pr.token;
