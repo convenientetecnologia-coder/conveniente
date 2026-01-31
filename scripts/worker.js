@@ -776,9 +776,14 @@ const CAPTCHA_FLOW_CFG = {
   maxTries: Math.max(1, Number(process.env.CAPTCHA_MAX_TRIES || 5) || 5)
 };
 
+// Mutex in-process: 1 captcha flow por host (fallback quando supervisor permits não estão habilitados).
+let _captchaFlowRunning = false;
+let _captchaFlowRunningNome = null;
+
 async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
   const startedAt = Date.now();
   const id = String(flowId || newFlowId('captcha'));
+  let _locked = false;
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
@@ -788,6 +793,25 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       return { ok: false, skipped: true, reason: 'human_control' };
     }
 
+    // Fallback enterprise: mutex interno (1 captcha por host).
+    // Importante: não depende do supervisor, então evita o "stall" quando permits estão disabled.
+    if (_captchaFlowRunning) {
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'captcha_flow_inproc_denied',
+          nome: String(nome||''),
+          flowId: id,
+          source: String(source||'').slice(0, 80),
+          runningNome: String(_captchaFlowRunningNome || '')
+        });
+      } catch {}
+      return { ok: false, denied: true, error: 'inproc_busy' };
+    }
+    _captchaFlowRunning = true;
+    _captchaFlowRunningNome = String(nome || '');
+    _locked = true;
+
     // Governança por tipo: 1 captcha por host (mas não bloqueia identity/login).
     let _govToken = null;
     try {
@@ -796,8 +820,23 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
         ttlMs: Math.min((6 * 60 * 1000), (15 * 60 * 1000))
       }).catch(()=>null);
       if (!pr || pr.ok !== true || !pr.token) {
-        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_governor_denied', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), reason: pr && pr.error ? String(pr.error) : 'unknown', retryAfterMs: pr && pr.retryAfterMs ? pr.retryAfterMs : null }); } catch {}
-        return { ok: false, denied: true, error: 'governor_busy' };
+        const why = pr && pr.error ? String(pr.error) : 'unknown';
+        // Alguns hosts podem ter permits desabilitados para esse tipo (retorna "disabled").
+        // Nesses casos seguimos apenas com o mutex interno (sem travar o fluxo).
+        if (String(why || '').toLowerCase() === 'disabled') {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'captcha_flow_governor_disabled_fallback',
+              nome: String(nome||''),
+              flowId: id,
+              source: String(source||'').slice(0,80)
+            });
+          } catch {}
+        } else {
+          try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_governor_denied', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), reason: why, retryAfterMs: pr && pr.retryAfterMs ? pr.retryAfterMs : null }); } catch {}
+          return { ok: false, denied: true, error: 'governor_busy' };
+        }
       }
       _govToken = pr.token;
     } catch (e) {
@@ -865,6 +904,11 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
     const msg = (e && e.message) ? String(e.message) : String(e);
     try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_exception', nome: String(nome||''), flowId: id, error: msg.slice(0, 200) }); } catch {}
     return { ok: false, error: `captcha_flow_exception:${msg}` };
+  } finally {
+    if (_locked) {
+      _captchaFlowRunning = false;
+      _captchaFlowRunningNome = null;
+    }
   }
 }
 
