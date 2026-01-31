@@ -8074,6 +8074,14 @@ const handlers = {
 
       ctrl.humanControl = true;
       try { await issues.append(nome, 'invoke_human_set', 'humanControl=true'); } catch {}
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'invoke_human_set',
+          nome: String(nome || ''),
+          humanControl: true
+        });
+      } catch {}
 
       try {
         await fileStore.withDesiredFileLockUpdate((desired) => {
@@ -8114,11 +8122,13 @@ const handlers = {
         fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay ok',data:{nome:String(nome||''),humanControl:!!(ctrl&&ctrl.humanControl)},timestamp:Date.now()})}).catch(()=>{});
         // #endregion
         try { await issues.append(nome, 'invoke_human_overlay_ok', 'ok'); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'invoke_human_overlay_ok', nome: String(nome || '') }); } catch {}
       } catch (e) {
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'rm3_invoke_human_1',hypothesisId:'H4',location:'worker.js:invoke_human:overlay',message:'ensureHumanOverlay error',data:{nome:String(nome||''),error:String((e&&e.message)||e)},timestamp:Date.now()})}).catch(()=>{});
         // #endregion
         try { await issues.append(nome, 'invoke_human_overlay_err', String((e && e.message) || e).slice(0, 120)); } catch {}
+        try { provisionAudit.append({ ts: Date.now(), event: 'invoke_human_overlay_err', nome: String(nome || ''), error: String((e && e.message) || e).slice(0, 160) }); } catch {}
       }
 
       await snapshotStatusAndWrite();
@@ -8354,6 +8364,15 @@ const handlers = {
 
             scheduledLoginRemediate = true;
             const op2 = `human_resume:${String(nome || '').trim()}:${Date.now()}`;
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'human_resume_login_form',
+                nome: String(nome || ''),
+                reason: String(lr && lr.reason || '').slice(0, 120),
+                source: String(lr && lr.domain || '')
+              });
+            } catch {}
             setTimeout(() => {
               try {
                 handlers.login_remediate({
@@ -9451,6 +9470,17 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
     st.reason = String(reason || '').slice(0, 80);
     st.source = String(source || '').slice(0, 80);
     st.enqueuedAt = now;
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'auto_login_remediate_queued',
+        nome: String(nome || ''),
+        reason: String(reason || '').slice(0, 120),
+        source: String(source || '').slice(0, 80),
+        nextAt: when,
+        immediate: !!immediate
+      });
+    } catch {}
     return true;
   } catch {
     return false;
