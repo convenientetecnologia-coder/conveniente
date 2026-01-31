@@ -23,8 +23,12 @@ function safeReadJson(filePath) {
 
 function readGroqConfig() {
   const j = safeReadJson(GROQ_CONFIG_PATH) || {};
-  const groqApiKey = String(j.groqApiKey || "").trim();
-  const groqModel = String(j.groqModel || "").trim();
+  // Enterprise: permitir fallback via env (útil quando o host é provisionado com variáveis
+  // mas ainda não escreveu o arquivo local).
+  const envKey = String(process.env.GROQ_API_KEY || "").trim();
+  const envModel = String(process.env.GROQ_MODEL || "").trim();
+  const groqApiKey = String(j.groqApiKey || envKey || "").trim();
+  const groqModel = String(j.groqModel || envModel || "").trim();
   return {
     ok: true,
     path: GROQ_CONFIG_PATH,

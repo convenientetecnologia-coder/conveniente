@@ -1878,6 +1878,36 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           });
         } catch {}
         if (!okMsg) {
+          // Enterprise hardening:
+          // Se o Messenger não ficou pronto, pode ser porque estamos em tela de captcha/identity/checkpoint.
+          // Antes de "engessar", re-probar loginRequired e encaminhar.
+          try {
+            const lr2 = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
+            if (lr2 && lr2.loginRequired) {
+              const rr2 = String(lr2.reason || '').toLowerCase();
+              try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_messenger_not_ready_lr', nome: String(nome||''), source: String(source||''), reason: rr2.slice(0,160) }); } catch {}
+              if (rr2.includes('captcha_persona_pre_screen') || rr2.includes('captcha_persona') || rr2.includes('checkpoint_captcha')) {
+                try {
+                  const c = controllers.get(nome) || ctrl;
+                  const p2 = (c && c.mainPage) ? c.mainPage : pg;
+                  if (c && p2) runCaptchaFlow(nome, c, p2, { source: `bootstrap_messenger_not_ready:${String(source||'')}`, force: true }).catch(()=>{});
+                } catch {}
+                try { await setLoginRequiredFlag(nome, { reason: lr2.reason || rr2, source: lr2.domain || source }); } catch {}
+                return { ok: true, state: 'captcha_flow_scheduled', reason: rr2 };
+              }
+              if (rr2.includes('identity')) {
+                try { await setIdentityRequiredFlag(nome, { source: lr2.domain || source, url: lr2.url || '', title: lr2.title || '' }); } catch {}
+                try {
+                  const c = controllers.get(nome) || ctrl;
+                  const p2 = (c && c.mainPage) ? c.mainPage : pg;
+                  if (c && p2) runIdentityFlow(nome, c, p2, { source: `bootstrap_messenger_not_ready:${String(source||'')}`, force: true }).catch(()=>{});
+                } catch {}
+                return { ok: true, state: 'identity_required', reason: rr2 };
+              }
+              // Outros loginRequired: não libera trabalho; devolve evidência.
+              return { ok: false, error: 'messenger_marketplace_not_ready_login_required', reason: rr2 };
+            }
+          } catch {}
           // Não avança para Robe nem libera trabalho se o Messenger não ficou realmente pronto.
           return { ok: false, error: 'messenger_marketplace_not_ready' };
         }
@@ -8685,7 +8715,7 @@ const handlers = {
               return { ok: true, preflight };
             }
 
-            // Non-automatable: captcha/identity/checkpoint => humano direto.
+            // Captcha/Checkpoint: temos fluxo automático (N tentativas) e só cai em humano se falhar.
             // 2FA => exclusão automática.
             const isTwoFactor = rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor');
             const isCaptchaCheckpoint = rr.includes('captcha') || rr.includes('checkpoint');
@@ -8701,8 +8731,8 @@ const handlers = {
             }
             if (isCaptchaCheckpoint) {
               // Captcha/Checkpoint é um estado próprio: NÃO marcar como "login/cookies falhou".
-              preflight.state = 'captcha_checkpoint';
-              try { await issues.append(nome, 'human_resume_preflight', `state=captcha_checkpoint reason=${String(lr.reason||'')}`); } catch {}
+              preflight.state = 'captcha_flow_scheduled';
+              try { await issues.append(nome, 'human_resume_preflight', `state=captcha_flow_scheduled reason=${String(lr.reason||'')}`); } catch {}
               try {
                 await fileStore.withDesiredFileLockUpdate((d) => {
                   d.perfis = d.perfis || {};
@@ -8711,8 +8741,9 @@ const handlers = {
                 });
               } catch {}
               try { ctrl.trabalhando = false; try { await stopVirtus(nome); } catch {} } catch {}
+              try { runCaptchaFlow(nome, ctrl, p0, { source: 'human_resume_preflight', force: true }).catch(()=>{}); } catch {}
               await snapshotStatusAndWrite();
-              logger.info('[HANDLER] human-resume preflight -> captcha/checkpoint', { nome, reason: lr.reason || '' });
+              logger.info('[HANDLER] human-resume preflight -> captcha_flow_scheduled', { nome, reason: lr.reason || '' });
               return { ok: true, preflight };
             }
             if (needsHuman) {
