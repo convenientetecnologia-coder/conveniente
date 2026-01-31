@@ -874,6 +874,34 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       lastReason = String(lr.reason || '').toLowerCase();
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_attempt', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80), attempt, reason: lastReason.slice(0,120) }); } catch {}
 
+      // Handoff enterprise:
+      // se saímos do captcha e entramos em outro estado (identidade/login/appeal), NÃO invocar humano pelo captcha flow.
+      // Encaminhamos para o fluxo correto e encerramos o captcha flow.
+      if (lastReason.includes('identity')) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_identity', nome: String(nome||''), flowId: id, attempt, reason: lastReason.slice(0,160) }); } catch {}
+        try { await setIdentityRequiredFlag(nome, { source: 'captcha_flow', url: lr.url || '', title: lr.title || '' }).catch(()=>{}); } catch {}
+        try {
+          const c = controllers.get(nome) || ctrl;
+          const p = (c && c.mainPage) ? c.mainPage : pg;
+          if (c && p) runIdentityFlow(nome, c, p, { source: `captcha_flow_handoff:${String(source||'').slice(0,60)}`, force: true }).catch(()=>{});
+        } catch {}
+        try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'handoff_identity' }).catch(()=>{}); } catch {}
+        return { ok: true, result: 'handoff_identity', flowId: id };
+      }
+      if (lastReason.includes('appeal')) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_appeal', nome: String(nome||''), flowId: id, attempt, reason: lastReason.slice(0,160) }); } catch {}
+        try { await setAppealSubmittedFlag(nome, { source: 'captcha_flow', url: lr.url || '', title: lr.title || '' }).catch(()=>{}); } catch {}
+        try { await armAppealMonitor(nome, { delayMs: APPEAL_CFG.firstDelayMs }).catch(()=>{}); } catch {}
+        try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'handoff_appeal' }).catch(()=>{}); } catch {}
+        return { ok: true, result: 'handoff_appeal', flowId: id };
+      }
+      if (lastReason.includes('login_form')) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_login_form', nome: String(nome||''), flowId: id, attempt }); } catch {}
+        try { queueAutoLoginRemediate(nome, { reason: lr.reason || '', source: lr.domain || '', immediate: true }); } catch {}
+        try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'handoff_login_form' }).catch(()=>{}); } catch {}
+        return { ok: true, result: 'handoff_login_form', flowId: id };
+      }
+
       if (lastReason.includes('captcha_persona_pre_screen')) {
         const clk = await browserHelper.clickContinueByLabel(pg, { maxWaitMs: 9000 }).catch(()=>({ ok:false, error:'click_failed' }));
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_pre_screen_click', nome: String(nome||''), flowId: id, attempt, ok: !!(clk && clk.ok), error: clk && clk.error ? String(clk.error).slice(0,120) : null }); } catch {}
