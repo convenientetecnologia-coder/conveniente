@@ -217,6 +217,11 @@ Fonte: `C:\conveniente\scripts\dashboard.js`
 - `set_ct_config`
 - `self_update`
 
+Notas operacionais (P0):
+
+- `open_all_24h` **deve abrir** perfis mesmo quando `loginRequired=captcha_*` / `checkpoint_*` / `identityRequired` (esses estados são “correção”, não motivo para manter browser fechado).
+- O contador “trabalhando” pode ter **warm-up** logo após Abrir Todos (abrindo browsers + `bootstrap_messenger_ready` + start do Virtus); se cair muito, esperar alguns minutos antes de concluir regressão.
+
 #### Anti “comandos zumbis” (fila/loops)
 
 O CT já tem GC/limpeza por TTL para comandos que ficaram sem ACK:

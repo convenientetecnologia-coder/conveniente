@@ -83,6 +83,18 @@ Formato canônico (copiar/colar):
 - **Rollback**: `git revert <hash>` + reiniciar `node index.js`.
 - **THREAD**: `TH-2026-02-01-open-gaps`
 
+#### 2026-02-01 — [CONV][FIX][OPS] Abrir Todos: não bloquear abertura quando `loginRequired=captcha_*` ou `identityRequired` e browser fechado
+
+- **O que**:
+  - `nurseTick` deixa de dar `continue` em captcha/identidade quando `ctrl` está ausente; o perfil cai no fluxo normal `want.active && !ctrl` e o navegador abre.
+  - Logs operacionais (sem segredos) no `provision_audit`: `nurse_captcha_required_no_ctrl_allow_open`, `nurse_identity_required_no_ctrl_allow_open`.
+  - Removidas instrumentações temporárias desta rodada (POST local `127.0.0.1:7242`).
+- **Por quê**: regra do negócio: “se está no servidor e tem `desired.active=true`, deve abrir — mesmo se estiver em captcha/identidade/appeal”.
+- **Evidência**: `C:\conveniente\scripts\worker.js` + INC `INC-20260201-0300-01` + RM1 CT snapshot `C:\sitechatbot\dados\084c8fff-c508-47bd-a33e-3ab34aeb1e3d-*.json`.
+- **Reinícios**: hosts `conveniente` após deploy.
+- **Rollback**: `git revert <hash>` + reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-01-open-gaps`
+
 #### 2026-01-31 — [CONV][FEAT][OPS] Captcha: implementa OCR Groq para resolver captchas automaticamente (ultra enterprise melhor do mundo)
 
 - **O que**:
