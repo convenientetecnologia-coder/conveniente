@@ -57,6 +57,19 @@ Formato canônico (copiar/colar):
 - **Reinícios**: `conveniente` (hosts) — humano reinicia com `node index.js`.
 - **Rollback**: reverter commit desta mudança e reiniciar `node index.js`.
 
+#### 2026-01-31 — [CONV][FIX][OPS] Pre-screen “Confirme que você é humano”: esperar “Continuar” habilitar e não invocar humano cedo
+
+- **O que**:
+  - Adicionado `waitForContinueEnabled` e usado no pre-screen.
+  - Pre-screen não entra em humano quando “Continuar” está desabilitado; retorna e o nurse re-tenta com debounce.
+- **Por quê**: evidência mostrou `continue_disabled` levando a humano cedo, mesmo sendo um estado transitório do Facebook.
+- **Evidência**:
+  - `C:\conveniente\scripts\browser.js` (`waitForContinueEnabled`)
+  - `C:\conveniente\scripts\worker.js` (`captcha_flow_pre_screen_wait` / retorno `pre_screen_disabled`)
+  - RM7 `provision_audit` (bundle CT: `rm7_fetch_sp_regression_1769899065677.json`)
+- **Reinícios**: `conveniente` (hosts) — humano reinicia com `node index.js`.
+- **Rollback**: reverter commit desta mudança e reiniciar `node index.js`.
+
 #### 2026-01-31 — [CONV][FIX][OPS] Captcha: tratar pre-screen "Confirme que você é humano" + 3 tentativas antes de invocar humano (sem OCR implementado)
 
 - **O que**:
