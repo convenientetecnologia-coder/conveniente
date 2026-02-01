@@ -10444,6 +10444,9 @@ async function nurseTick() {
       } catch {}
       return false;
     })();
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H1',location:'worker.js:nurseTick:openIntent',message:'nurse_open_intent_snapshot',data:{autoOpenEnabled,openAllActive:!!(desired0&&desired0._openAll&&desired0._openAll.active===true),desiredActiveCount:(()=>{try{return Object.values((desired0&&desired0.perfis)||{}).filter(w=>w&&w.active===true).length}catch{return 0}})(),controllersSize:controllers.size},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion agent log
 
     if (controllers.size === 0) {
       // Ainda fazemos o sweep leve (ban/2FA) 1x/min.
@@ -10997,13 +11000,24 @@ async function nurseTick() {
         if (isFrozenNow(nome)) continue;
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H2',location:'worker.js:nurseTick:skip_activationHeld',message:'nurse_skip_activationHeldUntil',data:{nome,activationHeldUntil:robeMeta[nome]?.activationHeldUntil||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion agent log
           continue;
         }
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H2',location:'worker.js:nurseTick:skip_reopenAt',message:'nurse_skip_reopenAt',data:{nome,reopenAt:robeMeta[nome]?.reopenAt||0,now:Date.now()},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion agent log
           continue;
         }
 
-        if (slotsInUse >= MAX_OPEN_CONCURRENCY) continue;
+        if (slotsInUse >= MAX_OPEN_CONCURRENCY) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H3',location:'worker.js:nurseTick:skip_slots',message:'nurse_skip_slots',data:{nome,slotsInUse,MAX_OPEN_CONCURRENCY},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion agent log
+          continue;
+        }
         slotsInUse++;
         try {
           let _flags = null;
@@ -11028,6 +11042,9 @@ async function nurseTick() {
                 ? String(provisionLockSnap.lock.meta.kind)
                 : '';
               const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H4',location:'worker.js:nurseTick:open_attempt',message:'nurse_open_attempt',data:{nome,useOpenAll,oaActive,lkActive,lkKind:lkKind||null},timestamp:Date.now()})}).catch(()=>{});
+              // #endregion agent log
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: useOpenAll ? 'open_all_24h' : 'nurse_auto', oaActive: !!oaActive, lkActive: !!lkActive, lkKind: lkKind || null }); } catch {}
               r = useOpenAll
                 ? await activateOnce(nome, 'open_all_24h', oaOwner)
@@ -11038,6 +11055,9 @@ async function nurseTick() {
             }
             if (!r || !r.ok) {
               const err = (r && r.error) || '';
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H4',location:'worker.js:nurseTick:open_denied',message:'nurse_open_denied',data:{nome,error:String(err||'').slice(0,160)},timestamp:Date.now()})}).catch(()=>{});
+              // #endregion agent log
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_denied', nome: String(nome||''), error: String(err || '').slice(0, 160) }); } catch {}
               try {
                 robeMeta[nome] = robeMeta[nome] || {};
@@ -11062,6 +11082,9 @@ async function nurseTick() {
                 }
               }
             } else {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H5',location:'worker.js:nurseTick:open_ok',message:'nurse_open_ok',data:{nome},timestamp:Date.now()})}).catch(()=>{});
+              // #endregion agent log
               // NOVO: Backoff fixo de 3s ao invés de 15s
               if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
               // Progresso do open-all: marca avanço para evitar "stall detector" falso.
