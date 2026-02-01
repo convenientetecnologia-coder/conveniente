@@ -11,7 +11,7 @@ const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
 const provisionAudit = require('./provisionAudit.js');
-const { readGroqConfig, writeGroqConfig } = require('./groqConfig');
+const { readGroqConfig, readGroqConfigMeta, writeGroqConfig } = require('./groqConfig');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
@@ -1895,13 +1895,16 @@ async function tick(reason = 'interval') {
     // Verifica se precisa solicitar config (ctBaseUrl ou logIngestSecret ausentes)
     const cfg = readCtConfig();
     const needsConfig = !cfg.ctBaseUrl || !cfg.logIngestSecret;
-    // Verifica se precisa solicitar config Groq (API key/model ausentes)
-    const groqCfg = readGroqConfig();
-    const envGroqKey = String(process.env.GROQ_API_KEY || '').trim();
-    const envGroqModel = String(process.env.GROQ_MODEL || '').trim();
+    // Verifica se precisa solicitar config Groq (API key/model ausentes OU modelo divergente do esperado)
+    // Importante: sem segredos no report — apenas boolean/modelo/metadata.
+    const groqCfg = readGroqConfig(); // usado em runtime (OCR)
+    const groqMeta = readGroqConfigMeta(); // telemetria segura
+    // Modelo esperado (enterprise): default global acordado (pode ser sobrescrito por env no host)
+    const expectedGroqModel = String(process.env.GROQ_MODEL || 'meta-llama/llama-4-maverick-17b-128e-instruct').trim();
     const needsGroqConfig =
-      !(envGroqKey || (groqCfg && groqCfg.groqApiKey)) ||
-      !(envGroqModel || (groqCfg && groqCfg.groqModel));
+      !(groqMeta && groqMeta.effectiveApiKeyPresent) ||
+      !(groqMeta && groqMeta.effectiveModelPresent) ||
+      (!!expectedGroqModel && !!(groqMeta && groqMeta.effectiveModel) && String(groqMeta.effectiveModel) !== String(expectedGroqModel));
 
     const payload = {
       hostname: quick.system.hostname,
@@ -1909,6 +1912,13 @@ async function tick(reason = 'interval') {
       sentAt: now(),
       needsConfig: needsConfig, // Flag para CT saber que precisa enviar set_ct_config
       needsGroqConfig: needsGroqConfig, // Flag para CT saber que precisa enviar set_groq_config
+      groq: {
+        expectedModel: String(expectedGroqModel || '').slice(0, 140),
+        effectiveSource: groqMeta && groqMeta.effectiveSource ? String(groqMeta.effectiveSource) : 'unknown',
+        effectiveModel: groqMeta && groqMeta.effectiveModel ? String(groqMeta.effectiveModel).slice(0, 140) : '',
+        effectiveApiKeyPresent: !!(groqMeta && groqMeta.effectiveApiKeyPresent),
+        fileUpdatedAt: (groqMeta && groqMeta.file && groqMeta.file.updatedAt) ? groqMeta.file.updatedAt : null
+      },
       host: {
         // RAM total do servidor (para capacidade no notificador)
         totalMemGB: (quick && quick.system && typeof quick.system.totalMB === 'number')

@@ -21,6 +21,33 @@ function safeReadJson(filePath) {
   }
 }
 
+// Meta (não sensível): usado para telemetria / handshake.
+function readGroqConfigMeta() {
+  const j = safeReadJson(GROQ_CONFIG_PATH) || {};
+  const fileModel = String(j.groqModel || "").trim();
+  const fileKeyPresent = !!String(j.groqApiKey || "").trim();
+  const fileUpdatedAt = Number(j.updatedAt || 0) || 0;
+
+  const envModel = String(process.env.GROQ_MODEL || "").trim();
+  const envKeyPresent = !!String(process.env.GROQ_API_KEY || "").trim();
+
+  // Regra: runtime usa arquivo (se existir) com prioridade mais alta.
+  const effectiveSource = (fileModel || fileKeyPresent) ? "file" : ((envModel || envKeyPresent) ? "env" : "none");
+  const effectiveModel = fileModel || envModel || "";
+  const effectiveApiKeyPresent = fileKeyPresent || envKeyPresent;
+
+  return {
+    ok: true,
+    path: GROQ_CONFIG_PATH,
+    effectiveSource,
+    effectiveModel,
+    effectiveModelPresent: !!effectiveModel,
+    effectiveApiKeyPresent: !!effectiveApiKeyPresent,
+    file: { present: !!(fileModel || fileKeyPresent), model: fileModel, apiKeyPresent: fileKeyPresent, updatedAt: fileUpdatedAt || null },
+    env: { present: !!(envModel || envKeyPresent), model: envModel, apiKeyPresent: envKeyPresent }
+  };
+}
+
 function readGroqConfig() {
   const j = safeReadJson(GROQ_CONFIG_PATH) || {};
   // Enterprise: permitir fallback via env (útil quando o host é provisionado com variáveis
@@ -53,5 +80,5 @@ function writeGroqConfig({ groqApiKey, groqModel } = {}) {
   }
 }
 
-module.exports = { GROQ_CONFIG_PATH, readGroqConfig, writeGroqConfig };
+module.exports = { GROQ_CONFIG_PATH, readGroqConfig, readGroqConfigMeta, writeGroqConfig };
 
