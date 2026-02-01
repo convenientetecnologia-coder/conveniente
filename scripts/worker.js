@@ -10765,7 +10765,7 @@ async function nurseTick() {
             const now = Date.now();
             if (!last || (now - last) > 60_000) {
               robeMeta.system._dbgShardSkip[k] = now;
-              try { provisionAudit.append({ ts: now, event: 'nurse_skip_other_shard_active', nome: String(nome||''), shardSize: SHARD_SET.size }); } catch {}
+              try { provisionAudit.append({ ts: now, event: 'nurse_skip_other_shard_active', nome: String(nome||''), shardSize: SHARD_SET.size, pid: process.pid }); } catch {}
             }
           }
         } catch {}
