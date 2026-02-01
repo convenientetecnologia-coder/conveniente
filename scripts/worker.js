@@ -9531,6 +9531,7 @@ const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityR
 const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
 const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
 const appealSubmitted = man ? !!(man.accountFlags && man.accountFlags.appealSubmitted === true) : !!robeMeta[nome]?.appealSubmitted;
+const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
 const appealSubmittedAt = man ? ((man.accountFlags && man.accountFlags.appealSubmittedAt) || null) : null;
 const appealNextCheckAt = man ? ((man.accountFlags && man.accountFlags.appealNextCheckAt) || null) : null;
 const appealLastCheckAt = man ? ((man.accountFlags && man.accountFlags.appealLastCheckAt) || null) : null;
@@ -9603,6 +9604,7 @@ perfis.push({
   appealNextCheckAt,
   appealLastCheckAt,
   appealLastReason,
+  loginRemediateFailed,
   messengerPin,
   messengerPinReason,
   problem,

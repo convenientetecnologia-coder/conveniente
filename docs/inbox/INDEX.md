@@ -18,6 +18,7 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 
 | id | P | state | rollout | validation | título | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260201-0100-01 | P1 | in_progress | not_deployed | not_run | CT/Servidores: contadores “Login/Cookies falhou” + “Recurso em análise” + ordenação OFFLINE primeiro | `in_progress/INC-20260201-0100-01.md` |
 | INC-20260201-0000-01 | P1 | done | deployed | passed | Groq config: garantir auto-download + auto-correção de modelo em TODOS os hosts após update/restart | `done/INC-20260201-0000-01.md` |
 | INC-20260131-0000-01 | P1 | done | deployed | passed | Captcha/Identidade: pre-screen “Confirme que você é humano” + OCR Groq + identity/appeal handoff | `done/INC-20260131-0000-01.md` |
 | INC-20260130-0905-01 | P0 | cancelled | not_deployed | not_run | CT marca RM3 OFFLINE mas host está acessível (Servidores + Estoque) | `cancelled/INC-20260130-0905-01.md` |

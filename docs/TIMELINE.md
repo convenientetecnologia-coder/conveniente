@@ -31,6 +31,18 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-01 — [CONV][CT][CROSS][FEAT] CT/Servidores: contadores “Login/Cookies falhou” + “Recurso em análise” + ordenação OFFLINE primeiro
+
+- **O que**:
+  - `conveniente`: snapshot `status.json` passa a expor `loginRemediateFailed` em `status.perfis`.
+  - `sitechatbot`: `GET /servers` agrega `flagsAgg.login_cookies_failed` e `flagsAgg.appeal_submitted`.
+  - `sitechatbot`: UI do menu Servidores renderiza novos pills e o sort prioriza OFFLINE antes da capacidade.
+- **Por quê**: dar visibilidade operacional exata no CT e manter lista estável (sem “dançar”).
+- **Evidência**: `C:\conveniente\scripts\worker.js` (snapshotStatusAndWrite), `C:\sitechatbot\index.js` (flagsAgg + sort), `C:\sitechatbot\public\index.html` (pills).
+- **Reinícios**: `conveniente` (hosts) e `sitechatbot` (CT) após deploy.
+- **Rollback**: `git revert <hash>` em cada repo + reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-01-ct-server-flags`
+
 #### 2026-01-31 — [CONV][FEAT][OPS] Captcha: implementa OCR Groq para resolver captchas automaticamente (ultra enterprise melhor do mundo)
 
 - **O que**:
