@@ -416,11 +416,18 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   const perfisFinalINST = Array.from(baseMap.values());
   // Progresso do "Abrir Todos" (sequenciador do desired.json) — para o dashboard acompanhar inFlight/idx/total.
   let openAll = null;
+  let autoOpen = null;
   try {
     const d = (fileStore && typeof fileStore.readJsonSafe === 'function')
       ? fileStore.readJsonSafe(fileStore.desiredPath, null)
       : null;
     openAll = d && d._openAll ? d._openAll : null;
+    const ao = d && d._autoOpen && typeof d._autoOpen === 'object' ? d._autoOpen : null;
+    autoOpen = {
+      enabled: !!(ao && ao.enabled === true),
+      changedAt: (ao && typeof ao.changedAt === 'number') ? ao.changedAt : 0,
+      changedBy: (ao && ao.changedBy) ? String(ao.changedBy) : null
+    };
   } catch { openAll = null; }
   res.json({
     perfis: perfisFinalINST,
@@ -433,6 +440,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     ops: opsState.getOps(),
     warning: warningINST,
     openAll,
+    autoOpen,
     ts: Date.now()
   });
   return;
@@ -520,6 +528,19 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
           : null;
         return d && d._openAll ? d._openAll : null;
       } catch { return null; }
+    })(),
+    autoOpen: (() => {
+      try {
+        const d = (fileStore && typeof fileStore.readJsonSafe === 'function')
+          ? fileStore.readJsonSafe(fileStore.desiredPath, null)
+          : null;
+        const ao = d && d._autoOpen && typeof d._autoOpen === 'object' ? d._autoOpen : null;
+        return {
+          enabled: !!(ao && ao.enabled === true),
+          changedAt: (ao && typeof ao.changedAt === 'number') ? ao.changedAt : 0,
+          changedBy: (ao && ao.changedBy) ? String(ao.changedBy) : null
+        };
+      } catch { return { enabled: false, changedAt: 0, changedBy: null }; }
     })()
   });
 }

@@ -2208,6 +2208,13 @@
             body: JSON.stringify({ enabled: nextEnabled })
           }).then(x => x.json()).catch(()=>null);
           if (!r || r.ok !== true) throw new Error((r && r.error) ? String(r.error) : 'auto_open_failed');
+          // Otimista: reflete no botão imediatamente (UI não fica travada em OFF).
+          window.__autoOpenEnabled = nextEnabled;
+          try {
+            btn.classList.remove('btn-verde', 'btn-vermelho', 'btn-cinza');
+            btn.classList.add(nextEnabled ? 'btn-verde' : 'btn-vermelho');
+            btn.textContent = nextEnabled ? 'Tudo aberto: ON' : 'Tudo aberto: OFF';
+          } catch {}
           await new Promise(r => setTimeout(r, 200));
           reloadPerfis();
         } catch (e) {

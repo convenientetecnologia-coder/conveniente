@@ -46,6 +46,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-01 — [CONV][FIX][OPS] Dashboard “Tudo aberto” não atualizava estado
+
+- **O que**:
+  - `/api/status` agora inclui `autoOpen` no payload principal e no fallback de erro.
+  - UI atualiza o botão “Tudo aberto” imediatamente após o clique.
+- **Por quê**: o botão ficava travado em OFF mesmo com autopilot ligado.
+- **Evidência**: `C:\conveniente\scripts\api_status.js`, `C:\conveniente\public\index.html`.
+- **Reinícios**: `conveniente` (hosts).
+- **Rollback**: `git revert <hash>` + reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-01-auto-open-toggle`
+
+---
+
 #### 2026-02-01 — [CONV][CT][CROSS][FEAT] CT/Servidores: contadores “Login/Cookies falhou” + “Recurso em análise” + ordenação OFFLINE primeiro
 
 - **O que**:
