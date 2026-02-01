@@ -43,6 +43,18 @@ Formato canônico (copiar/colar):
 - **Rollback**: `git revert <hash>` em cada repo + reiniciar `node index.js`.
 - **THREAD**: `TH-2026-02-01-ct-server-flags`
 
+#### 2026-02-01 — [CONV][FIX][OPS] P0 total>ativos: impedir desativação automática e manter perfis sempre ativos
+
+- **O que**:
+  - `open_all_finalize_partial` não desativa mais `desired.active`; aplica backoff curto para reabrir quando houver RAM.
+  - `nurseTick` reforça `desired.active=true` para perfis existentes (1x/min).
+  - adiciona `OPEN_ALL_PARTIAL_BACKOFF_MS` (default 60s) para evitar loop agressivo.
+- **Por quê**: evitar “browsers fechados sem motivo” e garantir abertura contínua quando há RAM.
+- **Evidência**: `C:\conveniente\scripts\worker.js` (open_all_finalize_partial + nurseTick) + INC `INC-20260201-0300-01`.
+- **Reinícios**: hosts `conveniente` após deploy.
+- **Rollback**: `git revert <hash>` + reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-01-open-gaps`
+
 #### 2026-01-31 — [CONV][FEAT][OPS] Captcha: implementa OCR Groq para resolver captchas automaticamente (ultra enterprise melhor do mundo)
 
 - **O que**:

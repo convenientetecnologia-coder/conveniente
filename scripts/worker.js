@@ -10382,6 +10382,34 @@ async function nurseTick() {
     // Otimização permitida: só reduzir trabalho quando NÃO existe nenhum desired.active=true e _openAll não está ativo.
     let desired0 = null;
     try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch { desired0 = { perfis: {} }; }
+
+    // Regra do humano: todo perfil deve ficar active=true (o sistema não desativa sozinho).
+    // Fazemos enforcement leve e com debounce para evitar IO excessivo.
+    try {
+      robeMeta.system = robeMeta.system || {};
+      const last = Number(robeMeta.system.desiredEnforceActiveAt || 0) || 0;
+      if (!last || (now0 - last) > 60_000) {
+        robeMeta.system.desiredEnforceActiveAt = now0;
+        const perfisArr = loadPerfisJson();
+        const names = Array.isArray(perfisArr) ? perfisArr.map(p => p && p.nome).filter(Boolean) : [];
+        let changed = 0;
+        await fileStore.withDesiredFileLockUpdate((d) => {
+          d = d || {}; d.perfis = d.perfis || {};
+          for (const nome of names) {
+            const cur = d.perfis[nome] || {};
+            if (cur.active !== true) {
+              d.perfis[nome] = { ...cur, active: true };
+              changed++;
+            }
+          }
+          return d;
+        });
+        if (changed > 0) {
+          try { provisionAudit.append({ ts: now0, event: 'desired_enforce_active', changed, total: names.length }); } catch {}
+          try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch {}
+        }
+      }
+    } catch {}
     const hasOpenIntent = (() => {
       try {
         const oa = desired0 && desired0._openAll && typeof desired0._openAll === 'object' ? desired0._openAll : null;
@@ -10607,10 +10635,17 @@ async function nurseTick() {
                   d._openAll.partialReason = 'ram_or_supervisor_denied';
                   d._openAll.partialOpened = opened;
                   d._openAll.partialTotal = total;
-                  // Desliga desired.active dos que ficaram impossíveis agora (para não continuar tentando em loop).
+                  // Regra do humano: NUNCA desligar desired.active automaticamente.
+                  // Em vez disso, aplicar backoff curto para evitar loop agressivo; o nurse reabre quando houver RAM.
+                  const backoffMs = Math.max(30_000, Number(process.env.OPEN_ALL_PARTIAL_BACKOFF_MS || 60000) || 60000);
                   for (const nn of (ramDeniedPending || [])) {
-                    const cur = d.perfis[nn] || {};
-                    d.perfis[nn] = { ...cur, active: false, virtus: 'off' };
+                    try {
+                      robeMeta[nn] = robeMeta[nn] || {};
+                      const now2 = Date.now();
+                      robeMeta[nn].activationHeldUntil = now2 + backoffMs;
+                      robeMeta[nn].reopenAt = now2 + backoffMs;
+                      robeMeta[nn].whyNotOpen = 'open_all_partial_ram';
+                    } catch {}
                   }
                   // Libera Virtus para quem ficou ativo e não está em humanHold.
                   for (const n of Object.keys(d.perfis || {})) {
