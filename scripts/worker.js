@@ -10878,6 +10878,12 @@ async function nurseTick() {
       try {
         const flagsIR = await readAccountFlags(nome).catch(()=>({}));
         if (flagsIR && flagsIR.identityRequired === true) {
+          // P0: Se o navegador NÃO está aberto, não podemos "assistir" identidade.
+          // Regra do humano: se desired.active=true, o navegador precisa abrir mesmo em identityRequired.
+          if (!ctrl && want && want.active === true) {
+            try { provisionAudit.append({ ts: now, event: 'nurse_identity_required_no_ctrl_allow_open', nome: String(nome||'') }); } catch {}
+            // NÃO continue aqui: deixa cair no bloco normal de abertura (want.active && !ctrl).
+          } else {
           try {
             if (ctrl) {
               ctrl.trabalhando = false;
@@ -10898,6 +10904,7 @@ async function nurseTick() {
           } catch {}
           await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_identity_required', 'nurse_identity_required');
           continue;
+          }
         }
       } catch {}
 
@@ -10931,8 +10938,16 @@ async function nurseTick() {
               } else {
                 await appendIssueNurseDebounced(nome, 'mil_action', 'nurse_captcha_debounced', 'nurse_captcha_debounced');
               }
+              continue;
             }
-            continue;
+            // P0: Se o navegador NÃO está aberto, não dá pra rodar captcha flow.
+            // Regra do humano: se desired.active=true, o navegador precisa abrir mesmo em captcha/loginRequired.
+            if (!ctrl && want && want.active === true) {
+              try { provisionAudit.append({ ts: now, event: 'nurse_captcha_required_no_ctrl_allow_open', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
+              // NÃO continue: deixa cair no bloco normal de abertura.
+            } else {
+              continue;
+            }
           }
         }
       } catch {}
