@@ -276,6 +276,7 @@
     <button class="btn" id="citiesCountBtn">Cidades</button>
     <button class="btn btn-roxo" id="startAllBtn">Abrir Todos 24h</button>
     <button class="btn btn-vermelho" id="stopAllBtn">Fechar Todos</button>
+    <button class="btn btn-cinza" id="autoOpenBtn">Tudo aberto: OFF</button>
     <button class="btn btn-amarelo" id="invokeAllBtn">Invocar Tudo</button>
     <button class="btn btn-verde" id="resumeAllBtn">Retomar Tudo</button>
     <button class="btn btn-azul" id="robe24AllBtn">Robe 24h</button>
@@ -312,7 +313,7 @@
       alert(msg || 'Outra ação em massa já está em andamento. Aguarde finalizar.');
     }
     function setGlobalActionButtonsDisabled(disable, { exclude = [] } = {}) {
-      const ids = ['startAllBtn','stopAllBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn'];
+      const ids = ['startAllBtn','stopAllBtn','autoOpenBtn','robe24AllBtn','robeReleaseAllBtn','unfreezeAllBtn','citiesCountBtn','invokeAllBtn','resumeAllBtn'];
       ids.forEach(id => {
         if (exclude.includes(id)) return;
         const el = document.getElementById(id);
@@ -1082,6 +1083,21 @@
             startBtn.textContent = 'Abrir Todos 24h';
             startBtn.title = '';
           }
+        }
+      } catch {}
+
+      // ====== NOVO: status do "Tudo aberto" (autopilot) ======
+      try {
+        const btn = document.getElementById('autoOpenBtn');
+        const enabled = !!(st && st.autoOpen && st.autoOpen.enabled === true);
+        window.__autoOpenEnabled = enabled;
+        if (btn) {
+          btn.classList.remove('btn-verde', 'btn-vermelho', 'btn-cinza');
+          btn.classList.add(enabled ? 'btn-verde' : 'btn-vermelho');
+          btn.textContent = enabled ? 'Tudo aberto: ON' : 'Tudo aberto: OFF';
+          const by = st && st.autoOpen && st.autoOpen.changedBy ? String(st.autoOpen.changedBy) : '';
+          const at = st && st.autoOpen && st.autoOpen.changedAt ? Number(st.autoOpen.changedAt) : 0;
+          btn.title = by ? (`Última mudança: ${by}${at ? ' @ ' + new Date(at).toLocaleString() : ''}`) : '';
         }
       } catch {}
 
@@ -2175,6 +2191,31 @@
       const btn = document.getElementById('stopAllBtn');
       if (!btn) return;
       btn.onclick = stopAllSequential;
+    })();
+
+    // Bind do botão "Tudo aberto" (autopilot)
+    (function bindAutoOpenBtn(){
+      const btn = document.getElementById('autoOpenBtn');
+      if (!btn) return;
+      btn.onclick = async () => {
+        if (isMassActionRunning()) { alertMassActionRunning(); return; }
+        const nextEnabled = !window.__autoOpenEnabled;
+        btn.disabled = true; btn.style.opacity = '0.7'; btn.style.cursor = 'not-allowed';
+        try {
+          const r = await fetch('/api/perfis/auto-open', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-operator': 'ui_auto_open' },
+            body: JSON.stringify({ enabled: nextEnabled })
+          }).then(x => x.json()).catch(()=>null);
+          if (!r || r.ok !== true) throw new Error((r && r.error) ? String(r.error) : 'auto_open_failed');
+          await new Promise(r => setTimeout(r, 200));
+          reloadPerfis();
+        } catch (e) {
+          alert('Falha ao alternar Tudo aberto: ' + (e && e.message || e));
+        } finally {
+          btn.disabled = false; btn.style.opacity = ''; btn.style.cursor = '';
+        }
+      };
     })();
 
     // Bind do botão "Abrir Todos e Iniciar 24h"

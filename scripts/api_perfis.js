@@ -1233,6 +1233,11 @@ module.exports = (app, workerClient, fileStore) => {
           lockOwner,
           by: String(op || 'bulk_open_all').slice(0, 120)
         };
+        // NOVO: ligar autopilot "Tudo aberto"
+        desired._autoOpen = desired._autoOpen || {};
+        desired._autoOpen.enabled = true;
+        desired._autoOpen.changedAt = Date.now();
+        desired._autoOpen.changedBy = String(op || 'bulk_open_all').slice(0, 120);
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;
@@ -1265,6 +1270,30 @@ module.exports = (app, workerClient, fileStore) => {
     } catch (e) {
       // Se falhou após adquirir o lock, liberar (best-effort).
       try { if (lockOwner) provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+      return res.json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+  // ========== ENDPOINT: ligar/desligar autopilot "Tudo aberto" ==========
+  app.post('/api/perfis/auto-open', async (req, res) => {
+    try {
+      const op = String(req.headers['x-operator'] || 'auto_open_toggle').slice(0, 120);
+      const enabled = (req && req.body && typeof req.body.enabled !== 'undefined')
+        ? !!req.body.enabled
+        : null;
+      if (enabled === null) return res.json({ ok: false, error: 'enabled_required' });
+
+      await fileStore.withDesiredFileLockUpdate((d) => {
+        d = d || {};
+        d._autoOpen = d._autoOpen || {};
+        d._autoOpen.enabled = enabled;
+        d._autoOpen.changedAt = Date.now();
+        d._autoOpen.changedBy = op;
+        return d;
+      });
+      try { provisionAudit.append({ ts: Date.now(), event: 'auto_open_toggle', enabled, by: op }); } catch {}
+      return res.json({ ok: true, enabled });
+    } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
@@ -1329,6 +1358,11 @@ module.exports = (app, workerClient, fileStore) => {
             cancelledReason: 'close_all'
           };
         }
+        // NOVO: desligar autopilot "Tudo aberto"
+        desired._autoOpen = desired._autoOpen || {};
+        desired._autoOpen.enabled = false;
+        desired._autoOpen.changedAt = Date.now();
+        desired._autoOpen.changedBy = String(by || 'close_all').slice(0, 120);
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;

@@ -31,6 +31,21 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-01 — [CONV][FEAT][OPS] Autopilot “Tudo aberto”: toggle no painel + boot OFF + controle via desired
+
+- **O que**:
+  - `desired._autoOpen.enabled` controla o modo “Tudo aberto” (autopilot).
+  - Boot do worker força OFF para evitar reabertura automática após restart.
+  - `open-all-24h` liga o autopilot; `close-all` desliga; novo endpoint `POST /api/perfis/auto-open`.
+  - `/api/status` passa a expor `autoOpen` e o painel mostra botão ON/OFF.
+- **Por quê**: permitir abrir manualmente sem reabertura automática e manter controle explícito de “Tudo aberto”.
+- **Evidência**: `C:\conveniente\scripts\worker.js`, `C:\conveniente\scripts\api_perfis.js`, `C:\conveniente\scripts\api_status.js`, `C:\conveniente\public\index.html`.
+- **Reinícios**: `conveniente` (hosts).
+- **Rollback**: `git revert <hash>` + reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-01-auto-open-toggle`
+
+---
+
 #### 2026-02-01 — [CONV][CT][CROSS][FEAT] CT/Servidores: contadores “Login/Cookies falhou” + “Recurso em análise” + ordenação OFFLINE primeiro
 
 - **O que**:

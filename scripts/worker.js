@@ -43,6 +43,21 @@ try {
   });
 } catch {}
 
+// ===== AUTO-OPEN BOOT RESET (sempre OFF no boot) =====
+// Regra operacional: ao iniciar o worker, "Tudo aberto" deve ficar desligado
+// para evitar auto-abertura após restart.
+try {
+  fileStore.withDesiredFileLockUpdate((d) => {
+    d = d || {};
+    d._autoOpen = d._autoOpen || {};
+    d._autoOpen.enabled = false;
+    d._autoOpen.changedAt = Date.now();
+    d._autoOpen.changedBy = 'boot_reset';
+    return d;
+  });
+  try { provisionAudit.append({ ts: Date.now(), event: 'auto_open_boot_reset', enabled: false }); } catch {}
+} catch {}
+
 const DATA_DIR = path.join(__dirname, '..', 'dados');
 const DIAG_DIR = path.join(DATA_DIR, 'diag');
 const LR_EVENTS_JSONL = path.join(DATA_DIR, 'login_required_events.jsonl');
@@ -10383,30 +10398,37 @@ async function nurseTick() {
     let desired0 = null;
     try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch { desired0 = { perfis: {} }; }
 
-    // Regra do humano: todo perfil deve ficar active=true (o sistema não desativa sozinho).
+    // Autopilot "Tudo aberto": só força desired.active=true quando _autoOpen.enabled=true.
     // Fazemos enforcement leve e com debounce para evitar IO excessivo.
+    let autoOpenEnabled = false;
     try {
-      robeMeta.system = robeMeta.system || {};
-      const last = Number(robeMeta.system.desiredEnforceActiveAt || 0) || 0;
-      if (!last || (now0 - last) > 60_000) {
-        robeMeta.system.desiredEnforceActiveAt = now0;
-        const perfisArr = loadPerfisJson();
-        const names = Array.isArray(perfisArr) ? perfisArr.map(p => p && p.nome).filter(Boolean) : [];
-        let changed = 0;
-        await fileStore.withDesiredFileLockUpdate((d) => {
-          d = d || {}; d.perfis = d.perfis || {};
-          for (const nome of names) {
-            const cur = d.perfis[nome] || {};
-            if (cur.active !== true) {
-              d.perfis[nome] = { ...cur, active: true };
-              changed++;
+      const ao = desired0 && desired0._autoOpen && typeof desired0._autoOpen === 'object' ? desired0._autoOpen : null;
+      autoOpenEnabled = !!(ao && ao.enabled === true);
+    } catch {}
+    try {
+      if (autoOpenEnabled) {
+        robeMeta.system = robeMeta.system || {};
+        const last = Number(robeMeta.system.desiredEnforceActiveAt || 0) || 0;
+        if (!last || (now0 - last) > 60_000) {
+          robeMeta.system.desiredEnforceActiveAt = now0;
+          const perfisArr = loadPerfisJson();
+          const names = Array.isArray(perfisArr) ? perfisArr.map(p => p && p.nome).filter(Boolean) : [];
+          let changed = 0;
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d = d || {}; d.perfis = d.perfis || {};
+            for (const nome of names) {
+              const cur = d.perfis[nome] || {};
+              if (cur.active !== true) {
+                d.perfis[nome] = { ...cur, active: true };
+                changed++;
+              }
             }
+            return d;
+          });
+          if (changed > 0) {
+            try { provisionAudit.append({ ts: now0, event: 'desired_enforce_active', changed, total: names.length }); } catch {}
+            try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch {}
           }
-          return d;
-        });
-        if (changed > 0) {
-          try { provisionAudit.append({ ts: now0, event: 'desired_enforce_active', changed, total: names.length }); } catch {}
-          try { desired0 = readJsonFile(desiredPath, { perfis: {} }); } catch {}
         }
       }
     } catch {}
@@ -10414,6 +10436,7 @@ async function nurseTick() {
       try {
         const oa = desired0 && desired0._openAll && typeof desired0._openAll === 'object' ? desired0._openAll : null;
         if (oa && oa.active === true) return true;
+        if (autoOpenEnabled) return true;
         for (const n of Object.keys((desired0 && desired0.perfis) || {})) {
           const w = desired0.perfis[n] || {};
           if (w && w.active === true) return true;

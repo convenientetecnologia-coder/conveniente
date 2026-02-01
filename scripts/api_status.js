@@ -292,6 +292,18 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   let robeQueue = (typeof rawStatus?.robeQueue !== "undefined" && rawStatus.robeQueue !== null) ? rawStatus.robeQueue : [];
   let autoMode = (typeof rawStatus?.autoMode !== 'undefined') ? rawStatus.autoMode : null;
   let sys = (typeof rawStatus?.sys !== 'undefined') ? rawStatus.sys : null;
+  let autoOpen = null;
+  try {
+    const d = fileStore.readJsonSafe(fileStore.desiredPath, null) || {};
+    const ao = d && d._autoOpen && typeof d._autoOpen === 'object' ? d._autoOpen : null;
+    autoOpen = {
+      enabled: !!(ao && ao.enabled === true),
+      changedAt: (ao && typeof ao.changedAt === 'number') ? ao.changedAt : 0,
+      changedBy: (ao && ao.changedBy) ? String(ao.changedBy) : null
+    };
+  } catch {
+    autoOpen = { enabled: false, changedAt: 0, changedBy: null };
+  }
 
   // WARNING: verifica se overlay incompleto/faltante (node ausentes ou timeout)
   let missing = perfis.filter((p, idx) => {
@@ -314,6 +326,7 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
     ...(robes ? { robes } : {}),
     ...(robeQueue ? { robeQueue } : {}),
     autoMode,
+    autoOpen,
     sys,
     ...(warningFinal ? { warning: warningFinal } : {}),
     ...(erroMsg ? { error: erroMsg } : {})
