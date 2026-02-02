@@ -49,6 +49,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - **Inbox de relatos do humano (intake/triage)** — `docs/INBOX_RELATOS_DO_HUMANO.md`
   - **Host registry (apelidos ↔ hostId)** — `docs/HOST_REGISTRY.md`
   - Checkups (relatórios) — `docs/checkups/`
+  - **P0 (CT) Fonte Única da Verdade — validação**: ver `docs/inbox/done/INC-20260202-2000-01.md` (inclui verificador offline `C:\sitechatbot\tools\verify_virtus_groups_truth.js`)
 
 ---
 
