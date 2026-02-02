@@ -31,6 +31,20 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-02 — [CT][CROSS][FIX][OPS] Fonte Única (runtime): Virtus/Grupos + Contas Facebook passam a usar classificador canônico e UI explicita janela/supply
+
+- **O que**:
+  - `sitechatbot`: `/api/dashboard/virtus` e `/api/contas-facebook` passam a usar `computeAccountsByGroupFromSnapshots` (canônico) com `fbAccountState` para A/LR/LE/B.
+  - `sitechatbot`: payload do Virtus inclui `groups.accountsMeta` (accountsMode/supplyMode/serversMeta) e UI Virtus mostra isso no topo (janela + supply + modo).
+  - `sitechatbot`: UI Virtus corrige rótulo para `Contas (A/LR/LE/B)` (antes faltava LE no header).
+- **Por quê**: garantir que CT “mostra” exatamente a mesma verdade que CT “decide” (evita divergência P0).
+- **Evidência**: `C:\sitechatbot\index.js` (`/api/dashboard/virtus`, `/api/contas-facebook`, `computeAccountsByGroupFromSnapshots`) + `C:\sitechatbot\public\virtus.js`.
+- **Reinícios**: `sitechatbot` (CT) — humano reinicia com `node index.js`.
+- **Rollback**: reverter alterações no CT e reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-02-truth-single-source`
+
+---
+
 #### 2026-02-02 — [CROSS][DOCS][OPS] Dossiê cidades/grupos: plano de implementação auditável (warmup/LE/anti-pânico)
 
 - **O que**:
