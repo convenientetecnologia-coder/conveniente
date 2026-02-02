@@ -31,6 +31,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-02 — [CROSS][DOCS][OPS] Dossiê cidades/grupos: plano de implementação auditável (warmup/LE/anti-pânico)
+
+- **O que**:
+  - Consolidado plano executável (CT-only) para score único por `cidade_uf` com guardrails: warmup 24h e LE por idade (12d).
+  - Registrada evidência do contrato do `nome` do perfil (timestamp no sufixo) e knobs do anti-pânico do CT (env vars).
+- **Por quê**: garantir 110% de rastreabilidade antes de tocar em runtime.
+- **Evidência**: `C:\conveniente\docs\inbox\in_progress\INC-20260202-1600-01.md` + `C:\conveniente\scripts\api_perfis.js` + `C:\sitechatbot\index.js`.
+- **Reinícios**: nenhum (somente documentação/planejamento).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+- **THREAD**: `TH-2026-02-02-city-score-plan`
+
+---
+
 #### 2026-02-01 — [CONV][FEAT][OPS] Autopilot “Tudo aberto”: toggle no painel + boot OFF + controle via desired
 
 - **O que**:

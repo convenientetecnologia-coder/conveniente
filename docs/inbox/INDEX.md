@@ -18,6 +18,7 @@ Modelo “médico”: `state=done` não exige restart/teste; isso vai em `rollou
 
 | id | P | state | rollout | validation | título | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260202-1600-01 | P0 | in_progress | not_deployed | not_run | Cidades/Grupos: contrato canônico + prioridade provisão (estoque→servidor) + migração manual | `in_progress/INC-20260202-1600-01.md` |
 | INC-20260201-0300-01 | P0 | done | deployed_partial | passed | P0: total>ativos (browsers fechados) apesar de RAM; sistema deve manter tudo aberto | `done/INC-20260201-0300-01.md` |
 | INC-20260201-0200-01 | P0 | in_progress | not_deployed | not_run | Forense RAM: RM4/RM5/RM6 (capacidade máxima), autoMode light/full e thresholds | `in_progress/INC-20260201-0200-01.md` |
 | INC-20260201-0100-01 | P1 | done | needs_restart | not_run | CT/Servidores: contadores “Login/Cookies falhou” + “Recurso em análise” + ordenação OFFLINE primeiro | `done/INC-20260201-0100-01.md` |
