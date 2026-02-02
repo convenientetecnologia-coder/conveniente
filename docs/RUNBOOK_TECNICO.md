@@ -112,6 +112,33 @@ O GPT **não** consegue reiniciar os seus processos remotos.
   - enfileirar um comando simples + confirmar ACK
   - `sitechatbot/dados/commands.log` registrando `ack`
 
+---
+
+### Simulação OFFLINE (CT) — cidades/grupos/migração/provisão (EXPERIMENTAL)
+
+Objetivo: validar fórmulas e guardrails com dados reais **antes** de tocar em runtime.
+
+Ferramentas (no host do CT):
+
+- Verificador Virtus/Grupos (insight + A/LR/LE/B): `C:\sitechatbot\tools\verify_virtus_groups_truth.js`
+- Simulador de plano (rank/picks/migrações): `C:\sitechatbot\tools\simulate_city_plan.js`
+
+Comandos (PowerShell):
+
+- Verificador (gera JSON parseável):
+  - `cd C:\sitechatbot; node tools\verify_virtus_groups_truth.js --category fretes --top 15 --out tools\_verify_virtus_groups_truth_out.json`
+- Simulador (gera texto com auditoria):
+  - `cd C:\sitechatbot; $env:SIM_ACCOUNT_STATE_MODE='fbAccountState'; $env:SIM_INCLUDE_OFFLINE='1'; $env:SIM_WARMUP_HOURS='24'; $env:SIM_LE_DAYS='12'; $env:SIM_LE_MAX_WEIGHT='0.35'; node tools\simulate_city_plan.js --category fretes --n 20 > tools\_simulate_city_plan_out.txt`
+
+Critério de sucesso:
+
+- o verificador bate com a UI Virtus/Grupos em 2–3 cidades amostrais (chamados, motoristas, insight, A/LR/LE/B).
+- o simulador respeita anti-pânico (TOP‑N + inflight cap) e não sugere migração quando a ação correta é LOGAR (LR>0).
+
+Rollback:
+
+- nenhum (offline, não mexe em runtime).
+
 #### Mudou `notificador/index.js`
 
 - **Reiniciar (humano)**: no host do notificador, parar o processo e subir de novo com `node index.js`.
