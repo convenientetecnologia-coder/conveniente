@@ -44,6 +44,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-02 — [CROSS][DOCS][OPS] P0: Fonte Única da Verdade (CT Virtus→Grupos vs Contas FB v2)
+
+- **O que**:
+  - Aberto INC P0 para unificar fonte da verdade entre dashboards e algoritmos (motoristas, engajamento e A/LR/LE/B).
+  - Documentadas divergências atuais: janelas (recent3d vs rolling) e classificador simples (`p.estado`) vs canônico (`fbAccountState`).
+- **Por quê**: evitar que humano veja uma coisa e o sistema decida outra (risco P0 de decisão errada).
+- **Evidência**: `C:\conveniente\docs\inbox\in_progress\INC-20260202-2000-01.md` + `C:\sitechatbot\index.js` (`/api/dashboard/virtus`, `/api/contas-facebook-v2`, `computeAccountsByGroupFromSnapshots`).
+- **Reinícios**: nenhum (somente documentação/planejamento).
+- **Rollback**: reverter alterações nos `.md` (não afeta runtime).
+- **THREAD**: `TH-2026-02-02-truth-single-source`
+
+---
+
 #### 2026-02-01 — [CONV][FEAT][OPS] Autopilot “Tudo aberto”: toggle no painel + boot OFF + controle via desired
 
 - **O que**:
