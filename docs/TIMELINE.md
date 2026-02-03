@@ -58,6 +58,20 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-03 — [CT][CROSS][FEAT][OPS] Cadastro (provisão) CT: rank por recent3d + remainingNeed (insight baixo amortecido por LE+pipeline)
+
+- **O que**:
+  - `sitechatbot`: `rankUrgentCityUFs()` passa a usar janela **recent3d** e prioriza **insight baixo** com amortecedor por `LE + pipelineW` (`remainingNeed`), evitando pânico/overfit em uma cidade.
+  - `sitechatbot`: `pickUrgentCityUF()` passa a reutilizar `rankUrgentCityUFs` (fallback consistente).
+  - `sitechatbot`: mantém anti‑pânico existente (TOP‑N + inflight cap + refresh) e continua “nunca parar” quando houver estoque + vaga (scheduler).
+- **Por quê**: cidades “frias” precisam de contas novas, mas o insight demora a reagir; o CT precisa descontar supply futuro (LE/provisões recentes) para distribuir com lucidez.
+- **Evidência**: `C:\sitechatbot\index.js` (`rankUrgentCityUFs`, `pickUrgentCityUF`, `pickNextCityUFForProvision`) + `C:\conveniente\docs\inbox\in_progress\INC-20260202-1600-01.md`.
+- **Reinícios**: `sitechatbot` (CT) — humano reinicia com `node index.js`.
+- **Rollback**: restaurar lógica anterior em `rankUrgentCityUFs/pickUrgentCityUF` e reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-03-ct-provision-city-remaining-need`
+
+---
+
 #### 2026-02-02 — [CROSS][DOCS][OPS] P0: Fonte Única da Verdade (CT Virtus→Grupos vs Contas FB v2)
 
 - **O que**:
