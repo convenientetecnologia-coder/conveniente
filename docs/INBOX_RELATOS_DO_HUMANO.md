@@ -120,6 +120,17 @@ CT Chat (2 itens):
 1) Composer (caixa de escrever) precisa auto-grow conforme digita; teto ~8 linhas.
 2) Mensagens grandes precisam de botÃ£o â€œVer maisâ€ (expandir/recolher).
 
+
+---
+
+triagem inbox (2026-02-03):
+CT Chat (5 itens):
+1) Editar mensagem no menu (...) com modal bonito (preview + campo + confirmar/cancelar).
+2) Links clicaveis no texto.
+3) Mensagem unica grande deve quebrar para baixo (sem scroll lateral).
+4) Reenviar quando falhar envio.
+5) Cor por usuario.
+
 ```
 
 ---
@@ -142,6 +153,11 @@ Colunas:
 
 | id | arquivo | P | sistema | sintoma (humano) | hipÃ³tese (GPT) | evidÃªncia | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| INC-20260203-2500-01 | `docs/inbox/in_progress/INC-20260203-2500-01.md` | P1 | sitechatbot | Chat: editar mensagem no menu (...) com modal | falta endpoint/edit + UI do menu/modal | debug ingest runId=chat_edit_v1 | in_progress | not_deployed | not_run | nao | sim |
+| INC-20260203-2510-01 | `docs/inbox/need_evidence/INC-20260203-2510-01.md` | P2 | sitechatbot | Chat: links clicaveis | falta linkify no render | debug ingest runId=chat_links_v1 | need_alignment | not_deployed | not_run | nao | sim |
+| INC-20260203-2520-01 | `docs/inbox/need_evidence/INC-20260203-2520-01.md` | P1 | sitechatbot | Chat: texto grande com scroll lateral | falta overflow-wrap/word-break | debug ingest runId=chat_wrap_v1 | need_alignment | not_deployed | not_run | nao | sim |
+| INC-20260203-2530-01 | `docs/inbox/need_evidence/INC-20260203-2530-01.md` | P1 | sitechatbot | Chat: reenviar msg falhada | falta acao de resend em UI/outbox | debug ingest runId=chat_resend_v1 | need_alignment | not_deployed | not_run | nao | sim |
+| INC-20260203-2540-01 | `docs/inbox/need_evidence/INC-20260203-2540-01.md` | P2 | sitechatbot | Chat: cor por usuario | falta paleta/estilo por actor | debug ingest runId=chat_colors_v1 | need_alignment | not_deployed | not_run | nao | sim |
 | INC-20260203-2400-01 | `docs/inbox/in_progress/INC-20260203-2400-01.md` | P1 | sitechatbot | Chat: composer nÃ£o cresce e texto some; mensagens grandes precisam â€œVer maisâ€ | Composer com altura fixa sem handler; bolhas sem truncamento/toggle | debug ingest (runId=chat_autogrow_v1, chat_vermais_v1) | in_progress | not_deployed | not_run | nÃ£o | sim |
 | INC-YYYYMMDD-HHMM-01 | `docs/inbox/in_progress/INC-YYYYMMDD-HHMM-01.md` | P1 | conveniente | â€¦ | â€¦ | logs_manifest + fetch_logs(keys=â€¦) | need_evidence | not_deployed | not_run | nÃ£o | sim |
 | INC-20260201-0300-01 | `docs/inbox/done/INC-20260201-0300-01.md` | P0 | conveniente+sitechatbot | Total>ativos: browsers fechados apesar de RAM; prejuÃ­zo (contas paradas) | Root-cause: `open_all_finalize_partial` desativava `desired.active` + `nurseTick` bloqueava open quando `loginRequired=captcha_*` ou `identityRequired` e `ctrl` ausente | CT snapshots `C:\\sitechatbot\\dados\\<hostId>-*.json` + `provision_audit` (bootstrap_messenger_ready + loginRequired) + patch worker.js | done | deployed_partial | passed | nÃ£o | nÃ£o |

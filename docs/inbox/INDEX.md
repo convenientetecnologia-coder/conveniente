@@ -25,6 +25,11 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260203-2100-01 | P0 | done | deployed | passed | CT Sistema Interno: Resumo divergente (KPI usa ct_drivers, abas usam ct_driver_memberships) | `done/INC-20260203-2100-01.md` |
 | INC-20260203-2230-01 | P1 | done | deployed | passed | CT Sistema Interno: WhatsApp verde + menu (abrir/copiar) + registro â€œChamou no zapâ€ (Testes Encerrados + Chamar depois + Cadastro + ParticipaÃ§Ã£o) | `done/INC-20260203-2230-01.md` |
 | INC-20260203-2400-01 | P1 | done | deployed | passed | CT Chat: composer auto-grow (ate 8 linhas) + Ver mais em mensagens grandes | `done/INC-20260203-2400-01.md` |
+| INC-20260203-2500-01 | P1 | in_progress | needs_restart | not_run | CT Chat: editar mensagem (menu ...) | `in_progress/INC-20260203-2500-01.md` |
+| INC-20260203-2510-01 | P2 | need_alignment | not_deployed | not_run | CT Chat: links clicaveis | `need_evidence/INC-20260203-2510-01.md` |
+| INC-20260203-2520-01 | P1 | need_alignment | not_deployed | not_run | CT Chat: quebrar texto grande (sem scroll lateral) | `need_evidence/INC-20260203-2520-01.md` |
+| INC-20260203-2530-01 | P1 | need_alignment | not_deployed | not_run | CT Chat: reenviar mensagem falhada | `need_evidence/INC-20260203-2530-01.md` |
+| INC-20260203-2540-01 | P2 | need_alignment | not_deployed | not_run | CT Chat: cor por usuario | `need_evidence/INC-20260203-2540-01.md` |
 | INC-20260201-0300-01 | P0 | done | deployed_partial | passed | P0: total>ativos (browsers fechados) apesar de RAM; sistema deve manter tudo aberto | `done/INC-20260201-0300-01.md` |
 | INC-20260201-0200-01 | P0 | need_evidence | not_deployed | not_run | Forense RAM: RM4/RM5/RM6 (capacidade mÃ¡xima), autoMode light/full e thresholds | `need_evidence/INC-20260201-0200-01.md` |
 | INC-20260201-0100-01 | P1 | done | needs_restart | not_run | CT/Servidores: contadores â€œLogin/Cookies falhouâ€ + â€œRecurso em anÃ¡liseâ€ + ordenaÃ§Ã£o OFFLINE primeiro | `done/INC-20260201-0100-01.md` |
