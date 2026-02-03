@@ -264,7 +264,26 @@ async function patchPage(nome, page, coords) {
     await page.evaluateOnNewDocument(() => {
       window.addEventListener('beforeunload', (e) => { try { e.stopImmediatePropagation(); } catch {} }, true);
     });
-  } catch {}
+  } catch (e) {
+    // #region agent log (debug)
+    // Diagnóstico do porquê caiu em probe_failed (sem HTML/sem segredos)
+    try {
+      let hrefSafe = '';
+      try { hrefSafe = (page && typeof page.url === 'function') ? String(page.url() || '') : ''; } catch {}
+      const msg = (e && e.message) ? String(e.message) : String(e || '');
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'rm3_probe_failed'),hypothesisId:'H1',location:'conveniente/scripts/browser.js:detectLoginRequired:probe_failed',message:'detectLoginRequired fallback probe_failed',data:{url:hrefSafe.slice(0,220),errName:(e&&e.name)?String(e.name).slice(0,80):null,errMsg:msg.slice(0,260)},timestamp:Date.now()})}).catch(()=>{});
+    } catch {}
+    // #endregion
+    // Fail-safe enterprise: se o probe falhar, não podemos concluir "liberado".
+    // Mantemos como loginRequired=true para evitar ações erradas.
+    try {
+      const hrefSafe = (page && typeof page.url === 'function') ? String(page.url() || '') : '';
+      const titleSafe = (page && typeof page.title === 'function') ? String(page.title() || '') : '';
+      const msg = (e && e.message) ? String(e.message) : String(e || '');
+      return { loginRequired: true, reason: 'probe_failed', domain: null, url: hrefSafe ? hrefSafe.slice(0, 260) : null, title: titleSafe ? titleSafe.slice(0, 120) : null, evidence: { probeError: { name: (e && e.name) ? String(e.name).slice(0, 80) : null, msg: msg.slice(0, 260) } } };
+    } catch {}
+    return { loginRequired: true, reason: 'probe_failed' };
+  }
 }
 
 // Minimização suave
