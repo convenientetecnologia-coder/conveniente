@@ -31,6 +31,17 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-03 â€” [CT] Chat: composer auto-grow + Ver mais
+
+- **O que**:
+  - Composer do chat agora cresce automaticamente ate ~8 linhas.
+  - Mensagens grandes agora exibem Ver mais/Ver menos.
+- **Por que**: melhorar UX/operacao do chat (nao perder texto e ler mensagens longas).
+- **Evidencia**: `docs/inbox/done/INC-20260203-2400-01.md` + UI em `sitechatbot/convenientetecnologia/public/ct.js`/`ct.css`.
+- **Reinicios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter ct.js/ct.css e reiniciar CT.
+
+
 #### 2026-02-03 â€” [CT][OPS] CT Sistema Interno: WhatsApp verde + menu + auditoria â€œChamou no zapâ€
 
 - **O que**:
