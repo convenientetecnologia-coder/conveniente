@@ -10,7 +10,7 @@ Escopo: auditar e “bater” (com evidência) o que foi aprovado no dossiê `IN
 
 ## 1) Contratos aprovados (fonte canônica)
 
-- **Dossiê/INC**: `C:\conveniente\docs\inbox\in_progress\INC-20260202-1600-01.md`
+- **Dossiê/INC**: `C:\conveniente\docs\inbox\done\INC-20260202-1600-01.md`
   - Migração V3 “corajosa”: doador insight alto → receptor insight baixo, com pareamento preferindo doador mais quente (donorBonus) e `canDrainToZero` somente se `donorInsight >= 2 * avgInsight`.
   - Cadastro: prioridade por insight baixo, amortecida por supply futuro (LE + pipeline de provisões recentes), evitando “pânico” e evitando cidades quentes.
 - **Reports de simulação (evidência)**:
