@@ -31,6 +31,15 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-03 - [CT] Chat: cores por usuÃ¡rio (pill no autor)
+
+- **O que**: cada usuÃ¡rio recebe uma cor consistente no pill do nome (CÃ¡ssio/Matheo/Larissa/Abiline com cores fixas; demais automÃ¡tico).
+- **Por que**: leitura mais rÃ¡pida e menos confusÃ£o operacional em conversas com mÃºltiplos autores.
+- **EvidÃªncia**: validaÃ§Ã£o humana (CÃ¡ssio): â€œficou excelenteâ€.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `ct.js`/`ct.css` e reiniciar CT.
+
+
 #### 2026-02-03 - [CT] Chat: histÃ³rico infinito (paginaÃ§Ã£o pra trÃ¡s)
 
 - **O que**:
