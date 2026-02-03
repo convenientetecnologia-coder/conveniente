@@ -31,6 +31,18 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-03 - [CT] Chat: editar mensagem (menu ... + modal)
+
+- **O que**:
+  - Adicionado item Editar no menu (3 pontinhos) das mensagens do proprio usuario.
+  - Modal de edicao com preview + textarea + confirmar/cancelar.
+  - Backend: endpoint para editar mensagem e auditar edited_at/edited_by (com recalc de mencoes).
+- **Por que**: corrigir rapidamente mensagens erradas e deixar o chat mais profissional.
+- **Evidencia**: `docs/inbox/done/INC-20260203-2500-01.md` + `sitechatbot/convenientetecnologia/public/ct.js` + `sitechatbot/convenientetecnologia/lib/ctStore.js`.
+- **Reinicios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter ct.js/ctStore/ctDb/index.js e reiniciar CT.
+
+
 #### 2026-02-03 â€” [CT] Chat: composer auto-grow + Ver mais
 
 - **O que**:
