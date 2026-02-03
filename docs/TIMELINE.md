@@ -72,6 +72,19 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-03 — [CT][CROSS][FEAT][FIX][OPS] Migrações CT (V3): doador insight alto → receptor insight baixo + pareamento corajoso (insight = recent3d)
+
+- **O que**:
+  - `sitechatbot`: `/api/contas-facebook-v2` passa a sugerir migrações com regra mestre V3: **doador = insight alto**, **receptor = insight baixo**, com `canDrainToZero` quando `donorInsight >= 2x avgInsight`.
+  - `sitechatbot`: corrige a divergência de janela do **insight_percent**: agora usa **recent3d** (igual Virtus/Grupos) ao calcular `totalEngajamento` e `ratio` (antes estava em `sent_24h`).
+  - Pareamento “corajoso” prioriza doadores mais quentes (config via `CT_MIG_DONOR_BONUS`, `CT_MIG_ALPHA`) e inclui `why` auditável em cada sugestão.
+  - Continua **manual**: CT apenas sugere; execução ainda é via `/api/contas-facebook-v2/migrations/execute`.
+- **Por quê**: evitar sugestões erradas (ex.: tirar de cidade fria) e alinhar decisão com o que o humano aprovou na simulação V3.
+- **Evidência**: `C:\sitechatbot\index.js` (`/api/contas-facebook-v2` bloco migrations) + `INC-20260202-1600-01` (motor 1 migração).
+- **Reinícios**: `sitechatbot` (CT) — humano reinicia com `node index.js`.
+- **Rollback**: reverter o bloco de migrações no endpoint e reiniciar `node index.js`.
+- **THREAD**: `TH-2026-02-03-ct-migrations-v3`
+
 #### 2026-02-02 — [CROSS][DOCS][OPS] P0: Fonte Única da Verdade (CT Virtus→Grupos vs Contas FB v2)
 
 - **O que**:
