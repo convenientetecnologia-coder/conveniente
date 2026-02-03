@@ -31,6 +31,20 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-02-03 — [DOCS][OPS] INBOX: remover duplicata que mantinha INC de migrações/cadastro como “in_progress”
+
+- **O que**:
+  - Removida a cópia duplicada do `INC-20260202-1600-01` que havia ficado em `docs/inbox/in_progress/` (o INC já estava corretamente em `docs/inbox/done/`).
+  - Criada pasta `docs/inbox/need_evidence/` e movido `INC-20260201-0200-01` para lá (ticket de RAM fica “pausado”, sem parecer WIP ativo).
+- **Por quê**: evitar confusão operacional (o humano via “em progresso” um INC já encerrado).
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\done\INC-20260202-1600-01.md`
+  - removido: `C:\conveniente\docs\inbox\in_progress\INC-20260202-1600-01.md`
+  - movido: `C:\conveniente\docs\inbox\need_evidence\INC-20260201-0200-01.md`
+  - índice: `C:\conveniente\docs\inbox\INDEX.md`
+- **Reinícios**: nenhum
+- **Rollback**: `git revert <commit>` (recria o arquivo removido; sem impacto em runtime)
+
 #### 2026-02-02 — [CT][CROSS][FIX][OPS] Fonte Única (runtime): Virtus/Grupos + Contas Facebook passam a usar classificador canônico e UI explicita janela/supply
 
 - **O que**:
@@ -51,7 +65,7 @@ Formato canônico (copiar/colar):
   - Consolidado plano executável (CT-only) para score único por `cidade_uf` com guardrails: warmup 24h e LE por idade (12d).
   - Registrada evidência do contrato do `nome` do perfil (timestamp no sufixo) e knobs do anti-pânico do CT (env vars).
 - **Por quê**: garantir 110% de rastreabilidade antes de tocar em runtime.
-- **Evidência**: `C:\conveniente\docs\inbox\in_progress\INC-20260202-1600-01.md` + `C:\conveniente\scripts\api_perfis.js` + `C:\sitechatbot\index.js`.
+- **Evidência**: `C:\conveniente\docs\inbox\done\INC-20260202-1600-01.md` + `C:\conveniente\scripts\api_perfis.js` + `C:\sitechatbot\index.js`.
 - **Reinícios**: nenhum (somente documentação/planejamento).
 - **Rollback**: reverter alterações nos `.md` (não afeta runtime).
 - **THREAD**: `TH-2026-02-02-city-score-plan`
@@ -65,7 +79,7 @@ Formato canônico (copiar/colar):
   - `sitechatbot`: `pickUrgentCityUF()` passa a reutilizar `rankUrgentCityUFs` (fallback consistente).
   - `sitechatbot`: mantém anti‑pânico existente (TOP‑N + inflight cap + refresh) e continua “nunca parar” quando houver estoque + vaga (scheduler).
 - **Por quê**: cidades “frias” precisam de contas novas, mas o insight demora a reagir; o CT precisa descontar supply futuro (LE/provisões recentes) para distribuir com lucidez.
-- **Evidência**: `C:\sitechatbot\index.js` (`rankUrgentCityUFs`, `pickUrgentCityUF`, `pickNextCityUFForProvision`) + `C:\conveniente\docs\inbox\in_progress\INC-20260202-1600-01.md`.
+- **Evidência**: `C:\sitechatbot\index.js` (`rankUrgentCityUFs`, `pickUrgentCityUF`, `pickNextCityUFForProvision`) + `C:\conveniente\docs\inbox\done\INC-20260202-1600-01.md`.
 - **Reinícios**: `sitechatbot` (CT) — humano reinicia com `node index.js`.
 - **Rollback**: restaurar lógica anterior em `rankUrgentCityUFs/pickUrgentCityUF` e reiniciar `node index.js`.
 - **THREAD**: `TH-2026-02-03-ct-provision-city-remaining-need`
@@ -92,7 +106,7 @@ Formato canônico (copiar/colar):
   - Aberto INC P0 para unificar fonte da verdade entre dashboards e algoritmos (motoristas, engajamento e A/LR/LE/B).
   - Documentadas divergências atuais: janelas (recent3d vs rolling) e classificador simples (`p.estado`) vs canônico (`fbAccountState`).
 - **Por quê**: evitar que humano veja uma coisa e o sistema decida outra (risco P0 de decisão errada).
-- **Evidência**: `C:\conveniente\docs\inbox\in_progress\INC-20260202-2000-01.md` + `C:\sitechatbot\index.js` (`/api/dashboard/virtus`, `/api/contas-facebook-v2`, `computeAccountsByGroupFromSnapshots`).
+- **Evidência**: `C:\conveniente\docs\inbox\done\INC-20260202-2000-01.md` + `C:\sitechatbot\index.js` (`/api/dashboard/virtus`, `/api/contas-facebook-v2`, `computeAccountsByGroupFromSnapshots`).
 - **Reinícios**: nenhum (somente documentação/planejamento).
 - **Rollback**: reverter alterações nos `.md` (não afeta runtime).
 - **THREAD**: `TH-2026-02-02-truth-single-source`
