@@ -31,6 +31,16 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-03 - [CT] Chat: links clicaveis
+
+- **O que**:
+  - Mensagens agora transformam URLs em links clicaveis (https/http, www, wa.me).
+- **Por que**: melhorar produtividade (abrir links direto do chat).
+- **Evidencia**: `docs/inbox/done/INC-20260203-2510-01.md` + `sitechatbot/convenientetecnologia/public/ct.js`.
+- **Reinicios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter ct.js/ct.css e reiniciar CT.
+
+
 #### 2026-02-03 - [CT] Chat: editar mensagem (menu ... + modal)
 
 - **O que**:
