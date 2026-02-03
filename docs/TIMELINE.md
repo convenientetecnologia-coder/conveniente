@@ -77,6 +77,7 @@ Formato canônico (copiar/colar):
 - **O que**:
   - `sitechatbot`: `/api/contas-facebook-v2` passa a sugerir migrações com regra mestre V3: **doador = insight alto**, **receptor = insight baixo**, com `canDrainToZero` quando `donorInsight >= 2x avgInsight`.
   - `sitechatbot`: corrige a divergência de janela do **insight_percent**: agora usa **recent3d** (igual Virtus/Grupos) ao calcular `totalEngajamento` e `ratio` (antes estava em `sent_24h`).
+  - `sitechatbot`: **corrige elegibilidade do doador no `/api/contas-facebook-v2/migrations/preview`** para nunca “migrar LE por engano”: a seleção passa a usar `fbAccountState.classify({ perfil, robeRec }).kind === 'ok'` (antes podia pegar `paused_limit` porque o `estado` não estava espelhado em `p.robeEstado`).
   - Pareamento “corajoso” prioriza doadores mais quentes (config via `CT_MIG_DONOR_BONUS`, `CT_MIG_ALPHA`) e inclui `why` auditável em cada sugestão.
   - Continua **manual**: CT apenas sugere; execução ainda é via `/api/contas-facebook-v2/migrations/execute`.
 - **Por quê**: evitar sugestões erradas (ex.: tirar de cidade fria) e alinhar decisão com o que o humano aprovou na simulação V3.
