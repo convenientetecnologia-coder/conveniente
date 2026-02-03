@@ -31,6 +31,25 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-03 - [CT] Chat: histÃ³rico infinito (paginaÃ§Ã£o pra trÃ¡s)
+
+- **O que**:
+  - Chat agora carrega mensagens antigas ao subir (infinite scroll), com banner â€œCarregando mais mensagensâ€¦â€ / â€œInÃ­cio do histÃ³ricoâ€.
+  - API passou a aceitar cursor `beforeId` alÃ©m de `sinceId`.
+- **Por que**: permitir auditoria/consulta do histÃ³rico completo e suportar testes como â€œreenviar falha antigaâ€.
+- **EvidÃªncia**: `c:\sitechatbot\.cursor\debug.log` (runId `chat_history_v1`) com requests usando `beforeId` e `hasMoreOlder=false` no final.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `ct.js`/`ctStore.js`/`index.js` e reiniciar CT.
+
+#### 2026-02-03 - [CT] Chat: Reenviar mensagem falhada
+
+- **O que**: Mensagem com falha fica com âš  e mostra botÃµes **Reenviar**/**Remover**; reenvio reutiliza texto/anexo do outbox.
+- **Por que**: reduzir atrito operacional quando rede/servidor falha no envio.
+- **EvidÃªncia**: validaÃ§Ã£o humana (CÃ¡ssio): â€œreenviar funcionouâ€.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `ct.js` e reiniciar CT.
+
+
 #### 2026-02-03 - [CT] Chat: links clicaveis
 
 - **O que**:

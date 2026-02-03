@@ -20,7 +20,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
 | INC-20260202-2000-01 | P0 | done | deployed | passed | CT: Fonte Ãšnica da Verdade (Virtusâ†’Grupos / Contas FB v2 / SimulaÃ§Ãµes) | `done/INC-20260202-2000-01.md` |
-| INC-20260203-2550-01 | P1 | in_progress | needs_restart | not_run | CT Chat: historico/paginacao (carregar antigas ao subir) | `in_progress/INC-20260203-2550-01.md` |
+| INC-20260203-2550-01 | P1 | done | deployed | passed | CT Chat: historico/paginacao (carregar antigas ao subir) | `done/INC-20260203-2550-01.md` |
 | INC-20260202-1600-01 | P0 | done | deployed | passed | Cidades/Grupos: contrato canÃ´nico + prioridade provisÃ£o (estoqueâ†’servidor) + migraÃ§Ã£o manual | `done/INC-20260202-1600-01.md` |
 | INC-20260203-1800-01 | P0 | need_evidence | deployed_partial | not_run | RM3: `loginRequired=probe_failed` com navegador aparentemente OK (Virtus derrubado por blindagem) | `need_evidence/INC-20260203-1800-01.md` |
 | INC-20260203-2100-01 | P0 | done | deployed | passed | CT Sistema Interno: Resumo divergente (KPI usa ct_drivers, abas usam ct_driver_memberships) | `done/INC-20260203-2100-01.md` |
@@ -29,7 +29,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260203-2500-01 | P1 | done | deployed | passed | CT Chat: editar mensagem (menu ...) | `done/INC-20260203-2500-01.md` |
 | INC-20260203-2510-01 | P2 | done | deployed | passed | CT Chat: links clicaveis | `done/INC-20260203-2510-01.md` |
 | INC-20260203-2520-01 | P1 | done | deployed | passed | CT Chat: quebrar texto grande (sem scroll lateral) | `done/INC-20260203-2520-01.md` |
-| INC-20260203-2530-01 | P1 | in_progress | needs_restart | not_run | CT Chat: reenviar mensagem falhada | `in_progress/INC-20260203-2530-01.md` |
+| INC-20260203-2530-01 | P1 | done | deployed | passed | CT Chat: reenviar mensagem falhada | `done/INC-20260203-2530-01.md` |
 | INC-20260203-2540-01 | P2 | need_alignment | not_deployed | not_run | CT Chat: cor por usuario | `need_evidence/INC-20260203-2540-01.md` |
 | INC-20260201-0300-01 | P0 | done | deployed_partial | passed | P0: total>ativos (browsers fechados) apesar de RAM; sistema deve manter tudo aberto | `done/INC-20260201-0300-01.md` |
 | INC-20260201-0200-01 | P0 | need_evidence | not_deployed | not_run | Forense RAM: RM4/RM5/RM6 (capacidade mÃ¡xima), autoMode light/full e thresholds | `need_evidence/INC-20260201-0200-01.md` |
