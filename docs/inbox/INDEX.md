@@ -23,6 +23,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260202-1600-01 | P0 | done | deployed | passed | Cidades/Grupos: contrato canÃ´nico + prioridade provisÃ£o (estoqueâ†’servidor) + migraÃ§Ã£o manual | `done/INC-20260202-1600-01.md` |
 | INC-20260203-1800-01 | P0 | need_evidence | deployed_partial | not_run | RM3: `loginRequired=probe_failed` com navegador aparentemente OK (Virtus derrubado por blindagem) | `need_evidence/INC-20260203-1800-01.md` |
 | INC-20260203-2100-01 | P0 | done | deployed | passed | CT Sistema Interno: Resumo divergente (KPI usa ct_drivers, abas usam ct_driver_memberships) | `done/INC-20260203-2100-01.md` |
+| INC-20260203-2230-01 | P1 | in_progress | needs_restart | not_run | CT Sistema Interno: WhatsApp menu em Testes Encerrados (abrir/copiar link/copiar nÃºmero) | `in_progress/INC-20260203-2230-01.md` |
 | INC-20260201-0300-01 | P0 | done | deployed_partial | passed | P0: total>ativos (browsers fechados) apesar de RAM; sistema deve manter tudo aberto | `done/INC-20260201-0300-01.md` |
 | INC-20260201-0200-01 | P0 | need_evidence | not_deployed | not_run | Forense RAM: RM4/RM5/RM6 (capacidade mÃ¡xima), autoMode light/full e thresholds | `need_evidence/INC-20260201-0200-01.md` |
 | INC-20260201-0100-01 | P1 | done | needs_restart | not_run | CT/Servidores: contadores â€œLogin/Cookies falhouâ€ + â€œRecurso em anÃ¡liseâ€ + ordenaÃ§Ã£o OFFLINE primeiro | `done/INC-20260201-0100-01.md` |
