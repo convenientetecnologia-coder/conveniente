@@ -31,6 +31,16 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-04 - [CT] Chat: corrigir mistura de mensagens entre salas (P0)
+
+- **O que**: Corrigido bug onde Equipe/Canais/Privados mostravam histÃ³rico misturado (cache global).
+- **Por que**: P0 â€” inviabilizava uso de canais/privados e causava risco de enviar no lugar errado.
+- **Como**: cache por `roomId` + outbox local filtrado por sala.
+- **EvidÃªncia**: `c:\sitechatbot\.cursor\debug.log` runId `chat_roommix_v1` (antes: sala vazia count=0 mas mergedCount alto; depois: mergedCount=0).
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `public/ct.js` e reiniciar CT.
+
+
 #### 2026-02-04 - [CT] Chat: composer (8 linhas) sem sobrepor + foco sem borda
 
 - **O que**:
