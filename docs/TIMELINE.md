@@ -31,6 +31,15 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-03 - [CT] Chat: composer layout (input full + botoes dentro)
+
+- **O que**: textarea do chat agora ocupa largura total; botÃµes ðŸ˜€/ï¼‹/Enviar ficam dentro do campo embaixo.
+- **Por que**: melhora digitaÃ§Ã£o (campo maior) e UX mais parecido com apps modernos.
+- **EvidÃªncia**: validaÃ§Ã£o humana (CÃ¡ssio): â€œfuncionou e ficou muito bomâ€.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `public/app.html` + `public/ct.css` e reiniciar CT.
+
+
 #### 2026-02-03 - [CT] Chat: cores por usuÃ¡rio (pill no autor)
 
 - **O que**: cada usuÃ¡rio recebe uma cor consistente no pill do nome (CÃ¡ssio/Matheo/Larissa/Abiline com cores fixas; demais automÃ¡tico).
