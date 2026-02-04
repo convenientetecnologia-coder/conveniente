@@ -42,6 +42,22 @@ Formato canÃ´nico (copiar/colar):
 - **Reinicios**: CT (sitechatbot) - `node index.js`.
 - **Rollback**: reverter `C:\sitechatbot\convenientetecnologia\public\ct.js` e reiniciar CT.
 
+#### 2026-02-04 - [CT] Aprovados: notificação por usuário + som dedicado (vitória/dinheiro)
+
+- **O que**:
+  - Badge de “novos em Aprovados” ficou monótono (não depende de contagem que sobe/desce).
+  - Estado de “visto” passa a ser **por usuário** (não vaza entre logins no mesmo browser).
+  - Som dedicado de Aprovados (diferente do chat), com timbre “bell/coin”.
+- **Por que**: operacional (financeiro) precisa de alerta confiável e motivador.
+- **Evidência**: `debug.log` (runId `ct_approved_notify_v1`) + confirmação humana.
+- **Reinicios**: CT (sitechatbot) - `node index.js` (migração/rotas/ct.js).
+
+#### 2026-02-04 - [CT] Aprovados: latência realtime aceitável (~1–2s) após enviar para o financeiro
+
+- **O que**: medição ponta-a-ponta de latência (ação → SSE `ct_changed` → refreshCore → badge/som).
+- **Evidência**: `debug.log` runId `ct_approved_rt_v1` (ex.: ack ~141ms, SSE recv ~138ms, badge ~1946ms).
+- **Decisão**: manter (sem ajuste adicional) — “tá ótimo desde que funcione”.
+
 #### 2026-02-04 - [CT] Encerrar INC-20260204-0130-01 (Zoom/Layout) por decisao do humano
 
 - **O que**: INC `INC-20260204-0130-01` movido para `cancelled` e encerrado por decisao do humano (tempo/custo/estresse).
