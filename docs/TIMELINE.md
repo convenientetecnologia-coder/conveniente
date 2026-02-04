@@ -31,6 +31,18 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-04 - [CT] Chat: composer (8 linhas) sem sobrepor + foco sem borda
+
+- **O que**:
+  - Composer ajustado para nÃ£o sobrepor o texto aos botÃµes quando bate o teto de ~8 linhas (scroll interno).
+  - Ajuste de espaÃ§amento do textarea (padding/line-height) para nÃ£o colar na borda.
+  - Removido halo/borda azul ao focar o textarea do chat (sÃ³ no chat).
+- **Por que**: melhorar leitura/digitaÃ§Ã£o e evitar texto â€œpor baixoâ€ de emoji/enviar.
+- **EvidÃªncia**: validaÃ§Ã£o humana (CÃ¡ssio): â€œficou excelenteâ€.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `public/ct.css`/`public/app.html`/`public/ct.js` e reiniciar CT.
+
+
 #### 2026-02-03 - [CT] Chat: emoji pack (padrÃ£o apps) + picker UX
 
 - **O que**:
