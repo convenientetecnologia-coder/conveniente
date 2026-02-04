@@ -31,6 +31,15 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-04 - [CT] Chat: "Mais usados" no picker do composer (ðŸ˜€)
+
+- **O que**: O picker do ðŸ˜€ agora mostra "Mais usados" no topo (mesmo ranking do menu de reaÃ§Ã£o) + "Todos" abaixo; clicar no emoji no composer tambÃ©m alimenta o ranking.
+- **Por que**: acelerar operaÃ§Ã£o (os emojis mais usados ficam sempre a 1 clique).
+- **EvidÃªncia**: `c:\sitechatbot\.cursor\debug.log` runId `chat_mostused_composer_v1` + validaÃ§Ã£o humana (CÃ¡ssio): â€œficou perfeitoâ€.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `public/ct.js` e reiniciar CT.
+
+
 #### 2026-02-04 - [CT] Chat: corrigir mistura de mensagens entre salas (P0)
 
 - **O que**: Corrigido bug onde Equipe/Canais/Privados mostravam histÃ³rico misturado (cache global).
