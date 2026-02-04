@@ -31,6 +31,25 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-04 - [CT] Chat: abrir sala no 1º nao lido + marcar como lido ao chegar no fim
+
+- **O que**:
+  - Ao abrir sala com nao lidas, ancora no 1º nao lido (em vez de abrir no fim).
+  - Ao chegar no fim do chat, marca como lido mesmo sem "Novas mensagens (x)".
+  - Evita corridas: abertura concorrente de salas agora auto-cancela para nao baguncar estado.
+- **Por que**: leitura operacional em ordem + parar de "voltar pro nao lido" apos ja ter lido.
+- **Evidencia**: `c:\sitechatbot\.cursor\debug.log` runIds `chat_open_unread_v1` (strategy before/after) e `chat_open_unread_perf_v1` (`mark_read_bottom`).
+- **Reinicios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `C:\sitechatbot\convenientetecnologia\public\ct.js` e reiniciar CT.
+
+#### 2026-02-04 - [CT] Encerrar INC-20260204-0130-01 (Zoom/Layout) por decisao do humano
+
+- **O que**: INC `INC-20260204-0130-01` movido para `cancelled` e encerrado por decisao do humano (tempo/custo/estresse).
+- **Por que**: nao atingiu baseline desejado em 100% (comparacao com 75%) dentro do tempo aceitavel.
+- **Evidencia**: `c:\sitechatbot\.cursor\debug.log` runIds `ct_zoom_layout_v1`, `ct_zoom_density_v2`, `ct_layout_cols_v1`, `ct_topbar_sync_v1`, `ct_approved_clip_v1/v2`.
+- **Reinicios**: nenhum (encerramento documental).
+- **Rollback**: n/a (INC encerrado; mudancas operacionais permanecem como estao no repo local do CT).
+
 #### 2026-02-04 - [CT] Chat: "Ver mais" sem indent na 1Âª linha
 
 - **O que**: Ajuste no HTML gerado pelo clamp do "Ver mais" para nÃ£o inserir whitespace de template literal que virava recuo visual na 1Âª linha.

@@ -23,7 +23,9 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260204-0110-01 | P2 | done | deployed | passed | CT Chat: "Mais usados" no picker do composer | `done/INC-20260204-0110-01.md` |
 | INC-20260204-0100-01 | P0 | done | deployed | passed | CT Chat: mensagens misturadas entre salas | `done/INC-20260204-0100-01.md` |
 | INC-20260204-0120-01 | P2 | done | deployed | passed | CT Chat: "Ver mais" indent na 1a linha | `done/INC-20260204-0120-01.md` |
-| INC-20260204-0130-01 | P1 | need_alignment | not_deployed | not_run | CT UI: layout quebra com zoom | `need_evidence/INC-20260204-0130-01.md` |
+| INC-20260204-0130-01 | P1 | cancelled | not_deployed | not_run | CT UI: layout quebra com zoom (encerrado por decisao do humano) | `cancelled/INC-20260204-0130-01.md` |
+| INC-20260204-0140-01 | P1 | need_evidence | not_deployed | not_run | CT Chat: mensagens demoram a chegar (latencia fim-a-fim) | `need_evidence/INC-20260204-0140-01.md` |
+| INC-20260204-0141-01 | P2 | done | deployed | passed | CT Chat: ao abrir, ir para a mensagem mais antiga nao lida | `done/INC-20260204-0141-01.md` |
 | INC-20260203-2580-01 | P2 | done | deployed | passed | CT Chat: composer nao sobrepor texto | `done/INC-20260203-2580-01.md` |
 | INC-20260203-2570-01 | P2 | done | deployed | passed | CT Chat: pack de emojis padrao | `done/INC-20260203-2570-01.md` |
 | INC-20260203-2560-01 | P2 | done | deployed | passed | CT Chat: layout do composer (input full + botoes dentro) | `done/INC-20260203-2560-01.md` |
