@@ -20,7 +20,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
 | INC-20260202-2000-01 | P0 | done | deployed | passed | CT: Fonte Ãšnica da Verdade (Virtusâ†’Grupos / Contas FB v2 / SimulaÃ§Ãµes) | `done/INC-20260202-2000-01.md` |
-| INC-20260204-0110-01 | P2 | need_alignment | not_deployed | not_run | CT Chat: "Mais usados" no picker do composer | `need_evidence/INC-20260204-0110-01.md` |
+| INC-20260204-0110-01 | P2 | in_progress | needs_restart | not_run | CT Chat: "Mais usados" no picker do composer | `in_progress/INC-20260204-0110-01.md` |
 | INC-20260204-0100-01 | P0 | done | deployed | passed | CT Chat: mensagens misturadas entre salas | `done/INC-20260204-0100-01.md` |
 | INC-20260203-2580-01 | P2 | done | deployed | passed | CT Chat: composer nao sobrepor texto | `done/INC-20260203-2580-01.md` |
 | INC-20260203-2570-01 | P2 | done | deployed | passed | CT Chat: pack de emojis padrao | `done/INC-20260203-2570-01.md` |
