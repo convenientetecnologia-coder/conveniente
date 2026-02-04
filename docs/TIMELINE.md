@@ -31,6 +31,19 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-03 - [CT] Chat: emoji pack (padrÃ£o apps) + picker UX
+
+- **O que**:
+  - Atualizado pack de emojis para lista padrÃ£o (apps) com filtro de compatibilidade no Windows.
+  - Picker do composer: abre acima do campo, nÃ£o fecha ao selecionar, sem scroll horizontal fantasma.
+  - Menu de reaÃ§Ã£o: nÃ£o fica mais cortado embaixo (altura/posiÃ§Ã£o calculadas pelo espaÃ§o disponÃ­vel).
+  - â€œMais usadosâ€ agora reseta/pruna quando o pack muda.
+- **Por que**: emoji Ã© ferramenta operacional; padronizar melhora consistÃªncia e velocidade.
+- **EvidÃªncia**: `c:\sitechatbot\.cursor\debug.log` (runId `chat_emoji_pack_v3/v4` e `chat_react_menu_v1`) + validaÃ§Ã£o humana (CÃ¡ssio): â€œficou muito bomâ€.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `public/ct.js` e `public/ct.css` e reiniciar CT.
+
+
 #### 2026-02-03 - [CT] Chat: composer layout (input full + botoes dentro)
 
 - **O que**: textarea do chat agora ocupa largura total; botÃµes ðŸ˜€/ï¼‹/Enviar ficam dentro do campo embaixo.

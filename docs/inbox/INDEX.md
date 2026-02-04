@@ -20,7 +20,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
 | INC-20260202-2000-01 | P0 | done | deployed | passed | CT: Fonte Ãšnica da Verdade (Virtusâ†’Grupos / Contas FB v2 / SimulaÃ§Ãµes) | `done/INC-20260202-2000-01.md` |
-| INC-20260203-2570-01 | P2 | in_progress | needs_restart | not_run | CT Chat: pack de emojis padrao | `in_progress/INC-20260203-2570-01.md` |
+| INC-20260203-2570-01 | P2 | done | deployed | passed | CT Chat: pack de emojis padrao | `done/INC-20260203-2570-01.md` |
 | INC-20260203-2560-01 | P2 | done | deployed | passed | CT Chat: layout do composer (input full + botoes dentro) | `done/INC-20260203-2560-01.md` |
 | INC-20260203-2550-01 | P1 | done | deployed | passed | CT Chat: historico/paginacao (carregar antigas ao subir) | `done/INC-20260203-2550-01.md` |
 | INC-20260202-1600-01 | P0 | done | deployed | passed | Cidades/Grupos: contrato canÃ´nico + prioridade provisÃ£o (estoqueâ†’servidor) + migraÃ§Ã£o manual | `done/INC-20260202-1600-01.md` |
