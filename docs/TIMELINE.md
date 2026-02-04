@@ -31,6 +31,15 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-04 - [CT] Chat: "Ver mais" sem indent na 1Âª linha
+
+- **O que**: Ajuste no HTML gerado pelo clamp do "Ver mais" para nÃ£o inserir whitespace de template literal que virava recuo visual na 1Âª linha.
+- **Por que**: padronizar layout; evitar 1Âª linha deslocada quando o clamp estÃ¡ ativo.
+- **EvidÃªncia**: `c:\sitechatbot\.cursor\debug.log` runId `chat_vermais_v2` (leadingWsLen=0) + validaÃ§Ã£o humana (CÃ¡ssio): â€œperfeito, foiâ€.
+- **ReinÃ­cios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `public/ct.js` e reiniciar CT.
+
+
 #### 2026-02-04 - [CT] Chat: "Mais usados" no picker do composer (ðŸ˜€)
 
 - **O que**: O picker do ðŸ˜€ agora mostra "Mais usados" no topo (mesmo ranking do menu de reaÃ§Ã£o) + "Todos" abaixo; clicar no emoji no composer tambÃ©m alimenta o ranking.
