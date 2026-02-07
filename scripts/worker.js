@@ -12464,6 +12464,15 @@ async function gracefulShutdown(reason) {
   _shuttingDown = true;
   try {
     logger.info('[WORKER] gracefulShutdown start', { reason });
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'dbg_shutdown_begin',
+        reason: String(reason || ''),
+        pid: process.pid,
+        controllersSize: controllers ? controllers.size : null
+      });
+    } catch {}
     try { robeQueue.clear(); } catch {}
     for (const [nome, ctrl] of controllers) {
       try {
@@ -12479,6 +12488,30 @@ async function gracefulShutdown(reason) {
         }
       } catch {}
     }
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'dbg_shutdown_after_close',
+        reason: String(reason || ''),
+        pid: process.pid,
+        controllersSize: controllers ? controllers.size : null
+      });
+    } catch {}
+    // P0: após fechar browsers, limpar controllers e gravar status final (evita "ativos fantasmas" no próximo boot)
+    try {
+      const before = controllers ? controllers.size : null;
+      try { controllers && controllers.clear && controllers.clear(); } catch {}
+      const after = controllers ? controllers.size : null;
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'dbg_shutdown_controllers_cleared',
+        reason: String(reason || ''),
+        pid: process.pid,
+        before,
+        after
+      });
+    } catch {}
+    try { await snapshotStatusAndWrite(); } catch {}
     for (const nome of _pruners.keys()) stopPruneLoop(nome);
     if (ramMonitorInterval) try { clearTimeout(ramMonitorInterval); } catch{}
   } catch (e) {
