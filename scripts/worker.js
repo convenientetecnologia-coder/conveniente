@@ -11295,6 +11295,71 @@ async function nurseTick() {
             const fp = path.join(__dirname, '..', 'dados', 'login_required_events.jsonl');
             fs.appendFileSync(fp, JSON.stringify({ ts: Date.now(), host: os.hostname(), perfil: nome, event: 'lr_scan_tabs', pages: scan }) + '\n');
           } catch {}
+
+          // === Enterprise hardening (P0): auto-desengessar "probe_failed" quando o scan prova LR=false ===
+          // Problema observado em produção (RM3): detectLoginRequired às vezes marca `probe_failed` (pessimista),
+          // a automação pausa (virtus off), mas o próprio scan subsequente mostra LR=false em abas reais.
+          // Guardrails:
+          // - só atua se o flag persistido é loginRequired=true com reason=probe_failed
+          // - só se o scan tem pelo menos 1 página FB/Messenger válida e TODAS têm lr=false
+          // - precisa de streak (evita flapping) + debounce (evita loop)
+          try {
+            const now = Date.now();
+            const scanHasPages = Array.isArray(scan) && scan.length > 0;
+            const scanAllClear = scanHasPages && scan.every(p => p && p.lr === false && !p.reason && (p.domain === 'messenger' || p.domain === 'facebook'));
+            if (scanAllClear) {
+              const flags = await readAccountFlags(nome).catch(()=>null);
+              const reason0 = flags && typeof flags.loginReason === 'string' ? String(flags.loginReason || '') : '';
+              const isProbeFailed = String(reason0 || '').toLowerCase() === 'probe_failed';
+              if (flags && flags.loginRequired === true && isProbeFailed) {
+                robeMeta[nome] = robeMeta[nome] || {};
+                const lastClearAt = Number(robeMeta[nome].lastLRAutoClearAt || 0) || 0;
+                if (!lastClearAt || (now - lastClearAt) > (15 * 60 * 1000)) {
+                  const prevTs = Number(robeMeta[nome].lrAutoClearStreakTs || 0) || 0;
+                  const prev = Number(robeMeta[nome].lrAutoClearStreak || 0) || 0;
+                  const next = (prevTs && (now - prevTs) < (2 * 60 * 1000)) ? (prev + 1) : 1;
+                  robeMeta[nome].lrAutoClearStreak = next;
+                  robeMeta[nome].lrAutoClearStreakTs = now;
+                  if (next >= 3) {
+                    robeMeta[nome].lastLRAutoClearAt = now;
+                    robeMeta[nome].lrAutoClearStreak = 0;
+                    robeMeta[nome].lrAutoClearStreakTs = 0;
+                    await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed','messengerPin']).catch(()=>{});
+                    try {
+                      provisionAudit.append({
+                        ts: now,
+                        event: 'lr_auto_clear_probe_failed',
+                        nome: String(nome||''),
+                        streak: next,
+                        pages: scan.length
+                      });
+                    } catch {}
+                    try {
+                      appendJsonl(LR_EVENTS_JSONL, {
+                        ts: now,
+                        host: os.hostname(),
+                        perfil: nome,
+                        event: 'lr_auto_clear',
+                        storedReason: 'probe_failed',
+                        method: 'lr_scan_tabs_all_clear',
+                        streak: next,
+                        pages: scan
+                      });
+                    } catch {}
+                    // Retoma trabalho sem forçar open/close (nurse faz o resto)
+                    setTimeout(() => { try { handlers.start_work({ nome, operator: 'lr_auto_clear_probe_failed' }).catch(()=>{}); } catch {} }, 0);
+                  }
+                }
+              }
+            } else {
+              // se o scan não está "limpo", zera streak (evita limpar em cenário flapping/ambíguo)
+              try {
+                robeMeta[nome] = robeMeta[nome] || {};
+                robeMeta[nome].lrAutoClearStreak = 0;
+                robeMeta[nome].lrAutoClearStreakTs = 0;
+              } catch {}
+            }
+          } catch {}
         } catch {}
 
         if (lr && lr.loginRequired) {
