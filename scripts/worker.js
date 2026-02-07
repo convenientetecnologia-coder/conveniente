@@ -69,6 +69,14 @@ const CT_ARCHIVE_QUEUE_DONE_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'done');
 const CT_ARCHIVE_EVID_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'evidence');
 const GOV_SNAP_JSONL = path.join(DATA_DIR, 'governor_snapshots.jsonl');
 const GOV_SNAP_LEADER_LOCK = path.join(DATA_DIR, '_governor_snapshot_leader.lock');
+// P0 hardening (INC-20260207-1403-01):
+// Garantia "volta a trabalhar" pós stock_provision em ambiente com shards.
+// A causa observada foi "volta parcial" quando alguns workers/shards não retomam.
+// Estratégia enterprise:
+// - Detectar transição de provision_lock (stock_provision) ativo -> inativo
+// - Persistir marcador global (no disco) do fim do provisionamento
+// - Cada worker/shard executa um resume sweep para seus perfis, respeitando guardrails (flags/login/humano/config)
+const STOCK_PROVISION_LAST_END_MARKER = path.join(DATA_DIR, 'stock_provision_last_end.json');
 
 function ensureDirSync(p) { try { fs.mkdirSync(p, { recursive: true }); } catch {} }
 function safeFilePart(s) {
@@ -148,6 +156,23 @@ function _touchGovSnapshotLeader() {
     return true;
   } catch {
     return false;
+  }
+}
+
+function writeStockProvisionEndMarker({ owner = null, kind = null, untilMs = 0 } = {}) {
+  try {
+    ensureDirSync(path.dirname(STOCK_PROVISION_LAST_END_MARKER));
+    const obj = {
+      ts: Date.now(),
+      owner: owner ? String(owner).slice(0, 220) : null,
+      kind: kind ? String(kind).slice(0, 60) : null,
+      untilMs: Number(untilMs || 0) || 0,
+      pid: process.pid
+    };
+    fs.writeFileSync(STOCK_PROVISION_LAST_END_MARKER, JSON.stringify(obj, null, 2), 'utf8');
+    return { ok: true, marker: obj };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
   }
 }
 
@@ -11771,8 +11796,174 @@ async function trySwapOpen(target) {
   return false;
 }
 
+// =========================
+// P0 hardening: post stock_provision resume (sharded)
+// =========================
+let _spLastActive = null;
+let _spLastOwner = null;
+let _spLastKind = null;
+let _spLastUntilMs = 0;
+
+function _readProvisionLockSnapSafe() {
+  try {
+    const lk = provisionLock.get ? provisionLock.get() : (provisionLock.isActive() ? { active: true, lock: null } : { active: false, lock: null });
+    const active = !!(lk && lk.active);
+    const lock = lk && lk.lock ? lk.lock : null;
+    const owner = lock && lock.owner ? String(lock.owner) : null;
+    const kind = (lock && lock.meta && lock.meta.kind) ? String(lock.meta.kind) : null;
+    const untilMs = lock && lock.untilMs ? Number(lock.untilMs) : 0;
+    return { ok: true, active, owner, kind, untilMs, lock };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e), active: false, owner: null, kind: null, untilMs: 0, lock: null };
+  }
+}
+
+function stockProvisionLockWatchTick() {
+  // Detecta transição active->inactive com owner stock_provision
+  const snap = _readProvisionLockSnapSafe();
+  const active = !!snap.active;
+  const owner = snap.owner || null;
+  const kind = snap.kind || (owner && /^stock_provision:/i.test(owner) ? 'stock_provision' : null);
+  const untilMs = Number(snap.untilMs || 0) || 0;
+
+  if (_spLastActive === null) {
+    _spLastActive = active;
+    _spLastOwner = owner;
+    _spLastKind = kind;
+    _spLastUntilMs = untilMs;
+    return;
+  }
+
+  const wasActive = !!_spLastActive;
+  const wasOwner = _spLastOwner;
+  const wasKind = _spLastKind;
+  const wasUntil = Number(_spLastUntilMs || 0) || 0;
+
+  _spLastActive = active;
+  _spLastOwner = owner;
+  _spLastKind = kind;
+  _spLastUntilMs = untilMs;
+
+  // Transição: ativo -> inativo
+  if (wasActive && !active) {
+    const wasStockProvision = (wasKind === 'stock_provision') || (wasOwner && /^stock_provision:/i.test(String(wasOwner)));
+    if (wasStockProvision) {
+      const w = writeStockProvisionEndMarker({ owner: wasOwner || null, kind: 'stock_provision', untilMs: wasUntil || 0 });
+      try {
+        provisionAudit.append({
+          ts: Date.now(),
+          event: 'stock_provision_lock_end_detected',
+          ok: !!(w && w.ok),
+          owner: wasOwner || null,
+          untilMs: wasUntil || 0
+        });
+      } catch {}
+    }
+  }
+}
+
+async function stockProvisionResumeTick() {
+  try {
+    if (provisionLock && provisionLock.isActive && provisionLock.isActive()) return;
+  } catch {}
+
+  const marker = _readJsonSafe(STOCK_PROVISION_LAST_END_MARKER, null);
+  if (!marker || !marker.ts) return;
+
+  const maxAgeMs = Math.max(30_000, parseInt(process.env.STOCK_PROVISION_RESUME_MAX_AGE_MS || String(10 * 60 * 1000), 10) || (10 * 60 * 1000));
+  if ((Date.now() - Number(marker.ts || 0)) > maxAgeMs) return;
+
+  robeMeta.system = robeMeta.system || {};
+  const lastDone = Number(robeMeta.system.stockProvisionResumeLastTs || 0) || 0;
+  if (lastDone >= Number(marker.ts || 0)) return;
+
+  // Rate limit global por worker (evita loop caso esteja falhando por alguma razão)
+  const lastTry = Number(robeMeta.system.stockProvisionResumeLastTryAt || 0) || 0;
+  if (lastTry && (Date.now() - lastTry) < 10_000) return;
+  robeMeta.system.stockProvisionResumeLastTryAt = Date.now();
+
+  const maxOpen = Math.max(0, parseInt(process.env.STOCK_PROVISION_RESUME_MAX_OPEN_PER_TICK || '2', 10) || 2);
+  const maxStart = Math.max(1, parseInt(process.env.STOCK_PROVISION_RESUME_MAX_START_PER_TICK || '12', 10) || 12);
+
+  let desired = null;
+  try { desired = readJsonFile(desiredPath, { perfis: {} }); } catch { desired = { perfis: {} }; }
+  const perfis = desired && desired.perfis && typeof desired.perfis === 'object' ? desired.perfis : {};
+
+  const candidates = [];
+  for (const nome of Object.keys(perfis)) {
+    const w = perfis[nome] || {};
+    if (w.active !== true) continue;
+    if (w.humanHold === true) continue;
+    const v = String(w.virtus || '').toLowerCase();
+    if (v === 'off') continue;
+    if (SHARD_SET.size && !inShard(nome)) continue;
+    candidates.push(String(nome));
+  }
+
+  let opened = 0;
+  let started = 0;
+  let skipped = 0;
+  let errors = 0;
+  const op = `stock_provision_resume:${Number(marker.ts || 0) || Date.now()}`;
+
+  for (const nome of candidates) {
+    if (started >= maxStart && opened >= maxOpen) break;
+
+    const ctrl = controllers.get(nome);
+    const hasBrowser = !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.());
+    const alreadyWorking = !!(ctrl && ctrl.trabalhando === true && ctrl.virtus);
+
+    if (alreadyWorking) { skipped++; continue; }
+    if (ctrl && (ctrl.humanControl === true || ctrl.configurando === true)) { skipped++; continue; }
+
+    if (hasBrowser) {
+      if (started >= maxStart) { skipped++; continue; }
+      const r = await handlers.start_work({ nome, operator: op }).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
+      if (r && r.ok) started++;
+      else { errors++; }
+      continue;
+    }
+
+    // Sem browser: tenta abrir + start_work (limitado)
+    if (opened >= maxOpen) { skipped++; continue; }
+    const a = await activateOnce(nome, 'stock_provision_resume', op).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
+    if (!a || a.ok !== true) { errors++; continue; }
+    opened++;
+    if (started < maxStart) {
+      const r2 = await handlers.start_work({ nome, operator: op }).catch(e => ({ ok: false, error: (e && e.message) || String(e) }));
+      if (r2 && r2.ok) started++;
+      else { errors++; }
+    }
+  }
+
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'stock_provision_post_resume_tick',
+      markerTs: Number(marker.ts || 0) || 0,
+      shardSize: SHARD_SET.size || 0,
+      candidates: candidates.length,
+      opened,
+      started,
+      skipped,
+      errors
+    });
+  } catch {}
+
+  // Se rodou e não teve erro, marca como done para este worker.
+  // Mesmo com erros: não marcar done (próximos ticks tentam novamente; guardrails impedem storm).
+  if (errors === 0) {
+    robeMeta.system.stockProvisionResumeLastTs = Number(marker.ts || 0) || Date.now();
+  }
+}
+
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
+// Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
+setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
+setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
+setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
+setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)
 setInterval(() => { autoLoginRemediateTick().catch(()=>{}); }, AUTO_LR_CFG.tickMs);
 setTimeout(() => { autoLoginRemediateTick().catch(()=>{}); }, 3500);

@@ -1,4 +1,4 @@
-﻿### Timeline â€” mudanÃ§as (mais novo em cima)
+### Timeline â€” mudanÃ§as (mais novo em cima)
 
 Regra: toda mudanÃ§a relevante entra aqui com:
 - tags (projeto/Ã¡rea),
@@ -30,6 +30,33 @@ Formato canÃ´nico (copiar/colar):
 - **THREAD**: `TH-...` (somente quando `[CROSS]`)
 
 ---
+
+#### 2026-02-07 - [CONV] P0: pós `stock_provision`, auto-resume enterprise por shard (evitar “volta parcial”)
+
+- **O que**:
+  - Adicionado mecanismo de **resume pós-provision**: ao detectar `provision_lock` (kind `stock_provision`) terminando, o sistema grava um marcador global (`stock_provision_last_end.json`).
+  - Cada worker/shard executa um **resume sweep** para seus perfis (`desired.active=true` e `desired.virtus!=off`) chamando `start_work` (e, se necessário, `activateOnce`), com limite por tick e guardrails.
+  - Telemetria irrefutável em `provision_audit`: `stock_provision_lock_end_detected` + `stock_provision_post_resume_tick`.
+- **Por quê**: evitar o P0 “cadastra e não volta tudo a trabalhar” quando há pausa/quiesce e parte dos shards não retoma automaticamente.
+- **Evidência**:
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260207-1403-01.md`
+  - Código: `C:\conveniente\scripts\worker.js` (post stock_provision resume + marker)
+  - Telemetria esperada: `C:\conveniente\dados\provision_audit.jsonl` eventos `stock_provision_*resume*`.
+- **Reinícios**: `conveniente` (hosts afetados) — humano roda `node index.js`.
+- **Rollback**: `git revert` do commit deste INC; reiniciar `conveniente`.
+
+#### 2026-02-04 - [CT] Removidos/Reprovados: histórico central no cadastro + remove coluna “Motivo”
+
+- **O que**:
+  - Remove a coluna “Motivo” da aba **Removidos**.
+  - Cria bloco **Histórico (Removidos/Reprovados)** no **cadastro (driver-level)** com scroll interno.
+  - Backend passa a registrar eventos `membership_removed`/`membership_rejected` com `payload.note` (motivo) e cidade.
+- **Por que**: “Motivo” não é dado de lista; é histórico operacional do cadastro (multi-cidade) e precisa ficar centralizado.
+- **Evidência**:
+  - `c:\sitechatbot\.cursor\debug.log` runId `ct_driver_motives_central_v1` (append events + fetch/render no cadastro)
+  - INC fechado: `C:\conveniente\docs\inbox\done\INC-20260204-0144-01.md`
+- **Reinícios**: CT (sitechatbot) - `node index.js`.
+- **Rollback**: reverter `C:\sitechatbot\convenientetecnologia\public\ct.js`, `C:\sitechatbot\convenientetecnologia\index.js`, `C:\sitechatbot\convenientetecnologia\lib\ctMembershipStore.js` e reiniciar CT.
 
 #### 2026-02-04 - [CT] Chat: abrir sala no 1º nao lido + marcar como lido ao chegar no fim
 
