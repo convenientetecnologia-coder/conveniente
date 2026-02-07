@@ -11800,6 +11800,21 @@ async function nurseTick() {
         } catch {}
         try {
           // #region agent log (debug mode)
+          // hypothesisId H1/H2/H3: distinguir
+          // - startVirtus não chamado (não veremos attempt)
+          // - startVirtus retorna falsy
+          // - startVirtus lança (já logado em dbg_virtus_start_error)
+          try {
+            const now = Date.now();
+            robeMeta[nome] = robeMeta[nome] || {};
+            const last = Number(robeMeta[nome].dbgVirtusAttemptAt || 0) || 0;
+            if (!last || (now - last) > 2 * 60 * 1000) {
+              robeMeta[nome].dbgVirtusAttemptAt = now;
+              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v2',hypothesisId:'H2',location:'worker.js:nurseTick:startVirtus:attempt',message:'attempt startVirtus',data:{nome:String(nome||''),pid:process.pid,hadVirtus:!!ctrl.virtus,hadTrabalhando:!!ctrl.trabalhando,mode:(autoMode&&autoMode.mode)||null},timestamp:now})}).catch(()=>{});
+            }
+          } catch {}
+          // #endregion
+          // #region agent log (debug mode)
           // NOTE: endpoint pode não existir em todos os hosts; nunca quebrar o worker.
           // hypothesisId H1/H2: startVirtus pode estar falhando silenciosamente em alguns workers (ex.: recurso global único/porta).
           // #endregion
@@ -11811,6 +11826,20 @@ async function nurseTick() {
           });
           ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
           ctrl.trabalhando = true;
+          // #region agent log (debug mode)
+          try {
+            const now = Date.now();
+            if (!ctrl.virtus) {
+              robeMeta[nome] = robeMeta[nome] || {};
+              const last = Number(robeMeta[nome].dbgVirtusFalsyAt || 0) || 0;
+              if (!last || (now - last) > 5 * 60 * 1000) {
+                robeMeta[nome].dbgVirtusFalsyAt = now;
+                try { provisionAudit.append({ ts: now, event: 'dbg_virtus_start_return_falsy', nome: String(nome||''), pid: process.pid, mode: (autoMode && autoMode.mode) ? String(autoMode.mode) : null }); } catch {}
+                fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v2',hypothesisId:'H3',location:'worker.js:nurseTick:startVirtus:falsy',message:'startVirtus returned falsy',data:{nome:String(nome||''),pid:process.pid,mode:(autoMode&&autoMode.mode)||null},timestamp:now})}).catch(()=>{});
+              }
+            }
+          } catch {}
+          // #endregion
           // #region agent log (debug mode)
           try {
             const now = Date.now();
