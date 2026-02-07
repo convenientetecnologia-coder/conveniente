@@ -10990,6 +10990,15 @@ async function nurseTick() {
               await snapshotStatusAndWrite().catch(()=>{});
             }
           } catch {}
+          // IMPORTANTE (P0): "Abrir todos" / desired.active=true deve abrir o navegador mesmo em appealSubmitted,
+          // porque conta fechada impede diagnóstico e impede o monitor de verificar o estado real.
+          // Regra: se não há controller e queremos active=true, NÃO bloqueie a abertura aqui.
+          // Mantemos o bloqueio de automação (Robe/Virtus) via continue APENAS quando o navegador já está aberto
+          // ou quando não queremos abrir.
+          if (!ctrl && want && want.active === true) {
+            try { provisionAudit.append({ ts: Date.now(), event: 'appeal_submitted_allow_open_no_ctrl', nome: String(nome||''), nextAt: Number(flags.appealNextCheckAt || 0) || 0 }); } catch {}
+            // NÃO continue: deixa cair no bloco normal de abertura (activateOnce) logo abaixo.
+          } else {
           const nextAt = Number(flags.appealNextCheckAt || 0) || 0;
           if (!nextAt || nextAt <= now) {
             // Só monitora se o navegador está aberto; senão, o nurse seguirá a regra normal de desired.active.
@@ -11006,6 +11015,7 @@ async function nurseTick() {
           }
           // Enquanto estiver em appealSubmitted, NÃO rodar automação normal (Robe/Virtus).
           continue;
+          }
         }
       } catch {}
 
