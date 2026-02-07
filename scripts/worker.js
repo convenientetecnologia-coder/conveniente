@@ -11798,11 +11798,54 @@ async function nurseTick() {
             try { await stopVirtus(nome); } catch {}
           }
         } catch {}
-        try { 
-          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch || 0, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' }); 
+        try {
+          // #region agent log (debug mode)
+          // NOTE: endpoint pode não existir em todos os hosts; nunca quebrar o worker.
+          // hypothesisId H1/H2: startVirtus pode estar falhando silenciosamente em alguns workers (ex.: recurso global único/porta).
+          // #endregion
+          ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, {
+            restrictTab: 0,
+            epoch: ctrl.virtusEpoch || 0,
+            slowMode: (autoMode && autoMode.mode !== 'full'),
+            governorMode: (autoMode && autoMode.mode) || 'full'
+          });
           ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
-          ctrl.trabalhando = true; 
-        } catch {}
+          ctrl.trabalhando = true;
+          // #region agent log (debug mode)
+          try {
+            const now = Date.now();
+            robeMeta[nome] = robeMeta[nome] || {};
+            const last = Number(robeMeta[nome].dbgVirtusStartedAt || 0) || 0;
+            if (!last || (now - last) > 10 * 60 * 1000) {
+              robeMeta[nome].dbgVirtusStartedAt = now;
+              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v1',hypothesisId:'H1',location:'worker.js:nurseTick:startVirtus:ok',message:'startVirtus ok',data:{nome:String(nome||''),pid:process.pid,mode:(autoMode&&autoMode.mode)||null},timestamp:now})}).catch(()=>{});
+            }
+          } catch {}
+          // #endregion
+        } catch (e) {
+          // #region agent log (debug mode)
+          try {
+            const now = Date.now();
+            robeMeta[nome] = robeMeta[nome] || {};
+            const last = Number(robeMeta[nome].dbgVirtusErrAt || 0) || 0;
+            if (!last || (now - last) > 2 * 60 * 1000) {
+              robeMeta[nome].dbgVirtusErrAt = now;
+              const msg = (e && e.message) ? String(e.message) : String(e);
+              try {
+                provisionAudit.append({
+                  ts: now,
+                  event: 'dbg_virtus_start_error',
+                  nome: String(nome||''),
+                  pid: process.pid,
+                  mode: (autoMode && autoMode.mode) ? String(autoMode.mode) : null,
+                  error: msg.slice(0, 220)
+                });
+              } catch {}
+              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v1',hypothesisId:'H1',location:'worker.js:nurseTick:startVirtus:error',message:'startVirtus threw',data:{nome:String(nome||''),pid:process.pid,mode:(autoMode&&autoMode.mode)||null,error:msg.slice(0,220)},timestamp:now})}).catch(()=>{});
+            }
+          } catch {}
+          // #endregion
+        }
       }
     }
   } finally {
