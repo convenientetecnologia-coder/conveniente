@@ -6670,12 +6670,25 @@ function resolveChromeUserDataRoot() {
 }
 
 function automationAllowed(ctrl, { operator } = {}) {
-  // Hardening: durante stock_provision, bloquear automação (Robe/Virtus),
-  // mas permitir o fluxo do PRÓPRIO provisionamento quando o operador é o dono do lock.
+  // Política enterprise:
+  // - Locks globais (configure/login_remediate/open_all_map/close_all) podem bloquear automação.
+  // - Stock provision NÃO deve bloquear Robe/Virtus do servidor (requisito do lead);
+  //   o provisionamento usa headroom/RAM + supervisor slots sem pausar o resto.
   try {
     const op = String(operator || '').trim();
-    const lk = provisionLock.shouldBlock(op);
-    if (lk && lk.block) return false;
+    const cur = provisionLock.get && provisionLock.get();
+    if (cur && cur.active && cur.lock) {
+      const owner = String(cur.lock.owner || '').trim();
+      const kind = String((cur.lock.meta && cur.lock.meta.kind) || '').trim();
+      const isStock = (kind === 'stock_provision') || /^stock_provision:/i.test(owner);
+      if (!isStock) {
+        const lk = provisionLock.shouldBlock(op);
+        if (lk && lk.block) return false;
+      }
+    } else {
+      const lk = provisionLock.shouldBlock(op);
+      if (lk && lk.block) return false;
+    }
   } catch {
     try { if (provisionLock.isActive()) return false; } catch {}
   }

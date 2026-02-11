@@ -991,15 +991,31 @@ async function execStockProvision(cmd) {
         // 0) baseline telemetria
         out.steps.push({ step: 'lock_acquired', at: Date.now(), lockOwner, lockUntilMs: out.lockUntilMs });
 
-        // 0.5) Ultra enterprise: quiescência determinística antes de mexer em cookies/config
-        // - espera envios/postagens ativos terminarem
-        // - garante Virtus pausado para os demais perfis (mínimo impacto)
+        // 0.5) Stock provision NÃO deve pausar Robe/Virtus do servidor (requisito do lead).
+        // O único guardrail necessário aqui é headroom (RAM) + supervisor slots.
+        // Se o operador quiser reativar o quiesce legado, pode ligar via env.
         {
-          // P1 policy: esperar busy mais tempo antes de falhar (o CT registra no histórico; depois o loop tenta de novo).
-          const waitBusyMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_BUSY_MS || (10 * 60 * 1000)) || (10 * 60 * 1000));
-          const waitPauseMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_PAUSE_MS || (2 * 60 * 1000)) || (2 * 60 * 1000));
-          const phaseBudgetMs = Math.min(budgetLeftMs(), Math.max(20_000, waitBusyMs + waitPauseMs + 10_000));
-          await waitForQuiesce({ out, phaseBudgetMs, waitBusyMs, waitPauseMs });
+          const quiesceEnabled = String(process.env.STOCK_PROVISION_QUIESCE_ENABLED || '0').trim() === '1';
+          if (quiesceEnabled) {
+            // Legacy: quiescência determinística (busy + pause).
+            const waitBusyMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_BUSY_MS || (10 * 60 * 1000)) || (10 * 60 * 1000));
+            const waitPauseMs = Math.max(0, Number(process.env.STOCK_PROVISION_WAIT_PAUSE_MS || (2 * 60 * 1000)) || (2 * 60 * 1000));
+            const phaseBudgetMs = Math.min(budgetLeftMs(), Math.max(20_000, waitBusyMs + waitPauseMs + 10_000));
+            await waitForQuiesce({ out, phaseBudgetMs, waitBusyMs, waitPauseMs });
+          } else {
+            try {
+              const st = await getStatusSnapshot();
+              const snap = computeQuiesceSnapshot(st);
+              provisionAudit.append({
+                event: 'stock_provision_quiesce_skipped',
+                cmdId: (cmd && cmd.id) ? String(cmd.id) : null,
+                batchId,
+                quiesceEnabled: false,
+                snap
+              });
+            } catch {}
+            out.steps.push({ step: 'quiesce_skipped', at: Date.now() });
+          }
         }
 
         // 1) criar perfil
