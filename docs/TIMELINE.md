@@ -31,6 +31,20 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-11 — [CONV] P0/P1: “Virtus Offline/trabalhando=false em massa” e “reserved mas não cadastra” (fix raiz, sem remendos)
+
+- **O que**:
+  - Fix P0: `login_remediate` pausava Virtus global (quiesce) e podia **não retomar**, derrubando `working` em massa com browsers ativos. Agora o `finally` do `login_remediate` **sempre tenta retomar** Virtus para os perfis pausados (`wasWorking=true`), respeitando `desired.virtus`.
+  - Fix P0: `stock_provision` **não depende de quiesce** (busy/pause) por padrão; o provisionamento passa a usar apenas **headroom (RAM) + supervisor slots**, evitando “não cadastrou” por `busy_timeout` e evitando pausar Virtus/Robe do servidor.
+  - Fix P1: durante `provision_lock` de `stock_provision`, a automação (Robe/Virtus) **não é bloqueada** (política do lead).
+- **Por quê**: garantir operação 24/7 sem “flap” e sem perdas por provisão; provisão não pode travar por `robeEmExecucao` nem derrubar trabalho em massa.
+- **Evidência**:
+  - `C:\conveniente\scripts\worker.js` (`login_remediate_quiesce_resumed`, `anomaly_*` em `provision_audit`)
+  - `C:\conveniente\scripts\dashboard.js` (`stock_provision_quiesce_skipped` em `provision_audit`)
+  - RM2: `C:\sitechatbot\dados\logs\<rm2_hostId>\rm2_tail_audit_postrestart_*.json` (quiesce pause + anomalias antes; estabilização depois)
+- **Reinícios**: `conveniente` (hosts afetados) — humano roda `node index.js` após `self_update`.
+- **Rollback**: `git revert` dos commits deste item e reiniciar `conveniente`.
+
 #### 2026-02-07 - [CONV] P0: pós `stock_provision`, auto-resume enterprise por shard (evitar “volta parcial”)
 
 - **O que**:
@@ -39,7 +53,7 @@ Formato canÃ´nico (copiar/colar):
   - Telemetria irrefutável em `provision_audit`: `stock_provision_lock_end_detected` + `stock_provision_post_resume_tick`.
 - **Por quê**: evitar o P0 “cadastra e não volta tudo a trabalhar” quando há pausa/quiesce e parte dos shards não retoma automaticamente.
 - **Evidência**:
-  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260207-1403-01.md`
+  - INC: `C:\conveniente\docs\inbox\done\INC-20260207-1403-01.md`
   - Código: `C:\conveniente\scripts\worker.js` (post stock_provision resume + marker)
   - Telemetria esperada: `C:\conveniente\dados\provision_audit.jsonl` eventos `stock_provision_*resume*`.
 - **Reinícios**: `conveniente` (hosts afetados) — humano roda `node index.js`.

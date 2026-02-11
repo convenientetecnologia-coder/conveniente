@@ -1,4 +1,4 @@
-﻿### INBOX â€” arquivo de relatos (Ã­ndice)
+### INBOX â€” arquivo de relatos (Ã­ndice)
 
 Regra: `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` Ã© a **entrada** (RAW_INPUT + triagem).
 Depois de triado, cada incidente ganha um arquivo prÃ³prio em uma pasta por status:
@@ -28,11 +28,13 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260204-0141-01 | P2 | done | deployed | passed | CT Chat: ao abrir, ir para a mensagem mais antiga nao lida | `done/INC-20260204-0141-01.md` |
 | INC-20260204-0142-01 | P1 | done | deployed | passed | CT Aprovados: notificação (novos) por usuário + som dedicado | `done/INC-20260204-0142-01.md` |
 | INC-20260204-0143-01 | P1 | done | deployed | passed | CT Aprovados: latência realtime (badge/som) após "Enviar p/ financeiro" | `done/INC-20260204-0143-01.md` |
+| INC-20260204-0144-01 | P1 | done | deployed | passed | CT Removidos: remover coluna “Motivo” e centralizar histórico no cadastro | `done/INC-20260204-0144-01.md` |
 | INC-20260203-2580-01 | P2 | done | deployed | passed | CT Chat: composer nao sobrepor texto | `done/INC-20260203-2580-01.md` |
 | INC-20260203-2570-01 | P2 | done | deployed | passed | CT Chat: pack de emojis padrao | `done/INC-20260203-2570-01.md` |
 | INC-20260203-2560-01 | P2 | done | deployed | passed | CT Chat: layout do composer (input full + botoes dentro) | `done/INC-20260203-2560-01.md` |
 | INC-20260203-2550-01 | P1 | done | deployed | passed | CT Chat: historico/paginacao (carregar antigas ao subir) | `done/INC-20260203-2550-01.md` |
 | INC-20260202-1600-01 | P0 | done | deployed | passed | Cidades/Grupos: contrato canÃ´nico + prioridade provisÃ£o (estoqueâ†’servidor) + migraÃ§Ã£o manual | `done/INC-20260202-1600-01.md` |
+| INC-20260207-1403-01 | P0 | done | deployed | passed | RM3: pós stock_provision, Virtus OFF em massa / volta parcial; fixes de resume e provisão | `done/INC-20260207-1403-01.md` |
 | INC-20260203-1800-01 | P0 | need_evidence | deployed_partial | not_run | RM3: `loginRequired=probe_failed` com navegador aparentemente OK (Virtus derrubado por blindagem) | `need_evidence/INC-20260203-1800-01.md` |
 | INC-20260203-2100-01 | P0 | done | deployed | passed | CT Sistema Interno: Resumo divergente (KPI usa ct_drivers, abas usam ct_driver_memberships) | `done/INC-20260203-2100-01.md` |
 | INC-20260203-2230-01 | P1 | done | deployed | passed | CT Sistema Interno: WhatsApp verde + menu (abrir/copiar) + registro â€œChamou no zapâ€ (Testes Encerrados + Chamar depois + Cadastro + ParticipaÃ§Ã£o) | `done/INC-20260203-2230-01.md` |

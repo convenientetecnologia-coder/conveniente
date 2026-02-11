@@ -7703,9 +7703,6 @@ const handlers = {
       };
       const failFastToHuman = async (reason) => {
         const why = String(reason || 'login_remediate_failed');
-        // #region agent log (debug)
-        fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:String(process.env.DEBUG_RUN_ID||'robe4_pre'),hypothesisId:'H2',location:'conveniente/scripts/worker.js:login_remediate:failFastToHuman',message:'login_remediate failFastToHuman called',data:{nome:String(nome||''),operator:String(op||'').slice(0,80),why:String(why||'').slice(0,120),stack:(()=>{try{const s=(new Error()).stack||'';return String(s).split('\n').slice(0,3).join(' | ').slice(0,320);}catch{return '';}})()},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         try {
           await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
         } catch {}
@@ -10652,9 +10649,6 @@ async function nurseTick() {
       } catch {}
       return false;
     })();
-    // #region agent log
-    try { if (typeof fetch === 'function') fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'debug1',hypothesisId:'H1',location:'worker.js:nurseTick:openIntent',message:'nurse_open_intent_snapshot',data:{autoOpenEnabled,openAllActive:!!(desired0&&desired0._openAll&&desired0._openAll.active===true),desiredActiveCount:(()=>{try{return Object.values((desired0&&desired0.perfis)||{}).filter(w=>w&&w.active===true).length}catch{return 0}})(),controllersSize:controllers.size},timestamp:Date.now()})}).catch(()=>{}); } catch {}
-    // #endregion agent log
 
     if (controllers.size === 0) {
       // Ainda fazemos o sweep leve (ban/2FA) 1x/min.
@@ -11982,25 +11976,6 @@ async function nurseTick() {
           }
         } catch {}
         try {
-          // #region agent log (debug mode)
-          // hypothesisId H1/H2/H3: distinguir
-          // - startVirtus não chamado (não veremos attempt)
-          // - startVirtus retorna falsy
-          // - startVirtus lança (já logado em dbg_virtus_start_error)
-          try {
-            const now = Date.now();
-            robeMeta[nome] = robeMeta[nome] || {};
-            const last = Number(robeMeta[nome].dbgVirtusAttemptAt || 0) || 0;
-            if (!last || (now - last) > 2 * 60 * 1000) {
-              robeMeta[nome].dbgVirtusAttemptAt = now;
-              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v2',hypothesisId:'H2',location:'worker.js:nurseTick:startVirtus:attempt',message:'attempt startVirtus',data:{nome:String(nome||''),pid:process.pid,hadVirtus:!!ctrl.virtus,hadTrabalhando:!!ctrl.trabalhando,mode:(autoMode&&autoMode.mode)||null},timestamp:now})}).catch(()=>{});
-            }
-          } catch {}
-          // #endregion
-          // #region agent log (debug mode)
-          // NOTE: endpoint pode não existir em todos os hosts; nunca quebrar o worker.
-          // hypothesisId H1/H2: startVirtus pode estar falhando silenciosamente em alguns workers (ex.: recurso global único/porta).
-          // #endregion
           ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, {
             restrictTab: 0,
             epoch: ctrl.virtusEpoch || 0,
@@ -12009,7 +11984,6 @@ async function nurseTick() {
           });
           ctrl._virtusGovernorMode = (autoMode && autoMode.mode) ? autoMode.mode : 'full';
           ctrl.trabalhando = true;
-          // #region agent log (debug mode)
           try {
             const now = Date.now();
             if (!ctrl.virtus) {
@@ -12018,24 +11992,10 @@ async function nurseTick() {
               if (!last || (now - last) > 5 * 60 * 1000) {
                 robeMeta[nome].dbgVirtusFalsyAt = now;
                 try { provisionAudit.append({ ts: now, event: 'dbg_virtus_start_return_falsy', nome: String(nome||''), pid: process.pid, mode: (autoMode && autoMode.mode) ? String(autoMode.mode) : null }); } catch {}
-                fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v2',hypothesisId:'H3',location:'worker.js:nurseTick:startVirtus:falsy',message:'startVirtus returned falsy',data:{nome:String(nome||''),pid:process.pid,mode:(autoMode&&autoMode.mode)||null},timestamp:now})}).catch(()=>{});
               }
             }
           } catch {}
-          // #endregion
-          // #region agent log (debug mode)
-          try {
-            const now = Date.now();
-            robeMeta[nome] = robeMeta[nome] || {};
-            const last = Number(robeMeta[nome].dbgVirtusStartedAt || 0) || 0;
-            if (!last || (now - last) > 10 * 60 * 1000) {
-              robeMeta[nome].dbgVirtusStartedAt = now;
-              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v1',hypothesisId:'H1',location:'worker.js:nurseTick:startVirtus:ok',message:'startVirtus ok',data:{nome:String(nome||''),pid:process.pid,mode:(autoMode&&autoMode.mode)||null},timestamp:now})}).catch(()=>{});
-            }
-          } catch {}
-          // #endregion
         } catch (e) {
-          // #region agent log (debug mode)
           try {
             const now = Date.now();
             robeMeta[nome] = robeMeta[nome] || {};
@@ -12053,10 +12013,8 @@ async function nurseTick() {
                   error: msg.slice(0, 220)
                 });
               } catch {}
-              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'dbg_rm3_working_low_v1',hypothesisId:'H1',location:'worker.js:nurseTick:startVirtus:error',message:'startVirtus threw',data:{nome:String(nome||''),pid:process.pid,mode:(autoMode&&autoMode.mode)||null,error:msg.slice(0,220)},timestamp:now})}).catch(()=>{});
             }
           } catch {}
-          // #endregion
         }
       }
     }

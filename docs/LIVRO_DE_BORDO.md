@@ -29,6 +29,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Regra de comunicação: sempre falar “reiniciar = rodar `node index.js` de novo”, e dizer claramente **qual projeto** (conveniente/CT/notificador).
   - **Padrão sem repetição (conveniente)**: se houve mudança no `conveniente`, o GPT **já** faz `commit/push` + dispara `self_update` via CT e só avisa: **“reinicia `node index.js` no host X”**.
   - Vocabulário: quando o humano disser **“pull”**, significa **disparar `self_update` via CT** (equivalente a `git pull` no host).
+- **Stock provision (regra do lead)**: por padrão, o `stock_provision` **não deve pausar** Virtus/Robe do servidor; ele deve garantir headroom (RAM) fechando browsers se necessário. O quiesce legado (busy/pause) só deve ser reativado explicitamente via env `STOCK_PROVISION_QUIESCE_ENABLED=1`.
   - Se o humano reportar que precisou fazer `git pull` manual no host: isso é **sinal de falha no fluxo de update** (self_update não foi enviado/entregue/ack). O GPT deve coletar evidência no CT e registrar na `docs/TIMELINE.md` + ajustar o runbook para não repetir.
   - Regra de restart (importante): **nem toda atualização precisa de restart “agora”** para continuar trabalhando em outras mudanças.
     - Restart é necessário quando a atualização precisa **valer no runtime** (para testar/validar o comportamento novo).
