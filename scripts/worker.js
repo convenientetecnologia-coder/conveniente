@@ -7769,6 +7769,9 @@ const handlers = {
           } catch {}
         } catch {}
       };
+      // Importante: `pausedVirtus` precisa estar acessível no `finally` global para garantir resume
+      // mesmo em returns antecipados (evita queda massiva de working após quiesce).
+      let pausedVirtus = []; // [{ nome, wasWorking }]
       try {
       // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execução.
       if (overrideHumanHold) {
@@ -7812,7 +7815,7 @@ const handlers = {
       // - espera envios/postagens ativos terminarem (busy)
       // - pausa Virtus de todos os perfis "pausáveis"
       // Se não conseguir quiescer dentro do timeout: aborta (sem falso positivo).
-      const pausedVirtus = []; // [{ nome, wasWorking }]
+      pausedVirtus = []; // [{ nome, wasWorking }]
       try {
         const require = true;
         const waitPauseMs = Math.max(0, Number(opts.waitPauseMs || 45_000) || 45_000);
@@ -8548,9 +8551,56 @@ const handlers = {
           if (c2) c2.configurando = prevConfigurando ? true : false;
         } catch {}
         // 7) libera lock global sempre (mesmo com returns/erros)
+        // IMPORTANTE: liberar ANTES do resume para `automationAllowed()` não bloquear re-start do Virtus.
         try { provisionLock.release({ owner: op }); } catch {}
         // Governança: libera permit sempre (anti-leak)
         try { if (_govPermitToken) await supervisorClient.releasePermit(_govPermitToken, { result: 'done' }).catch(()=>{}); } catch {}
+
+        // P0 fix (forense): sempre tentar retomar Virtus dos perfis pausados pela quiescência.
+        // Sem isso, um único auto_login_remediate pode derrubar "working" em massa (active=ok, virtusOffline).
+        try {
+          if (Array.isArray(pausedVirtus) && pausedVirtus.length > 0) {
+            const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
+            const resumed = [];
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'login_remediate_quiesce_resume_begin',
+                nome: String(nome || ''),
+                operator: op,
+                pausedCount: pausedVirtus.length,
+                pausedNames: pausedVirtus.map(x => x && x.nome).filter(Boolean).slice(0, 40)
+              });
+            } catch {}
+            for (const it of pausedVirtus) {
+              try {
+                if (!it || it.wasWorking !== true) continue;
+                const n = String(it.nome || '').trim();
+                if (!n) continue;
+                const want = desiredSnap && desiredSnap.perfis ? (desiredSnap.perfis[n] || {}) : {};
+                if (want && want.virtus === 'off') continue; // respeita desired
+                const c = controllers.get(n);
+                if (!c || !c.browser || !c.browser.isConnected?.()) continue;
+                if (!automationAllowed(c)) continue;
+                c.virtusEpoch = (c.virtusEpoch || 0);
+                c.virtus = virtusHelper.startVirtus(c.browser, n, { restrictTab: 0, epoch: c.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
+                c.trabalhando = true;
+                try { unfreezeCooldownIfWorking(n); } catch {}
+                resumed.push(n);
+              } catch {}
+            }
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'login_remediate_quiesce_resumed',
+                nome: String(nome || ''),
+                operator: op,
+                resumedCount: resumed.length,
+                resumed: resumed.slice(0, 60)
+              });
+            } catch {}
+          }
+        } catch {}
       }
     });
   },
