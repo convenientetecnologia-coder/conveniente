@@ -9547,6 +9547,11 @@ try {
 const perfisArr = loadPerfisJson();
 const desiredSnap = readJsonFile(desiredPath, { perfis: {} });
 const perfis = [];
+// #region agent log
+// Forense enterprise: detectar e registrar (via provision_audit) quedas de working/Virtus inesperadas,
+// sem depender do CT "poke" e sem spam (rate-limit).
+let _anomalyTs = Date.now();
+// #endregion
 for (const p of perfisArr) {
 const nome = p.nome;
 let issuesCount = 0;
@@ -9652,6 +9657,121 @@ perfis.push({
   stockAccountId
 });
 }
+
+// #region agent log
+try {
+  // Anomalia de massa: muitos perfis "ativos" porém não trabalhando.
+  // Critério: captura quedas relevantes também em hosts menores, sem spammar.
+  if (!global.__ANOMALY_WORKING_LAST_AT) global.__ANOMALY_WORKING_LAST_AT = 0;
+  if (!global.__ANOMALY_PROFILE_LAST_AT) global.__ANOMALY_PROFILE_LAST_AT = new Map();
+
+  const activeArr = perfis.filter(x => x && x.active === true);
+  const workingArr = activeArr.filter(x => x.trabalhando === true);
+  const virtusArr = activeArr.filter(x => x.virtusOnline === true);
+  const deficit = activeArr.length - workingArr.length;
+
+  const massMinActive = 10;
+  const massMinDeficitAbs = 6;
+  const massMinDeficitRatio = 0.30; // 30%+ de queda (ex.: 32->16)
+  const shouldEmitMass =
+    (activeArr.length >= massMinActive) &&
+    (
+      deficit >= massMinDeficitAbs ||
+      (activeArr.length > 0 && (deficit / activeArr.length) >= massMinDeficitRatio)
+    );
+  const now = Date.now();
+  if (shouldEmitMass && (now - Number(global.__ANOMALY_WORKING_LAST_AT || 0)) >= 60_000) {
+    global.__ANOMALY_WORKING_LAST_AT = now;
+    const dmap = (desiredSnap && desiredSnap.perfis && typeof desiredSnap.perfis === 'object') ? desiredSnap.perfis : {};
+    const suspects = activeArr
+      .filter(x =>
+        x.trabalhando !== true &&
+        x.virtusOnline !== true &&
+        // "deveria trabalhar": desired ativo + virtus on e sem flags de bloqueio óbvias
+        dmap[x.nome] && dmap[x.nome].active === true && String(dmap[x.nome].virtus || '') === 'on' &&
+        x.loginRequired !== true &&
+        x.identityRequired !== true &&
+        x.appealSubmitted !== true &&
+        x.humanControl !== true &&
+        x.humanHold !== true
+      )
+      .slice(0, 12)
+      .map(x => ({
+        nome: x.nome,
+        // sem PII: não incluir label/login
+        virtusOnline: x.virtusOnline === true,
+        trabalhando: x.trabalhando === true,
+        loginRequired: x.loginRequired === true,
+        loginReason: x.loginReason || null,
+        identityRequired: x.identityRequired === true,
+        appealSubmitted: x.appealSubmitted === true,
+        humanControl: x.humanControl === true,
+        humanHold: x.humanHold === true,
+        sendLockActive: x.sendLockActive === true,
+        configurando: x.configurando === true,
+        robeEmExecucao: x.robeEmExecucao === true,
+        manifestStatus: x.manifestStatus || null,
+        openBackoffMs: x.openBackoffMs || null,
+        closingReason: x.closingReason || null,
+        desired: dmap[x.nome] ? { active: !!dmap[x.nome].active, virtus: String(dmap[x.nome].virtus || '') } : null
+      }));
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'anomaly_working_low',
+        active: activeArr.length,
+        working: workingArr.length,
+        virtusOnline: virtusArr.length,
+        deficit,
+        suspects
+      });
+    } catch {}
+  }
+
+  // Anomalia por perfil: "Browser ativo" mas Virtus offline e deveria estar trabalhando.
+  // Rate-limit por perfil: 15 min.
+  const dmap = (desiredSnap && desiredSnap.perfis && typeof desiredSnap.perfis === 'object') ? desiredSnap.perfis : {};
+  for (const x of activeArr) {
+    if (!x || x.trabalhando === true) continue;
+    if (x.virtusOnline === true) continue;
+    const d = dmap[x.nome];
+    if (!d || d.active !== true || String(d.virtus || '') !== 'on') continue;
+    if (x.loginRequired === true || x.identityRequired === true || x.appealSubmitted === true) continue;
+    if (x.humanControl === true || x.humanHold === true) continue;
+    const last = global.__ANOMALY_PROFILE_LAST_AT.get(x.nome) || 0;
+    if ((now - Number(last || 0)) < (15 * 60 * 1000)) continue;
+    global.__ANOMALY_PROFILE_LAST_AT.set(x.nome, now);
+    const ctrl = controllers.get(x.nome);
+    const browserConnected = !!(ctrl && ctrl.browser && typeof ctrl.browser.isConnected === 'function' && ctrl.browser.isConnected());
+    try {
+      provisionAudit.append({
+        ts: now,
+        event: 'anomaly_profile_should_work_but_not',
+        nome: x.nome,
+        browserConnected,
+        ctrlHasVirtus: !!(ctrl && ctrl.virtus),
+        ctrlTrabalhando: !!(ctrl && ctrl.trabalhando),
+        flags: {
+          loginRequired: x.loginRequired === true,
+          loginReason: x.loginReason || null,
+          identityRequired: x.identityRequired === true,
+          appealSubmitted: x.appealSubmitted === true,
+          humanControl: x.humanControl === true,
+          humanHold: x.humanHold === true,
+          sendLockActive: x.sendLockActive === true,
+          configurando: x.configurando === true,
+          robeEmExecucao: x.robeEmExecucao === true
+        },
+        manifestStatus: x.manifestStatus || null,
+        openBackoffMs: x.openBackoffMs || null,
+        closingReason: x.closingReason || null,
+        desired: { active: !!d.active, virtus: String(d.virtus || '') }
+      });
+    } catch {}
+  }
+} catch {}
+// #endregion
+
 const robes = {};
 for (const p of perfisArr) {
 const nome = p.nome;
