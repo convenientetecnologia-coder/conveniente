@@ -487,17 +487,25 @@ async function execBackupRestoreMerge(cmd) {
   const currentDesired = _readJsonSafeSync(fileStore.desiredPath, { perfis: {} });
 
   const mergedPerfisR = _mergePerfisByNome({ backupPerfisArr: backupPerfis, currentPerfisArr: currentPerfis });
+  const backupOnlyPerfisR = _mergePerfisByNome({ backupPerfisArr: backupPerfis, currentPerfisArr: [] });
   const currentNamesSet = new Set(mergedPerfisR.addedFromCurrent || []);
 
   let desiredMergeR = null;
+  let mergedPerfis = null;
+  let mergedDesired = null;
   if (policy === 'keep_backup_desired_plus_current_new' || policy === 'keep-backup-desired') {
     desiredMergeR = _mergeDesiredKeepBackupPlusCurrentNew({ backupDesired, currentDesired, currentNamesSet });
+    mergedPerfis = mergedPerfisR.merged;
+    mergedDesired = desiredMergeR.desired;
+  } else if (policy === 'replace_with_backup' || policy === 'backup_only' || policy === 'backup-only') {
+    // Enterprise: modo recovery — restaura EXATAMENTE o backup (perfis + desired),
+    // mas ainda calcula addedFromCurrent para facilitar reconciliação pós-wipe (voltar para estoque).
+    desiredMergeR = { desired: backupDesired, keptFromCurrent: [], merged: [] };
+    mergedPerfis = backupOnlyPerfisR.merged;
+    mergedDesired = desiredMergeR.desired;
   } else {
     return { ok: false, error: 'unknown_policy', policy };
   }
-
-  const mergedPerfis = mergedPerfisR.merged;
-  const mergedDesired = desiredMergeR.desired;
 
   const mergedPerfisCount = mergedPerfis.length;
   const mergedDesiredCount = (mergedDesired && mergedDesired.perfis && typeof mergedDesired.perfis === 'object') ? Object.keys(mergedDesired.perfis).length : null;
