@@ -229,6 +229,135 @@ function _findBackupJsonFiles(backupDirResolved) {
   const tried = candidates.flatMap(c => [c.perfis, c.desired]).filter(Boolean);
   return { ok: false, error: 'backup_files_not_found', tried };
 }
+
+// ===== Backup inventory (enterprise): listar backups e detectar wipes =====
+function _isBackupTagDirName(name) {
+  const s = String(name || '').trim();
+  // autoBackupWorker: YYYYMMDD_HHMMSS
+  return /^\d{8}_\d{6}$/.test(s);
+}
+
+function _safeStatBestEffort(fp) {
+  try { return fsSync.statSync(fp); } catch { return null; }
+}
+
+function _countPerfisBestEffort(fp) {
+  try {
+    const j = JSON.parse(fsSync.readFileSync(fp, 'utf8'));
+    return Array.isArray(j) ? j.length : null;
+  } catch { return null; }
+}
+
+function _countDesiredBestEffort(fp) {
+  try {
+    const j = JSON.parse(fsSync.readFileSync(fp, 'utf8'));
+    const p = j && j.perfis && typeof j.perfis === 'object' ? j.perfis : null;
+    return p ? Object.keys(p).length : null;
+  } catch { return null; }
+}
+
+function _listBackupDirsUnder(rootDir, { limit = 200 } = {}) {
+  try {
+    if (!fsSync.existsSync(rootDir)) return [];
+    const names = fsSync.readdirSync(rootDir).filter(_isBackupTagDirName);
+    names.sort((a, b) => String(b).localeCompare(String(a))); // desc
+    return names.slice(0, Math.max(1, Math.min(800, Number(limit || 0) || 200)));
+  } catch {
+    return [];
+  }
+}
+
+async function execBackupsManifest(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const limit = Math.max(1, Math.min(800, Number(payload.limit || 200) || 200));
+  const roots = [
+    path.resolve(path.join(__dirname, '..', '_backup_auto')),
+    path.resolve(path.join(__dirname, '..', '_backup_auto_root'))
+  ];
+  const requestedRoot = String(payload.root || 'auto').trim().toLowerCase(); // auto|_backup_auto|_backup_auto_root
+
+  let rootUsed = null;
+  let dirs = [];
+  if (requestedRoot === '_backup_auto' || requestedRoot === 'backup_auto') {
+    rootUsed = roots[0];
+    dirs = _listBackupDirsUnder(rootUsed, { limit });
+  } else if (requestedRoot === '_backup_auto_root' || requestedRoot === 'backup_auto_root') {
+    rootUsed = roots[1];
+    dirs = _listBackupDirsUnder(rootUsed, { limit });
+  } else {
+    // auto: prefer _backup_auto se existir e tiver dirs; fallback para _backup_auto_root
+    const d1 = _listBackupDirsUnder(roots[0], { limit });
+    const d2 = _listBackupDirsUnder(roots[1], { limit });
+    if (d1 && d1.length) { rootUsed = roots[0]; dirs = d1; }
+    else { rootUsed = roots[1]; dirs = d2; }
+  }
+
+  const backups = [];
+  const errors = [];
+
+  for (const tag of dirs) {
+    const dir = path.join(rootUsed, tag);
+    const ff = _findBackupJsonFiles(dir);
+    if (!ff || ff.ok !== true) {
+      errors.push({ tag, dir, error: ff && ff.error ? String(ff.error) : 'backup_files_not_found', tried: ff && ff.tried ? ff.tried : null });
+      continue;
+    }
+    const stPerfis = _safeStatBestEffort(ff.perfisPath);
+    const stDesired = _safeStatBestEffort(ff.desiredPath);
+    const perfisBytes = stPerfis ? Number(stPerfis.size || 0) : null;
+    const desiredBytes = stDesired ? Number(stDesired.size || 0) : null;
+    const perfisMtimeMs = stPerfis ? Number(stPerfis.mtimeMs || 0) : null;
+    const desiredMtimeMs = stDesired ? Number(stDesired.mtimeMs || 0) : null;
+
+    // Counts são fundamentais para detectar wipe; payloads aqui são pequenos (~200KB), então parse é aceitável.
+    const perfisCount = _countPerfisBestEffort(ff.perfisPath);
+    const desiredCount = _countDesiredBestEffort(ff.desiredPath);
+
+    backups.push({
+      tag,
+      dir,
+      perfis: { path: ff.perfisPath, bytes: perfisBytes, mtimeMs: perfisMtimeMs, count: perfisCount },
+      desired: { path: ff.desiredPath, bytes: desiredBytes, mtimeMs: desiredMtimeMs, count: desiredCount }
+    });
+  }
+
+  // Heurística: detectar quedas bruscas (sem tomar ação; só evidência)
+  const drops = [];
+  for (let i = 1; i < backups.length; i++) {
+    const newer = backups[i - 1];
+    const older = backups[i];
+    const a = Number(newer?.perfis?.count || 0) || 0;
+    const b = Number(older?.perfis?.count || 0) || 0;
+    if (a > 0 && b > 0) {
+      const ratio = a / b;
+      if (ratio <= 0.20) { // caiu 80%+
+        drops.push({ fromTag: older.tag, toTag: newer.tag, fromCount: b, toCount: a, kind: 'perfis_count_drop' });
+      }
+    }
+    const ab = Number(newer?.perfis?.bytes || 0) || 0;
+    const bb = Number(older?.perfis?.bytes || 0) || 0;
+    if (ab > 0 && bb > 0) {
+      const ratioB = ab / bb;
+      if (ratioB <= 0.20) {
+        drops.push({ fromTag: older.tag, toTag: newer.tag, fromBytes: bb, toBytes: ab, kind: 'perfis_bytes_drop' });
+      }
+    }
+  }
+
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'backups_manifest',
+      rootUsed,
+      limit,
+      backupsCount: backups.length,
+      errorsCount: errors.length,
+      dropsCount: drops.length
+    });
+  } catch {}
+
+  return { ok: true, rootUsed, limit, backups, errors, drops };
+}
 function _mergePerfisByNome({ backupPerfisArr, currentPerfisArr }) {
   const backup = Array.isArray(backupPerfisArr) ? backupPerfisArr : [];
   const current = Array.isArray(currentPerfisArr) ? currentPerfisArr : [];
@@ -2120,6 +2249,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
       else if (c.type === 'backup_restore_probe') { ackDetails = await execBackupRestoreProbe(c); }
       else if (c.type === 'backup_restore_merge') { ackDetails = await execBackupRestoreMerge(c); }
+      else if (c.type === 'backups_manifest')     { ackDetails = await execBackupsManifest(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
