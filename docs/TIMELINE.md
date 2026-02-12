@@ -31,6 +31,23 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-12 — [CONV] P0: Disaster recovery RM2 — restore de perfis via backup (dry-run + apply atômico + rollback)
+
+- **O que**:
+  - Adicionados comandos CT no `conveniente` para **restaurar perfis** a partir de backup local do host:
+    - `backup_restore_probe` (valida backup + contagens + sha256)
+    - `backup_restore_merge` (`dry_run` + `apply` atômico)
+  - `apply` é protegido por `provision_lock` e salva rollback automático em `C:\conveniente\dados\_ops_audit\restore_<ts>_*.before.json`.
+- **Por quê**: RM2 teve `perfis.json` sobrescrito (caiu para 7 perfis); precisava recuperação urgente sem cópia manual e sem duplicar as 7 contas novas.
+- **Evidência**:
+  - Código: `C:\conveniente\scripts\dashboard.js` (handlers `execBackupRestoreProbe/execBackupRestoreMerge`)
+  - INC restore: `C:\conveniente\docs\inbox\done\INC-20260212-0240-01.md`
+  - INC investigação wipe: `C:\conveniente\docs\inbox\need_evidence\INC-20260212-0315-01.md`
+- **Reinícios**: RM2 (`conveniente`) — humano: `node index.js`.
+- **Rollback**:
+  - restaurar os arquivos “before” em `C:\conveniente\dados\_ops_audit\restore_<ts>_*.before.json` e reiniciar, **ou**
+  - `git revert` do commit do restore e reiniciar.
+
 #### 2026-02-11 — [CONV] P0/P1: “Virtus Offline/trabalhando=false em massa” e “reserved mas não cadastra” (fix raiz, sem remendos)
 
 - **O que**:

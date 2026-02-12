@@ -35,6 +35,8 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260203-2550-01 | P1 | done | deployed | passed | CT Chat: historico/paginacao (carregar antigas ao subir) | `done/INC-20260203-2550-01.md` |
 | INC-20260202-1600-01 | P0 | done | deployed | passed | Cidades/Grupos: contrato canÃ´nico + prioridade provisÃ£o (estoqueâ†’servidor) + migraÃ§Ã£o manual | `done/INC-20260202-1600-01.md` |
 | INC-20260207-1403-01 | P0 | done | deployed | passed | RM3: pós stock_provision, Virtus OFF em massa / volta parcial; fixes de resume e provisão | `done/INC-20260207-1403-01.md` |
+| INC-20260212-0240-01 | P0 | done | deployed | passed | RM2: restore de perfis via backup (merge seguro + dry-run + apply atômico) | `done/INC-20260212-0240-01.md` |
+| INC-20260212-0315-01 | P0 | need_evidence | not_deployed | not_run | RM2: “wipe”/sobrescrita de perfis (perfis.json caiu de ~100 para 7) — investigação forense | `need_evidence/INC-20260212-0315-01.md` |
 | INC-20260203-1800-01 | P0 | need_evidence | deployed_partial | not_run | RM3: `loginRequired=probe_failed` com navegador aparentemente OK (Virtus derrubado por blindagem) | `need_evidence/INC-20260203-1800-01.md` |
 | INC-20260203-2100-01 | P0 | done | deployed | passed | CT Sistema Interno: Resumo divergente (KPI usa ct_drivers, abas usam ct_driver_memberships) | `done/INC-20260203-2100-01.md` |
 | INC-20260203-2230-01 | P1 | done | deployed | passed | CT Sistema Interno: WhatsApp verde + menu (abrir/copiar) + registro â€œChamou no zapâ€ (Testes Encerrados + Chamar depois + Cadastro + ParticipaÃ§Ã£o) | `done/INC-20260203-2230-01.md` |
