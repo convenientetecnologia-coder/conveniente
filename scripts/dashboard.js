@@ -11,6 +11,7 @@ const fotos = require('./fotos.js'); // ADICIONADO
 const provisionLock = require('./provisionLock.js');
 const ramPolicy = require('./ramPolicy.js');
 const provisionAudit = require('./provisionAudit.js');
+const fileStore = require('./fileStore.js');
 const { readGroqConfig, readGroqConfigMeta, writeGroqConfig } = require('./groqConfig');
 
 const httpPort = parseInt(process.env.PORT || '8088', 10);
@@ -187,6 +188,283 @@ async function readAggregatedStatus() {
 
 // Helper para verificar se é imagem
 function isImage(name) { return /\.(jpe?g|png)$/i.test(String(name||'')); }
+
+// ===== Backup restore (enterprise) =====
+function _readJsonSafeSync(fp, fallback = null) {
+  try { return JSON.parse(fsSync.readFileSync(fp, 'utf8')); } catch { return fallback; }
+}
+function _sha256FileBestEffort(fp) {
+  try {
+    const crypto = require('crypto');
+    const buf = fsSync.readFileSync(fp);
+    return crypto.createHash('sha256').update(buf).digest('hex');
+  } catch { return null; }
+}
+function _resolveBackupDir(inputPath) {
+  const p = String(inputPath || '').trim();
+  if (!p) return { ok: false, error: 'missing_backupDir' };
+  const resolved = path.resolve(p);
+  const roots = [
+    path.resolve(path.join(__dirname, '..', '_backup_auto')),
+    path.resolve(path.join(__dirname, '..', '_backup_auto_root'))
+  ];
+  const okPrefix = roots.some(r => (resolved === r) || resolved.startsWith(r + path.sep));
+  if (!okPrefix) return { ok: false, error: 'backupDir_not_allowed', resolved, roots };
+  if (!fsSync.existsSync(resolved)) return { ok: false, error: 'backupDir_not_found', resolved };
+  return { ok: true, resolved, roots };
+}
+function _findBackupJsonFiles(backupDirResolved) {
+  const candidates = [
+    // backup root
+    { perfis: path.join(backupDirResolved, 'perfis.json'), desired: path.join(backupDirResolved, 'desired.json') },
+    // common layout: <backup>/dados/*.json
+    { perfis: path.join(backupDirResolved, 'dados', 'perfis.json'), desired: path.join(backupDirResolved, 'dados', 'desired.json') },
+  ];
+  for (const c of candidates) {
+    if (c.perfis && c.desired && fsSync.existsSync(c.perfis) && fsSync.existsSync(c.desired)) {
+      return { ok: true, perfisPath: c.perfis, desiredPath: c.desired };
+    }
+  }
+  // Partial info for diagnostics
+  const tried = candidates.flatMap(c => [c.perfis, c.desired]).filter(Boolean);
+  return { ok: false, error: 'backup_files_not_found', tried };
+}
+function _mergePerfisByNome({ backupPerfisArr, currentPerfisArr }) {
+  const backup = Array.isArray(backupPerfisArr) ? backupPerfisArr : [];
+  const current = Array.isArray(currentPerfisArr) ? currentPerfisArr : [];
+  const seen = new Set();
+  const duplicatesInBackup = [];
+  for (const p of backup) {
+    const n = p && p.nome ? String(p.nome) : '';
+    if (!n) continue;
+    if (seen.has(n)) duplicatesInBackup.push(n);
+    seen.add(n);
+  }
+  const merged = [];
+  const mergedSet = new Set();
+  for (const p of backup) {
+    const n = p && p.nome ? String(p.nome) : '';
+    if (!n) continue;
+    if (mergedSet.has(n)) continue; // de-dup backup
+    merged.push(p);
+    mergedSet.add(n);
+  }
+  const addedFromCurrent = [];
+  for (const p of current) {
+    const n = p && p.nome ? String(p.nome) : '';
+    if (!n) continue;
+    if (mergedSet.has(n)) continue;
+    merged.push(p);
+    mergedSet.add(n);
+    addedFromCurrent.push(n);
+  }
+  return { merged, addedFromCurrent, duplicatesInBackup: Array.from(new Set(duplicatesInBackup)) };
+}
+function _mergeDesiredKeepBackupPlusCurrentNew({ backupDesired, currentDesired, currentNamesSet }) {
+  const b = (backupDesired && typeof backupDesired === 'object') ? backupDesired : { perfis: {} };
+  const c = (currentDesired && typeof currentDesired === 'object') ? currentDesired : { perfis: {} };
+  const out = { ...b, perfis: { ...(b.perfis || {}) } };
+  const merged = [];
+  const keptFromCurrent = [];
+  const currentPerfis = (c && c.perfis && typeof c.perfis === 'object') ? c.perfis : {};
+  for (const nome of Object.keys(currentPerfis)) {
+    if (!currentNamesSet || !currentNamesSet.has(nome)) continue;
+    out.perfis[nome] = { ...(currentPerfis[nome] || {}) };
+    keptFromCurrent.push(nome);
+  }
+  return { desired: out, keptFromCurrent, merged };
+}
+function _listMissingProfileDirs(perfisArr, { cap = 80 } = {}) {
+  const missing = [];
+  for (const p of (Array.isArray(perfisArr) ? perfisArr : [])) {
+    const nome = p && p.nome ? String(p.nome) : '';
+    if (!nome) continue;
+    const dir = path.join(fileStore.perfisDir, nome);
+    if (!fsSync.existsSync(dir)) missing.push(nome);
+    if (missing.length >= cap) break;
+  }
+  return missing;
+}
+
+async function execBackupRestoreProbe(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const backupDir = String(payload.backupDir || '').trim();
+  const rr = _resolveBackupDir(backupDir);
+  if (!rr.ok) return { ok: false, error: rr.error, resolved: rr.resolved || null };
+
+  const ff = _findBackupJsonFiles(rr.resolved);
+  if (!ff.ok) return { ok: false, error: ff.error, resolved: rr.resolved, tried: ff.tried || [] };
+
+  const stPerfis = (() => { try { return fsSync.statSync(ff.perfisPath); } catch { return null; } })();
+  const stDesired = (() => { try { return fsSync.statSync(ff.desiredPath); } catch { return null; } })();
+
+  const backupPerfis = _readJsonSafeSync(ff.perfisPath, null);
+  const backupDesired = _readJsonSafeSync(ff.desiredPath, null);
+  const currentPerfis = _readJsonSafeSync(fileStore.perfisPath, []);
+  const currentDesired = _readJsonSafeSync(fileStore.desiredPath, { perfis: {} });
+
+  const backupPerfisCount = Array.isArray(backupPerfis) ? backupPerfis.length : null;
+  const backupDesiredCount = (backupDesired && backupDesired.perfis && typeof backupDesired.perfis === 'object') ? Object.keys(backupDesired.perfis).length : null;
+  const currentPerfisCount = Array.isArray(currentPerfis) ? currentPerfis.length : null;
+  const currentDesiredCount = (currentDesired && currentDesired.perfis && typeof currentDesired.perfis === 'object') ? Object.keys(currentDesired.perfis).length : null;
+
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'backup_restore_probe',
+      backupDir: rr.resolved,
+      backupPerfisCount,
+      backupDesiredCount,
+      currentPerfisCount,
+      currentDesiredCount
+    });
+  } catch {}
+
+  return {
+    ok: true,
+    backupDir: rr.resolved,
+    files: {
+      backupPerfis: { path: ff.perfisPath, bytes: stPerfis ? Number(stPerfis.size || 0) : null, sha256: _sha256FileBestEffort(ff.perfisPath) },
+      backupDesired: { path: ff.desiredPath, bytes: stDesired ? Number(stDesired.size || 0) : null, sha256: _sha256FileBestEffort(ff.desiredPath) }
+    },
+    counts: {
+      backupPerfisCount,
+      backupDesiredCount,
+      currentPerfisCount,
+      currentDesiredCount
+    }
+  };
+}
+
+async function execBackupRestoreMerge(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const backupDir = String(payload.backupDir || '').trim();
+  const mode = String(payload.mode || 'dry_run').trim().toLowerCase();
+  const force = (payload.force === true || payload.force === 1 || payload.force === '1' || String(payload.force || '').toLowerCase() === 'true');
+  const policy = String(payload.policy || 'keep_backup_desired_plus_current_new').trim().toLowerCase();
+
+  const rr = _resolveBackupDir(backupDir);
+  if (!rr.ok) return { ok: false, error: rr.error, resolved: rr.resolved || null };
+
+  const ff = _findBackupJsonFiles(rr.resolved);
+  if (!ff.ok) return { ok: false, error: ff.error, resolved: rr.resolved, tried: ff.tried || [] };
+
+  const backupPerfis = _readJsonSafeSync(ff.perfisPath, null);
+  const backupDesired = _readJsonSafeSync(ff.desiredPath, null);
+  if (!Array.isArray(backupPerfis)) return { ok: false, error: 'backup_perfis_invalid', resolved: rr.resolved };
+  if (!backupDesired || typeof backupDesired !== 'object') return { ok: false, error: 'backup_desired_invalid', resolved: rr.resolved };
+
+  const currentPerfis = _readJsonSafeSync(fileStore.perfisPath, []);
+  const currentDesired = _readJsonSafeSync(fileStore.desiredPath, { perfis: {} });
+
+  const mergedPerfisR = _mergePerfisByNome({ backupPerfisArr: backupPerfis, currentPerfisArr: currentPerfis });
+  const currentNamesSet = new Set(mergedPerfisR.addedFromCurrent || []);
+
+  let desiredMergeR = null;
+  if (policy === 'keep_backup_desired_plus_current_new' || policy === 'keep-backup-desired') {
+    desiredMergeR = _mergeDesiredKeepBackupPlusCurrentNew({ backupDesired, currentDesired, currentNamesSet });
+  } else {
+    return { ok: false, error: 'unknown_policy', policy };
+  }
+
+  const mergedPerfis = mergedPerfisR.merged;
+  const mergedDesired = desiredMergeR.desired;
+
+  const mergedPerfisCount = mergedPerfis.length;
+  const mergedDesiredCount = (mergedDesired && mergedDesired.perfis && typeof mergedDesired.perfis === 'object') ? Object.keys(mergedDesired.perfis).length : null;
+
+  // Sanidade: desired cobre TODOS perfis
+  const missingDesired = [];
+  try {
+    const dp = (mergedDesired && mergedDesired.perfis && typeof mergedDesired.perfis === 'object') ? mergedDesired.perfis : {};
+    for (const p of mergedPerfis) {
+      const nome = p && p.nome ? String(p.nome) : '';
+      if (!nome) continue;
+      if (!dp[nome]) missingDesired.push(nome);
+      if (missingDesired.length >= 50) break;
+    }
+  } catch {}
+
+  const missingProfileDirs = _listMissingProfileDirs(mergedPerfis, { cap: 80 });
+  const missingProfileDirsCount = missingProfileDirs.length;
+
+  const report = {
+    ok: true,
+    mode,
+    policy,
+    backupDir: rr.resolved,
+    counts: {
+      backupPerfisCount: backupPerfis.length,
+      currentPerfisCount: Array.isArray(currentPerfis) ? currentPerfis.length : null,
+      mergedPerfisCount,
+      backupDesiredCount: (backupDesired && backupDesired.perfis && typeof backupDesired.perfis === 'object') ? Object.keys(backupDesired.perfis).length : null,
+      currentDesiredCount: (currentDesired && currentDesired.perfis && typeof currentDesired.perfis === 'object') ? Object.keys(currentDesired.perfis).length : null,
+      mergedDesiredCount
+    },
+    merge: {
+      addedFromCurrentCount: (mergedPerfisR.addedFromCurrent || []).length,
+      addedFromCurrentSample: (mergedPerfisR.addedFromCurrent || []).slice(0, 25),
+      duplicatesInBackupCount: (mergedPerfisR.duplicatesInBackup || []).length,
+      duplicatesInBackupSample: (mergedPerfisR.duplicatesInBackup || []).slice(0, 25),
+      keptDesiredFromCurrentCount: (desiredMergeR.keptFromCurrent || []).length,
+      keptDesiredFromCurrentSample: (desiredMergeR.keptFromCurrent || []).slice(0, 25)
+    },
+    sanity: {
+      missingDesiredCount: missingDesired.length,
+      missingDesiredSample: missingDesired.slice(0, 25),
+      missingProfileDirsCount,
+      missingProfileDirsSample: missingProfileDirs.slice(0, 25)
+    }
+  };
+
+  // Gate: se faltam muitos diretórios de perfil, não aplicar sem force
+  if (mode === 'apply') {
+    const lockOwner = `backup_restore:${String(cmd && cmd.id || randId()).slice(0, 24)}`;
+    const lock = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 15 * 60 * 1000, meta: { op: 'backup_restore', mode: 'apply' } });
+    if (!lock || !lock.ok) {
+      try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_apply_denied_lock_busy', owner: lockOwner, error: lock && lock.error ? String(lock.error) : 'busy' }); } catch {}
+      return { ok: false, error: 'provision_lock_busy', lock: lock && lock.lock ? lock.lock : null };
+    }
+    try {
+      if (!force && missingProfileDirsCount > 5) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_apply_denied_missing_dirs', owner: lockOwner, missingProfileDirsCount }); } catch {}
+        return { ok: false, error: 'missing_profile_dirs', missingProfileDirsCount, sample: missingProfileDirs.slice(0, 25) };
+      }
+      if (!force && missingDesired.length > 0) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_apply_denied_missing_desired', owner: lockOwner, missingDesiredCount: missingDesired.length }); } catch {}
+        return { ok: false, error: 'missing_desired_entries', missingDesiredCount: missingDesired.length, sample: missingDesired.slice(0, 25) };
+      }
+
+      const ts = Date.now();
+      const auditDir = path.join(fileStore.dadosDir, '_ops_audit');
+      try { fsSync.mkdirSync(auditDir, { recursive: true }); } catch {}
+
+      // Backup arquivos atuais (rollback)
+      const beforePerfis = _readJsonSafeSync(fileStore.perfisPath, null);
+      const beforeDesired = _readJsonSafeSync(fileStore.desiredPath, null);
+      try { fsSync.writeFileSync(path.join(auditDir, `restore_${ts}_perfis.before.json`), JSON.stringify(beforePerfis, null, 2), 'utf8'); } catch {}
+      try { fsSync.writeFileSync(path.join(auditDir, `restore_${ts}_desired.before.json`), JSON.stringify(beforeDesired, null, 2), 'utf8'); } catch {}
+
+      try { provisionAudit.append({ ts, event: 'backup_restore_apply_begin', owner: lockOwner, backupDir: rr.resolved, mergedPerfisCount, mergedDesiredCount }); } catch {}
+
+      const okPerfis = fileStore.writeJsonAtomic(fileStore.perfisPath, mergedPerfis);
+      const okDesired = fileStore.writeJsonAtomic(fileStore.desiredPath, mergedDesired);
+      if (!okPerfis || !okDesired) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_apply_fail_write', owner: lockOwner, okPerfis: !!okPerfis, okDesired: !!okDesired }); } catch {}
+        return { ok: false, error: 'write_failed', okPerfis: !!okPerfis, okDesired: !!okDesired };
+      }
+
+      try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_apply_ok', owner: lockOwner, mergedPerfisCount, mergedDesiredCount }); } catch {}
+      return { ...report, applied: true, auditDir };
+    } finally {
+      try { provisionLock.release({ owner: lockOwner, force: true }); } catch {}
+    }
+  }
+
+  // dry_run
+  try { provisionAudit.append({ ts: Date.now(), event: 'backup_restore_dry_run', backupDir: rr.resolved, mergedPerfisCount, mergedDesiredCount }); } catch {}
+  return report;
+}
 
 function buildQuickSnapshot(status) {
   const perfis = Array.isArray(status && status.perfis) ? status.perfis : [];
@@ -1840,6 +2118,8 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'provision_unlock') { ackDetails = await execProvisionUnlock(c); }
       else if (c.type === 'stock_export_profiles') { ackDetails = await execStockExportProfiles(c); }
       else if (c.type === 'stock_push_account_update') { ackDetails = await execStockPushAccountUpdate(c); }
+      else if (c.type === 'backup_restore_probe') { ackDetails = await execBackupRestoreProbe(c); }
+      else if (c.type === 'backup_restore_merge') { ackDetails = await execBackupRestoreMerge(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
