@@ -1060,6 +1060,146 @@ async function execProfilesFsAudit(cmd) {
   };
 }
 
+// ===== NOVO: profiles_purge_dirs (purge seguro de lixo órfão) =====
+// Objetivo: remover lixo (dados/perfis/<nome> e Chrome User Data/Conveniente/<nome>) APENAS
+// quando o perfil NÃO está no perfis.json/desired.json.
+// - Suporta dryRun=1 (não apaga, só reporta).
+// - Não depende do CT; o CT fornece a lista (ex.: ctDeleted).
+async function execProfilesPurgeDirs(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const names0 = Array.isArray(payload.profileNames) ? payload.profileNames : (Array.isArray(payload.names) ? payload.names : []);
+  const list = names0.map(x => String(x || '').trim()).filter(Boolean);
+  const dryRun = (payload.dryRun === true || payload.dryRun === 1 || payload.dryRun === '1');
+  const maxItems = Math.max(20, Math.min(1200, Number(payload.maxItems || 600) || 600));
+  const nowMs = Date.now();
+
+  const safeExistsDir = (p) => { try { return !!(p && fsSync.existsSync(p) && fsSync.statSync(p).isDirectory()); } catch { return false; } };
+  const safeRmDir = (p) => { try { fsSync.rmSync(p, { recursive: true, force: true }); return { ok:true }; } catch (e) { return { ok:false, error: (e && e.message) || String(e) }; } };
+
+  const resolveChromeUserDataRoot = () => {
+    try {
+      if (process.platform === 'win32') {
+        const la = process.env.LOCALAPPDATA;
+        if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+        return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+      }
+      return path.join(os.homedir(), '.config', 'google-chrome');
+    } catch { return null; }
+  };
+  const chromeRoot = resolveChromeUserDataRoot();
+
+  const perfisArr = Array.isArray(fileStore.loadPerfisJson()) ? (fileStore.loadPerfisJson() || []) : [];
+  const perfisSet = new Set(perfisArr.map(p => p && p.nome ? String(p.nome) : '').filter(Boolean));
+  let desiredPerfis = {};
+  try {
+    const j = fileStore.readJsonSafe(fileStore.desiredPath, null);
+    desiredPerfis = (j && j.perfis && typeof j.perfis === 'object') ? j.perfis : {};
+  } catch { desiredPerfis = {}; }
+
+  const results = [];
+  for (const nome of list.slice(0, maxItems)) {
+    if (!nome || nome.toLowerCase() === 'system') {
+      results.push({ nome, ok:false, skipped:true, reason:'invalid_name' });
+      continue;
+    }
+    // Safety gate: nunca apagar algo que ainda está “vivo” no estado declarativo/runtime.
+    if (perfisSet.has(nome) || (desiredPerfis && desiredPerfis[nome])) {
+      results.push({ nome, ok:false, skipped:true, reason:'still_in_perfis_or_desired' });
+      continue;
+    }
+
+    const perfDir = path.join(fileStore.perfisDir, nome);
+    const udir = (chromeRoot && nome) ? path.join(chromeRoot, 'Conveniente', nome) : null;
+
+    const perfDirExists = safeExistsDir(perfDir);
+    const udirExists = udir ? safeExistsDir(udir) : false;
+
+    const item = {
+      nome,
+      ok: true,
+      dryRun,
+      perfDir,
+      perfDirExists,
+      userDataDir: udir,
+      userDataDirExists: udirExists,
+      deleted: { perfDir: false, userDataDir: false },
+      errors: []
+    };
+
+    if (!dryRun) {
+      // Best-effort: tentar matar processos do Chrome para este profile (evita "dir em uso").
+      if (udirExists) {
+        try {
+          const browserHelper = require('./browser.js');
+          try { if (browserHelper && browserHelper.killChromeProfileProcesses) browserHelper.killChromeProfileProcesses(udir); } catch {}
+          await sleep(500);
+        } catch {}
+      }
+
+      if (perfDirExists) {
+        const rr = safeRmDir(perfDir);
+        if (rr.ok) item.deleted.perfDir = true;
+        else { item.ok = false; item.errors.push({ target: 'perfisDir', error: rr.error }); }
+      }
+      if (udirExists && udir) {
+        const rr = safeRmDir(udir);
+        if (rr.ok) item.deleted.userDataDir = true;
+        else { item.ok = false; item.errors.push({ target: 'userDataDir', error: rr.error }); }
+      }
+    }
+
+    results.push(item);
+    await sleep(10);
+  }
+
+  const okCount = results.filter(r => r && r.ok === true).length;
+  const skippedCount = results.filter(r => r && r.skipped === true).length;
+  const failCount = results.length - okCount - skippedCount;
+
+  const outDir = path.join(__dirname, '..', 'dados', '_ops_audit');
+  try { fsSync.mkdirSync(outDir, { recursive: true }); } catch {}
+  const outPath = path.join(outDir, `profiles_purge_dirs_${nowMs}_${String(cmd && cmd.id || '').slice(0, 18) || 'cmd'}.json`);
+  try {
+    fsSync.writeFileSync(outPath, JSON.stringify({
+      ok: true,
+      hostNowMs: nowMs,
+      cmdId: cmd && cmd.id ? String(cmd.id) : null,
+      dryRun,
+      chromeRoot: chromeRoot || null,
+      requestedCount: list.length,
+      processedCount: results.length,
+      okCount,
+      skippedCount,
+      failCount,
+      results
+    }, null, 2), 'utf8');
+  } catch {}
+
+  // ACK compacto
+  const compact = results.slice(0, 250).map(r => ({
+    nome: r.nome,
+    ok: r.ok === true,
+    skipped: r.skipped === true,
+    reason: r.reason || null,
+    perfDirExists: r.perfDirExists,
+    userDataDirExists: r.userDataDirExists,
+    deleted: r.deleted || null,
+    errors: (r.errors && r.errors.length) ? r.errors.slice(0, 2) : []
+  }));
+
+  return {
+    ok: failCount === 0,
+    dryRun,
+    requestedCount: list.length,
+    processedCount: results.length,
+    okCount,
+    skippedCount,
+    failCount,
+    reportPath: outPath,
+    sample: compact
+  };
+}
+
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
 async function execLoginRemediate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -2449,6 +2589,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'backup_restore_merge') { ackDetails = await execBackupRestoreMerge(c); }
       else if (c.type === 'backups_manifest')     { ackDetails = await execBackupsManifest(c); }
       else if (c.type === 'profiles_fs_audit')    { ackDetails = await execProfilesFsAudit(c); }
+      else if (c.type === 'profiles_purge_dirs')  { ackDetails = await execProfilesPurgeDirs(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
