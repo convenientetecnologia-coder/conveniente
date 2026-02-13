@@ -1308,6 +1308,19 @@ async function execProfilesManifestProbe(cmd) {
       if (man && typeof man === 'object') {
         const cookiesArr = Array.isArray(man.cookies) ? man.cookies : [];
         const cookieNames = new Set(cookiesArr.map(c => c && c.name ? String(c.name) : '').filter(Boolean));
+        // cookie_fp (sha1) compatível com CT: sha1(`c_user=<...>;xs=<...>;datr=<...>`)
+        let cookieFp = null;
+        try {
+          if (cookiesArr.length) {
+            const crypto = require('crypto');
+            const sha1 = (s) => crypto.createHash('sha1').update(String(s || '')).digest('hex');
+            const byName = new Map(cookiesArr.map(c => [String(c && c.name || '').trim(), String(c && c.value || '')]));
+            const cUser = byName.get('c_user') || '';
+            const xs = byName.get('xs') || '';
+            const datr = byName.get('datr') || '';
+            if (cUser && xs) cookieFp = sha1(`c_user=${cUser};xs=${xs};datr=${datr}`);
+          }
+        } catch {}
         r.manifest = {
           nome: man.nome ? String(man.nome) : null,
           cidade: man.cidade ? String(man.cidade) : null,
@@ -1318,7 +1331,8 @@ async function execProfilesManifestProbe(cmd) {
           cookiesCount: cookiesArr.length,
           has_c_user: cookieNames.has('c_user'),
           has_xs: cookieNames.has('xs'),
-          has_datr: cookieNames.has('datr')
+          has_datr: cookieNames.has('datr'),
+          cookie_fp: cookieFp
         };
       } else {
         r.manifest = null;
@@ -1361,7 +1375,8 @@ async function execProfilesManifestProbe(cmd) {
       hasPassword: !!r.manifest.hasPassword,
       cookiesCount: Number(r.manifest.cookiesCount || 0) || 0,
       has_c_user: !!r.manifest.has_c_user,
-      has_xs: !!r.manifest.has_xs
+      has_xs: !!r.manifest.has_xs,
+      cookie_fp: r.manifest.cookie_fp || null
     } : null
   }));
 
