@@ -1394,7 +1394,7 @@ async function execProfilesManifestProbe(cmd) {
 // Regras:
 // - NÃO apaga nada.
 // - Só relinka se:
-//   - NÃO está em perfis.json e NÃO está em desired.json
+//   - NÃO está em perfis.json
 //   - userDataDir existe (chromeRoot/Conveniente/<nome>)
 //   - manifest.json existe e tem shape mínimo
 // - Não devolve cookies no ACK (somente counts/flags).
@@ -1435,8 +1435,8 @@ async function execProfilesRelinkOrphans(cmd) {
     if (!nome || nome.toLowerCase() === 'system') {
       item.skipped = true; item.reason = 'invalid_name'; results.push(item); continue;
     }
-    if (perfisSet.has(nome) || (desiredPerfis && desiredPerfis[nome])) {
-      item.skipped = true; item.reason = 'still_in_perfis_or_desired'; results.push(item); continue;
+    if (perfisSet.has(nome)) {
+      item.skipped = true; item.reason = 'still_in_perfis'; results.push(item); continue;
     }
     if (!chromeRoot) {
       item.skipped = true; item.reason = 'chrome_root_unavailable'; results.push(item); continue;
