@@ -190,7 +190,8 @@ module.exports = (app, workerClient, fileStore) => {
         cookies: cookiesArr,
         robeCooldownUntil: 0,
         configuredAt: null,
-        userDataDir // <- AGORA dentro do User Data do Chrome
+        userDataDir, // <- AGORA dentro do User Data do Chrome
+        createdAt: Date.now()
       };
 
       // Atualiza perfis.json (serializado e atômico; evita corrida em cluster)
@@ -202,6 +203,10 @@ module.exports = (app, workerClient, fileStore) => {
       if (!wr || wr.ok === false) {
         return res.json({ ok: false, error: (wr && wr.error) ? String(wr.error) : 'perfis_write_failed' });
       }
+
+      // Registro redundante militar (sem secrets): dados/perfis/<nome>/perfil.json
+      // Importante: este registro permite rebuild/forense caso perfis.json fique indisponível.
+      try { fileStore.writePerfilRecord && fileStore.writePerfilRecord(perfilObj, { caller: 'api_perfis_create' }); } catch {}
 
       // Grava manifest.json SOMENTE no userDataDir externo
       // Ultra enterprise: gravar credenciais no manifest para permitir fluxo automático

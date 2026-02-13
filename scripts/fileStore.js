@@ -30,12 +30,54 @@ function readJsonSafe(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
-/** Grava JSON atômico, sempre em tmp+rename */
+function _safeUnlink(p) { try { fs.unlinkSync(p); } catch {} }
+
+function _sha256Hex(s) {
+  try { return crypto.createHash('sha256').update(String(s || ''), 'utf8').digest('hex'); }
+  catch { return null; }
+}
+
+// Leitura com preferência por backups (evita fallback destrutivo em cenários de crash/IO).
+// - Se `file` falhar, tenta `file.old` e `file.bak_last`.
+// - `validate` (opcional) permite exigir shape (ex.: Array para perfis.json).
+function readJsonPrefer(file, fallback, { validate = null, retries = 4, delayMs = 25 } = {}) {
+  const primary = String(file || '');
+  const candidates = [primary, primary + '.old', primary + '.bak_last'];
+  let lastErr = null;
+  for (let attempt = 1; attempt <= Math.max(1, Number(retries) || 1); attempt++) {
+    for (const fp of candidates) {
+      try {
+        if (!fp) continue;
+        if (!fs.existsSync(fp)) continue;
+        const raw = fs.readFileSync(fp, 'utf8');
+        const val = JSON.parse(raw);
+        if (validate && !validate(val)) throw new Error('invalid_shape');
+        return { ok: true, value: val, source: fp, sha256: _sha256Hex(raw) };
+      } catch (e) {
+        lastErr = (e && e.message) ? String(e.message) : String(e);
+      }
+    }
+    // Pequeno backoff: tolerante a janela de troca/IO (processo legado fora do lock).
+    try { sleepMsSync(Math.max(0, Number(delayMs) || 0)); } catch {}
+  }
+  return { ok: false, value: fallback, source: null, sha256: null, error: lastErr || 'read_failed' };
+}
+
+function ledgerAppend(obj) {
+  try {
+    const p = path.join(dadosDir, 'perfis_ledger.jsonl');
+    fs.appendFileSync(p, JSON.stringify({ ts: Date.now(), ...(obj || {}) }) + '\n', 'utf8');
+  } catch {}
+}
+
+/** Grava JSON atômico (Windows-safe), sem janela "unlink → missing" */
 function writeJsonAtomic(file, obj) {
   try {
     const dir = path.dirname(file);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const tmp = file + '.tmp';
+    const old = file + '.old';
+    const bakLast = file + '.bak_last';
     const fd = fs.openSync(tmp, 'w');
     try {
       fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
@@ -43,28 +85,81 @@ function writeJsonAtomic(file, obj) {
     } finally {
       fs.closeSync(fd);
     }
-    try { fs.unlinkSync(file); } catch {}
-    try { fs.renameSync(tmp, file); }
-    catch {
-      fs.copyFileSync(tmp, file);
-      try { fs.unlinkSync(tmp); } catch {}
+    // Sempre manter um backup rápido do último "bom" (best-effort)
+    try { if (fs.existsSync(file)) fs.copyFileSync(file, bakLast); } catch {}
+    // Evita conflito no rename (Windows não sobrescreve destino)
+    _safeUnlink(old);
+    let movedToOld = false;
+    try {
+      if (fs.existsSync(file)) { fs.renameSync(file, old); movedToOld = true; }
+      try {
+        fs.renameSync(tmp, file);
+      } catch (e) {
+        // fallback: copy (ex.: cross-device). Ainda assim NÃO deixa buraco.
+        fs.copyFileSync(tmp, file);
+        _safeUnlink(tmp);
+      }
+      // Sucesso: limpa o antigo (já existe bak_last)
+      if (movedToOld) _safeUnlink(old);
+      return true;
+    } catch (e) {
+      // Rollback best-effort: se movemos o original para .old e falhamos, tentar restaurar.
+      try {
+        if (movedToOld && !fs.existsSync(file) && fs.existsSync(old)) {
+          fs.renameSync(old, file);
+        }
+      } catch {}
+      throw e;
     }
-    return true;
   } catch { return false; }
 }
 
 /** Garante desired.json (perfis) existe */
 function ensureDesired() {
-  try { if (!fs.existsSync(desiredPath)) writeJsonAtomic(desiredPath, { perfis: {} }); } catch {}
+  try {
+    if (fs.existsSync(desiredPath)) return;
+    const old = desiredPath + '.old';
+    const bak = desiredPath + '.bak_last';
+    try {
+      if (fs.existsSync(old)) { fs.copyFileSync(old, desiredPath); return; }
+      if (fs.existsSync(bak)) { fs.copyFileSync(bak, desiredPath); return; }
+    } catch {}
+    writeJsonAtomic(desiredPath, { perfis: {} });
+  } catch {}
 }
 /** Garante perfis.json existe */
 function ensurePerfisJson() {
-  try { if (!fs.existsSync(perfisPath)) writeJsonAtomic(perfisPath, []); } catch {}
+  try {
+    if (fs.existsSync(perfisPath)) return;
+    // Se houve crash durante troca, preferir restaurar de .old / .bak_last
+    const old = perfisPath + '.old';
+    const bak = perfisPath + '.bak_last';
+    try {
+      if (fs.existsSync(old)) { fs.copyFileSync(old, perfisPath); return; }
+      if (fs.existsSync(bak)) { fs.copyFileSync(bak, perfisPath); return; }
+    } catch {}
+    // Rebuild best-effort: se houver registros por perfil, reconstruir o array (sem segredos).
+    try {
+      const rebuilt = loadPerfisFromRecordsBestEffort(10_000);
+      if (rebuilt && rebuilt.length > 0) {
+        writeJsonAtomic(perfisPath, rebuilt);
+        ledgerAppend({ event: 'perfis_rebuild_from_records', ok: true, count: rebuilt.length });
+        return;
+      }
+    } catch {}
+    // Primeiro boot “zerado” (sem histórico): cria vazio (único caso permitido).
+    writeJsonAtomic(perfisPath, []);
+    ledgerAppend({ event: 'perfis_init_empty_created', ok: true });
+  } catch {}
 }
 
 //// PERFIS: carregar e salvar array principal ////
 function loadPerfisJson() {
-  return readJsonSafe(perfisPath, []);
+  const r = readJsonPrefer(perfisPath, [], { validate: Array.isArray });
+  if (r && r.ok && r.source && r.source !== perfisPath) {
+    ledgerAppend({ event: 'perfis_read_fallback_used', source: r.source });
+  }
+  return (r && r.ok) ? r.value : [];
 }
 function savePerfisJson(arr) {
   // Guardrail militar: nunca permitir gravar [] por acidente (wipe total).
@@ -167,9 +262,28 @@ async function withDesiredFileLockUpdate(mutator) {
   let fd = null;
   try {
     fd = await acquireDesiredLockFile();
-    const desired = readJsonSafe(desiredPath, { perfis: {} }) || { perfis: {} };
+    // CRÍTICO: desired.json não pode ser "zerado" por parse error.
+    // - Se o arquivo estiver ausente (primeiro boot), começamos do default.
+    // - Se existir mas estiver inválido, tentamos .old/.bak_last; se falhar, aborta a escrita.
+    let desired = null;
+    if (!fs.existsSync(desiredPath)) {
+      desired = { perfis: {} };
+    } else {
+      const r = readJsonPrefer(desiredPath, null, {
+        validate: (v) => !!v && typeof v === 'object' && !Array.isArray(v),
+        retries: 6,
+        delayMs: 35
+      });
+      if (!r || r.ok !== true) {
+        ledgerAppend({ event: 'desired_write_blocked_unreadable', ok: false, error: (r && r.error) ? String(r.error) : 'unreadable' });
+        throw new Error('desired_unreadable');
+      }
+      desired = r.value || { perfis: {} };
+    }
+    desired.perfis = desired.perfis || {};
     const next = await Promise.resolve(mutator(desired)) || desired;
-    writeJsonAtomic(desiredPath, next);
+    const okWrite = writeJsonAtomic(desiredPath, next);
+    if (!okWrite) throw new Error('desired_write_failed');
     return next;
   } finally {
     releaseDesiredLockFile(fd);
@@ -234,19 +348,110 @@ function withPerfisFileLockUpdate(mutator, meta = null) {
     }
     if (!ok) return { ok: false, error: 'perfis_lock_timeout' };
 
-    const cur = readJsonSafe(perfisPath, []);
-    const before = Array.isArray(cur) ? cur : [];
+    // CRÍTICO: nunca permitir que um erro de leitura/parse vire "[]".
+    // Se perfis.json estiver inválido/ausente, tentar fallback (.old/.bak_last). Se não houver, abortar write.
+    const r0 = readJsonPrefer(perfisPath, null, { validate: Array.isArray, retries: 6, delayMs: 35 });
+    if (!r0 || r0.ok !== true) {
+      ledgerAppend({ event: 'perfis_write_blocked_unreadable', ok: false, error: (r0 && r0.error) ? String(r0.error) : 'unreadable', meta: meta || null });
+      return { ok: false, error: 'perfis_unreadable' };
+    }
+    const before = r0.value;
     const beforeLen = before.length;
     const next = mutator ? (mutator(before) ?? before) : before;
     const arr = Array.isArray(next) ? next : before;
+    const afterLen = arr.length;
+
+    // Guardrails militares:
+    // (1) nunca gravar vazio por acidente
+    if (afterLen === 0 && String(process.env.PERFIS_ALLOW_EMPTY || '').trim() !== '1') {
+      ledgerAppend({ event: 'perfis_write_blocked_empty', ok: false, beforeLen, afterLen, meta: meta || null });
+      return { ok: false, error: 'perfis_guard_blocked_empty' };
+    }
+    // (2) bloquear "wipe para 1/2 perfis" quando antes era grande (sinal forte de fallback/IO)
+    if (beforeLen >= 10 && afterLen <= 2 && String(process.env.PERFIS_ALLOW_TINY_AFTER || '').trim() !== '1') {
+      ledgerAppend({ event: 'perfis_write_blocked_tiny_after', ok: false, beforeLen, afterLen, meta: meta || null });
+      return { ok: false, error: 'perfis_guard_blocked_tiny_after' };
+    }
 
     const wrote = writeJsonAtomic(perfisPath, arr);
     if (!wrote) return { ok: false, error: 'perfis_write_failed' };
-    return { ok: true, beforeLen, afterLen: arr.length };
+    ledgerAppend({
+      event: 'perfis_write_ok',
+      ok: true,
+      beforeLen,
+      afterLen,
+      beforeSha256: r0.sha256 || null,
+      afterSha256: _sha256Hex(JSON.stringify(arr)) || null,
+      meta: meta || null
+    });
+    return { ok: true, beforeLen, afterLen };
   } catch (e) {
     return { ok: false, error: (e && e.message) ? String(e.message) : String(e) };
   } finally {
     releasePerfisLockFile(fd);
+  }
+}
+
+// ===== Registro redundante por perfil (dados/perfis/<nome>/perfil.json) =====
+function loadPerfisFromRecordsBestEffort(limit = 5000) {
+  const base = perfisDir; // dados/perfis/<nome>/
+  const out = [];
+  try {
+    if (!fs.existsSync(base)) return out;
+    const entries = fs.readdirSync(base, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent || !ent.isDirectory()) continue;
+      const nome = String(ent.name || '').trim();
+      if (!nome) continue;
+      const fp = path.join(base, nome, 'perfil.json');
+      if (!fs.existsSync(fp)) continue;
+      const rec = readJsonSafe(fp, null);
+      if (!rec || !rec.nome || !rec.cidade || !rec.userDataDir) continue;
+      out.push({
+        nome: String(rec.nome),
+        cidade: String(rec.cidade),
+        uaPresetId: rec.uaPresetId || 'default',
+        uaString: rec.uaString,
+        uaCh: rec.uaCh || {},
+        fp: rec.fp || {},
+        cookies: [], // nunca reconstruir cookies via records
+        robeCooldownUntil: 0,
+        configuredAt: null,
+        userDataDir: String(rec.userDataDir),
+        label: rec.label || null
+      });
+      if (out.length >= limit) break;
+    }
+  } catch {}
+  return out;
+}
+
+function writePerfilRecord(perfilObj, { caller = 'unknown' } = {}) {
+  try {
+    const p = perfilObj && typeof perfilObj === 'object' ? perfilObj : null;
+    const nome = p && p.nome ? String(p.nome) : '';
+    if (!nome) return false;
+    const dir = path.join(perfisDir, nome);
+    try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const fp = path.join(dir, 'perfil.json');
+    const rec = {
+      nome,
+      cidade: p && p.cidade ? String(p.cidade) : null,
+      label: p && p.label ? String(p.label) : null,
+      userDataDir: p && p.userDataDir ? String(p.userDataDir) : null,
+      uaPresetId: p && p.uaPresetId ? String(p.uaPresetId) : 'default',
+      uaString: p && p.uaString ? String(p.uaString) : null,
+      uaCh: (p && p.uaCh && typeof p.uaCh === 'object') ? p.uaCh : {},
+      fp: (p && p.fp && typeof p.fp === 'object') ? p.fp : {},
+      createdAt: p && typeof p.createdAt === 'number' ? p.createdAt : Date.now(),
+      updatedAt: Date.now(),
+      caller: String(caller || '').slice(0, 120)
+    };
+    const ok = writeJsonAtomic(fp, rec);
+    ledgerAppend({ event: 'perfil_record_write', ok: !!ok, nome, caller: rec.caller });
+    return !!ok;
+  } catch {
+    return false;
   }
 }
 
@@ -708,4 +913,7 @@ module.exports = {
   withDesiredFileLockUpdate,
   removeDesired, // <<--------- NOVO EXPORT
   withPerfisFileLockUpdate,
+  // Redundância/forense:
+  writePerfilRecord,
+  loadPerfisFromRecordsBestEffort,
 };

@@ -18,8 +18,14 @@ function getManifestPath(nome) {
   const perfisPath = path.join(__dirname, '..', 'dados', 'perfis.json');
   const arr = readJsonSafe(perfisPath, []);
   const p = arr.find(x => x && x.nome === nome);
-  if (!p || !p.userDataDir) throw new Error('userDataDir não encontrado: ' + nome);
-  return path.join(p.userDataDir, 'manifest.json');
+  if (p && p.userDataDir) return path.join(p.userDataDir, 'manifest.json');
+  // Fallback militar: registro redundante por perfil (não depende do perfis.json).
+  try {
+    const recPath = path.join(__dirname, '..', 'dados', 'perfis', String(nome), 'perfil.json');
+    const rec = readJsonSafe(recPath, null);
+    if (rec && rec.userDataDir) return path.join(String(rec.userDataDir), 'manifest.json');
+  } catch {}
+  throw new Error('userDataDir não encontrado: ' + nome);
 }
 
 /** Leitura de JSON com fallback robusto. */
@@ -27,11 +33,13 @@ function readJsonSafe(file, fb) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fb; }
 }
 
-/** Escrita de JSON atômica, sempre com write + rename para segurança. */
+/** Escrita de JSON atômica (Windows-safe), sem janela "unlink → missing". */
 function writeJsonAtomic(file, obj) {
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const tmp = file + '.tmp';
+  const old = file + '.old';
+  const bakLast = file + '.bak_last';
   const fd = fs.openSync(tmp, 'w');
   try {
     fs.writeFileSync(fd, JSON.stringify(obj, null, 2), 'utf8');
@@ -39,9 +47,23 @@ function writeJsonAtomic(file, obj) {
   } finally {
     fs.closeSync(fd);
   }
-  try { fs.unlinkSync(file); } catch {}
-  try { fs.renameSync(tmp, file); }
-  catch { fs.copyFileSync(tmp, file); try { fs.unlinkSync(tmp);} catch {} }
+  try { if (fs.existsSync(file)) fs.copyFileSync(file, bakLast); } catch {}
+  try { fs.unlinkSync(old); } catch {}
+  let moved = false;
+  try {
+    if (fs.existsSync(file)) { fs.renameSync(file, old); moved = true; }
+    try { fs.renameSync(tmp, file); }
+    catch {
+      fs.copyFileSync(tmp, file);
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+    if (moved) { try { fs.unlinkSync(old); } catch {} }
+  } catch (e) {
+    try {
+      if (moved && !fs.existsSync(file) && fs.existsSync(old)) fs.renameSync(old, file);
+    } catch {}
+    throw e;
+  }
 }
 
 /** Lock atômico simples por perfil para serialização de IO/disco. */

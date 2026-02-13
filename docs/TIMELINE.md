@@ -31,6 +31,20 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-13 — [CONV] P0: blindagem anti-wipe de `perfis.json`/`desired.json` (anti-fallback + atomic write Windows-safe + registro redundante + ledger)
+
+- **O que**:
+  - `writeJsonAtomic()` agora faz swap Windows-safe **sem** janela `unlink → missing` (usa `file.old` + `file.bak_last` + rollback best-effort).
+  - `withPerfisFileLockUpdate()` bloqueia escrita se `perfis.json` estiver ilegível (nunca cai para `[]`) e adiciona guardrails contra “virar 1/2 perfis” quando antes era grande.
+  - Registro redundante por perfil: grava `C:\conveniente\dados\perfis\<nome>\perfil.json` (sem secrets) e `manifestStore` passou a conseguir resolver `manifest.json` via esse registro mesmo se `perfis.json` estiver ruim.
+  - Ledger append-only: `C:\conveniente\dados\perfis_ledger.jsonl` com eventos de escrita/guard/restore (forense).
+- **Por quê**: evidência forte de que os “wipes” (RM2/RM6) ocorreram ao redor de `stock_provision` e havia vetor destrutivo por fallback/IO; o sistema não pode mais “apagar silenciosamente”.
+- **Evidência**:
+  - Código: `C:\conveniente\scripts\fileStore.js`, `C:\conveniente\scripts\api_perfis.js`, `C:\conveniente\scripts\manifestStore.js`
+  - INCs: `C:\conveniente\docs\inbox\in_progress\INC-20260212-0315-01.md` e `C:\conveniente\docs\inbox\need_evidence\INC-20260213-1200-01.md`
+- **Reinícios**: `conveniente` (hosts) — humano: `node index.js` após `self_update`.
+- **Rollback**: `git revert` do commit desta blindagem e reiniciar `conveniente`.
+
 #### 2026-02-12 — [CONV] P0: Disaster recovery RM2 — restore de perfis via backup (dry-run + apply atômico + rollback)
 
 - **O que**:
@@ -42,7 +56,7 @@ Formato canÃ´nico (copiar/colar):
 - **Evidência**:
   - Código: `C:\conveniente\scripts\dashboard.js` (handlers `execBackupRestoreProbe/execBackupRestoreMerge`)
   - INC restore: `C:\conveniente\docs\inbox\done\INC-20260212-0240-01.md`
-  - INC investigação wipe: `C:\conveniente\docs\inbox\need_evidence\INC-20260212-0315-01.md`
+  - INC investigação wipe: `C:\conveniente\docs\inbox\in_progress\INC-20260212-0315-01.md`
 - **Reinícios**: RM2 (`conveniente`) — humano: `node index.js`.
 - **Rollback**:
   - restaurar os arquivos “before” em `C:\conveniente\dados\_ops_audit\restore_<ts>_*.before.json` e reiniciar, **ou**
