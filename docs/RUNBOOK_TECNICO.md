@@ -108,6 +108,7 @@ O GPT **não** consegue reiniciar os seus processos remotos.
 #### Mudou `sitechatbot/index.js` (CT)
 
 - **Reiniciar (humano)**: no host do CT, parar o processo e subir de novo com `node index.js`.
+- **Nota (UI/cache)**: se a mudança foi em `sitechatbot/convenientetecnologia/public/` (ex.: `ct.js`) e após restart a tela parecer “antiga”, fazer **hard refresh** no browser (`Ctrl+F5`) ou abrir em janela anônima para eliminar “asset fantasma”.
 - **Validar**:
   - enfileirar um comando simples + confirmar ACK
   - `sitechatbot/dados/commands.log` registrando `ack`
@@ -173,6 +174,45 @@ Validação:
 - endpoint/status:
 - logs:
 ```
+
+---
+
+### Playbook (CANÔNICO) — Auditoria CT “Em uso” vs perfis reais do servidor (por host)
+
+Objetivo: repetir de forma atômica e auditável (um host por vez) a conferência que garante:
+
+- CT (`ct_fb_stock_accounts` `assigned`) bate com o servidor (perfis reais),
+- não há duplicatas, cross-host, fantasmas ou sobras sem decisão explícita,
+- exclusão manual no servidor reflete no CT (vai para Excluídas).
+
+**Fonte (baseline validada)**:
+- RM1: `C:\conveniente\docs\inbox\done\INC-20260212-0605-01.md`
+
+Procedimento (ordem):
+
+1) **Export do servidor (via CT)**
+   - Enfileirar `stock_export_profiles` para o `hostId` alvo.
+   - Evidência obrigatória: `C:\sitechatbot\dados\logs\<hostId>\ack_<cmdId>.json`
+
+2) **Auditoria offline no CT**
+   - Rodar auditoria comparando:
+     - CT `assigned` (estoque) vs perfis do export do servidor (preferir correlação por `cookie_fp`).
+   - Script (CT): `C:\sitechatbot\scripts\auditHostAssigned.js`
+
+3) **Correções (somente com evidência)**
+   - Duplicado no servidor: usar `delete_perfis` no perfil duplicado (guardar ACK).
+   - Cross-host: decidir “onde fica”, corrigir CT e deletar duplicata no host errado (um por vez).
+   - Fantasma: reprovisionar 1 por vez **ou** arquivar em Excluídas (motivo explícito).
+
+4) **Teste real de exclusão manual (opcional, mas recomendado antes de repetir em massa)**
+   - Humano exclui manualmente 1–2 perfis.
+   - GPT confirma:
+     - export pós-exclusão (perfil não existe; contagem caiu),
+     - CT: conta saiu de `assigned` e foi para `archived` (Excluídas),
+     - inventário `ct_fb_stock_server_profiles` marcou `deleted_on_server_at/reason`.
+
+Reinícios:
+- normalmente **nenhum** (é operação via CT + ação manual do humano no host).
 
 ---
 

@@ -48,6 +48,19 @@ Formato canÃ´nico (copiar/colar):
   - restaurar os arquivos “before” em `C:\conveniente\dados\_ops_audit\restore_<ts>_*.before.json` e reiniciar, **ou**
   - `git revert` do commit do restore e reiniciar.
 
+#### 2026-02-12 — [CROSS][OPS][DOCS] RM1: auditoria CT vs servidor + teste real de exclusão manual (CT ⇄ servidor alinhados)
+
+- **O que**:
+  - Executada auditoria “CT em uso vs perfis reais do servidor” no **ROBE MÃE 1** e saneamento operacional.
+  - Remoção de perfis inválidos no servidor e arquivamento correspondente no CT (Excluídas), com evidência por ACK.
+  - Teste real: humano excluiu manualmente 2 perfis no servidor e o CT refletiu corretamente (saiu de Em uso, foi pra Excluídas).
+- **Por quê**: estabelecer um playbook canônico e provar que o pipeline de exclusão/alinhamento está correto antes de repetir em RM2–RM7.
+- **Evidência**:
+  - INC fechado: `C:\conveniente\docs\inbox\done\INC-20260212-0605-01.md`
+  - ACKs (CT): `C:\sitechatbot\dados\logs\084c8fff-c508-47bd-a33e-3ab34aeb1e3d\ack_*.json`
+- **Reinícios**: nenhum
+- **Rollback**: n/a (ação operacional; rollback seria reprovisionar sob decisão humana)
+
 #### 2026-02-11 — [CONV] P0/P1: “Virtus Offline/trabalhando=false em massa” e “reserved mas não cadastra” (fix raiz, sem remendos)
 
 - **O que**:
