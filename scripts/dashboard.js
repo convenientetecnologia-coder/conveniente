@@ -1200,6 +1200,180 @@ async function execProfilesPurgeDirs(cmd) {
   };
 }
 
+// ===== NOVO: profiles_manifest_probe (probe forense sanitizado) =====
+// Objetivo: extrair evidência máxima SEM vazar secrets.
+// - NUNCA retorna cookie values, login, password.
+// - Retorna apenas flags/contagens/metadados + stockAccountId (se existir).
+async function execProfilesManifestProbe(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const names0 = Array.isArray(payload.profileNames) ? payload.profileNames : (Array.isArray(payload.names) ? payload.names : []);
+  const list = names0.map(x => String(x || '').trim()).filter(Boolean);
+  const maxItems = Math.max(10, Math.min(800, Number(payload.maxItems || 200) || 200));
+  const nowMs = Date.now();
+
+  const safeExists = (p) => { try { return !!(p && fsSync.existsSync(p)); } catch { return false; } };
+  const safeStat = (p) => { try { return fsSync.statSync(p); } catch { return null; } };
+  const safeReadJson = (p) => { try { return JSON.parse(fsSync.readFileSync(p, 'utf8')); } catch { return null; } };
+
+  const resolveChromeUserDataRoot = () => {
+    try {
+      if (process.platform === 'win32') {
+        const la = process.env.LOCALAPPDATA;
+        if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+        return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+      }
+      return path.join(os.homedir(), '.config', 'google-chrome');
+    } catch { return null; }
+  };
+  const chromeRoot = resolveChromeUserDataRoot();
+
+  const perfisArr = Array.isArray(fileStore.loadPerfisJson()) ? (fileStore.loadPerfisJson() || []) : [];
+  const perfisSet = new Set(perfisArr.map(p => p && p.nome ? String(p.nome) : '').filter(Boolean));
+  let desiredPerfis = {};
+  try {
+    const j = fileStore.readJsonSafe(fileStore.desiredPath, null);
+    desiredPerfis = (j && j.perfis && typeof j.perfis === 'object') ? j.perfis : {};
+  } catch { desiredPerfis = {}; }
+
+  const results = [];
+  for (const nome of list.slice(0, maxItems)) {
+    if (!nome) continue;
+    const r = { nome };
+    // status runtime (não tocar)
+    r.inPerfisJson = perfisSet.has(nome);
+    r.inDesired = !!(desiredPerfis && desiredPerfis[nome]);
+
+    // dados/perfis/<nome>
+    const perfDir = path.join(fileStore.perfisDir, nome);
+    r.perfDirExists = safeExists(perfDir);
+    const perfilRecPath = path.join(perfDir, 'perfil.json');
+    const issuesPath = path.join(perfDir, 'issues.json');
+    r.perfilRecordExists = safeExists(perfilRecPath);
+    r.issuesExists = safeExists(issuesPath);
+
+    // perfil.json (sanitizado)
+    if (r.perfilRecordExists) {
+      const rec = safeReadJson(perfilRecPath);
+      const st = safeStat(perfilRecPath);
+      r.perfilRecord = rec && typeof rec === 'object' ? {
+        nome: rec.nome ? String(rec.nome) : null,
+        cidade: rec.cidade ? String(rec.cidade) : null,
+        label: rec.label ? String(rec.label) : null,
+        uaPresetId: rec.uaPresetId ? String(rec.uaPresetId) : null,
+        userDataDirPresent: !!rec.userDataDir,
+        stockAccountId: (rec.stockAccountId || rec.stock_account_id) ? (Number(rec.stockAccountId || rec.stock_account_id) || null) : null,
+        createdAt: (typeof rec.createdAt === 'number') ? rec.createdAt : null,
+        updatedAt: (typeof rec.updatedAt === 'number') ? rec.updatedAt : null
+      } : null;
+      r.perfilRecordMeta = {
+        bytes: Number(st && st.size || 0) || 0,
+        mtimeMs: Number(st && st.mtimeMs || 0) || 0
+      };
+    }
+
+    // issues.json (apenas últimos N tipos/mensagens truncadas)
+    if (r.issuesExists) {
+      const arr = safeReadJson(issuesPath);
+      const st = safeStat(issuesPath);
+      const listIssues = Array.isArray(arr) ? arr : [];
+      const tail = listIssues.slice(Math.max(0, listIssues.length - 12)).map(it => ({
+        ts: (it && typeof it.ts === 'number') ? it.ts : null,
+        type: it && it.type ? String(it.type).slice(0, 80) : null,
+        message: it && it.message ? String(it.message).slice(0, 140) : null
+      }));
+      r.issuesMeta = {
+        bytes: Number(st && st.size || 0) || 0,
+        mtimeMs: Number(st && st.mtimeMs || 0) || 0,
+        count: listIssues.length
+      };
+      r.issuesTail = tail;
+      // sinal de delete manual (evidência)
+      r.hasDeleteIssue = tail.some(x => x && x.type && String(x.type).includes('admin_delete_perfil'));
+    }
+
+    // manifest.json no User Data (padrão) — SANITIZADO
+    const udir = (chromeRoot && nome) ? path.join(chromeRoot, 'Conveniente', nome) : null;
+    r.userDataDir = udir;
+    r.userDataDirExists = udir ? safeExists(udir) : null;
+    const manPath = udir ? path.join(udir, 'manifest.json') : null;
+    r.manifestPath = manPath;
+    r.manifestExists = manPath ? safeExists(manPath) : null;
+    if (r.manifestExists) {
+      const st = safeStat(manPath);
+      const man = safeReadJson(manPath);
+      r.manifestMeta = {
+        bytes: Number(st && st.size || 0) || 0,
+        mtimeMs: Number(st && st.mtimeMs || 0) || 0
+      };
+      if (man && typeof man === 'object') {
+        const cookiesArr = Array.isArray(man.cookies) ? man.cookies : [];
+        const cookieNames = new Set(cookiesArr.map(c => c && c.name ? String(c.name) : '').filter(Boolean));
+        r.manifest = {
+          nome: man.nome ? String(man.nome) : null,
+          cidade: man.cidade ? String(man.cidade) : null,
+          label: man.label ? String(man.label) : null,
+          stockAccountId: (man.stockAccountId || man.stock_account_id) ? (Number(man.stockAccountId || man.stock_account_id) || null) : null,
+          hasLogin: typeof man.login === 'string' && man.login.length > 0,
+          hasPassword: typeof man.password === 'string' && man.password.length > 0,
+          cookiesCount: cookiesArr.length,
+          has_c_user: cookieNames.has('c_user'),
+          has_xs: cookieNames.has('xs'),
+          has_datr: cookieNames.has('datr')
+        };
+      } else {
+        r.manifest = null;
+      }
+    }
+
+    results.push(r);
+    await sleep(5);
+  }
+
+  const outDir = path.join(__dirname, '..', 'dados', '_ops_audit');
+  try { fsSync.mkdirSync(outDir, { recursive: true }); } catch {}
+  const outPath = path.join(outDir, `profiles_manifest_probe_${nowMs}_${String(cmd && cmd.id || '').slice(0, 18) || 'cmd'}.json`);
+  try {
+    fsSync.writeFileSync(outPath, JSON.stringify({
+      ok: true,
+      hostNowMs: nowMs,
+      cmdId: cmd && cmd.id ? String(cmd.id) : null,
+      chromeRoot: chromeRoot || null,
+      requestedCount: list.length,
+      processedCount: results.length,
+      results
+    }, null, 2), 'utf8');
+  } catch {}
+
+  // ACK compacto (sem dados sensíveis)
+  const sample = results.slice(0, 80).map(r => ({
+    nome: r.nome,
+    inPerfisJson: r.inPerfisJson,
+    inDesired: r.inDesired,
+    perfDirExists: r.perfDirExists,
+    perfilRecordExists: r.perfilRecordExists,
+    issuesExists: r.issuesExists,
+    hasDeleteIssue: r.hasDeleteIssue || false,
+    userDataDirExists: r.userDataDirExists,
+    manifestExists: r.manifestExists,
+    manifest: r.manifest ? {
+      stockAccountId: r.manifest.stockAccountId || null,
+      hasLogin: !!r.manifest.hasLogin,
+      hasPassword: !!r.manifest.hasPassword,
+      cookiesCount: Number(r.manifest.cookiesCount || 0) || 0,
+      has_c_user: !!r.manifest.has_c_user,
+      has_xs: !!r.manifest.has_xs
+    } : null
+  }));
+
+  return {
+    ok: true,
+    requestedCount: list.length,
+    processedCount: results.length,
+    reportPath: outPath,
+    sample
+  };
+}
+
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
 async function execLoginRemediate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -2590,6 +2764,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'backups_manifest')     { ackDetails = await execBackupsManifest(c); }
       else if (c.type === 'profiles_fs_audit')    { ackDetails = await execProfilesFsAudit(c); }
       else if (c.type === 'profiles_purge_dirs')  { ackDetails = await execProfilesPurgeDirs(c); }
+      else if (c.type === 'profiles_manifest_probe') { ackDetails = await execProfilesManifestProbe(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
