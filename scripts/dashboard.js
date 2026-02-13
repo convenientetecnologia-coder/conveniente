@@ -873,7 +873,7 @@ async function execProfilesCleanup(cmd) {
 // ===== NOVO: profiles_fs_audit (auditoria perfis.json vs dados/perfis vs userDataDir) =====
 // Objetivo: alinhar “verdade” sem risco de ressuscitar legado.
 // - NÃO deleta nada.
-// - Gera relatório em dados/_ops_audit e devolve apenas summary + path.
+// - Gera relatório em dados/_ops_audit e devolve summary + listas limitadas (via ACK).
 async function execProfilesFsAudit(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const cutoffDays = Math.max(0, Math.min(365, Number(payload.cutoffDays || 12) || 12));
@@ -995,7 +995,33 @@ async function execProfilesFsAudit(cmd) {
   };
   try { fsSync.writeFileSync(outPath, JSON.stringify(report, null, 2), 'utf8'); } catch {}
 
-  return { ok: true, summary, reportPath: outPath };
+  // Importante: devolvemos listas limitadas no ACK para o CT enxergar sem depender de fetch de arquivo.
+  // (o arquivo completo continua salvo em _ops_audit para auditoria local / coleta via logs no futuro)
+  const compact = (arr) => {
+    const xs = Array.isArray(arr) ? arr : [];
+    return xs.slice(0, Math.min(maxItems, 300)).map(x => {
+      if (!x || typeof x !== 'object') return x;
+      return {
+        nome: x.nome,
+        lastTouchMs: x.lastTouchMs,
+        olderThanCutoff: x.olderThanCutoff,
+        userDataDirExists: x.userDataDirExists,
+        manifestExists: x.manifestExists,
+        inDesired: x.inDesired
+      };
+    });
+  };
+  return {
+    ok: true,
+    summary,
+    reportPath: outPath,
+    lists: includeLists ? {
+      missingDirForActive: missingDirForActive.slice(0, Math.min(maxItems, 300)),
+      orphanDirsOlder: compact(orphanDirsOlder),
+      orphanDirsRecent: compact(orphanDirsRecent),
+      recoveryCandidates: compact(recoveryCandidates)
+    } : null
+  };
 }
 
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
