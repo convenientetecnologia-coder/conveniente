@@ -138,15 +138,21 @@ function ensurePerfisJson() {
       if (fs.existsSync(old)) { fs.copyFileSync(old, perfisPath); return; }
       if (fs.existsSync(bak)) { fs.copyFileSync(bak, perfisPath); return; }
     } catch {}
-    // Rebuild best-effort: se houver registros por perfil, reconstruir o array (sem segredos).
-    try {
-      const rebuilt = loadPerfisFromRecordsBestEffort(10_000);
-      if (rebuilt && rebuilt.length > 0) {
-        writeJsonAtomic(perfisPath, rebuilt);
-        ledgerAppend({ event: 'perfis_rebuild_from_records', ok: true, count: rebuilt.length });
-        return;
-      }
-    } catch {}
+    // REBUILD é poderoso, mas pode ressuscitar legado (ex.: pastas antigas em dados/perfis).
+    // Por padrão, DESLIGADO. Só habilita com flag explícita.
+    if (String(process.env.PERFIS_ALLOW_REBUILD_FROM_RECORDS || '').trim() === '1') {
+      // Rebuild best-effort: se houver registros por perfil, reconstruir o array (sem segredos).
+      try {
+        const rebuilt = loadPerfisFromRecordsBestEffort(10_000);
+        if (rebuilt && rebuilt.length > 0) {
+          writeJsonAtomic(perfisPath, rebuilt);
+          ledgerAppend({ event: 'perfis_rebuild_from_records', ok: true, count: rebuilt.length });
+          return;
+        }
+      } catch {}
+    } else {
+      ledgerAppend({ event: 'perfis_rebuild_skipped_flag_off', ok: true });
+    }
     // Primeiro boot “zerado” (sem histórico): cria vazio (único caso permitido).
     writeJsonAtomic(perfisPath, []);
     ledgerAppend({ event: 'perfis_init_empty_created', ok: true });
