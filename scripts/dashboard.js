@@ -887,6 +887,24 @@ async function execProfilesFsAudit(cmd) {
   const safeReadJson = (p) => {
     try { return JSON.parse(fsSync.readFileSync(p, 'utf8')); } catch { return null; }
   };
+  const resolveChromeUserDataRoot = () => {
+    try {
+      if (process.platform === 'win32') {
+        const la = process.env.LOCALAPPDATA;
+        if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+        // fallback defensivo
+        return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+      }
+      return path.join(os.homedir(), '.config', 'google-chrome');
+    } catch { return null; }
+  };
+  const chromeRoot = resolveChromeUserDataRoot();
+  const guessUserDataDirFor = (nome) => {
+    try {
+      if (!chromeRoot || !nome) return null;
+      return path.join(chromeRoot, 'Conveniente', String(nome));
+    } catch { return null; }
+  };
   const readDesiredBestEffort = () => {
     // audit-only: se estiver inválido, devolve null (não tenta corrigir aqui)
     try {
@@ -923,10 +941,17 @@ async function execProfilesFsAudit(cmd) {
         const manPath = recUserDataDir ? path.join(recUserDataDir, 'manifest.json') : null;
         const manStat = manPath && safeExists(manPath) ? safeStat(manPath) : null;
 
+        // Heurística militar: mesmo sem record, o padrão é chromeRoot/Conveniente/<nome>
+        const guessUserDataDir = guessUserDataDirFor(nome);
+        const guessUserDataDirExists = guessUserDataDir ? safeExists(guessUserDataDir) : null;
+        const guessManPath = guessUserDataDir ? path.join(guessUserDataDir, 'manifest.json') : null;
+        const guessManStat = (guessManPath && safeExists(guessManPath)) ? safeStat(guessManPath) : null;
+
         const lastTouchMs = Math.max(
           Number(st && st.mtimeMs || 0) || 0,
           Number(recOk && rec.updatedAt || 0) || 0,
-          Number(manStat && manStat.mtimeMs || 0) || 0
+          Number(manStat && manStat.mtimeMs || 0) || 0,
+          Number(guessManStat && guessManStat.mtimeMs || 0) || 0
         );
 
         dirs.push({
@@ -941,6 +966,10 @@ async function execProfilesFsAudit(cmd) {
           userDataDirExists: recUserDataDir ? safeExists(recUserDataDir) : null,
           manifestExists: manPath ? safeExists(manPath) : null,
           manifestMtimeMs: Number(manStat && manStat.mtimeMs || 0) || 0,
+          guessUserDataDir,
+          guessUserDataDirExists,
+          guessManifestExists: guessManPath ? safeExists(guessManPath) : null,
+          guessManifestMtimeMs: Number(guessManStat && guessManStat.mtimeMs || 0) || 0,
           lastTouchMs,
           olderThanCutoff: lastTouchMs > 0 ? (lastTouchMs < cutoffMs) : null
         });
@@ -958,7 +987,11 @@ async function execProfilesFsAudit(cmd) {
 
   // Candidatos para “recovery”: existe pasta mas não está no perfis.json e é recente (janela dos 12 dias)
   const recoveryCandidates = orphanDirsRecent
-    .filter(d => d.hasPerfilRecord && d.perfilRecordOk && d.userDataDir && d.userDataDirExists);
+    .filter(d => {
+      if (d.hasPerfilRecord && d.perfilRecordOk && d.userDataDir && d.userDataDirExists) return true;
+      if (d.guessUserDataDirExists === true && d.guessManifestExists === true) return true;
+      return false;
+    });
 
   const summary = {
     nowMs,
@@ -971,7 +1004,8 @@ async function execProfilesFsAudit(cmd) {
     orphanDirsCount: orphanDirs.length,
     orphanDirsOlderCount: orphanDirsOlder.length,
     orphanDirsRecentCount: orphanDirsRecent.length,
-    recoveryCandidatesCount: recoveryCandidates.length
+    recoveryCandidatesCount: recoveryCandidates.length,
+    chromeRoot: chromeRoot || null
   };
 
   // Persistir relatório
@@ -1007,6 +1041,8 @@ async function execProfilesFsAudit(cmd) {
         olderThanCutoff: x.olderThanCutoff,
         userDataDirExists: x.userDataDirExists,
         manifestExists: x.manifestExists,
+        guessUserDataDirExists: x.guessUserDataDirExists,
+        guessManifestExists: x.guessManifestExists,
         inDesired: x.inDesired
       };
     });
