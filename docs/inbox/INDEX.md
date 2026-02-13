@@ -39,7 +39,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260212-0315-01 | P0 | in_progress | not_deployed | not_run | RM2: “wipe”/sobrescrita de perfis (perfis.json caiu de ~100 para 7) — investigação forense | `in_progress/INC-20260212-0315-01.md` |
 | INC-20260213-1200-01 | P0 | need_evidence | not_deployed | not_run | RM6: “wipe”/apagamento de perfis (perfis.json) — investigação forense | `need_evidence/INC-20260213-1200-01.md` |
 | INC-20260212-0605-01 | P0 | done | operational_fix | passed | RM1: auditoria CT vs servidor (alinhamento + teste de exclusão manual) | `done/INC-20260212-0605-01.md` |
-| INC-20260212-0610-01 | P0 | need_evidence | not_deployed | not_run | RM2: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0610-01.md` |
+| INC-20260212-0610-01 | P0 | in_progress | not_deployed | not_run | RM2: auditoria CT vs servidor (mesmo playbook do RM1) | `in_progress/INC-20260212-0610-01.md` |
 | INC-20260212-0615-01 | P0 | need_evidence | not_deployed | not_run | RM3: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0615-01.md` |
 | INC-20260212-0620-01 | P0 | need_evidence | not_deployed | not_run | RM4: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0620-01.md` |
 | INC-20260212-0625-01 | P0 | need_evidence | not_deployed | not_run | RM5: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0625-01.md` |
