@@ -943,8 +943,41 @@ module.exports = (app, workerClient, fileStore) => {
       // Mesmo assim, escrevemos tombstone para impedir ressuscitar via recovery/rebuild de userDataDir.
       try { assertPerfilExists(fileStore, nome); } catch (e) {
         logger.warn('Tentativa de delete perfil inexistente (idempotente)', { nome, error: e && e.message });
+        // IMPORTANTE (ops): mesmo sem registro em perfis.json, ainda podemos ter sobras a limpar:
+        // - desired.perfis[nome]
+        // - dados/perfis/<nome>
+        // - Chrome User Data/Conveniente/<nome> (best-effort)
+        // Isso evita “lixo” persistente e desbloqueia purge seguro posteriormente.
+        const cleanup = { desiredRemoved: false, perfDirRemoved: false, userDataDirRemoved: false };
         try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'delete_missing_idempotent', by: String(op || '').slice(0, 120), stage: 'already_missing' }); } catch {}
-        return res.json({ ok: true, alreadyDeleted: true, nome });
+        try {
+          // 1) desired: remover completamente (se existir)
+          try { await fileStore.removeDesired(nome); cleanup.desiredRemoved = true; } catch {}
+          // 2) dados/perfis/<nome>
+          try {
+            const dir = path.join(fileStore.perfisDir, nome);
+            if (dir && fileStore.existsDir && fileStore.existsDir(dir)) {
+              fileStore.rimrafSync(dir);
+              cleanup.perfDirRemoved = true;
+            }
+          } catch {}
+          // 3) Chrome User Data/Conveniente/<nome> (best-effort)
+          try {
+            const la = process.env.LOCALAPPDATA;
+            const chromeRoot = la
+              ? path.join(la, 'Google', 'Chrome', 'User Data')
+              : path.join(require('os').homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+            const udir = path.join(chromeRoot, 'Conveniente', String(nome));
+            if (udir && fileStore.existsDir && fileStore.existsDir(udir)) {
+              try {
+                const browserHelper = require('./browser.js');
+                try { if (browserHelper && browserHelper.killChromeProfileProcesses) browserHelper.killChromeProfileProcesses(udir); } catch {}
+              } catch {}
+              try { fileStore.rimrafSync(udir); cleanup.userDataDirRemoved = true; } catch {}
+            }
+          } catch {}
+        } catch {}
+        return res.json({ ok: true, alreadyDeleted: true, nome, cleanup });
       }
       // Tombstone cedo (anti-ressurreição no boot/recovery)
       try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'manual_delete', by: String(op||'').slice(0, 120), stage: 'begin' }); } catch {}
