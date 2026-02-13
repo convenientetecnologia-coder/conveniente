@@ -55,6 +55,7 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - **Host registry (apelidos ↔ hostId)** — `docs/HOST_REGISTRY.md`
   - Checkups (relatórios) — `docs/checkups/`
   - **P0 (CT) Fonte Única da Verdade — validação**: ver `docs/inbox/done/INC-20260202-2000-01.md` (inclui verificador offline `C:\sitechatbot\tools\verify_virtus_groups_truth.js`)
+  - **Playbook (FS) perfis órfãos/recovery/purge (RM1 validado)**: `docs/RUNBOOK_TECNICO.md` (seção “Alinhamento no disco…”) + checkup `docs/checkups/checkup_2026-02-13_rm1_profiles_orphans_alignment.md`
 
 ---
 

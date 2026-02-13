@@ -216,6 +216,77 @@ Reinícios:
 
 ---
 
+### Playbook (CANÔNICO) — Alinhamento no disco: `perfis.json` vs `dados/perfis` vs Chrome User Data (órfãos/recovery/purge)
+
+Objetivo: repetir de forma **forense e segura** (um host por vez) a limpeza/recuperação de perfis “órfãos” no host, sem “ressuscitar legado”.
+
+Quando usar:
+
+- discrepância do tipo: `perfis.json` tem X perfis, mas `C:\conveniente\dados\perfis\` tem muito mais pastas,
+- suspeita de wipe/falha histórica de exclusão (pastas ficaram no disco),
+- necessidade de recuperar “perfis quentes” que podem existir no `User Data` mesmo fora do `perfis.json`.
+
+Regras não negociáveis (segurança):
+
+- **NUNCA** habilitar rebuild automático do `perfis.json` a partir de `dados/perfis/` durante limpeza.
+  - Flag perigosa (manter OFF): `PERFIS_ALLOW_REBUILD_FROM_RECORDS=1`.
+- Toda ação destrutiva deve ter **ACK** no CT e **report** no host (`dados/_ops_audit`).
+- Separar em grupos antes de apagar:
+  - **lixo confirmado** (órfão + sem `manifest`/sem `User Data`),
+  - **recovery candidates** (órfão + `manifest` existe),
+  - **system** (ignorar).
+
+Fonte/validação:
+
+- Exemplo validado (RM1): `C:\conveniente\docs\checkups\checkup_2026-02-13_rm1_profiles_orphans_alignment.md`
+
+Procedimento (ordem canônica):
+
+1) **FS audit no host (somente leitura)**
+   - Comando remoto (via CT): `profiles_fs_audit`
+   - Evidência:
+     - ACK: `C:\sitechatbot\dados\logs\<hostId>\ack_<cmdId>.json`
+     - Report no host: `C:\conveniente\dados\_ops_audit\profiles_fs_audit_<ts>_<cmdId>.json`
+
+2) **Classificar órfãos no CT (sem tocar no host)**
+   - Cruzar lista de órfãos com CT `ct_fb_stock_server_profiles` (se possível).
+   - Ferramenta CT (offline):
+     - `C:\sitechatbot\tools\ct_audit_orphans_from_profiles_fs_audit_ack.js`
+   - Saída: listas para automatizar purge/relink em lotes (ex.: `tools\_rmX_ctDeleted_*.json`, `tools\_rmX_ctMissing_*.json`)
+
+3) **Purge seguro (apenas órfãos CT-deleted)**
+   - Comando remoto (via CT): `profiles_purge_dirs`
+   - Primeiro `DRY_RUN=1`, depois `DRY_RUN=0`.
+   - Guardrail do comando: **não apaga** se o nome estiver em `perfis.json` ou `desired.json`.
+
+4) **Probe sanitizado (órfãos CT-missing)**
+   - Comando remoto (via CT): `profiles_manifest_probe`
+   - Objetivo: extrair metadata **sem secrets** (ex.: `hasLogin/hasPassword/cookiesCount/cookie_fp`) para decidir se vale relink.
+
+5) **Relink para teste visual humano (controlado)**
+   - Comando remoto (via CT): `profiles_relink_orphans`
+   - Regras:
+     - só relinka se existir `User Data + manifest`
+     - grava `humanHold=true` (para não abrir/rodar automaticamente)
+
+6) **Humano testa visualmente (fora do CT)**
+   - Resultado deve voltar como lista: “manter” vs “excluir”.
+
+7) **Excluir reprovados (remoção física)**
+   - Comando remoto (via CT): `delete_perfis` com `profileNames[]`
+   - Evidência: `ack_<cmdId>.json` com `okCount/failCount`.
+
+8) **Purge final (lixo remanescente)**
+   - Rodar `profiles_purge_dirs` para órfãos restantes (se existirem), sempre com dry-run antes.
+
+Reinícios:
+
+- normalmente **nenhum** (são comandos via CT). Só reiniciar `conveniente` se houver deploy de runtime envolvido.
+
+Rollback:
+
+- operações de limpeza não têm rollback automático. Se for necessário “voltar”, a ação correta é reprovisionar por decisão humana/CT.
+
 ### CT (sitechatbot) — Dashboard **Servidores**: catálogo de estados/flags (CANÔNICO)
 
 Objetivo: o menu **Servidores** é fonte de verdade operacional. O operador precisa ver “qual host, qual problema, o que fazer”, sem “Desconhecido” genérico.

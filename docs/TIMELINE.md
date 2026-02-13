@@ -45,6 +45,25 @@ Formato canÃ´nico (copiar/colar):
 - **Reinícios**: `conveniente` (hosts) — humano: `node index.js` após `self_update`.
 - **Rollback**: `git revert` do commit desta blindagem e reiniciar `conveniente`.
 
+#### 2026-02-13 — [CROSS][CONV][CT][OPS] RM1: alinhamento no disco (órfãos) + recovery controlado + exclusão final (playbook replicável RM2–RM7)
+
+- **O que**:
+  - Auditoria FS (`perfis.json` vs `desired.json` vs `dados/perfis` vs Chrome User Data) para detectar órfãos sem “ressuscitar legado”.
+  - Probing sanitizado (`manifest.json`/cookies/login) para separar “potencialmente quente” vs lixo.
+  - Relink controlado de órfãos com `humanHold=true` para teste visual humano.
+  - Exclusão final (delete_perfis) dos reprovados e purge de diretórios órfãos remanescentes.
+- **Por quê**: RM1 tinha histórico de pastas sobrando; com o cenário de wipes (RM2/RM6), precisávamos um método enterprise para recuperar o que for útil e limpar o que for lixo, sem risco de “169 perfis voltarem do nada”.
+- **Evidência**:
+  - Checkup canônico: `C:\conveniente\docs\checkups\checkup_2026-02-13_rm1_profiles_orphans_alignment.md`
+  - ACKs (CT):
+    - `profiles_fs_audit`: `C:\sitechatbot\dados\logs\084c8fff-c508-47bd-a33e-3ab34aeb1e3d\ack_57ecd300-62a6-458c-bada-36eac4b9f54c.json`
+    - `profiles_manifest_probe`: `C:\sitechatbot\dados\logs\084c8fff-c508-47bd-a33e-3ab34aeb1e3d\ack_47603d26-2696-4832-a878-832877e263ac.json`
+    - `profiles_relink_orphans`: `C:\sitechatbot\dados\logs\084c8fff-c508-47bd-a33e-3ab34aeb1e3d\ack_8b9d16a8-07b6-4dd6-bb5c-940ac2738b30.json`
+    - `delete_perfis`: `C:\sitechatbot\dados\logs\084c8fff-c508-47bd-a33e-3ab34aeb1e3d\ack_bd31e092-5ac8-4a92-9e93-a8a06e9df38c.json`
+    - `profiles_purge_dirs`: `C:\sitechatbot\dados\logs\084c8fff-c508-47bd-a33e-3ab34aeb1e3d\ack_8fc23b09-abaf-41a1-a723-824af9493012.json`
+- **Reinícios**: nenhum (operações via CT no host RM1; sem deploy de runtime nesta etapa)
+- **Rollback**: n/a (operação; rollback seria reprovisionar sob decisão humana)
+
 #### 2026-02-12 — [CONV] P0: Disaster recovery RM2 — restore de perfis via backup (dry-run + apply atômico + rollback)
 
 - **O que**:
