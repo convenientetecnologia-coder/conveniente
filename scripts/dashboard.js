@@ -1389,6 +1389,150 @@ async function execProfilesManifestProbe(cmd) {
   };
 }
 
+// ===== NOVO: profiles_relink_orphans (re-cadastrar órfãos no perfis.json) =====
+// Objetivo: permitir teste visual/humano de perfis órfãos que ainda têm Chrome profile no disco.
+// Regras:
+// - NÃO apaga nada.
+// - Só relinka se:
+//   - NÃO está em perfis.json e NÃO está em desired.json
+//   - userDataDir existe (chromeRoot/Conveniente/<nome>)
+//   - manifest.json existe e tem shape mínimo
+// - Não devolve cookies no ACK (somente counts/flags).
+async function execProfilesRelinkOrphans(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const names0 = Array.isArray(payload.profileNames) ? payload.profileNames : (Array.isArray(payload.names) ? payload.names : []);
+  const list = names0.map(x => String(x || '').trim()).filter(Boolean);
+  const maxItems = Math.max(5, Math.min(300, Number(payload.maxItems || 80) || 80));
+  const nowMs = Date.now();
+
+  const safeExists = (p) => { try { return !!(p && fsSync.existsSync(p)); } catch { return false; } };
+  const safeStat = (p) => { try { return fsSync.statSync(p); } catch { return null; } };
+  const safeReadJson = (p) => { try { return JSON.parse(fsSync.readFileSync(p, 'utf8')); } catch { return null; } };
+
+  const resolveChromeUserDataRoot = () => {
+    try {
+      if (process.platform === 'win32') {
+        const la = process.env.LOCALAPPDATA;
+        if (la) return path.join(la, 'Google', 'Chrome', 'User Data');
+        return path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+      }
+      return path.join(os.homedir(), '.config', 'google-chrome');
+    } catch { return null; }
+  };
+  const chromeRoot = resolveChromeUserDataRoot();
+
+  const perfisArr = Array.isArray(fileStore.loadPerfisJson()) ? (fileStore.loadPerfisJson() || []) : [];
+  const perfisSet = new Set(perfisArr.map(p => p && p.nome ? String(p.nome) : '').filter(Boolean));
+  let desiredPerfis = {};
+  try {
+    const j = fileStore.readJsonSafe(fileStore.desiredPath, null);
+    desiredPerfis = (j && j.perfis && typeof j.perfis === 'object') ? j.perfis : {};
+  } catch { desiredPerfis = {}; }
+
+  const results = [];
+  for (const nome of list.slice(0, maxItems)) {
+    const item = { nome, ok: false, skipped: false, reason: null };
+    if (!nome || nome.toLowerCase() === 'system') {
+      item.skipped = true; item.reason = 'invalid_name'; results.push(item); continue;
+    }
+    if (perfisSet.has(nome) || (desiredPerfis && desiredPerfis[nome])) {
+      item.skipped = true; item.reason = 'still_in_perfis_or_desired'; results.push(item); continue;
+    }
+    if (!chromeRoot) {
+      item.skipped = true; item.reason = 'chrome_root_unavailable'; results.push(item); continue;
+    }
+    const udir = path.join(chromeRoot, 'Conveniente', nome);
+    const manPath = path.join(udir, 'manifest.json');
+    if (!safeExists(udir) || !safeExists(manPath)) {
+      item.skipped = true; item.reason = 'missing_userData_or_manifest'; results.push(item); continue;
+    }
+    const man = safeReadJson(manPath);
+    if (!man || typeof man !== 'object') {
+      item.skipped = true; item.reason = 'manifest_invalid'; results.push(item); continue;
+    }
+    const cookiesArr = Array.isArray(man.cookies) ? man.cookies : [];
+    const byName = new Set(cookiesArr.map(c => c && c.name ? String(c.name) : '').filter(Boolean));
+
+    // Monta objeto de perfil (sem inventar nada): usa dados do manifest quando disponíveis.
+    const perfilObj = {
+      nome: String(nome),
+      cidade: man.cidade ? String(man.cidade) : null,
+      label: man.label ? String(man.label) : null,
+      uaPresetId: man.uaPresetId ? String(man.uaPresetId) : 'default',
+      uaString: man.uaString ? String(man.uaString) : null,
+      uaCh: (man.uaCh && typeof man.uaCh === 'object') ? man.uaCh : {},
+      fp: (man.fp && typeof man.fp === 'object') ? man.fp : {},
+      cookies: cookiesArr, // necessário para “como se estivesse cadastrada”; NÃO expor no ACK
+      robeCooldownUntil: (typeof man.robeCooldownUntil === 'number') ? man.robeCooldownUntil : 0,
+      configuredAt: (man.configuredAt !== undefined) ? man.configuredAt : null,
+      userDataDir: udir,
+      createdAt: (typeof man.createdAt === 'number') ? man.createdAt : nowMs,
+      recoveredAt: nowMs
+    };
+
+    // 1) gravar em perfis.json (lock)
+    const wr = fileStore.withPerfisFileLockUpdate((arr) => {
+      const next = Array.isArray(arr) ? arr.slice() : [];
+      if (next.some(p => p && p.nome === nome)) return next;
+      next.push(perfilObj);
+      return next;
+    }, { caller: 'profiles_relink_orphans', reason: `relink:${nome}` });
+    if (!wr || wr.ok === false) {
+      item.ok = false; item.reason = (wr && wr.error) ? String(wr.error) : 'perfis_write_failed';
+      results.push(item);
+      continue;
+    }
+
+    // 2) desired: manter desligado + hold humano (evita auto abrir/trabalhar)
+    try {
+      await fileStore.withDesiredFileLockUpdate(desired => {
+        desired.perfis = desired.perfis || {};
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off', humanHold: true, recovered: true };
+        return desired;
+      });
+    } catch {}
+
+    // 3) record redundante (sem secrets)
+    try { fileStore.writePerfilRecord && fileStore.writePerfilRecord(perfilObj, { caller: 'profiles_relink_orphans' }); } catch {}
+
+    const stMan = safeStat(manPath);
+    item.ok = true;
+    item.reason = 'relinked';
+    item.summary = {
+      userDataDirExists: true,
+      manifestExists: true,
+      manifestMtimeMs: Number(stMan && stMan.mtimeMs || 0) || 0,
+      cookiesCount: cookiesArr.length,
+      has_c_user: byName.has('c_user'),
+      has_xs: byName.has('xs'),
+      hasLogin: typeof man.login === 'string' && man.login.length > 0,
+      hasPassword: typeof man.password === 'string' && man.password.length > 0
+    };
+    results.push(item);
+    await sleep(10);
+  }
+
+  const okCount = results.filter(r => r && r.ok).length;
+  const skippedCount = results.filter(r => r && r.skipped).length;
+  const failCount = results.length - okCount - skippedCount;
+
+  const outDir = path.join(__dirname, '..', 'dados', '_ops_audit');
+  try { fsSync.mkdirSync(outDir, { recursive: true }); } catch {}
+  const outPath = path.join(outDir, `profiles_relink_orphans_${nowMs}_${String(cmd && cmd.id || '').slice(0, 18) || 'cmd'}.json`);
+  try { fsSync.writeFileSync(outPath, JSON.stringify({ ok: true, hostNowMs: nowMs, cmdId: cmd && cmd.id ? String(cmd.id) : null, okCount, skippedCount, failCount, results }, null, 2), 'utf8'); } catch {}
+
+  return {
+    ok: failCount === 0,
+    requestedCount: list.length,
+    processedCount: results.length,
+    okCount,
+    skippedCount,
+    failCount,
+    reportPath: outPath,
+    sample: results.slice(0, 120)
+  };
+}
+
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
 async function execLoginRemediate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -2780,6 +2924,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'profiles_fs_audit')    { ackDetails = await execProfilesFsAudit(c); }
       else if (c.type === 'profiles_purge_dirs')  { ackDetails = await execProfilesPurgeDirs(c); }
       else if (c.type === 'profiles_manifest_probe') { ackDetails = await execProfilesManifestProbe(c); }
+      else if (c.type === 'profiles_relink_orphans') { ackDetails = await execProfilesRelinkOrphans(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
