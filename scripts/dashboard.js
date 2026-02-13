@@ -1617,19 +1617,12 @@ async function execDeletePerfis(cmd) {
   const results = [];
   for (const nome of list) {
     try {
-      // Ultra enterprise: se o perfil já não existe no perfis.json local,
-      // não precisa nem chamar a rota HTTP (evita log poluído e loops "assustadores").
-      // Ainda assim consideramos sucesso para o CT parar de reenfileirar.
-      try {
-        const fileStore = require('./fileStore.js');
-        const perfis = fileStore && fileStore.loadPerfisJson ? (fileStore.loadPerfisJson() || []) : [];
-        const exists = Array.isArray(perfis) && perfis.some(p => p && p.nome === nome);
-        if (!exists) {
-          try { fileStore.writeTombstone && fileStore.writeTombstone(nome, { reason: 'delete_missing_cmd', stage: 'skip_http' }); } catch {}
-          results.push({ nome, profileName: nome, ok: true, alreadyMissing: true });
-          continue;
-        }
-      } catch {}
+      // IMPORTANTE (forense/ops):
+      // Mesmo que o perfil não esteja no perfis.json, ainda podemos precisar limpar:
+      // - desired.perfis[nome] (sobras)
+      // - dados/perfis/<nome> (pastas órfãs)
+      // - Chrome User Data/Conveniente/<nome> (best-effort)
+      // A rota DELETE já faz esse cleanup. Portanto, NÃO short-circuit aqui.
       const r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}`, { method: 'DELETE' });
       if (!r || r.ok === false) {
         results.push({ nome, ok: false, error: (r && r.error) ? String(r.error) : 'delete_failed' });
