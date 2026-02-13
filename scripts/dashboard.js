@@ -870,6 +870,134 @@ async function execProfilesCleanup(cmd) {
   return { ok: failCount === 0, okCount, failCount, results };
 }
 
+// ===== NOVO: profiles_fs_audit (auditoria perfis.json vs dados/perfis vs userDataDir) =====
+// Objetivo: alinhar “verdade” sem risco de ressuscitar legado.
+// - NÃO deleta nada.
+// - Gera relatório em dados/_ops_audit e devolve apenas summary + path.
+async function execProfilesFsAudit(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const cutoffDays = Math.max(0, Math.min(365, Number(payload.cutoffDays || 12) || 12));
+  const maxItems = Math.max(50, Math.min(2000, Number(payload.maxItems || 800) || 800));
+  const includeLists = (payload.includeLists === false) ? false : true;
+  const nowMs = Date.now();
+  const cutoffMs = nowMs - (cutoffDays * 24 * 60 * 60 * 1000);
+
+  const safeStat = (p) => { try { return fsSync.statSync(p); } catch { return null; } };
+  const safeExists = (p) => { try { return fsSync.existsSync(p); } catch { return false; } };
+  const safeReadJson = (p) => {
+    try { return JSON.parse(fsSync.readFileSync(p, 'utf8')); } catch { return null; }
+  };
+  const readDesiredBestEffort = () => {
+    // audit-only: se estiver inválido, devolve null (não tenta corrigir aqui)
+    try {
+      if (!safeExists(fileStore.desiredPath)) return { perfis: {} };
+      const j = safeReadJson(fileStore.desiredPath);
+      if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
+      j.perfis = j.perfis && typeof j.perfis === 'object' ? j.perfis : {};
+      return j;
+    } catch { return null; }
+  };
+
+  const perfisArr = Array.isArray(fileStore.loadPerfisJson()) ? (fileStore.loadPerfisJson() || []) : [];
+  const perfisNames = perfisArr.map(p => p && p.nome ? String(p.nome) : '').filter(Boolean);
+  const perfisSet = new Set(perfisNames);
+
+  const desired = readDesiredBestEffort();
+  const desiredPerfis = (desired && desired.perfis && typeof desired.perfis === 'object') ? desired.perfis : {};
+
+  // Listar diretórios de dados/perfis
+  const dirs = [];
+  try {
+    if (safeExists(fileStore.perfisDir)) {
+      const entries = fsSync.readdirSync(fileStore.perfisDir, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent || !ent.isDirectory()) continue;
+        const nome = String(ent.name || '').trim();
+        if (!nome) continue;
+        const full = path.join(fileStore.perfisDir, nome);
+        const st = safeStat(full);
+        const recPath = path.join(full, 'perfil.json');
+        const rec = safeExists(recPath) ? safeReadJson(recPath) : null;
+        const recOk = !!(rec && typeof rec === 'object' && rec.nome);
+        const recUserDataDir = recOk && rec.userDataDir ? String(rec.userDataDir) : null;
+        const manPath = recUserDataDir ? path.join(recUserDataDir, 'manifest.json') : null;
+        const manStat = manPath && safeExists(manPath) ? safeStat(manPath) : null;
+
+        const lastTouchMs = Math.max(
+          Number(st && st.mtimeMs || 0) || 0,
+          Number(recOk && rec.updatedAt || 0) || 0,
+          Number(manStat && manStat.mtimeMs || 0) || 0
+        );
+
+        dirs.push({
+          nome,
+          dirMtimeMs: Number(st && st.mtimeMs || 0) || 0,
+          inPerfisJson: perfisSet.has(nome),
+          inDesired: !!(desiredPerfis && desiredPerfis[nome]),
+          hasPerfilRecord: safeExists(recPath),
+          perfilRecordOk: recOk,
+          recordUpdatedAt: Number(recOk && rec.updatedAt || 0) || 0,
+          userDataDir: recUserDataDir,
+          userDataDirExists: recUserDataDir ? safeExists(recUserDataDir) : null,
+          manifestExists: manPath ? safeExists(manPath) : null,
+          manifestMtimeMs: Number(manStat && manStat.mtimeMs || 0) || 0,
+          lastTouchMs,
+          olderThanCutoff: lastTouchMs > 0 ? (lastTouchMs < cutoffMs) : null
+        });
+      }
+    }
+  } catch {}
+
+  const dirNames = dirs.map(d => d.nome);
+  const dirSet = new Set(dirNames);
+
+  const missingDirForActive = perfisNames.filter(n => !dirSet.has(n));
+  const orphanDirs = dirs.filter(d => !d.inPerfisJson);
+  const orphanDirsOlder = orphanDirs.filter(d => d.olderThanCutoff === true);
+  const orphanDirsRecent = orphanDirs.filter(d => d.olderThanCutoff === false);
+
+  // Candidatos para “recovery”: existe pasta mas não está no perfis.json e é recente (janela dos 12 dias)
+  const recoveryCandidates = orphanDirsRecent
+    .filter(d => d.hasPerfilRecord && d.perfilRecordOk && d.userDataDir && d.userDataDirExists);
+
+  const summary = {
+    nowMs,
+    cutoffDays,
+    cutoffMs,
+    perfisJsonCount: perfisNames.length,
+    desiredCount: desiredPerfis ? Object.keys(desiredPerfis).length : null,
+    perfisDirCount: dirs.length,
+    missingDirForActiveCount: missingDirForActive.length,
+    orphanDirsCount: orphanDirs.length,
+    orphanDirsOlderCount: orphanDirsOlder.length,
+    orphanDirsRecentCount: orphanDirsRecent.length,
+    recoveryCandidatesCount: recoveryCandidates.length
+  };
+
+  // Persistir relatório
+  const outDir = path.join(__dirname, '..', 'dados', '_ops_audit');
+  try { fsSync.mkdirSync(outDir, { recursive: true }); } catch {}
+  const outPath = path.join(outDir, `profiles_fs_audit_${nowMs}_${String(cmd && cmd.id || '').slice(0, 18) || 'cmd'}.json`);
+  const report = {
+    ok: true,
+    hostNowMs: nowMs,
+    cmdId: cmd && cmd.id ? String(cmd.id) : null,
+    cutoffDays,
+    summary,
+    // listas podem ficar grandes; limitamos para não estourar ACK/memória
+    lists: includeLists ? {
+      missingDirForActive: missingDirForActive.slice(0, maxItems),
+      orphanDirsOlder: orphanDirsOlder.slice(0, maxItems),
+      orphanDirsRecent: orphanDirsRecent.slice(0, maxItems),
+      recoveryCandidates: recoveryCandidates.slice(0, maxItems),
+      sampleDirs: dirs.slice(0, Math.min(maxItems, 300))
+    } : null
+  };
+  try { fsSync.writeFileSync(outPath, JSON.stringify(report, null, 2), 'utf8'); } catch {}
+
+  return { ok: true, summary, reportPath: outPath };
+}
+
 // ===== NOVO: login_remediate (teste/controlado via comando remoto) =====
 async function execLoginRemediate(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
@@ -2258,6 +2386,7 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'backup_restore_probe') { ackDetails = await execBackupRestoreProbe(c); }
       else if (c.type === 'backup_restore_merge') { ackDetails = await execBackupRestoreMerge(c); }
       else if (c.type === 'backups_manifest')     { ackDetails = await execBackupsManifest(c); }
+      else if (c.type === 'profiles_fs_audit')    { ackDetails = await execProfilesFsAudit(c); }
       else if (c.type === 'fetch_logs')       { await execFetchLogs(c); }
       else if (c.type === 'fetch_logs_query') { await execFetchLogsQuery(c); }
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); }
