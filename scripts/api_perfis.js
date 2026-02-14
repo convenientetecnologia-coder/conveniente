@@ -159,6 +159,11 @@ module.exports = (app, workerClient, fileStore) => {
         logger.warn('Tentativa de criação de perfil com cookies inválidos', { cidade });
         return res.json({ ok: false, error: 'Cookies inválidos ou ausentes: precisa de c_user e xs!' });
       }
+      const cUser = String((cookiesArr.find(c => c && c.name === 'c_user') || {}).value || '').trim();
+      const stockAccountIdNum = Number(stockAccountId || 0) || 0;
+      if (!cUser) {
+        return res.json({ ok: false, error: 'Cookies inválidos: c_user ausente.' });
+      }
 
       // Checagem de coordenadas (AVISO só)
       try {
@@ -188,6 +193,7 @@ module.exports = (app, workerClient, fileStore) => {
           hardwareConcurrency: preset.hardwareConcurrency || 4
         },
         cookies: cookiesArr,
+        stockAccountId: stockAccountIdNum || null,
         robeCooldownUntil: 0,
         configuredAt: null,
         userDataDir, // <- AGORA dentro do User Data do Chrome
@@ -197,10 +203,39 @@ module.exports = (app, workerClient, fileStore) => {
       // Atualiza perfis.json (serializado e atômico; evita corrida em cluster)
       const wr = fileStore.withPerfisFileLockUpdate((arr) => {
         const next = Array.isArray(arr) ? arr.slice() : [];
+        const extractCUser = (p) => {
+          try {
+            const list = Array.isArray(p && p.cookies) ? p.cookies : [];
+            const v = list.find(x => x && x.name === 'c_user');
+            return String((v && v.value) || '').trim();
+          } catch {
+            return '';
+          }
+        };
+        const dupeByCUser = next.find(p => p && extractCUser(p) === cUser);
+        if (dupeByCUser) {
+          throw new Error(`duplicate_c_user:${String(dupeByCUser.nome || '').trim() || 'unknown'}`);
+        }
+        if (stockAccountIdNum > 0) {
+          const dupeByStockId = next.find(p => (Number(p && p.stockAccountId || 0) || 0) === stockAccountIdNum);
+          if (dupeByStockId) {
+            throw new Error(`duplicate_stockAccountId:${String(dupeByStockId.nome || '').trim() || 'unknown'}`);
+          }
+        }
+        if (next.find(p => p && p.nome === nome)) {
+          throw new Error('duplicate_profile_name');
+        }
         next.push(perfilObj);
         return next;
       }, { caller: 'api_perfis_create', reason: `create:${nome}` });
       if (!wr || wr.ok === false) {
+        const e = String((wr && wr.error) ? wr.error : '');
+        if (e.startsWith('duplicate_c_user:')) {
+          return res.json({ ok: false, error: 'duplicate_c_user', existingProfile: e.slice('duplicate_c_user:'.length) || null });
+        }
+        if (e.startsWith('duplicate_stockAccountId:')) {
+          return res.json({ ok: false, error: 'duplicate_stockAccountId', existingProfile: e.slice('duplicate_stockAccountId:'.length) || null });
+        }
         return res.json({ ok: false, error: (wr && wr.error) ? String(wr.error) : 'perfis_write_failed' });
       }
 
@@ -220,7 +255,10 @@ module.exports = (app, workerClient, fileStore) => {
         const sid = Number(stockAccountId || 0) || 0;
         if (sid) manifestObj.stockAccountId = sid;
       } catch {}
-      fs.writeFileSync(path.join(userDataDir, 'manifest.json'), JSON.stringify(manifestObj, null, 2), 'utf8');
+      const manifestPath = path.join(userDataDir, 'manifest.json');
+      if (!fileStore.writeJsonAtomic(manifestPath, manifestObj)) {
+        return res.json({ ok: false, error: 'manifest_write_failed' });
+      }
 
       // desired.json default (não liga nada) - ATOMICIDADE GARANTIDA PELO LOCK!
       // ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.

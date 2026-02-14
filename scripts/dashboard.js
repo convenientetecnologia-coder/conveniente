@@ -18,6 +18,7 @@ const httpPort = parseInt(process.env.PORT || '8088', 10);
 const INTERVAL_MS = parseInt(process.env.DASHBOARD_INTERVAL_MS || '30000', 10); // 30s recomendado
 const STATUS_PATH = path.join(__dirname, '..', 'dados', 'status.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
+const ACK_PENDING_PATH = path.join(__dirname, '..', 'dados', 'acks_pending.json');
 
 // Endpoint do notificador (centralizado)
 const { resolveEndpoints } = require('./notifierEndpoints');
@@ -2099,7 +2100,14 @@ async function execStockProvision(cmd) {
             // automático "cookies -> login+senha" sem depender de clique em "retomar trabalho".
             body: { cidade: city, cookies, login, password, stockAccountId }
           });
-          if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'create_profile_failed');
+          if (!r || r.ok === false) {
+            const err = String((r && r.error) || 'create_profile_failed');
+            const existingProfile = String((r && r.existingProfile) || '').trim();
+            if ((err === 'duplicate_c_user' || err === 'duplicate_stockAccountId') && existingProfile) {
+              return { ok: true, perfil: { nome: existingProfile }, reusedExisting: true };
+            }
+            throw new Error(err);
+          }
           return r;
         });
         const nome = created?.perfil?.nome ? String(created.perfil.nome) : '';
@@ -2233,58 +2241,172 @@ function notifierBaseFromEndpoints() {
     return `${url.protocol}//${url.host}`;
   } catch { return null; }
 }
-async function ackCommand(cmdId, ok, errorMsg, details) {
+
+function readAckPending() {
   try {
-    const base = notifierBaseFromEndpoints();
-    if (!base || !hostIdCache || !cmdId) return;
-    const ackDebug = String(process.env.DASHBOARD_ACK_DEBUG || '').trim() === '1';
-    const controller = new (global.AbortController || require('node-abort-controller'))();
-    const t = setTimeout(() => { try { controller.abort(); } catch {} }, 3000);
+    const raw = fsSync.readFileSync(ACK_PENDING_PATH, 'utf8');
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(x => x && typeof x === 'object' && x.id && x.hostId);
+  } catch {
+    return [];
+  }
+}
+
+function writeAckPending(list) {
+  try {
+    const arr = Array.isArray(list) ? list : [];
+    return !!fileStore.writeJsonAtomic(ACK_PENDING_PATH, arr);
+  } catch {
+    return false;
+  }
+}
+
+function upsertAckPending(rec) {
+  try {
+    const arr = readAckPending();
+    const id = String(rec && rec.id || '').trim();
+    if (!id) return false;
+    const i = arr.findIndex(x => String(x && x.id || '') === id);
+    if (i >= 0) arr[i] = { ...arr[i], ...rec };
+    else arr.push(rec);
+    return writeAckPending(arr);
+  } catch {
+    return false;
+  }
+}
+
+function removeAckPending(cmdId) {
+  try {
+    const id = String(cmdId || '').trim();
+    if (!id) return false;
+    const arr = readAckPending();
+    const next = arr.filter(x => String(x && x.id || '') !== id);
+    if (next.length === arr.length) return true;
+    return writeAckPending(next);
+  } catch {
+    return false;
+  }
+}
+
+async function sendAckOnce({ base, payload, timeoutMs = 3000 } = {}) {
+  const controller = new (global.AbortController || require('node-abort-controller'))();
+  const t = setTimeout(() => { try { controller.abort(); } catch {} }, Math.max(1000, Number(timeoutMs) || 3000));
+  try {
     const url = `${base}/api/commands/ack`;
     const resp = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({
-        hostId: hostIdCache,
-        id: cmdId,
-        ok: !!ok,
-        error: errorMsg ? String(errorMsg) : null,
-        details: (details && typeof details === 'object') ? details : null
-      }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
       signal: controller.signal
-    }).catch((e)=> {
+    }).catch(() => null);
+    if (!resp) return { ok: false, status: null };
+    return { ok: !!resp.ok, status: Number(resp.status || 0) || null };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function flushPendingAcks({ limit = 20 } = {}) {
+  try {
+    const base = notifierBaseFromEndpoints();
+    if (!base) return { ok: false, error: 'base_unavailable', flushed: 0 };
+    const nowTs = Date.now();
+    const arr = readAckPending().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+    if (!arr.length) return { ok: true, flushed: 0, remaining: 0 };
+    let changed = false;
+    let flushed = 0;
+    const max = Math.max(1, Math.min(100, Number(limit) || 20));
+    for (const rec of arr) {
+      if (flushed >= max) break;
+      const attempts = Number(rec && rec.attempts || 0) || 0;
+      const lastAttemptAt = Number(rec && rec.lastAttemptAt || 0) || 0;
+      const backoffMs = Math.min(60_000, Math.max(1000, (2 ** Math.min(8, attempts)) * 1000));
+      if (lastAttemptAt && (nowTs - lastAttemptAt) < backoffMs) continue;
+      const payload = {
+        hostId: String(rec.hostId || ''),
+        id: String(rec.id || ''),
+        ok: !!rec.ok,
+        error: rec.error ? String(rec.error) : null,
+        details: (rec.details && typeof rec.details === 'object') ? rec.details : null
+      };
+      const r = await sendAckOnce({ base, payload, timeoutMs: 4000 });
+      rec.lastAttemptAt = Date.now();
+      rec.attempts = attempts + 1;
+      changed = true;
+      if (r && r.ok) {
+        rec._remove = true;
+        flushed++;
+      }
+    }
+    if (!changed) return { ok: true, flushed: 0, remaining: arr.length };
+    const next = arr.filter(x => !x._remove).map(({ _remove, ...rest }) => rest);
+    writeAckPending(next);
+    return { ok: true, flushed, remaining: next.length };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : String(e), flushed: 0 };
+  }
+}
+
+async function ackCommand(cmdId, ok, errorMsg, details) {
+  try {
+    const base = notifierBaseFromEndpoints();
+    if (!cmdId) return;
+    if (!hostIdCache) {
+      try { hostIdCache = await getOrCreateHostId(); } catch {}
+    }
+    if (!base || !hostIdCache) return;
+    const ackDebug = String(process.env.DASHBOARD_ACK_DEBUG || '').trim() === '1';
+    const payload = {
+      hostId: hostIdCache,
+      id: String(cmdId),
+      ok: !!ok,
+      error: errorMsg ? String(errorMsg) : null,
+      details: (details && typeof details === 'object') ? details : null
+    };
+    const r = await sendAckOnce({ base, payload, timeoutMs: 3000 });
+    if (!r || !r.ok) {
+      upsertAckPending({
+        hostId: String(payload.hostId),
+        id: String(payload.id),
+        ok: !!payload.ok,
+        error: payload.error,
+        details: payload.details,
+        createdAt: Date.now(),
+        lastAttemptAt: Date.now(),
+        attempts: 1
+      });
       if (ackDebug) {
         try {
           const p = path.join(__dirname, '..', 'dados', 'commands_ack_debug.jsonl');
           fsSync.appendFileSync(p, JSON.stringify({
             ts: Date.now(),
-            event: 'ack_fetch_error',
-            url,
+            event: 'ack_queued_for_retry',
             hostId: hostIdCache,
             cmdId,
             ok: !!ok,
-            error: (e && e.message) ? String(e.message) : String(e)
+            httpStatus: r ? r.status : null
           }) + '\n');
         } catch {}
       }
-      return null;
-    });
+      return;
+    }
+    removeAckPending(String(cmdId));
     if (ackDebug) {
       try {
         const p = path.join(__dirname, '..', 'dados', 'commands_ack_debug.jsonl');
         fsSync.appendFileSync(p, JSON.stringify({
           ts: Date.now(),
           event: 'ack_done',
-          url,
+          via: 'direct',
           hostId: hostIdCache,
           cmdId,
           ackOk: !!ok,
-          httpStatus: resp ? Number(resp.status || 0) : null,
-          httpOk: resp ? !!resp.ok : null
+          httpStatus: r ? Number(r.status || 0) : null,
+          httpOk: true
         }) + '\n');
       } catch {}
     }
-    clearTimeout(t);
   } catch {}
 }
 // ===== ALTERAÇÃO FIM ===============================================
@@ -2976,6 +3098,8 @@ async function tick(reason = 'interval') {
   inFlight = true;
   pending = false;
   try {
+    // Tentativa de drenar ACKs pendentes antes do ciclo normal.
+    try { await flushPendingAcks({ limit: 40 }); } catch {}
     // ===== ALTERAÇÃO: obter [status, hostId] e atualizar hostIdCache =====
     const [status, hostId] = await Promise.all([readAggregatedStatus(), getOrCreateHostId()]);
     hostIdCache = hostId;
@@ -3029,6 +3153,8 @@ async function tick(reason = 'interval') {
     if (resp && Array.isArray(resp.commands) && resp.commands.length) {
       await applyCommands(resp.commands);
     }
+    // Nova drenagem após executar comandos (captura ACKs recém-encolados por falha transitória).
+    try { await flushPendingAcks({ limit: 40 }); } catch {}
     if (process.env.DASHBOARD_DEBUG === '1') {
       logger.info(`[DASH][TICK] post finish in ${Date.now() - start}ms`);
     }
