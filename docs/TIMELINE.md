@@ -31,6 +31,89 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-13 — [CROSS][CT][CONV][OPS] INC-20260214-1020-01: implementação rodada 1 (H1/H2/H3) com rollout seguro
+
+- **O que**:
+  - H1 (CT): `releaseReservedAccount` ficou restrito a `reserved`; criada rota explícita para liberar `assigned` apenas com confirmação.
+  - H2 (host): adicionado gate `production/maintenance` para bypass de guardrails de `perfis.json`; tombstone funcional integrado ao `fileStore` e usado para bloquear rebuild de perfil tombstonado.
+  - H3 (CT): criado `computeH3HealthGate()` e integrado ao scheduler em modo observação por padrão (enforcement só com `CT_H3_ENFORCE_BLOCK=1`).
+- **Por quê**: fechar risco residual crítico de regressão sem introduzir ruptura operacional abrupta.
+- **Evidência**:
+  - `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js`
+  - `C:\sitechatbot\index.js`
+  - `C:\conveniente\scripts\fileStore.js`
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md`
+- **Reinícios**:
+  - `sitechatbot` (CT): necessário para aplicar H1/H3 em runtime (`node index.js`)
+  - `conveniente` (hosts): necessário para aplicar H2 em runtime (`node index.js`)
+- **Rollback**: `git revert` dos commits dos blocos H1/H2/H3 e reinício dos serviços afetados
+- **THREAD**: `TH-2026-02-13-inc1020-impl-round1`
+
+---
+
+#### 2026-02-13 — [CROSS][DOCS][OPS] INC-20260214-1020-01: meta-auditoria rodada 2 (confirmação final pré-código)
+
+- **O que**:
+  - Executada uma segunda rodada completa de auditoria (“meta-auditoria”) para confirmar que nenhum ponto crítico ficou fora do dossiê antes de codar.
+  - Achados foram reconciliados em três classes: risco confirmado, risco contextual/intencional, hipótese não confirmada.
+  - Resultado consolidado manteve o plano H1 -> H2 -> H3 sem adicionar novos bloqueadores.
+- **Por quê**: garantir 0 achismo antes da fase de implementação, com validação cruzada de ponta a ponta.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md` (seção “Bateria de auditoria ultra - rodada 2”)
+  - revisão direta de `C:\sitechatbot\index.js`, `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js`, `C:\conveniente\scripts\fileStore.js`, `C:\conveniente\scripts\api_perfis.js`
+- **Reinícios**: nenhum (somente auditoria/documentação)
+- **Rollback**: `git revert` nas alterações de `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-13-inc1020-meta-audit-round2`
+
+---
+
+#### 2026-02-13 — [CROSS][DOCS][OPS] INC-20260214-1020-01: bateria de auditoria ultra (H1/H2/H3) concluída com dossiê técnico
+
+- **O que**:
+  - Executada auditoria forense de ponta a ponta no novo INC de blindagem final (`INC-20260214-1020-01`), cobrindo:
+    - H1: risco de release indevido de contas `assigned` no CT,
+    - H2: risco de bypass dos guardrails de `perfis.json` por flags de ambiente,
+    - H3: ausência de gate periódico único para detectar regressão cedo.
+  - Dossiê consolidado registrado no próprio INC com:
+    - findings por severidade,
+    - evidência de código,
+    - snapshot operacional de runtime,
+    - plano de execução seguro em ordem H1 -> H2 -> H3.
+- **Por quê**: transformar risco residual em plano executável com evidência objetiva, sem achismo, antes de qualquer alteração de runtime.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md`
+  - `C:\sitechatbot\tools\list_running_provisions.js` (snapshot: running provision = 0)
+  - `C:\sitechatbot\tools\check_stock_state.js` (snapshot de status/jobs)
+  - `C:\sitechatbot\tools\check_stock_unique_index.js` (índice de proteção de provision por host)
+  - `C:\conveniente\dados\perfis_ledger.jsonl` (eventos guardrail)
+- **Reinícios**: nenhum (fase de auditoria/documentação)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-13-inc1020-ultra-audit-round1`
+
+---
+
+#### 2026-02-13 — [CROSS][DOCS][OPS] Encerramento do INC P0 de cadastro + abertura de INC novo de blindagem final
+
+- **O que**:
+  - INC `INC-20260214-0900-01` atualizado para `done` com fechamento formal após validação final R10-R12 no RM1.
+  - Aberto novo INC canônico `INC-20260214-1020-01` para hardening final anti-regressão (H1/H2/H3):
+    - H1: restringir release de reserva para não atingir `assigned` por engano.
+    - H2: travar bypass de guardrails de `perfis.json` em produção.
+    - H3: gate contínuo de saúde para detectar regressão cedo.
+  - Índices e livros sincronizados para manter organização única de operação/auditoria.
+- **Por quê**: separar claramente “problema P0 principal resolvido” da “fase de blindagem final”, mantendo governança documental limpa e rastreável.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-0900-01.md`
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md`
+- **Reinícios**: nenhum (somente documentação/organização nesta etapa)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-13-p0-close-and-final-hardening-open`
+
+---
+
 #### 2026-02-13 — [CONV] P0: blindagem anti-wipe de `perfis.json`/`desired.json` (anti-fallback + atomic write Windows-safe + registro redundante + ledger)
 
 - **O que**:

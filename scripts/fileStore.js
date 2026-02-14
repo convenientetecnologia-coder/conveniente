@@ -16,6 +16,7 @@ const perfisDir   = path.join(dadosDir, 'perfis');
 const presetsPath = path.join(dadosDir, 'ua_presets.json');
 const desiredPath = path.join(dadosDir, 'desired.json');
 const statusPath  = path.join(dadosDir, 'status.json');
+const tombstonesDir = path.join(dadosDir, 'tombstones');
 
 // ManifestStore import para setPerfilFrozenUntil
 // const manifestStore = require('./manifestStore.js');
@@ -68,6 +69,28 @@ function ledgerAppend(obj) {
     const p = path.join(dadosDir, 'perfis_ledger.jsonl');
     fs.appendFileSync(p, JSON.stringify({ ts: Date.now(), ...(obj || {}) }) + '\n', 'utf8');
   } catch {}
+}
+
+// H2 guard mode:
+// - production (default): bypass flags are ignored
+// - maintenance: bypass flags can be honored (with explicit env flag)
+function getPerfisGuardMode() {
+  const v = String(process.env.PERFIS_GUARD_MODE || '').trim().toLowerCase();
+  return (v === 'maintenance') ? 'maintenance' : 'production';
+}
+function isPerfisMaintenanceMode() {
+  return getPerfisGuardMode() === 'maintenance';
+}
+function shouldAllowPerfisBypass(flagName) {
+  const mode = getPerfisGuardMode();
+  const flagOn = String(process.env[String(flagName) || '']).trim() === '1';
+  if (mode !== 'maintenance') {
+    if (flagOn) ledgerAppend({ event: 'perfis_bypass_blocked_production', flag: String(flagName || ''), mode });
+    return false;
+  }
+  if (!flagOn) return false;
+  ledgerAppend({ event: 'perfis_bypass_allowed_maintenance', flag: String(flagName || ''), mode });
+  return true;
 }
 
 /** Grava JSON atômico (Windows-safe), sem janela "unlink → missing" */
@@ -140,7 +163,7 @@ function ensurePerfisJson() {
     } catch {}
     // REBUILD é poderoso, mas pode ressuscitar legado (ex.: pastas antigas em dados/perfis).
     // Por padrão, DESLIGADO. Só habilita com flag explícita.
-    if (String(process.env.PERFIS_ALLOW_REBUILD_FROM_RECORDS || '').trim() === '1') {
+    if (shouldAllowPerfisBypass('PERFIS_ALLOW_REBUILD_FROM_RECORDS')) {
       // Rebuild best-effort: se houver registros por perfil, reconstruir o array (sem segredos).
       try {
         const rebuilt = loadPerfisFromRecordsBestEffort(10_000);
@@ -171,7 +194,7 @@ function savePerfisJson(arr) {
   // Guardrail militar: nunca permitir gravar [] por acidente (wipe total).
   // Para permitir explicitamente (caso extremo), setar PERFIS_ALLOW_EMPTY=1.
   const next = Array.isArray(arr) ? arr : (arr ? [arr] : []);
-  if (next.length === 0 && String(process.env.PERFIS_ALLOW_EMPTY || '').trim() !== '1') {
+  if (next.length === 0 && !shouldAllowPerfisBypass('PERFIS_ALLOW_EMPTY')) {
     try {
       // mantém o arquivo atual e só loga (evita "sumiu tudo" pós-deploy/crash)
       console.error('[GUARD][perfis.json] tentativa de gravar array vazio BLOQUEADA (PERFIS_ALLOW_EMPTY!=1)');
@@ -369,12 +392,12 @@ function withPerfisFileLockUpdate(mutator, meta = null) {
 
     // Guardrails militares:
     // (1) nunca gravar vazio por acidente
-    if (afterLen === 0 && String(process.env.PERFIS_ALLOW_EMPTY || '').trim() !== '1') {
+    if (afterLen === 0 && !shouldAllowPerfisBypass('PERFIS_ALLOW_EMPTY')) {
       ledgerAppend({ event: 'perfis_write_blocked_empty', ok: false, beforeLen, afterLen, meta: meta || null });
       return { ok: false, error: 'perfis_guard_blocked_empty' };
     }
     // (2) bloquear "wipe para 1/2 perfis" quando antes era grande (sinal forte de fallback/IO)
-    if (beforeLen >= 10 && afterLen <= 2 && String(process.env.PERFIS_ALLOW_TINY_AFTER || '').trim() !== '1') {
+    if (beforeLen >= 10 && afterLen <= 2 && !shouldAllowPerfisBypass('PERFIS_ALLOW_TINY_AFTER')) {
       ledgerAppend({ event: 'perfis_write_blocked_tiny_after', ok: false, beforeLen, afterLen, meta: meta || null });
       return { ok: false, error: 'perfis_guard_blocked_tiny_after' };
     }
@@ -409,6 +432,7 @@ function loadPerfisFromRecordsBestEffort(limit = 5000) {
       if (!ent || !ent.isDirectory()) continue;
       const nome = String(ent.name || '').trim();
       if (!nome) continue;
+      if (isTombstoned(nome)) continue; // não ressuscitar perfil já tombstonado
       const fp = path.join(base, nome, 'perfil.json');
       if (!fs.existsSync(fp)) continue;
       const rec = readJsonSafe(fp, null);
@@ -456,6 +480,43 @@ function writePerfilRecord(perfilObj, { caller = 'unknown' } = {}) {
     const ok = writeJsonAtomic(fp, rec);
     ledgerAppend({ event: 'perfil_record_write', ok: !!ok, nome, caller: rec.caller });
     return !!ok;
+  } catch {
+    return false;
+  }
+}
+
+function writeTombstone(nome, meta = {}) {
+  try {
+    const n = String(nome || '').trim();
+    if (!n) return false;
+    try { if (!fs.existsSync(tombstonesDir)) fs.mkdirSync(tombstonesDir, { recursive: true }); } catch {}
+    const fp = path.join(tombstonesDir, `${n}.json`);
+    const prev = readJsonSafe(fp, null) || {};
+    const next = {
+      nome: n,
+      deletedAt: Number(meta && meta.deletedAt) || Date.now(),
+      reason: meta && meta.reason ? String(meta.reason).slice(0, 160) : (prev.reason || 'delete'),
+      by: meta && meta.by ? String(meta.by).slice(0, 120) : (prev.by || 'unknown'),
+      stage: meta && meta.stage ? String(meta.stage).slice(0, 80) : (prev.stage || 'done'),
+      updatedAt: Date.now()
+    };
+    const ok = writeJsonAtomic(fp, next);
+    ledgerAppend({ event: 'perfis_tombstone_write', ok: !!ok, nome: n, stage: next.stage });
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
+function isTombstoned(nome) {
+  try {
+    const n = String(nome || '').trim();
+    if (!n) return false;
+    const fp = path.join(tombstonesDir, `${n}.json`);
+    if (!fs.existsSync(fp)) return false;
+    const t = readJsonSafe(fp, null);
+    if (!t || String(t.nome || '').trim() !== n) return false;
+    return true;
   } catch {
     return false;
   }
@@ -922,4 +983,6 @@ module.exports = {
   // Redundância/forense:
   writePerfilRecord,
   loadPerfisFromRecordsBestEffort,
+  writeTombstone,
+  isTombstoned,
 };
