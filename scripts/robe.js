@@ -1160,22 +1160,6 @@ async function captureCreatePageVitals(page, nome, attId, stage) {
       const bodyStyle = b ? window.getComputedStyle(b) : null;
       const htmlStyle = h ? window.getComputedStyle(h) : null;
       const txt = b ? String((b.innerText || '').trim()) : '';
-      let notificationType = 'undefined';
-      let notificationExists = false;
-      let notificationPermission = null;
-      let hasPermissionsApi = false;
-      try {
-        notificationType = typeof Notification;
-        notificationExists = typeof Notification !== 'undefined';
-      } catch {}
-      try {
-        hasPermissionsApi = !!(navigator && navigator.permissions && typeof navigator.permissions.query === 'function');
-      } catch {}
-      try {
-        if (notificationExists && Notification && typeof Notification.permission !== 'undefined') {
-          notificationPermission = String(Notification.permission || '');
-        }
-      } catch {}
       return {
         href: String(location.href || ''),
         readyState: String(d && d.readyState || ''),
@@ -1192,11 +1176,7 @@ async function captureCreatePageVitals(page, nome, attId, stage) {
         htmlVisibility: htmlStyle ? String(htmlStyle.visibility || '') : '',
         bodyVisibility: bodyStyle ? String(bodyStyle.visibility || '') : '',
         viewport: { w: window.innerWidth || 0, h: window.innerHeight || 0 },
-        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0,
-        notificationType,
-        notificationExists,
-        notificationPermission,
-        hasPermissionsApi
+        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0
       };
     });
   } catch (e) {

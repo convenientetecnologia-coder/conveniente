@@ -226,6 +226,21 @@ async function patchPage(nome, page, coords) {
       )
     );
 
+  // #region agent log
+  try {
+    const targetUrlForDebug = (() => {
+      try {
+        if (page && page.target && typeof page.target === 'function') {
+          if (typeof page.target().url === 'function') return String(page.target().url() || '');
+          if (page.target()._targetInfo && page.target()._targetInfo.url) return String(page.target()._targetInfo.url || '');
+        }
+      } catch {}
+      return '';
+    })();
+    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v4',hypothesisId:'H11',location:'scripts/browser.js:patchPage:interception_decision',message:'Request interception decision',data:{nome:String(nome||''),pageUrl:String(url||''),targetUrl:String(targetUrlForDebug||''),enableVirtusMessengerBlock:!!enableVirtusMessengerBlock},timestamp:Date.now()})}).catch(()=>{});
+  } catch {}
+  // #endregion
+
   // ==== PATCH APLICADO CONFORME INSTRUÇÃO (PATCH MILITAR) ====
   if (enableVirtusMessengerBlock) {
     try {
@@ -248,11 +263,29 @@ async function patchPage(nome, page, coords) {
             return req.continue();
           }
           if (type === 'media' || type === 'font') {
+            // #region agent log
+            try {
+              page._dbgAbortCount = Number(page._dbgAbortCount || 0);
+              if (page._dbgAbortCount < 8) {
+                page._dbgAbortCount++;
+                fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v4',hypothesisId:'H11',location:'scripts/browser.js:patchPage:request_abort',message:'Aborted request by interception',data:{nome:String(nome||''),type:String(type||''),url:String(u||'').slice(0,280)},timestamp:Date.now()})}).catch(()=>{});
+              }
+            } catch {}
+            // #endregion
             return req.abort();
           }
           if (type === 'image') {
             if (process.env.VIRTUS_BLOCK_IMAGES === '1') {
               if (/favicon\.ico$/i.test(u)) return req.continue();
+              // #region agent log
+              try {
+                page._dbgAbortCount = Number(page._dbgAbortCount || 0);
+                if (page._dbgAbortCount < 8) {
+                  page._dbgAbortCount++;
+                  fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v4',hypothesisId:'H11',location:'scripts/browser.js:patchPage:image_abort',message:'Image aborted by interception',data:{nome:String(nome||''),type:String(type||''),url:String(u||'').slice(0,280)},timestamp:Date.now()})}).catch(()=>{});
+                }
+              } catch {}
+              // #endregion
               return req.abort();
             }
             return req.continue();
@@ -998,7 +1031,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--no-first-run', // Não exibe onboarding
       '--no-default-browser-check', // Não pergunta padrão
       '--password-store=basic', // Evita prompts/chaves desktop
-      // '--disable-notifications' removido: alguns fluxos do Marketplace quebram quando Notification API some.
+      '--disable-notifications', // Silencia push/browser
       '--disable-extensions', // Zero extensão custom
       '--lang=pt-BR', // GOAL: idioma fixo PT-BR
       '--disable-background-timer-throttling', // Não pausa timers de fundo
