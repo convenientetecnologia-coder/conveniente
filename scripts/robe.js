@@ -1160,6 +1160,19 @@ async function captureCreatePageVitals(page, nome, attId, stage) {
       const bodyStyle = b ? window.getComputedStyle(b) : null;
       const htmlStyle = h ? window.getComputedStyle(h) : null;
       const txt = b ? String((b.innerText || '').trim()) : '';
+      const alertRoots = Array.from(d ? d.querySelectorAll('body > div[role="alert"]') : []);
+      const autoMsgs = Array.from(d ? d.querySelectorAll('.automation-message') : []);
+      const hiddenAlertRoots = alertRoots.filter((el) => {
+        try {
+          const st = window.getComputedStyle(el);
+          return !!st && (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity || '1') === 0);
+        } catch {
+          return false;
+        }
+      });
+      const hugeHiddenAlert = hiddenAlertRoots.some((el) => {
+        try { return Number(el.childElementCount || 0) > 60; } catch { return false; }
+      });
       return {
         href: String(location.href || ''),
         readyState: String(d && d.readyState || ''),
@@ -1176,7 +1189,12 @@ async function captureCreatePageVitals(page, nome, attId, stage) {
         htmlVisibility: htmlStyle ? String(htmlStyle.visibility || '') : '',
         bodyVisibility: bodyStyle ? String(bodyStyle.visibility || '') : '',
         viewport: { w: window.innerWidth || 0, h: window.innerHeight || 0 },
-        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0
+        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0,
+        alertRootCount: alertRoots.length,
+        hiddenAlertRootCount: hiddenAlertRoots.length,
+        automationMessageCount: autoMsgs.length,
+        hugeHiddenAlert,
+        firstAlertText: alertRoots[0] ? String((alertRoots[0].innerText || '').trim()).slice(0, 160) : ''
       };
     });
   } catch (e) {
