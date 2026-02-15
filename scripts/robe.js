@@ -1176,7 +1176,11 @@ async function captureCreatePageVitals(page, nome, attId, stage) {
         htmlVisibility: htmlStyle ? String(htmlStyle.visibility || '') : '',
         bodyVisibility: bodyStyle ? String(bodyStyle.visibility || '') : '',
         viewport: { w: window.innerWidth || 0, h: window.innerHeight || 0 },
-        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0
+        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0,
+        notificationType: typeof Notification,
+        hasNotificationInWindow: ('Notification' in window),
+        hasPermissionsApi: !!(navigator && navigator.permissions && typeof navigator.permissions.query === 'function'),
+        serviceWorkerControlled: !!(navigator && navigator.serviceWorker && navigator.serviceWorker.controller)
       };
     });
   } catch (e) {
@@ -1219,7 +1223,7 @@ function isCreateFormDegraded(v) {
 function installCreatePageForensics(page, nome, attId) {
   if (!page || page.__ctCreateForensicsInstalled) return;
   page.__ctCreateForensicsInstalled = true;
-  const state = { console: 0, pageerror: 0, requestfailed: 0, nav: 0 };
+  const state = { console: 0, pageerror: 0, requestfailed: 0, nav: 0, response: 0, runtime: 0 };
   const maxEach = 14;
   const can = (k) => {
     state[k] = Number(state[k] || 0) + 1;
@@ -1234,7 +1238,9 @@ function installCreatePageForensics(page, nome, attId) {
     page.on('pageerror', (err) => {
       if (!can('pageerror')) return;
       const msg = String((err && err.message) || err || '');
-      logEvt('dbg_create_page_pageerror', { message: msg.slice(0, 300) });
+      const stack = String((err && err.stack) || '').slice(0, 500);
+      const name = String((err && err.name) || '');
+      logEvt('dbg_create_page_pageerror', { message: msg.slice(0, 300), name: name.slice(0, 80), stack });
     });
   } catch {}
   try {
@@ -1263,6 +1269,55 @@ function installCreatePageForensics(page, nome, attId) {
       const url = String((frame && frame.url && frame.url()) || '');
       logEvt('dbg_create_page_mainframe_nav', { url: url.slice(0, 300) });
     });
+  } catch {}
+  try {
+    page.on('response', (resp) => {
+      if (!can('response')) return;
+      const status = Number((resp && resp.status && resp.status()) || 0);
+      if (!status || status < 400) return;
+      const req = resp && resp.request ? resp.request() : null;
+      const type = String((req && req.resourceType && req.resourceType()) || '');
+      if (!/script|xhr|fetch|document/i.test(type)) return;
+      const url = String((resp && resp.url && resp.url()) || '');
+      logEvt('dbg_create_page_response_error', { status, type, url: url.slice(0, 300) });
+    });
+  } catch {}
+  try {
+    const fnName = `__ctCreateForensicsEmit_${String(attId || 'na').replace(/[^a-zA-Z0-9_]/g, '_')}`;
+    if (!page[fnName]) {
+      page[fnName] = true;
+      page.exposeFunction(fnName, (payload) => {
+        if (!can('runtime')) return;
+        const data = (payload && typeof payload === 'object') ? payload : null;
+        logEvt('dbg_create_page_runtime_error', data);
+      }).catch(() => {});
+      page.evaluateOnNewDocument((name) => {
+        try {
+          const emit = (kind, payload) => {
+            try {
+              const fn = window[name];
+              if (typeof fn === 'function') fn({ kind, ...(payload || {}) });
+            } catch {}
+          };
+          window.addEventListener('error', (e) => {
+            const message = String((e && e.message) || '');
+            const filename = String((e && e.filename) || '');
+            const lineno = Number((e && e.lineno) || 0);
+            const colno = Number((e && e.colno) || 0);
+            const stack = String((e && e.error && e.error.stack) || '').slice(0, 500);
+            emit('window_error', { message: message.slice(0, 300), filename: filename.slice(0, 260), lineno, colno, stack });
+          }, true);
+          window.addEventListener('unhandledrejection', (e) => {
+            const reason = (e && e.reason);
+            const msg = typeof reason === 'string'
+              ? reason
+              : String((reason && reason.message) || reason || '');
+            const stack = String((reason && reason.stack) || '').slice(0, 500);
+            emit('unhandledrejection', { message: msg.slice(0, 300), stack });
+          }, true);
+        } catch {}
+      }, fnName).catch(() => {});
+    }
   } catch {}
 }
 
