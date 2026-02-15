@@ -51,6 +51,8 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Visão geral (o que é cada projeto) — **este arquivo**
   - Runbook (operar/restart/diagnóstico) — `docs/RUNBOOK_TECNICO.md`
   - Timeline (mudanças) — `docs/TIMELINE.md`
+  - Incidentes P0 concluídos desta etapa — `docs/inbox/done/INC-20260214-0900-01.md` e `docs/inbox/done/INC-20260214-1020-01.md`
+  - Incidente P0 encerrado desta etapa — `docs/inbox/done/INC-20260215-1100-01.md`
   - **Inbox de relatos do humano (intake/triage)** — `docs/INBOX_RELATOS_DO_HUMANO.md`
   - **Host registry (apelidos ↔ hostId)** — `docs/HOST_REGISTRY.md`
   - Checkups (relatórios) — `docs/checkups/`

@@ -1,4 +1,4 @@
-﻿### INBOX â€” relatos do humano (CÃ¡ssio) â€” CANÃ”NICO
+### INBOX â€” relatos do humano (CÃ¡ssio) â€” CANÃ”NICO
 
 Objetivo: quando o humano mandar um texto grande/bagunÃ§ado com â€œmil problemasâ€, o GPT usa este arquivo como **canal de intake**:
 
@@ -316,3 +316,69 @@ ObservaÃ§Ã£o (organizaÃ§Ã£o):
 - **Rollback**:
   - `git revert` + (se for validar rollback) reiniciar `node index.js`
 
+---
+
+## RAW_INPUT — 2026-02-14 (pedido de “fase 2”: atomicidade + duplicação zero)
+
+```text
+(humano)
+
+Quero fechar os 2 INCs de wipe (RM2 e RM6) porque já varremos todos os servidores (RM1..RM7) e agora quero começar
+uma fase nova “ultra enterprise”:
+
+1 - cadastro de contas nunca em hipótese alguma zerar perfis
+2 - nada, em hipótese alguma zerar perfis
+3 - usar a pasta perfis para registrar mais coisas referente aos perfis, como um banco secundário perfeito:
+    - registrar UA, fp, login/senha, datas e histórico (sem o sistema usar isso como verdade)
+    - servir como fallback/recovery caso perfis.json suma
+    - registrar exclusão pendente e fazer auto-retry de limpeza no boot/periodicamente (se falhar por lock)
+    - mas NUNCA usar a pasta perfis como fonte da verdade para o dashboard, para não ressuscitar lixo
+4 - investigação forense: por que está dando conta duplicada:
+    - duplicada nos servidores
+    - duplicada entre servidores
+    - duplicada no CT em uso
+   Quero saber tudo, resolver ponta a ponta de modo atômico:
+    - conta do estoque -> 1 servidor só, nunca 2
+    - CT registrar em uso perfeito, e exclusão perfeita também
+
+Quero abrir um INC novo pra isso, fechar os 2 INCs antigos, e garantir que agora está tudo perfeito pra liberar
+cadastro urgente sem surtar.
+```
+
+### TRIAGE — 2026-02-14
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Fechar INCs antigos de wipe (RM2/RM6) como superseded | done | `docs/inbox/cancelled/INC-20260212-0315-01.md`, `docs/inbox/cancelled/INC-20260213-1200-01.md` |
+| 2 | P0 | PROGRAMA ÚNICO: cadastro sem duplicação (CT estoque -> servidor -> CT em uso) | done | `docs/inbox/done/INC-20260214-0900-01.md` |
+| 3 | P0 | INCs auxiliares (0910/0920) fundidos no programa único | done | `docs/inbox/cancelled/INC-20260214-0910-01.md`, `docs/inbox/cancelled/INC-20260214-0920-01.md` |
+| 4 | P1 | Fase 2 (0930/0940/0950/1000/1010) reclassificada após estabilizar cadastro | done | `docs/inbox/cancelled/INC-20260214-0930-01.md`, `docs/inbox/cancelled/INC-20260214-0940-01.md`, `docs/inbox/cancelled/INC-20260214-0950-01.md`, `docs/inbox/cancelled/INC-20260214-1000-01.md`, `docs/inbox/cancelled/INC-20260214-1010-01.md` |
+| 5 | P0 | BLINDAGEM FINAL: hardening anti-regressão (H1/H2/H3) | done | `docs/inbox/done/INC-20260214-1020-01.md` |
+
+---
+
+## RAW_INPUT — 2026-02-15 (RM1: Robe postar / Marketplace “tela preta”)
+
+```text
+triagem inbox
+
+robe mae 1
+
+estamos com o seguinte problema, quando o robe vai postar , na aba zero ta rodando o virtus daquela conta, dai cheag a hora do robe postar, ele abre aba 1 facebook criar item , a tela ta ficando preta
+
+o robe abre a aba 1 naveag para a pagina correta, ta tudo perfeito, ta indo pra pagina correta, as vezes consegue colocar foto, mas é muito raro, as vezes consegue colocar titulo, as vezes na foto ele ta ficando tela preta, as vezes no titulo, e em casos muito raros ele consegue chegar no preço, mas é muito raro
+
+geralmente ja ta dando tela preta logo apos acessar a pagina, a pagina do criar item aparece, mas fica preta em seguida
+
+temos essa conta aqui la no rm1 pra gente testar
+
+[001] Alex Santana
+ID: maringa-1759198592235
+Cidade: Marabá
+```
+
+### TRIAGE — 2026-02-15
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | RM1: Robe postar (Marketplace) — aba 1 tela preta ao criar item | done | `docs/inbox/done/INC-20260215-1100-01.md` |

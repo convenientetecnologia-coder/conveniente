@@ -31,6 +31,57 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-15 — [CONV][DOCS][OPS] Abrir INC: RM1 Robe Marketplace “tela preta” (aba 1 criar item)
+
+- **O que**:
+  - Aberto INC `INC-20260215-1100-01` para investigar “tela preta” na aba 1 durante o fluxo de postar item do Robe no Marketplace, com Virtus rodando na aba 0.
+  - Registrado dossiê inicial: sintoma, hipóteses, plano de evidências (rodada 1 sem mudar código) e proposta de instrumentação opt-in (rodada 2).
+  - Índices sincronizados para o ticket aparecer como ativo.
+- **Por quê**: problema recorrente bloqueia postagem; precisamos prova objetiva antes de correção cirúrgica.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260215-1100-01.md`
+- **Reinícios**: nenhum (fase 1: investigação/documentação)
+- **Rollback**: n/a (somente docs)
+- **THREAD**: `TH-2026-02-15-rm1-robe-marketplace-black`
+
+---
+
+#### 2026-02-15 — [CONV][ROBE][P0] Encerramento INC-20260215-1100-01 (tela preta + aba extra de bootstrap)
+
+- **O que**:
+  - Encerrado o INC `INC-20260215-1100-01` com status `done/deployed/passed`.
+  - Confirmado em runtime que o Robe voltou a postar com estabilidade e sem regressao do fluxo.
+  - Removido comportamento obsoleto de abrir aba extra de create no bootstrap (`open_manual`) por default.
+- **Por quê**: finalizar o P0 com correcoes comprovadas por evidencia operacional e validacao humana.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\done\INC-20260215-1100-01.md`
+  - Commits: `40a6ae1`, `08d2410`, `5f17b31`, `0062a42`, `91dd50e`
+- **Reinícios**: sim (self_update + restart no RM1 durante rollout/validacao)
+- **Rollback**: reverter em ordem inversa os commits listados acima
+- **THREAD**: `TH-2026-02-15-rm1-robe-marketplace-black`
+
+---
+
+#### 2026-02-13 — [CROSS][DOCS][OPS] Encerramento formal dos 2 INCs P0 da etapa (0900 e 1020) + limpeza de `in_progress`
+
+- **O que**:
+  - INC `INC-20260214-0900-01` movido para `docs/inbox/done/` com status final concluído.
+  - INC `INC-20260214-1020-01` movido para `docs/inbox/done/` com status final concluído.
+  - Pasta `docs/inbox/in_progress/` ficou sem esses dois INCs, removendo pendência visual/operacional.
+  - Índices sincronizados: `docs/inbox/INDEX.md`, `docs/INBOX_RELATOS_DO_HUMANO.md`, `docs/LIVRO_DE_BORDO.md`.
+- **Por quê**: encerrar a etapa de segurança com organização canônica, sem tickets P0 ativos indevidamente em `in_progress`.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\done\INC-20260214-0900-01.md`
+  - `C:\conveniente\docs\inbox\done\INC-20260214-1020-01.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\LIVRO_DE_BORDO.md`
+- **Reinícios**: nenhum (somente organização/documentação)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-13-inc0900-inc1020-closeout`
+
+---
+
 #### 2026-02-13 — [CROSS][CT][CONV][OPS] INC-20260214-1020-01: implementação rodada 1 (H1/H2/H3) com rollout seguro
 
 - **O que**:
@@ -42,7 +93,7 @@ Formato canÃ´nico (copiar/colar):
   - `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js`
   - `C:\sitechatbot\index.js`
   - `C:\conveniente\scripts\fileStore.js`
-  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md`
+  - `C:\conveniente\docs\inbox\done\INC-20260214-1020-01.md`
 - **Reinícios**:
   - `sitechatbot` (CT): necessário para aplicar H1/H3 em runtime (`node index.js`)
   - `conveniente` (hosts): necessário para aplicar H2 em runtime (`node index.js`)
@@ -59,7 +110,7 @@ Formato canÃ´nico (copiar/colar):
   - Resultado consolidado manteve o plano H1 -> H2 -> H3 sem adicionar novos bloqueadores.
 - **Por quê**: garantir 0 achismo antes da fase de implementação, com validação cruzada de ponta a ponta.
 - **Evidência**:
-  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md` (seção “Bateria de auditoria ultra - rodada 2”)
+  - `C:\conveniente\docs\inbox\done\INC-20260214-1020-01.md` (seção “Bateria de auditoria ultra - rodada 2”)
   - revisão direta de `C:\sitechatbot\index.js`, `C:\sitechatbot\convenientetecnologia\lib\ctFbStock.js`, `C:\conveniente\scripts\fileStore.js`, `C:\conveniente\scripts\api_perfis.js`
 - **Reinícios**: nenhum (somente auditoria/documentação)
 - **Rollback**: `git revert` nas alterações de `docs/` (sem impacto de runtime)
@@ -81,7 +132,7 @@ Formato canÃ´nico (copiar/colar):
     - plano de execução seguro em ordem H1 -> H2 -> H3.
 - **Por quê**: transformar risco residual em plano executável com evidência objetiva, sem achismo, antes de qualquer alteração de runtime.
 - **Evidência**:
-  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md`
+  - `C:\conveniente\docs\inbox\done\INC-20260214-1020-01.md`
   - `C:\sitechatbot\tools\list_running_provisions.js` (snapshot: running provision = 0)
   - `C:\sitechatbot\tools\check_stock_state.js` (snapshot de status/jobs)
   - `C:\sitechatbot\tools\check_stock_unique_index.js` (índice de proteção de provision por host)
@@ -103,8 +154,8 @@ Formato canÃ´nico (copiar/colar):
   - Índices e livros sincronizados para manter organização única de operação/auditoria.
 - **Por quê**: separar claramente “problema P0 principal resolvido” da “fase de blindagem final”, mantendo governança documental limpa e rastreável.
 - **Evidência**:
-  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-0900-01.md`
-  - `C:\conveniente\docs\inbox\in_progress\INC-20260214-1020-01.md`
+  - `C:\conveniente\docs\inbox\done\INC-20260214-0900-01.md`
+  - `C:\conveniente\docs\inbox\done\INC-20260214-1020-01.md`
   - `C:\conveniente\docs\inbox\INDEX.md`
   - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
   - `C:\conveniente\docs\LIVRO_DE_BORDO.md`

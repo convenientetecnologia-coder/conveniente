@@ -36,15 +36,25 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260202-1600-01 | P0 | done | deployed | passed | Cidades/Grupos: contrato canÃ´nico + prioridade provisÃ£o (estoqueâ†’servidor) + migraÃ§Ã£o manual | `done/INC-20260202-1600-01.md` |
 | INC-20260207-1403-01 | P0 | done | deployed | passed | RM3: pós stock_provision, Virtus OFF em massa / volta parcial; fixes de resume e provisão | `done/INC-20260207-1403-01.md` |
 | INC-20260212-0240-01 | P0 | done | deployed | passed | RM2: restore de perfis via backup (merge seguro + dry-run + apply atômico) | `done/INC-20260212-0240-01.md` |
-| INC-20260212-0315-01 | P0 | in_progress | not_deployed | not_run | RM2: “wipe”/sobrescrita de perfis (perfis.json caiu de ~100 para 7) — investigação forense | `in_progress/INC-20260212-0315-01.md` |
-| INC-20260213-1200-01 | P0 | need_evidence | not_deployed | not_run | RM6: “wipe”/apagamento de perfis (perfis.json) — investigação forense | `need_evidence/INC-20260213-1200-01.md` |
+| INC-20260212-0315-01 | P0 | cancelled | not_deployed | not_run | RM2: “wipe”/sobrescrita de perfis (perfis.json caiu de ~100 para 7) — investigação forense (superseded) | `cancelled/INC-20260212-0315-01.md` |
+| INC-20260213-1200-01 | P0 | cancelled | not_deployed | not_run | RM6: “wipe”/apagamento de perfis (perfis.json) — investigação forense (superseded) | `cancelled/INC-20260213-1200-01.md` |
 | INC-20260212-0605-01 | P0 | done | operational_fix | passed | RM1: auditoria CT vs servidor (alinhamento + teste de exclusão manual) | `done/INC-20260212-0605-01.md` |
 | INC-20260212-0610-01 | P0 | done | deployed | passed | RM2: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0610-01.md` |
-| INC-20260212-0615-01 | P0 | need_evidence | not_deployed | not_run | RM3: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0615-01.md` |
-| INC-20260212-0620-01 | P0 | need_evidence | not_deployed | not_run | RM4: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0620-01.md` |
-| INC-20260212-0625-01 | P0 | need_evidence | not_deployed | not_run | RM5: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0625-01.md` |
-| INC-20260212-0630-01 | P0 | need_evidence | not_deployed | not_run | RM6: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0630-01.md` |
-| INC-20260212-0635-01 | P0 | need_evidence | not_deployed | not_run | RM7: auditoria CT vs servidor (mesmo playbook do RM1) | `need_evidence/INC-20260212-0635-01.md` |
+| INC-20260212-0615-01 | P0 | done | deployed | passed | RM3: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0615-01.md` |
+| INC-20260212-0620-01 | P0 | done | operational_fix | passed | RM4: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0620-01.md` |
+| INC-20260212-0625-01 | P0 | done | operational_fix | passed | RM5: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0625-01.md` |
+| INC-20260212-0630-01 | P0 | done | operational_fix | passed | RM6: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0630-01.md` |
+| INC-20260212-0635-01 | P0 | done | operational_fix | passed | RM7: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0635-01.md` |
+| INC-20260214-0900-01 | P0 | done | deployed_rm1_controlled | passed_rm1_e2e | PROGRAMA UNICO P0: cadastro sem duplicação (CT estoque -> servidor -> CT em uso) | `done/INC-20260214-0900-01.md` |
+| INC-20260214-1020-01 | P0 | done | deployed_rm1_controlled | passed_rm1_e2e | BLINDAGEM FINAL P0: hardening anti-regressão (perfis/ACK/estado) | `done/INC-20260214-1020-01.md` |
+| INC-20260214-0910-01 | P0 | cancelled | not_deployed | not_run | Fundido no INC-20260214-0900-01 (canal/ACK virou bloco do programa único) | `cancelled/INC-20260214-0910-01.md` |
+| INC-20260214-0920-01 | P0 | cancelled | not_deployed | not_run | Fundido no INC-20260214-0900-01 (invariantes anti-duplicação viraram bloco do programa único) | `cancelled/INC-20260214-0920-01.md` |
+| INC-20260214-0930-01 | P0 | cancelled | not_deployed | not_run | Fase 2: anti-wipe amplo (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-0930-01.md` |
+| INC-20260214-0940-01 | P0 | cancelled | not_deployed | not_run | Fase 2: delete E2E retry-safe (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-0940-01.md` |
+| INC-20260214-0950-01 | P1 | cancelled | not_deployed | not_run | Fase 2: registry secundário detalhado (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-0950-01.md` |
+| INC-20260214-1000-01 | P1 | cancelled | not_deployed | not_run | Fase 2: observabilidade completa (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-1000-01.md` |
+| INC-20260214-1010-01 | P1 | cancelled | not_deployed | not_run | Fase 2: recovery/backup/restore amplo (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-1010-01.md` |
+| INC-20260215-1100-01 | P0 | done | deployed | passed | RM1: Robe postar (Marketplace) — aba 1 tela preta ao criar item | `done/INC-20260215-1100-01.md` |
 | INC-20260203-1800-01 | P0 | need_evidence | deployed_partial | not_run | RM3: `loginRequired=probe_failed` com navegador aparentemente OK (Virtus derrubado por blindagem) | `need_evidence/INC-20260203-1800-01.md` |
 | INC-20260203-2100-01 | P0 | done | deployed | passed | CT Sistema Interno: Resumo divergente (KPI usa ct_drivers, abas usam ct_driver_memberships) | `done/INC-20260203-2100-01.md` |
 | INC-20260203-2230-01 | P1 | done | deployed | passed | CT Sistema Interno: WhatsApp verde + menu (abrir/copiar) + registro â€œChamou no zapâ€ (Testes Encerrados + Chamar depois + Cadastro + ParticipaÃ§Ã£o) | `done/INC-20260203-2230-01.md` |
