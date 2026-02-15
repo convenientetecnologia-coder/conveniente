@@ -1216,6 +1216,56 @@ function isCreateFormDegraded(v) {
   return fileInputs <= 0 || textLen < 120;
 }
 
+function installCreatePageForensics(page, nome, attId) {
+  if (!page || page.__ctCreateForensicsInstalled) return;
+  page.__ctCreateForensicsInstalled = true;
+  const state = { console: 0, pageerror: 0, requestfailed: 0, nav: 0 };
+  const maxEach = 14;
+  const can = (k) => {
+    state[k] = Number(state[k] || 0) + 1;
+    return state[k] <= maxEach;
+  };
+  const logEvt = (event, data) => {
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event, nome: String(nome || ''), attId: String(attId || ''), data: data || null }); } catch {}
+    // #endregion
+  };
+  try {
+    page.on('pageerror', (err) => {
+      if (!can('pageerror')) return;
+      const msg = String((err && err.message) || err || '');
+      logEvt('dbg_create_page_pageerror', { message: msg.slice(0, 300) });
+    });
+  } catch {}
+  try {
+    page.on('console', (m) => {
+      if (!can('console')) return;
+      const type = String((m && m.type && m.type()) || '');
+      const text = String((m && m.text && m.text()) || '');
+      if (!/error|warning|assert/i.test(type) && !/chunk|react|marketplace|exception|error/i.test(text)) return;
+      logEvt('dbg_create_page_console', { type, text: text.slice(0, 340) });
+    });
+  } catch {}
+  try {
+    page.on('requestfailed', (req) => {
+      if (!can('requestfailed')) return;
+      const url = String((req && req.url && req.url()) || '');
+      const type = String((req && req.resourceType && req.resourceType()) || '');
+      const err = req && req.failure ? req.failure() : null;
+      const em = err && err.errorText ? String(err.errorText) : '';
+      if (!/script|xhr|fetch|document/i.test(type)) return;
+      logEvt('dbg_create_page_requestfailed', { type, url: url.slice(0, 300), errorText: em.slice(0, 120) });
+    });
+  } catch {}
+  try {
+    page.on('framenavigated', (frame) => {
+      if (!frame || frame !== page.mainFrame() || !can('nav')) return;
+      const url = String((frame && frame.url && frame.url()) || '');
+      logEvt('dbg_create_page_mainframe_nav', { url: url.slice(0, 300) });
+    });
+  } catch {}
+}
+
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
@@ -1686,6 +1736,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Nova aba + patchPage (sem minimizar/off-screen)
     const coords = utils.getCoords(manifest.cidade || '');
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
+    installCreatePageForensics(page, nome, attId);
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H3_H4',location:'scripts/robe.js:startRobe:page_created',message:'Robe create tab is open',data:{nome:String(nome||''),url:(page&&typeof page.url==='function')?String(page.url()||''):'',totalPages:(browser&&typeof browser.pages==='function')?Number((await browser.pages().catch(()=>[])).length||0):null},timestamp:Date.now()})}).catch(()=>{});
     // #endregion
