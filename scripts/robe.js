@@ -1220,6 +1220,12 @@ function isCreateFormDegraded(v) {
   return fileInputs <= 0 || textLen < 120;
 }
 
+function isMarketplaceComposerRateLimitMessage(msg) {
+  const s = String(msg || '');
+  if (!s) return false;
+  return /1675004/.test(s) && /useMarketplaceComposerMedianPackageDetailQuery/i.test(s);
+}
+
 function installCreatePageForensics(page, nome, attId) {
   if (!page || page.__ctCreateForensicsInstalled) return;
   page.__ctCreateForensicsInstalled = true;
@@ -1290,6 +1296,19 @@ function installCreatePageForensics(page, nome, attId) {
         if (!can('runtime')) return;
         const data = (payload && typeof payload === 'object') ? payload : null;
         logEvt('dbg_create_page_runtime_error', data);
+        const msg = String((data && data.message) || '');
+        if (isMarketplaceComposerRateLimitMessage(msg)) {
+          page.__ctMarketplaceComposerRateLimited = {
+            ts: Date.now(),
+            code: '1675004',
+            message: msg.slice(0, 280)
+          };
+          logEvt('dbg_create_page_rate_limit_detected', {
+            code: '1675004',
+            op: 'useMarketplaceComposerMedianPackageDetailQuery',
+            message: msg.slice(0, 280)
+          });
+        }
       }).catch(() => {});
       page.evaluateOnNewDocument((name) => {
         try {
@@ -1872,6 +1891,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_create_page_degraded_detected', nome: String(nome || ''), attId: String(attId || ''), vitals }); } catch {}
       // #endregion
       for (let recoverAttempt = 1; recoverAttempt <= 2; recoverAttempt++) {
+        const rl = page && page.__ctMarketplaceComposerRateLimited ? page.__ctMarketplaceComposerRateLimited : null;
+        if (rl && Number(rl.ts || 0) > 0) {
+          // #region agent log
+          try { provisionAudit.append({ ts: Date.now(), event: 'dbg_create_page_recover_skipped_rate_limit', nome: String(nome || ''), attId: String(attId || ''), recoverAttempt: Number(recoverAttempt || 0), rateLimit: rl }); } catch {}
+          // #endregion
+          break;
+        }
         try {
           await page.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
         } catch {}
@@ -1880,6 +1906,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         await captureCreatePageVitals(page, nome, attId, `recover_create_form_attempt_${recoverAttempt}`);
         vitals = await readCreatePageVitals(page);
         if (!isCreateFormDegraded(vitals)) break;
+      }
+      const rlAfter = page && page.__ctMarketplaceComposerRateLimited ? page.__ctMarketplaceComposerRateLimited : null;
+      if (isCreateFormDegraded(vitals) && rlAfter && Number(rlAfter.ts || 0) > 0) {
+        throw new Error(`Marketplace rate limit 1675004 detectado (${String((rlAfter && rlAfter.message) || '').slice(0, 160)})`);
       }
     }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });
