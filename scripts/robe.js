@@ -1422,6 +1422,56 @@ function installCreatePageForensics(page, nome, attId) {
   } catch {}
 }
 
+async function installCreatePageGraphqlRateGuard(page, nome, attId) {
+  if (!page || page.__ctGraphqlRateGuardInstalled) return;
+  page.__ctGraphqlRateGuardInstalled = true;
+  try {
+    if (!page._ctRateGuardInterceptionEnabled) {
+      await page.setRequestInterception(true);
+      page._ctRateGuardInterceptionEnabled = true;
+    }
+  } catch {}
+  const safeContinue = (req) => {
+    try { req.continue(); } catch {}
+  };
+  try {
+    page.on('request', (req) => {
+      try {
+        const url = String((req && req.url && req.url()) || '');
+        const method = String((req && req.method && req.method()) || '');
+        if (!/\/api\/graphql\//i.test(url) || method !== 'POST') return safeContinue(req);
+        const postData = String((req && req.postData && req.postData()) || '');
+        const isComposerMedianQuery =
+          /useMarketplaceComposerMedianPackageDetailQuery/i.test(postData) ||
+          /doc_id=9336866166424067/i.test(postData);
+        if (!isComposerMedianQuery) return safeContinue(req);
+        // #region agent log
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'dbg_create_page_graphql_rate_guard_stubbed',
+            nome: String(nome || ''),
+            attId: String(attId || ''),
+            data: { url: url.slice(0, 260), method: String(method || ''), postDataLen: Number(postData.length || 0) }
+          });
+        } catch {}
+        // #endregion
+        try {
+          req.respond({
+            status: 200,
+            contentType: 'application/json; charset=utf-8',
+            body: JSON.stringify({ data: {} })
+          });
+          return;
+        } catch {}
+        return safeContinue(req);
+      } catch {
+        return safeContinue(req);
+      }
+    });
+  } catch {}
+}
+
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
@@ -1892,6 +1942,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Nova aba + patchPage (sem minimizar/off-screen)
     const coords = utils.getCoords(manifest.cidade || '');
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
+    await installCreatePageGraphqlRateGuard(page, nome, attId);
     installCreatePageForensics(page, nome, attId);
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H3_H4',location:'scripts/robe.js:startRobe:page_created',message:'Robe create tab is open',data:{nome:String(nome||''),url:(page&&typeof page.url==='function')?String(page.url()||''):'',totalPages:(browser&&typeof browser.pages==='function')?Number((await browser.pages().catch(()=>[])).length||0):null},timestamp:Date.now()})}).catch(()=>{});
