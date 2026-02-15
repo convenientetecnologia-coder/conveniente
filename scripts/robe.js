@@ -1990,7 +1990,18 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
       const rlAfter = page && page.__ctMarketplaceComposerRateLimited ? page.__ctMarketplaceComposerRateLimited : null;
       if (isCreateFormDegraded(vitals) && rlAfter && Number(rlAfter.ts || 0) > 0) {
-        throw new Error(`Marketplace rate limit 1675004 detectado (${String((rlAfter && rlAfter.message) || '').slice(0, 160)})`);
+        await applyLimitPostingAndAbort({
+          page,
+          nome,
+          attId,
+          where: 'graphql_rate_limit_1675004',
+          overlaySnapshot: {
+            h2: 'GraphQL rate limit',
+            body: String((rlAfter && rlAfter.message) || '').slice(0, 280),
+            ts: Number(rlAfter.ts || Date.now())
+          }
+        });
+        return;
       }
     }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });
