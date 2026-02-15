@@ -1229,7 +1229,7 @@ function isMarketplaceComposerRateLimitMessage(msg) {
 function installCreatePageForensics(page, nome, attId) {
   if (!page || page.__ctCreateForensicsInstalled) return;
   page.__ctCreateForensicsInstalled = true;
-  const state = { console: 0, pageerror: 0, requestfailed: 0, nav: 0, response: 0, runtime: 0, graphql: 0 };
+  const state = { console: 0, pageerror: 0, requestfailed: 0, nav: 0, response: 0, runtime: 0, graphql: 0, graphqlReq: 0 };
   const maxEach = 14;
   const can = (k) => {
     state[k] = Number(state[k] || 0) + 1;
@@ -1332,8 +1332,40 @@ function installCreatePageForensics(page, nome, attId) {
         code: code || null,
         message: message || null,
         operation: operation || null,
+        bodyReadable: !!raw,
+        bodyLen: Number((raw && raw.length) || 0),
         matched1675004: /1675004/.test(raw),
         matchedComposerOp: /useMarketplaceComposerMedianPackageDetailQuery/i.test(raw)
+      });
+    });
+  } catch {}
+  try {
+    page.on('request', (req) => {
+      if (!can('graphqlReq')) return;
+      const url = String((req && req.url && req.url()) || '');
+      if (!/\/api\/graphql\//i.test(url)) return;
+      const type = String((req && req.resourceType && req.resourceType()) || '');
+      if (!/xhr|fetch/i.test(type)) return;
+      const method = String((req && req.method && req.method()) || '');
+      let postData = '';
+      try { postData = String((req && req.postData && req.postData()) || ''); } catch {}
+      if (!/MarketplaceComposer|useMarketplaceComposerMedianPackageDetailQuery|doc_id|fb_api_req_friendly_name/i.test(postData)) return;
+      const opMatch = postData.match(/(?:fb_api_req_friendly_name|operationName)=([^&]+)/i);
+      const docMatch = postData.match(/doc_id=([0-9]+)/i);
+      const varsMatch = postData.match(/variables=([^&]+)/i);
+      let op = '';
+      let varsHead = '';
+      try { op = opMatch ? decodeURIComponent(String(opMatch[1] || '')) : ''; } catch {}
+      try { varsHead = varsMatch ? decodeURIComponent(String(varsMatch[1] || '')).slice(0, 200) : ''; } catch {}
+      logEvt('dbg_create_page_graphql_request', {
+        method,
+        type,
+        url: url.slice(0, 300),
+        operation: op.slice(0, 140) || null,
+        docId: docMatch ? String(docMatch[1] || '') : null,
+        hasComposerMarker: /useMarketplaceComposerMedianPackageDetailQuery/i.test(postData),
+        postDataLen: postData.length,
+        varsHead
       });
     });
   } catch {}
