@@ -2101,8 +2101,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     })().catch(()=>{});
 
     // Upload - procurar no documento, shadow DOM e frames; se necessário, acionar seletor de fotos.
-    let inputFoto = await findFileInputEverywhere(page);
-    if (!inputFoto) {
+    // Se a tela degradar nesse ponto (após fastlane), recarrega create/item 1x para retentativa real.
+    let inputFoto = null;
+    for (let uploadAttempt = 1; uploadAttempt <= 2 && !inputFoto; uploadAttempt++) {
+      inputFoto = await findFileInputEverywhere(page);
+      if (inputFoto) break;
       await captureCreatePageVitals(page, nome, attId, 'before_trigger_photo_picker');
       await triggerPhotoPickerEverywhere(page);
       await page.waitForFunction(() => {
@@ -2130,6 +2133,27 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         return pick(document);
       }, { timeout: 8000 }).catch(()=>{});
       inputFoto = await findFileInputEverywhere(page);
+      if (inputFoto) break;
+
+      await captureCreatePageVitals(page, nome, attId, `upload_input_not_found_attempt_${uploadAttempt}`);
+      const uploadVitals = await readCreatePageVitals(page);
+      const degradedAtUpload = isCreateFormDegraded(uploadVitals);
+      // #region agent log
+      try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_upload_recover_probe', nome: String(nome || ''), attId: String(attId || ''), uploadAttempt: Number(uploadAttempt || 0), degradedAtUpload: !!degradedAtUpload, textLen: Number((uploadVitals && uploadVitals.textLen) || 0), fileInputs: Number((uploadVitals && uploadVitals.fileInputs) || 0) }); } catch {}
+      // #endregion
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_upload_recover_v1',hypothesisId:'H19_H20',location:'scripts/robe.js:startRobe:upload_probe',message:'Upload input missing after picker trigger',data:{nome:String(nome||''),attId:String(attId||''),uploadAttempt:Number(uploadAttempt||0),degradedAtUpload:!!degradedAtUpload,textLen:Number((uploadVitals&&uploadVitals.textLen)||0),fileInputs:Number((uploadVitals&&uploadVitals.fileInputs)||0)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+
+      const rl = page && page.__ctMarketplaceComposerRateLimited ? page.__ctMarketplaceComposerRateLimited : null;
+      if (!degradedAtUpload || uploadAttempt >= 2 || (rl && Number(rl.ts || 0) > 0)) break;
+
+      try {
+        await page.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      } catch {}
+      await waitForCreateItemReady(page, { timeout: 7000 }).catch(()=>false);
+      await page.waitForSelector('input[type="file"][accept*="image"], input[type="file"]', { timeout: 6000 }).catch(()=>{});
+      await captureCreatePageVitals(page, nome, attId, `upload_recover_create_attempt_${uploadAttempt}`);
     }
     if (!inputFoto) {
       await captureCreatePageVitals(page, nome, attId, 'upload_input_not_found_final');
