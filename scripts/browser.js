@@ -2995,6 +2995,9 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
 
           if (suppressed) {
             if (age != null && age >= maxAge) {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H4',location:'scripts/browser.js:installAboutBlankKiller:max_age_kill',message:'about:blank killed by max age while suppressed',data:{nome:String(nome||''),pageKey:String(key||''),ageMs:Number(age||0),maxAgeMs:Number(maxAge||0),graceMs:Number(graceMs||0)},timestamp:Date.now()})}).catch(()=>{});
+              // #endregion
               try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
               try { await issues.append(nome, 'mil_action', 'about_blank_killed_max_age'); } catch {}
               return;
@@ -3006,6 +3009,9 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           }
 
           // Fora de Robe e sem suppress => mata imediatamente
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H4',location:'scripts/browser.js:installAboutBlankKiller:immediate_kill',message:'about:blank killed immediately (not suppressed)',data:{nome:String(nome||''),pageKey:String(key||''),ageMs:(age==null?null:Number(age)),graceMs:Number(graceMs||0),suppressUntil:Number((browser&&browser._suppressBlankKillUntil&&browser._suppressBlankKillUntil[nome])||0)},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
           try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}
         } finally {
