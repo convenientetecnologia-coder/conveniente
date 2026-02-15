@@ -9046,6 +9046,12 @@ const handlers = {
   async ['robe-play']({ nome }) {
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] robe-play chamada', { nome });
+      // #region agent log
+      try { provisionAudit.append({ ts: Date.now(), event: 'dbg_worker_robe_play_handler_entry', nome: String(nome || ''), hasCtrl: !!controllers.get(nome) }); } catch {}
+      // #endregion
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix_v2',hypothesisId:'H6_H7',location:'scripts/worker.js:robe-play:handler_entry',message:'Worker robe-play handler entered',data:{nome:String(nome||''),hasCtrl:!!controllers.get(nome)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
@@ -9069,6 +9075,9 @@ const handlers = {
       } catch {}
 
       if (!robeQueue.inQueue(nome) && !robeQueue.isActive(nome)) {
+        // #region agent log
+        try { provisionAudit.append({ ts: Date.now(), event: 'dbg_worker_robe_play_enqueued', nome: String(nome || ''), inQueue: !!robeQueue.inQueue(nome), isActive: !!robeQueue.isActive(nome) }); } catch {}
+        // #endregion
         robeUpdateMeta(nome, { emFila: true });
         robeQueue.enqueue(nome, async () => {
 
@@ -9087,6 +9096,12 @@ const handlers = {
           }
 
           try { logger.info('[WORKER][robe-play] Robe start', { nome }); } catch {}
+          // #region agent log
+          try { provisionAudit.append({ ts: Date.now(), event: 'dbg_worker_robe_play_startrobe_call', nome: String(nome || ''), virtusWasRunningHint: !!(ctrl && ctrl.virtus) }); } catch {}
+          // #endregion
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix_v2',hypothesisId:'H6_H7',location:'scripts/worker.js:robe-play:startrobe_call',message:'Calling startRobeDynamic',data:{nome:String(nome||''),virtusRunning:!!(ctrl&&ctrl.virtus)},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           try { await reportAction(nome, 'robe_start', 'Iniciando Robe via robe-play'); } catch {}
 
           let mainPage = null;
@@ -9212,6 +9227,10 @@ const handlers = {
           }
         });
         await snapshotStatusAndWrite();
+      } else {
+        // #region agent log
+        try { provisionAudit.append({ ts: Date.now(), event: 'dbg_worker_robe_play_skip_already_queued_or_active', nome: String(nome || ''), inQueue: !!robeQueue.inQueue(nome), isActive: !!robeQueue.isActive(nome) }); } catch {}
+        // #endregion
       }
       logger.info('[HANDLER] robe-play ok', { nome });
       return { ok: true };
