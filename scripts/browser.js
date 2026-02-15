@@ -166,6 +166,22 @@ async function patchPage(nome, page, coords) {
     safeDefine(navigator, 'platform', () => 'Win32');
     safeDefine(navigator, 'webdriver', () => undefined);
     window.chrome = window.chrome || { runtime: {} };
+    // Keep Notification API shape present to avoid marketplace runtime ReferenceError.
+    // We force denied semantics, so behavior stays non-intrusive.
+    if (typeof window.Notification === 'undefined') {
+      try {
+        const NotificationShim = function Notification() {
+          throw new TypeError('Illegal constructor');
+        };
+        NotificationShim.permission = 'denied';
+        NotificationShim.requestPermission = () => Promise.resolve('denied');
+        Object.defineProperty(window, 'Notification', {
+          value: NotificationShim,
+          configurable: true,
+          writable: true
+        });
+      } catch {}
+    }
   });
 
   // --- GEOLOCALIZAÇÃO ---
@@ -1035,7 +1051,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--no-first-run', // Não exibe onboarding
       '--no-default-browser-check', // Não pergunta padrão
       '--password-store=basic', // Evita prompts/chaves desktop
-      '--disable-notifications', // Silencia push/browser
       '--disable-extensions', // Zero extensão custom
       '--lang=pt-BR', // GOAL: idioma fixo PT-BR
       '--disable-background-timer-throttling', // Não pausa timers de fundo
