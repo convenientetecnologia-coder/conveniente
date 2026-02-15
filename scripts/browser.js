@@ -998,7 +998,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--no-first-run', // Não exibe onboarding
       '--no-default-browser-check', // Não pergunta padrão
       '--password-store=basic', // Evita prompts/chaves desktop
-      '--disable-notifications', // Silencia push/browser
+      // '--disable-notifications' removido: alguns fluxos do Marketplace quebram quando Notification API some.
       '--disable-extensions', // Zero extensão custom
       '--lang=pt-BR', // GOAL: idioma fixo PT-BR
       '--disable-background-timer-throttling', // Não pausa timers de fundo
