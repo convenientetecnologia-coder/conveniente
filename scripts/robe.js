@@ -183,6 +183,7 @@ const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 // PATCH MILITAR — Constantes de limit_posting
 const LIMIT_POSTING_REASON = 'limit_posting';
 const LIMIT_POSTING_MS = 24 * 60 * 60 * 1000;
+const MARKETPLACE_RATE_LIMIT_ERR = 'marketplace_rate_limit_1675004';
 
 // Guards ABSOLUTOS para abortar fluxo pós-limit
 const ABORT_LIMIT_POSTING = 'LIMIT_POSTING_ABORT';
@@ -1990,18 +1991,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
       const rlAfter = page && page.__ctMarketplaceComposerRateLimited ? page.__ctMarketplaceComposerRateLimited : null;
       if (isCreateFormDegraded(vitals) && rlAfter && Number(rlAfter.ts || 0) > 0) {
-        await applyLimitPostingAndAbort({
-          page,
-          nome,
-          attId,
-          where: 'graphql_rate_limit_1675004',
-          overlaySnapshot: {
-            h2: 'GraphQL rate limit',
-            body: String((rlAfter && rlAfter.message) || '').slice(0, 280),
-            ts: Number(rlAfter.ts || Date.now())
-          }
-        });
-        return;
+        throw new Error(`${MARKETPLACE_RATE_LIMIT_ERR}: ${String((rlAfter && rlAfter.message) || '').slice(0, 200)}`);
       }
     }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });
@@ -2218,6 +2208,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // Tipo de issue (no-photo vs erro geral)
     const isNoPhoto = /sem foto dispon[ií]vel/i.test(errMsg);
+    const isMarketplaceRateLimit = errMsg.includes(MARKETPLACE_RATE_LIMIT_ERR) || /1675004/.test(errMsg);
     const issueType = isNoPhoto ? 'robe_no_photo' : 'robe_error';
 
     // Registra issue (silencioso)
@@ -2228,13 +2219,25 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // Cooldown padrão: Sempre após post (sucesso ou erro), aplica 15–30min. NUNCA penalidade/backoff especial.
     try {
-      const pause = (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
+      if (isMarketplaceRateLimit) {
+        await manifestStore.update(nome, (m) => {
+          m = m || {};
+          if (m.robePauseReason === LIMIT_POSTING_REASON) delete m.robePauseReason;
+          return m;
+        });
+      }
+      const pause = isMarketplaceRateLimit
+        ? (2 + Math.floor(Math.random() * 4)) * 60 * 1000
+        : (15 + Math.floor(Math.random() * 16)) * 60 * 1000;
       await manifestStore.update(nome, m => {
         m.robeCooldownUntil = Date.now() + pause;
         return m;
       });
       cooldownApplied = true;
-      try { await logIssue(nome, 'robe_error', `Erro técnico; cooldown padrão ${Math.ceil(pause/60000)}min: ${errMsg}`); } catch {}
+      try {
+        const reason = isMarketplaceRateLimit ? 'rate_limit_curto_retry' : 'erro_tecnico_padrao';
+        await logIssue(nome, 'robe_error', `Erro técnico (${reason}); cooldown ${Math.ceil(pause/60000)}min: ${errMsg}`);
+      } catch {}
     } catch {}
 
     // P2 ULTRA ROBUSTO: MARCAR COMO USADA MESMO EM FALHA!!!
@@ -2254,7 +2257,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }
     } catch {}
 
-    return { ok: false, error: errMsg, log: stepLogArr };
+    return { ok: false, error: errMsg, retryable: isMarketplaceRateLimit, errorCode: isMarketplaceRateLimit ? MARKETPLACE_RATE_LIMIT_ERR : null, log: stepLogArr };
 
   } finally {
     // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting
