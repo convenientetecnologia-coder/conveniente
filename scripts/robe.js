@@ -1149,6 +1149,47 @@ async function triggerPhotoPickerEverywhere(page) {
   }
 }
 
+async function captureCreatePageVitals(page, nome, attId, stage) {
+  if (!page) return;
+  let snap = null;
+  try {
+    snap = await page.evaluate(() => {
+      const d = document;
+      const b = d && d.body;
+      const h = d && d.documentElement;
+      const bodyStyle = b ? window.getComputedStyle(b) : null;
+      const htmlStyle = h ? window.getComputedStyle(h) : null;
+      const txt = b ? String((b.innerText || '').trim()) : '';
+      return {
+        href: String(location.href || ''),
+        readyState: String(d && d.readyState || ''),
+        visibilityState: String(d && d.visibilityState || ''),
+        hidden: !!(d && d.hidden),
+        bodyExists: !!b,
+        bodyChildCount: b && b.children ? Number(b.children.length || 0) : 0,
+        textLen: txt.length,
+        textHead: txt.slice(0, 140),
+        htmlBg: htmlStyle ? String(htmlStyle.backgroundColor || '') : '',
+        bodyBg: bodyStyle ? String(bodyStyle.backgroundColor || '') : '',
+        htmlDisplay: htmlStyle ? String(htmlStyle.display || '') : '',
+        bodyDisplay: bodyStyle ? String(bodyStyle.display || '') : '',
+        htmlVisibility: htmlStyle ? String(htmlStyle.visibility || '') : '',
+        bodyVisibility: bodyStyle ? String(bodyStyle.visibility || '') : '',
+        viewport: { w: window.innerWidth || 0, h: window.innerHeight || 0 },
+        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0
+      };
+    });
+  } catch (e) {
+    snap = { evalError: String((e && e.message) || e || '') };
+  }
+  // #region agent log
+  try { provisionAudit.append({ ts: Date.now(), event: 'dbg_create_page_vitals', nome: String(nome || ''), attId: String(attId || ''), stage: String(stage || ''), snap }); } catch {}
+  // #endregion
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v3',hypothesisId:'H8_H9',location:'scripts/robe.js:captureCreatePageVitals',message:'Create page vitals snapshot',data:{nome:String(nome||''),attId:String(attId||''),stage:String(stage||''),snap},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+}
+
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
@@ -1170,6 +1211,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       await patchPage(nome, p, coords);
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H3_H4',location:'scripts/robe.js:openCreateItemPageRobust:goto_success',message:'Create-item page navigation success',data:{nome:String(nome||''),attempt:Number(attempt||0),url:(typeof p.url==='function'?String(p.url()||''):''),title:(typeof p.title==='function'?String(await p.title().catch(()=>'')):''),suppressedUntil:Number((guard&&guard[nome])||0)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
@@ -1691,6 +1733,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         timeout: 8000
       }).catch(() => {});
     }
+    await captureCreatePageVitals(page, nome, attId, `after_ready_fastlane_${readyFast ? 'ok' : 'fallback'}`);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });
 
     // Micro settle (2 frames + 100–220 ms); substituído por sleep apenas (alteração)
@@ -1745,6 +1788,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Upload - procurar no documento, shadow DOM e frames; se necessário, acionar seletor de fotos.
     let inputFoto = await findFileInputEverywhere(page);
     if (!inputFoto) {
+      await captureCreatePageVitals(page, nome, attId, 'before_trigger_photo_picker');
       await triggerPhotoPickerEverywhere(page);
       await page.waitForFunction(() => {
         const pick = (root) => {
@@ -1773,6 +1817,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       inputFoto = await findFileInputEverywhere(page);
     }
     if (!inputFoto) {
+      await captureCreatePageVitals(page, nome, attId, 'upload_input_not_found_final');
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_upload_input_not_found_after_trigger', nome: String(nome || ''), attId: String(attId || ''), url: (typeof page.url === 'function') ? String(page.url() || '') : '' }); } catch {}
       // #endregion
