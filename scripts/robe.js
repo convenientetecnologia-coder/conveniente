@@ -1941,6 +1941,19 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // Nova aba + patchPage (sem minimizar/off-screen)
     const coords = utils.getCoords(manifest.cidade || '');
+    // Pré-seleciona foto antes de abrir/create para reduzir janela de degradação entre recovery e upload.
+    const photoPickStartedAt = Date.now();
+    const pick = await fotos.pickPhotoForAccount(nome, workingNames);
+    if (!pick.ok) {
+      const reason = pick.error || 'no-photo-available';
+      throw new Error(`Sem foto disponível para esta conta (${reason}).`);
+    }
+    fotoPath = pick.absPath;
+    fotoNome = pick.file;
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_photo_prepicked', nome: String(nome || ''), attId: String(attId || ''), file: String(fotoNome || ''), durMs: Number(Date.now() - photoPickStartedAt) }); } catch {}
+    // #endregion
+
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
     await installCreatePageGraphqlRateGuard(page, nome, attId);
     installCreatePageForensics(page, nome, attId);
@@ -2086,15 +2099,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         } catch {}
       }
     })().catch(()=>{});
-
-    // FOTO — via fotos.js
-    const pick = await fotos.pickPhotoForAccount(nome, workingNames);
-    if (!pick.ok) {
-      const reason = pick.error || 'no-photo-available';
-      throw new Error(`Sem foto disponível para esta conta (${reason}).`);
-    }
-    fotoPath = pick.absPath;
-    fotoNome = pick.file;
 
     // Upload - procurar no documento, shadow DOM e frames; se necessário, acionar seletor de fotos.
     let inputFoto = await findFileInputEverywhere(page);
