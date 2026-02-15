@@ -744,9 +744,6 @@ module.exports = (app, workerClient, fileStore) => {
     // #region agent log
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_api_robe_play_entry', nome: String(nome || ''), op: String(op || '') }); } catch {}
     // #endregion
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix_v2',hypothesisId:'H6',location:'scripts/api_perfis.js:robe-play:entry',message:'API robe-play called',data:{nome:String(nome||''),operator:String(op||'')},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (!nome) return res.json({ ok: false, error: 'nome ausente' });
     try { assertPerfilExists(fileStore, nome); } catch(e) {
       logger.warn('Tentativa de robe-play para perfil inexistente ou inválido', { nome, error: e && e.message });
@@ -758,9 +755,6 @@ module.exports = (app, workerClient, fileStore) => {
       logger.info('Comando robe-play disparado', { nome });
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_api_robe_play_resp', nome: String(nome || ''), ok: !!(resp && resp.ok), error: (resp && resp.error) ? String(resp.error) : null }); } catch {}
-      // #endregion
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix_v2',hypothesisId:'H6',location:'scripts/api_perfis.js:robe-play:resp',message:'API robe-play worker response',data:{nome:String(nome||''),ok:!!(resp&&resp.ok),error:(resp&&resp.error)?String(resp.error):null},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
       return res.json(resp);
     } catch (e) {

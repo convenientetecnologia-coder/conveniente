@@ -254,7 +254,6 @@ async function patchPage(nome, page, coords) {
       } catch {}
       return '';
     })();
-    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v4',hypothesisId:'H11',location:'scripts/browser.js:patchPage:interception_decision',message:'Request interception decision',data:{nome:String(nome||''),pageUrl:String(url||''),targetUrl:String(targetUrlForDebug||''),enableVirtusMessengerBlock:!!enableVirtusMessengerBlock},timestamp:Date.now()})}).catch(()=>{});
     try { provisionAudit.append({ ts: Date.now(), event: 'dbg_patchpage_interception_decision', nome: String(nome || ''), pageUrl: String(url || ''), targetUrl: String(targetUrlForDebug || ''), enableVirtusMessengerBlock: !!enableVirtusMessengerBlock }); } catch {}
   } catch {}
   // #endregion
@@ -286,7 +285,6 @@ async function patchPage(nome, page, coords) {
               page._dbgAbortCount = Number(page._dbgAbortCount || 0);
               if (page._dbgAbortCount < 8) {
                 page._dbgAbortCount++;
-                fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v4',hypothesisId:'H11',location:'scripts/browser.js:patchPage:request_abort',message:'Aborted request by interception',data:{nome:String(nome||''),type:String(type||''),url:String(u||'').slice(0,280)},timestamp:Date.now()})}).catch(()=>{});
                 try { provisionAudit.append({ ts: Date.now(), event: 'dbg_patchpage_request_abort', nome: String(nome || ''), type: String(type || ''), url: String(u || '').slice(0, 280) }); } catch {}
               }
             } catch {}
@@ -301,7 +299,6 @@ async function patchPage(nome, page, coords) {
                 page._dbgAbortCount = Number(page._dbgAbortCount || 0);
                 if (page._dbgAbortCount < 8) {
                   page._dbgAbortCount++;
-                  fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v4',hypothesisId:'H11',location:'scripts/browser.js:patchPage:image_abort',message:'Image aborted by interception',data:{nome:String(nome||''),type:String(type||''),url:String(u||'').slice(0,280)},timestamp:Date.now()})}).catch(()=>{});
                   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_patchpage_image_abort', nome: String(nome || ''), type: String(type || ''), url: String(u || '').slice(0, 280) }); } catch {}
                 }
               } catch {}
@@ -3057,7 +3054,6 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
           if (suppressed) {
             if (age != null && age >= maxAge) {
               // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H4',location:'scripts/browser.js:installAboutBlankKiller:max_age_kill',message:'about:blank killed by max age while suppressed',data:{nome:String(nome||''),pageKey:String(key||''),ageMs:Number(age||0),maxAgeMs:Number(maxAge||0),graceMs:Number(graceMs||0)},timestamp:Date.now()})}).catch(()=>{});
               // #endregion
               try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
               try { await issues.append(nome, 'mil_action', 'about_blank_killed_max_age'); } catch {}
@@ -3071,7 +3067,6 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
 
           // Fora de Robe e sem suppress => mata imediatamente
           // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H4',location:'scripts/browser.js:installAboutBlankKiller:immediate_kill',message:'about:blank killed immediately (not suppressed)',data:{nome:String(nome||''),pageKey:String(key||''),ageMs:(age==null?null:Number(age)),graceMs:Number(graceMs||0),suppressUntil:Number((browser&&browser._suppressBlankKillUntil&&browser._suppressBlankKillUntil[nome])||0)},timestamp:Date.now()})}).catch(()=>{});
           // #endregion
           try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
           try { await issues.append(nome, 'mil_action', 'about_blank_killed'); } catch {}

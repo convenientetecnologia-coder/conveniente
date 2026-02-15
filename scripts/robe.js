@@ -1190,9 +1190,6 @@ async function captureCreatePageVitals(page, nome, attId, stage) {
   // #region agent log
   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_create_page_vitals', nome: String(nome || ''), attId: String(attId || ''), stage: String(stage || ''), snap }); } catch {}
   // #endregion
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_forensics_v3',hypothesisId:'H8_H9',location:'scripts/robe.js:captureCreatePageVitals',message:'Create page vitals snapshot',data:{nome:String(nome||''),attId:String(attId||''),stage:String(stage||''),snap},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 }
 
 async function readCreatePageVitals(page) {
@@ -1481,9 +1478,6 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_attempt', nome: String(nome || ''), attempt: Number(attempt || 0), baseAttId: String(baseAttId || '') }); } catch {}
       // #endregion
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H4',location:'scripts/robe.js:openCreateItemPageRobust:attempt_start',message:'Starting create-item tab attempt',data:{nome:String(nome||''),attempt:Number(attempt||0),baseAttId:String(baseAttId||'')},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       p = await browser.newPage();
       // SUPRESSOR para o killer de about:blank durante patchPage+goto (20s de guarda)
       const guard = (browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {});
@@ -1495,9 +1489,6 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H3_H4',location:'scripts/robe.js:openCreateItemPageRobust:goto_success',message:'Create-item page navigation success',data:{nome:String(nome||''),attempt:Number(attempt||0),url:(typeof p.url==='function'?String(p.url()||''):''),title:(typeof p.title==='function'?String(await p.title().catch(()=>'')):''),suppressedUntil:Number((guard&&guard[nome])||0)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
-      // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_success', nome: String(nome || ''), attempt: Number(attempt || 0), url: (typeof p.url === 'function') ? String(p.url() || '') : '' }); } catch {}
       // #endregion
       return p; // sucesso
@@ -1506,9 +1497,6 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       const msg = (e && e.message) ? e.message : String(e);
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_error', nome: String(nome || ''), attempt: Number(attempt || 0), error: String(msg || '') }); } catch {}
-      // #endregion
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H1_H2_H4',location:'scripts/robe.js:openCreateItemPageRobust:goto_error',message:'Create-item page navigation error',data:{nome:String(nome||''),attempt:Number(attempt||0),error:String(msg||''),retryable:/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(String(msg||''))},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
       try { await safeClosePage(p); } catch {}
       if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
@@ -1888,9 +1876,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   // #region agent log
   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_start_entry', nome: String(nome || ''), attId: String(attId || ''), robePauseMs: Number(robePauseMs || 0) }); } catch {}
   // #endregion
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H3',location:'scripts/robe.js:startRobe:entry',message:'startRobe entry',data:{nome:String(nome||''),robePauseMs:Number(robePauseMs||0),workingNamesCount:Array.isArray(workingNames)?workingNames.length:0},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 
   logger.info(`[ROBE][startRobe] INÍCIO`, { nome, robePauseMs, horario: new Date().toLocaleString() });
 
@@ -1957,9 +1942,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
     await installCreatePageGraphqlRateGuard(page, nome, attId);
     installCreatePageForensics(page, nome, attId);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H3_H4',location:'scripts/robe.js:startRobe:page_created',message:'Robe create tab is open',data:{nome:String(nome||''),url:(page&&typeof page.url==='function')?String(page.url()||''):'',totalPages:(browser&&typeof browser.pages==='function')?Number((await browser.pages().catch(()=>[])).length||0):null},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     stepLogArr.push(`[${nome}] Nova aba criada para Robe`);
 
     // PASSO 1 — Detector ultra-específico antes de qualquer attach/fastDetect/overlay:
@@ -2140,9 +2122,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       const degradedAtUpload = isCreateFormDegraded(uploadVitals);
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_upload_recover_probe', nome: String(nome || ''), attId: String(attId || ''), uploadAttempt: Number(uploadAttempt || 0), degradedAtUpload: !!degradedAtUpload, textLen: Number((uploadVitals && uploadVitals.textLen) || 0), fileInputs: Number((uploadVitals && uploadVitals.fileInputs) || 0) }); } catch {}
-      // #endregion
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_upload_recover_v1',hypothesisId:'H19_H20',location:'scripts/robe.js:startRobe:upload_probe',message:'Upload input missing after picker trigger',data:{nome:String(nome||''),attId:String(attId||''),uploadAttempt:Number(uploadAttempt||0),degradedAtUpload:!!degradedAtUpload,textLen:Number((uploadVitals&&uploadVitals.textLen)||0),fileInputs:Number((uploadVitals&&uploadVitals.fileInputs)||0)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
 
       const rl = page && page.__ctMarketplaceComposerRateLimited ? page.__ctMarketplaceComposerRateLimited : null;
