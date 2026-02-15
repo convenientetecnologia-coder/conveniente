@@ -148,15 +148,22 @@ async function patchPage(nome, page, coords) {
 
   // --- viewport, deviceScale, threads ---
   await page.evaluateOnNewDocument((hwc) => {
-    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => hwc });
+    try {
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => hwc, configurable: true });
+    } catch {}
   }, hardwareConcurrency);
 
   // --- LANGUAGE/PLATFORM PATCH anti-detect ---
   await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'language', { get: () => 'pt-BR' });
-    Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
-    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    const safeDefine = (obj, key, getter) => {
+      try {
+        Object.defineProperty(obj, key, { get: getter, configurable: true });
+      } catch {}
+    };
+    safeDefine(navigator, 'language', () => 'pt-BR');
+    safeDefine(navigator, 'languages', () => ['pt-BR', 'pt', 'en-US', 'en']);
+    safeDefine(navigator, 'platform', () => 'Win32');
+    safeDefine(navigator, 'webdriver', () => undefined);
     window.chrome = window.chrome || { runtime: {} };
   });
 
@@ -179,7 +186,9 @@ async function patchPage(nome, page, coords) {
     document.addEventListener('DOMContentLoaded', () => {
       document.head.appendChild(style);
     });
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    try {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+    } catch {}
   });
 
   // --- INJEÇÃO DO DISMISS AUTOMÁTICO DO OVERLAY "SUSPEITAMOS..." ---
