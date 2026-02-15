@@ -10,6 +10,7 @@ const locais = require('./locais.js');     // controlador de rotação de locali
 const manifestStore = require('./manifestStore.js');
 const stepLog = require('./stepLog.js');
 const logger = require('./logger.js');
+const provisionAudit = require('./provisionAudit.js');
 
 // Log de issues (robusto; falha silenciosa se não existir)
 let issues = null;
@@ -1071,12 +1072,92 @@ async function safeClosePage(page) {
   try { await page.close({ runBeforeUnload: false }).catch(()=>{}); } catch {}
 }
 
+async function findFileInputInFrame(frame) {
+  if (!frame) return null;
+  let handle = null;
+  try {
+    handle = await frame.evaluateHandle(() => {
+      const pick = (root) => {
+        if (!root) return null;
+        const direct = root.querySelector && root.querySelector('input[type="file"][accept*="image"], input[type="file"]');
+        if (direct) return direct;
+        const queue = [];
+        if (root.children && root.children.length) {
+          for (const el of root.children) queue.push(el);
+        } else if (root.documentElement) {
+          queue.push(root.documentElement);
+        }
+        while (queue.length) {
+          const el = queue.shift();
+          if (!el) continue;
+          if (el.tagName === 'INPUT') {
+            const t = String(el.type || '').toLowerCase();
+            if (t === 'file') return el;
+          }
+          if (el.shadowRoot) {
+            const inside = pick(el.shadowRoot);
+            if (inside) return inside;
+          }
+          if (el.children && el.children.length) {
+            for (const c of el.children) queue.push(c);
+          }
+        }
+        return null;
+      };
+      return pick(document);
+    });
+    const el = handle && typeof handle.asElement === 'function' ? handle.asElement() : null;
+    if (el) return el;
+  } catch {}
+  try { if (handle && typeof handle.dispose === 'function') await handle.dispose(); } catch {}
+  return null;
+}
+
+async function findFileInputEverywhere(page) {
+  if (!page) return null;
+  let input = await findFileInputInFrame(page).catch(()=>null);
+  if (input) return input;
+  for (const fr of page.frames()) {
+    if (!fr || fr === page.mainFrame()) continue;
+    input = await findFileInputInFrame(fr).catch(()=>null);
+    if (input) return input;
+  }
+  return null;
+}
+
+async function triggerPhotoPickerEverywhere(page) {
+  if (!page) return;
+  const clickInFrame = async (frame) => {
+    try {
+      await frame.evaluate(() => {
+        const hasPhotoWord = (s) => /(foto|fotos|imagem|imagens|photo|photos|image|images|upload|adicionar fotos|add photos)/i.test(String(s || ''));
+        const candidates = Array.from(document.querySelectorAll('label,[role="button"],button,div,span,a'));
+        for (const el of candidates) {
+          const txt = `${el.innerText || ''} ${el.textContent || ''} ${el.getAttribute?.('aria-label') || ''} ${el.getAttribute?.('title') || ''}`.trim();
+          if (!hasPhotoWord(txt)) continue;
+          const st = window.getComputedStyle(el);
+          if (!st || st.display === 'none' || st.visibility === 'hidden') continue;
+          try { el.click(); return; } catch {}
+        }
+      });
+    } catch {}
+  };
+  await clickInFrame(page).catch(()=>{});
+  for (const fr of page.frames()) {
+    if (!fr || fr === page.mainFrame()) continue;
+    await clickInFrame(fr).catch(()=>{});
+  }
+}
+
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     let p = null;
     try {
+      // #region agent log
+      try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_attempt', nome: String(nome || ''), attempt: Number(attempt || 0), baseAttId: String(baseAttId || '') }); } catch {}
+      // #endregion
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H4',location:'scripts/robe.js:openCreateItemPageRobust:attempt_start',message:'Starting create-item tab attempt',data:{nome:String(nome||''),attempt:Number(attempt||0),baseAttId:String(baseAttId||'')},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
@@ -1092,10 +1173,16 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H3_H4',location:'scripts/robe.js:openCreateItemPageRobust:goto_success',message:'Create-item page navigation success',data:{nome:String(nome||''),attempt:Number(attempt||0),url:(typeof p.url==='function'?String(p.url()||''):''),title:(typeof p.title==='function'?String(await p.title().catch(()=>'')):''),suppressedUntil:Number((guard&&guard[nome])||0)},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
+      // #region agent log
+      try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_success', nome: String(nome || ''), attempt: Number(attempt || 0), url: (typeof p.url === 'function') ? String(p.url() || '') : '' }); } catch {}
+      // #endregion
       return p; // sucesso
     } catch (e) {
       lastError = e;
       const msg = (e && e.message) ? e.message : String(e);
+      // #region agent log
+      try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_error', nome: String(nome || ''), attempt: Number(attempt || 0), error: String(msg || '') }); } catch {}
+      // #endregion
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H1_H2_H4',location:'scripts/robe.js:openCreateItemPageRobust:goto_error',message:'Create-item page navigation error',data:{nome:String(nome||''),attempt:Number(attempt||0),error:String(msg||''),retryable:/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(String(msg||''))},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
@@ -1475,6 +1562,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   const attId = stepLog.attemptId();
   stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'start', robePauseMs });
   // #region agent log
+  try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_start_entry', nome: String(nome || ''), attId: String(attId || ''), robePauseMs: Number(robePauseMs || 0) }); } catch {}
+  // #endregion
+  // #region agent log
   fetch('http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'robe_black_pre_fix',hypothesisId:'H2_H3',location:'scripts/robe.js:startRobe:entry',message:'startRobe entry',data:{nome:String(nome||''),robePauseMs:Number(robePauseMs||0),workingNamesCount:Array.isArray(workingNames)?workingNames.length:0},timestamp:Date.now()})}).catch(()=>{});
   // #endregion
 
@@ -1652,17 +1742,40 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     fotoPath = pick.absPath;
     fotoNome = pick.file;
 
-    // Upload - procurar no documento e em frames
-    let inputFoto = await page.$('input[type="file"][accept*="image"], input[type="file"]');
+    // Upload - procurar no documento, shadow DOM e frames; se necessário, acionar seletor de fotos.
+    let inputFoto = await findFileInputEverywhere(page);
     if (!inputFoto) {
-      for (const fr of page.frames()) {
-        try {
-          inputFoto = await fr.$('input[type="file"][accept*="image"], input[type="file"]');
-          if (inputFoto) break;
-        } catch {}
-      }
+      await triggerPhotoPickerEverywhere(page);
+      await page.waitForFunction(() => {
+        const pick = (root) => {
+          if (!root) return false;
+          const direct = root.querySelector && root.querySelector('input[type="file"][accept*="image"], input[type="file"]');
+          if (direct) return true;
+          const queue = [];
+          if (root.children && root.children.length) {
+            for (const el of root.children) queue.push(el);
+          } else if (root.documentElement) {
+            queue.push(root.documentElement);
+          }
+          while (queue.length) {
+            const el = queue.shift();
+            if (!el) continue;
+            if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'file') return true;
+            if (el.shadowRoot && pick(el.shadowRoot)) return true;
+            if (el.children && el.children.length) {
+              for (const c of el.children) queue.push(c);
+            }
+          }
+          return false;
+        };
+        return pick(document);
+      }, { timeout: 8000 }).catch(()=>{});
+      inputFoto = await findFileInputEverywhere(page);
     }
     if (!inputFoto) {
+      // #region agent log
+      try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_upload_input_not_found_after_trigger', nome: String(nome || ''), attId: String(attId || ''), url: (typeof page.url === 'function') ? String(page.url() || '') : '' }); } catch {}
+      // #endregion
       // Antes de falhar, última checagem de bloqueio
       const late = await detectLimitOverlayEverywhere(page, 1500).catch(()=>null);
       if (late && late.blocked) {
