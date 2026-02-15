@@ -1985,10 +1985,11 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         }
       } catch {}
 
-      // Política militar: em open_all, NUNCA abrir aba extra (create) durante o boot.
-      // Isso reduz concorrência e evita a sensação de “2 abas abrindo” na abertura.
+      // Política militar: NÃO abrir aba extra de create no bootstrap por padrão.
+      // Isso elimina navegação obsoleta de verificação em aba 1 e reduz concorrência.
       let robeProbe = null;
-      if (!_isOpenAll) {
+      const enableBootstrapRobeProbe = String(process.env.BOOTSTRAP_ROBE_PROBE_ENABLED || '0') === '1' && !_isOpenAll;
+      if (enableBootstrapRobeProbe) {
         try {
           const man = await manifestStore.read(nome).catch(()=>null);
           const robeMode = (man && man.robeMode) ? String(man.robeMode) : 'itens';
@@ -2075,7 +2076,15 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_end', nome: String(nome||''), source: String(source||''), ok: false, error: String(robeProbe.error||'').slice(0, 180) }); } catch {}
         }
       } else {
-        try { provisionAudit.append({ ts: Date.now(), event: 'bootstrap_robe_probe_skipped_open_all', nome: String(nome||''), source: String(source||'') }); } catch {}
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'bootstrap_robe_probe_skipped',
+            nome: String(nome||''),
+            source: String(source||''),
+            reason: _isOpenAll ? 'open_all' : 'disabled_by_default'
+          });
+        } catch {}
       }
 
       // 2) Se o Robe probe achou bloqueio (captcha/login/identity/appeal), NÃO liberar “clear”.
