@@ -1190,6 +1190,32 @@ async function captureCreatePageVitals(page, nome, attId, stage) {
   // #endregion
 }
 
+async function readCreatePageVitals(page) {
+  if (!page) return null;
+  try {
+    return await page.evaluate(() => {
+      const d = document;
+      const b = d && d.body;
+      const txt = b ? String((b.innerText || '').trim()) : '';
+      return {
+        href: String(location.href || ''),
+        readyState: String(d && d.readyState || ''),
+        textLen: txt.length,
+        fileInputs: d ? d.querySelectorAll('input[type="file"]').length : 0
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+function isCreateFormDegraded(v) {
+  if (!v) return true;
+  const textLen = Number(v.textLen || 0);
+  const fileInputs = Number(v.fileInputs || 0);
+  return fileInputs <= 0 || textLen < 120;
+}
+
 // —————— NOVA FUNÇÃO: Abertura robusta da página de criação com retries ——————
 async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
   let lastError = null;
@@ -1734,6 +1760,22 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       }).catch(() => {});
     }
     await captureCreatePageVitals(page, nome, attId, `after_ready_fastlane_${readyFast ? 'ok' : 'fallback'}`);
+    let vitals = await readCreatePageVitals(page);
+    if (isCreateFormDegraded(vitals)) {
+      // #region agent log
+      try { provisionAudit.append({ ts: Date.now(), event: 'dbg_create_page_degraded_detected', nome: String(nome || ''), attId: String(attId || ''), vitals }); } catch {}
+      // #endregion
+      for (let recoverAttempt = 1; recoverAttempt <= 2; recoverAttempt++) {
+        try {
+          await page.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        } catch {}
+        await waitForCreateItemReady(page, { timeout: 5000 }).catch(()=>false);
+        await page.waitForSelector('input[type="file"][accept*="image"], input[type="file"]', { timeout: 5000 }).catch(()=>{});
+        await captureCreatePageVitals(page, nome, attId, `recover_create_form_attempt_${recoverAttempt}`);
+        vitals = await readCreatePageVitals(page);
+        if (!isCreateFormDegraded(vitals)) break;
+      }
+    }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });
 
     // Micro settle (2 frames + 100–220 ms); substituído por sleep apenas (alteração)
