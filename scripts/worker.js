@@ -6153,6 +6153,9 @@ async function getRobeModuleFor(nome) {
   try {
     const man = await manifestStore.read(nome).catch(()=>null);
     const mode = (man && man.robeMode) ? String(man.robeMode) : 'itens';
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_module_mode', nome: String(nome || ''), robeMode: String(mode || 'itens') }); } catch {}
+    // #endregion
     if (mode === 'veiculos') {
       return require('./robeVeiculos.js');
     }
@@ -6164,15 +6167,24 @@ async function getRobeModuleFor(nome) {
 
 // Wrapper: startRobeDynamic (substitui hook global robeHelper.startRobe)
 async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
+  // #region agent log
+  try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_entry', nome: String(nome || ''), robePauseMs: Number(robePauseMs || 0), workingNowCount: Array.isArray(workingNow) ? workingNow.length : -1 }); } catch {}
+  // #endregion
   let manifest = null;
   try { manifest = await manifestStore.read(nome); } catch{}
   if (!manifest) {
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_abort_manifest_unavailable', nome: String(nome || '') }); } catch {}
+    // #endregion
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].activationHeldUntil = Date.now() + 15000;
     await reportAction(nome, 'mil_action', 'robe_abort_manifest_unavailable (no freeze)');
     return { ok: false, error: 'manifest_unavailable' };
   }
   if (!manifest.cookies || !manifest.fp) {
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_abort_manifest_incomplete', nome: String(nome || ''), hasCookies: !!manifest.cookies, hasFp: !!manifest.fp }); } catch {}
+    // #endregion
     robeMeta[nome] = robeMeta[nome] || {};
     robeMeta[nome].activationHeldUntil = Date.now() + 15000;
     await reportAction(nome, 'mil_action', 'robe_abort_manifest_incomplete (no freeze)');
@@ -6180,12 +6192,25 @@ async function startRobeDynamic(browser, nome, robePauseMs, workingNow) {
   }
   const now = Date.now();
   if (robeMeta[nome]?.ramKilledAt && robeMeta[nome].ramKillBackoff && robeMeta[nome].ramKillBackoff > now) {
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_abort_ram_backoff', nome: String(nome || ''), ramKillBackoff: Number(robeMeta[nome].ramKillBackoff || 0), now: Number(now || 0) }); } catch {}
+    // #endregion
     return { ok: false, error: 'ram_backoff' };
   }
   try {
     const mod = await getRobeModuleFor(nome);
-    return await mod.startRobe(browser, nome, robePauseMs, workingNow);
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_before_module_start', nome: String(nome || ''), hasStartRobe: !!(mod && typeof mod.startRobe === 'function') }); } catch {}
+    // #endregion
+    const res = await mod.startRobe(browser, nome, robePauseMs, workingNow);
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_module_return', nome: String(nome || ''), ok: !!(res && res.ok), error: (res && res.error) ? String(res.error) : null }); } catch {}
+    // #endregion
+    return res;
   } catch (e) {
+    // #region agent log
+    try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_catch', nome: String(nome || ''), error: String((e && e.message) || e || '') }); } catch {}
+    // #endregion
     await reportAction(nome, 'robe_error', `Erro técnico no Robe: ${(e&&e.message)||e}. Cooldown padrão (15–30min) será aplicado pelo módulo.`);
     return { ok: false, error: String(e&&e.message||e) };
   }
