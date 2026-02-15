@@ -1229,7 +1229,7 @@ function isMarketplaceComposerRateLimitMessage(msg) {
 function installCreatePageForensics(page, nome, attId) {
   if (!page || page.__ctCreateForensicsInstalled) return;
   page.__ctCreateForensicsInstalled = true;
-  const state = { console: 0, pageerror: 0, requestfailed: 0, nav: 0, response: 0, runtime: 0 };
+  const state = { console: 0, pageerror: 0, requestfailed: 0, nav: 0, response: 0, runtime: 0, graphql: 0 };
   const maxEach = 14;
   const can = (k) => {
     state[k] = Number(state[k] || 0) + 1;
@@ -1286,6 +1286,55 @@ function installCreatePageForensics(page, nome, attId) {
       if (!/script|xhr|fetch|document/i.test(type)) return;
       const url = String((resp && resp.url && resp.url()) || '');
       logEvt('dbg_create_page_response_error', { status, type, url: url.slice(0, 300) });
+    });
+  } catch {}
+  try {
+    page.on('response', async (resp) => {
+      if (!can('graphql')) return;
+      const req = resp && resp.request ? resp.request() : null;
+      const type = String((req && req.resourceType && req.resourceType()) || '');
+      if (!/xhr|fetch/i.test(type)) return;
+      const url = String((resp && resp.url && resp.url()) || '');
+      if (!/\/api\/graphql\//i.test(url)) return;
+      const status = Number((resp && resp.status && resp.status()) || 0);
+      let raw = '';
+      try { raw = String(await resp.text()); } catch {}
+      if (!raw || !/1675004|useMarketplaceComposerMedianPackageDetailQuery/i.test(raw)) return;
+      let code = null;
+      let message = '';
+      let operation = '';
+      try {
+        const parsed = JSON.parse(raw);
+        const getFirstErr = (obj) => {
+          if (!obj) return null;
+          if (Array.isArray(obj)) {
+            for (const it of obj) {
+              const hit = getFirstErr(it);
+              if (hit) return hit;
+            }
+            return null;
+          }
+          if (obj && Array.isArray(obj.errors) && obj.errors.length) return obj.errors[0];
+          if (obj && obj.error) return obj.error;
+          return null;
+        };
+        const err = getFirstErr(parsed);
+        if (err && typeof err === 'object') {
+          code = (err.code != null) ? String(err.code) : (err.error_code != null ? String(err.error_code) : null);
+          message = String(err.message || err.summary || '').slice(0, 260);
+          operation = String(err.error_user_title || err.error_user_msg || '').slice(0, 160);
+        }
+      } catch {}
+      logEvt('dbg_create_page_graphql_rate_payload', {
+        status,
+        type,
+        url: url.slice(0, 300),
+        code: code || null,
+        message: message || null,
+        operation: operation || null,
+        matched1675004: /1675004/.test(raw),
+        matchedComposerOp: /useMarketplaceComposerMedianPackageDetailQuery/i.test(raw)
+      });
     });
   } catch {}
   try {
