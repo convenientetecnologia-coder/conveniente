@@ -3129,6 +3129,13 @@ async function detectLoginRequired(page) {
       const hasEmailInput = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
       const hasPassInput = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
       const hasInputs = hasEmailInput && hasPassInput;
+      const href0 = String(location && location.href ? location.href : '');
+      const path0 = String(location && location.pathname ? location.pathname : '');
+      const title0 = String(document && document.title ? document.title : '');
+      // 2) Checkpoint/captcha
+      const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
+      // HARDEN: também usa body.innerText, porque às vezes o texto está fora do recorte inicial
+      const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
       // Fallback robusto: alguns layouts não expõem royal_login_form, mas exibem claramente a superfície de login.
       const hasLoginUiHints =
         bodyTxt.includes('esqueceu a senha') ||
@@ -3139,13 +3146,6 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('log into facebook') ||
         bodyTxt.includes('e-mail ou telefone') ||
         bodyTxt.includes('email or phone');
-      const href0 = String(location && location.href ? location.href : '');
-      const path0 = String(location && location.pathname ? location.pathname : '');
-      const title0 = String(document && document.title ? document.title : '');
-      // 2) Checkpoint/captcha
-      const h1 = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2000).map(el => norm(el.innerText||el.textContent||''));
-      // HARDEN: também usa body.innerText, porque às vezes o texto está fora do recorte inicial
-      const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
       const hasCaptchaPromptText =
         bodyTxt.includes('digite o texto da imagem') ||
         bodyTxt.includes('type the text from the image') ||
