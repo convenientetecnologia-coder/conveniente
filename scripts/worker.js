@@ -11574,7 +11574,26 @@ async function nurseTick() {
           try {
             const now = Date.now();
             const scanHasPages = Array.isArray(scan) && scan.length > 0;
-            const scanAllClear = scanHasPages && scan.every(p => p && p.lr === false && !p.reason && (p.domain === 'messenger' || p.domain === 'facebook'));
+            const hasMessengerClear = hasMessengerTab && hasMessengerOk;
+            const isHardReason = (r) => {
+              const s = String(r || '').toLowerCase();
+              if (!s) return false;
+              return (
+                s.includes('login_form') ||
+                s.includes('captcha') ||
+                s.includes('checkpoint') ||
+                s.includes('two_factor') ||
+                s.includes('2fa') ||
+                s.includes('identity') ||
+                s.includes('appeal') ||
+                s.includes('banned') ||
+                s.includes('suspended') ||
+                s.includes('messenger_pin')
+              );
+            };
+            // Menos rígido e mais robusto: limpar probe_failed preso quando Messenger está comprovadamente limpo
+            // e não há nenhum sinal forte de bloqueio nas abas escaneadas.
+            const scanAllClear = scanHasPages && hasMessengerClear && scan.every(p => p && p.lr === false && !isHardReason(p.reason));
             if (scanAllClear) {
               const flags = await readAccountFlags(nome).catch(()=>null);
               const reason0 = flags && typeof flags.loginReason === 'string' ? String(flags.loginReason || '') : '';
