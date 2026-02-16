@@ -5777,8 +5777,6 @@ async function closeExtraPages(browser, mainPage, nome) {
       for (const p of again) {
         if (mainPage && p === mainPage) continue;
         if (!mainPage && again[0] && p === again[0]) continue;
-        let url = ''; try { url = typeof p.url === 'function' ? p.url() : ''; } catch {}
-        if (/facebook\.com\/marketplace\/create\/item/i.test(url)) continue;
         await p.close({ runBeforeUnload: false }).catch(()=>{});
         closed++;
       }
@@ -11506,6 +11504,9 @@ async function nurseTick() {
         let lrPage = p0;
         try {
           const scan = [];
+          let hasMessengerTab = false;
+          let hasMessengerOk = false;
+          let weakCreateProbeFailed = null;
           for (const pg of (pages || []).slice(0, 8)) {
             let u = '';
             try { u = (typeof pg.url === 'function') ? (pg.url() || '') : ''; } catch {}
@@ -11513,14 +11514,46 @@ async function nurseTick() {
             if (!/(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(String(u || ''))) continue;
             const det = await browserHelper.detectLoginRequired(pg).catch(()=>null);
             if (det && typeof det === 'object') {
-              scan.push({ u: String(u || '').slice(0, 120), lr: !!det.loginRequired, reason: det.reason || null, domain: det.domain || null });
+              const urlNow = String(u || '');
+              const domainNow = String(det.domain || '').toLowerCase();
+              const reasonNow = String(det.reason || '').toLowerCase();
+              const isMessengerTab = /messenger\.com/i.test(urlNow) || domainNow === 'messenger';
+              const isCreateItemTab = /facebook\.com\/marketplace\/create\/(?:item|vehicle)\b/i.test(urlNow);
+
+              scan.push({ u: urlNow.slice(0, 120), lr: !!det.loginRequired, reason: det.reason || null, domain: det.domain || null });
+
+              if (isMessengerTab) hasMessengerTab = true;
+              if (isMessengerTab && !det.loginRequired) hasMessengerOk = true;
+
               if (det.loginRequired) {
+                // Regra de domínio: Virtus é decidido por Messenger.
+                // "probe_failed" em create/item é sinal fraco quando Messenger está saudável.
+                if (isCreateItemTab && reasonNow === 'probe_failed') {
+                  weakCreateProbeFailed = { det, pg, url: urlNow };
+                  continue;
+                }
                 if (!lr || reasonPriority(det.reason) > reasonPriority(lr.reason)) {
                   lr = det;
                   lrPage = pg;
                 }
               }
             }
+          }
+          if (!lr && weakCreateProbeFailed && hasMessengerTab && hasMessengerOk) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'lr_scan_weak_signal_ignored',
+                nome: String(nome || ''),
+                reason: 'probe_failed',
+                sourceUrl: String(weakCreateProbeFailed.url || '').slice(0, 220),
+                policy: 'messenger_domain_priority'
+              });
+            } catch {}
+          } else if (!lr && weakCreateProbeFailed && !hasMessengerTab) {
+            // Se não há Messenger disponível, mantém fallback para não ficar cego.
+            lr = weakCreateProbeFailed.det;
+            lrPage = weakCreateProbeFailed.pg;
           }
           // Log leve: scan (para auditoria e ajuste fino)
           try {
