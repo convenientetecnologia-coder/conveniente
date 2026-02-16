@@ -11638,6 +11638,55 @@ async function nurseTick() {
             const scanAllClear = scanHasPages && hasMessengerClear && scan.every(p => p && p.lr === false && !isHardReason(p.reason));
             if (scanAllClear) {
               const flags = await readAccountFlags(nome).catch(()=>null);
+              // Auto-heal de "virtus off" órfão:
+              // quando Messenger está comprovadamente limpo e não há bloqueadores, não deixar conta presa em off.
+              try {
+                const wantNow = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
+                const desiredVirtusOff = String((wantNow && wantNow.virtus) || '').toLowerCase() === 'off';
+                const hasHardBlock =
+                  !!(flags && (
+                    flags.loginRequired === true ||
+                    flags.loginRemediateFailed === true ||
+                    flags.messengerPin === true ||
+                    flags.banned === true ||
+                    flags.twoFactor === true ||
+                    flags.identityRequired === true ||
+                    flags.identitySubmitted === true ||
+                    flags.appealSubmitted === true
+                  ));
+                const ctrlNow = controllers.get(nome);
+                const shouldHealVirtusOff =
+                  desiredVirtusOff &&
+                  !hasHardBlock &&
+                  !!(wantNow && wantNow.active === true) &&
+                  !!ctrlNow &&
+                  ctrlNow.humanControl !== true &&
+                  ctrlNow.configurando !== true &&
+                  ctrlNow.trabalhando !== true;
+                if (shouldHealVirtusOff) {
+                  const nowHeal = Date.now();
+                  robeMeta[nome] = robeMeta[nome] || {};
+                  const lastHeal = Number(robeMeta[nome].lastVirtusOffAutoHealAt || 0) || 0;
+                  if (!lastHeal || (nowHeal - lastHeal) > (10 * 60 * 1000)) {
+                    robeMeta[nome].lastVirtusOffAutoHealAt = nowHeal;
+                    await fileStore.withDesiredFileLockUpdate((d) => {
+                      d = d || {};
+                      d.perfis = d.perfis || {};
+                      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'on', humanHold: false };
+                      return d;
+                    }).catch(()=>{});
+                    try {
+                      provisionAudit.append({
+                        ts: nowHeal,
+                        event: 'virtus_off_auto_heal_messenger_clear',
+                        nome: String(nome || ''),
+                        policy: 'messenger_clear_no_hard_block'
+                      });
+                    } catch {}
+                    setTimeout(() => { try { handlers.start_work({ nome, operator: 'virtus_off_auto_heal' }).catch(()=>{}); } catch {} }, 0);
+                  }
+                }
+              } catch {}
               const reason0 = flags && typeof flags.loginReason === 'string' ? String(flags.loginReason || '') : '';
               const isProbeFailed = String(reason0 || '').toLowerCase() === 'probe_failed';
               if (flags && flags.loginRequired === true && isProbeFailed) {
