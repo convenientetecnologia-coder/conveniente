@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { patchPage/*, ensureMinimizedWindowForPage*/ } = require('./browser.js');
-const { detectLimitOverlayDeep, detectLimitOverlayEverywhere } = require('./browser.js');
+const { detectLimitOverlayDeep, detectLimitOverlayEverywhere, detectLoginRequired } = require('./browser.js');
 const utils = require('./utils.js');
 const fotos = require('./fotos.js');       // autoridade central de fotos
 const locais = require('./locais.js');     // controlador de rotação de localizações
@@ -108,6 +108,16 @@ async function waitSentinelLimitOverlay(page, timeoutMs = 10000) {
     }
   } catch {}
   return null;
+}
+
+function makeRobeLoginRequiredError(det = {}) {
+  const reason = String((det && det.reason) || 'login_required');
+  const source = String((det && det.domain) || 'facebook');
+  const e = new Error(`ROBE_LOGIN_REQUIRED:${reason}`);
+  e.ROBE_LOGIN_REQUIRED = true;
+  e.loginReason = reason;
+  e.loginSource = source;
+  return e;
 }
 
 // FAST-PROBE: detecção ultra-rápida (1.8s) de overlay/limite na página de criação
@@ -1488,6 +1498,26 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
       await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
+      // Guardrail: se create/item redirecionar para fluxo de login, sinalizar erro semântico de Robe.
+      try {
+        const lrNow = await detectLoginRequired(p).catch(() => ({ loginRequired: false }));
+        if (lrNow && lrNow.loginRequired === true) {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'dbg_robe_open_create_login_required',
+              nome: String(nome || ''),
+              attempt: Number(attempt || 0),
+              reason: String(lrNow.reason || ''),
+              source: String(lrNow.domain || ''),
+              url: (typeof p.url === 'function') ? String(p.url() || '') : ''
+            });
+          } catch {}
+          throw makeRobeLoginRequiredError(lrNow);
+        }
+      } catch (e) {
+        if (e && e.ROBE_LOGIN_REQUIRED === true) throw e;
+      }
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_success', nome: String(nome || ''), attempt: Number(attempt || 0), url: (typeof p.url === 'function') ? String(p.url() || '') : '' }); } catch {}
       // #endregion
@@ -2144,6 +2174,26 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       if (late && late.blocked) {
         await applyLimitPostingAndAbort({ page, nome, attId, where: 'no_file_input_overlay', overlaySnapshot: late });
         return; // aborta por limit_posting como deve
+      }
+      // Última checagem semântica: ausência de input também pode ser "login_required" no fluxo do Robe.
+      try {
+        const lrNow = await detectLoginRequired(page).catch(() => ({ loginRequired: false }));
+        if (lrNow && lrNow.loginRequired === true) {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'dbg_robe_upload_login_required_detected',
+              nome: String(nome || ''),
+              attId: String(attId || ''),
+              reason: String(lrNow.reason || ''),
+              source: String(lrNow.domain || ''),
+              url: (typeof page.url === 'function') ? String(page.url() || '') : ''
+            });
+          } catch {}
+          throw makeRobeLoginRequiredError(lrNow);
+        }
+      } catch (e) {
+        if (e && e.ROBE_LOGIN_REQUIRED === true) throw e;
       }
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }

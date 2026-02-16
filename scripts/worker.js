@@ -9169,6 +9169,34 @@ const handlers = {
             try {
               res = await startRobeDynamic(ctrl.browser, nome, (15 + Math.floor(Math.random() * 16)) * 60 * 1000, workingNow);
             } catch (e) {
+              if (e && e.ROBE_LOGIN_REQUIRED === true) {
+                const rr = String(e.loginReason || 'login_required');
+                const ss = String(e.loginSource || 'facebook');
+                try {
+                  provisionAudit.append({
+                    ts: Date.now(),
+                    event: 'robe_login_required_detected',
+                    nome: String(nome || ''),
+                    reason: rr,
+                    source: ss
+                  });
+                } catch {}
+                try { await setLoginRequiredFlag(nome, { reason: rr, source: ss }); } catch {}
+                // Agenda remediação automática para convergir o fluxo Robe sem depender de novo clique.
+                setTimeout(() => {
+                  try {
+                    handlers.login_remediate({
+                      nome,
+                      operator: `robe_play_login_required:${nome}:${Date.now()}`,
+                      options: { overrideHumanHold: true }
+                    }).catch(() => {});
+                  } catch {}
+                }, 0);
+                try { await reportAction(nome, 'robe_login_required', `Robe detectou login_required (${rr}); remediação agendada.`); } catch {}
+                robeUpdateMeta(nome, { estado: 'idle', cooldownSec: await normalizeCooldown(nome) });
+                try { if (ctrl && ctrl.browser) delete ctrl.browser._robeActiveFor; } catch {}
+                return;
+              }
               if (e && (e.LIMIT_POSTING === true || String(e && e.message || '').includes('LIMIT_POSTING_ABORT'))) {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].limitPostingThisRun = Date.now();
