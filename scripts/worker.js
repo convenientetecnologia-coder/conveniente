@@ -10999,7 +10999,8 @@ async function nurseTick() {
     }
 
     for (const nome of Object.keys(desired.perfis || {})) {
-      if (SHARD_SET.size && !inShard(nome)) {
+      const ctrlExisting = controllers.get(nome);
+      if (SHARD_SET.size && !inShard(nome) && !ctrlExisting) {
         // Debug enterprise (P0 gaps): se o perfil está desired.active=true mas não está no shard,
         // ele fica "órfão" e nunca abre. Logar com debounce para evidência irrefutável.
         try {
@@ -11022,7 +11023,7 @@ async function nurseTick() {
         continue;
       }
       const want = desired.perfis[nome] || {};
-      const ctrl = controllers.get(nome);
+      const ctrl = ctrlExisting || null;
 
       // Reconciliador: mesmo em modo humano/hold, precisamos atualizar flags conforme a UI real,
       // senão o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
