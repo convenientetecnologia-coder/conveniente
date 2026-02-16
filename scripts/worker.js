@@ -6755,6 +6755,20 @@ async function start_work({ nome, operator }) {
         try { await setTwoFactorFlag(nome, { reason: String(flags.twoFactorReason || 'two_factor'), snippet: String(flags.twoFactorText || '') }); } catch {}
         return { ok: false, error: 'two_factor' };
       }
+      if (flags && flags.loginRequired === true) {
+        const rr = String(flags.loginReason || 'login_required').slice(0, 120);
+        try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind: 'login_required', reason: rr }); } catch {}
+        try {
+          await fileStore.withDesiredFileLockUpdate((d) => {
+            d.perfis = d.perfis || {};
+            d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+            return d;
+          });
+        } catch {}
+        try { ctrl.trabalhando = false; await stopVirtus(nome).catch(()=>{}); } catch {}
+        try { await snapshotStatusAndWrite(); } catch {}
+        return { ok: false, error: 'login_required' };
+      }
       if (flags && (flags.identitySubmitted === true || flags.identityRequired === true)) {
         const kind = flags.identitySubmitted === true ? 'identity_submitted' : 'identity_required';
         try { provisionAudit.append({ ts: Date.now(), event: 'start_work_blocked_by_flags', nome: String(nome||''), kind, nextAt: Number(flags.identityNextCheckAt||0)||0 }); } catch {}
