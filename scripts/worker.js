@@ -940,6 +940,9 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       }
       if (lastReason.includes('login_form')) {
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_login_form', nome: String(nome||''), flowId: id, attempt }); } catch {}
+        // Blindagem P0: nunca enfileirar remediação sem persistir flag LR.
+        // Sem isso, o autoLoginRemediateTick ignora o perfil (depende de loginRequired=true).
+        try { await setLoginRequiredFlag(nome, { reason: lr.reason || 'login_form', source: lr.domain || 'captcha_flow' }); } catch {}
         try { queueAutoLoginRemediate(nome, { reason: lr.reason || '', source: lr.domain || '', immediate: true }); } catch {}
         try { if (_govToken) supervisorClient.releasePermit(_govToken, { result: 'handoff_login_form' }).catch(()=>{}); } catch {}
         return { ok: true, result: 'handoff_login_form', flowId: id };
@@ -2213,7 +2216,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         const c = controllers.get(nome) || ctrl;
         const p = (c && c.mainPage) ? c.mainPage : pg;
         if (c && p) {
-          runIdentityFlow(nome, c, p, { source: `probe_captcha:${String(source||'')}`, force: true }).catch(()=>{});
+          runCaptchaFlow(nome, c, p, { source: `probe_captcha:${String(source||'')}`, force: true }).catch(()=>{});
         }
       } catch {}
       // Expor estado sem engessar (humano só será invocado no final do runIdentityFlow se falhar).
@@ -2893,6 +2896,8 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
         return { ok: true, flowId: id, result: 'appeal_submitted', didAction, actions: actionKinds };
       }
       if (rr2.includes('login_form')) {
+        // Blindagem P0: garantir flag persistida antes de agendar auto-remediação.
+        await setLoginRequiredFlag(nome, { reason: lr2.reason || 'login_form', source: lr2.domain || 'identity_flow' }).catch(()=>{});
         queueAutoLoginRemediate(nome, { reason: lr2.reason || '', source: lr2.domain || '', immediate: true });
         try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_end', flowId: id, nome: String(nome||''), result: 'login_form' }); } catch {}
         return { ok: true, flowId: id, result: 'login_form', didAction, actions: actionKinds };

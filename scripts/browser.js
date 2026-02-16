@@ -3126,7 +3126,19 @@ async function detectLoginRequired(page) {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
       // 1) Formulários de login canônicos
       const hasRoyal = !!document.querySelector('form[data-testid="royal_login_form"], form#login_form');
-      const hasInputs = !!document.querySelector('input[name="email"], input#email') && !!document.querySelector('input[name="pass"], input#pass');
+      const hasEmailInput = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
+      const hasPassInput = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
+      const hasInputs = hasEmailInput && hasPassInput;
+      // Fallback robusto: alguns layouts não expõem royal_login_form, mas exibem claramente a superfície de login.
+      const hasLoginUiHints =
+        bodyTxt.includes('esqueceu a senha') ||
+        bodyTxt.includes('forgot password') ||
+        bodyTxt.includes('criar nova conta') ||
+        bodyTxt.includes('create new account') ||
+        bodyTxt.includes('entrar no facebook') ||
+        bodyTxt.includes('log into facebook') ||
+        bodyTxt.includes('e-mail ou telefone') ||
+        bodyTxt.includes('email or phone');
       const href0 = String(location && location.href ? location.href : '');
       const path0 = String(location && location.pathname ? location.pathname : '');
       const title0 = String(document && document.title ? document.title : '');
@@ -3292,7 +3304,7 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('identidade') ||
         bodyTxt.includes('video selfie');
 
-      return { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, hasPageNotAvailable, hasHumanConfirmPreScreen, hasCaptchaPromptText, hasCaptchaImg, hasCaptchaInput, hasContinueBtn, href0, path0, title0 };
+      return { hasRoyal, hasInputs, hasEmailInput, hasPassInput, hasLoginUiHints, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked, hasContentNotAvailable, hasPageNotAvailable, hasHumanConfirmPreScreen, hasCaptchaPromptText, hasCaptchaImg, hasCaptchaInput, hasContinueBtn, href0, path0, title0 };
     });
 
     const domain = (/messenger\.com/i.test(href) ? 'messenger' : 'facebook');
@@ -3301,6 +3313,7 @@ async function detectLoginRequired(page) {
     const hasRoyal = !!(v && v.hasRoyal);
     const hasInputs = !!(v && v.hasInputs);
     const hasPersonaText = !!(v && v.hasPersonaText);
+    const hasLoginUiHints = !!(v && v.hasLoginUiHints);
     const hasCheckpointText = !!(v && v.hasCheckpointText);
     const hasIdentityText = !!(v && v.hasIdentityText);
     const hasIdentitySubmitted = !!(v && v.hasIdentitySubmitted);
@@ -3494,7 +3507,7 @@ async function detectLoginRequired(page) {
     // Messenger é especial:
     // muitas vezes a tela de login (form#login_form) aparece na rota "/" (marketing page),
     // então não dá para exigir strongLoginPath/title como no Facebook.
-    if (domain === 'messenger' && hasRoyal && hasInputs) {
+    if (domain === 'messenger' && hasInputs && (hasRoyal || hasLoginUiHints || looksLikeLoggedOutTitle || looksLikeLoginUrl)) {
       return {
         loginRequired: true,
         reason: 'login_form',
@@ -3510,7 +3523,7 @@ async function detectLoginRequired(page) {
     // - checkpoint/captcha também exige rota/sinais de checkpoint
     // IMPORTANT: em algumas telas, o form aparece em rotas como /marketplace ou /index.php (logged-out),
     // então não podemos depender apenas do path.
-    if (hasRoyal && hasInputs && (strongLoginPath || looksLikeLoginUrl || looksLikeLoggedOutTitle)) {
+    if (hasInputs && (hasRoyal || hasLoginUiHints) && (strongLoginPath || looksLikeLoginUrl || looksLikeLoggedOutTitle || hasLoginUiHints)) {
       return {
         loginRequired: true,
         reason: 'login_form',
