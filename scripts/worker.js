@@ -415,16 +415,45 @@ async function lockProfileAction(nome, fn) {
     if (st && st.nome === nome) return await fn();
   } catch {}
 
+  const hadPrev = _profileOpLocks.has(nome);
   const prev = _profileOpLocks.get(nome) || Promise.resolve();
   let resolveNext;
   const next = new Promise(res => resolveNext = res);
   _profileOpLocks.set(nome, prev.then(() => next));
+  // #region agent log
+  __agentLog(
+    'H6',
+    'worker.js:lockProfileAction',
+    'profile_lock_enqueued',
+    {
+      nome: String(nome || ''),
+      lockMapSize: _profileOpLocks.size,
+      hadPrev
+    },
+    `profileLock.enqueue.${String(nome || '')}`,
+    15000
+  );
+  // #endregion
   try {
     await prev;
     return await _profileLockAls.run({ nome }, fn);
   } finally {
     resolveNext();
     if (_profileOpLocks.get(nome) === next) _profileOpLocks.delete(nome);
+    // #region agent log
+    __agentLog(
+      'H6',
+      'worker.js:lockProfileAction',
+      'profile_lock_release',
+      {
+        nome: String(nome || ''),
+        lockMapSize: _profileOpLocks.size,
+        lockStillPresent: _profileOpLocks.has(nome)
+      },
+      `profileLock.release.${String(nome || '')}`,
+      15000
+    );
+    // #endregion
   }
 }
 
@@ -5068,6 +5097,27 @@ function memorySweep() {
   } catch {}
 }
 setInterval(memorySweep, 10 * 60 * 1000);
+setInterval(() => {
+  try {
+    __agentLog(
+      'H1',
+      'worker.js:runtimeHeartbeat',
+      'runtime_structure_sizes',
+      {
+        controllersSize: controllers.size,
+        prunersSize: _pruners.size,
+        activationLocksSize: activationLocks.size,
+        profileOpLocksSize: _profileOpLocks.size,
+        openingKeys: Object.keys(opening || {}).length,
+        robeMetaKeys: Object.keys(robeMeta || {}).length,
+        healthStateSize: healthState.size,
+        profileFailuresSize: profileFailures.size
+      },
+      'runtime.heartbeat.structures',
+      55000
+    );
+  } catch {}
+}, 60 * 1000);
 // #region agent log
 __agentLog(
   'H5',
