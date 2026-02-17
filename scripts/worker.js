@@ -5005,14 +5005,53 @@ const controllers = new Map();
 
 const robeMeta = {};
 
+const __AGENT_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
+const __agentDebugState = { lastByKey: Object.create(null) };
+function __agentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
+  try {
+    const now = Date.now();
+    const k = String(key || `${hypothesisId}:${location}:${message}`);
+    const last = Number(__agentDebugState.lastByKey[k] || 0) || 0;
+    if (minIntervalMs > 0 && (now - last) < minIntervalMs) return;
+    __agentDebugState.lastByKey[k] = now;
+    // #region agent log
+    fetch(__AGENT_DEBUG_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: 'stage2-pre-fix', hypothesisId, location, message, data, timestamp: now }) }).catch(() => {});
+    // #endregion
+  } catch {}
+}
+
 function memorySweep() {
   try {
     const nomesValidos = new Set(loadPerfisJson().map(p => p.nome));
+    const _dbgBefore = {
+      healthStateSize: healthState.size,
+      profileFailuresSize: profileFailures.size,
+      robeMetaKeys: Object.keys(robeMeta).length,
+      activationLocksSize: activationLocks.size,
+      prunersSize: _pruners.size,
+      profileOpLocksSize: _profileOpLocks.size,
+      openingKeys: Object.keys(opening || {}).length,
+      controllersSize: controllers.size,
+      nomesValidosSize: nomesValidos.size
+    };
     for (const [n] of healthState) if (!nomesValidos.has(n) && !controllers.has(n)) healthState.delete(n);
     for (const [n] of profileFailures) if (!nomesValidos.has(n) && !controllers.has(n)) profileFailures.delete(n);
     for (const n of Object.keys(robeMeta)) {
       if (!nomesValidos.has(n) && !controllers.has(n)) delete robeMeta[n];
     }
+    const _dbgAfter = {
+      healthStateSize: healthState.size,
+      profileFailuresSize: profileFailures.size,
+      robeMetaKeys: Object.keys(robeMeta).length,
+      activationLocksSize: activationLocks.size,
+      prunersSize: _pruners.size,
+      profileOpLocksSize: _profileOpLocks.size,
+      openingKeys: Object.keys(opening || {}).length,
+      controllersSize: controllers.size
+    };
+    // #region agent log
+    __agentLog('H1', 'worker.js:memorySweep', 'sweep_sizes', { before: _dbgBefore, after: _dbgAfter }, 'memorySweep.sizes', 60000);
+    // #endregion
   } catch {}
 }
 setInterval(memorySweep, 10 * 60 * 1000);
@@ -5824,13 +5863,20 @@ function maybeStartPruneLoop(nome, browser, mainPage) {
     }
   }, 2*60*1000);
   _pruners.set(nome, interval);
+  // #region agent log
+  __agentLog('H2', 'worker.js:maybeStartPruneLoop', 'pruner_started', { nome: String(nome || ''), prunersSize: _pruners.size, controllersSize: controllers.size }, `pruner.start.${String(nome || '')}`, 20000);
+  // #endregion
 }
 
 function stopPruneLoop(nome) {
+  const had = _pruners.has(nome);
   if (_pruners.has(nome)) {
     clearInterval(_pruners.get(nome));
     _pruners.delete(nome);
   }
+  // #region agent log
+  __agentLog('H2', 'worker.js:stopPruneLoop', 'pruner_stopped', { nome: String(nome || ''), had, prunersSize: _pruners.size, controllersSize: controllers.size }, `pruner.stop.${String(nome || '')}`, 20000);
+  // #endregion
 }
 
 let ramMonitorInterval = null;
@@ -6222,6 +6268,31 @@ async function ramCpuMonitorTick() {
       tickIntervalMs: INTERVAL_MS,
       counters: { ..._ramDiagCounters }
     };
+    if (_ramDiagLast && (_ramDiagLast.tickMs >= 12000 || Number(_ramDiagLast.counters && _ramDiagLast.counters.staleHits || 0) > 0)) {
+      // #region agent log
+      __agentLog(
+        'H4',
+        'worker.js:ramCpuMonitorTick',
+        'ram_tick_diag',
+        {
+          tickMs: _ramDiagLast.tickMs,
+          controllers: _ramDiagLast.controllers,
+          refreshBudget: _ramDiagLast.refreshBudget,
+          forcedRefreshCount: _ramDiagLast.forcedRefreshCount,
+          forcedRefreshMsTotal: _ramDiagLast.forcedRefreshMsTotal,
+          staleHits: Number(_ramDiagLast.counters && _ramDiagLast.counters.staleHits || 0),
+          cacheHits: Number(_ramDiagLast.counters && _ramDiagLast.counters.cacheHits || 0),
+          refreshes: Number(_ramDiagLast.counters && _ramDiagLast.counters.refreshes || 0),
+          refreshErrors: Number(_ramDiagLast.counters && _ramDiagLast.counters.refreshErrors || 0),
+          prunersSize: _pruners.size,
+          activationLocksSize: activationLocks.size,
+          profileOpLocksSize: _profileOpLocks.size
+        },
+        'ram.tick.diag',
+        30000
+      );
+      // #endregion
+    }
     await snapshotStatusAndWrite();
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
@@ -6745,6 +6816,25 @@ try {
 try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
 
 stopPruneLoop(nome);
+// #region agent log
+__agentLog(
+  'H3',
+  'worker.js:attachBrowserLifecycle.disconnected',
+  'cleanup_after_disconnected',
+  {
+    nome: String(nome || ''),
+    hasController: controllers.has(nome),
+    hasRobeMeta: !!robeMeta[nome],
+    hasActivationLock: activationLocks.has(nome),
+    hasPruner: _pruners.has(nome),
+    hasProfileOpLock: _profileOpLocks.has(nome),
+    hasOpening: !!(opening && opening[nome]),
+    rootPid: robeMeta[nome] ? (robeMeta[nome].rootPid || null) : null
+  },
+  `cleanup.disconnected.${String(nome || '')}`,
+  15000
+);
+// #endregion
 
 try { registerFailure(nome, 'disconnected', 'external'); } catch {}
 try {
@@ -7385,6 +7475,26 @@ const handlers = {
   } catch {}
 
   stopPruneLoop(nome);
+  // #region agent log
+  __agentLog(
+    'H3',
+    'worker.js:deactivate.cleanup',
+    'cleanup_after_deactivate',
+    {
+      nome: String(nome || ''),
+      preserve: !!preserve,
+      hasController: controllers.has(nome),
+      hasRobeMeta: !!robeMeta[nome],
+      hasActivationLock: activationLocks.has(nome),
+      hasPruner: _pruners.has(nome),
+      hasProfileOpLock: _profileOpLocks.has(nome),
+      hasOpening: !!(opening && opening[nome]),
+      rootPid: robeMeta[nome] ? (robeMeta[nome].rootPid || null) : null
+    },
+    `cleanup.deactivate.${String(nome || '')}`,
+    15000
+  );
+  // #endregion
   if (!preserve) {
     try {
       await fileStore.withDesiredFileLockUpdate((d) => {
