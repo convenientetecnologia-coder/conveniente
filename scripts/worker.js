@@ -5017,6 +5017,19 @@ function __agentLog(hypothesisId, location, message, data, key = '', minInterval
     // #region agent log
     fetch(__AGENT_DEBUG_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: 'stage2-pre-fix', hypothesisId, location, message, data, timestamp: now }) }).catch(() => {});
     // #endregion
+    try {
+      if (typeof provisionAudit !== 'undefined' && provisionAudit && typeof provisionAudit.append === 'function') {
+        provisionAudit.append({
+          ts: now,
+          event: 'dbg_agent_runtime',
+          runId: 'stage2-pre-fix',
+          hypothesisId: String(hypothesisId || ''),
+          location: String(location || ''),
+          message: String(message || ''),
+          data: data && typeof data === 'object' ? data : {}
+        });
+      }
+    } catch {}
   } catch {}
 }
 
