@@ -6086,7 +6086,7 @@ async function ramCpuMonitorTick() {
   let _forcedRefreshMsTotal = 0;
   if (_ramTickBusy) {
     // agenda próximo tick mesmo se estiver ocupada (anti overlap)
-    const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '10000', 10);
+    const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '15000', 10);
     const NIX_INTERVAL_MS = 8000 + Math.floor(Math.random() * 2000);
     const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
     ramMonitorInterval = setTimeout(ramCpuMonitorTick, INTERVAL_MS);
