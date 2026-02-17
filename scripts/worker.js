@@ -5956,6 +5956,40 @@ function stopPruneLoop(nome) {
   // #endregion
 }
 
+function cleanupProfileTransientLocks(nome, source) {
+  try {
+    if (!nome) return;
+    const hasController = controllers.has(nome);
+    if (hasController) return;
+    const hadProfileLock = _profileOpLocks.has(nome);
+    const hadActivationLock = activationLocks.has(nome);
+    const hadOpening = !!(opening && opening[nome]);
+    if (hadProfileLock) _profileOpLocks.delete(nome);
+    if (hadActivationLock) activationLocks.delete(nome);
+    if (hadOpening) delete opening[nome];
+    // #region agent log
+    __agentLog(
+      'H3',
+      'worker.js:cleanupProfileTransientLocks',
+      'cleanup_transient_locks',
+      {
+        nome: String(nome || ''),
+        source: String(source || ''),
+        hasControllerAfter: controllers.has(nome),
+        hadProfileLock,
+        hadActivationLock,
+        hadOpening,
+        profileOpLocksSize: _profileOpLocks.size,
+        activationLocksSize: activationLocks.size,
+        openingKeys: Object.keys(opening || {}).length
+      },
+      `cleanup.transient.${String(source || 'unknown')}.${String(nome || '')}`,
+      5000
+    );
+    // #endregion
+  } catch {}
+}
+
 let ramMonitorInterval = null;
 
 // ====== ELEIÇÃO DE LÍDER DE MÉTRICAS (UM POR HOST) ======
@@ -6893,6 +6927,7 @@ try {
 try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado (evento disconnected)'); } catch {}
 
 stopPruneLoop(nome);
+cleanupProfileTransientLocks(nome, 'disconnected');
 // #region agent log
 __agentLog(
   'H3',
@@ -7552,6 +7587,7 @@ const handlers = {
   } catch {}
 
   stopPruneLoop(nome);
+  cleanupProfileTransientLocks(nome, 'deactivate');
   // #region agent log
   __agentLog(
     'H3',
