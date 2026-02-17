@@ -5956,9 +5956,10 @@ async function getPosixPsMap() {
 }
 
 // === INÍCIO: PID discovery via CDP/Tracing (sem WMI) ===
-const PIDS_CACHE_TTL_MS = parseInt(process.env.RAM_PIDS_CACHE_TTL_MS || '30000', 10); // 30s
-const PIDS_TRACE_MS     = parseInt(process.env.RAM_PIDS_TRACE_MS || '240', 10);       // ~240ms
-const PIDS_REFRESH_PER_TICK = parseInt(process.env.RAM_PIDS_REFRESH_PER_TICK || '2', 10);
+const PIDS_CACHE_TTL_MS = parseInt(process.env.RAM_PIDS_CACHE_TTL_MS || '90000', 10); // 90s
+const PIDS_TRACE_MS     = parseInt(process.env.RAM_PIDS_TRACE_MS || '160', 10);       // amostra curta
+const PIDS_REFRESH_PER_TICK = parseInt(process.env.RAM_PIDS_REFRESH_PER_TICK || '1', 10);
+const PIDS_TRACE_HARD_TIMEOUT_MS = parseInt(process.env.RAM_PIDS_TRACE_HARD_TIMEOUT_MS || '3000', 10);
 
 async function readIOStreamChunks(session, stream) {
   const chunks = [];
@@ -6009,8 +6010,14 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
     await new Promise(r => setTimeout(r, Math.max(120, sampleMs)));
     // Stop
     try { await session.send('Tracing.end').catch(()=>{}); } catch {}
-    const res = await tracingComplete;
+    const timeoutMs = Math.max(1200, Number(PIDS_TRACE_HARD_TIMEOUT_MS || 3000));
+    const timeoutSentinel = Symbol('trace_timeout');
+    const res = await Promise.race([
+      tracingComplete,
+      new Promise((resolve) => setTimeout(() => resolve(timeoutSentinel), timeoutMs))
+    ]);
     try { await session.detach && session.detach().catch(()=>{}); } catch {}
+    if (res === timeoutSentinel) return [];
     return Array.isArray(res) ? res : [];
   } catch {
     return [];
