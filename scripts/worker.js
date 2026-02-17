@@ -5055,6 +5055,20 @@ function memorySweep() {
   } catch {}
 }
 setInterval(memorySweep, 10 * 60 * 1000);
+// #region agent log
+__agentLog(
+  'H5',
+  'worker.js:boot',
+  'debug_instrumentation_loaded',
+  {
+    pid: process.pid,
+    platform: process.platform,
+    hostId: (typeof readHostIdSync === 'function' ? (readHostIdSync() || null) : null)
+  },
+  `debug.boot.${String(process.pid)}`,
+  0
+);
+// #endregion
 
 // Governor (NORMAL/SLOW) — roda sempre, ultra leve (sem WMI)
 setInterval(() => { governorTick().catch(()=>{}); }, GOVERNOR_TICK_MS);
