@@ -120,6 +120,12 @@ function makeRobeLoginRequiredError(det = {}) {
   return e;
 }
 
+function makeRobeProbeFailedError(where = 'robe_action') {
+  const e = new Error(`ROBE_PROBE_FAILED:${where}`);
+  e.ROBE_PROBE_FAILED = true;
+  return e;
+}
+
 // FAST-PROBE: detecção ultra-rápida (1.8s) de overlay/limite na página de criação
 async function fastDetectPostingLimit(page, { timeoutMs = 1800 } = {}) {
   try {
@@ -1502,6 +1508,22 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       try {
         const lrNow = await detectLoginRequired(p).catch(() => ({ loginRequired: false }));
         if (lrNow && lrNow.loginRequired === true) {
+          const rr = String((lrNow && lrNow.reason) || '').toLowerCase();
+          if (rr === 'probe_failed' || rr.startsWith('probe_failed')) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'dbg_robe_open_create_probe_failed_retry',
+                nome: String(nome || ''),
+                attempt: Number(attempt || 0),
+                reason: String(lrNow.reason || ''),
+                source: String(lrNow.domain || ''),
+                url: (typeof p.url === 'function') ? String(p.url() || '') : ''
+              });
+            } catch {}
+            if (attempt < 3) throw makeRobeProbeFailedError('open_create_retry');
+            throw makeRobeProbeFailedError('open_create_abort');
+          }
           try {
             provisionAudit.append({
               ts: Date.now(),
@@ -1516,7 +1538,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
           throw makeRobeLoginRequiredError(lrNow);
         }
       } catch (e) {
-        if (e && e.ROBE_LOGIN_REQUIRED === true) throw e;
+        if (e && (e.ROBE_LOGIN_REQUIRED === true || e.ROBE_PROBE_FAILED === true)) throw e;
       }
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_success', nome: String(nome || ''), attempt: Number(attempt || 0), url: (typeof p.url === 'function') ? String(p.url() || '') : '' }); } catch {}
@@ -1529,6 +1551,10 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_error', nome: String(nome || ''), attempt: Number(attempt || 0), error: String(msg || '') }); } catch {}
       // #endregion
       try { await safeClosePage(p); } catch {}
+      if (e && e.ROBE_PROBE_FAILED === true) {
+        await new Promise(r => setTimeout(r, 350));
+        continue; // retry da ação sem classificar como login_required
+      }
       if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
         await new Promise(r => setTimeout(r, 300));
         continue; // retry
@@ -2115,7 +2141,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Upload - procurar no documento, shadow DOM e frames; se necessário, acionar seletor de fotos.
     // Se a tela degradar nesse ponto (após fastlane), recarrega create/item 1x para retentativa real.
     let inputFoto = null;
-    for (let uploadAttempt = 1; uploadAttempt <= 2 && !inputFoto; uploadAttempt++) {
+    for (let uploadAttempt = 1; uploadAttempt <= 3 && !inputFoto; uploadAttempt++) {
       inputFoto = await findFileInputEverywhere(page);
       if (inputFoto) break;
       await captureCreatePageVitals(page, nome, attId, 'before_trigger_photo_picker');
@@ -2155,7 +2181,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       // #endregion
 
       const rl = page && page.__ctMarketplaceComposerRateLimited ? page.__ctMarketplaceComposerRateLimited : null;
-      if (!degradedAtUpload || uploadAttempt >= 2 || (rl && Number(rl.ts || 0) > 0)) break;
+      if (!degradedAtUpload || uploadAttempt >= 3 || (rl && Number(rl.ts || 0) > 0)) break;
 
       try {
         await page.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -2179,6 +2205,21 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try {
         const lrNow = await detectLoginRequired(page).catch(() => ({ loginRequired: false }));
         if (lrNow && lrNow.loginRequired === true) {
+          const rr = String((lrNow && lrNow.reason) || '').toLowerCase();
+          if (rr === 'probe_failed' || rr.startsWith('probe_failed')) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'dbg_robe_upload_probe_failed_retry',
+                nome: String(nome || ''),
+                attId: String(attId || ''),
+                reason: String(lrNow.reason || ''),
+                source: String(lrNow.domain || ''),
+                url: (typeof page.url === 'function') ? String(page.url() || '') : ''
+              });
+            } catch {}
+            throw makeRobeProbeFailedError('upload_input_probe_failed');
+          }
           try {
             provisionAudit.append({
               ts: Date.now(),
@@ -2193,7 +2234,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           throw makeRobeLoginRequiredError(lrNow);
         }
       } catch (e) {
-        if (e && e.ROBE_LOGIN_REQUIRED === true) throw e;
+        if (e && (e.ROBE_LOGIN_REQUIRED === true || e.ROBE_PROBE_FAILED === true)) throw e;
       }
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }

@@ -644,6 +644,18 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
   // Ela tem semântica própria (humano + monitor 1h quando submetido).
   try {
     const rr = String(reason || '').toLowerCase();
+    // Regra ultra enterprise: "probe_failed" é falha de medição, não evidência de login.
+    // Não pode persistir LR/derrubar Virtus por si só.
+    if (rr === 'probe_failed' || rr.startsWith('probe_failed')) {
+      try {
+        await issues.append(
+          nome,
+          'probe_unavailable',
+          `reason=${String(reason||'')} source=${String(source||'')} at=${new Date().toISOString()}`
+        );
+      } catch {}
+      return;
+    }
     if (rr.includes('identity_submitted')) {
       await setIdentitySubmittedFlag(nome, { source: source || '', url: '', title: '' });
       return;
