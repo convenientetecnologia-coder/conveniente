@@ -11693,8 +11693,17 @@ async function nurseTick() {
                 }
               } catch {}
               const reason0 = flags && typeof flags.loginReason === 'string' ? String(flags.loginReason || '') : '';
-              const isProbeFailed = String(reason0 || '').toLowerCase() === 'probe_failed';
-              if (flags && flags.loginRequired === true && isProbeFailed) {
+              const reasonNorm0 = String(reason0 || '').toLowerCase();
+              // Auto-clear enterprise (stale LR):
+              // além de probe_failed, também pode limpar login_form preso quando
+              // o scan prova Messenger limpo + nenhuma aba com bloqueio real.
+              const isClearableStaleReason =
+                !reasonNorm0 ||
+                reasonNorm0 === 'probe_failed' ||
+                reasonNorm0 === 'login_form' ||
+                reasonNorm0 === 'checkpoint_interstitial' ||
+                reasonNorm0 === 'messenger_page_not_available';
+              if (flags && flags.loginRequired === true && isClearableStaleReason) {
                 robeMeta[nome] = robeMeta[nome] || {};
                 const lastClearAt = Number(robeMeta[nome].lastLRAutoClearAt || 0) || 0;
                 if (!lastClearAt || (now - lastClearAt) > (15 * 60 * 1000)) {
@@ -11711,9 +11720,10 @@ async function nurseTick() {
                     try {
                       provisionAudit.append({
                         ts: now,
-                        event: 'lr_auto_clear_probe_failed',
+                        event: 'lr_auto_clear_stale',
                         nome: String(nome||''),
                         streak: next,
+                        storedReason: reasonNorm0 || null,
                         pages: scan.length
                       });
                     } catch {}
@@ -11723,14 +11733,14 @@ async function nurseTick() {
                         host: os.hostname(),
                         perfil: nome,
                         event: 'lr_auto_clear',
-                        storedReason: 'probe_failed',
+                        storedReason: reasonNorm0 || '',
                         method: 'lr_scan_tabs_all_clear',
                         streak: next,
                         pages: scan
                       });
                     } catch {}
                     // Retoma trabalho sem forçar open/close (nurse faz o resto)
-                    setTimeout(() => { try { handlers.start_work({ nome, operator: 'lr_auto_clear_probe_failed' }).catch(()=>{}); } catch {} }, 0);
+                    setTimeout(() => { try { handlers.start_work({ nome, operator: 'lr_auto_clear_stale' }).catch(()=>{}); } catch {} }, 0);
                   }
                 }
               }
