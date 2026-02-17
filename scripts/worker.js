@@ -6019,15 +6019,22 @@ async function collectChromePidsViaTracing(browser, { sampleMs = PIDS_TRACE_MS }
 
 async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}) {
   try {
+    _ramDiagCounters.calls = Number(_ramDiagCounters.calls || 0) + 1;
     if (!ctrl || !ctrl.browser || (ctrl.browser.isConnected && ctrl.browser.isConnected() === false)) return [];
     robeMeta[nome] = robeMeta[nome] || {};
     const cache = robeMeta[nome]._pidCache || { pids: [], ts: 0 };
     const expired = (Date.now() - cache.ts) > PIDS_CACHE_TTL_MS;
     if (!forceRefresh && !expired && Array.isArray(cache.pids) && cache.pids.length) {
+      _ramDiagCounters.cacheHits = Number(_ramDiagCounters.cacheHits || 0) + 1;
       return cache.pids.slice(0);
     }
     // Força refresh (tranquilo: curto e leve)
+    const _refreshStart = Date.now();
     const pids = await collectChromePidsViaTracing(ctrl.browser).catch(()=>[]);
+    const _refreshMs = Date.now() - _refreshStart;
+    _ramDiagCounters.refreshes = Number(_ramDiagCounters.refreshes || 0) + 1;
+    _ramDiagCounters.refreshMsTotal = Number(_ramDiagCounters.refreshMsTotal || 0) + _refreshMs;
+    _ramDiagCounters.lastRefreshMs = _refreshMs;
     // Garante incluir o rootPid (fallback)
     const root = robeMeta[nome].rootPid || null;
     const set = new Set(Array.isArray(pids) ? pids : []);
@@ -6036,6 +6043,7 @@ async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}
     robeMeta[nome]._pidCache = { pids: arr, ts: Date.now() };
     return arr.slice(0);
   } catch {
+    _ramDiagCounters.refreshErrors = Number(_ramDiagCounters.refreshErrors || 0) + 1;
     return [];
   }
 }
@@ -6043,8 +6051,22 @@ async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}
 
 // Pequeno lock para evitar overlap de ticks
 let _ramTickBusy = false;
+let _ramDiagLast = null;
+const _ramDiagCounters = {
+  calls: 0,
+  cacheHits: 0,
+  refreshes: 0,
+  refreshErrors: 0,
+  refreshMsTotal: 0,
+  lastRefreshMs: 0
+};
 
 async function ramCpuMonitorTick() {
+  const _tickStart = Date.now();
+  let _refreshBudgetUsed = 0;
+  let _forcedRefreshCount = 0;
+  let _forcedRefreshErr = 0;
+  let _forcedRefreshMsTotal = 0;
   if (_ramTickBusy) {
     // agenda próximo tick mesmo se estiver ocupada (anti overlap)
     const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '10000', 10);
@@ -6062,6 +6084,20 @@ async function ramCpuMonitorTick() {
   try {
     // Se não há nenhum browser ativo neste worker, não gasta CPU
     if (!controllers || controllers.size === 0) {
+      _ramDiagLast = {
+        ts: Date.now(),
+        tickMs: Date.now() - _tickStart,
+        idleNoControllers: true,
+        controllers: 0,
+        refreshBudget: 0,
+        forcedRefreshCount: 0,
+        forcedRefreshErr: 0,
+        forcedRefreshMsTotal: 0,
+        pidCacheTtlMs: PIDS_CACHE_TTL_MS,
+        pidsRefreshPerTick: PIDS_REFRESH_PER_TICK,
+        tickIntervalMs: INTERVAL_MS,
+        counters: { ..._ramDiagCounters }
+      };
       for (const nome of Object.keys(robeMeta)) {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].ramMB = null;
@@ -6079,9 +6115,18 @@ async function ramCpuMonitorTick() {
     // Refrescamos no máximo N perfis por tick (demais usam cache)
     const entries = Array.from(controllers.entries());
     const refreshBudget = Math.min(PIDS_REFRESH_PER_TICK, entries.length);
+    _refreshBudgetUsed = refreshBudget;
     for (let i = 0; i < refreshBudget; i++) {
       const [n, c] = entries[(i + (ramCpuMonitorTick._rr || 0)) % entries.length];
-      try { await getControllerPidsCached(n, c, { forceRefresh: true }); } catch {}
+      const _rfStart = Date.now();
+      try {
+        await getControllerPidsCached(n, c, { forceRefresh: true });
+        _forcedRefreshCount++;
+      } catch {
+        _forcedRefreshErr++;
+      } finally {
+        _forcedRefreshMsTotal += (Date.now() - _rfStart);
+      }
     }
     ramCpuMonitorTick._rr = ((ramCpuMonitorTick._rr || 0) + refreshBudget) % Math.max(1, entries.length);
 
@@ -6146,6 +6191,20 @@ async function ramCpuMonitorTick() {
       }
     }
 
+    _ramDiagLast = {
+      ts: Date.now(),
+      tickMs: Date.now() - _tickStart,
+      idleNoControllers: false,
+      controllers: (controllers && typeof controllers.size === 'number') ? controllers.size : 0,
+      refreshBudget: _refreshBudgetUsed,
+      forcedRefreshCount: _forcedRefreshCount,
+      forcedRefreshErr: _forcedRefreshErr,
+      forcedRefreshMsTotal: _forcedRefreshMsTotal,
+      pidCacheTtlMs: PIDS_CACHE_TTL_MS,
+      pidsRefreshPerTick: PIDS_REFRESH_PER_TICK,
+      tickIntervalMs: INTERVAL_MS,
+      counters: { ..._ramDiagCounters }
+    };
     await snapshotStatusAndWrite();
   } catch (e) {
     try { logger.warn('[RAM-TICK] erro', { error: (e && e.message) || e }); } catch {}
@@ -9984,11 +10043,36 @@ if (pauseActive) {
 }
 }
 const robeQueueList = robeQueue.queueList();
+const _nodeMu = (() => { try { return process.memoryUsage(); } catch { return null; } })();
+const _nodeRssMB = (_nodeMu && Number.isFinite(Number(_nodeMu.rss))) ? Math.round(Number(_nodeMu.rss) / (1024 * 1024)) : null;
+const _nodeHeapUsedMB = (_nodeMu && Number.isFinite(Number(_nodeMu.heapUsed))) ? Math.round(Number(_nodeMu.heapUsed) / (1024 * 1024)) : null;
+const _nodeExternalMB = (_nodeMu && Number.isFinite(Number(_nodeMu.external))) ? Math.round(Number(_nodeMu.external) / (1024 * 1024)) : null;
+const _nodeArrayBuffersMB = (_nodeMu && Number.isFinite(Number(_nodeMu.arrayBuffers))) ? Math.round(Number(_nodeMu.arrayBuffers) / (1024 * 1024)) : null;
+const _profileRamMBLocal = perfis.reduce((acc, p) => {
+  const v = Number(p && p.ramMB);
+  return Number.isFinite(v) ? (acc + v) : acc;
+}, 0);
+const _freeMB = Math.round(os.freemem()/(1024*1024));
+const _totalMB = Math.round(os.totalmem()/(1024*1024));
+const _usedMB = (Number.isFinite(_totalMB) && Number.isFinite(_freeMB)) ? (_totalMB - _freeMB) : null;
+const _residualMBLocal =
+  (Number.isFinite(_usedMB) && Number.isFinite(_profileRamMBLocal) && Number.isFinite(_nodeRssMB))
+    ? (_usedMB - _profileRamMBLocal - _nodeRssMB)
+    : null;
 const sys = {
-  freeMB: Math.round(os.freemem()/(1024*1024)),
-  totalMB: Math.round(os.totalmem()/(1024*1024)),
+  freeMB: _freeMB,
+  totalMB: _totalMB,
+  usedMB: _usedMB,
   cores: (os.cpus()||[]).length,
-  cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length)))
+  cpuApprox: Math.min(100, Math.round(Object.values(robeMeta).reduce((acc, m) => acc + (typeof m.cpuPercent==='number' ? m.cpuPercent : 0), 0) / Math.max(1,(os.cpus()||[]).length))),
+  workerPid: process.pid,
+  nodeRssMB: _nodeRssMB,
+  nodeHeapUsedMB: _nodeHeapUsedMB,
+  nodeExternalMB: _nodeExternalMB,
+  nodeArrayBuffersMB: _nodeArrayBuffersMB,
+  profileRamMBLocal: _profileRamMBLocal,
+  residualMBLocal: _residualMBLocal,
+  ramDiagLast: _ramDiagLast
 };
 const statusObj = { perfis, robes, robeQueue: robeQueueList, autoMode, sys, build: (typeof buildStatusSnap === 'function' ? buildStatusSnap() : null), ts: Date.now() };
 
