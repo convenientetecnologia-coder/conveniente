@@ -5956,7 +5956,7 @@ async function getPosixPsMap() {
 }
 
 // === INÍCIO: PID discovery via CDP/Tracing (sem WMI) ===
-const PIDS_CACHE_TTL_MS = parseInt(process.env.RAM_PIDS_CACHE_TTL_MS || '90000', 10); // 90s
+const PIDS_CACHE_TTL_MS = parseInt(process.env.RAM_PIDS_CACHE_TTL_MS || '180000', 10); // 180s
 const PIDS_TRACE_MS     = parseInt(process.env.RAM_PIDS_TRACE_MS || '160', 10);       // amostra curta
 const PIDS_REFRESH_PER_TICK = parseInt(process.env.RAM_PIDS_REFRESH_PER_TICK || '1', 10);
 const PIDS_TRACE_HARD_TIMEOUT_MS = parseInt(process.env.RAM_PIDS_TRACE_HARD_TIMEOUT_MS || '3000', 10);
@@ -6031,9 +6031,18 @@ async function getControllerPidsCached(nome, ctrl, { forceRefresh = false } = {}
     robeMeta[nome] = robeMeta[nome] || {};
     const cache = robeMeta[nome]._pidCache || { pids: [], ts: 0 };
     const expired = (Date.now() - cache.ts) > PIDS_CACHE_TTL_MS;
-    if (!forceRefresh && !expired && Array.isArray(cache.pids) && cache.pids.length) {
+    const hasCache = Array.isArray(cache.pids) && cache.pids.length > 0;
+    if (!forceRefresh && hasCache) {
       _ramDiagCounters.cacheHits = Number(_ramDiagCounters.cacheHits || 0) + 1;
+      if (expired) _ramDiagCounters.staleHits = Number(_ramDiagCounters.staleHits || 0) + 1;
       return cache.pids.slice(0);
+    }
+    // Caminho crítico: fora do orçamento de refresh, nunca dispara tracing pesado.
+    // Retorna rootPid como fallback leve até o próximo refresh forçado.
+    if (!forceRefresh) {
+      const root = robeMeta[nome].rootPid || null;
+      if (root && Number.isFinite(root)) return [root];
+      return [];
     }
     // Força refresh (tranquilo: curto e leve)
     const _refreshStart = Date.now();
@@ -6062,6 +6071,7 @@ let _ramDiagLast = null;
 const _ramDiagCounters = {
   calls: 0,
   cacheHits: 0,
+  staleHits: 0,
   refreshes: 0,
   refreshErrors: 0,
   refreshMsTotal: 0,
@@ -6084,7 +6094,7 @@ async function ramCpuMonitorTick() {
   }
 
   _ramTickBusy = true;
-  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '12000', 10); // 12s padrão Windows
+  const WIN_INTERVAL_MS = parseInt(process.env.WIN_RAM_TICK_MS || '15000', 10); // 15s padrão Windows
   const NIX_INTERVAL_MS = 9000 + Math.floor(Math.random() * 2000); // ~9–11s POSIX
   const INTERVAL_MS = (process.platform === 'win32') ? WIN_INTERVAL_MS : NIX_INTERVAL_MS;
 
