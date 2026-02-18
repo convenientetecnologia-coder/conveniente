@@ -79,9 +79,9 @@ async function clearComposerIfAny(p, campo) {
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
-const VIRTUS_PAGE_HEAP_RECYCLE_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCLE_MB || '95', 10);
-const VIRTUS_PAGE_NODES_RECYCLE = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE || '3200', 10);
-const VIRTUS_PAGE_RECYCLE_COOLDOWN_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_MS || '1800000', 10); // 30 min
+const VIRTUS_PAGE_HEAP_RECYCLE_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCLE_MB || '75', 10);
+const VIRTUS_PAGE_NODES_RECYCLE = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE || '2600', 10);
+const VIRTUS_PAGE_RECYCLE_COOLDOWN_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_MS || '900000', 10); // 15 min
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
@@ -1588,6 +1588,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               `virtus.page.recycle.done.${String(nome || '')}`,
               30000
             );
+            try {
+              const pm2 = await p.metrics();
+              __virtusAgentLog(
+                'H11',
+                'virtus.js:filaManagerLoop',
+                'virtus_page_recycle_post_metrics',
+                {
+                  nome: String(nome || ''),
+                  jsHeapUsedMB: Number((Number(pm2 && pm2.JSHeapUsedSize || 0) / 1048576).toFixed(2)),
+                  jsHeapTotalMB: Number((Number(pm2 && pm2.JSHeapTotalSize || 0) / 1048576).toFixed(2)),
+                  nodes: Number(pm2 && pm2.Nodes || 0),
+                  documents: Number(pm2 && pm2.Documents || 0)
+                },
+                `virtus.page.recycle.post.${String(nome || '')}`,
+                30000
+              );
+            } catch {}
           } catch (recycleErr) {
             __virtusAgentLog(
               'H11',
