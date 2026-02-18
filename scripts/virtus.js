@@ -78,6 +78,31 @@ async function clearComposerIfAny(p, campo) {
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
+const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
+const __virtusDbgState = { lastByKey: Object.create(null) };
+function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
+  try {
+    const now = Date.now();
+    const k = String(key || `${hypothesisId}:${location}:${message}`);
+    const last = Number(__virtusDbgState.lastByKey[k] || 0) || 0;
+    if (minIntervalMs > 0 && (now - last) < minIntervalMs) return;
+    __virtusDbgState.lastByKey[k] = now;
+    // #region agent log
+    fetch(__VIRTUS_DEBUG_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        runId: 'stage3-pre-fix',
+        hypothesisId,
+        location,
+        message,
+        data: data && typeof data === 'object' ? data : {},
+        timestamp: now
+      })
+    }).catch(() => {});
+    // #endregion
+  } catch {}
+}
 
 // Debounce de log "Browser morto, não é possível garantir page." — 1x/60s por perfil
 const virtusDeadLogTimes = {}; // { [nome]: timestamp }
@@ -611,16 +636,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         setResponded(id, ts);
       }
     }
+    // #region agent log
+    __virtusAgentLog(
+      'H7',
+      'virtus.js:carregaHistorico',
+      'virtus_history_loaded',
+      {
+        nome: String(nome || ''),
+        historicoKeys: Object.keys(historico || {}).length,
+        respondedCacheSize: respondedCache.size,
+        noRepeatWindowSec: NO_REPEAT_WINDOW_SEC,
+        pollIntervalMs: POLL_INTERVAL_MS
+      },
+      `virtus.history.loaded.${String(nome || '')}`,
+      60000
+    );
+    // #endregion
   }
 
   function limpaHistoricoVelho() {
     let mudanca = false;
     const agora = agoraEpoch();
+    let removed = 0;
     Object.keys(historico).forEach(id => {
       const ts = Number(historico[id]) || 0;
       if (!ts || (agora - ts) >= NO_REPEAT_WINDOW_SEC) {
         delete historico[id];
         respondedCache.delete(id);
+        removed += 1;
         mudanca = true;
         log(`Histórico limpo: ${id} removido (>24h)`);
       }
@@ -631,6 +674,22 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (first !== undefined) respondedCache.delete(first);
       mudanca = true;
     }
+    // #region agent log
+    __virtusAgentLog(
+      'H7',
+      'virtus.js:limpaHistoricoVelho',
+      'virtus_history_prune',
+      {
+        nome: String(nome || ''),
+        removed,
+        historicoKeys: Object.keys(historico || {}).length,
+        respondedCacheSize: respondedCache.size,
+        changed: !!mudanca
+      },
+      `virtus.history.prune.${String(nome || '')}`,
+      60000
+    );
+    // #endregion
     return mudanca;
   }
 
@@ -967,6 +1026,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       log(`[FILA] Atualizada: ${fila.length} chats pendentes para resposta.`);
       mudancaFila = true;
     }
+    // #region agent log
+    __virtusAgentLog(
+      'H8',
+      'virtus.js:atualizaFila',
+      'virtus_queue_state',
+      {
+        nome: String(nome || ''),
+        chatsNovosCount: Array.isArray(chatsNovos) ? chatsNovos.length : 0,
+        novosAti,
+        filaSize: fila.length,
+        chatAtivo: chatAtivo ? String(chatAtivo) : null,
+        pendingTimers: {
+          filaInterval: !!filaInterval,
+          filaChatTimer: !!filaChatTimer,
+          scrollInterval: !!scrollInterval
+        }
+      },
+      `virtus.queue.state.${String(nome || '')}`,
+      45000
+    );
+    // #endregion
     return mudancaFila;
   }
 
@@ -989,6 +1069,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   }
 
   async function responderChat(chatId) {
+    const tStartMs = Date.now();
     if (!running || !epochOk()) return;
     // ========== INÍCIO BLOCO FREEZER INSTRUÇÃO 2 ==========
     let manifestFrozenUntil = 0;
@@ -1259,6 +1340,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         try { chatLock.release(nome, chatId); } catch {}
         stepLog.appendJSONL(nome, 'virtus', { attempt: attId, step: 'chat_unlock', chatId });
       }
+      // #region agent log
+      __virtusAgentLog(
+        'H9',
+        'virtus.js:responderChat.finally',
+        'virtus_reply_cycle_done',
+        {
+          nome: String(nome || ''),
+          chatId: String(chatId || ''),
+          durationMs: Date.now() - tStartMs,
+          filaSize: Array.isArray(fila) ? fila.length : 0,
+          historicoKeys: Object.keys(historico || {}).length,
+          respondedCacheSize: respondedCache.size,
+          failCountsSize: failCounts.size
+        },
+        `virtus.reply.done.${String(nome || '')}.${String(chatId || '')}`,
+        15000
+      );
+      // #endregion
     }
   }
 
@@ -1389,6 +1488,37 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           scrollChatsToTop(p, nome);
         }, 800);
       } catch {}
+
+      // #region agent log
+      let metrics = null;
+      try {
+        const pm = await p.metrics();
+        metrics = {
+          jsHeapUsedMB: Number((Number(pm.JSHeapUsedSize || 0) / 1048576).toFixed(2)),
+          jsHeapTotalMB: Number((Number(pm.JSHeapTotalSize || 0) / 1048576).toFixed(2)),
+          nodes: Number(pm.Nodes || 0),
+          documents: Number(pm.Documents || 0),
+          layoutCount: Number(pm.LayoutCount || 0),
+          taskDuration: Number(pm.TaskDuration || 0)
+        };
+      } catch {}
+      __virtusAgentLog(
+        'H10',
+        'virtus.js:filaManagerLoop',
+        'virtus_page_metrics',
+        {
+          nome: String(nome || ''),
+          filaSize: Array.isArray(fila) ? fila.length : 0,
+          chatAtivo: chatAtivo ? String(chatAtivo) : null,
+          historicoKeys: Object.keys(historico || {}).length,
+          respondedCacheSize: respondedCache.size,
+          failCountsSize: failCounts.size,
+          metrics
+        },
+        `virtus.page.metrics.${String(nome || '')}`,
+        60000
+      );
+      // #endregion
 
       // ========== INÍCIO BLOCO ADICIONADO CONFORME INSTRUÇÃO ==========
       // Checagem de bloqueio temporário Messenger (DOM) — apenas LOG, congelamento é feito pelo nurseTick
