@@ -79,6 +79,9 @@ async function clearComposerIfAny(p, campo) {
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
+const VIRTUS_PAGE_HEAP_RECYCLE_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCLE_MB || '95', 10);
+const VIRTUS_PAGE_NODES_RECYCLE = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE || '3200', 10);
+const VIRTUS_PAGE_RECYCLE_COOLDOWN_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_MS || '1800000', 10); // 30 min
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
@@ -596,6 +599,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let filaLoopBusy = false;
   let recoverBackoffMs = 0;
   const failCounts = new Map();
+  let lastPageRecycleAt = 0;
   // Limpeza/cap failCounts — nunca deve passar de 1000
   function setFailCount(chatId, n) {
     if (!failCounts.has(chatId) && failCounts.size >= 1000) {
@@ -1532,6 +1536,75 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         `virtus.page.metrics.${String(nome || '')}`,
         60000
       );
+      // #endregion
+
+      // #region agent log
+      // Stage-3 fix candidate: recycle hot Messenger page only when idle.
+      try {
+        const nowMs = Date.now();
+        const heapUsed = Number(metrics && metrics.jsHeapUsedMB || 0);
+        const nodesUsed = Number(metrics && metrics.nodes || 0);
+        const hasPressure = (
+          (heapUsed >= VIRTUS_PAGE_HEAP_RECYCLE_MB) ||
+          (nodesUsed >= VIRTUS_PAGE_NODES_RECYCLE)
+        );
+        const cooldownOk = (nowMs - Number(lastPageRecycleAt || 0)) >= VIRTUS_PAGE_RECYCLE_COOLDOWN_MS;
+        const idleSafe = !chatAtivo && Array.isArray(fila) && fila.length === 0 && !isVirtusLocked(nome);
+        if (hasPressure && cooldownOk) {
+          __virtusAgentLog(
+            'H11',
+            'virtus.js:filaManagerLoop',
+            'virtus_page_recycle_candidate',
+            {
+              nome: String(nome || ''),
+              heapUsed,
+              nodesUsed,
+              thresholdHeap: VIRTUS_PAGE_HEAP_RECYCLE_MB,
+              thresholdNodes: VIRTUS_PAGE_NODES_RECYCLE,
+              idleSafe,
+              cooldownOk,
+              filaSize: Array.isArray(fila) ? fila.length : 0,
+              chatAtivo: chatAtivo ? String(chatAtivo) : null
+            },
+            `virtus.page.recycle.candidate.${String(nome || '')}`,
+            30000
+          );
+        }
+        if (hasPressure && cooldownOk && idleSafe) {
+          const t0 = Date.now();
+          try {
+            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            lastPageRecycleAt = Date.now();
+            __virtusAgentLog(
+              'H11',
+              'virtus.js:filaManagerLoop',
+              'virtus_page_recycle_done',
+              {
+                nome: String(nome || ''),
+                heapUsedBefore: heapUsed,
+                nodesBefore: nodesUsed,
+                durationMs: Date.now() - t0
+              },
+              `virtus.page.recycle.done.${String(nome || '')}`,
+              30000
+            );
+          } catch (recycleErr) {
+            __virtusAgentLog(
+              'H11',
+              'virtus.js:filaManagerLoop',
+              'virtus_page_recycle_failed',
+              {
+                nome: String(nome || ''),
+                heapUsedBefore: heapUsed,
+                nodesBefore: nodesUsed,
+                error: String(recycleErr && recycleErr.message ? recycleErr.message : recycleErr)
+              },
+              `virtus.page.recycle.fail.${String(nome || '')}`,
+              30000
+            );
+          }
+        }
+      } catch {}
       // #endregion
 
       // ========== INÍCIO BLOCO ADICIONADO CONFORME INSTRUÇÃO ==========
