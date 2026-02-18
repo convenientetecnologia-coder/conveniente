@@ -21,6 +21,7 @@ const stepLog = require('./stepLog.js');
 const chatLock = require('./chatLock.js');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
+const provisionAudit = require('./provisionAudit.js');
 
 // Locks por perfil de input
 const VIRTUS_INPUT_LOCKS = new Map();
@@ -100,6 +101,19 @@ function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIn
         timestamp: now
       })
     }).catch(() => {});
+    try {
+      if (provisionAudit && typeof provisionAudit.append === 'function') {
+        provisionAudit.append({
+          ts: now,
+          event: 'dbg_agent_runtime',
+          runId: 'stage3-pre-fix',
+          hypothesisId: String(hypothesisId || ''),
+          location: String(location || ''),
+          message: String(message || ''),
+          data: data && typeof data === 'object' ? data : {}
+        });
+      }
+    } catch {}
     // #endregion
   } catch {}
 }
