@@ -82,6 +82,7 @@ const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
 const VIRTUS_PAGE_HEAP_RECYCLE_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCLE_MB || '75', 10);
 const VIRTUS_PAGE_NODES_RECYCLE = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE || '2600', 10);
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_MS || '900000', 10); // 15 min
+const VIRTUS_PAGE_RECYCLE_FOLLOWUP_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_FOLLOWUP_MS || '45000', 10);
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
@@ -600,6 +601,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let recoverBackoffMs = 0;
   const failCounts = new Map();
   let lastPageRecycleAt = 0;
+  let lastPageRecycleMeta = null;
   // Limpeza/cap failCounts — nunca deve passar de 1000
   function setFailCount(chatId, n) {
     if (!failCounts.has(chatId) && failCounts.size >= 1000) {
@@ -1544,6 +1546,30 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         const nowMs = Date.now();
         const heapUsed = Number(metrics && metrics.jsHeapUsedMB || 0);
         const nodesUsed = Number(metrics && metrics.nodes || 0);
+        if (lastPageRecycleMeta && String(lastPageRecycleMeta.nome || '') === String(nome || '')) {
+          const elapsedMs = nowMs - Number(lastPageRecycleMeta.at || 0);
+          if (elapsedMs >= VIRTUS_PAGE_RECYCLE_FOLLOWUP_MS) {
+            __virtusAgentLog(
+              'H13',
+              'virtus.js:filaManagerLoop',
+              'virtus_page_recycle_followup_metrics',
+              {
+                nome: String(nome || ''),
+                elapsedMs,
+                jsHeapUsedMB: heapUsed,
+                nodes: nodesUsed,
+                heapBefore: Number(lastPageRecycleMeta.heapBefore || 0),
+                nodesBefore: Number(lastPageRecycleMeta.nodesBefore || 0),
+                navStatus: lastPageRecycleMeta.navStatus == null ? null : Number(lastPageRecycleMeta.navStatus),
+                preUrl: String(lastPageRecycleMeta.preUrl || ''),
+                postUrl: String(lastPageRecycleMeta.postUrl || '')
+              },
+              `virtus.page.recycle.followup.${String(nome || '')}`,
+              15000
+            );
+            lastPageRecycleMeta = null;
+          }
+        }
         const hasPressure = (
           (heapUsed >= VIRTUS_PAGE_HEAP_RECYCLE_MB) ||
           (nodesUsed >= VIRTUS_PAGE_NODES_RECYCLE)
@@ -1573,7 +1599,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (hasPressure && cooldownOk && idleSafe) {
           const t0 = Date.now();
           try {
-            await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            const preUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
+            const navResp = await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            const postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
+            const navStatus = navResp && typeof navResp.status === 'function' ? Number(navResp.status()) : null;
             lastPageRecycleAt = Date.now();
             __virtusAgentLog(
               'H11',
@@ -1588,6 +1617,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               `virtus.page.recycle.done.${String(nome || '')}`,
               30000
             );
+            __virtusAgentLog(
+              'H12',
+              'virtus.js:filaManagerLoop',
+              'virtus_page_recycle_nav_result',
+              {
+                nome: String(nome || ''),
+                preUrl,
+                postUrl,
+                navStatus,
+                durationMs: Date.now() - t0
+              },
+              `virtus.page.recycle.nav.${String(nome || '')}`,
+              30000
+            );
+            lastPageRecycleMeta = {
+              at: Date.now(),
+              nome: String(nome || ''),
+              heapBefore: heapUsed,
+              nodesBefore: nodesUsed,
+              navStatus,
+              preUrl,
+              postUrl
+            };
             try {
               const pm2 = await p.metrics();
               __virtusAgentLog(
