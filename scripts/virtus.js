@@ -92,11 +92,14 @@ const VIRTUS_PAGE_HEAP_RECYCLE_CRITICAL_MB = parseInt(process.env.VIRTUS_PAGE_HE
 const VIRTUS_PAGE_NODES_RECYCLE_CRITICAL = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE_CRITICAL || '1600', 10);
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS || '180000', 10); // 3 min
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS || '60000', 10); // 1 min
+const VIRTUS_RECYCLE_GLOBAL_GAP_MS = parseInt(process.env.VIRTUS_RECYCLE_GLOBAL_GAP_MS || '4000', 10);
+const VIRTUS_RECYCLE_LOCK_TTL_MS = parseInt(process.env.VIRTUS_RECYCLE_LOCK_TTL_MS || '45000', 10);
 const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX || '3000', 10);
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
 const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_CRITICAL_MAX || '350', 10);
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
+const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
 const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
   try {
@@ -637,6 +640,34 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       removed += 1;
     }
     return removed;
+  }
+  function tryAcquireGlobalRecycle(nome, nowMs) {
+    try {
+      const owner = String(__virtusGlobalRecycle.owner || '');
+      const acquiredAt = Number(__virtusGlobalRecycle.acquiredAt || 0);
+      const lockExpired = !owner || ((nowMs - acquiredAt) > VIRTUS_RECYCLE_LOCK_TTL_MS);
+      if (!lockExpired && owner && owner !== String(nome || '')) {
+        return { ok: false, reason: 'locked', owner };
+      }
+      const sinceLast = nowMs - Number(__virtusGlobalRecycle.lastReleaseAt || 0);
+      if (sinceLast < VIRTUS_RECYCLE_GLOBAL_GAP_MS) {
+        return { ok: false, reason: 'gap', waitMs: VIRTUS_RECYCLE_GLOBAL_GAP_MS - sinceLast };
+      }
+      __virtusGlobalRecycle.owner = String(nome || '');
+      __virtusGlobalRecycle.acquiredAt = nowMs;
+      return { ok: true };
+    } catch {
+      return { ok: false, reason: 'exception' };
+    }
+  }
+  function releaseGlobalRecycle(nome) {
+    try {
+      if (String(__virtusGlobalRecycle.owner || '') === String(nome || '')) {
+        __virtusGlobalRecycle.owner = '';
+        __virtusGlobalRecycle.acquiredAt = 0;
+        __virtusGlobalRecycle.lastReleaseAt = Date.now();
+      }
+    } catch {}
   }
 
   // Persistência segura no Windows
@@ -1693,8 +1724,27 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           );
         }
         if (hasAdaptivePressure && cooldownOk && idleSafe) {
-          const t0 = Date.now();
-          try {
+          const globalSlot = tryAcquireGlobalRecycle(nome, nowMs);
+          if (!globalSlot.ok) {
+            __virtusAgentLog(
+              'H17',
+              'virtus.js:filaManagerLoop',
+              'virtus_page_recycle_skipped_global_guard',
+              {
+                nome: String(nome || ''),
+                reason: String(globalSlot.reason || ''),
+                lockedBy: String(globalSlot.owner || ''),
+                waitMs: Number(globalSlot.waitMs || 0),
+                pressureMode,
+                hostFreeMB
+              },
+              `virtus.page.recycle.skip.global.${String(nome || '')}`,
+              15000
+            );
+          }
+          if (globalSlot.ok) {
+            const t0 = Date.now();
+            try {
             const preUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
             const navTimeoutMs = pressureMode === 'critical' ? 12000 : (pressureMode === 'low' ? 18000 : 30000);
             let navStatus = null;
@@ -1723,16 +1773,36 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 await p.evaluate(() => {
                   try { location.assign('https://www.messenger.com/marketplace'); } catch {}
                 });
-                await p.waitForFunction(
-                  () => {
-                    try {
-                      return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace'));
-                    } catch {
-                      return false;
-                    }
-                  },
-                  { timeout: Math.max(6000, Math.floor(navTimeoutMs * 0.8)) }
-                );
+                const waitBudgetMs = Math.max(6000, Math.floor(navTimeoutMs * 0.8));
+                try {
+                  await Promise.race([
+                    p.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: waitBudgetMs }).catch(() => null),
+                    p.waitForFunction(
+                      () => {
+                        try {
+                          return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace'));
+                        } catch {
+                          return false;
+                        }
+                      },
+                      { timeout: waitBudgetMs }
+                    ).catch(() => null)
+                  ]);
+                } catch {}
+                let landed = false;
+                try {
+                  const u = String(p.url() || '');
+                  landed = u.includes('/marketplace');
+                } catch {}
+                if (!landed) {
+                  try {
+                    landed = !!(await p.evaluate(() => {
+                      try { return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace')); }
+                      catch { return false; }
+                    }));
+                  } catch {}
+                }
+                if (!landed) throw new Error('fallback_not_landed_marketplace');
                 postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
                 __virtusAgentLog(
                   'H16',
@@ -1821,20 +1891,23 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 30000
               );
             } catch {}
-          } catch (recycleErr) {
-            __virtusAgentLog(
-              'H11',
-              'virtus.js:filaManagerLoop',
-              'virtus_page_recycle_failed',
-              {
-                nome: String(nome || ''),
-                heapUsedBefore: heapUsed,
-                nodesBefore: nodesUsed,
-                error: String(recycleErr && recycleErr.message ? recycleErr.message : recycleErr)
-              },
-              `virtus.page.recycle.fail.${String(nome || '')}`,
-              30000
-            );
+            } catch (recycleErr) {
+              __virtusAgentLog(
+                'H11',
+                'virtus.js:filaManagerLoop',
+                'virtus_page_recycle_failed',
+                {
+                  nome: String(nome || ''),
+                  heapUsedBefore: heapUsed,
+                  nodesBefore: nodesUsed,
+                  error: String(recycleErr && recycleErr.message ? recycleErr.message : recycleErr)
+                },
+                `virtus.page.recycle.fail.${String(nome || '')}`,
+                30000
+              );
+            } finally {
+              releaseGlobalRecycle(nome);
+            }
           }
         }
       } catch {}
