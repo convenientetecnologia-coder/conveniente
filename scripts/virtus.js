@@ -1696,9 +1696,74 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           const t0 = Date.now();
           try {
             const preUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
-            const navResp = await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            const postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
-            const navStatus = navResp && typeof navResp.status === 'function' ? Number(navResp.status()) : null;
+            const navTimeoutMs = pressureMode === 'critical' ? 12000 : (pressureMode === 'low' ? 18000 : 30000);
+            let navStatus = null;
+            let navMethod = 'goto';
+            let postUrl = '';
+            try {
+              const navResp = await p.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
+              postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
+              navStatus = navResp && typeof navResp.status === 'function' ? Number(navResp.status()) : null;
+            } catch (primaryNavErr) {
+              navMethod = 'assign_wait';
+              __virtusAgentLog(
+                'H16',
+                'virtus.js:filaManagerLoop',
+                'virtus_page_recycle_fallback_start',
+                {
+                  nome: String(nome || ''),
+                  pressureMode,
+                  navTimeoutMs,
+                  primaryError: String(primaryNavErr && primaryNavErr.message ? primaryNavErr.message : primaryNavErr)
+                },
+                `virtus.page.recycle.fallback.start.${String(nome || '')}`,
+                15000
+              );
+              try {
+                await p.evaluate(() => {
+                  try { location.assign('https://www.messenger.com/marketplace'); } catch {}
+                });
+                await p.waitForFunction(
+                  () => {
+                    try {
+                      return !!(location && typeof location.pathname === 'string' && location.pathname.includes('/marketplace'));
+                    } catch {
+                      return false;
+                    }
+                  },
+                  { timeout: Math.max(6000, Math.floor(navTimeoutMs * 0.8)) }
+                );
+                postUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
+                __virtusAgentLog(
+                  'H16',
+                  'virtus.js:filaManagerLoop',
+                  'virtus_page_recycle_fallback_done',
+                  {
+                    nome: String(nome || ''),
+                    pressureMode,
+                    navTimeoutMs,
+                    postUrl
+                  },
+                  `virtus.page.recycle.fallback.done.${String(nome || '')}`,
+                  15000
+                );
+              } catch (fallbackNavErr) {
+                __virtusAgentLog(
+                  'H16',
+                  'virtus.js:filaManagerLoop',
+                  'virtus_page_recycle_fallback_failed',
+                  {
+                    nome: String(nome || ''),
+                    pressureMode,
+                    navTimeoutMs,
+                    fallbackError: String(fallbackNavErr && fallbackNavErr.message ? fallbackNavErr.message : fallbackNavErr)
+                  },
+                  `virtus.page.recycle.fallback.fail.${String(nome || '')}`,
+                  15000
+                );
+                throw new Error(`primary_nav=${String(primaryNavErr && primaryNavErr.message ? primaryNavErr.message : primaryNavErr)}; fallback_nav=${String(fallbackNavErr && fallbackNavErr.message ? fallbackNavErr.message : fallbackNavErr)}`);
+              }
+            }
             lastPageRecycleAt = Date.now();
             __virtusAgentLog(
               'H11',
@@ -1722,6 +1787,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
                 preUrl,
                 postUrl,
                 navStatus,
+                navMethod,
+                navTimeoutMs,
                 durationMs: Date.now() - t0
               },
               `virtus.page.recycle.nav.${String(nome || '')}`,
@@ -1733,6 +1800,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               heapBefore: heapUsed,
               nodesBefore: nodesUsed,
               navStatus,
+              navMethod,
               preUrl,
               postUrl
             };
