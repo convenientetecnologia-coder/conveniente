@@ -92,6 +92,10 @@ const VIRTUS_PAGE_HEAP_RECYCLE_CRITICAL_MB = parseInt(process.env.VIRTUS_PAGE_HE
 const VIRTUS_PAGE_NODES_RECYCLE_CRITICAL = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE_CRITICAL || '1600', 10);
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS || '180000', 10); // 3 min
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS || '60000', 10); // 1 min
+const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX || '3000', 10);
+const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
+const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
+const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_CRITICAL_MAX || '350', 10);
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
@@ -588,8 +592,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
+  let respCacheMaxDynamic = RESP_CACHE_MAX;
   function setResponded(id, ts) {
-    if (!respondedCache.has(id) && respondedCache.size >= RESP_CACHE_MAX) {
+    if (!respondedCache.has(id) && respondedCache.size >= respCacheMaxDynamic) {
       const first = respondedCache.keys().next().value;
       if (first !== undefined) respondedCache.delete(first);
     }
@@ -609,16 +614,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let filaLoopBusy = false;
   let recoverBackoffMs = 0;
   const failCounts = new Map();
+  const FAIL_COUNTS_MAX = 1000;
+  let failCountsMaxDynamic = FAIL_COUNTS_MAX;
   let lastPageRecycleAt = 0;
   let lastPageRecycleMeta = null;
   let lastPressureModeLogAt = 0;
-  // Limpeza/cap failCounts — nunca deve passar de 1000
+  // Limpeza/cap failCounts
   function setFailCount(chatId, n) {
-    if (!failCounts.has(chatId) && failCounts.size >= 1000) {
+    if (!failCounts.has(chatId) && failCounts.size >= failCountsMaxDynamic) {
       const first = failCounts.keys().next().value;
       if (first !== undefined) failCounts.delete(first);
     }
     failCounts.set(chatId, n);
+  }
+  function trimMapOldest(mapRef, maxSize) {
+    let removed = 0;
+    const target = Math.max(0, Number(maxSize || 0));
+    while (mapRef && mapRef.size > target) {
+      const first = mapRef.keys().next().value;
+      if (first === undefined) break;
+      mapRef.delete(first);
+      removed += 1;
+    }
+    return removed;
   }
 
   // Persistência segura no Windows
@@ -699,7 +717,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       }
     });
     // Garantir cap adicional do respondedCache
-    while (respondedCache.size > RESP_CACHE_MAX) {
+    while (respondedCache.size > respCacheMaxDynamic) {
       const first = respondedCache.keys().next().value;
       if (first !== undefined) respondedCache.delete(first);
       mudanca = true;
@@ -1590,11 +1608,42 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           thresholdHeap = VIRTUS_PAGE_HEAP_RECYCLE_CRITICAL_MB;
           thresholdNodes = VIRTUS_PAGE_NODES_RECYCLE_CRITICAL;
           cooldownMs = VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS;
+          respCacheMaxDynamic = Math.min(RESP_CACHE_MAX, VIRTUS_RESP_CACHE_CRITICAL_MAX);
+          failCountsMaxDynamic = Math.min(FAIL_COUNTS_MAX, VIRTUS_FAIL_COUNTS_CRITICAL_MAX);
         } else if (hostFreeMB <= VIRTUS_HOST_FREE_LOW_MB) {
           pressureMode = 'low';
           thresholdHeap = VIRTUS_PAGE_HEAP_RECYCLE_LOW_MB;
           thresholdNodes = VIRTUS_PAGE_NODES_RECYCLE_LOW;
           cooldownMs = VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS;
+          respCacheMaxDynamic = Math.min(RESP_CACHE_MAX, VIRTUS_RESP_CACHE_LOW_MAX);
+          failCountsMaxDynamic = Math.min(FAIL_COUNTS_MAX, VIRTUS_FAIL_COUNTS_LOW_MAX);
+        } else {
+          respCacheMaxDynamic = RESP_CACHE_MAX;
+          failCountsMaxDynamic = FAIL_COUNTS_MAX;
+        }
+        if (pressureMode !== 'normal') {
+          const removedResp = trimMapOldest(respondedCache, respCacheMaxDynamic);
+          const removedFail = trimMapOldest(failCounts, failCountsMaxDynamic);
+          if (removedResp > 0 || removedFail > 0) {
+            __virtusAgentLog(
+              'H15',
+              'virtus.js:filaManagerLoop',
+              'virtus_pressure_trim',
+              {
+                nome: String(nome || ''),
+                hostFreeMB,
+                pressureMode,
+                removedResponded: removedResp,
+                removedFailCounts: removedFail,
+                respondedCacheSize: respondedCache.size,
+                failCountsSize: failCounts.size,
+                respondedCap: respCacheMaxDynamic,
+                failCountsCap: failCountsMaxDynamic
+              },
+              `virtus.pressure.trim.${String(nome || '')}`,
+              15000
+            );
+          }
         }
         if ((nowMs - Number(lastPressureModeLogAt || 0)) >= 60000) {
           lastPressureModeLogAt = nowMs;
