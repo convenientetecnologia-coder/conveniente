@@ -15,6 +15,7 @@ Arquitetura:
 const fs = require('fs/promises');
 const fsRaw = require('fs'); // Necessário para uso síncrono dentro de getPerfilManifest
 const path = require('path');
+const os = require('os');
 const { patchPage, ensureMinimizedWindowForPage } = require('./browser.js');
 const utils = require('./utils.js');
 const stepLog = require('./stepLog.js');
@@ -83,6 +84,14 @@ const VIRTUS_PAGE_HEAP_RECYCLE_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCL
 const VIRTUS_PAGE_NODES_RECYCLE = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE || '2600', 10);
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_MS || '900000', 10); // 15 min
 const VIRTUS_PAGE_RECYCLE_FOLLOWUP_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_FOLLOWUP_MS || '45000', 10);
+const VIRTUS_HOST_FREE_LOW_MB = parseInt(process.env.VIRTUS_HOST_FREE_LOW_MB || '6000', 10);
+const VIRTUS_HOST_FREE_CRITICAL_MB = parseInt(process.env.VIRTUS_HOST_FREE_CRITICAL_MB || '4000', 10);
+const VIRTUS_PAGE_HEAP_RECYCLE_LOW_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCLE_LOW_MB || '60', 10);
+const VIRTUS_PAGE_NODES_RECYCLE_LOW = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE_LOW || '2200', 10);
+const VIRTUS_PAGE_HEAP_RECYCLE_CRITICAL_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCLE_CRITICAL_MB || '45', 10);
+const VIRTUS_PAGE_NODES_RECYCLE_CRITICAL = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE_CRITICAL || '1800', 10);
+const VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS || '300000', 10); // 5 min
+const VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS || '120000', 10); // 2 min
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
@@ -602,6 +611,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   const failCounts = new Map();
   let lastPageRecycleAt = 0;
   let lastPageRecycleMeta = null;
+  let lastPressureModeLogAt = 0;
   // Limpeza/cap failCounts — nunca deve passar de 1000
   function setFailCount(chatId, n) {
     if (!failCounts.has(chatId) && failCounts.size >= 1000) {
@@ -1570,13 +1580,47 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             lastPageRecycleMeta = null;
           }
         }
-        const hasPressure = (
-          (heapUsed >= VIRTUS_PAGE_HEAP_RECYCLE_MB) ||
-          (nodesUsed >= VIRTUS_PAGE_NODES_RECYCLE)
+        const hostFreeMB = Number((os.freemem() / 1048576).toFixed(0));
+        let pressureMode = 'normal';
+        let thresholdHeap = VIRTUS_PAGE_HEAP_RECYCLE_MB;
+        let thresholdNodes = VIRTUS_PAGE_NODES_RECYCLE;
+        let cooldownMs = VIRTUS_PAGE_RECYCLE_COOLDOWN_MS;
+        if (hostFreeMB <= VIRTUS_HOST_FREE_CRITICAL_MB) {
+          pressureMode = 'critical';
+          thresholdHeap = VIRTUS_PAGE_HEAP_RECYCLE_CRITICAL_MB;
+          thresholdNodes = VIRTUS_PAGE_NODES_RECYCLE_CRITICAL;
+          cooldownMs = VIRTUS_PAGE_RECYCLE_COOLDOWN_CRITICAL_MS;
+        } else if (hostFreeMB <= VIRTUS_HOST_FREE_LOW_MB) {
+          pressureMode = 'low';
+          thresholdHeap = VIRTUS_PAGE_HEAP_RECYCLE_LOW_MB;
+          thresholdNodes = VIRTUS_PAGE_NODES_RECYCLE_LOW;
+          cooldownMs = VIRTUS_PAGE_RECYCLE_COOLDOWN_LOW_MS;
+        }
+        if ((nowMs - Number(lastPressureModeLogAt || 0)) >= 60000) {
+          lastPressureModeLogAt = nowMs;
+          __virtusAgentLog(
+            'H14',
+            'virtus.js:filaManagerLoop',
+            'virtus_recycle_pressure_mode',
+            {
+              nome: String(nome || ''),
+              hostFreeMB,
+              pressureMode,
+              thresholdHeap,
+              thresholdNodes,
+              cooldownMs
+            },
+            `virtus.page.recycle.mode.${String(nome || '')}`,
+            60000
+          );
+        }
+        const hasAdaptivePressure = (
+          (heapUsed >= thresholdHeap) ||
+          (nodesUsed >= thresholdNodes)
         );
-        const cooldownOk = (nowMs - Number(lastPageRecycleAt || 0)) >= VIRTUS_PAGE_RECYCLE_COOLDOWN_MS;
+        const cooldownOk = (nowMs - Number(lastPageRecycleAt || 0)) >= cooldownMs;
         const idleSafe = !chatAtivo && Array.isArray(fila) && fila.length === 0 && !isVirtusLocked(nome);
-        if (hasPressure && cooldownOk) {
+        if (hasAdaptivePressure && cooldownOk) {
           __virtusAgentLog(
             'H11',
             'virtus.js:filaManagerLoop',
@@ -1585,8 +1629,11 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               nome: String(nome || ''),
               heapUsed,
               nodesUsed,
-              thresholdHeap: VIRTUS_PAGE_HEAP_RECYCLE_MB,
-              thresholdNodes: VIRTUS_PAGE_NODES_RECYCLE,
+              hostFreeMB,
+              pressureMode,
+              thresholdHeap,
+              thresholdNodes,
+              cooldownMs,
               idleSafe,
               cooldownOk,
               filaSize: Array.isArray(fila) ? fila.length : 0,
@@ -1596,7 +1643,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             30000
           );
         }
-        if (hasPressure && cooldownOk && idleSafe) {
+        if (hasAdaptivePressure && cooldownOk && idleSafe) {
           const t0 = Date.now();
           try {
             const preUrl = (() => { try { return String(p.url() || ''); } catch { return ''; } })();
