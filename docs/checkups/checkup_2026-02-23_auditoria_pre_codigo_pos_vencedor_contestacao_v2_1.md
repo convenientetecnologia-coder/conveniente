@@ -209,3 +209,29 @@ Para cada execução, gerar um relatório JSON em `C:\sitechatbot\dados\forensic
   - smoke test em ambiente controlado
   - evidência por `requestId`/`lead_token` em logs e no CT DB
 
+---
+
+### Atualizacao de execucao (P1 slice inicial)
+
+Status: implementacao iniciada com foco em persistencia/retomada apos restart.
+
+Entregas implementadas (local):
+- `C:\sitechatbot\convenientetecnologia\lib\ctLeadContestationStore.js`
+  - bootstrap idempotente de caso por `case_key` (`lead_token#cycle_no`)
+  - listagem de followup T+15 vencido
+  - marcação de prompt T+15 enviado
+  - registro de resposta do motorista (ok / noresp / issue) com evento
+- `C:\sitechatbot\whatsapp\lib\timeouts.js`
+  - bootstrap do caso quando vencedor é notificado
+  - envio de T+15 com botões técnicos (`contest:t15:{caseId}:{acao}`)
+- `C:\sitechatbot\whatsapp\lib\flow.js`
+  - captura da resposta de T+15 no número operacional e transição do caso
+
+Validação executada:
+- carga de módulos sem erro de sintaxe:
+  - comando: `node -e "require('./convenientetecnologia/lib/ctLeadContestationStore'); require('./whatsapp/lib/timeouts'); require('./whatsapp/lib/flow'); console.log('ok-modules')"`
+  - resultado: `ok-modules`
+
+Reinício necessário para ativar em runtime:
+- `sitechatbot` (`node index.js`).
+

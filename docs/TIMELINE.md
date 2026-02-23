@@ -31,6 +31,24 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-23 — [CT][DOCS][CROSS][OPS] Contestação V2.1: início de runtime com persistência T+15 e retomada pós-restart
+
+- **O que**:
+  - criada implementação inicial do store canônico de contestação (`ct_lead_contestation_*`) com bootstrap idempotente por `case_key`;
+  - `timeouts` passou a: bootstrapar caso após vencedor notificado e enviar followup T+15 persistente com `interactive_id` técnico;
+  - `flow` passou a capturar resposta T+15 do motorista no número operacional e transicionar estado do caso (`closed`/`provisional`/`manual_queue`).
+- **Por quê**: iniciar execução real do pós-vencedor sem perder estado em restart e sem quebrar legado/fluxo tokenized atual.
+- **Evidência**:
+  - `C:\sitechatbot\convenientetecnologia\lib\ctLeadContestationStore.js`
+  - `C:\sitechatbot\whatsapp\lib\timeouts.js`
+  - `C:\sitechatbot\whatsapp\lib\flow.js`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-23_auditoria_pre_codigo_pos_vencedor_contestacao_v2_1.md`
+- **Reinícios**: `sitechatbot` (`node index.js`) para ativar a slice no runtime.
+- **Rollback**: restaurar os 3 arquivos acima para a versão anterior e reiniciar `sitechatbot`.
+- **THREAD**: `TH-2026-02-20-leads-porte-contestacao-ct`
+
+---
+
 #### 2026-02-23 — [DOCS][CT][CROSS][OPS] Auditoria pré‑código pós‑vencedor (Contestação V2.1) — baseline real + gaps + simulação P2
 
 - **O que**:
