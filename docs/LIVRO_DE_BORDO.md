@@ -49,10 +49,16 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
 
 - **Começar por aqui**
   - Visão geral (o que é cada projeto) — **este arquivo**
+  - Continuidade entre chats (handoff pronto para colar no novo chat) — `docs/INFORMACOES_CONTINUIDADE_GPT.md`
   - Runbook (operar/restart/diagnóstico) — `docs/RUNBOOK_TECNICO.md`
   - Timeline (mudanças) — `docs/TIMELINE.md`
+  - Dossiê pré-código (novo fluxo de leads por sorteio/cobrança) — `docs/checkups/checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
+  - Auditoria pré‑código (pós‑vencedor / Contestação V2.1: baseline real + gaps + simulação pesada P2) — `docs/checkups/checkup_2026-02-23_auditoria_pre_codigo_pos_vencedor_contestacao_v2_1.md`
   - Incidentes P0 concluídos desta etapa — `docs/inbox/done/INC-20260214-0900-01.md` e `docs/inbox/done/INC-20260214-1020-01.md`
-  - Incidente P0 encerrado desta etapa — `docs/inbox/done/INC-20260215-1100-01.md`
+  - Incidente P0 reaberto em monitoramento (aguardando evidência) — `docs/inbox/need_evidence/INC-20260215-1100-01.md`
+  - Incidente P0 em monitoramento (aguardando evidência) — `docs/inbox/need_evidence/INC-20260203-1800-01.md`
+  - Incidente P0 em monitoramento (aguardando evidência) — `docs/inbox/need_evidence/INC-20260216-1600-01.md`
+  - Incidente P0 em monitoramento (aguardando evidência) — `docs/inbox/need_evidence/INC-20260216-1930-01.md`
   - **Inbox de relatos do humano (intake/triage)** — `docs/INBOX_RELATOS_DO_HUMANO.md`
   - **Host registry (apelidos ↔ hostId)** — `docs/HOST_REGISTRY.md`
   - Checkups (relatórios) — `docs/checkups/`
@@ -351,3 +357,14 @@ Para detalhes (restart/checklists/diagnóstico), usar o runbook: `docs/RUNBOOK_T
 
 Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
 
+---## 2026-02-20 — Fechamento P0 com simulação pesada (PASS)- Rodada final executada com foco em "fechar com chave de ouro", sempre em base forense isolada (sem tocar runtime de produção).
+- Incidentes P0 validados:
+  - webhook Asaas com baixa automática idempotente
+  - webhook atrasado recuperado por reconciliação `poll` (`reconcileOpenAsaasPayments`)
+  - reemissão com ajuste sem perda de atomicidade financeira
+  - alertas operacionais críticos com métricas esperadas
+- Stress pesado aprovado:
+  - suíte enterprise completa (`stress_phase4_enterprise`) com `8` rodadas e `ok=true`
+  - sorteio atômico em alta carga (`1200` leads, `62674` participações persistidas, `0` falhas)
+  - billing atômico em carga alta (`180` motoristas, `0` boletos abertos após webhook, `180` pagos)
+- Status operacional após rodada: sem pendência P0 aberta nos blocos testados nesta fase.

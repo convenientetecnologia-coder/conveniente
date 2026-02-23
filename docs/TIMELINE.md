@@ -31,6 +31,486 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-23 — [DOCS][CT][CROSS][OPS] Auditoria pré‑código pós‑vencedor (Contestação V2.1) — baseline real + gaps + simulação P2
+
+- **O que**:
+  - auditado “o que existe hoje” no pós‑vencedor: winner recebe 1 mensagem + lead é debitado no ledger (idempotente por `lead_token`);
+  - registrado dossiê pré‑código com mapeamento função‑a‑função, gaps P0/P1/P2 e desenho da simulação pesada (500–600/dia) com deadline (anti‑trava);
+  - linkado no INC canônico de contestação V2.1.
+- **Por quê**: iniciar codificação sem achismo e sem regressão no core tokenized já validado.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-23_auditoria_pre_codigo_pos_vencedor_contestacao_v2_1.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260222-2310-01.md`
+- **Reinícios**: nenhum (apenas documentação/auditoria).
+- **Rollback**: reverter commits de docs (git) se necessário.
+
+---
+
+#### 2026-02-23 — [DOCS][CROSS][OPS] Handoff blindado (INC reorganizado + contestação V2.1 canonizada + bloco copiar/colar)
+
+- **O que**:
+  - reorganizados INCs por pasta conforme `state` (done/need_evidence/in_progress) e alinhado `docs/inbox/INDEX.md`;
+  - reforçada governança: `INC-20260222-2310-01` agora traz **V2.1 como canônico no topo** (V1 fica como histórico) + copy V2.1 canônica;
+  - atualizado `docs/INFORMACOES_CONTINUIDADE_GPT.md` com bloco pronto para copiar/colar no novo chat, mantendo continuidade sem perda.
+- **Por quê**: evitar perda de decisões “na memória” e impedir que um GPT futuro implemente V1 por engano.
+- **Evidência**:
+  - `C:\conveniente\docs\INFORMACOES_CONTINUIDADE_GPT.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260222-2310-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260222-2230-01.md`
+- **Reinícios**: nenhum (apenas documentação/organização).
+- **Rollback**: reverter os commits de docs (git) se for necessário voltar a estrutura anterior.
+- **THREAD**: `TH-2026-02-20-leads-porte-contestacao-ct`
+
+---
+
+#### 2026-02-20 — [DOCS][CT][CROSS][OPS] Auditoria ponta a ponta pre-codigo (porte + sorteio + contestacao + CT)
+
+- **O que**:
+  - consolidada auditoria tecnica completa, funcao por funcao, cobrindo fluxo WhatsApp, sorteio tokenized, financeiro por `lead_token` e operacao CT;
+  - validadas evidencias reais de consistencia e stress isolado de sorteio (`failures=0`);
+  - fechado gate `READY_TO_IMPLEMENT_PHASED` com invariantes atomicos (estorno total somente do lead contestado, idempotencia e all-or-nothing por lead).
+- **Por quê**: iniciar codificacao sem achismo, com regras e evidencias fechadas, reduzindo risco de regressao operacional e financeira.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-20_auditoria_ponta_a_ponta_pre_codigo.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260222-2230-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260222-2310-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0950-01.md`
+- **Reinícios**: nenhum (rodada documental/auditoria pre-codigo).
+- **Rollback**: remover/ajustar os registros documentais acima caso o escopo seja redefinido.
+- **THREAD**: `TH-2026-02-20-leads-porte-contestacao-ct`
+
+---
+
+#### 2026-02-21 — [CT][NOTIF][CROSS][OPS] Fechamento DR: full_mirror sem falha residual por lock (exclusões absolutas)
+
+- **O que**:
+  - ajustado `driveBackup` para enviar exclusões do `robocopy` com caminhos absolutos nas rotinas de `full_mirror`;
+  - removidos do mirror pesado os diretórios de lock recorrente (`node_modules`, `dados/fb_gpt`, logs voláteis e áreas de runtime já cobertas por `live_overlay`/`snapshot`);
+  - validação manual executada com retorno saudável:
+    - `sitechatbot` `SITE_RC=3`;
+    - `notificador` `NOTIFIER_RC=2`.
+- **Por quê**: eliminar ruído residual de `robocopy` por arquivo em uso sem reduzir continuidade de recuperação.
+- **Evidência**:
+  - `C:\sitechatbot\lib\driveBackup.js`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260220-2230-01.md`
+- **Reinícios**: `sitechatbot` (`node index.js`) para aplicar este ajuste em runtime automático.
+- **Rollback**: restaurar `driveBackup.js` anterior e reiniciar `sitechatbot`.
+- **THREAD**: `TH-2026-02-20-dr-drive-orquestracao`
+
+---
+
+#### 2026-02-21 — [CT][NOTIF][CROSS][OPS] Hardening de backup DR (integridade SQLite + manifesto + anti-trava)
+
+- **O que**:
+  - Backup DR passou a rodar sem bloquear o boot do `sitechatbot` (execução assíncrona com disparo pós-start).
+  - Incluído timeout para `robocopy` e log de skip por concorrência para evitar sobreposição silenciosa.
+  - Snapshot agora gera `snapshot_manifest.json` com:
+    - `sha256` dos bancos copiados;
+    - validação `PRAGMA quick_check` em cada SQLite copiado.
+  - Criados metadados de DR (`runtime_write_inventory.json`, `last_success.json`) e validação de arquivos críticos no script de restore.
+- **Por quê**: reduzir risco de inconsistência silenciosa e aumentar auditabilidade em cenários adversos (interrupções/falhas em cópia).
+- **Evidência**:
+  - `C:\sitechatbot\lib\driveBackup.js`
+  - `C:\sitechatbot\tools\restore_from_drive.ps1`
+- **Reinícios**: `sitechatbot` (`node index.js`) para ativar o hardening em runtime.
+- **Rollback**: restaurar versões anteriores dos dois arquivos e reiniciar `sitechatbot`.
+- **THREAD**: `TH-2026-02-20-dr-drive-orquestracao`
+
+---
+
+#### 2026-02-21 — [CT][CROSS][OPS] Durabilidade SQLite elevada para FULL nos bancos críticos
+
+- **O que**:
+  - Alterado `synchronous` dos bancos SQLite críticos para `FULL` por padrão (mantendo `WAL` + `busy_timeout`):
+    - `pedidosStore` (`PEDIDOS_SQLITE_SYNC_MODE`);
+    - `ctDb` (`CT_SQLITE_SYNC_MODE`);
+    - `whatsapp/db` (`WHATSAPP_SQLITE_SYNC_MODE`).
+- **Por quê**: maximizar durabilidade de escrita em cenário adverso (queda de energia/interrupção abrupta), reduzindo risco de perda recente de páginas.
+- **Evidência**:
+  - `C:\sitechatbot\lib\pedidosStore.js`
+  - `C:\sitechatbot\convenientetecnologia\lib\ctDb.js`
+  - `C:\sitechatbot\whatsapp\lib\db.js`
+- **Reinícios**: `sitechatbot` (`node index.js`) para aplicar nas novas conexões SQLite.
+- **Rollback**: voltar `synchronous` para `NORMAL` nos três arquivos e reiniciar `sitechatbot`.
+- **THREAD**: `TH-2026-02-20-dr-drive-orquestracao`
+
+---
+
+#### 2026-02-21 — [CT][CROSS][OPS] Backup DR com concorrência isolada por tipo de job (mirror/overlay/snapshot)
+
+- **O que**:
+  - removido lock global único do backup e aplicado lock por grupo (`mirror`, `overlay`, `snapshot`);
+  - `live_overlay` deixa de ser pulado quando `full_mirror` está em execução longa.
+- **Por quê**: melhorar RPO real e evitar janelas maiores de defasagem durante espelhamento pesado.
+- **Evidência**:
+  - `C:\sitechatbot\lib\driveBackup.js`
+- **Reinícios**: `sitechatbot` (`node index.js`) para ativar o novo modelo de concorrência.
+- **Rollback**: restaurar `driveBackup.js` anterior e reiniciar `sitechatbot`.
+- **THREAD**: `TH-2026-02-20-dr-drive-orquestracao`
+
+---
+
+#### 2026-02-21 — [CT][CROSS][OPS] Auditoria runtime DR + ajuste final de schema WhatsApp para FULL
+
+- **O que**:
+  - executada auditoria runtime pós-restart com evidências de `ngrok`, `:3000`, metadados DR no Drive e lock do `notificador`;
+  - ajustado `whatsapp/db/schema.sql` de `PRAGMA synchronous = NORMAL` para `FULL` para eliminar override de durabilidade.
+- **Por quê**: fechar o último gap de escrita durável e consolidar trilha de evidência operacional para DR restore-first.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-21_validacao_runtime_dr_hardening.md`
+  - `C:\sitechatbot\whatsapp\db\schema.sql`
+  - `G:\Meu Drive\_dr_meta\runtime_write_inventory.json`
+  - `G:\Meu Drive\sitechatbot\_dr_meta\last_success.json`
+  - `G:\Meu Drive\notificador\_dr_meta\last_success.json`
+- **Reinícios**: `sitechatbot` (`node index.js`) para carregar integralmente ajustes finais desta rodada.
+- **Rollback**: reverter `schema.sql` WhatsApp para `NORMAL` (não recomendado) e reiniciar.
+- **THREAD**: `TH-2026-02-20-dr-drive-orquestracao`
+
+---
+
+#### 2026-02-20 — [CT][NOTIF][CROSS][OPS] Boot unificado (1 comando) + backup contínuo no Drive privado
+
+- **O que**:
+  - `sitechatbot` passou a iniciar e supervisionar `ngrok` + `notificador` no mesmo `node index.js`, com restart automático e encerramento coordenado.
+  - Implementado backup contínuo para `G:\Meu Drive\sitechatbot` e `G:\Meu Drive\notificador` com camadas:
+    - `live` (incremental frequente de dados vivos, incluindo SQLite+WAL/SHM e `.baileys_auth`);
+    - `snapshot` periódico com retenção.
+  - Adicionada trava de instância única no `notificador` para evitar duplicidade de worker em paralelo.
+- **Por quê**: reduzir risco operacional (3 terminais manuais), consolidar DR privado e evitar regressão por dupla execução do notificador.
+- **Evidência**:
+  - `C:\sitechatbot\lib\unifiedRuntime.js`
+  - `C:\sitechatbot\lib\driveBackup.js`
+  - `C:\sitechatbot\index.js`
+  - `C:\notificador\index.js`
+  - `C:\sitechatbot\dados\logs\drive_backup.jsonl` (após reinício e runtime)
+- **Reinícios**: `sitechatbot` (`node index.js`) — sobe `ngrok` e `notificador` junto
+- **Rollback**: remover chamadas no `sitechatbot/index.js` e restaurar arquivos `lib/unifiedRuntime.js`, `lib/driveBackup.js`, `notificador/index.js` para versão anterior.
+- **THREAD**: `TH-2026-02-20-dr-drive-orquestracao`
+
+---
+
+#### 2026-02-21 — [CT][NOTIF][CROSS][OPS] DR restore-first 1:1 (espelho completo Drive + script de restauração)
+
+- **O que**:
+  - Backup no Drive evoluiu de cobertura parcial para espelho completo 1:1 dos projetos:
+    - `C:\sitechatbot` -> `G:\Meu Drive\sitechatbot`
+    - `C:\notificador` -> `G:\Meu Drive\notificador`
+  - Mantidos snapshots/metadata de DR no destino sem conflito com o espelho (`_snapshots`, `_dr_meta`).
+  - Criado script canônico de restauração para host novo:
+    - `C:\sitechatbot\tools\restore_from_drive.ps1`
+    - restaura arquivos 1:1 e instala dependências (`npm ci`/`npm install`) quando necessário.
+- **Por quê**: garantir continuidade real após desastre (host novo do zero) com procedimento simples e reprodutível.
+- **Evidência**:
+  - `C:\sitechatbot\lib\driveBackup.js`
+  - `C:\sitechatbot\tools\restore_from_drive.ps1`
+  - restore probe OK em:
+    - `C:\sitechatbot_restore_probe`
+    - `C:\notificador_restore_probe`
+- **Reinícios**: `sitechatbot` (`node index.js`) para carregar o novo modo de backup 1:1
+- **Rollback**: restaurar `C:\sitechatbot\lib\driveBackup.js` para versão anterior e reiniciar `sitechatbot`.
+- **THREAD**: `TH-2026-02-20-dr-drive-orquestracao`
+
+---
+
+#### 2026-02-19 — [CT][CROSS][OPS] Protótipo do ledger/scheduler alinhado com cobrança seg-sex (08:00/15:00) + competência
+
+- **O que**:
+  - Alinhado o protótipo de cobrança/ledger no CT para:
+    - cobrança em dias úteis (seg-sex);
+    - bloqueio default às 15:00 (`LEAD_BILLING_BLOCK_HOUR=15`);
+    - competência: `lead_award` do dia não entra na fatura do próprio dia (cobrança do dia seguinte; fim de semana cai na segunda);
+    - lançamentos (lead/ajuste) passam a “grudar” na fatura aberta e atualizar `amount_cents` para não existir saldo fora da fatura.
+  - Atualizado o validador offline para provar a janela (bloqueio 15:01) e removido ruído de migração em DB forense.
+- **Por quê**: eliminar divergência entre regra canônica e protótipo, e impedir inconsistência “paguei a fatura mas ainda devo” por lançamentos fora da fatura.
+- **Evidência**:
+  - `C:\sitechatbot\convenientetecnologia\lib\ctLeadLedgerStore.js`
+  - `C:\sitechatbot\tools\validate_billing_window_rule.js` (resultado `ok:true`)
+  - `C:\sitechatbot\convenientetecnologia\lib\ctDb.js` (migração dedupe sem warning em DB novo)
+- **Reinícios**: (quando levar para runtime real) `sitechatbot`: reiniciar `node index.js`
+- **Rollback**: reverter alterações nos arquivos acima e reiniciar `sitechatbot`
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-19 — [CROSS][DOCS][OPS] Alinhamento final de handoff + nova regra de cobrança diária (08:00/15:00)
+
+- **O que**:
+  - Atualizada a regra do programa de cobrança Asaas para janela diária útil (seg-sex 08:00) com bloqueio às 15:00 e competência sexta/sábado/domingo na segunda.
+  - Sincronizados INC financeiro, índice de INCs, intake canônico, checkup técnico e runbook com a nova regra operacional.
+  - Criado arquivo de continuidade dedicado para abrir novo chat sem perda de contexto (`INFORMACOES_CONTINUIDADE_GPT.md`).
+- **Por quê**: preparar transição de chat e garantir que a próxima sessão parta da regra mais recente definida pelo humano, sem ambiguidade.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0940-01.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
+  - `C:\conveniente\docs\INFORMACOES_CONTINUIDADE_GPT.md`
+  - `C:\sitechatbot\docs\INTEGRACAO_ASAAS.md`
+- **Reinícios**: nenhum (somente documentação e handoff)
+- **Rollback**: `git revert` das alterações nos arquivos `docs/` e em `sitechatbot/docs/INTEGRACAO_ASAAS.md`
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-19 — [CROSS][DOCS][OPS] Revalidação ultra do dossiê (rodada 5) com checklist de completude 110%
+
+- **O que**:
+  - Executada checagem final de cobertura requisito-a-requisito, com matriz explícita de status (`OK`/`PENDENTE`) para o novo fluxo.
+  - Registrado gate hard-stop com 7 bloqueadores obrigatórios antes da auditoria de plano de execução.
+  - Sincronizado INC mestre com checklist objetivo de prontidão (sem espaço para achismo).
+- **Por quê**: garantir que nenhum ponto crítico fique implícito antes de entrar na fase de plano de execução.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0900-01.md`
+- **Reinícios**: nenhum (somente auditoria/documentação)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-19 — [CROSS][DOCS][OPS] Revalidação ultra do dossiê (rodada 4) com destrinche do código atual
+
+- **O que**:
+  - Executada nova auditoria completa, focada em separar explicitamente: o que já existe em produção vs o que falta para o novo modelo.
+  - Confirmado no código que o legado segue ativo com publicação de contato do cliente (builder atual), exigindo builder tokenizado sob flag para piloto.
+  - Confirmado que CT já possui base madura de memberships/chat, porém o domínio financeiro atual é de mensalidade por participação e não ledger por lead ganho.
+  - Registrado plano técnico anti-regressão por etapas (isolamento dual-number -> sorteio/token -> ledger -> cobrança -> chat -> E2E -> piloto).
+- **Por quê**: evitar qualquer regressão no fluxo atual e eliminar ambiguidade de escopo antes do primeiro commit de implementação.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0900-01.md`
+  - `C:\sitechatbot\lib\pedidosStore.js`
+  - `C:\sitechatbot\index.js`
+  - `C:\sitechatbot\whatsapp\lib\metaParser.js`
+  - `C:\sitechatbot\convenientetecnologia\index.js`
+  - `C:\sitechatbot\convenientetecnologia\lib\ctDb.js`
+  - `C:\sitechatbot\convenientetecnologia\lib\ctMembershipStore.js`
+  - `C:\notificador\index.js`
+- **Reinícios**: nenhum (somente auditoria/documentação)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-19 — [CROSS][DOCS][OPS] Revalidação ultra do dossiê (rodada 3) com blindagem anti-mistura
+
+- **O que**:
+  - Executada terceira auditoria técnica, focada em não-regressão do legado e isolamento entre os dois números WhatsApp (atendimento x operacional).
+  - Confirmado bloqueador P0 de isolamento: pipeline atual do WhatsApp opera por `phone` sem `phone_number_id` no parser/banco/conversa.
+  - Confirmado bloqueador P0 de rollout: fila/notificador ainda sem segregação explícita de `delivery_mode` por `groupId` (risco de afetar grupos fora do piloto).
+  - Registradas invariantes obrigatórias e matriz de validação pré-código no checkup canônico.
+- **Por quê**: impedir mistura de contexto entre APIs e garantir que o fluxo atual continue intacto durante a implantação gradual.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0900-01.md`
+  - `C:\sitechatbot\whatsapp\lib\metaParser.js`
+  - `C:\sitechatbot\whatsapp\index.js`
+  - `C:\sitechatbot\whatsapp\lib\db.js`
+  - `C:\sitechatbot\whatsapp\db\schema.sql`
+  - `C:\sitechatbot\lib\pedidosStore.js`
+  - `C:\notificador\index.js`
+- **Reinícios**: nenhum (somente auditoria/documentação)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-19 — [CROSS][DOCS][OPS] Revalidação ultra do dossiê (rodada 2) com bloqueadores pré-código
+
+- **O que**:
+  - Executada segunda auditoria técnica "sem piedade" cruzando dossiê + INCs + código real (`sitechatbot`/`notificador`).
+  - Registrados bloqueadores P0/P1 adicionais: roteamento dual-number por `phone_number_id`, lock transacional do sorteio, conflito domínio legado x pay-per-lead, scheduler idempotente com catch-up, elegibilidade em dois pontos, e flag de piloto por `groupId`.
+  - Atualizados o checkup canônico e o INC mestre com faltantes objetivos antes do primeiro commit de código.
+- **Por quê**: eliminar lacunas ocultas de concorrência e governança financeira antes de iniciar implementação.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0900-01.md`
+  - `C:\sitechatbot\whatsapp\lib\metaParser.js`
+  - `C:\sitechatbot\lib\pedidosStore.js`
+  - `C:\sitechatbot\convenientetecnologia\lib\ctMembershipStore.js`
+  - `C:\sitechatbot\convenientetecnologia\lib\ctDb.js`
+  - `C:\notificador\index.js`
+- **Reinícios**: nenhum (somente auditoria/documentação)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-19 — [CROSS][DOCS][OPS] Dossiê técnico completo pré-código (novo fluxo de leads por sorteio/cobrança)
+
+- **O que**:
+  - Criado checkup canônico com auditoria do estado atual do código e arquitetura-alvo para o novo modelo de leads.
+  - Consolidada ordem de implementação por INC (segurança -> tokenização -> sorteio -> ledger -> cobrança -> atendimento -> E2E -> piloto).
+  - Vinculado o dossiê no INC mestre `INC-20260219-0900-01`.
+- **Por quê**: iniciar codificação com escopo fechado, sem achismo e com critério objetivo de Go/No-Go.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-19_novo_fluxo_leads_sorteio_cobranca.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0900-01.md`
+  - `C:\sitechatbot\docs\INTEGRACAO_ASAAS.md`
+- **Reinícios**: nenhum (somente documentação/planejamento)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-19 — [CROSS][DOCS][OPS] Abertura de triagem macro para novo fluxo de leads (sorteio + cobrança)
+
+- **O que**:
+  - Aberto programa-mãe `INC-20260219-0900-01` e desdobrados 8 sub-INCs canônicos para separar domínios técnicos sem misturar escopo.
+  - Registrada triagem no intake (`INBOX_RELATOS_DO_HUMANO.md`) com prioridade P0/P1 e status inicial `need_alignment/need_evidence`.
+  - Atualizado índice `docs/inbox/INDEX.md` com os novos tickets:
+    - arquitetura webhook/link token,
+    - sorteio 2 minutos,
+    - ledger/banco por motorista,
+    - cobrança Asaas + baixa + bloqueio,
+    - atendimento financeiro/administrativo,
+    - rollout piloto em 3 grupos,
+    - plano E2E/Go-NoGo,
+    - segurança de credencial exposta.
+- **Por quê**: iniciar a reconstrução do método operacional com rastreabilidade total antes de qualquer implementação em runtime.
+- **Evidência**:
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0900-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0910-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0920-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0930-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0940-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-0950-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-1000-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-1010-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260219-1020-01.md`
+- **Reinícios**: nenhum (somente documentação/triagem)
+- **Rollback**: `git revert` das alterações em `docs/` (sem impacto de runtime)
+- **THREAD**: `TH-2026-02-19-new-lead-flow-triage`
+
+---
+
+#### 2026-02-16 — [CONV][RM3][P0] Ajuste fino de consistência Virtus/LR + rollout controlado
+
+- **O que**:
+  - Aplicados hotfixes em `scripts/worker.js` para reduzir estados invertidos observados em produção:
+    - `9229adf`: auto-clear de `probe_failed` menos rígido (exige Messenger limpo + ausência de razão forte).
+    - `619e088`: `start_work` passa a bloquear explicitamente quando `loginRequired=true`, forçando `virtus=off` e snapshot imediato.
+  - Rollout executado com `self_update` no RM3 e reinício operacional confirmado pelo host.
+- **Por quê**: eliminar casos residuais de `loginRequired + Virtus Online` e manter coerência de estado sem regredir o avanço obtido no `Virtus Offline` sem motivo.
+- **Evidência**:
+  - `C:\conveniente\scripts\worker.js`
+  - Commits: `9229adf`, `619e088`
+  - RM3 status build: `buildId=1.0.0|worker_mtime=1771266647123`
+- **Reinícios**: RM3 (`conveniente`) reiniciado na rodada
+- **Rollback**: revert dos commits `619e088` e `9229adf` (ordem inversa)
+- **THREAD**: `TH-2026-02-15-rm3-lr-probe-false-positive`
+
+---
+
+#### 2026-02-16 — [CONV][DOCS][OPS][P0] Reabertura do INC de tela preta (RM1) para monitoramento residual
+
+- **O que**:
+  - `INC-20260215-1100-01` reclassificado de `done` para `need_evidence` por relato de tela preta residual e confiabilidade parcial de retentativa.
+  - INC movido para `docs/inbox/need_evidence/INC-20260215-1100-01.md`.
+- **Por quê**: preservar histórico de correções já aplicadas e fechar o gap residual com nova rodada de evidência.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260215-1100-01.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+- **Reinícios**: nenhum (documentação/monitoramento)
+- **Rollback**: retornar estado/path no `INDEX.md` para `done`
+- **THREAD**: `TH-2026-02-15-rm1-robe-marketplace-black`
+
+---
+
+#### 2026-02-16 — [CONV][RM4][P0] Abertura de INC novo: loop Robe login_required x Messenger saudável
+
+- **O que**:
+  - Aberto `INC-20260216-1930-01` para investigar o fluxo observado na conta `recife-1769723410217`:
+    - Robe detecta login_required no contexto `create/item`;
+    - reconciliação com Messenger saudável parece limpar/oscilar flags;
+    - Robe não converge para resolver sessão de postagem.
+- **Por quê**: separar domínio Virtus x Robe sem apagar bloqueio legítimo do Robe.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260216-1930-01.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260203-1800-01.md` (regras de domínio relacionadas)
+- **Reinícios**: nenhum (fase forense)
+- **Rollback**: n/a (somente abertura de incidente/documentação)
+- **THREAD**: `TH-2026-02-16-rm4-robe-loginrequired-loop`
+
+---
+
+#### 2026-02-16 — [CONV][CT][RM3][P0][FORENSICS] Rodada 2 RAM: série em tempo real + probe automatizado 6h
+
+- **O que**:
+  - Executada série curta em tempo real no RM3 com `controllers=120` estáveis e captura de delta de `freeMB` em minutos.
+  - Criado probe automatizado: `C:\sitechatbot\tools\rm3_ram_forensics_probe.js` para coleta contínua (`status_node_1..4`, `governor_snapshots`, `issues_fallback`) e geração de dossiê JSON.
+  - INC `INC-20260216-1600-01` atualizado com plano operacional completo de resolução por fases (A evidência, B A/B, C correção, D garantia contínua).
+- **Por quê**: transformar investigação em pipeline repetível para fechar causalidade e validar correção sem achismo.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260216-1600-01.md`
+  - `C:\sitechatbot\tools\rm3_ram_forensics_probe.js`
+  - `C:\sitechatbot\dados\forensics\rm3_ram_probe_5d7c3309-8581-4a50-a421-e6cbb52d8070_1771260441764.json`
+- **Reinícios**: nenhum nesta rodada (forense + tooling)
+- **Rollback**: remover script `rm3_ram_forensics_probe.js` e descartar artefatos de `dados/forensics/`
+- **THREAD**: `TH-2026-02-16-rm3-ram-degradation-forensics`
+
+---
+
+#### 2026-02-16 — [CONV][RM3][P0][FORENSICS] Rodada 1 de RAM: baseline por nó + histórico de degradação confirmado
+
+- **O que**:
+  - Coletada evidência objetiva do RM3 (`governor_snapshots`, `status_node_1..4`, `issues_fallback`) com requestIds rastreáveis.
+  - Confirmado baseline atual pós-restart: ~`37GB` em `ramMB` somado dos 120 perfis e ~`10-11GB` livres no host.
+  - Confirmada degradação histórica com controladores estáveis (`>=28`): janela com queda de `~12.5GB -> ~2.0GB`, incluindo `~408` min abaixo de `2GB` em ~48h.
+  - Confirmado acionamento real de `light/mem_low` por logs de issues e transições no governor.
+  - Registrado achado técnico: monitor RAM por PID usa CDP tracing periódico por worker (candidato forte para experimento A/B controlado).
+- **Por quê**: transformar dor antiga de RAM em causalidade mensurável antes de patch definitivo.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260216-1600-01.md`
+  - `dados/logs/5d7c3309-8581-4a50-a421-e6cbb52d8070/fetch_logs_..._1771259169637_d537.json`
+  - `dados/logs/5d7c3309-8581-4a50-a421-e6cbb52d8070/fetch_logs_..._1771259379394_285d.json`
+  - `dados/logs/5d7c3309-8581-4a50-a421-e6cbb52d8070/fetch_logs_..._1771259434287_5997.json`
+- **Reinícios**: nenhum (rodada apenas forense/documental)
+- **Rollback**: n/a (sem alteração de runtime)
+- **THREAD**: `TH-2026-02-16-rm3-ram-degradation-forensics`
+
+---
+
+#### 2026-02-16 — [CONV][DOCS][OPS] Reclassificação de INCs (RM3 em monitoramento, RAM cancelado, latência CT chat encerrado)
+
+- **O que**:
+  - `INC-20260203-1800-01` movido de `in_progress` para `need_evidence` (soak/monitoramento em produção após patch no RM3).
+  - `INC-20260201-0200-01` movido de `need_evidence` para `cancelled` por decisão operacional.
+  - `INC-20260204-0140-01` movido de `need_evidence` para `done` (estável na rodada atual).
+  - Índices sincronizados: `docs/inbox/INDEX.md`, `docs/INBOX_RELATOS_DO_HUMANO.md`, `docs/LIVRO_DE_BORDO.md`.
+- **Por quê**: refletir estado real da operação e manter backlog limpo para próxima evidência.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260203-1800-01.md`
+  - `C:\conveniente\docs\inbox\cancelled\INC-20260201-0200-01.md`
+  - `C:\conveniente\docs\inbox\done\INC-20260204-0140-01.md`
+- **Reinícios**: nenhum (somente organização/documentação de status)
+- **Rollback**: mover os INCs de volta para pastas/estados anteriores no `docs/inbox/`
+
+---
+
+#### 2026-02-16 — [CONV][RM3][P0] Abertura de INC forense de memória (queda progressiva pós-boot)
+
+- **O que**:
+  - Aberto INC `INC-20260216-1600-01` para investigar degradação de RAM no RM3 após restart/open_all:
+    - cenário inicial saudável (~11GB livre, 120/120 ativos, 118 trabalhando);
+    - degradação em 3-6h para ~2GB livre;
+    - entrada em ações defensivas (close/stop/degrade).
+  - Definido plano forense em 3 blocos: série temporal de memória, topologia de execução, causalidade operacional.
+- **Por quê**: eliminar modo destrutivo recorrente e estabelecer controle estável de headroom sem achismo.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260216-1600-01.md`
+  - `C:\conveniente\docs\inbox\INDEX.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+- **Reinícios**: nenhum (fase de coleta/forense)
+- **Rollback**: n/a (somente documentação)
+- **THREAD**: `TH-2026-02-16-rm3-ram-degradation-forensics`
+
+---
+
 #### 2026-02-15 — [CONV][DOCS][OPS] Abrir INC: RM1 Robe Marketplace “tela preta” (aba 1 criar item)
 
 - **O que**:
@@ -59,6 +539,61 @@ Formato canÃ´nico (copiar/colar):
 - **Reinícios**: sim (self_update + restart no RM1 durante rollout/validacao)
 - **Rollback**: reverter em ordem inversa os commits listados acima
 - **THREAD**: `TH-2026-02-15-rm1-robe-marketplace-black`
+
+---
+
+#### 2026-02-15 — [CONV][RM3][P0] Reabertura operacional INC-20260203-1800-01 (Virtus offline por falso `probe_failed`)
+
+- **O que**:
+  - Reclassificado `INC-20260203-1800-01` para `in_progress` com plano de ação cirúrgico.
+  - Consolidada evidência RM3 nas contas `ipatinga-1768508775083` e `juiz_de_fora-1769026433175`:
+    - `lr_flag_snapshot` com `storedReason=probe_failed`;
+    - `lr_scan_tabs` com Messenger `lr=false` e aba `create/item` com `lr=true` em parte dos ciclos.
+  - Registrada regra arquitetural: saúde do Virtus deve priorizar contexto Messenger; create/item pertence ao Robe.
+- **Por quê**: eliminar falso positivo que desliga Virtus em contas aparentemente saudáveis no Messenger.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260203-1800-01.md`
+  - `C:\Users\NOTIFICADOR\.cursor\projects\c-sitechatbot\agent-tools\99733b5e-1749-4a66-b642-a3ba4f555b9e.txt`
+  - `C:\Users\NOTIFICADOR\.cursor\projects\c-sitechatbot\agent-tools\40e9d861-a5a8-41a2-ae66-c19e060095dd.txt`
+- **Reinícios**: nenhum (forense em estado vivo)
+- **Rollback**: n/a (somente documentação nesta etapa)
+- **THREAD**: `TH-2026-02-15-rm3-lr-probe-false-positive`
+
+---
+
+#### 2026-02-15 — [CONV][RM3][P0] Dossiê ultra-forense consolidado (matriz Virtus x Robe + invariantes)
+
+- **O que**:
+  - Consolidado no INC `INC-20260203-1800-01`:
+    - catálogo de problemas confirmados;
+    - matriz de decisão por domínio (Virtus=Messenger, Robe=create/item);
+    - critérios de evidência 110% e checklist operacional pré-implementação.
+  - Atualizada triagem de relatos do humano com o incidente RM3 em andamento.
+- **Por quê**: prevenir regressão e remover ambiguidade de decisão de saúde em produção.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260203-1800-01.md`
+  - `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md`
+- **Reinícios**: nenhum
+- **Rollback**: n/a (somente documentação)
+- **THREAD**: `TH-2026-02-15-rm3-lr-probe-false-positive`
+
+---
+
+#### 2026-02-15 — [CONV][RM3][P0] Patch cirúrgico aplicado + soak test 72h (INC permanece aberto)
+
+- **O que**:
+  - Aplicado patch em `scripts/worker.js` para:
+    - priorizar domínio Messenger na decisão de `loginRequired` do Virtus;
+    - tratar `probe_failed` em `create/item` como sinal fraco quando Messenger está OK;
+    - fechar aba extra ociosa (incluindo `create/item`) fora de Robe/humano/config.
+  - INC `INC-20260203-1800-01` atualizado para fase de execução controlada + observação 72h.
+- **Por quê**: eliminar falso positivo sistêmico que derrubava Virtus com Messenger saudável.
+- **Evidência**:
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\docs\inbox\in_progress\INC-20260203-1800-01.md`
+- **Reinícios**: pendente conforme operação do RM3
+- **Rollback**: revert único do patch em `scripts/worker.js`
+- **THREAD**: `TH-2026-02-15-rm3-lr-probe-false-positive`
 
 ---
 
@@ -1226,3 +1761,207 @@ Formato canÃ´nico (copiar/colar):
   - `C:\conveniente\scripts\dashboard.js`
 - **ReinÃ­cios**: `conveniente` (para runtime novo aplicar).
 - **THREAD**: `TH-2026-01-29-open-close-all-governance`
+
+---
+
+#### 2026-02-19 — [SORTEIO][FASE-D][PASS] Validação formal consolidada (stress + legado + isolamento)
+
+- **O que**: concluída validação formal com três provas objetivas: stress pesado de sorteio, não regressão fora do piloto e isolamento por `wa_phone_number_id`.
+- **Evidência**: `C:\conveniente\docs\checkups\checkup_2026-02-19_fase_d_validacao_formal_sorteio.md`
+- **Resultado**: `PASS` (sem falhas nas três frentes); nenhum reinício necessário nesta fase (somente validação/documentação).
+
+---
+
+#### 2026-02-20 — [SITECHATBOT][P0][PASS] Drill de incidentes + simulação pesada de fechamento (forense isolado)
+
+- **O que**: rodada final de fechamento com validação objetiva em ambiente isolado (SQLite forense), cobrindo incidentes críticos e stress de ponta a ponta.
+- **Blocos executados (P0)**:
+  - webhook Asaas + idempotência de baixa local (`PAYMENT_RECEIVED`/`PAYMENT_CONFIRMED`)
+  - webhook atrasado com recuperação automática por `reconcileOpenAsaasPayments` (poll)
+  - reemissão com ajuste mantendo atomicidade de fatura/saldo
+  - alertas de observabilidade (`asaas_paid_without_local_settlement`, `debt_without_open_invoice`, `overdue_open_windows`)
+- **Evidências (arquivos/saídas)**:
+  - `C:\sitechatbot\tools\validate_asaas_webhook_auto_settlement.js`
+  - `C:\sitechatbot\tools\simulate_asaas_invoice_lifecycle.js`
+  - `C:\sitechatbot\tools\validate_ops_health_alerts.js`
+  - `C:\sitechatbot\dados\forensics\ct_poll_reconcile_1771623887927.sqlite`
+  - `C:\sitechatbot\dados\forensics\ct_ops_health_1771623930026.sqlite`
+  - `C:\sitechatbot\dados\forensics\pedidos_ops_health_1771623930026.sqlite`
+- **Stress pesado adicional (PASS)**:
+  - suíte enterprise: `C:\sitechatbot\tools\stress_phase4_enterprise.js`
+    - saída: `C:\sitechatbot\dados\forensics\stress_phase4_enterprise_1771624051549.json`
+    - `ok=true`, `rounds=8`, `elapsedMs=188210`
+  - sorteio atômico extra:
+    - saída: `C:\sitechatbot\dados\forensics\stress_lottery_report_1771624251610.json`
+    - `totalLeads=1200`, `totalParticipantsPersisted=62674`, `failures=0`
+  - billing atômico extra:
+    - DB: `C:\sitechatbot\dados\forensics\ct_stress_billing_atomic_1771624251435.sqlite`
+    - `drivers=180`, `openInvoicesAfterWebhook=0`, `paidInvoices=180`
+- **Ajuste de qualidade**: script `validate_ops_health_alerts.js` atualizado para regra diária idempotente de emissão (evita falso negativo no mesmo dia útil).
+- **Resultado**: `PASS` em todos os critérios da rodada; sem alteração de runtime de produção.
+
+#### 2026-02-20 — [PROGRAMA][GO/NO-GO] Piloto 5 grupos: GO condicional aprovado
+
+- Checkup formal final criado com decisão e plano de rollout: `C:\conveniente\docs\checkups\checkup_2026-02-20_go_no_go_piloto_4_grupos.md` (título atualizado para 5 grupos)
+- Status: critérios P0 da fase fechados com evidência; pendência única para iniciar piloto é confirmar `groupId` dos 5 grupos/cidades (Ipatinga, Montes Claros, Foz do Iguaçu, Fortaleza, Petrolina).
+
+#### 2026-02-20 — [SITECHATBOT][HOTFIX CONFIG] Fortaleza ainda legado no piloto: causa raiz e correção
+
+- **Sintoma**: pedido de Fortaleza saiu no molde legado (com telefone/link), apesar da cidade estar no piloto.
+- **Causa raiz**: o `delivery_mode` default é decidido no enqueue do `sitechatbot` por `C:\sitechatbot\dados\tokenized_pilot_cities.json`; esse arquivo ainda estava apenas com Ipatinga.
+- **Correção**:
+  - atualizado `C:\sitechatbot\dados\tokenized_pilot_cities.json` com as 5 cidades piloto;
+  - validação em DB forense isolado confirmou `delivery_mode='tokenized'` para `Fortaleza (CE)`.
+- **Impacto esperado**: somente as cidades piloto entram no novo fluxo; demais grupos/cidades permanecem no legado sem regressão.
+
+#### 2026-02-20 — [SITECHATBOT/NOTIFICADOR][HOTFIX ROLLOUT] Migração corrigida para cobertura real por grupo piloto
+
+- **Sintoma**: após reinício, novo pedido em `Horizonte (CE)` (mesmo `groupId` de Fortaleza) ainda saiu no molde legado.
+- **Causa raiz**: rollout estava parametrizado por **5 cidades âncora**, não por **cobertura completa das cidades pertencentes aos 5 grupos piloto**.
+- **Evidência objetiva**:
+  - `Horizonte (CE)` e `Fortaleza (CE)` compartilham `groupId=120363418394810828@g.us` (consulta em `C:\notificador\gruposids.json`);
+  - em runtime local, pedido `wa_31312` foi persistido como `delivery_mode='legacy'` para `Horizonte (CE)` antes da correção;
+  - após correção, diagnóstico `diag_horiz_*` em `C:\sitechatbot\dados\pedidos.sqlite` confirmou `delivery_mode='tokenized'`.
+- **Correção aplicada**:
+  - expandida a lista piloto para **todas as cidades** dos 5 grupos (78 cidades) em:
+    - `C:\sitechatbot\dados\tokenized_pilot_cities.json`
+    - `C:\notificador\tokenized_pilot_cities.json`
+  - arquivos sincronizados (`same=true`) para evitar divergência entre enqueue (`sitechatbot`) e entrega (`notificador`).
+- **Impacto esperado**: qualquer pedido de cidade pertencente aos 5 grupos piloto entra no fluxo novo; demais grupos seguem legado.
+
+#### 2026-02-20 — [SITECHATBOT/NOTIFICADOR][ARQUITETURA] Rollout tokenized por groupId (fonte única)
+
+- **Decisão enterprise**: remover dependência operacional de lista gigante por cidade para piloto.
+- **Fonte única do rollout**: `C:\notificador\tokenized_pilot_groups.json` (somente `groupId` piloto).
+- **Resolução automática**:
+  - `sitechatbot` resolve cidade -> `groupId` via `C:\notificador\gruposids.json` e aplica piloto por grupo;
+  - `notificador` aplica modo efetivo por grupo usando o mesmo arquivo de `groupId` piloto.
+- **Benefício**: ao liberar novo grupo, altera-se apenas 1 arquivo; cidades secundárias novas herdam automaticamente via `gruposids.json`.
+
+#### 2026-02-20 — [SITECHATBOT/NOTIFICADOR][HARDENING] Remoção total de fallback por cidade no rollout tokenized
+
+- **O que foi removido**:
+  - arquivos de lista por cidade:
+    - `C:\sitechatbot\dados\tokenized_pilot_cities.json`
+    - `C:\notificador\tokenized_pilot_cities.json`
+  - lógica de fallback por cidade em:
+    - `C:\sitechatbot\lib\pedidosStore.js`
+    - `C:\notificador\index.js`
+- **Regra final (canônica)**: somente `groupId` piloto definido em `C:\notificador\tokenized_pilot_groups.json`.
+- **Evidência objetiva**:
+  - `cityFileExists=false` no `notificador`;
+  - diagnóstico em `sitechatbot` para `Horizonte (CE)` resultou `delivery_mode='tokenized'` apenas por mapeamento cidade->grupo em `gruposids`.
+
+#### 2026-02-20 — [SITECHATBOT][SIMULAÇÃO PESADA][PASS] Resolução cidade->grupo sem fallback por cidade
+
+- **Objetivo**: validar em ambiente isolado que o rollout tokenized funciona somente por `groupId` piloto + `gruposids`, sem envio real para grupos.
+- **Método**:
+  - execução forense com `PEDIDOS_DB_PATH` isolado (sem tocar fila de produção);
+  - varredura determinística de **todas as 856 cidades** do `gruposids`;
+  - stress aleatório adicional de **12.000 iterações**;
+  - checks críticos para `Fortaleza`, `Horizonte`, `Ipatinga`, `Montes Claros`, `Petrolina`, `Foz do Iguaçu`, `São Paulo`, `Santos`.
+- **Resultado**:
+  - `ok=true`, `mismatches=0`, `randomMismatch=0`;
+  - cidades dos 5 grupos piloto => `tokenized`;
+  - cidades fora dos grupos piloto => `legacy`.
+- **Evidência**:
+  - relatório: `C:\sitechatbot\dados\forensics\pilot_group_resolution_stress_1771635481802.json`
+  - probe unicode (acento íntegro): `Foz do Iguaçu (PR)` => `tokenized`, `São Paulo (SP)` => `legacy`.
+
+#### 2026-02-20 — [PROGRAMA][GOVERNANÇA] Abertura de INC para publicação segura no GitHub (`sitechatbot` + `notificador`)
+
+- **Decisão**: não publicar imediatamente; primeiro formalizar dossiê de segurança/continuidade.
+- **INC aberto**: `C:\conveniente\docs\inbox\need_evidence\INC-20260220-2230-01.md`
+- **Escopo do INC**:
+  - inventário de risco de segredos e artefatos locais;
+  - plano de `.gitignore`/allowlist/denylist;
+  - checklist de preflight e validação de bootstrap em clone limpo;
+  - estratégia de publicação em etapas com rollback definido.
+
+#### 2026-02-20 — [PROGRAMA][GOVERNANÇA] Pivot do INC: continuidade por backup no Drive privado (DR)
+
+- **Decisão do owner**: priorizar backup completo no drive privado em vez de publicação imediata no GitHub para `sitechatbot`/`notificador`.
+- **Evidência de acesso**: drive disponível em `G:\Meu Drive`.
+- **Atualização canônica**:
+  - `INC-20260220-2230-01` redefinido para dossiê de backup contínuo + restore/disaster recovery.
+  - `INDEX` e `INBOX_RELATOS_DO_HUMANO` alinhados com a nova estratégia.
+
+#### 2026-02-20 — [PROGRAMA][CHECKUP][PASS] Auditoria pré-codificação (orquestração 1 comando + backup DR no Drive)
+
+- Checkup formal criado: `C:\conveniente\docs\checkups\checkup_2026-02-20_pre_codificacao_orquestracao_backup_drive.md`
+- Escopo auditado ponta a ponta:
+  - estado atual de startup (`sitechatbot`/`notificador`/`ngrok`);
+  - inventário objetivo de dados críticos (SQLite + WAL/SHM + sessão WhatsApp + envs);
+  - evidência de destino de backup (`G:\Meu Drive`) e lacunas de DR.
+- Decisão desta rodada: documentação e evidência concluídas; implementação técnica ficará para próxima etapa, sem achismo.
+
+#### 2026-02-20 — [PROGRAMA][CHECKUP][PASS COM ACHADOS] Auditoria "olhos de deus" pré-código (2a rodada)
+
+- Checkup formal criado: `C:\conveniente\docs\checkups\checkup_2026-02-20_auditoria_olhos_de_deus_pre_codificacao.md`
+- Achados críticos registrados antes de codar:
+  - `whatsapp.sqlite` fora do snapshot local atual do `sitechatbot`;
+  - `.baileys_auth` fora do snapshot local atual do `notificador`;
+  - `spool` do notificador em backup parcial/opt-in;
+  - necessidade de snapshot atômico para SQLite.
+- Decisão: manter `INC-20260220-2230-01` em execução e só iniciar codificação com esses guardrails incorporados no desenho.
+
+#### 2026-02-20 — [PROGRAMA][CHECKUP][PASS COM BLOQUEIOS] Auditoria "olhos de deus" (3a rodada) pré-código
+
+- Checkup formal criado: `C:\conveniente\docs\checkups\checkup_2026-02-20_auditoria_olhos_de_deus_rodada3_pre_codificacao.md`
+- Confirmações operacionais:
+  - API ativa em `:3000`;
+  - ngrok ativo em `:4040` com túnel público no subdomínio canônico;
+  - contrato `sitechatbot`/`notificador` validado (`/api/notifier/next` e `/api/notifier/ack`).
+- Bloqueios de continuidade mantidos:
+  - incluir `whatsapp.sqlite` e `.baileys_auth` no DR;
+  - retenção por camadas para preservar espaço no `G:`;
+  - orquestração única com rastreabilidade de subprocessos.
+
+#### 2026-02-20 — [LEADS][CONTESTACAO][CHECKUP V2] Dossie ponta-a-ponta pre-codigo (funcao-a-funcao)
+
+- **Contexto**: rodada de alinhamento antes de qualquer runtime, para congelar regras de contestacao com foco em operacao real (cliente e motorista).
+- **Documento canonico criado**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-20_contestacao_v2_dossie_ponta_a_ponta_pre_codigo.md`
+- **Decisoes V2 congeladas**:
+  - janela de contestacao: ate 23h;
+  - motivos: 4 (nao respondeu, ja contratou outro, desistiu apos contato, divergencia de info);
+  - validacao com cliente via Virtus para motivos ambiguos;
+  - reenvio automatico maximo: 1 ciclo, depois manual;
+  - telefone do cliente como referencia humana no CT (lead_token tecnico interno).
+- **Governanca**:
+  - INC principal atualizado com apontamento V2:
+    - `C:\conveniente\docs\inbox\need_evidence\INC-20260222-2310-01.md`
+  - status: desenho pre-codigo locked_v2, aguardando implementacao por fases + simulacoes pesadas.
+
+#### 2026-02-20 — [LEADS][CONTESTACAO][CHECKUP V2.1] Refinamento M1 "cliente nao respondeu" (cadencia 23h)
+
+- **Motivacao**: ajustar o fluxo ao comportamento real observado (resposta distribuida em 15min / 2h / ate 23h), evitando estorno precoce.
+- **Refinamento congelado**:
+  - M1 nao encerra antes de 23h;
+  - checkpoints operacionais:
+    - T+15min motorista,
+    - T+3h cliente,
+    - ate 1 lembrete cliente entre T+3h e T+23h;
+  - fechamento 23h com confirmacao final de motorista (cliente opcional recomendado);
+  - decisao financeira M1:
+    - cliente disse "nao quero" -> estorno;
+    - sem resposta ate 23h sem avancos -> estorno;
+    - cliente disse "sim quero" -> atendimento segue, sem estorno automatico final.
+- **Documento canonico atualizado**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-20_contestacao_v2_dossie_ponta_a_ponta_pre_codigo.md`
+- **INC sincronizado**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260222-2310-01.md`
+
+#### 2026-02-20 — [LEADS][CONTESTACAO][PLANO TECNICO FORMAL V1] Ordem executavel P0->P1->P2
+
+- **Objetivo**: transformar o dossie funcional em plano tecnico com checklist executavel e gates de aceite.
+- **Documento canonico criado**:
+  - `C:\conveniente\docs\checkups\plano_tecnico_formal_v1_contestacao_p0_p1_p2.md`
+- **Conteudo principal**:
+  - P0: contencao e fundacao (contrato, estados, schema, neutralizacao de risco);
+  - P1: integridade financeira/operacional (idempotencia envio+ack, ownership lock, normalizacao telefone, reconciliacao winner vs ledger);
+  - P2: escala (cadencia T+15/T+3h/T+23h, reenvio maximo 1, observabilidade).
+- **Governanca**:
+  - artefato rascunho removido para evitar falsa percepcao de pronto:
+    - `C:\sitechatbot\convenientetecnologia\lib\ctLeadContestationStore.js`
+  - INC atualizado com referencia do plano formal.

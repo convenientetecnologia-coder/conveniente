@@ -164,7 +164,7 @@ Colunas:
 | INC-20260201-0300-01 | `docs/inbox/done/INC-20260201-0300-01.md` | P0 | conveniente+sitechatbot | Total>ativos: browsers fechados apesar de RAM; prejuÃ­zo (contas paradas) | Root-cause: `open_all_finalize_partial` desativava `desired.active` + `nurseTick` bloqueava open quando `loginRequired=captcha_*` ou `identityRequired` e `ctrl` ausente | CT snapshots `C:\\sitechatbot\\dados\\<hostId>-*.json` + `provision_audit` (bootstrap_messenger_ready + loginRequired) + patch worker.js | done | deployed_partial | passed | nÃ£o | nÃ£o |
 | INC-20260202-1600-01 | `docs/inbox/done/INC-20260202-1600-01.md` | P0 | sitechatbot+conveniente+notificador | Cidades/Grupos: contrato canÃ´nico + prioridade de provisÃ£o (estoqueâ†’servidor) + migraÃ§Ã£o manual | Fixar contrato: CT canÃ´nico=`cidade_uf`; `conveniente` recebe `cidade` sem UF; `notificador` depende de `cidade_uf`; depois construir score Ãºnico (24/48/72h + motoristas + A + LE por idade ~12d + warmup 24h) | evidÃªncia por cÃ³digo: `C:\\sitechatbot\\index.js`, `C:\\conveniente\\scripts\\dashboard.js`, `C:\\notificador\\index.js` | done | deployed | passed | nÃ£o | nÃ£o |
 | INC-20260202-2000-01 | `docs/inbox/done/INC-20260202-2000-01.md` | P0 | sitechatbot+conveniente | Fonte Ãšnica da Verdade: Virtusâ†’Grupos vs Contas FB v2 divergindo (janelas + classificaÃ§Ã£o A/LR/LE/B) | Hoje existiam â€œ2 verdadesâ€: dashboard usava recent3d + classificador simples; v2 usava `fbAccountState`. Unificado para agregador canÃ´nico + janelas explÃ­citas + includeOffline explÃ­cito | evidÃªncia: CT `C:\\sitechatbot\\index.js` (`/api/dashboard/virtus`, `/api/contas-facebook`, `computeAccountsByGroupFromSnapshots`) + verificador offline `C:\\sitechatbot\\tools\\verify_virtus_groups_truth.js` | done | deployed | passed | nÃ£o | nÃ£o |
-| INC-20260201-0200-01 | `docs/inbox/in_progress/INC-20260201-0200-01.md` | P0 | conveniente+sitechatbot | Forense RAM: avaliar RM4/RM5/RM6 lotados (min freeMB, autoMode light/full, risco e capacidade) | autoMode pode estar entrando em â€œlightâ€ por regras de tictac/lag mesmo com RAM sobrando; precisamos prova por telemetria por minuto | CT: logs_manifest + fetch_logs(keys=ram_telemetry*, status, governor/ops) dos hosts RM4/5/6 | in_progress | not_deployed | not_run | nÃ£o | nÃ£o |
+| INC-20260201-0200-01 | `docs/inbox/cancelled/INC-20260201-0200-01.md` | P0 | conveniente+sitechatbot | Forense RAM: avaliar RM4/RM5/RM6 lotados (min freeMB, autoMode light/full, risco e capacidade) | autoMode pode estar entrando em â€œlightâ€ por regras de tictac/lag mesmo com RAM sobrando; precisamos prova por telemetria por minuto | CT: logs_manifest + fetch_logs(keys=ram_telemetry*, status, governor/ops) dos hosts RM4/5/6 | cancelled | not_deployed | not_run | nÃ£o | nÃ£o |
 | INC-20260201-0100-01 | `docs/inbox/done/INC-20260201-0100-01.md` | P1 | sitechatbot+conveniente | Menu Servidores: mostrar contagem de â€œLogin/Cookies falhouâ€ e â€œRecurso em anÃ¡liseâ€ no pill do servidor; ordenar OFFLINE primeiro | CT hoje nÃ£o consegue contar â€œlogin/cookies falhouâ€ porque `status.perfis` nÃ£o expÃµe `loginRemediateFailed`; appeal jÃ¡ existe; sort nÃ£o prioriza offline | evidÃªncia por cÃ³digo: `conveniente/scripts/worker.js` (`setLoginRemediateFailedFlag`, `setAppealSubmittedFlag`, `snapshotStatusAndWrite`) + `sitechatbot/index.js` (`GET /servers flagsAgg + sort`) + `sitechatbot/public/index.html` (render pills) | done | needs_restart | not_run | nÃ£o | sim |
 | INC-20260201-0000-01 | `docs/inbox/done/INC-20260201-0000-01.md` | P1 | conveniente+sitechatbot | Groq config distribuÃ­do e alinhado (modelo maverick) em RM1â€“RM7 | ForÃ§ar set_groq_config e validar por evidÃªncia CT (cmd ok + modelo correto) | evidÃªncia: CT `dados/commands.json` (set_groq_config ok + groqModel maverick) | done | deployed | passed | nÃ£o | nÃ£o |
 | INC-20260131-0000-01 | `docs/inbox/done/INC-20260131-0000-01.md` | P1 | conveniente | Captcha/Identidade: pre-screen â€œConfirme que vocÃª Ã© humanoâ€ + OCR Groq + handoff identity/appeal; evitar engessamento | Root-cause: botÃ£o â€œContinuarâ€ disabled + cooldown global de identity gate; corrigido com waits + gate sem cooldown | evidÃªncia RM7: `rm7_fetch_success_evidence_1769911213784.json` + `rm7_fetch_identity_stuck_1769899549740.json` | done | deployed | passed | nÃ£o | nÃ£o |
@@ -316,17 +316,13 @@ ObservaÃ§Ã£o (organizaÃ§Ã£o):
 - **Rollback**:
   - `git revert` + (se for validar rollback) reiniciar `node index.js`
 
----
-
-## RAW_INPUT — 2026-02-14 (pedido de “fase 2”: atomicidade + duplicação zero)
+---## RAW_INPUT — 2026-02-14 (pedido de “fase 2”: atomicidade + duplicação zero)
 
 ```text
 (humano)
 
 Quero fechar os 2 INCs de wipe (RM2 e RM6) porque já varremos todos os servidores (RM1..RM7) e agora quero começar
-uma fase nova “ultra enterprise”:
-
-1 - cadastro de contas nunca em hipótese alguma zerar perfis
+uma fase nova “ultra enterprise”:1 - cadastro de contas nunca em hipótese alguma zerar perfis
 2 - nada, em hipótese alguma zerar perfis
 3 - usar a pasta perfis para registrar mais coisas referente aos perfis, como um banco secundário perfeito:
     - registrar UA, fp, login/senha, datas e histórico (sem o sistema usar isso como verdade)
@@ -343,11 +339,7 @@ uma fase nova “ultra enterprise”:
 
 Quero abrir um INC novo pra isso, fechar os 2 INCs antigos, e garantir que agora está tudo perfeito pra liberar
 cadastro urgente sem surtar.
-```
-
-### TRIAGE — 2026-02-14
-
-| item | P | título | status | links |
+```### TRIAGE — 2026-02-14| item | P | título | status | links |
 |---|---|---|---|---|
 | 1 | P0 | Fechar INCs antigos de wipe (RM2/RM6) como superseded | done | `docs/inbox/cancelled/INC-20260212-0315-01.md`, `docs/inbox/cancelled/INC-20260213-1200-01.md` |
 | 2 | P0 | PROGRAMA ÚNICO: cadastro sem duplicação (CT estoque -> servidor -> CT em uso) | done | `docs/inbox/done/INC-20260214-0900-01.md` |
@@ -355,30 +347,137 @@ cadastro urgente sem surtar.
 | 4 | P1 | Fase 2 (0930/0940/0950/1000/1010) reclassificada após estabilizar cadastro | done | `docs/inbox/cancelled/INC-20260214-0930-01.md`, `docs/inbox/cancelled/INC-20260214-0940-01.md`, `docs/inbox/cancelled/INC-20260214-0950-01.md`, `docs/inbox/cancelled/INC-20260214-1000-01.md`, `docs/inbox/cancelled/INC-20260214-1010-01.md` |
 | 5 | P0 | BLINDAGEM FINAL: hardening anti-regressão (H1/H2/H3) | done | `docs/inbox/done/INC-20260214-1020-01.md` |
 
----
-
-## RAW_INPUT — 2026-02-15 (RM1: Robe postar / Marketplace “tela preta”)
-
-```text
+---## RAW_INPUT — 2026-02-15 (RM1: Robe postar / Marketplace “tela preta”)```text
 triagem inbox
 
-robe mae 1
-
-estamos com o seguinte problema, quando o robe vai postar , na aba zero ta rodando o virtus daquela conta, dai cheag a hora do robe postar, ele abre aba 1 facebook criar item , a tela ta ficando preta
-
-o robe abre a aba 1 naveag para a pagina correta, ta tudo perfeito, ta indo pra pagina correta, as vezes consegue colocar foto, mas é muito raro, as vezes consegue colocar titulo, as vezes na foto ele ta ficando tela preta, as vezes no titulo, e em casos muito raros ele consegue chegar no preço, mas é muito raro
-
-geralmente ja ta dando tela preta logo apos acessar a pagina, a pagina do criar item aparece, mas fica preta em seguida
+robe mae 1estamos com o seguinte problema, quando o robe vai postar , na aba zero ta rodando o virtus daquela conta, dai cheag a hora do robe postar, ele abre aba 1 facebook criar item , a tela ta ficando pretao robe abre a aba 1 naveag para a pagina correta, ta tudo perfeito, ta indo pra pagina correta, as vezes consegue colocar foto, mas é muito raro, as vezes consegue colocar titulo, as vezes na foto ele ta ficando tela preta, as vezes no titulo, e em casos muito raros ele consegue chegar no preço, mas é muito rarogeralmente ja ta dando tela preta logo apos acessar a pagina, a pagina do criar item aparece, mas fica preta em seguida
 
 temos essa conta aqui la no rm1 pra gente testar
 
 [001] Alex Santana
 ID: maringa-1759198592235
 Cidade: Marabá
+```### TRIAGE — 2026-02-15| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | RM1: Robe postar (Marketplace) — tela preta residual e retentativa não determinística | need_evidence | `docs/inbox/need_evidence/INC-20260215-1100-01.md` |
+| 2 | P0 | RM3: Virtus Offline com Messenger saudável (`loginRequired=probe_failed`) | done | `docs/inbox/done/INC-20260203-1800-01.md` |
+| 2 | P0 | RM3: Virtus Offline com `loginRequired=probe_failed` e abas inconsistentes | done | `docs/inbox/done/INC-20260203-1800-01.md` |
+
+---## RAW_INPUT — 2026-02-16 (RM3: degradação de RAM ao longo das horas)```text
+triagem inbox
+
+criar inc
+
+robe mae 3
+
+acabei de reiniciar o robe mae 3, cliquei em abrir todos, ele ficou total 120, ativos 120 e trabalhando 118.
+no CT servidores apareceu ~11gb de ram livre, mas nas próximas horas isso cai para ~2gb e o sistema entra em modo destrutivo
+(fecha navegador, para trabalho, tenta sobreviver).
+
+dor principal: entender com prova por que a RAM degrada com o tempo mesmo com parque parecido de contas abertas.
+objetivo: controle total de memória, usar só RAM necessária, evitar acúmulo e manter operação estável.
 ```
 
-### TRIAGE — 2026-02-15
+### TRIAGE — 2026-02-16
 
 | item | P | título | status | links |
 |---|---|---|---|---|
-| 1 | P0 | RM1: Robe postar (Marketplace) — aba 1 tela preta ao criar item | done | `docs/inbox/done/INC-20260215-1100-01.md` |
+| 1 | P0 | RM3: queda progressiva de RAM após boot (~11GB -> ~2GB) com entrada em modo defensivo | need_evidence | `docs/inbox/need_evidence/INC-20260216-1600-01.md` |
+| 2 | P0 | RM3: Virtus Online/Offline em convergência pós-fix (monitoramento de estabilidade) | done | `docs/inbox/done/INC-20260203-1800-01.md` |
+| 3 | P0 | RM1: tela preta residual em postagem (reabertura para evidência) | need_evidence | `docs/inbox/need_evidence/INC-20260215-1100-01.md` |
+| 4 | P0 | RM4: Robe login_required com Messenger saudável (loop de flag sem convergir) | need_evidence | `docs/inbox/need_evidence/INC-20260216-1930-01.md` |
+
+---
+
+## RAW_INPUT — 2026-02-17 (RM6: about:blank + loginRequired inconsistente)
+
+```text
+triagem inbox
+
+abrir inc robe mae 6
+
+[005] Igor Barbosa
+ID: campina_grande-1769232949697
+Navegador Ativo
+Virtus Offline
+Login requerido
+Robe pronto/idle
+
+observação humana:
+- aba zero messenger saudável
+- estado continua login requerido + virtus offline
+- existem 2 contas "Davi" com aba 1 about:blank (sem invocar humano para preservar estado real)
+```
+
+### TRIAGE — 2026-02-17
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | RM6: about:blank + loginRequired inconsistente com Messenger saudável (Virtus Offline indevido) | done | `docs/inbox/done/INC-20260217-1450-01.md` |
+
+---## RAW_INPUT — 2026-02-19 (novo modelo operacional de leads por sorteio e cobrança)```text
+triagem inbox novo inc
+
+objetivo macro:
+- mudar o método de operação para "pay-per-lead" com sorteio;
+- manter tudo ultra organizado/documentado antes de codar;
+- não executar mudanças agora, só triagem/análise e registro.
+
+requisitos relatados (resumo bruto; histórico — pode ficar desatualizado se houver adendo):
+1) pedido chega pelo número de entrada e hoje vai aos grupos com contato do cliente; novo fluxo deve ocultar contato e enviar link com código.
+2) motorista clica no link, fala no número de operação e entra numa janela de 2 minutos.
+3) após 2 minutos, ganha quem tem menos leads; empate decide por ordem de chegada; só 1 recebe contato completo do cliente.
+4) criar "banco" no cadastro do motorista para registrar leads ganhos e débito por lead.
+5) (histórico) cobrança automática via Asaas (boleto/pix) e bloqueio por pendência — ver **Adendo de regra** logo abaixo para a regra atual.
+6) permitir ajustes manuais no banco (abatimento, desconto, zerar, renegociar, reemitir cobrança).
+7) motorista com dívida recebe opção pagar/falar com financeiro; sem cadastro recebe opção cadastrar/falar com administrativo; atendimento deve ir para chat interno.
+8) rollout controlado: começar com 3 grupos piloto; restante continua legado até aprovação.
+9) necessidade de testes E2E completos e simulações antes de liberar o piloto.
+10) pedido explícito de documentação total e operação sem achismo.
+```
+
+Adendo de regra (2026-02-19, atualização humana):
+- cobrança passa a ser diária em dias úteis às 08:00;
+- bloqueio por inadimplência passa para 15:00 do mesmo dia;
+- competência de cobrança: segunda cobra leads de sexta/sábado/domingo + segunda; terça cobra segunda; quarta cobra terça; quinta cobra quarta; sexta cobra quinta.
+- janela operacional humana: segunda a sexta, 10:00–17:00.
+
+Adendo de rollout (2026-02-20, atualização humana):
+- piloto ajustado para 5 grupos/cidades: Ipatinga (MG), Montes Claros (MG), Foz do Iguaçu (PR), Fortaleza (CE), Petrolina (PE).
+
+### TRIAGE — 2026-02-19
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Programa macro: novo modelo de leads por sorteio + cobrança por uso | in_progress | `docs/inbox/need_evidence/INC-20260219-0900-01.md` |
+| 2 | P0 | Webhook dual + distribuição anônima + link tokenizado | done | `docs/inbox/need_evidence/INC-20260219-0910-01.md` |
+| 3 | P0 | Sorteio 3min (menor consumo + desempate por chegada) | done | `docs/inbox/need_evidence/INC-20260219-0920-01.md` |
+| 4 | P0 | Banco/ledger do motorista (leads, débitos, ajustes) | done | `docs/inbox/need_evidence/INC-20260219-0930-01.md` |
+| 5 | P0 | Cobrança Asaas diária (seg-sex 08:00) + bloqueio 15:00 + baixa automática | done | `docs/inbox/need_evidence/INC-20260219-0940-01.md` |
+| 6 | P1 | Atendimento financeiro/administrativo no WhatsApp integrado ao CT | need_alignment | `docs/inbox/need_evidence/INC-20260219-0950-01.md` |
+| 7 | P0 | Rollout controlado por grupo (piloto em 5 grupos) | done | `docs/inbox/need_evidence/INC-20260219-1000-01.md` |
+| 8 | P0 | Plano de testes E2E e critérios Go/No-Go | done | `docs/inbox/need_evidence/INC-20260219-1010-01.md` |
+| 9 | P0 | Segurança: rotação de credencial exposta no relato | accepted_risk_by_owner | `docs/inbox/need_evidence/INC-20260219-1020-01.md` |
+
+---
+
+## RAW_INPUT — 2026-02-20 (continuidade e segurança: GitHub para sitechatbot/notificador)```text
+precisamos abrir um INC para publicar os projetos sitechatbot e notificador no GitHub com segurança.contexto:
+- servidor "notificador" roda sitechatbot + ngrok + notificador;
+- hoje há repos no GitHub para conveniente e site;
+- ainda não há repos para sitechatbot e notificador;
+- objetivo é segurança/continuidade (evitar risco de backup local único).
+
+pedido:
+- não publicar agora;
+- abrir dossiê completo, auditável e enterprise para essa publicação.
+```
+
+### TRIAGE — 2026-02-20
+
+| item | P | título | status | links |
+|---|---|---|---|---|
+| 1 | P0 | Publicação segura de `sitechatbot` e `notificador` no GitHub (dossiê + plano) | in_progress | `docs/inbox/need_evidence/INC-20260220-2230-01.md` |
+
+Adendo (2026-02-20, decisão humana):
+- pivot de estratégia: em vez de GitHub neste momento, priorizar backup completo no drive privado (acesso exclusivo do owner), com sincronização contínua e plano de restore/disaster recovery.

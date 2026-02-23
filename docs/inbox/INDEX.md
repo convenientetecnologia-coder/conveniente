@@ -1,14 +1,17 @@
 ### INBOX â€” arquivo de relatos (Ã­ndice)
 
-Regra: `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` Ã© a **entrada** (RAW_INPUT + triagem).
-Depois de triado, cada incidente ganha um arquivo prÃ³prio em uma pasta por status:
+Regra: `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` é a **entrada** (RAW_INPUT + triagem).
+Depois de triado, cada incidente ganha um arquivo próprio em uma pasta por status:
 
 - `C:\conveniente\docs\inbox\in_progress\` (em andamento / WIP)
-- `C:\conveniente\docs\inbox\need_evidence\` (aguardando prÃ³xima rodada de evidÃªncia/decisÃ£o; nÃ£o Ã© WIP ativo)
+- `C:\conveniente\docs\inbox\need_evidence\` (aguardando próxima rodada de evidência/decisão; não é WIP ativo)
 - `C:\conveniente\docs\inbox\done\` (concluÃ­do)
 - `C:\conveniente\docs\inbox\cancelled\` (cancelado / nÃ£o serÃ¡ feito)
 
 Objetivo: manter um **banco de relatos** pesquisÃ¡vel, sem virar um â€œtextÃ£o infinitoâ€ no arquivo de entrada.
+
+Nota importante (para não confundir GPTs):
+- não existe pasta separada `need_alignment/`; INCs com `state=need_alignment` ficam em `need_evidence/` até virarem `in_progress` ou mudarem para `done/cancelled`.
 
 ---
 
@@ -19,12 +22,24 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 
 | id | P | state | rollout | validation | tÃ­tulo | arquivo |
 |---|---|---|---|---|---|---|
+| INC-20260219-0900-01 | P0 | in_progress | pilot_next | pass_for_core | Programa novo modelo de leads (sorteio + cobrança por uso) | `in_progress/INC-20260219-0900-01.md` |
+| INC-20260219-0910-01 | P0 | done | pilot_ready | pass | Webhook dual + distribuição anônima com link tokenizado | `done/INC-20260219-0910-01.md` |
+| INC-20260219-0920-01 | P0 | done | pilot_ready | pass | Sorteio 3 minutos (menor consumo + desempate por chegada) | `done/INC-20260219-0920-01.md` |
+| INC-20260219-0930-01 | P0 | done | pilot_ready | pass | Banco do motorista (ledger de leads, débitos e ajustes) | `done/INC-20260219-0930-01.md` |
+| INC-20260219-0940-01 | P0 | done | pilot_ready | pass | Cobrança Asaas diária (seg-sex 08:00), baixa automática e bloqueio às 15:00 | `done/INC-20260219-0940-01.md` |
+| INC-20260219-0950-01 | P1 | need_alignment | not_deployed | not_run | Atendimento no WhatsApp (financeiro/administrativo) integrado ao CT | `need_evidence/INC-20260219-0950-01.md` |
+| INC-20260219-1000-01 | P0 | done | pilot_enabled_by_city | pass | Rollout controlado por grupos (piloto em 5 grupos, sem quebrar legado) | `done/INC-20260219-1000-01.md` |
+| INC-20260219-1010-01 | P0 | done | pilot_ready | pass | Plano de testes E2E/simulações antes do Go-Live | `done/INC-20260219-1010-01.md` |
+| INC-20260219-1020-01 | P0 | accepted_risk_by_owner | manual_step_required | waived | Segurança operacional: segredo exposto em conversa e rotação obrigatória | `done/INC-20260219-1020-01.md` |
+| INC-20260220-2230-01 | P0 | done | deployed_monitoring | pass_for_core | Backup completo de `sitechatbot` e `notificador` no Drive privado (dossie + plano DR) | `done/INC-20260220-2230-01.md` |
+| INC-20260222-2230-01 | P0 | need_alignment | not_deployed | not_run | Qualificacao de tamanho de frete antes do sorteio tokenized | `need_evidence/INC-20260222-2230-01.md` |
+| INC-20260222-2310-01 | P0 | need_alignment | not_deployed | not_run | Contestacao de lead tokenized (devolucao ao grupo + estorno com anti-abuso) | `need_evidence/INC-20260222-2310-01.md` |
 | INC-20260202-2000-01 | P0 | done | deployed | passed | CT: Fonte Ãšnica da Verdade (Virtusâ†’Grupos / Contas FB v2 / SimulaÃ§Ãµes) | `done/INC-20260202-2000-01.md` |
 | INC-20260204-0110-01 | P2 | done | deployed | passed | CT Chat: "Mais usados" no picker do composer | `done/INC-20260204-0110-01.md` |
 | INC-20260204-0100-01 | P0 | done | deployed | passed | CT Chat: mensagens misturadas entre salas | `done/INC-20260204-0100-01.md` |
 | INC-20260204-0120-01 | P2 | done | deployed | passed | CT Chat: "Ver mais" indent na 1a linha | `done/INC-20260204-0120-01.md` |
 | INC-20260204-0130-01 | P1 | cancelled | not_deployed | not_run | CT UI: layout quebra com zoom (encerrado por decisao do humano) | `cancelled/INC-20260204-0130-01.md` |
-| INC-20260204-0140-01 | P1 | need_evidence | not_deployed | not_run | CT Chat: mensagens demoram a chegar (latencia fim-a-fim) | `need_evidence/INC-20260204-0140-01.md` |
+| INC-20260204-0140-01 | P1 | done | not_applicable | passed | CT Chat: mensagens demoram a chegar (latencia fim-a-fim) | `done/INC-20260204-0140-01.md` |
 | INC-20260204-0141-01 | P2 | done | deployed | passed | CT Chat: ao abrir, ir para a mensagem mais antiga nao lida | `done/INC-20260204-0141-01.md` |
 | INC-20260204-0142-01 | P1 | done | deployed | passed | CT Aprovados: notificação (novos) por usuário + som dedicado | `done/INC-20260204-0142-01.md` |
 | INC-20260204-0143-01 | P1 | done | deployed | passed | CT Aprovados: latência realtime (badge/som) após "Enviar p/ financeiro" | `done/INC-20260204-0143-01.md` |
@@ -45,7 +60,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260212-0625-01 | P0 | done | operational_fix | passed | RM5: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0625-01.md` |
 | INC-20260212-0630-01 | P0 | done | operational_fix | passed | RM6: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0630-01.md` |
 | INC-20260212-0635-01 | P0 | done | operational_fix | passed | RM7: auditoria CT vs servidor (mesmo playbook do RM1) | `done/INC-20260212-0635-01.md` |
-| INC-20260214-0900-01 | P0 | done | deployed_rm1_controlled | passed_rm1_e2e | PROGRAMA UNICO P0: cadastro sem duplicação (CT estoque -> servidor -> CT em uso) | `done/INC-20260214-0900-01.md` |
+| INC-20260214-0900-01 | P0 | done | deployed | passed | PROGRAMA UNICO P0: cadastro sem duplicação (CT estoque -> servidor -> CT em uso) | `done/INC-20260214-0900-01.md` |
 | INC-20260214-1020-01 | P0 | done | deployed_rm1_controlled | passed_rm1_e2e | BLINDAGEM FINAL P0: hardening anti-regressão (perfis/ACK/estado) | `done/INC-20260214-1020-01.md` |
 | INC-20260214-0910-01 | P0 | cancelled | not_deployed | not_run | Fundido no INC-20260214-0900-01 (canal/ACK virou bloco do programa único) | `cancelled/INC-20260214-0910-01.md` |
 | INC-20260214-0920-01 | P0 | cancelled | not_deployed | not_run | Fundido no INC-20260214-0900-01 (invariantes anti-duplicação viraram bloco do programa único) | `cancelled/INC-20260214-0920-01.md` |
@@ -54,8 +69,11 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260214-0950-01 | P1 | cancelled | not_deployed | not_run | Fase 2: registry secundário detalhado (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-0950-01.md` |
 | INC-20260214-1000-01 | P1 | cancelled | not_deployed | not_run | Fase 2: observabilidade completa (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-1000-01.md` |
 | INC-20260214-1010-01 | P1 | cancelled | not_deployed | not_run | Fase 2: recovery/backup/restore amplo (fora do escopo do GO de cadastro sem duplicação) | `cancelled/INC-20260214-1010-01.md` |
-| INC-20260215-1100-01 | P0 | done | deployed | passed | RM1: Robe postar (Marketplace) — aba 1 tela preta ao criar item | `done/INC-20260215-1100-01.md` |
-| INC-20260203-1800-01 | P0 | need_evidence | deployed_partial | not_run | RM3: `loginRequired=probe_failed` com navegador aparentemente OK (Virtus derrubado por blindagem) | `need_evidence/INC-20260203-1800-01.md` |
+| INC-20260215-1100-01 | P0 | need_evidence | deployed_partial | monitoring | RM1: Robe postar (Marketplace) — tela preta residual e confiabilidade de retentativa | `need_evidence/INC-20260215-1100-01.md` |
+| INC-20260203-1800-01 | P0 | done | deployed_rm3_controlled | passed_operational | RM3: `loginRequired=probe_failed` com navegador aparentemente OK (Virtus derrubado por falso positivo) | `done/INC-20260203-1800-01.md` |
+| INC-20260216-1600-01 | P0 | need_evidence | not_deployed | not_run | RM3: queda progressiva de RAM após boot (~11GB -> ~2GB) e entrada em modo defensivo | `need_evidence/INC-20260216-1600-01.md` |
+| INC-20260216-1930-01 | P0 | need_evidence | not_deployed | not_run | RM4: loop Robe login_required x Messenger saudável (flag sobe/desce e Robe não converge) | `need_evidence/INC-20260216-1930-01.md` |
+| INC-20260217-1450-01 | P0 | done | deployed_rm6_controlled | passed_operational | RM6: about:blank + loginRequired inconsistente com Messenger saudável (Virtus Offline indevido) | `done/INC-20260217-1450-01.md` |
 | INC-20260203-2100-01 | P0 | done | deployed | passed | CT Sistema Interno: Resumo divergente (KPI usa ct_drivers, abas usam ct_driver_memberships) | `done/INC-20260203-2100-01.md` |
 | INC-20260203-2230-01 | P1 | done | deployed | passed | CT Sistema Interno: WhatsApp verde + menu (abrir/copiar) + registro â€œChamou no zapâ€ (Testes Encerrados + Chamar depois + Cadastro + ParticipaÃ§Ã£o) | `done/INC-20260203-2230-01.md` |
 | INC-20260203-2400-01 | P1 | done | deployed | passed | CT Chat: composer auto-grow (ate 8 linhas) + Ver mais em mensagens grandes | `done/INC-20260203-2400-01.md` |
@@ -65,7 +83,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260203-2530-01 | P1 | done | deployed | passed | CT Chat: reenviar mensagem falhada | `done/INC-20260203-2530-01.md` |
 | INC-20260203-2540-01 | P2 | done | deployed | passed | CT Chat: cores por usuario | `done/INC-20260203-2540-01.md` |
 | INC-20260201-0300-01 | P0 | done | deployed_partial | passed | P0: total>ativos (browsers fechados) apesar de RAM; sistema deve manter tudo aberto | `done/INC-20260201-0300-01.md` |
-| INC-20260201-0200-01 | P0 | need_evidence | not_deployed | not_run | Forense RAM: RM4/RM5/RM6 (capacidade mÃ¡xima), autoMode light/full e thresholds | `need_evidence/INC-20260201-0200-01.md` |
+| INC-20260201-0200-01 | P0 | cancelled | not_deployed | not_run | Forense RAM: RM4/RM5/RM6 (capacidade mÃ¡xima), autoMode light/full e thresholds | `cancelled/INC-20260201-0200-01.md` |
 | INC-20260201-0100-01 | P1 | done | needs_restart | not_run | CT/Servidores: contadores â€œLogin/Cookies falhouâ€ + â€œRecurso em anÃ¡liseâ€ + ordenaÃ§Ã£o OFFLINE primeiro | `done/INC-20260201-0100-01.md` |
 | INC-20260201-0000-01 | P1 | done | deployed | passed | Groq config: garantir auto-download + auto-correÃ§Ã£o de modelo em TODOS os hosts apÃ³s update/restart | `done/INC-20260201-0000-01.md` |
 | INC-20260131-0000-01 | P1 | done | deployed | passed | Captcha/Identidade: pre-screen â€œConfirme que vocÃª Ã© humanoâ€ + OCR Groq + identity/appeal handoff | `done/INC-20260131-0000-01.md` |

@@ -119,6 +119,10 @@ O GPT **não** consegue reiniciar os seus processos remotos.
 
 Objetivo: validar fórmulas e guardrails com dados reais **antes** de tocar em runtime.
 
+Regra operacional (anti-trava):
+- Evitar “suíte única” sem deadline. Preferir rodar **blocos isolados** com timeout e evidência por arquivo.
+- Se um comando ficar “parado/infinito”, identificar PID do `node.exe` e encerrar; registrar a evidência no checkup/timeline.
+
 Ferramentas (no host do CT):
 
 - Verificador Virtus/Grupos (insight + A/LR/LE/B): `C:\sitechatbot\tools\verify_virtus_groups_truth.js`
@@ -654,3 +658,28 @@ Quando formos implementar, vira um checkup próprio com:
 - kill-switch,
 - rollback.
 
+---
+
+### EXPERIMENTAL — Integração Asaas (novo fluxo de leads pay-per-lead)
+
+Objetivo: preparar cobrança automática por lead (sem expor secrets).
+
+Escopo desta fase:
+- geração de cobrança em dias úteis às 08:00 (segunda a sexta);
+- regra de competência: sexta/sábado/domingo entram na cobrança de segunda;
+- baixa automática por webhook de pagamento;
+- bloqueio às 15:00 do dia de cobrança para quem ficar em aberto;
+- desbloqueio de elegibilidade por baixa confirmada.
+
+Configuração (sem valor em docs/chat):
+- `ASAAS_ACCESS_TOKEN` (token API);
+- `ASAAS_BASE_URL` (ex.: produção/sandbox);
+- `ASAAS_WEBHOOK_TOKEN` (validação de webhook, se aplicável);
+- `ASAAS_BILLING_METHODS` (ex.: `boleto,pix`).Local recomendado de configuração:
+- ambiente do `sitechatbot` (`process.env`) no host do CT;
+- nunca salvar valor de token em arquivo versionado.Evidência mínima por rodada:
+- requestId/correlationId por emissão;
+- id da cobrança no Asaas + status retornado;
+- evento de baixa recebido no webhook;
+- transição de elegibilidade no CT (bloqueado -> liberado).Regra:
+- se token for compartilhado em texto livre por engano, abrir INC de rotação imediata e revogar chave anterior.
