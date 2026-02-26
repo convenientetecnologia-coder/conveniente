@@ -153,6 +153,7 @@ Colunas:
 
 | id | arquivo | P | sistema | sintoma (humano) | hipÃ³tese (GPT) | evidÃªncia | state | rollout | validation | reiniciar agora? | reiniciar p/ validar? |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| INC-20260226-1500-01 | `docs/inbox/need_evidence/INC-20260226-1500-01.md` | P0 | sitechatbot | CT: criar menu "Contestacao" com olhos de Deus (taxas, motivos, motoristas, ciclos, valor zero) | falta congelar definicoes (denominador/numerador) + capturar dimensoes (cidade/grupo) no caso para analytics 110% auditavel | fontes: CT DB `ct_lead_contestation_*` + ledger `ct_driver_lead_ledger` + pedidos.sqlite `lead_lottery_*` | need_alignment | not_deployed | not_run | nao | sim |
 | INC-20260203-2500-01 | `docs/inbox/in_progress/INC-20260203-2500-01.md` | P1 | sitechatbot | Chat: editar mensagem no menu (...) com modal | falta endpoint/edit + UI do menu/modal | debug ingest runId=chat_edit_v1 | in_progress | not_deployed | not_run | nao | sim |
 | INC-20260203-2510-01 | `docs/inbox/need_evidence/INC-20260203-2510-01.md` | P2 | sitechatbot | Chat: links clicaveis | falta linkify no render | debug ingest runId=chat_links_v1 | need_alignment | not_deployed | not_run | nao | sim |
 | INC-20260203-2520-01 | `docs/inbox/need_evidence/INC-20260203-2520-01.md` | P1 | sitechatbot | Chat: texto grande com scroll lateral | falta overflow-wrap/word-break | debug ingest runId=chat_wrap_v1 | need_alignment | not_deployed | not_run | nao | sim |

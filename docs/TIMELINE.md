@@ -31,6 +31,19 @@ Formato canÃ´nico (copiar/colar):
 
 ---
 
+#### 2026-02-26 — [DOCS][CT] Abrir INC: Menu "Contestacao" (olhos de Deus) com metricas avancadas (ciclo, valor, valor-zero, reabertura)
+
+- **O que**:
+  - criado novo INC para congelar definicoes e desenho enterprise do menu de contestacao no CT (sem codar ainda);
+  - escopo cobre: taxa por cidade/grupo, ranking de motivos, ranking de motoristas, recontestacoes/ciclos e deteccao de "valor zero".
+- **Por quê**: migracao tokenized esta virando diaria; precisamos observabilidade objetiva para decisao sem achismo.
+- **Evidência**:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260226-1500-01.md`
+  - relacionado: `C:\conveniente\docs\inbox\in_progress\INC-20260224-1300-01.md`
+  - base tecnica (CT): `C:\sitechatbot\convenientetecnologia\lib\ctLeadContestationStore.js`, `C:\sitechatbot\convenientetecnologia\lib\ctDb.js`, `C:\sitechatbot\lib\pedidosStore.js`
+- **Reinícios**: nenhum (somente docs)
+- **Rollback**: reverter commit de docs (git) se necessario.
+
 #### 2026-02-23 — [CT][DOCS][CROSS][OPS] Contestação V2.1: início de runtime com persistência T+15 e retomada pós-restart
 
 - **O que**:

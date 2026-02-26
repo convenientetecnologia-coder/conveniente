@@ -34,6 +34,7 @@ Modelo â€œmÃ©dicoâ€: `state=done` nÃ£o exige restart/teste; isso va
 | INC-20260220-2230-01 | P0 | done | deployed_monitoring | pass_for_core | Backup completo de `sitechatbot` e `notificador` no Drive privado (dossie + plano DR) | `done/INC-20260220-2230-01.md` |
 | INC-20260222-2230-01 | P0 | need_alignment | not_deployed | not_run | Qualificacao de tamanho de frete antes do sorteio tokenized | `need_evidence/INC-20260222-2230-01.md` |
 | INC-20260222-2310-01 | P0 | need_alignment | not_deployed | not_run | Contestacao de lead tokenized (devolucao ao grupo + estorno com anti-abuso) | `need_evidence/INC-20260222-2310-01.md` |
+| INC-20260226-1500-01 | P0 | need_alignment | not_deployed | not_run | CT: Menu "Contestacao" (olhos de Deus) — metricas avancadas (ciclo, valor, reabertura, abuso) | `need_evidence/INC-20260226-1500-01.md` |
 | INC-20260202-2000-01 | P0 | done | deployed | passed | CT: Fonte Ãšnica da Verdade (Virtusâ†’Grupos / Contas FB v2 / SimulaÃ§Ãµes) | `done/INC-20260202-2000-01.md` |
 | INC-20260204-0110-01 | P2 | done | deployed | passed | CT Chat: "Mais usados" no picker do composer | `done/INC-20260204-0110-01.md` |
 | INC-20260204-0100-01 | P0 | done | deployed | passed | CT Chat: mensagens misturadas entre salas | `done/INC-20260204-0100-01.md` |
