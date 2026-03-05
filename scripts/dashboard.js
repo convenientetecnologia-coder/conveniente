@@ -2443,6 +2443,8 @@ function logsAllowlist() {
     status_node_5: path.join(base, 'status_node_5.json'),
     status_node_6: path.join(base, 'status_node_6.json'),
     provision_audit: path.join(base, 'provision_audit.jsonl'),
+    // Dossiê forense de queda/flapping por perfil (Lote 2 blindagem RM7)
+    fall_forensics: path.join(base, 'fall_forensics.jsonl'),
     login_required_events: path.join(base, 'login_required_events.jsonl'),
     login_remediate_evidence: path.join(base, 'login_remediate_evidence.jsonl'),
     messenger_pin: path.join(base, 'messenger_pin.jsonl'),

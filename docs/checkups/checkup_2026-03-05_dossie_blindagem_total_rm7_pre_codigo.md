@@ -297,3 +297,8 @@ Status: **executado e validado localmente**
 
 Impacto esperado:
 - transformar “abre/fecha rápido e não sei por quê” em causa rastreável por timeline e classe de falha.
+
+### Ajuste operacional Lote 2.1
+
+- liberada key `fall_forensics` no canal `fetch_logs/logs_manifest` do `dashboard.js`;
+- elimina lacuna de coleta remota do CT para o novo dossiê de queda.
