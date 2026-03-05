@@ -11668,7 +11668,23 @@ async function nurseTick() {
         continue;
       }
 
-      if (want.active === true && !ctrl) {
+      // Guardrail: se sobrou controller "zumbi" (sem browser conectado),
+      // trate como ausente para permitir reopen automático.
+      const ctrlDisconnected = !!(ctrl && (!ctrl.browser || !ctrl.browser.isConnected?.()));
+      if (want.active === true && ctrlDisconnected) {
+        try {
+          provisionAudit.append({
+            ts: Date.now(),
+            event: 'nurse_cleanup_stale_controller',
+            nome: String(nome || ''),
+            hadBrowser: !!(ctrl && ctrl.browser),
+            wasConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.())
+          });
+        } catch {}
+        try { controllers.delete(nome); } catch {}
+      }
+
+      if (want.active === true && (!ctrl || ctrlDisconnected)) {
         if (isFrozenNow(nome)) continue;
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
@@ -11704,7 +11720,16 @@ async function nurseTick() {
               const lkKind = (provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.meta && provisionLockSnap.lock.meta.kind)
                 ? String(provisionLockSnap.lock.meta.kind)
                 : '';
-              const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
+              const useOpenAll =
+                oaActive &&
+                oaOwner &&
+                lkActive &&
+                lkOwner === oaOwner &&
+                (
+                  lkKind === 'open_all_map' ||
+                  lkKind === 'open_all_keepalive' ||
+                  (!lkKind && /^open_all_map:/i.test(lkOwner))
+                );
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: useOpenAll ? 'open_all_24h' : 'nurse_auto', oaActive: !!oaActive, lkActive: !!lkActive, lkKind: lkKind || null }); } catch {}
               r = useOpenAll
                 ? await activateOnce(nome, 'open_all_24h', oaOwner)
@@ -11751,7 +11776,16 @@ async function nurseTick() {
                 const lkKind = (provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.meta && provisionLockSnap.lock.meta.kind)
                   ? String(provisionLockSnap.lock.meta.kind)
                   : '';
-                const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
+                const useOpenAll =
+                  oaActive &&
+                  oaOwner &&
+                  lkActive &&
+                  lkOwner === oaOwner &&
+                  (
+                    lkKind === 'open_all_map' ||
+                    lkKind === 'open_all_keepalive' ||
+                    (!lkKind && /^open_all_map:/i.test(lkOwner))
+                  );
                 if (useOpenAll) {
                   await fileStore.withDesiredFileLockUpdate((d) => {
                     d = d || {}; d._openAll = d._openAll || {};
