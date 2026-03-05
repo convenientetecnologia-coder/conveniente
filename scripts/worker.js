@@ -92,6 +92,44 @@ function appendJsonl(fp, obj) {
   } catch {}
 }
 
+function appendForensicEvent({
+  eventType = '',
+  profileName = '',
+  outcome = 'ok',
+  severity = 'info',
+  source = 'worker',
+  flowId = '',
+  traceId = '',
+  cause = '',
+  decision = '',
+  meta = null
+} = {}) {
+  try {
+    const ev = String(eventType || '').trim();
+    if (!ev) return;
+    const nome = String(profileName || '').trim();
+    const out = String(outcome || 'ok').trim();
+    const sev = String(severity || 'info').trim();
+    const hostId = (() => { try { return readHostIdSync() || null; } catch { return null; } })();
+    provisionAudit.append({
+      ts: Date.now(),
+      event: ev,
+      eventType: ev,
+      source: String(source || 'worker').trim() || 'worker',
+      hostId,
+      profileName: nome || null,
+      nome: nome || null,
+      flowId: flowId ? String(flowId).slice(0, 120) : null,
+      traceId: traceId ? String(traceId).slice(0, 120) : null,
+      outcome: out || 'ok',
+      severity: sev || 'info',
+      cause: cause ? String(cause).slice(0, 120) : null,
+      decision: decision ? String(decision).slice(0, 120) : null,
+      meta: (meta && typeof meta === 'object') ? meta : null
+    });
+  } catch {}
+}
+
 function _readJsonSafe(fp, fallback = null) {
   try { return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { return fallback; }
 }
@@ -10358,15 +10396,52 @@ const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS |
 const ACTIVATE_ONCE_NURSE_TIMEOUT_MS = Math.max(45_000, Math.min(300_000, Number(process.env.ACTIVATE_ONCE_NURSE_TIMEOUT_MS || 120_000) || 120_000));
 
 async function activateOnceNurseSafe(nome, source = '', operator = '') {
+  const traceId = newFlowId('nurse_open');
+  const startedAt = Date.now();
+  appendForensicEvent({
+    eventType: 'nurse_open_begin',
+    profileName: nome,
+    outcome: 'begin',
+    severity: 'info',
+    source: 'nurse',
+    traceId,
+    decision: 'activate_once_race_start',
+    meta: {
+      source: String(source || '').slice(0, 80),
+      operator: String(operator || '').slice(0, 120),
+      timeoutMs: ACTIVATE_ONCE_NURSE_TIMEOUT_MS
+    }
+  });
   let timer = null;
   const timeoutPromise = new Promise((resolve) => {
     timer = setTimeout(() => resolve({ ok: false, error: `activate_once_timeout:${ACTIVATE_ONCE_NURSE_TIMEOUT_MS}` }), ACTIVATE_ONCE_NURSE_TIMEOUT_MS);
   });
   try {
-    return await Promise.race([
+    const result = await Promise.race([
       activateOnce(nome, source, operator),
       timeoutPromise
     ]);
+    const ok = !!(result && result.ok);
+    const err = !ok ? String((result && result.error) || 'unknown').slice(0, 180) : null;
+    appendForensicEvent({
+      eventType: 'nurse_open_end',
+      profileName: nome,
+      outcome: ok ? 'ok' : 'error',
+      severity: ok ? 'info' : 'warn',
+      source: 'nurse',
+      traceId,
+      cause: err || null,
+      decision: ok ? 'activate_once_ok' : 'activate_once_failed',
+      meta: {
+        durationMs: Date.now() - startedAt,
+        source: String(source || '').slice(0, 80),
+        operator: String(operator || '').slice(0, 120),
+        timeoutMs: ACTIVATE_ONCE_NURSE_TIMEOUT_MS,
+        already: !!(result && result.already),
+        error: err
+      }
+    });
+    return result;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -11763,6 +11838,16 @@ async function nurseTick() {
                 robeMeta[nome].lastOpenDeniedReason = String(err || '').slice(0, 220);
               } catch {}
               if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
+                appendForensicEvent({
+                  eventType: 'nurse_open_ram_denied',
+                  profileName: nome,
+                  outcome: 'error',
+                  severity: 'warn',
+                  source: 'nurse',
+                  cause: 'ram_or_supervisor_denied',
+                  decision: 'try_swap_open',
+                  meta: { error: String(err || '').slice(0, 180) }
+                });
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
 
                 const swapped = await trySwapOpen(nome);
@@ -11780,6 +11865,15 @@ async function nurseTick() {
                 }
               }
             } else {
+              appendForensicEvent({
+                eventType: 'nurse_open_success',
+                profileName: nome,
+                outcome: 'ok',
+                severity: 'info',
+                source: 'nurse',
+                decision: 'controller_active',
+                meta: { source: 'nurse_activate_once' }
+              });
               // NOVO: Backoff fixo de 3s ao invés de 15s
               if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
               // Progresso do open-all: marca avanço para evitar "stall detector" falso.

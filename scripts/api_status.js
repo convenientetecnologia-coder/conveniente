@@ -3,6 +3,8 @@
 
 module.exports = (app, workerClient, fileStore) => {
 const opsState = require('./opsState.js');
+const fs = require('fs');
+const provisionAudit = require('./provisionAudit.js');
 // Cache militar: nunca devolver lista vazia por falha transitória de IO/lock.
 // Protege o dashboard contra "piscar" (some e volta) quando /api/perfis ou /api/status falham 1 ciclo.
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
@@ -545,6 +547,73 @@ function montarPayloadCompleto(rawStatus, erroMsg, warning) {
   });
 }
 
+});
+
+// Forense local por perfil (janela de horas) — leitura otimizada do tail.
+app.get('/api/perfis/:nome/forensics', async (req, res) => {
+  try {
+    const nome = String(req.params && req.params.nome || '').trim();
+    if (!nome) return res.json({ ok: false, error: 'nome_ausente' });
+
+    const hours = Math.max(1, Math.min(168, Number(req.query.hours || 24) || 24));
+    const limit = Math.max(10, Math.min(5000, Number(req.query.limit || 800) || 800));
+    const bytesTail = Math.max(256 * 1024, Math.min(8 * 1024 * 1024, Number(req.query.bytesTail || (2 * 1024 * 1024)) || (2 * 1024 * 1024)));
+    const now = Date.now();
+    const fromTs = now - (hours * 60 * 60 * 1000);
+
+    let events = [];
+    try {
+      const fp = provisionAudit.FILE_PATH;
+      if (fs.existsSync(fp)) {
+        const st = fs.statSync(fp);
+        const size = Number(st.size || 0) || 0;
+        const start = Math.max(0, size - bytesTail);
+        const len = Math.max(0, size - start);
+        let buf = Buffer.alloc(0);
+        if (len > 0) {
+          const fd = fs.openSync(fp, 'r');
+          try {
+            buf = Buffer.alloc(len);
+            fs.readSync(fd, buf, 0, len, start);
+          } finally {
+            try { fs.closeSync(fd); } catch {}
+          }
+        }
+        const text = buf.toString('utf8');
+        const lines = text.split(/\r?\n/).filter(Boolean);
+        const out = [];
+        for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+          const line = lines[i];
+          let obj = null;
+          try { obj = JSON.parse(line); } catch { obj = null; }
+          if (!obj || typeof obj !== 'object') continue;
+          const ts = Number(obj.ts || 0) || 0;
+          if (ts && ts < fromTs) continue;
+          const p1 = String(obj.nome || '').trim();
+          const p2 = String(obj.profileName || '').trim();
+          if (p1 !== nome && p2 !== nome) continue;
+          out.push(obj);
+        }
+        events = out.reverse();
+      }
+    } catch (e) {
+      return res.json({ ok: false, error: `forensics_read_failed:${(e && e.message) || String(e)}` });
+    }
+
+    return res.json({
+      ok: true,
+      nome,
+      fromTs,
+      toTs: now,
+      hours,
+      bytesTail,
+      limit,
+      total: events.length,
+      events
+    });
+  } catch (e) {
+    return res.json({ ok: false, error: (e && e.message) || String(e) });
+  }
 });
 
 // ATENÇÃO: nunca altere o shape de resposta deste endpoint, nem remova campos esperados pelo painel! Fallbacks SEMPRE devem garantir compatibilidade retroativa.
