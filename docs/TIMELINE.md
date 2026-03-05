@@ -1,35 +1,260 @@
-### Timeline â€” mudanÃ§as (mais novo em cima)
+### Timeline — mudanças (mais novo em cima)
 
-Regra: toda mudanÃ§a relevante entra aqui com:
-- tags (projeto/Ã¡rea),
+Regra: toda mudança relevante entra aqui com:
+- tags (projeto/área),
 - o que mudou,
 - por que mudou,
-- evidÃªncia (arquivo/endpoint/log),
-- impacto operacional (reinÃ­cios),
+- evidência (arquivo/endpoint/log),
+- impacto operacional (reinícios),
 - rollback.
 
-Tags (modelo A = timeline Ãºnica):
+Tags (modelo A = timeline única):
 - `[CONV]`: conveniente
 - `[CT]`: sitechatbot / CT
 - `[NOTIF]`: notificador
 - `[CROSS]`: envolve 2+ sistemas (sempre use junto com as tags de cada sistema)
-- `[DOCS]`: documentaÃ§Ã£o/organizaÃ§Ã£o (sem runtime)
-- `[OPS]`: operaÃ§Ã£o (procedimentos/rollback/restart)
+- `[DOCS]`: documentação/organização (sem runtime)
+- `[OPS]`: operação (procedimentos/rollback/restart)
 
-Quando for â€œa mesma iniciativaâ€ em mais de um sistema, usar um identificador:
+Quando for “a mesma iniciativa” em mais de um sistema, usar um identificador:
 - `THREAD=TH-YYYY-MM-DD-slug-curto`
 
-Formato canÃ´nico (copiar/colar):
+Formato canônico (copiar/colar):
 
-- `#### YYYY-MM-DD â€” [TAGS...] TÃ­tulo curto`
-- **O que**: 1â€“5 bullets (sem detalhe excessivo)
-- **Por quÃª**: 1 frase
-- **EvidÃªncia**: caminho de arquivo / endpoint / log (ou â€œver checkup Xâ€)
-- **ReinÃ­cios**: quais serviÃ§os/nodes precisam reiniciar (ou â€œnenhumâ€)
-- **Rollback**: como desfazer (1â€“2 linhas)
+- `#### YYYY-MM-DD — [TAGS...] Título curto`
+- **O que**: 1–5 bullets (sem detalhe excessivo)
+- **Por quê**: 1 frase
+- **Evidência**: caminho de arquivo / endpoint / log (ou “ver checkup X”)
+- **Reinícios**: quais serviços/nodes precisam reiniciar (ou “nenhum”)
+- **Rollback**: como desfazer (1–2 linhas)
 - **THREAD**: `TH-...` (somente quando `[CROSS]`)
 
 ---
+
+#### 2026-03-05 — [DOCS][CONV][OPS] Auditoria pré-código da migração Chrome -> Chromium (com baseline de backup)
+
+- **O que**:
+  - executada auditoria ponta a ponta do fluxo de browser/session no `conveniente` antes de codar a migração;
+  - identificado que o runtime já aceita `CHROMIUM_PATH`, mas a descoberta default no Windows ainda privilegia paths do Google Chrome;
+  - identificado risco de drift em service mode (bootstrap não propaga env de engine/executable por padrão);
+  - registrado checkup técnico e atualização do INC de migração; backup baseline concluído e anexado como dependência atendida.
+- **Por quê**: reduzir risco de regressão em produção e evitar mudança parcial/ambígua na troca de engine.
+- **Evidência**:
+  - checkup: `C:\conveniente\docs\checkups\checkup_2026-03-05_migracao_chromium_pre_codigo.md`
+  - INC migração: `C:\conveniente\docs\inbox\in_progress\INC-20260305-0900-01.md`
+  - INC backup (done): `C:\conveniente\docs\inbox\done\INC-20260305-0900-02.md`
+  - backup: `C:\sitechatbot\backups\conveniente_full_20260305_140355\_backup_manifest.json`
+- **Reinícios**: nenhum (somente auditoria/documentação).
+- **Rollback**: reverter os arquivos de docs/checkup/INC/timeline desta rodada.
+
+#### 2026-03-05 — [DOCS][CONV][OPS] Auditoria E2E “olhos de deus” (Chromium + sessões + persistência)
+
+- **O que**:
+  - consolidado dossiê E2E com resposta objetiva por requisito:
+    - Chromium sem fallback para Chrome,
+    - reaproveitamento das sessões já salvas,
+    - persistência de sessão quente em operação,
+    - UX nome/email no perfil do navegador;
+  - evidenciado que reuso de sessão e atualização de cookies já são automáticos hoje, enquanto “Chromium estrito sem fallback” e UX nome/email ainda são pendências de implementação.
+- **Por quê**: travar critérios de aceite reais antes de codar, evitando rollout parcial ou interpretação ambígua.
+- **Evidência**:
+  - checkup E2E: `C:\conveniente\docs\checkups\checkup_2026-03-05_auditoria_e2e_chromium_sessoes.md`
+  - INC: `C:\conveniente\docs\inbox\in_progress\INC-20260305-0900-01.md`
+- **Reinícios**: nenhum (somente auditoria/documentação).
+- **Rollback**: reverter docs desta entrada se necessário.
+
+#### 2026-03-05 — [CONV][OPS][DOCS] Fase 1 aplicada: Chromium estrito sem fallback para Chrome (código)
+
+- **O que**:
+  - implementada seleção explícita de engine no launcher (`BROWSER_ENGINE`, default `chromium`);
+  - em modo `chromium`, removido fallback para Chrome e adicionado erro explícito quando Chromium não é encontrado;
+  - bootstrap de serviço atualizado para propagar envs de engine/path (`BROWSER_ENGINE`, `CHROMIUM_PATH`, `CHROME_PATH`);
+  - instalador atualizado para tratar Chromium como obrigatório e validar presença pós-instalação.
+- **Por quê**: garantir migração determinística para Chromium em todos os hosts, sem “falso positivo” por fallback silencioso para Chrome.
+- **Evidência**:
+  - checkup: `C:\conveniente\docs\checkups\checkup_2026-03-05_fase1_chromium_estrito_impl.md`
+  - código: `C:\conveniente\scripts\browser.js`, `C:\conveniente\scripts\bootstrapService.js`, `C:\conveniente\instalar_conveniente.ps1`
+- **Reinícios**: após deploy no host alvo, reiniciar `conveniente` (`node index.js`).
+- **Rollback**: revert dos arquivos acima + deploy + restart.
+
+#### 2026-03-03 — [CT][OPS][DOCS] Janela de cobrança: bloqueio/vencimento alterado de 15h para 10h
+
+- **O que**:
+  - atualizado o motor de cobrança para manter emissão em **segunda/quinta 22:00** e aplicar bloqueio/vencimento em **10:00** no próximo ciclo;
+  - atualizado texto técnico da fatura automática para refletir `bloqueio 10h`;
+  - atualizado teste canônico de janela de cobrança para validar bloqueio em 10:00 (segunda->quinta e quinta->segunda).
+- **Por quê**: ajuste operacional solicitado para antecipar horário de vencimento/bloqueio sem alterar os dias de emissão.
+- **Evidência**:
+  - `C:\sitechatbot\convenientetecnologia\lib\ctLeadLedgerStore.js`
+  - `C:\sitechatbot\tools\validate_billing_window_rule.js`
+  - `C:\conveniente\docs\RUNBOOK_TECNICO.md`
+- **Reinícios**: `sitechatbot` (`node index.js`) para aplicar a nova regra no runtime.
+- **Rollback**: restaurar `BILLING_BLOCK_HOUR=15` e string de nota em `ctLeadLedgerStore.js`; reiniciar `sitechatbot`.
+
+#### 2026-03-03 — [DOCS][CT][OPS] Auditoria forense RM1..RM7 (exclusões de contas em 24h/48h/72h/96h)
+
+- **O que**:
+  - executada auditoria de exclusões para os hosts ROBE MÃE 1..7 usando `deleted_on_server_at` como evento canônico de queda/exclusão no servidor;
+  - cruzadas, por evento, as três datas pedidas: cadastro no estoque (`ct_fb_stock_accounts.created_at`), cadastro no servidor (`ct_fb_stock_server_profiles.created_at`) e exclusão (`deleted_on_server_at`);
+  - gerados artefatos em Markdown (leitura humana) e JSON (evidência estruturada) com resumo por janela, por host, por tipo (`source_kind`) e detalhe linha a linha (96h).
+- **Por quê**: dar visibilidade objetiva de “quais contas estão caindo”, com trilha temporal completa e sem achismo.
+- **Evidência**:
+  - checkup: `C:\conveniente\docs\checkups\checkup_2026-03-03_auditoria_exclusoes_rm1_rm7_24h_48h_72h_96h.md`
+  - JSON: `C:\conveniente\docs\checkups\checkup_2026-03-03_auditoria_exclusoes_rm1_rm7_24h_48h_72h_96h.json`
+  - INC: `C:\conveniente\docs\inbox\done\INC-20260303-1755-01.md`
+- **Reinícios**: nenhum (somente leitura de banco + documentação).
+- **Rollback**: reverter apenas os arquivos de docs/checkup se necessário.
+
+#### 2026-03-03 — [DOCS][CT][OPS] Refino forense: causa real da exclusão (ban/2FA/manual) separada do evento operacional
+
+- **O que**:
+  - ajustado o dossiê humano para distinguir claramente:
+    - evento operacional (`missing_in_snapshot` / `ct_delete`) e
+    - causa real da conta (extraída de `stock_evidence/<stock_account_id>/meta.json`, campo `reason`);
+  - gerada lista 96h por servidor com causa real em português claro e coluna técnica bruta para auditoria.
+- **Por quê**: evitar interpretação errada de que `missing_in_snapshot` seria “ban/2FA”; isso é apenas marcador de reconciliação de inventário.
+- **Evidência**:
+  - novo relatório: `C:\conveniente\docs\checkups\checkup_2026-03-03_lista_humana_exclusoes_96h_com_causa_real.md`
+  - fonte de causa real: `C:\sitechatbot\dados\stock_evidence\<stock_account_id>\meta.json`
+- **Reinícios**: nenhum (somente auditoria/documentação).
+- **Rollback**: reverter arquivo de checkup desta rodada.
+
+#### 2026-03-03 — [DOCS][CT][OPS][FORENSE] Dossiê UAFP das exclusões (10 dias) com concentração e percentuais
+
+- **O que**:
+  - criado relatório forense dedicado para padrão UAFP (UA + fingerprint resumido) nas contas excluídas dos ROBE MÃE 1..7;
+  - calculados percentuais por causa real, por servidor, por UA, por FP e por combinação UAFP, incluindo concentração dos Top 5;
+  - incluída seção de “sinais de padrão ruim” para destacar UAFP com alta recorrência de banida/desativada.
+- **Por quê**: responder objetivamente se há padrão repetitivo de UAFP nas exclusões ou se está distribuído.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-03_auditoria_forense_uafp_exclusoes_10dias.md`
+  - fontes: `C:\sitechatbot\dados\convenientetecnologia.sqlite` + `C:\sitechatbot\dados\stock_evidence\<stock_account_id>\meta.json`
+- **Reinícios**: nenhum (somente leitura/relatório).
+- **Rollback**: reverter arquivo de checkup desta rodada.
+
+#### 2026-03-02 — [CT][DOCS][CROSS][OPS] Fechamento INC-20260302-1500-01 (sorteio justo por “carga” + contestação não zera prioridade)
+
+- **O que**:
+  - ranking de sorteio passou a usar **carga** (ledger + faturas) com `LEAD_LOTTERY_RANK_MODE=load` (mantém `legacy` disponível por flag);
+  - contestação estorna valor, mas **mantém carga** para justiça até pagamento/baixa da competência;
+  - mensagem de cobrança WhatsApp ajustada para explicar que **boletos em aberto reduzem prioridade** e que pagar baixa a competência (melhorando prioridade nas próximas rodadas).
+- **Por quê**: remover incentivo involuntário de “contestar para voltar a 0 e ganhar de novo” e reforçar pagamento como mecanismo justo de zeragem por competência.
+- **Evidência**:
+  - INC fechado: `C:\conveniente\docs\inbox\done\INC-20260302-1500-01.md`
+  - auditoria runtime (snapshot): `C:\sitechatbot\dados\audit_tiebreak_postrun.json`
+  - testes isolados R1..R7: `C:\sitechatbot\tools\validate_lottery_load_r1_r7.js`
+  - mensagem cobrança: `C:\sitechatbot\whatsapp\lib\timeouts.js`
+- **Reinícios**: `sitechatbot` (`node index.js`) para aplicar texto de mensagem em runtime (mudança de WhatsApp).
+- **Rollback**: setar `LEAD_LOTTERY_RANK_MODE=legacy` (comportamento de ranking anterior) e reverter `whatsapp/lib/timeouts.js` para o texto anterior.
+- **THREAD**: `TH-2026-03-02-sorteio-carga-contestacao`
+
+#### 2026-03-02 — [CT][OPS][FINANCEIRO] Migração tokenized: correção do sinal de “crédito em dobro” (ledger)
+
+- **O que**:
+  - identificado que o lote `tokenized_credito_dobro_lote1_2026-02-27` lançou `manual_adjustment.amount_cents` **positivo** (que no ledger significa **dívida**);
+  - aplicada correção idempotente por `correction_key=tokenized_credito_dobro_lote1_2026-02-27__sign_fix_v1` (compensação de \(-2x\) do lançamento original por motorista);
+  - hardening do playbook: scripts de migração/correção agora exigem `--apply --confirm` e validam direção `negative_is_credit`.
+- **Por quê**: crédito no ledger é representado por valor **negativo**; um lançamento positivo transforma crédito em dívida e gera reclamação imediata.
+- **Evidência**:
+  - script da migração (guard rails de crédito): `C:\sitechatbot\tools\apply_tokenized_credit_migration_lote1.js`
+  - script de correção (idempotente): `C:\sitechatbot\tools\fix_tokenized_credit_migration_lote1_sign.js`
+  - auditoria (pré e pós): `C:\sitechatbot\tools\audit_tokenized_migration_lote1.js`
+  - relatórios forenses (contêm PII; não commitar): `C:\sitechatbot\dados\forensics\tokenized_credit_migration_lote1_sign_fix_*.json` e `C:\sitechatbot\dados\forensics\tokenized_credit_migration_lote1_audit_postfix_2026-03-02.json`
+- **Reinícios**: nenhum (mudança é em SQLite; refletida imediatamente nas leituras do CT).
+- **Rollback**: aplicar ajuste compensatório inverso (novo `manual_adjustment`) referenciando o mesmo `correction_key` (não apagar histórico).
+
+#### 2026-02-26 — [DOCS][INBOX] Fechamento e alinhamento dos INCs (sem divergência)
+
+- **O que**:
+  - alinhado “arquivo real” vs `docs/inbox/INDEX.md` e movidos INCs concluídos para `docs/inbox/done/`;
+  - corrigidos paths/citações no `docs/LIVRO_DE_BORDO.md` para refletir estado real.
+- **Por quê**: evitar operação “no escuro” com INCs marcados errado (fonte única do status é arquivo+índice coerentes).
+- **Evidência**:
+  - `docs/inbox/INDEX.md`
+  - `docs/inbox/done/INC-20260222-2310-01.md`
+  - `docs/inbox/done/INC-20260224-0005-01.md`
+  - `docs/inbox/done/INC-20260224-1600-01.md`
+  - `docs/inbox/done/INC-20260225-1400-01.md`
+  - `docs/LIVRO_DE_BORDO.md`
+- **Reinícios**: nenhum (somente docs/organização).
+- **Rollback**: reverter commit de docs desta rodada.
+
+#### 2026-02-26 — [DOCS][CT][NOTIF][CROSS][OPS] Dossie pre-codigo Contestacao: auditoria ponta a ponta + matriz de metricas e queries congeladas
+
+- **O que**:
+  - consolidado dossie mestre de auditoria pre-codigo para menu "Contestacao", com anexos por modulo (CT contestacao, ledger/Asaas, WhatsApp, tokenized ciclos, notificador/ACK);
+  - congelada matriz de metricas com definicao humana + tecnica e queries de referencia para Hoje/Ontem/MTD/Custom;
+  - registrado risco P0/P1/P2 com evidencias por funcao/arquivo para gate Go/No-Go antes de qualquer endpoint/UI.
+- **Por quê**: eliminar ambiguidade antes de codar, garantir fonte de verdade unica e reduzir risco de regressao operacional/financeira.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_dossie_auditoria_contestacao_pre_codigo.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_anexo_contestacao_ct.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_anexo_ledger_financeiro_asaas.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_anexo_whatsapp_contestacao.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_anexo_tokenized_ciclos.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_anexo_notificador_ack.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_matriz_metricas_queries_contestacao.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260226-1500-01.md`
+- **Reinícios**: nenhum (somente documentação e auditoria).
+- **Rollback**: reverter commit de docs desta rodada.
+- **THREAD**: `TH-2026-02-26-contestacao-dossie-pre-codigo`
+
+#### 2026-02-26 — [DOCS][CT][OPS] Contestacao: contrato de endpoints backend fechado (overview/city/reason/drivers/leads/meta)
+
+- **O que**:
+  - definida especificacao tecnica dos endpoints da aba Contestacao com request/response, filtros, ordenacao, validacoes e SLO alvo;
+  - congelada whitelist de `sort_by` por endpoint e padrao de erro JSON;
+  - vinculada regra de aceite 1:1 com a matriz de metricas/queries ja congelada.
+- **Por quê**: iniciar implementacao backend sem ambiguidade de contrato e sem risco de cada endpoint "contar diferente".
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_especificacao_endpoints_menu_contestacao.md`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_matriz_metricas_queries_contestacao.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260226-1500-01.md`
+- **Reinícios**: nenhum (somente documentação/planejamento técnico).
+- **Rollback**: reverter commit de docs desta rodada.
+
+#### 2026-02-26 — [DOCS][CT][OPS] Contestacao: plano de implementacao backend em slices fechado (S0..S6)
+
+- **O que**:
+  - definido plano executavel em slices curtas para backend da aba Contestacao, com ordem de entrega, arquivos-alvo, critérios de teste por slice e gates de no-go;
+  - congelado pipeline de rollout com feature flag e etapa obrigatoria de comparacao 1:1 contra queries canônicas;
+  - atualizado INC com referencia direta ao plano de slices.
+- **Por quê**: reduzir risco de regressao e permitir entrega incremental com validacao objetiva em cada etapa.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_plano_implementacao_backend_contestacao_slices.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260226-1500-01.md`
+- **Reinícios**: nenhum (somente documentação/plano técnico).
+- **Rollback**: reverter commit de docs desta rodada.
+
+#### 2026-02-26 — [DOCS][CT][OPS] Contestacao: auditoria forense final pre-codigo (veredito NO-GO temporario)
+
+- **O que**:
+  - executada auditoria forense final ponta a ponta antes de codar, com foco em risco estrutural de schema/estado e rastreabilidade operacional;
+  - identificados 2 bloqueios P0: duplicidade de familias de tabela de contestacao e divergencia de dicionario de status/validacao;
+  - registrado checklist objetivo para virar GO.
+- **Por quê**: evitar iniciar codificacao com ambiguidade estrutural que comprometa KPI, trilha forense e comparacao 1:1.
+- **Evidência**:
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_auditoria_forense_final_pre_codigo_contestacao.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260226-1500-01.md`
+- **Reinícios**: nenhum (somente auditoria/documentação).
+- **Rollback**: reverter commit de docs desta rodada.
+
+#### 2026-02-26 — [CT][DOCS][OPS] Contestacao: saneamento P0 pre-codigo concluido (canonizacao + customer_confirm)
+
+- **O que**:
+  - aplicada canonizacao estrutural sem quebra em 3 arquivos: store, flow e schema de contestacao;
+  - unificado dicionario de client validation no store usando contrato central (`CLIENT_VALIDATION_STATUS`);
+  - adicionada persistencia explicita para acao `contest:customerconfirm` no fluxo WhatsApp;
+  - normalizados aliases antigos de status/validacao no schema V21 e documentada familia canônica `ct_lead_contestation_*`.
+- **Por quê**: remover bloqueios P0 detectados na auditoria final e liberar inicio dos endpoints com base forense consistente.
+- **Evidência**:
+  - `C:\sitechatbot\convenientetecnologia\lib\ctLeadContestationStore.js`
+  - `C:\sitechatbot\whatsapp\lib\flow.js`
+  - `C:\sitechatbot\convenientetecnologia\lib\ctDb.js`
+  - `C:\conveniente\docs\checkups\checkup_2026-02-26_execucao_p0_pre_codigo_canonizacao_contestacao.md`
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260226-1500-01.md`
+- **Reinícios**: `sitechatbot` (`node index.js`) para aplicar mudanças no runtime.
+- **Rollback**: restaurar os 3 arquivos alterados e reiniciar `sitechatbot`.
 
 #### 2026-02-26 — [DOCS][CT] Abrir INC: Menu "Contestacao" (olhos de Deus) com metricas avancadas (ciclo, valor, valor-zero, reabertura)
 
@@ -1996,3 +2221,93 @@ Formato canÃ´nico (copiar/colar):
   - artefato rascunho removido para evitar falsa percepcao de pronto:
     - `C:\sitechatbot\convenientetecnologia\lib\ctLeadContestationStore.js`
   - INC atualizado com referencia do plano formal.
+
+#### 2026-03-02 — [OPERACAO][GOVERNANCA] Contrato operacional formalizado + regra persistente do Cursor
+
+- **Objetivo**: operar produção real com evidência, sem “achismo”, e com divisão clara: humano reinicia, GPT coleta/organiza/implementa.
+- **Mudança**:
+  - regra persistente criada: `C:\conveniente\.cursor\rules\operacao-enterprise.mdc`
+  - correção de legibilidade (acentos/aspas) no intake canônico: `C:\conveniente\docs\INBOX_RELATOS_DO_HUMANO.md` (seções iniciais)
+- **Restart**: nenhum.
+
+#### 2026-03-02 — [FORENSE][LEADS] Dossie "olhos de Deus" (sorteio x contestacao x boleto)
+
+- **Objetivo**: auditoria ponta a ponta sem codar, para provar o estado real do runtime antes de qualquer alteração.
+- **Documento canônico criado**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-02_dossie_forense_sorteio_contestacao_boleto.md`
+- **Achado central**:
+  - sorteio atual prioriza `wins_count` histórico (`lead_lottery_winners`) + `first_joined_at`;
+  - contestação/boletos hoje afetam elegibilidade e financeiro, mas não entram como chave primária do ranking.
+- **Governança**:
+  - INC atualizado com alinhamento e referência forense:
+    - `C:\conveniente\docs\inbox\need_evidence\INC-20260302-1500-01.md`
+
+Adendo (rodada aprofundada):
+- dossiê expandido com:
+  - trilha ponta a ponta (sorteio -> award -> contestacao -> reabertura -> emissao -> pagamento),
+  - invariantes anti-quebra,
+  - matriz de regressão obrigatória (R1..R6),
+  - gate Go/No-Go pré-código.
+
+#### 2026-03-02 — [FORENSE][LEADS] Plano técnico faseado pré-código (feature flag + rollback)
+
+- **Documento canônico criado**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-02_plano_tecnico_faseado_sorteio_carga_competencia.md`
+- **Conteúdo**:
+  - arquitetura de mudança mínima e reversível;
+  - `rank_mode=legacy|load` com política explícita sem fallback automático em `load` (fail-closed auditável);
+  - competência temporal de baixa por boleto;
+  - matriz de regressão ampliada (R1..R7);
+  - rollout/rollback operacional.
+- **Status**:
+  - codificação ainda não iniciada; aguardando aprovação explícita do owner.
+
+Adendo (blindagem de contingência):
+- anexo canônico criado para erro de cálculo em `rank_mode=load`:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-02_anexo_canonico_contingencia_sorteio_load.md`
+- decisão final desta rodada:
+  - sem fallback silencioso;
+  - sem travamento global;
+  - fail-closed por janela + reprocesso explícito com trilha auditável.
+
+#### 2026-03-02 — [IMPLEMENTACAO][LEADS] Ranking por carga (legacy|load) + fail-closed por janela + bateria R1..R7
+
+- **Código**:
+  - `C:\sitechatbot\lib\pedidosStore.js`:
+    - flag `LEAD_LOTTERY_RANK_MODE=legacy|load`;
+    - seleção por carga no modo `load`;
+    - erro de carga em `load` marca janela `error_load` (fail-closed por janela, sem travamento global);
+    - utilitários de operação para listar/reprocessar janelas em erro.
+  - `C:\sitechatbot\convenientetecnologia\lib\ctLeadLedgerStore.js`:
+    - função canônica `getDriverLotteryLoadByPhone(...)` para ranking por carga.
+  - `C:\sitechatbot\tools\validate_lottery_load_r1_r7.js`:
+    - suíte isolada cobrindo R1..R7.
+- **Validação**:
+  - R1..R7 isolado verde:
+    - `C:\sitechatbot\dados\forensics\lottery_load_r1_r7_report_1772478624630.json`
+  - stress atômico em `rank_mode=load` verde:
+    - `C:\sitechatbot\dados\forensics\stress_lottery_report_1772478624814.json`
+- **Restart**: nenhum nesta fase (ainda não houve deploy em runtime de produção).
+
+Adendo (ajuste operacional aprovado pelo owner):
+- prioridade para não perder sorteio:
+  - retries automáticos em `load`;
+  - se retries esgotarem, override explícito/auditado para `legacy` (sem fallback silencioso);
+  - `fail_closed` fica opcional via flag para operação extraordinária.
+
+#### 2026-03-05 — [CONVENIENTE][CHROMIUM] Hardening de launch CDP após flapping abre/fecha
+
+- **Sintoma em runtime (evidência)**:
+  - Chromium resolvido via `puppeteer-managed`, porém várias tentativas falhando com:
+    - `Target.setDiscoverTargets: Target closed`
+    - `Target.setAutoAttach: Target closed`
+  - erro secundário intermitente:
+    - `Requesting main frame too early!` em `patchPage`.
+- **Correção aplicada** (`C:\conveniente\scripts\browser.js`):
+  - `tryLaunch(args, tag)` passa a usar os args da tentativa (corrigido);
+  - retries 2/3 com perfil de flags mais conservador para Chromium gerenciado;
+  - `pipe: true` no `puppeteer.launch` para reduzir flake de conexão CDP;
+  - guardas em `evaluateOnNewDocument` para não abortar ativação por frame transitório.
+- **Operação**:
+  - sem `self_update` nesta rodada (owner fará `git pull` no host);
+  - requer restart manual do `conveniente` para carregar o patch.

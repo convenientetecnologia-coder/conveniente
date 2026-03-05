@@ -148,41 +148,46 @@ async function patchPage(nome, page, coords) {
   try { await page.emulateTimezone(patchTz); } catch {}
 
   // --- viewport, deviceScale, threads ---
-  await page.evaluateOnNewDocument((hwc) => {
-    try {
-      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => hwc, configurable: true });
-    } catch {}
-  }, hardwareConcurrency);
+  // Chromium pode fechar alvo muito cedo em hosts sob pressão; isso não pode matar a ativação inteira.
+  try {
+    await page.evaluateOnNewDocument((hwc) => {
+      try {
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => hwc, configurable: true });
+      } catch {}
+    }, hardwareConcurrency);
+  } catch {}
 
   // --- LANGUAGE/PLATFORM PATCH anti-detect ---
-  await page.evaluateOnNewDocument(() => {
-    const safeDefine = (obj, key, getter) => {
-      try {
-        Object.defineProperty(obj, key, { get: getter, configurable: true });
-      } catch {}
-    };
-    safeDefine(navigator, 'language', () => 'pt-BR');
-    safeDefine(navigator, 'languages', () => ['pt-BR', 'pt', 'en-US', 'en']);
-    safeDefine(navigator, 'platform', () => 'Win32');
-    safeDefine(navigator, 'webdriver', () => undefined);
-    window.chrome = window.chrome || { runtime: {} };
-    // Keep Notification API shape present to avoid marketplace runtime ReferenceError.
-    // We force denied semantics, so behavior stays non-intrusive.
-    if (typeof window.Notification === 'undefined') {
-      try {
-        const NotificationShim = function Notification() {
-          throw new TypeError('Illegal constructor');
-        };
-        NotificationShim.permission = 'denied';
-        NotificationShim.requestPermission = () => Promise.resolve('denied');
-        Object.defineProperty(window, 'Notification', {
-          value: NotificationShim,
-          configurable: true,
-          writable: true
-        });
-      } catch {}
-    }
-  });
+  try {
+    await page.evaluateOnNewDocument(() => {
+      const safeDefine = (obj, key, getter) => {
+        try {
+          Object.defineProperty(obj, key, { get: getter, configurable: true });
+        } catch {}
+      };
+      safeDefine(navigator, 'language', () => 'pt-BR');
+      safeDefine(navigator, 'languages', () => ['pt-BR', 'pt', 'en-US', 'en']);
+      safeDefine(navigator, 'platform', () => 'Win32');
+      safeDefine(navigator, 'webdriver', () => undefined);
+      window.chrome = window.chrome || { runtime: {} };
+      // Keep Notification API shape present to avoid marketplace runtime ReferenceError.
+      // We force denied semantics, so behavior stays non-intrusive.
+      if (typeof window.Notification === 'undefined') {
+        try {
+          const NotificationShim = function Notification() {
+            throw new TypeError('Illegal constructor');
+          };
+          NotificationShim.permission = 'denied';
+          NotificationShim.requestPermission = () => Promise.resolve('denied');
+          Object.defineProperty(window, 'Notification', {
+            value: NotificationShim,
+            configurable: true,
+            writable: true
+          });
+        } catch {}
+      }
+    });
+  } catch {}
 
   // --- GEOLOCALIZAÇÃO ---
   if (coords && coords.latitude) {
@@ -190,23 +195,25 @@ async function patchPage(nome, page, coords) {
   }
 
   // --- OCULTAR BANNER AUTOMATION ---
-  await page.evaluateOnNewDocument(() => {
-    const style = document.createElement('style');
-    style.innerHTML = `
-      body > div[role="alert"], .automation-message {
-        display: none !important;
-        visibility: hidden !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
-      }
-    `;
-    document.addEventListener('DOMContentLoaded', () => {
-      document.head.appendChild(style);
+  try {
+    await page.evaluateOnNewDocument(() => {
+      const style = document.createElement('style');
+      style.innerHTML = `
+        body > div[role="alert"], .automation-message {
+          display: none !important;
+          visibility: hidden !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+        }
+      `;
+      document.addEventListener('DOMContentLoaded', () => {
+        document.head.appendChild(style);
+      });
+      try {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+      } catch {}
     });
-    try {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
-    } catch {}
-  });
+  } catch {}
 
   // --- INJEÇÃO DO DISMISS AUTOMÁTICO DO OVERLAY "SUSPEITAMOS..." ---
   try {
@@ -215,17 +222,19 @@ async function patchPage(nome, page, coords) {
       dismissAutomationSuspect(page, nome).catch(()=>false)
     );
     // Injeta um scanner após DOMContentLoaded: tenta algumas vezes nas primeiras rodadas
-    await page.evaluateOnNewDocument(() => {
-      let rodadas = 0;
-      function tryDismiss(){
-        if (++rodadas > 8) return;
-        if (window.__dismissAutomationSuspect) {
-          window.__dismissAutomationSuspect().catch(()=>{});
+    try {
+      await page.evaluateOnNewDocument(() => {
+        let rodadas = 0;
+        function tryDismiss(){
+          if (++rodadas > 8) return;
+          if (window.__dismissAutomationSuspect) {
+            window.__dismissAutomationSuspect().catch(()=>{});
+          }
+          setTimeout(tryDismiss, 900 + Math.floor(Math.random()*400));
         }
-        setTimeout(tryDismiss, 900 + Math.floor(Math.random()*400));
-      }
-      window.addEventListener('DOMContentLoaded', tryDismiss);
-    });
+        window.addEventListener('DOMContentLoaded', tryDismiss);
+      });
+    } catch {}
   } catch {} // nunca deixa travar
 
   // GUARDA: Virtus Messenger asset interception (apenas Messenger, nunca Marketplace Create)
@@ -1113,7 +1122,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--start-maximized' // Maximizada sempre
       // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
     ];
-
     // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
     if (process.env.MEDIA_AUTO_UI === '1') {
       launchArgs.push('--use-fake-ui-for-media-stream');
@@ -1141,6 +1149,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // Fase 1: engine explícita com resolução auditável.
     const browserBin = findChromeStable();
     const executablePath = browserBin.executablePath;
+    const isManagedChromium = browserBin && browserBin.engine === 'chromium' && browserBin.source === 'puppeteer-managed';
     try {
       logger.info('[BROWSER][ENGINE] executable resolved', {
         engine: browserBin.engine,
@@ -1148,6 +1157,16 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         executablePath
       });
     } catch {}
+
+    const safeLaunchArgs = (() => {
+      if (!isManagedChromium) return [...launchArgs];
+      const strip = new Set([
+        '--process-per-site',
+        '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion'
+      ]);
+      const base = launchArgs.filter((a) => !strip.has(String(a || '')));
+      return [...base, '--disable-background-networking'];
+    })();
 
     async function tryLaunch(args, tag) {
       try {
@@ -1158,8 +1177,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
           headless: isHeadless ? true : false,
           executablePath,
           userDataDir,
-          args: launchArgs,
+          args,
           defaultViewport,
+          pipe: true,
           dumpio: !!process.env.BROWSER_DEBUG,
           protocolTimeout: 120000 // 120 segundos garante o Stealth/plugin
         });
@@ -1184,13 +1204,15 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     if (!browserTry) {
       try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
-      browserTry = await tryLaunch(launchArgs, 'LAUNCH 2');
+      try { await sleep(350); } catch {}
+      browserTry = await tryLaunch(safeLaunchArgs, 'LAUNCH 2_SAFE');
     }
 
     if (!browserTry) {
       try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
-      browserTry = await tryLaunch(launchArgs, 'LAUNCH 3');
+      try { await sleep(700); } catch {}
+      browserTry = await tryLaunch(safeLaunchArgs, 'LAUNCH 3_SAFE');
     }
 
     if (!browserTry) {
