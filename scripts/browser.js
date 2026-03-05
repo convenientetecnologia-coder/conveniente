@@ -962,49 +962,76 @@ function installOneTabGuard(browser, nome, {
   } catch {}
 }
 
-// ====== FIND CHROME STABLE ======
-// Tenta Chrome Stable por CHROME_PATH/CHROMIUM_PATH variáveis de ambiente, depois paths padrão de OS.
+function resolveBrowserEngine() {
+  const raw = String(process.env.BROWSER_ENGINE || 'chromium').trim().toLowerCase();
+  if (raw === 'chrome' || raw === 'chromium') return raw;
+  return 'chromium';
+}
+
+// ====== FIND BROWSER EXECUTABLE ======
+// Regra Fase 1:
+// - default: chromium
+// - BROWSER_ENGINE=chromium => NÃO faz fallback para Chrome
+// - BROWSER_ENGINE=chrome => usa apenas Chrome
 function findChromeStable() {
-  const envChrome = process.env.CHROME_PATH;
-  if (envChrome && fs.existsSync(envChrome)) {
-    return envChrome;
-  }
-  const envChromium = process.env.CHROMIUM_PATH;
-  if (envChromium && fs.existsSync(envChromium)) {
-    return envChromium;
+  const engine = resolveBrowserEngine();
+  const envChrome = String(process.env.CHROME_PATH || '').trim();
+  const envChromium = String(process.env.CHROMIUM_PATH || '').trim();
+
+  if (engine === 'chromium') {
+    if (envChromium && fs.existsSync(envChromium)) {
+      return { engine, executablePath: envChromium, source: 'env:CHROMIUM_PATH' };
+    }
+
+    const chromiumCandidates = [];
+    if (process.platform === 'win32') {
+      chromiumCandidates.push(
+        path.join(process.env.LOCALAPPDATA || '', 'Chromium', 'Application', 'chrome.exe'),
+        path.join(process.env.PROGRAMFILES || '', 'Chromium', 'Application', 'chrome.exe'),
+        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Chromium', 'Application', 'chrome.exe')
+      );
+    } else if (process.platform === 'darwin') {
+      chromiumCandidates.push(
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        path.join(os.homedir(), 'Applications', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+      );
+    } else {
+      chromiumCandidates.push('/usr/bin/chromium-browser', '/usr/bin/chromium', '/snap/bin/chromium');
+    }
+
+    for (const file of chromiumCandidates) {
+      if (file && fs.existsSync(file)) return { engine, executablePath: file, source: 'default:chromium' };
+    }
+
+    if (process.platform === 'win32') {
+      throw new Error('Chromium não encontrado (modo estrito). Instale Chromium ou defina CHROMIUM_PATH. Dica: winget install -e --id Chromium.Chromium -h');
+    }
+    throw new Error('Chromium não encontrado (modo estrito). Instale Chromium ou defina CHROMIUM_PATH.');
   }
 
-  // Default installs, by OS
-  const candidates = [];
+  if (envChrome && fs.existsSync(envChrome)) {
+    return { engine, executablePath: envChrome, source: 'env:CHROME_PATH' };
+  }
+
+  const chromeCandidates = [];
   if (process.platform === 'win32') {
-    candidates.push(
-      path.join(process.env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    chromeCandidates.push(
+      path.join(process.env.PROGRAMFILES || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
       path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe')
+      path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe')
     );
   } else if (process.platform === 'darwin') {
-    candidates.push(
+    chromeCandidates.push(
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       path.join(os.homedir(), 'Applications', 'Google Chrome.app', 'Contents', 'MacOS', 'Google Chrome')
     );
   } else {
-    candidates.push(
-      '/opt/google/chrome/chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome',
-      '/snap/bin/chromium'
-    );
+    chromeCandidates.push('/opt/google/chrome/chrome', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome');
   }
-
-  // Adiciona ao final dos candidatos o path do Chromium por variável de ambiente, se definido
-  if (envChromium) {
-    candidates.push(envChromium);
+  for (const file of chromeCandidates) {
+    if (file && fs.existsSync(file)) return { engine, executablePath: file, source: 'default:chrome' };
   }
-
-  for (const file of candidates) {
-    if (file && fs.existsSync(file)) return file;
-  }
-  throw new Error('Chrome/Chromium não encontrado. Instale o Chrome Stable ou defina CHROME_PATH/CHROMIUM_PATH.');
+  throw new Error('Chrome não encontrado (modo estrito). Instale Chrome ou defina CHROME_PATH.');
 }
 
 //
@@ -1086,8 +1113,16 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // DEFAULT VIEWPORT: null SEMPRE
     const defaultViewport = null;
 
-    // GUARDA: Chrome Stable only
-    const executablePath = findChromeStable();
+    // Fase 1: engine explícita com resolução auditável.
+    const browserBin = findChromeStable();
+    const executablePath = browserBin.executablePath;
+    try {
+      logger.info('[BROWSER][ENGINE] executable resolved', {
+        engine: browserBin.engine,
+        source: browserBin.source,
+        executablePath
+      });
+    } catch {}
 
     async function tryLaunch(args, tag) {
       try {

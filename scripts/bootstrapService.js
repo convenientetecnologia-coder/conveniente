@@ -236,6 +236,10 @@ function buildEnvPairs() {
   if (process.env.LOG_INGEST_SECRET) pairs.push({ key: "LOG_INGEST_SECRET", value: process.env.LOG_INGEST_SECRET });
   if (process.env.PORT) pairs.push({ key: "PORT", value: process.env.PORT });
   if (process.env.DASHBOARD_INTERVAL_MS) pairs.push({ key: "DASHBOARD_INTERVAL_MS", value: process.env.DASHBOARD_INTERVAL_MS });
+  // Fase 1 Chromium: propagar engine/executable para evitar drift entre sessão interativa e serviço.
+  pairs.push({ key: "BROWSER_ENGINE", value: String(process.env.BROWSER_ENGINE || "chromium") });
+  if (process.env.CHROMIUM_PATH) pairs.push({ key: "CHROMIUM_PATH", value: process.env.CHROMIUM_PATH });
+  if (process.env.CHROME_PATH) pairs.push({ key: "CHROME_PATH", value: process.env.CHROME_PATH });
   // Proteção: não abrir chromium automaticamente no servidor
   pairs.push({ key: "OPEN_CHROMIUM_ON_START", value: "0" });
   return pairs;

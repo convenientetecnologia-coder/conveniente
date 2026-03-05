@@ -12,7 +12,7 @@ winget install -e --id OpenJS.NodeJS.LTS -h
 Log "Instalando Google Chrome (Se necessário)..."
 winget install -e --id Google.Chrome -h
 
-Log "Instalando Chromium (opcional)..."
+Log "Instalando Chromium (obrigatório para runtime)..."
 winget install -e --id Chromium.Chromium -h
 
 Log "Instalando Git (Se necessário para baixar o repositório)..."
@@ -20,6 +20,22 @@ winget install -e --id Git.Git -h
 
 # Aguarda alguns segundos para evitar falhas de ambiente
 Start-Sleep -Seconds 10
+
+# 1.1 Verificação obrigatória do Chromium (fase 1: sem fallback para Chrome)
+$ChromiumCandidates = @(
+    "$env:LOCALAPPDATA\Chromium\Application\chrome.exe",
+    "$env:ProgramFiles\Chromium\Application\chrome.exe",
+    "${env:ProgramFiles(x86)}\Chromium\Application\chrome.exe"
+) | Where-Object { $_ -and $_.Trim() -ne "" }
+
+$ChromiumPath = $null
+foreach ($p in $ChromiumCandidates) {
+    if (Test-Path $p) { $ChromiumPath = $p; break }
+}
+if (-not $ChromiumPath) {
+    throw "Chromium não encontrado após instalação. Instale manualmente Chromium.Chromium e configure CHROMIUM_PATH."
+}
+Log "Chromium detectado: $ChromiumPath"
 
 # 2. Clonar o projeto do GitHub em C:\conveniente
 if (Test-Path "C:\conveniente") {
