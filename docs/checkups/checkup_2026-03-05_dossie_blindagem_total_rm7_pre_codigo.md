@@ -277,3 +277,23 @@ Status: **executado e validado localmente**
 Validação:
 - parse de sintaxe dos arquivos alterados em Node OK;
 - lint sem erros nos arquivos alterados.
+
+---
+
+## 13) Execução incremental (Lote 2)
+
+Status: **executado e validado localmente**
+
+- `scripts/worker.js`
+  - criado dossiê automático por queda em `dados/fall_forensics.jsonl`;
+  - adicionado detector de padrão flapping em falhas repetidas de abertura;
+  - snapshots automáticos em eventos de `nurse_open_failed`, `nurse_open_flapping_suspected`, `login_required_detected` e `banned_detected_predelete`.
+
+- `scripts/api_status.js`
+  - endpoint forense por perfil enriquecido com:
+    - `fallSnapshots`,
+    - `causeSummary`,
+    - `fallCauseSummary`.
+
+Impacto esperado:
+- transformar “abre/fecha rápido e não sei por quê” em causa rastreável por timeline e classe de falha.

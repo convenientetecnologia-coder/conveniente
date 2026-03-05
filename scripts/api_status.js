@@ -4,7 +4,9 @@
 module.exports = (app, workerClient, fileStore) => {
 const opsState = require('./opsState.js');
 const fs = require('fs');
+const path = require('path');
 const provisionAudit = require('./provisionAudit.js');
+const FALL_FORENSICS_FILE = path.join(__dirname, '..', 'dados', 'fall_forensics.jsonl');
 // Cache militar: nunca devolver lista vazia por falha transitória de IO/lock.
 // Protege o dashboard contra "piscar" (some e volta) quando /api/perfis ou /api/status falham 1 ciclo.
 let _lastBaselinePerfis = null; // array de perfis (perfis.json) da última leitura boa
@@ -562,6 +564,7 @@ app.get('/api/perfis/:nome/forensics', async (req, res) => {
     const fromTs = now - (hours * 60 * 60 * 1000);
 
     let events = [];
+    let fallSnapshots = [];
     try {
       const fp = provisionAudit.FILE_PATH;
       if (fs.existsSync(fp)) {
@@ -600,6 +603,57 @@ app.get('/api/perfis/:nome/forensics', async (req, res) => {
       return res.json({ ok: false, error: `forensics_read_failed:${(e && e.message) || String(e)}` });
     }
 
+    try {
+      const fallLimit = Math.max(10, Math.min(2000, Number(req.query.fallLimit || 300) || 300));
+      const fallBytesTail = Math.max(128 * 1024, Math.min(8 * 1024 * 1024, Number(req.query.fallBytesTail || bytesTail) || bytesTail));
+      if (fs.existsSync(FALL_FORENSICS_FILE)) {
+        const st = fs.statSync(FALL_FORENSICS_FILE);
+        const size = Number(st.size || 0) || 0;
+        const start = Math.max(0, size - fallBytesTail);
+        const len = Math.max(0, size - start);
+        let buf = Buffer.alloc(0);
+        if (len > 0) {
+          const fd = fs.openSync(FALL_FORENSICS_FILE, 'r');
+          try {
+            buf = Buffer.alloc(len);
+            fs.readSync(fd, buf, 0, len, start);
+          } finally {
+            try { fs.closeSync(fd); } catch {}
+          }
+        }
+        const text = buf.toString('utf8');
+        const lines = text.split(/\r?\n/).filter(Boolean);
+        const out = [];
+        for (let i = lines.length - 1; i >= 0 && out.length < fallLimit; i--) {
+          let obj = null;
+          try { obj = JSON.parse(lines[i]); } catch { obj = null; }
+          if (!obj || typeof obj !== 'object') continue;
+          const ts = Number(obj.ts || 0) || 0;
+          if (ts && ts < fromTs) continue;
+          const p = String(obj.profileName || obj.nome || '').trim();
+          if (p !== nome) continue;
+          out.push(obj);
+        }
+        fallSnapshots = out.reverse();
+      }
+    } catch (e) {
+      // extensão best-effort; não quebra endpoint principal
+      fallSnapshots = [{ _error: `fall_forensics_read_failed:${(e && e.message) || String(e)}` }];
+    }
+
+    const causeSummary = {};
+    for (const ev of events) {
+      const key = String(ev && (ev.cause || ev.reason || ev.eventType || ev.event || 'unknown')).slice(0, 120);
+      if (!key) continue;
+      causeSummary[key] = Number(causeSummary[key] || 0) + 1;
+    }
+    const fallCauseSummary = {};
+    for (const fsnap of fallSnapshots) {
+      const key = String(fsnap && (fsnap.causeClass || fsnap.cause || fsnap.eventType || 'unknown')).slice(0, 120);
+      if (!key) continue;
+      fallCauseSummary[key] = Number(fallCauseSummary[key] || 0) + 1;
+    }
+
     return res.json({
       ok: true,
       nome,
@@ -609,7 +663,11 @@ app.get('/api/perfis/:nome/forensics', async (req, res) => {
       bytesTail,
       limit,
       total: events.length,
-      events
+      events,
+      causeSummary,
+      fallTotal: fallSnapshots.length,
+      fallCauseSummary,
+      fallSnapshots
     });
   } catch (e) {
     return res.json({ ok: false, error: (e && e.message) || String(e) });

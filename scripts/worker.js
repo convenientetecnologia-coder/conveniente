@@ -69,6 +69,7 @@ const CT_ARCHIVE_QUEUE_DONE_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'done');
 const CT_ARCHIVE_EVID_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'evidence');
 const GOV_SNAP_JSONL = path.join(DATA_DIR, 'governor_snapshots.jsonl');
 const GOV_SNAP_LEADER_LOCK = path.join(DATA_DIR, '_governor_snapshot_leader.lock');
+const FALL_FORENSICS_JSONL = path.join(DATA_DIR, 'fall_forensics.jsonl');
 // P0 hardening (INC-20260207-1403-01):
 // Garantia "volta a trabalhar" pós stock_provision em ambiente com shards.
 // A causa observada foi "volta parcial" quando alguns workers/shards não retomam.
@@ -128,6 +129,124 @@ function appendForensicEvent({
       meta: (meta && typeof meta === 'object') ? meta : null
     });
   } catch {}
+}
+
+function classifyFallCause(cause = '') {
+  const c = String(cause || '').toLowerCase();
+  if (!c) return 'unknown';
+  if (c.includes('browser não iniciou') || c.includes('target closed') || c.includes('main frame too early') || c.includes('protocol error')) return 'launch_instability';
+  if (c.includes('timeout')) return 'timeout';
+  if (c.includes('ram') || c.includes('supervisor_denied') || c.includes('slots') || c.includes('headroom')) return 'resource_pressure';
+  if (c.includes('login') || c.includes('identity') || c.includes('appeal') || c.includes('captcha')) return 'checkpoint_or_login';
+  if (c.includes('banned') || c.includes('suspensa') || c.includes('disabled')) return 'ban_or_disabled';
+  return 'unknown';
+}
+
+function registerNurseOpenFailurePattern(nome, err = '', traceId = '', source = '') {
+  try {
+    const msg = String(err || '');
+    const mayFlap = /Browser não iniciou após 4 tentativas|Target\.setDiscoverTargets|Target closed|Requesting main frame too early|Protocol error|net::ERR_/i.test(msg);
+    if (!mayFlap) return { flapping: false, count: 0 };
+    const now = Date.now();
+    robeMeta[nome] = robeMeta[nome] || {};
+    const rec = robeMeta[nome];
+    rec.nurseOpenFailWindow = Array.isArray(rec.nurseOpenFailWindow) ? rec.nurseOpenFailWindow : [];
+    rec.nurseOpenFailWindow = rec.nurseOpenFailWindow.filter(x => x && (now - Number(x.ts || 0) < 10 * 60 * 1000));
+    rec.nurseOpenFailWindow.push({ ts: now, err: msg.slice(0, 220), traceId: String(traceId || '').slice(0, 120), source: String(source || '').slice(0, 80) });
+    const count = rec.nurseOpenFailWindow.length;
+    const canEmit = !rec.lastFlapSuspectedAt || (now - Number(rec.lastFlapSuspectedAt || 0) > 2 * 60 * 1000);
+    if (count >= 3 && canEmit) {
+      rec.lastFlapSuspectedAt = now;
+      return { flapping: true, count };
+    }
+    return { flapping: false, count };
+  } catch {
+    return { flapping: false, count: 0 };
+  }
+}
+
+async function captureFallForensicsSnapshot({
+  profileName = '',
+  eventType = '',
+  source = 'worker',
+  traceId = '',
+  flowId = '',
+  cause = '',
+  decision = '',
+  severity = 'warn',
+  meta = null
+} = {}) {
+  try {
+    const nome = String(profileName || '').trim();
+    if (!nome) return { ok: false, error: 'profile_required' };
+    const now = Date.now();
+    let flags = null;
+    let desiredPerfil = null;
+    let statusPerfil = null;
+    let pagesCount = null;
+    let browserConnected = false;
+    let ctrlInfo = null;
+    try { flags = await readAccountFlags(nome).catch(() => null); } catch {}
+    try {
+      const d = fileStore.readJsonSafe(desiredPath, null) || {};
+      desiredPerfil = d && d.perfis && d.perfis[nome] ? d.perfis[nome] : null;
+    } catch {}
+    try {
+      const st = fileStore.readJsonSafe(statusPath, null) || {};
+      const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
+      statusPerfil = arr.find((p) => p && p.nome === nome) || null;
+    } catch {}
+    try {
+      const ctrl = controllers.get(nome);
+      if (ctrl && ctrl.browser) {
+        browserConnected = !!ctrl.browser.isConnected?.();
+        const pages = await ctrl.browser.pages().catch(() => []);
+        pagesCount = Array.isArray(pages) ? pages.length : null;
+      }
+      ctrlInfo = {
+        exists: !!ctrl,
+        humanControl: !!(ctrl && ctrl.humanControl === true),
+        configurando: !!(ctrl && ctrl.configurando === true),
+        trabalhando: !!(ctrl && ctrl.trabalhando === true)
+      };
+    } catch {}
+
+    const causeClass = classifyFallCause(cause);
+    const rec = {
+      ts: now,
+      hostId: readHostIdSync() || null,
+      eventType: String(eventType || 'fall_snapshot'),
+      source: String(source || 'worker'),
+      profileName: nome,
+      traceId: traceId ? String(traceId).slice(0, 120) : null,
+      flowId: flowId ? String(flowId).slice(0, 120) : null,
+      severity: String(severity || 'warn'),
+      cause: String(cause || '').slice(0, 220) || null,
+      causeClass,
+      decision: String(decision || '').slice(0, 160) || null,
+      flags: flags || null,
+      desired: desiredPerfil || null,
+      status: statusPerfil || null,
+      ctrl: { ...(ctrlInfo || {}), browserConnected, pagesCount },
+      meta: (meta && typeof meta === 'object') ? meta : null
+    };
+    appendJsonl(FALL_FORENSICS_JSONL, rec);
+    appendForensicEvent({
+      eventType: 'fall_forensics_snapshot',
+      profileName: nome,
+      outcome: 'captured',
+      severity: String(severity || 'warn'),
+      source: String(source || 'worker'),
+      traceId,
+      flowId,
+      cause: String(cause || '').slice(0, 120) || null,
+      decision: String(decision || '').slice(0, 120) || null,
+      meta: { causeClass, eventType: rec.eventType, file: 'dados/fall_forensics.jsonl' }
+    });
+    return { ok: true, causeClass };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
 }
 
 function _readJsonSafe(fp, fallback = null) {
@@ -787,6 +906,19 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     } catch {}
 
     try { await snapshotStatusAndWrite(); } catch {}
+    if (!already) {
+      try {
+        await captureFallForensicsSnapshot({
+          profileName: nome,
+          eventType: 'login_required_detected',
+          source: 'flags',
+          cause: String(reason || 'login_required'),
+          decision: 'set_login_required_flag',
+          severity: 'warn',
+          meta: { source: String(source || '').slice(0, 80) }
+        });
+      } catch {}
+    }
   } catch {}
 }
 
@@ -3333,6 +3465,19 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       try {
         const m0 = await manifestStore.read(nome).catch(()=>null);
         if (m0 && (m0.stockAccountId || m0.stock_account_id)) stockAccountId = Number(m0.stockAccountId || m0.stock_account_id) || null;
+      } catch {}
+
+      try {
+        await captureFallForensicsSnapshot({
+          profileName: nome,
+          eventType: 'banned_detected_predelete',
+          source: 'banflow',
+          flowId,
+          cause: String(reason || 'banned').slice(0, 220),
+          decision: 'archive_and_delete_profile',
+          severity: 'error',
+          meta: { snippet: String(snippet || '').slice(0, 220), stockAccountId: stockAccountId || null }
+        });
       } catch {}
 
       // 0) Captura evidence (antes de fechar)
@@ -10441,6 +10586,32 @@ async function activateOnceNurseSafe(nome, source = '', operator = '') {
         error: err
       }
     });
+    if (!ok) {
+      const p = registerNurseOpenFailurePattern(nome, err || '', traceId, source);
+      if (p && p.flapping) {
+        appendForensicEvent({
+          eventType: 'nurse_open_flapping_suspected',
+          profileName: nome,
+          outcome: 'error',
+          severity: 'error',
+          source: 'nurse',
+          traceId,
+          cause: err || null,
+          decision: 'open_retry_pattern_detected',
+          meta: { failuresIn10m: Number(p.count || 0), source: String(source || '').slice(0, 80) }
+        });
+      }
+      await captureFallForensicsSnapshot({
+        profileName: nome,
+        eventType: (p && p.flapping) ? 'nurse_open_flapping_suspected' : 'nurse_open_failed',
+        source: 'nurse',
+        traceId,
+        cause: err || '',
+        decision: (p && p.flapping) ? 'open_retry_pattern_detected' : 'activate_once_failed',
+        severity: (p && p.flapping) ? 'error' : 'warn',
+        meta: { failuresIn10m: Number((p && p.count) || 0), operator: String(operator || '').slice(0, 120), source: String(source || '').slice(0, 80) }
+      });
+    }
     return result;
   } finally {
     if (timer) clearTimeout(timer);
