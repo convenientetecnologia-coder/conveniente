@@ -10935,19 +10935,30 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
       return false;
     }
 
+    const reasonNorm = String(reason || '').toLowerCase();
+    // Prioridade P0: quando voltou para login_form, não pode ficar preso em backoff antigo.
+    // Ex.: tentativa passada falhou por UI bloqueada e deixou nextAt distante; agora precisamos tentar novamente.
+    const immediateLoginForm = !!immediate && reasonNorm.includes('login_form');
+    const bypassSchedule = !!(force || immediateLoginForm);
     const last = Number(st.lastStartAt || 0) || 0;
-    const earliest = force ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
+    const earliest = bypassSchedule ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
     const when = Math.max(
       now + (immediate ? AUTO_LR_CFG.immediateDelayMs : 2500),
       earliest,
-      force ? 0 : (Number(st.nextAt || 0) || 0)
+      bypassSchedule ? 0 : (Number(st.nextAt || 0) || 0)
     );
+    // Evita spam de eventos quando já está enfileirado para o mesmo instante.
+    const prevQueued = !!st.queued;
+    const prevNextAt = Number(st.nextAt || 0) || 0;
     st.queued = true;
     st.nextAt = when;
     st.reason = String(reason || '').slice(0, 80);
     st.source = String(source || '').slice(0, 80);
-    st.force = !!force;
+    st.force = !!bypassSchedule;
     st.enqueuedAt = now;
+    if (prevQueued && prevNextAt === when) {
+      return true;
+    }
     try {
       provisionAudit.append({
         ts: now,
@@ -10957,7 +10968,7 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
         source: String(source || '').slice(0, 80),
         nextAt: when,
         immediate: !!immediate,
-        force: !!force
+        force: !!bypassSchedule
       });
     } catch {}
     return true;
