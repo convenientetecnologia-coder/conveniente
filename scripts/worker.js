@@ -10310,6 +10310,7 @@ try {
   // Critério: captura quedas relevantes também em hosts menores, sem spammar.
   if (!global.__ANOMALY_WORKING_LAST_AT) global.__ANOMALY_WORKING_LAST_AT = 0;
   if (!global.__ANOMALY_PROFILE_LAST_AT) global.__ANOMALY_PROFILE_LAST_AT = new Map();
+  if (!global.__STUCK_CONFIG_SINCE_AT) global.__STUCK_CONFIG_SINCE_AT = new Map();
 
   const activeArr = perfis.filter(x => x && x.active === true);
   const workingArr = activeArr.filter(x => x.trabalhando === true);
@@ -10384,11 +10385,70 @@ try {
     if (!d || d.active !== true || String(d.virtus || '') !== 'on') continue;
     if (x.loginRequired === true || x.identityRequired === true || x.appealSubmitted === true) continue;
     if (x.humanControl === true || x.humanHold === true) continue;
+    const ctrl = controllers.get(x.nome);
+    const browserConnected = !!(ctrl && ctrl.browser && typeof ctrl.browser.isConnected === 'function' && ctrl.browser.isConnected());
+
+    // Auto-heal P0: perfil "travado em configurando" sem lock global ativo.
+    // Sintoma observado em produção: desired=virtus:on, browser ativo, mas ctrl.configurando=true por tempo indefinido.
+    // Regra de segurança:
+    // - só tenta recuperar sem provision lock ativo;
+    // - ignora se houver sendLock/robe em execução;
+    // - exige persistência mínima para evitar corrida com configuração legítima.
+    try {
+      const staleNoLock =
+        !!(ctrl && ctrl.configurando === true) &&
+        browserConnected &&
+        x.sendLockActive !== true &&
+        x.robeEmExecucao !== true &&
+        !provisionLock.isActive();
+      if (staleNoLock) {
+        const since = Number(global.__STUCK_CONFIG_SINCE_AT.get(x.nome) || 0) || now;
+        if (!global.__STUCK_CONFIG_SINCE_AT.get(x.nome)) global.__STUCK_CONFIG_SINCE_AT.set(x.nome, since);
+        const ageMs = now - since;
+        const minAgeMs = Math.max(30_000, Number(process.env.STUCK_CONFIG_RECOVER_MIN_AGE_MS || 120_000) || 120_000);
+        if (ageMs >= minAgeMs) {
+          let resumedVirtus = false;
+          let recoverError = null;
+          try {
+            ctrl.configurando = false;
+            if (!ctrl.virtus && automationAllowed(ctrl, { operator: 'stuck_config_recover' })) {
+              ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, x.nome, {
+                restrictTab: 0,
+                epoch: ctrl.virtusEpoch,
+                slowMode: (autoMode && autoMode.mode !== 'full'),
+                governorMode: (autoMode && autoMode.mode) || 'full'
+              });
+              ctrl.trabalhando = true;
+              resumedVirtus = true;
+              try { unfreezeCooldownIfWorking(x.nome); } catch {}
+            }
+          } catch (e) {
+            recoverError = (e && e.message) ? String(e.message) : String(e);
+          }
+          try {
+            provisionAudit.append({
+              ts: now,
+              event: 'stuck_config_auto_recover',
+              nome: x.nome,
+              ageMs,
+              minAgeMs,
+              browserConnected,
+              resumedVirtus,
+              recoverError,
+              desired: { active: !!d.active, virtus: String(d.virtus || '') }
+            });
+          } catch {}
+          global.__STUCK_CONFIG_SINCE_AT.delete(x.nome);
+        }
+      } else {
+        global.__STUCK_CONFIG_SINCE_AT.delete(x.nome);
+      }
+    } catch {}
+
     const last = global.__ANOMALY_PROFILE_LAST_AT.get(x.nome) || 0;
     if ((now - Number(last || 0)) < (15 * 60 * 1000)) continue;
     global.__ANOMALY_PROFILE_LAST_AT.set(x.nome, now);
-    const ctrl = controllers.get(x.nome);
-    const browserConnected = !!(ctrl && ctrl.browser && typeof ctrl.browser.isConnected === 'function' && ctrl.browser.isConnected());
     try {
       provisionAudit.append({
         ts: now,
