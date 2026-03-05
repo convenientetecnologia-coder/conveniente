@@ -10355,6 +10355,22 @@ const NURSE_CFG = {
 const MAX_OPEN_CONCURRENCY = 1;
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
+const ACTIVATE_ONCE_NURSE_TIMEOUT_MS = Math.max(45_000, Math.min(300_000, Number(process.env.ACTIVATE_ONCE_NURSE_TIMEOUT_MS || 120_000) || 120_000));
+
+async function activateOnceNurseSafe(nome, source = '', operator = '') {
+  let timer = null;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, error: `activate_once_timeout:${ACTIVATE_ONCE_NURSE_TIMEOUT_MS}` }), ACTIVATE_ONCE_NURSE_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([
+      activateOnce(nome, source, operator),
+      timeoutPromise
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,
@@ -11372,7 +11388,7 @@ async function nurseTick() {
         slotsInUse++;
         try {
           await reportAction(appealReadyPick, 'nurse_restart', 'appeal_ready_priority_open');
-          await activateOnce(appealReadyPick, 'nurse_appeal_ready').catch(()=>null);
+          await activateOnceNurseSafe(appealReadyPick, 'nurse_appeal_ready').catch(()=>null);
         } catch {} finally {
           slotsInUse--;
         }
@@ -11732,11 +11748,11 @@ async function nurseTick() {
                 );
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: useOpenAll ? 'open_all_24h' : 'nurse_auto', oaActive: !!oaActive, lkActive: !!lkActive, lkKind: lkKind || null }); } catch {}
               r = useOpenAll
-                ? await activateOnce(nome, 'open_all_24h', oaOwner)
-                : await activateOnce(nome, 'nurse_auto');
+                ? await activateOnceNurseSafe(nome, 'open_all_24h', oaOwner)
+                : await activateOnceNurseSafe(nome, 'nurse_auto');
             } catch {
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: 'nurse_auto', oaActive: false, lkActive: false, lkKind: null }); } catch {}
-              r = await activateOnce(nome, 'nurse_auto');
+              r = await activateOnceNurseSafe(nome, 'nurse_auto');
             }
             if (!r || !r.ok) {
               const err = (r && r.error) || '';
