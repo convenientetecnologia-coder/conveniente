@@ -968,6 +968,23 @@ function resolveBrowserEngine() {
   return 'chromium';
 }
 
+function getPuppeteerManagedBrowserPath() {
+  try {
+    if (puppeteer && typeof puppeteer.executablePath === 'function') {
+      const p = String(puppeteer.executablePath() || '').trim();
+      if (p && fs.existsSync(p)) return p;
+    }
+  } catch {}
+  try {
+    const pptr = require('puppeteer');
+    if (pptr && typeof pptr.executablePath === 'function') {
+      const p = String(pptr.executablePath() || '').trim();
+      if (p && fs.existsSync(p)) return p;
+    }
+  } catch {}
+  return null;
+}
+
 // ====== FIND BROWSER EXECUTABLE ======
 // Regra Fase 1:
 // - default: chromium
@@ -1003,10 +1020,18 @@ function findChromeStable() {
       if (file && fs.existsSync(file)) return { engine, executablePath: file, source: 'default:chromium' };
     }
 
-    if (process.platform === 'win32') {
-      throw new Error('Chromium não encontrado (modo estrito). Instale Chromium ou defina CHROMIUM_PATH. Dica: winget install -e --id Chromium.Chromium -h');
+    // Fase 1 sem fallback para Chrome do sistema:
+    // aceita também o browser gerenciado pelo Puppeteer (Chrome for Testing) quando presente.
+    // Isso cobre hosts onde o runtime foi provisionado via npm install, mesmo sem Chromium global no PATH.
+    const pptrManaged = getPuppeteerManagedBrowserPath();
+    if (pptrManaged) {
+      return { engine, executablePath: pptrManaged, source: 'puppeteer-managed' };
     }
-    throw new Error('Chromium não encontrado (modo estrito). Instale Chromium ou defina CHROMIUM_PATH.');
+
+    if (process.platform === 'win32') {
+      throw new Error('Chromium não encontrado (modo estrito). Instale Chromium, configure CHROMIUM_PATH, ou garanta browser gerenciado do Puppeteer. Dica: winget install -e --id Chromium.Chromium -h');
+    }
+    throw new Error('Chromium não encontrado (modo estrito). Instale Chromium, configure CHROMIUM_PATH, ou garanta browser gerenciado do Puppeteer.');
   }
 
   if (envChrome && fs.existsSync(envChrome)) {
