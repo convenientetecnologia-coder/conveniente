@@ -353,6 +353,15 @@ async function patchPage(nome, page, coords) {
   }
 }
 
+function isTransientMainFrameError(err) {
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return (
+    msg.includes('requesting main frame too early') ||
+    msg.includes('main frame') ||
+    msg.includes('target closed')
+  );
+}
+
 // Minimização suave
 async function ensureMinimizedWindowForPage(page) {
   // GUARDA: A função minimize é inerte para steady-state (só uso manual/debug)
@@ -1167,6 +1176,19 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       const base = launchArgs.filter((a) => !strip.has(String(a || '')));
       return [...base, '--disable-background-networking'];
     })();
+    const ultraSafeLaunchArgs = (() => {
+      if (!isManagedChromium) return [...safeLaunchArgs];
+      return [
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--password-store=basic',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,CalculateNativeWinOcclusion',
+        '--window-size=1366,768',
+        '--start-maximized'
+      ];
+    })();
 
     async function tryLaunch(args, tag) {
       try {
@@ -1216,7 +1238,14 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
 
     if (!browserTry) {
-      throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
+      try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
+      try { cleanupUserDataLocks(userDataDir); } catch {}
+      try { await sleep(1200); } catch {}
+      browserTry = await tryLaunch(ultraSafeLaunchArgs, 'LAUNCH 4_ULTRA_SAFE');
+    }
+
+    if (!browserTry) {
+      throw new Error('Browser não iniciou após 4 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
 
@@ -1360,8 +1389,22 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
 
     // 5) patchPage na primeira aba — se falhar, fecha e relança
     try {
-      const page = (await browser.pages())[0];
-      await patchPage(manifest.nome, page, coords);
+      let patched = false;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const page = (await browser.pages())[0];
+          if (!page) throw new Error('patchPage: nenhuma aba disponível');
+          await patchPage(manifest.nome, page, coords);
+          patched = true;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (!isTransientMainFrameError(e) || attempt >= 3) break;
+          try { await sleep(300 * attempt); } catch {}
+        }
+      }
+      if (!patched) throw (lastErr || new Error('patchPage_failed'));
     } catch (e) {
       await safeCloseBrowser(browser);
       throw e;
