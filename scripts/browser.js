@@ -2381,7 +2381,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   if (dbg) logger.debug('[CONFIG] configureProfile (3-tabs) begin', { nome });
 
   // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsíveis:
-  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com/marketplace
+  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com (home auth)
   let pages = [];
   try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
   if (!pages || !pages.length) {
@@ -2426,7 +2426,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  const msgUrl = 'https://www.messenger.com/marketplace';
+  const msgUrl = 'https://www.messenger.com/';
 
   // Aba 0 — Facebook base
   try {
@@ -4734,7 +4734,7 @@ async function collectFreshCookies(browser) {
     const p0 = pages && pages[0];
     if (!p0) return { ok: false, error: 'no_pages' };
     // garantir que os domínios relevantes foram tocados (para preencher jar)
-    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await p0.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
     const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
     const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);

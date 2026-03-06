@@ -2045,7 +2045,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 
     const targetUrl =
       (prefer === 'messenger')
-        ? 'https://www.messenger.com/marketplace'
+        ? 'https://www.messenger.com/'
         : 'https://www.facebook.com/';
     await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(900);
@@ -8477,7 +8477,7 @@ const handlers = {
           try {
             const u0 = safeUrl(page);
             if (label === 'msg' && !/messenger\.com/i.test(u0)) {
-              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await page.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
@@ -8694,7 +8694,7 @@ const handlers = {
 
           // Messenger depois (se necessário)
           pushStep({ step: 'attempt2_login_msg_begin' });
-          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await p0.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
           await new Promise(r => setTimeout(r, 2600));
           await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
@@ -8870,7 +8870,7 @@ const handlers = {
           const pages = await ctrl.browser.pages().catch(()=>[]);
           const pFail = (pages && pages[0]) ? pages[0] : null;
           if (pFail) {
-            await pFail.goto('https://www.messenger.com/login.php?next=https%3A%2F%2Fwww.messenger.com%2Fmarketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+            await pFail.goto('https://www.messenger.com/login.php?next=https%3A%2F%2Fwww.messenger.com%2F', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
             await sleep(900);
             pushStep({ step: 'ui_blocked_parked_messenger_login' });
           }
