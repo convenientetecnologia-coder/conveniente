@@ -1134,6 +1134,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       if (lastReason.includes('identity')) {
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_identity', nome: String(nome||''), flowId: id, attempt, reason: lastReason.slice(0,160) }); } catch {}
         try { await setIdentityRequiredFlag(nome, { source: 'captcha_flow', url: lr.url || '', title: lr.title || '' }).catch(()=>{}); } catch {}
+        let messengerLoginConfirmed = false;
         try {
           const c = controllers.get(nome) || ctrl;
           const p = (c && c.mainPage) ? c.mainPage : pg;
@@ -8668,8 +8669,6 @@ const handlers = {
             await failFastToHuman('missing_credentials');
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
-
-          let messengerLoginConfirmed = false;
 
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
