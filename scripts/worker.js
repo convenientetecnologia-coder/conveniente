@@ -2745,10 +2745,13 @@ async function appealMonitorCheckNow(nome, ctrl) {
     if (rr.includes('login_form')) {
       const op = `appeal_monitor_login_form:${String(nome || '')}:${Date.now()}`;
       try { provisionAudit.append({ ts: Date.now(), event: 'appeal_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
-      setTimeout(() => {
-        try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
-      }, 0);
-      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_scheduled' };
+      try {
+        await enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
+          reason: rr || 'login_form',
+          source: 'appeal_monitor'
+        });
+      } catch {}
+      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_enqueued' };
     }
 
     return { ok: true, transitioned: true, reason: rr };
@@ -3414,10 +3417,13 @@ async function identityMonitorCheckNow(nome, ctrl) {
     if (rr.includes('login_form')) {
       const op = `identity_monitor_login_form:${String(nome || '')}:${Date.now()}`;
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
-      setTimeout(() => {
-        try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
-      }, 0);
-      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_scheduled' };
+      try {
+        await enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
+          reason: rr || 'login_form',
+          source: 'identity_monitor'
+        });
+      } catch {}
+      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_enqueued' };
     }
 
     return { ok: true, transitioned: true, reason: rr };
@@ -9512,15 +9518,9 @@ const handlers = {
             } catch {}
             setTimeout(() => {
               try {
-                handlers.login_remediate({
-                  nome,
-                  operator: op2,
-                  options: { overrideHumanHold: true }
-                }).then((res) => {
-                  if (res && res.error === 'governor_busy') {
-                    const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume', immediate: true, force: true });
-                    try { provisionAudit.append({ ts: Date.now(), event: 'login_remediate_governor_retry_queued', nome: String(nome||''), operator: op2, queued: !!queued }); } catch {}
-                  }
+                enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
+                  reason: String(lr && lr.reason || 'login_form'),
+                  source: 'human_resume'
                 }).catch(()=>null);
               } catch {}
             }, 0);
@@ -9566,18 +9566,14 @@ const handlers = {
                 try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_schedule_login_remediate', nome: String(nome||''), reason: String(lrPost && lrPost.reason || ''), source: String(lrPost && lrPost.domain || '') }); } catch {}
                 const opPost = `human_resume_post_nav:${String(nome || '').trim()}:${Date.now()}`;
                 try {
-                  handlers.login_remediate({ nome, operator: opPost, options: { overrideHumanHold: true } })
-                    .then((res) => {
-                      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_result', nome: String(nome||''), operator: String(opPost||''), ok: !!(res && res.ok), error: String(res && res.error || '') }); } catch {}
-                      const err = String(res && res.error || '');
-                      if (err === 'governor_busy' || err === 'busy') {
-                        const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume_post_nav', immediate: true, force: true });
-                        try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_retry_queued', nome: String(nome||''), operator: String(opPost||''), queued: !!queued, error: err }); } catch {}
-                      }
-                    })
-                    .catch((err) => {
-                      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_error', nome: String(nome||''), operator: String(opPost||''), error: String(err && err.message || err || '') }); } catch {}
-                    });
+                  enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
+                    reason: String(lrPost && lrPost.reason || 'login_form'),
+                    source: 'human_resume_post_nav'
+                  }).then((res) => {
+                    try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_result', nome: String(nome||''), operator: String(opPost||''), ok: !!(res && res.ok), error: String(res && res.error || '') }); } catch {}
+                  }).catch((err) => {
+                    try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_error', nome: String(nome||''), operator: String(opPost||''), error: String(err && err.message || err || '') }); } catch {}
+                  });
                 } catch {}
                 await snapshotStatusAndWrite();
                 return { ok: true, scheduledLoginRemediate: true, preflight: { ok: true, state: 'login_required_post_nav', reason: String(lrPost.reason || '') } };
@@ -9714,10 +9710,9 @@ const handlers = {
                 // Agenda remediação automática para convergir o fluxo Robe sem depender de novo clique.
                 setTimeout(() => {
                   try {
-                    handlers.login_remediate({
-                      nome,
-                      operator: `robe_play_login_required:${nome}:${Date.now()}`,
-                      options: { overrideHumanHold: true }
+                    enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
+                      reason: rr || 'login_required',
+                      source: 'robe_play_login_required'
                     }).catch(() => {});
                   } catch {}
                 }, 0);
@@ -10940,8 +10935,28 @@ const AUTO_LR_CFG = {
   }
 };
 
+const RECOVERY_QUEUE_CFG = {
+  enabled: String(process.env.RECOVERY_QUEUE_ENABLED || '1').trim() !== '0',
+  tickMs: Math.max(2000, Number(process.env.RECOVERY_QUEUE_TICK_MS || 5000) || 5000),
+  delayMinMs: Math.max(5 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MIN_MS || (60 * 60 * 1000)) || (60 * 60 * 1000)),
+  delayMaxMs: Math.max(10 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MAX_MS || (2 * 60 * 60 * 1000)) || (2 * 60 * 60 * 1000)),
+  maxAttemptsPerItem: Math.max(1, Number(process.env.RECOVERY_QUEUE_MAX_ATTEMPTS || 6) || 6),
+};
+if (RECOVERY_QUEUE_CFG.delayMaxMs < RECOVERY_QUEUE_CFG.delayMinMs) {
+  RECOVERY_QUEUE_CFG.delayMaxMs = RECOVERY_QUEUE_CFG.delayMinMs;
+}
+
+const RECOVERY_ACTION = Object.freeze({
+  LOGIN_REQUIRED: 'login_required_recover',
+  CAPTCHA: 'captcha_recover',
+  IDENTITY: 'identity_recover',
+  APPEAL: 'appeal_followup_recover',
+});
+
 let _autoLoginRemediateRunning = false;
 let _autoLoginRemediateRunningNome = null;
+let _recoveryQueueTickRunning = false;
+let _recoveryQueueLastNoopLogAt = 0;
 
 function _pruneWindow(arr, winMs) {
   const now = Date.now();
@@ -10949,8 +10964,393 @@ function _pruneWindow(arr, winMs) {
   return a.filter(ts => ts && (now - ts) <= winMs);
 }
 
+function _recoveryRandomDelayMs() {
+  const min = Number(RECOVERY_QUEUE_CFG.delayMinMs || 60 * 60 * 1000) || (60 * 60 * 1000);
+  const max = Number(RECOVERY_QUEUE_CFG.delayMaxMs || 2 * 60 * 60 * 1000) || (2 * 60 * 60 * 1000);
+  if (max <= min) return min;
+  return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+function _newRecoveryItemId(nome, tipo) {
+  return `rq_${Date.now()}_${safeFilePart(nome)}_${safeFilePart(tipo)}_${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function _getRecoveryQueueFromDesired(desired) {
+  desired = desired || {};
+  desired._recoveryQueue = desired._recoveryQueue || {};
+  const q = desired._recoveryQueue;
+  q.enabled = RECOVERY_QUEUE_CFG.enabled;
+  q.items = Array.isArray(q.items) ? q.items : [];
+  q.history = Array.isArray(q.history) ? q.history : [];
+  q.running = q.running && typeof q.running === 'object' ? q.running : null;
+  q.cooldownUntil = Number(q.cooldownUntil || 0) || 0;
+  q.lastTickAt = Number(q.lastTickAt || 0) || 0;
+  return q;
+}
+
+function _queueAudit(event, payload = {}) {
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: String(event || ''),
+      ...payload
+    });
+  } catch {}
+}
+
+async function enqueueRecoveryAction(nome, tipo, {
+  reason = '',
+  source = '',
+  immediate = false,
+  force = false,
+  meta = null
+} = {}) {
+  try {
+    if (!RECOVERY_QUEUE_CFG.enabled) {
+      nome = String(nome || '').trim();
+      tipo = String(tipo || '').trim();
+      if (!nome || !tipo) return { ok: false, skipped: 'disabled_invalid_input' };
+      try {
+        _queueAudit('recovery_queue_bypass_disabled', { nome, tipo, reason: String(reason || '').slice(0, 120), source: String(source || '').slice(0, 80) });
+      } catch {}
+      if (tipo === RECOVERY_ACTION.LOGIN_REQUIRED) {
+        const queued = queueAutoLoginRemediate(nome, { reason, source, immediate: true, force: true });
+        return { ok: !!queued, skipped: 'disabled_legacy_login' };
+      }
+      const ctrl = controllers.get(nome);
+      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, skipped: 'disabled_no_ctrl' };
+      const pages = await ctrl.browser.pages().catch(() => []);
+      const pg = (pages && pages[0]) || ctrl.mainPage || null;
+      if (!pg) return { ok: false, skipped: 'disabled_no_page' };
+      if (tipo === RECOVERY_ACTION.CAPTCHA) {
+        setTimeout(() => { try { runCaptchaFlow(nome, ctrl, pg, { source: source || 'legacy_disabled', force: true }).catch(()=>{}); } catch {} }, 0);
+        return { ok: true, skipped: 'disabled_legacy_captcha' };
+      }
+      if (tipo === RECOVERY_ACTION.IDENTITY) {
+        setTimeout(() => { try { runIdentityFlow(nome, ctrl, pg, { source: source || 'legacy_disabled', force: true }).catch(()=>{}); } catch {} }, 0);
+        return { ok: true, skipped: 'disabled_legacy_identity' };
+      }
+      if (tipo === RECOVERY_ACTION.APPEAL) {
+        setTimeout(() => { try { appealMonitorCheckNow(nome, ctrl).catch(()=>{}); } catch {} }, 0);
+        return { ok: true, skipped: 'disabled_legacy_appeal' };
+      }
+      return { ok: false, skipped: 'disabled_unknown_type' };
+    }
+    nome = String(nome || '').trim();
+    tipo = String(tipo || '').trim();
+    if (!nome || !tipo) return { ok: false, skipped: 'invalid_input' };
+    const now = Date.now();
+    const reasonSafe = String(reason || '').slice(0, 180);
+    const sourceSafe = String(source || '').slice(0, 80);
+    let out = null;
+    await fileStore.withDesiredFileLockUpdate((desired) => {
+      desired = desired || {};
+      desired.perfis = desired.perfis || {};
+      const q = _getRecoveryQueueFromDesired(desired);
+      const items = q.items;
+      const idx = items.findIndex((it) =>
+        it &&
+        it.nome === nome &&
+        it.tipo === tipo &&
+        it.state !== 'done' &&
+        it.state !== 'cancelled'
+      );
+      if (idx >= 0) {
+        const item = items[idx];
+        item.lastSeenAt = now;
+        item.seenCount = Number(item.seenCount || 0) + 1;
+        if (item.state === 'running') item.seenWhileRunning = Number(item.seenWhileRunning || 0) + 1;
+        if (reasonSafe) item.lastReason = reasonSafe;
+        if (sourceSafe) item.lastSource = sourceSafe;
+        if (meta && typeof meta === 'object') item.lastMeta = meta;
+        items[idx] = item;
+        out = { ok: true, dedup: true, itemId: item.id, nextEligibleAt: Number(item.nextEligibleAt || 0) || 0 };
+        return desired;
+      }
+      const delayMs = force ? 0 : (immediate ? _recoveryRandomDelayMs() : _recoveryRandomDelayMs());
+      const nextEligibleAt = now + delayMs;
+      const item = {
+        id: _newRecoveryItemId(nome, tipo),
+        nome,
+        tipo,
+        state: 'pending',
+        reason: reasonSafe || null,
+        source: sourceSafe || null,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        nextEligibleAt,
+        attempts: 0,
+        seenCount: 1,
+        seenWhileRunning: 0,
+        lastOutcome: null,
+        lastError: null,
+        lastReason: reasonSafe || null,
+        lastSource: sourceSafe || null,
+        createdBy: sourceSafe || 'worker',
+        meta: (meta && typeof meta === 'object') ? meta : null,
+      };
+      items.push(item);
+      out = { ok: true, dedup: false, itemId: item.id, nextEligibleAt };
+      return desired;
+    });
+    if (out && out.ok) {
+      _queueAudit(out.dedup ? 'recovery_queue_dedup_hit' : 'recovery_queue_enqueued', {
+        nome,
+        tipo,
+        reason: reasonSafe || null,
+        source: sourceSafe || null,
+        itemId: out.itemId,
+        nextEligibleAt: out.nextEligibleAt
+      });
+    }
+    return out || { ok: false, skipped: 'enqueue_failed' };
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message).slice(0, 180) : String(e).slice(0, 180);
+    _queueAudit('recovery_queue_enqueue_error', { nome: String(nome || ''), tipo: String(tipo || ''), error: msg });
+    return { ok: false, error: msg };
+  }
+}
+
+async function _finishRecoveryQueueRun({
+  runId = '',
+  lockOwner = '',
+  item = null,
+  success = false,
+  outcome = '',
+  error = '',
+  keepInQueue = false
+} = {}) {
+  const now = Date.now();
+  const delayMs = _recoveryRandomDelayMs();
+  const cooldownUntil = now + delayMs;
+  await fileStore.withDesiredFileLockUpdate((desired) => {
+    desired = desired || {};
+    const q = _getRecoveryQueueFromDesired(desired);
+    q.running = null;
+    q.cooldownUntil = cooldownUntil;
+    q.lastDoneAt = now;
+    q.lastOutcome = String(outcome || (success ? 'ok' : 'failed')).slice(0, 140);
+    q.lastError = error ? String(error).slice(0, 220) : null;
+    const items = q.items;
+    const idx = items.findIndex((it) => it && item && it.id === item.id);
+    if (idx >= 0) {
+      const cur = items[idx];
+      if (keepInQueue) {
+        cur.state = 'pending';
+        cur.nextEligibleAt = cooldownUntil;
+        cur.lastOutcome = q.lastOutcome;
+        cur.lastError = q.lastError;
+        cur.lastRunAt = now;
+        cur.attempts = Number(cur.attempts || 0) + 1;
+        items.splice(idx, 1);
+        items.push(cur);
+      } else {
+        cur.state = 'done';
+        cur.doneAt = now;
+        cur.lastOutcome = q.lastOutcome;
+        cur.lastError = q.lastError;
+        cur.lastRunAt = now;
+        cur.attempts = Number(cur.attempts || 0) + 1;
+        items.splice(idx, 1);
+      }
+    }
+    q.history = Array.isArray(q.history) ? q.history : [];
+    q.history.push({
+      ts: now,
+      runId: String(runId || ''),
+      itemId: item && item.id ? item.id : null,
+      nome: item && item.nome ? item.nome : null,
+      tipo: item && item.tipo ? item.tipo : null,
+      success: !!success,
+      outcome: q.lastOutcome,
+      error: q.lastError,
+      delayMs
+    });
+    if (q.history.length > 200) q.history = q.history.slice(-200);
+    return desired;
+  });
+  _queueAudit(keepInQueue ? 'recovery_queue_requeued' : 'recovery_queue_done', {
+    runId: String(runId || ''),
+    itemId: item && item.id ? item.id : null,
+    nome: item && item.nome ? item.nome : null,
+    tipo: item && item.tipo ? item.tipo : null,
+    success: !!success,
+    outcome: String(outcome || (success ? 'ok' : 'failed')).slice(0, 140),
+    error: error ? String(error).slice(0, 220) : null,
+    cooldownUntil
+  });
+  try {
+    if (lockOwner) provisionLock.release({ owner: String(lockOwner), force: false });
+  } catch {}
+}
+
+async function _executeRecoveryQueueItem(item) {
+  const nome = String(item && item.nome || '').trim();
+  const tipo = String(item && item.tipo || '').trim();
+  const attempts = Number(item && item.attempts || 0) || 0;
+  if (!nome || !tipo) return { ok: false, outcome: 'invalid_item', error: 'invalid_item' };
+  const ctrl = controllers.get(nome);
+  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
+    return { ok: false, outcome: 'no_ctrl', error: 'no_connected_browser' };
+  }
+  const pages = await ctrl.browser.pages().catch(() => []);
+  const pg = (pages && pages[0]) || ctrl.mainPage || null;
+  if (!pg) return { ok: false, outcome: 'no_page', error: 'no_page' };
+  const operator = `recovery_queue:${tipo}:${nome}:${Date.now()}`;
+  if (tipo === RECOVERY_ACTION.LOGIN_REQUIRED) {
+    const resp = await handlers.login_remediate({
+      nome,
+      operator,
+      options: {
+        overrideHumanHold: false,
+        closeAfterSuccess: true,
+        startAfterSuccess: true,
+        reopenClosedForRam: true,
+        maxHardDeactivations: 2,
+        totalTimeoutMs: AUTO_LR_CFG.totalTimeoutMs,
+        stageTimeoutMs: AUTO_LR_CFG.stageTimeoutMs,
+        waitBusyMs: 120_000
+      }
+    });
+    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'login_recovered' : 'login_recover_failed', error: resp && resp.error ? String(resp.error) : null };
+  }
+  if (tipo === RECOVERY_ACTION.CAPTCHA) {
+    const resp = await runCaptchaFlow(nome, ctrl, pg, { source: 'recovery_queue', force: true }).catch((e) => ({ ok: false, error: (e && e.message) || String(e) }));
+    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'captcha_recovered' : 'captcha_recover_failed', error: resp && resp.error ? String(resp.error) : null };
+  }
+  if (tipo === RECOVERY_ACTION.IDENTITY) {
+    const resp = await runIdentityFlow(nome, ctrl, pg, { source: 'recovery_queue', force: true }).catch((e) => ({ ok: false, error: (e && e.message) || String(e) }));
+    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'identity_recovered' : 'identity_recover_failed', error: resp && resp.error ? String(resp.error) : null };
+  }
+  if (tipo === RECOVERY_ACTION.APPEAL) {
+    const resp = await appealMonitorCheckNow(nome, ctrl).catch((e) => ({ ok: false, error: (e && e.message) || String(e) }));
+    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'appeal_checked' : 'appeal_check_failed', error: resp && resp.error ? String(resp.error) : null };
+  }
+  return { ok: false, outcome: 'unknown_type', error: `unknown_type:${tipo}:attempts=${attempts}` };
+}
+
+async function processRecoveryQueueTick() {
+  if (!RECOVERY_QUEUE_CFG.enabled) return;
+  if (_recoveryQueueTickRunning) return;
+  _recoveryQueueTickRunning = true;
+  const now = Date.now();
+  let runCtx = null;
+  try {
+    if (provisionLock.isActive()) {
+      const lock = provisionLock.readLockState() || null;
+      const kind = String((lock && lock.meta && lock.meta.kind) || '');
+      if (kind !== 'recovery_queue_runner') {
+        const last = Number(_recoveryQueueLastNoopLogAt || 0) || 0;
+        if (!last || (now - last) > 60_000) {
+          _recoveryQueueLastNoopLogAt = now;
+          _queueAudit('recovery_queue_tick_blocked', { reason: 'provision_lock', lockKind: kind || null });
+        }
+        return;
+      }
+    }
+
+    const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
+    const q = _getRecoveryQueueFromDesired(desired);
+    if (q.running && q.running.startedAt && (now - Number(q.running.startedAt || 0)) < (AUTO_LR_CFG.totalTimeoutMs + 120_000)) {
+      return;
+    }
+    if (Number(q.cooldownUntil || 0) > now) return;
+
+    const items = Array.isArray(q.items) ? q.items.slice() : [];
+    const next = items
+      .filter((it) => it && it.state === 'pending')
+      .sort((a, b) => Number(a.nextEligibleAt || 0) - Number(b.nextEligibleAt || 0))[0];
+    if (!next) return;
+    if (Number(next.nextEligibleAt || 0) > now) return;
+
+    const runId = `rqrun_${now}_${crypto.randomUUID().slice(0, 8)}`;
+    const lockOwner = `recovery_queue_runner:${runId}`;
+    try {
+      const got = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: Math.max(120_000, AUTO_LR_CFG.totalTimeoutMs + 120_000), meta: { kind: 'recovery_queue_runner', runId, itemId: next.id, nome: next.nome, tipo: next.tipo } });
+      if (!got) {
+        _queueAudit('recovery_queue_tick_blocked', { reason: 'lock_acquire_failed', runId, itemId: next.id, nome: next.nome, tipo: next.tipo });
+        return;
+      }
+    } catch (e) {
+      _queueAudit('recovery_queue_tick_blocked', { reason: 'lock_acquire_error', runId, error: String((e && e.message) || e).slice(0, 180) });
+      return;
+    }
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      const qq = _getRecoveryQueueFromDesired(d);
+      const idx = qq.items.findIndex((it) => it && it.id === next.id && it.state === 'pending');
+      if (idx < 0) return d;
+      qq.items[idx].state = 'running';
+      qq.items[idx].runningAt = now;
+      qq.items[idx].runId = runId;
+      qq.items[idx].lastStartAt = now;
+      qq.running = {
+        runId,
+        itemId: qq.items[idx].id,
+        nome: qq.items[idx].nome,
+        tipo: qq.items[idx].tipo,
+        startedAt: now
+      };
+      qq.lastTickAt = now;
+      return d;
+    });
+
+    runCtx = { runId, lockOwner, item: next };
+    _queueAudit('recovery_queue_started', {
+      runId,
+      itemId: next.id,
+      nome: next.nome,
+      tipo: next.tipo,
+      attempts: Number(next.attempts || 0) || 0,
+      firstSeenAt: Number(next.firstSeenAt || 0) || 0,
+      lastSeenAt: Number(next.lastSeenAt || 0) || 0,
+      nextEligibleAt: Number(next.nextEligibleAt || 0) || 0
+    });
+
+    const resp = await _executeRecoveryQueueItem(next);
+    const attemptsNext = (Number(next.attempts || 0) || 0) + 1;
+    const maxAttemptsReached = attemptsNext >= RECOVERY_QUEUE_CFG.maxAttemptsPerItem;
+    const keepInQueue = !resp.ok && !maxAttemptsReached;
+    await _finishRecoveryQueueRun({
+      runId,
+      lockOwner,
+      item: next,
+      success: !!resp.ok,
+      outcome: String(resp.outcome || (resp.ok ? 'ok' : 'failed')),
+      error: resp.error ? String(resp.error) : '',
+      keepInQueue
+    });
+  } catch (e) {
+    const msg = (e && e.message) ? String(e.message) : String(e);
+    if (runCtx && runCtx.item) {
+      await _finishRecoveryQueueRun({
+        runId: runCtx.runId,
+        lockOwner: runCtx.lockOwner,
+        item: runCtx.item,
+        success: false,
+        outcome: 'runner_exception',
+        error: msg,
+        keepInQueue: true
+      }).catch(()=>{});
+    } else {
+      _queueAudit('recovery_queue_tick_error', { error: msg.slice(0, 220) });
+    }
+  } finally {
+    _recoveryQueueTickRunning = false;
+  }
+}
+
 function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false, force = false } = {}) {
   try {
+    if (RECOVERY_QUEUE_CFG.enabled) {
+      enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
+        reason,
+        source: source || 'auto_login_remediate',
+        immediate,
+        force
+      }).catch(()=>{});
+      return true;
+    }
     if (!AUTO_LR_CFG.enabled) return false;
     if (!nome) return false;
     robeMeta[nome] = robeMeta[nome] || {};
@@ -11008,6 +11408,9 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
 }
 
 async function autoLoginRemediateTick() {
+  if (RECOVERY_QUEUE_CFG.enabled) {
+    return processRecoveryQueueTick();
+  }
   if (!AUTO_LR_CFG.enabled) return;
   if (_autoLoginRemediateRunning) return;
   // Não competir com provisionamento/manual configure em andamento: evita alternância de lock
@@ -11371,7 +11774,12 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
         const op = `human_reconcile_login_form:${String(nome||'')}:${now}`;
         try { provisionAudit.append({ ts: now, event: 'human_reconcile_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
         setTimeout(() => {
-          try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
+          try {
+            enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
+              reason: lr.reason || 'login_form',
+              source: 'human_reconcile'
+            }).catch(()=>{});
+          } catch {}
         }, 0);
       } else {
         try { provisionAudit.append({ ts: now, event: 'human_reconcile_schedule_suppressed', nome: String(nome||''), reason: 'min_interval' }); } catch {}
@@ -11913,7 +12321,12 @@ async function nurseTick() {
                 const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
                 const pg = pages && pages[0];
                 if (pg) {
-                  await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
+                  try {
+                    await enqueueRecoveryAction(nome, RECOVERY_ACTION.IDENTITY, {
+                      reason: 'identity_required',
+                      source: 'nurse_identity_required'
+                    });
+                  } catch {}
                 }
               }
               await snapshotStatusAndWrite().catch(()=>{});
@@ -11948,7 +12361,12 @@ async function nurseTick() {
                 const pg = (pages && pages[0]) || ctrl.mainPage || null;
                 if (pg) {
                   try { provisionAudit.append({ ts: now, event: 'nurse_captcha_flow_schedule', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
-                  runCaptchaFlow(nome, ctrl, pg, { source: 'nurse_captcha_login_required', force: true }).catch(()=>{});
+                  try {
+                    await enqueueRecoveryAction(nome, RECOVERY_ACTION.CAPTCHA, {
+                      reason: rr || 'captcha',
+                      source: 'nurse_captcha_login_required'
+                    });
+                  } catch {}
                 } else {
                   try { provisionAudit.append({ ts: now, event: 'nurse_captcha_flow_no_page', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
                 }
@@ -12596,7 +13014,10 @@ async function nurseTick() {
                 try {
                   const pg = (lrPage || p0);
                   if (pg && ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-                    await runIdentityFlow(nome, ctrl, pg, { source: 'lr_scan' }).catch(()=>null);
+                    await enqueueRecoveryAction(nome, RECOVERY_ACTION.IDENTITY, {
+                      reason: rr || 'identity_required',
+                      source: 'lr_scan'
+                    }).catch(()=>null);
                   }
                 } catch {}
               } else if (rr.includes('captcha') || rr.includes('checkpoint')) {

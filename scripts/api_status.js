@@ -674,6 +674,41 @@ app.get('/api/perfis/:nome/forensics', async (req, res) => {
   }
 });
 
+// Recovery queue diagnostics (P0 anti-pânico):
+// endpoint de observabilidade para validar: enfileirou -> esperou -> executou -> resultado.
+app.get('/api/recovery-queue/status', async (req, res) => {
+  try {
+    const desired = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} }) || { perfis: {} };
+    const q = desired._recoveryQueue || {};
+    const items = Array.isArray(q.items) ? q.items : [];
+    const history = Array.isArray(q.history) ? q.history : [];
+    const now = Date.now();
+    const pending = items.filter((it) => it && it.state === 'pending');
+    const running = items.filter((it) => it && it.state === 'running');
+    const next = pending
+      .slice()
+      .sort((a, b) => Number(a.nextEligibleAt || 0) - Number(b.nextEligibleAt || 0))
+      .slice(0, 20);
+    return res.json({
+      ok: true,
+      ts: now,
+      enabled: q.enabled !== false,
+      running: q.running || null,
+      cooldownUntil: Number(q.cooldownUntil || 0) || 0,
+      queueLength: items.length,
+      pendingCount: pending.length,
+      runningCount: running.length,
+      nextItems: next,
+      lastOutcome: q.lastOutcome || null,
+      lastError: q.lastError || null,
+      historyTotal: history.length,
+      historyTail: history.slice(-40)
+    });
+  } catch (e) {
+    return res.json({ ok: false, error: `recovery_queue_status_failed:${(e && e.message) || String(e)}` });
+  }
+});
+
 // ATENÇÃO: nunca altere o shape de resposta deste endpoint, nem remova campos esperados pelo painel! Fallbacks SEMPRE devem garantir compatibilidade retroativa.
 
 // Militar: retorna shape exato esperado pelo painel — { mem: {...}, cpu: {...} }
