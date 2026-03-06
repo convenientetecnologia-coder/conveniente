@@ -1568,6 +1568,9 @@ async function execLoginRemediate(cmd) {
     r = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
       method: 'POST',
       headers: { 'x-operator': operator },
+      // Sem isso, a ponte local pode abortar antes do fluxo completar (falso fail).
+      timeoutMs,
+      retries: 0,
       body: { options: (payload && payload.options ? payload.options : {}), timeoutMs }
     }).catch(() => null);
 
