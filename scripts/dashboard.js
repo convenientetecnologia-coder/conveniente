@@ -64,6 +64,16 @@ function debounceWarn(msg, ms = 60000) {
   }
 }
 
+function isBenignAbortError(err) {
+  try {
+    const name = String(err && err.name || '').toLowerCase();
+    const msg = String((err && err.message) ? err.message : err || '').toLowerCase();
+    return name === 'aborterror' || msg.includes('operation was aborted') || msg.includes('aborted');
+  } catch {
+    return false;
+  }
+}
+
 function ensureDirSync(p) {
   try { fsSync.mkdirSync(p, { recursive: true }); } catch {}
 }
@@ -3166,7 +3176,13 @@ async function tick(reason = 'interval') {
 
   } catch (e) {
     const m = e && e.message ? e.message : String(e);
-    debounceWarn('Falha ao enviar status: ' + m);
+    // Timeout/abort em fetch é ruído operacional esperado em cenários transitórios.
+    // Não poluir terminal com WARN contínuo nesses casos.
+    if (!isBenignAbortError(e)) {
+      debounceWarn('Falha ao enviar status: ' + m);
+    } else if (process.env.DASHBOARD_DEBUG === '1') {
+      logger.info('[DASHBOARD] envio de status abortado (transitório)');
+    }
   } finally {
     inFlight = false;
     lastTickDoneAt = Date.now();
