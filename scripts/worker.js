@@ -8669,6 +8669,8 @@ const handlers = {
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
 
+          let messengerLoginConfirmed = false;
+
           // Facebook primeiro (tende a refletir no Messenger)
           pushStep({ step: 'attempt2_login_fb_begin' });
           // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
@@ -8701,6 +8703,7 @@ const handlers = {
           if (await checkAndAbortIfBanned(p0, 'before_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
           const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
           pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
+          messengerLoginConfirmed = !!(rmsg && rmsg.ok === true);
           await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
           if (await checkAndAbortIfBanned(p0, 'after_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
@@ -8856,6 +8859,11 @@ const handlers = {
         const fbUiBlockedOnly = !!(uiFacebook && uiFacebook.ok === false);
         if (!uiOk && messengerUiOk && noLoginRequired && fbUiBlockedOnly) {
           pushStep({ step: 'stock_provision_tolerate_fb_ui_blocked', uiMessenger, uiFacebook });
+          uiOk = true;
+          success = true;
+        }
+        if (!uiOk && noLoginRequired && messengerLoginConfirmed) {
+          pushStep({ step: 'stock_provision_tolerate_residual_ui_after_msg_login', uiMessenger, uiFacebook });
           uiOk = true;
           success = true;
         }
