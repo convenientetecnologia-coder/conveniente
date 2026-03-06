@@ -36,15 +36,21 @@ async function injectCookies(page, cookies) {
   try {
     if (!Array.isArray(cookies) || !cookies.length) return;
     const allowed = ['name','value','domain','path','expires','httpOnly','secure','sameSite'];
-    const fixDomain = (d) => {
+    const ESSENTIAL = new Set(['c_user', 'xs', 'fr', 'sb', 'datr']);
+    const normalizeDomain = (d) => {
       let dd = String(d || '.facebook.com').replace(/\s/g, '').toLowerCase();
+      if (!dd) dd = '.facebook.com';
       if (!dd.startsWith('.')) dd = '.' + dd;
-      if (!dd.includes('.facebook.com')) dd = '.facebook.com';
-      return dd;
+      if (dd.includes('messenger.com')) return '.messenger.com';
+      if (dd.includes('facebook.com')) return '.facebook.com';
+      return '.facebook.com';
+    };
+    const fixDomain = (d) => {
+      return normalizeDomain(d);
     };
     const fixPath = (p) => (typeof p === 'string' ? p.trim() : '/');
     const ascii = (s) => String(s || '').normalize('NFD').replace(/[^\w\-]/g, '');
-    const filtered = cookies.map(c => {
+    const filteredBase = cookies.map(c => {
       const obj = {};
       for (const k of allowed) {
         if (c[k] !== undefined) {
@@ -72,6 +78,22 @@ async function injectCookies(page, cookies) {
       obj.path = fixPath(obj.path);
       return obj;
     }).filter(c => c.name && c.value && c.domain && c.path);
+    // Chromium (RM7) ficou mais estrito no isolamento de domínio:
+    // se vier só .facebook.com, espelhamos cookies essenciais para .messenger.com.
+    const expanded = [];
+    for (const c of filteredBase) {
+      expanded.push(c);
+      if (ESSENTIAL.has(String(c.name || '')) && String(c.domain || '').includes('facebook.com')) {
+        expanded.push({ ...c, domain: '.messenger.com' });
+      }
+    }
+    const seen = new Set();
+    const filtered = expanded.filter((c) => {
+      const key = `${String(c.name||'')}|${String(c.domain||'')}|${String(c.path||'/')}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[COOKIES] PARA INJETAR FINAL:', { cookies: filtered });
     }
