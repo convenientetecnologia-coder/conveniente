@@ -11237,7 +11237,7 @@ async function processRecoveryQueueTick() {
   let runCtx = null;
   try {
     if (provisionLock.isActive()) {
-      const lock = provisionLock.readLockState() || null;
+      const lock = (provisionLock.get && provisionLock.get().lock) || null;
       const kind = String((lock && lock.meta && lock.meta.kind) || '');
       if (kind !== 'recovery_queue_runner') {
         const last = Number(_recoveryQueueLastNoopLogAt || 0) || 0;
@@ -11267,8 +11267,10 @@ async function processRecoveryQueueTick() {
     const lockOwner = `recovery_queue_runner:${runId}`;
     try {
       const got = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: Math.max(120_000, AUTO_LR_CFG.totalTimeoutMs + 120_000), meta: { kind: 'recovery_queue_runner', runId, itemId: next.id, nome: next.nome, tipo: next.tipo } });
-      if (!got) {
-        _queueAudit('recovery_queue_tick_blocked', { reason: 'lock_acquire_failed', runId, itemId: next.id, nome: next.nome, tipo: next.tipo });
+      if (!got || !got.ok) {
+        const lockOwnerBusy = got && got.lock && got.lock.owner ? String(got.lock.owner) : null;
+        const lockError = got && got.error ? String(got.error) : null;
+        _queueAudit('recovery_queue_tick_blocked', { reason: 'lock_acquire_failed', runId, itemId: next.id, nome: next.nome, tipo: next.tipo, lockOwner: lockOwnerBusy, error: lockError });
         return;
       }
     } catch (e) {
