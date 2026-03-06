@@ -763,12 +763,25 @@ function ensureChromeProfilePreferences(userDataDir) {
     prefs.session = prefs.session || {};
     prefs.session.restore_on_startup = 0; // 0: Nova guia
     prefs.session.startup_urls = [];
+    // Idioma/tradução (enterprise):
+    // - força idioma preferencial PT-BR;
+    // - desativa prompt de tradução para evitar "popup" e página em inglês no bootstrap.
+    prefs.intl = prefs.intl || {};
+    prefs.intl.accept_languages = 'pt-BR,pt';
+    prefs.translate = prefs.translate || {};
+    prefs.translate.enabled = false;
+    prefs.translate.translate_site_blacklist = Array.isArray(prefs.translate.translate_site_blacklist)
+      ? Array.from(new Set([...(prefs.translate.translate_site_blacklist || []), '*']))
+      : ['*'];
     writeJsonAtomic(prefsPath, prefs);
 
     // Local State
     const localStatePath = path.join(userDataDir, 'Local State');
     const ls = readJsonSafe(localStatePath, {}) || {};
     ls.exited_cleanly = true;
+    ls.intl = ls.intl || {};
+    ls.intl.app_locale = 'pt-BR';
+    ls.intl.accept_languages = 'pt-BR,pt';
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferências: ' + ((e && e.message) || e)); } } catch {}
@@ -1170,8 +1183,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     const safeLaunchArgs = (() => {
       if (!isManagedChromium) return [...launchArgs];
       const strip = new Set([
-        '--process-per-site',
-        '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion'
+        '--process-per-site'
       ]);
       const base = launchArgs.filter((a) => !strip.has(String(a || '')));
       return [...base, '--disable-background-networking'];

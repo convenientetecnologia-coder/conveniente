@@ -8852,6 +8852,16 @@ const handlers = {
       if (!uiOk) {
         const kind = (uiFacebook && uiFacebook.kind) || (uiMessenger && uiMessenger.kind) || 'ui_blocked';
         pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
+        // Em falha, manter landing no Messenger/login para preservar contexto correto de remediação.
+        try {
+          const pages = await ctrl.browser.pages().catch(()=>[]);
+          const pFail = (pages && pages[0]) ? pages[0] : null;
+          if (pFail) {
+            await pFail.goto('https://www.messenger.com/login.php?next=https%3A%2F%2Fwww.messenger.com%2Fmarketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+            await sleep(900);
+            pushStep({ step: 'ui_blocked_parked_messenger_login' });
+          }
+        } catch {}
         try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate' }); } catch {}
         await failFastToHuman(`ui_blocked:${kind}`);
         return { ok: false, error: `ui_blocked:${kind}`, steps, closedForRam, pausedVirtus };
@@ -11223,10 +11233,14 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     };
     let lr = null;
     let lrPage = pg;
+    let sawMessengerPage = false;
+    let sawFacebookPage = false;
     try {
       for (const p of (pages || []).slice(0, HUMAN_RECONCILE_CFG.maxPagesScan)) {
         const u = safeUrl(p);
         if (!/(facebook|messenger)\.com/i.test(u)) continue;
+        if (/messenger\.com/i.test(u)) sawMessengerPage = true;
+        if (/facebook\.com/i.test(u)) sawFacebookPage = true;
         const det = await browserHelper.detectLoginRequired(p).catch(()=>null);
         if (det && det.loginRequired) {
           if (!lr || reasonPriority(det.reason) > reasonPriority(lr.reason)) {
@@ -11238,6 +11252,25 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     } catch {}
     if (!lr) lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
+      // Guardrail: se o último bloqueio veio de Messenger, mas não há aba Messenger para validar,
+      // o estado é inconclusivo e NÃO pode limpar flags.
+      try {
+        const flagsPeek = await readAccountFlags(nome).catch(()=>({}));
+        const lastLoginSource = String((flagsPeek && flagsPeek.loginSource) || '').toLowerCase();
+        if (lastLoginSource === 'messenger' && !sawMessengerPage) {
+          try {
+            provisionAudit.append({
+              ts: now,
+              event: 'human_reconcile_inconclusive_no_messenger_page',
+              nome: String(nome||''),
+              source: String(source||''),
+              sawMessengerPage: false,
+              sawFacebookPage: !!sawFacebookPage
+            });
+          } catch {}
+          return { ok: true, state: 'inconclusive_no_messenger_page' };
+        }
+      } catch {}
       // Estado real mudou: browser está ok, mas flags antigas podem ter ficado presas (ex.: loginRemediateFailed).
       // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
       let cleared = [];
