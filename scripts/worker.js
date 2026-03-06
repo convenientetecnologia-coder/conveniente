@@ -8775,6 +8775,7 @@ const handlers = {
         !(lrMessenger && lrMessenger.loginRequired) &&
         !(lrFacebook && lrFacebook.loginRequired) &&
         !!uiOk;
+      const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
 
       // Hard rule: se cair em captcha/checkpoint/identity, NÃO é sucesso e deve invocar humano.
       const nonAutomatableReason = (lr) => {
@@ -8803,7 +8804,6 @@ const handlers = {
       if (!uiOk) {
         // Stock provision: tente mais uma rodada determinística (reload + unblock) antes de declarar "UI bloqueada (Humano)".
         // Motivação: conta nova costuma cair em consent/dialog temporário; dá para resolver sem humano em muitos casos.
-        const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
         if (isStockProvision) {
           try {
             pushStep({ step: 'ui_blocked_retry_begin', uiMessenger, uiFacebook });
@@ -8845,6 +8845,19 @@ const handlers = {
               !!uiOk;
             pushStep({ step: 'ui_blocked_retry_done', uiOk, uiMessenger, uiFacebook });
           } catch {}
+        }
+      }
+
+      // Stock provision (conta nova): se Messenger já autenticou e só o create/item ficou com diálogo,
+      // não derrubar o cadastro. Robe já fica em cooldown e o objetivo imediato é Virtus online estável.
+      if (isStockProvision) {
+        const messengerUiOk = (!uiMessenger || uiMessenger.ok === true);
+        const noLoginRequired = !(lrMessenger && lrMessenger.loginRequired) && !(lrFacebook && lrFacebook.loginRequired);
+        const fbUiBlockedOnly = !!(uiFacebook && uiFacebook.ok === false);
+        if (!uiOk && messengerUiOk && noLoginRequired && fbUiBlockedOnly) {
+          pushStep({ step: 'stock_provision_tolerate_fb_ui_blocked', uiMessenger, uiFacebook });
+          uiOk = true;
+          success = true;
         }
       }
 
