@@ -31,6 +31,22 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-07 — [CONV][OPS][DOCS] P2 safe-mode: recovery serial por perfil + fila 15–30min + robe 20–35min
+
+- **O que**:
+  - aplicada governança de recovery com estado único por perfil (evita concorrência simultânea de LR/captcha/identity/appeal no mesmo perfil);
+  - adicionada transição de follow-up por perfil para preservar fluxo natural de recuperação em sequência;
+  - adicionado guardrail anti-conta saudável parada (`virtus_off_auto_heal_guardrail`);
+  - acelerada fila global de recovery para `15–30 min` (defaults);
+  - recalibrado cooldown padrão do `Robe` para `20–35 min`;
+  - desativado `dbg_agent_runtime` legado por padrão (`LEGACY_RUNTIME_DEBUG=1` para habilitar).
+- **Por quê**: reduzir comportamento de pânico/competição em recovery sem sacrificar continuidade de Virtus/Robe.
+- **Evidência**:
+  - código: `C:\conveniente\scripts\worker.js`, `C:\conveniente\scripts\virtus.js`, `C:\conveniente\scripts\robe.js`
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260305-1815-01.md`
+- **Reinícios**: `conveniente` no host alvo (RM7) após `self_update` (`node index.js`).
+- **Rollback**: reverter este commit, disparar `self_update` e reiniciar o runtime.
+
 #### 2026-03-07 — [CONV][OPS][DOCS] P1 anti-pânico: LR scan desacelerado (5min saudável / 20min risco)
 
 - **O que**:

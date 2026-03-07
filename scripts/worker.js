@@ -5226,8 +5226,10 @@ const robeMeta = {};
 
 const __AGENT_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __agentDebugState = { lastByKey: Object.create(null) };
+const LEGACY_RUNTIME_DEBUG_ENABLED = String(process.env.LEGACY_RUNTIME_DEBUG || '').trim() === '1';
 function __agentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
   try {
+    if (!LEGACY_RUNTIME_DEBUG_ENABLED) return;
     const now = Date.now();
     const k = String(key || `${hypothesisId}:${location}:${message}`);
     const last = Number(__agentDebugState.lastByKey[k] || 0) || 0;
@@ -11045,8 +11047,8 @@ const AUTO_LR_CFG = {
 const RECOVERY_QUEUE_CFG = {
   enabled: String(process.env.RECOVERY_QUEUE_ENABLED || '1').trim() !== '0',
   tickMs: Math.max(2000, Number(process.env.RECOVERY_QUEUE_TICK_MS || 5000) || 5000),
-  delayMinMs: Math.max(5 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MIN_MS || (60 * 60 * 1000)) || (60 * 60 * 1000)),
-  delayMaxMs: Math.max(10 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MAX_MS || (2 * 60 * 60 * 1000)) || (2 * 60 * 60 * 1000)),
+  delayMinMs: Math.max(5 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MIN_MS || (15 * 60 * 1000)) || (15 * 60 * 1000)),
+  delayMaxMs: Math.max(10 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MAX_MS || (30 * 60 * 1000)) || (30 * 60 * 1000)),
   maxAttemptsPerItem: Math.max(1, Number(process.env.RECOVERY_QUEUE_MAX_ATTEMPTS || 6) || 6),
 };
 if (RECOVERY_QUEUE_CFG.delayMaxMs < RECOVERY_QUEUE_CFG.delayMinMs) {
@@ -11080,6 +11082,16 @@ function _recoveryRandomDelayMs() {
 
 function _newRecoveryItemId(nome, tipo) {
   return `rq_${Date.now()}_${safeFilePart(nome)}_${safeFilePart(tipo)}_${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function _recoveryStateFromType(tipo = '', phase = 'pending') {
+  const t = String(tipo || '').trim();
+  const p = String(phase || 'pending').trim();
+  if (t === RECOVERY_ACTION.LOGIN_REQUIRED) return p === 'running' ? 'lr_running' : 'lr_pending';
+  if (t === RECOVERY_ACTION.CAPTCHA) return p === 'running' ? 'captcha_running' : 'captcha_pending';
+  if (t === RECOVERY_ACTION.IDENTITY) return p === 'running' ? 'identity_running' : 'identity_pending';
+  if (t === RECOVERY_ACTION.APPEAL) return p === 'running' ? 'appeal_running' : 'appeal_pending';
+  return p === 'running' ? 'recovery_running' : 'recovery_pending';
 }
 
 function _getRecoveryQueueFromDesired(desired) {
@@ -11174,6 +11186,52 @@ async function enqueueRecoveryAction(nome, tipo, {
         out = { ok: true, dedup: true, itemId: item.id, nextEligibleAt: Number(item.nextEligibleAt || 0) || 0 };
         return desired;
       }
+      const idxAny = items.findIndex((it) =>
+        it &&
+        it.nome === nome &&
+        it.state !== 'done' &&
+        it.state !== 'cancelled'
+      );
+      if (idxAny >= 0) {
+        const item = items[idxAny];
+        const prevTipo = String(item.tipo || '').trim();
+        item.lastSeenAt = now;
+        item.seenCount = Number(item.seenCount || 0) + 1;
+        if (reasonSafe) item.lastReason = reasonSafe;
+        if (sourceSafe) item.lastSource = sourceSafe;
+        if (meta && typeof meta === 'object') item.lastMeta = meta;
+        if (item.state === 'running') {
+          item.seenWhileRunning = Number(item.seenWhileRunning || 0) + 1;
+          if (prevTipo !== tipo) {
+            item.nextTipo = tipo;
+            item.nextReason = reasonSafe || null;
+            item.nextSource = sourceSafe || null;
+            item.nextMeta = (meta && typeof meta === 'object') ? meta : null;
+          }
+          out = {
+            ok: true,
+            dedup: true,
+            rerouted: prevTipo !== tipo,
+            itemId: item.id,
+            nextEligibleAt: Number(item.nextEligibleAt || 0) || 0
+          };
+          return desired;
+        }
+        if (prevTipo !== tipo) {
+          item.tipo = tipo;
+          if (reasonSafe) item.reason = reasonSafe;
+          if (sourceSafe) item.source = sourceSafe;
+          if (meta && typeof meta === 'object') item.meta = meta;
+        }
+        out = {
+          ok: true,
+          dedup: true,
+          rerouted: prevTipo !== tipo,
+          itemId: item.id,
+          nextEligibleAt: Number(item.nextEligibleAt || 0) || 0
+        };
+        return desired;
+      }
       const delayMs = force ? 0 : (immediate ? _recoveryRandomDelayMs() : _recoveryRandomDelayMs());
       const nextEligibleAt = now + delayMs;
       const item = {
@@ -11204,6 +11262,7 @@ async function enqueueRecoveryAction(nome, tipo, {
       _queueAudit(out.dedup ? 'recovery_queue_dedup_hit' : 'recovery_queue_enqueued', {
         nome,
         tipo,
+        rerouted: !!out.rerouted,
         reason: reasonSafe || null,
         source: sourceSafe || null,
         itemId: out.itemId,
@@ -11240,9 +11299,22 @@ async function _finishRecoveryQueueRun({
     q.lastError = error ? String(error).slice(0, 220) : null;
     const items = q.items;
     const idx = items.findIndex((it) => it && item && it.id === item.id);
+    let keepInQueueEffective = !!keepInQueue;
     if (idx >= 0) {
       const cur = items[idx];
-      if (keepInQueue) {
+      const hasFollowup = !!(cur.nextTipo && String(cur.nextTipo || '') !== String(cur.tipo || ''));
+      if (hasFollowup) {
+        keepInQueueEffective = true;
+        cur.tipo = String(cur.nextTipo || cur.tipo);
+        if (cur.nextReason) cur.reason = String(cur.nextReason);
+        if (cur.nextSource) cur.source = String(cur.nextSource);
+        if (cur.nextMeta && typeof cur.nextMeta === 'object') cur.meta = cur.nextMeta;
+        cur.nextTipo = null;
+        cur.nextReason = null;
+        cur.nextSource = null;
+        cur.nextMeta = null;
+      }
+      if (keepInQueueEffective) {
         cur.state = 'pending';
         cur.nextEligibleAt = cooldownUntil;
         cur.lastOutcome = q.lastOutcome;
@@ -11260,6 +11332,14 @@ async function _finishRecoveryQueueRun({
         cur.attempts = Number(cur.attempts || 0) + 1;
         items.splice(idx, 1);
       }
+      try {
+        desired.perfis = desired.perfis || {};
+        const curPerfil = desired.perfis[cur.nome] || {};
+        desired.perfis[cur.nome] = {
+          ...curPerfil,
+          recoveryState: keepInQueueEffective ? _recoveryStateFromType(cur.tipo, 'pending') : (success ? 'healthy' : 'recovery_error')
+        };
+      } catch {}
     }
     q.history = Array.isArray(q.history) ? q.history : [];
     q.history.push({
@@ -11401,6 +11481,14 @@ async function processRecoveryQueueTick() {
         startedAt: now
       };
       qq.lastTickAt = now;
+      try {
+        d.perfis = d.perfis || {};
+        const curPerfil = d.perfis[qq.items[idx].nome] || {};
+        d.perfis[qq.items[idx].nome] = {
+          ...curPerfil,
+          recoveryState: _recoveryStateFromType(qq.items[idx].tipo, 'running')
+        };
+      } catch {}
       return d;
     });
 
@@ -12884,6 +12972,62 @@ async function nurseTick() {
                 url: urlNow,
                 title: titleNow
               });
+            }
+          }
+        } catch {}
+
+        // Guardrail P2: nunca manter conta saudável "viva e parada" por política de recovery.
+        // Se não há bloqueio real, não há item pendente/running de recovery e desired.virtus está off,
+        // reativa virtus automaticamente (com debounce) sem depender do LR scan completo.
+        try {
+          const nowGuard = Date.now();
+          const wantNow = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
+          const desiredVirtusOff = String((wantNow && wantNow.virtus) || '').toLowerCase() === 'off';
+          const hardBlock = !!(flagsSnapshot && (
+            flagsSnapshot.loginRequired === true ||
+            flagsSnapshot.loginRemediateFailed === true ||
+            flagsSnapshot.messengerPin === true ||
+            flagsSnapshot.banned === true ||
+            flagsSnapshot.twoFactor === true ||
+            flagsSnapshot.identityRequired === true ||
+            flagsSnapshot.identitySubmitted === true ||
+            flagsSnapshot.appealSubmitted === true
+          ));
+          const qItems = (desired && desired._recoveryQueue && Array.isArray(desired._recoveryQueue.items))
+            ? desired._recoveryQueue.items
+            : [];
+          const hasPendingRecovery = qItems.some((it) =>
+            it && it.nome === nome && (it.state === 'pending' || it.state === 'running')
+          );
+          const shouldGuardHeal =
+            desiredVirtusOff &&
+            !hardBlock &&
+            !hasPendingRecovery &&
+            !!(wantNow && wantNow.active === true) &&
+            !!ctrl &&
+            ctrl.humanControl !== true &&
+            ctrl.configurando !== true &&
+            ctrl.trabalhando !== true;
+          if (shouldGuardHeal) {
+            robeMeta[nome] = robeMeta[nome] || {};
+            const lastHeal = Number(robeMeta[nome].lastVirtusGuardHealAt || 0) || 0;
+            if (!lastHeal || (nowGuard - lastHeal) > (5 * 60 * 1000)) {
+              robeMeta[nome].lastVirtusGuardHealAt = nowGuard;
+              await fileStore.withDesiredFileLockUpdate((d) => {
+                d = d || {};
+                d.perfis = d.perfis || {};
+                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'on', humanHold: false };
+                return d;
+              }).catch(()=>{});
+              try {
+                provisionAudit.append({
+                  ts: nowGuard,
+                  event: 'virtus_off_auto_heal_guardrail',
+                  nome: String(nome || ''),
+                  policy: 'healthy_profile_never_stalled'
+                });
+              } catch {}
+              setTimeout(() => { try { handlers.start_work({ nome, operator: 'virtus_off_auto_heal_guardrail' }).catch(()=>{}); } catch {} }, 0);
             }
           }
         } catch {}

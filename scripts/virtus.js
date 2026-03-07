@@ -80,6 +80,7 @@ async function clearComposerIfAny(p, campo) {
 // Debug flags por variável de ambiente
 const VIRTUS_SCROLL_DEBUG = process.env && process.env.VIRTUS_SCROLL_DEBUG === '1';
 const VIRTUS_DETAILED_DEBUG = process.env && process.env.VIRTUS_DEBUG === '1';
+const LEGACY_RUNTIME_DEBUG_ENABLED = String(process.env.LEGACY_RUNTIME_DEBUG || '').trim() === '1';
 const VIRTUS_PAGE_HEAP_RECYCLE_MB = parseInt(process.env.VIRTUS_PAGE_HEAP_RECYCLE_MB || '75', 10);
 const VIRTUS_PAGE_NODES_RECYCLE = parseInt(process.env.VIRTUS_PAGE_NODES_RECYCLE || '2600', 10);
 const VIRTUS_PAGE_RECYCLE_COOLDOWN_MS = parseInt(process.env.VIRTUS_PAGE_RECYCLE_COOLDOWN_MS || '900000', 10); // 15 min
@@ -103,6 +104,7 @@ const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
 const __virtusDbgState = { lastByKey: Object.create(null) };
 function __virtusAgentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
   try {
+    if (!LEGACY_RUNTIME_DEBUG_ENABLED) return;
     const now = Date.now();
     const k = String(key || `${hypothesisId}:${location}:${message}`);
     const last = Number(__virtusDbgState.lastByKey[k] || 0) || 0;
