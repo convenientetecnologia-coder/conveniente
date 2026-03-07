@@ -1248,3 +1248,23 @@ Mudança técnica:
 
 Resultado esperado:
 - menos assinatura de ritmo robótico no Robe sem impacto funcional relevante.
+
+---
+
+## Humanização no Browser Helper (2026-03-07, RM7)
+
+Contexto:
+- `browser.js` ainda continha delays fixos curtos em ações de click/type.
+
+Mudança técnica:
+- `scripts/browser.js`
+  - pausa humana central:
+    - `BROWSER_HUMAN_PAUSE_MIN_MS=220`
+    - `BROWSER_HUMAN_PAUSE_JITTER_MS=180`
+  - jitter de ação:
+    - click `90..170ms`
+    - type `65..140ms`
+  - aplicado em caminhos de nonce/login/fallback e click real de assistente.
+
+Resultado esperado:
+- menor assinatura sistemática no helper base de navegador com manutenção de robustez.

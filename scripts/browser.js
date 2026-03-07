@@ -350,7 +350,20 @@ async function ensureMinimizedWindowForPage(page) {
   return;
 }
 
-function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+const BROWSER_HUMAN_PAUSE_MIN_MS = Math.max(120, parseInt(process.env.BROWSER_HUMAN_PAUSE_MIN_MS || '220', 10) || 220);
+const BROWSER_HUMAN_PAUSE_JITTER_MS = Math.max(0, parseInt(process.env.BROWSER_HUMAN_PAUSE_JITTER_MS || '180', 10) || 180);
+const BROWSER_CLICK_DELAY_MIN_MS = Math.max(40, parseInt(process.env.BROWSER_CLICK_DELAY_MIN_MS || '90', 10) || 90);
+const BROWSER_CLICK_DELAY_MAX_MS = Math.max(BROWSER_CLICK_DELAY_MIN_MS, parseInt(process.env.BROWSER_CLICK_DELAY_MAX_MS || '170', 10) || 170);
+const BROWSER_TYPE_DELAY_MIN_MS = Math.max(30, parseInt(process.env.BROWSER_TYPE_DELAY_MIN_MS || '65', 10) || 65);
+const BROWSER_TYPE_DELAY_MAX_MS = Math.max(BROWSER_TYPE_DELAY_MIN_MS, parseInt(process.env.BROWSER_TYPE_DELAY_MAX_MS || '140', 10) || 140);
+function randBetween(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
+function toHumanPauseMs(ms) {
+  const raw = Math.max(0, Number(ms) || 0);
+  if (raw === 0) return 0;
+  if (raw >= BROWSER_HUMAN_PAUSE_MIN_MS) return raw;
+  return BROWSER_HUMAN_PAUSE_MIN_MS + Math.floor(Math.random() * (BROWSER_HUMAN_PAUSE_JITTER_MS + 1));
+}
+function sleep(ms){ return new Promise(r => setTimeout(r, toHumanPauseMs(ms))); }
 
 async function hasFocus(page) {
   try {
@@ -1375,10 +1388,10 @@ async function clickByXPath(page, xps, { waitNav = true, timeoutNav = 15000, log
         if (waitNav) {
           await Promise.all([
             page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: timeoutNav }).catch(()=>{}),
-            els[0].click({ delay: 80 })
+            els[0].click({ delay: randBetween(BROWSER_CLICK_DELAY_MIN_MS, BROWSER_CLICK_DELAY_MAX_MS) })
           ]);
         } else {
-          await els[0].click({ delay: 80 });
+          await els[0].click({ delay: randBetween(BROWSER_CLICK_DELAY_MIN_MS, BROWSER_CLICK_DELAY_MAX_MS) });
         }
         return true;
       }
@@ -1405,7 +1418,7 @@ async function resolveNonceIfPresent(page, { logPrefix='[messenger][nonce]', max
       try {
         await Promise.all([
           page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}),
-          recarregar.click({ delay: 60 })
+          recarregar.click({ delay: randBetween(BROWSER_CLICK_DELAY_MIN_MS, BROWSER_CLICK_DELAY_MAX_MS) })
         ]);
         await sleep(800);
         continue;
@@ -4244,7 +4257,7 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
     const r = await pickAndClick();
     if (r && r.ok && typeof r.x === 'number' && typeof r.y === 'number') {
       // Clique real (mouse) para evitar falso "click()" sem efeito.
-      try { await page.mouse.click(r.x, r.y, { delay: 28 }).catch(()=>{}); } catch {}
+      try { await page.mouse.click(r.x, r.y, { delay: randBetween(BROWSER_CLICK_DELAY_MIN_MS, BROWSER_CLICK_DELAY_MAX_MS) }).catch(()=>{}); } catch {}
       await sleep(650);
       return {
         ok: true,
@@ -4486,8 +4499,8 @@ async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true 
       if (e) e.value = '';
       if (p) p.value = '';
     }).catch(()=>{});
-    await page.type('input[name="email"], input#email', email, { delay: 28 }).catch(()=>{});
-    await page.type('input[name="pass"], input#pass', pass, { delay: 28 }).catch(()=>{});
+    await page.type('input[name="email"], input#email', email, { delay: randBetween(BROWSER_TYPE_DELAY_MIN_MS, BROWSER_TYPE_DELAY_MAX_MS) }).catch(()=>{});
+    await page.type('input[name="pass"], input#pass', pass, { delay: randBetween(BROWSER_TYPE_DELAY_MIN_MS, BROWSER_TYPE_DELAY_MAX_MS) }).catch(()=>{});
   } catch (e) {
     return { ok: false, error: (e && e.message) || 'type_failed' };
   }

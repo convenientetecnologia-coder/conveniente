@@ -2453,3 +2453,14 @@ Adendo (ajuste operacional aprovado pelo owner):
   - diminuir assinatura robótica de microtempos no fluxo Robe mantendo comportamento funcional.
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Forense fase 5: humanização de base no Browser Helper
+
+- **Achado de risco**:
+  - delays curtos e fixos em `browser.js` (click/type/mouse click) ainda podiam gerar assinatura sistemática.
+- **Mitigação aplicada**:
+  - guardrail global de pausa humana + jitter de click/type no helper base.
+- **Objetivo**:
+  - diminuir previsibilidade temporal nos fluxos de login/recuperação sem regressão funcional.
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

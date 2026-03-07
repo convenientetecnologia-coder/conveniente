@@ -616,3 +616,12 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - guardrail global em ambos os scripts para converter pauses curtas em faixa humana com jitter configurável.
 - Objetivo:
   - reduzir padrão mecânico de interação durante criação/publicação sem alterar a lógica de negócio.
+
+## 2026-03-07 — Fase 5 forense (humanização no browser.js)
+
+- Achado:
+  - helper base de navegador ainda tinha delays fixos curtos em passos sensíveis de login/recuperação.
+- Correção:
+  - guardrail de pausa humana + jitter para click/type no `scripts/browser.js`.
+- Objetivo:
+  - reduzir previsibilidade de microtempo no núcleo de automação sem degradar estabilidade.

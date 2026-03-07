@@ -141,3 +141,27 @@ Mitigação aplicada:
 
 Objetivo da fase 4:
 - reduzir padrão robótico no fluxo Robe sem alterar a lógica funcional de publicação.
+
+---
+
+### Fase 5 — Humanização de base no Browser Helper
+
+Contexto:
+- `browser.js` ainda mantinha delays fixos curtos em ações sensíveis (click/type/mouse click), o que reforça assinatura sistemática.
+
+Mitigação aplicada:
+- `scripts/browser.js`:
+  - guardrail central de pausa humana:
+    - `BROWSER_HUMAN_PAUSE_MIN_MS` default `220`
+    - `BROWSER_HUMAN_PAUSE_JITTER_MS` default `180`
+  - jitter humano para ações:
+    - click: `BROWSER_CLICK_DELAY_MIN_MS=90`, `BROWSER_CLICK_DELAY_MAX_MS=170`
+    - type: `BROWSER_TYPE_DELAY_MIN_MS=65`, `BROWSER_TYPE_DELAY_MAX_MS=140`
+  - pontos cobertos:
+    - `clickByXPath` (CTA/fallbacks de navegação);
+    - `resolveNonceIfPresent` (botão recarregar nonce);
+    - `hackedAssistStep` (mouse click real);
+    - `tryLoginEmailPass` (digitação email/senha).
+
+Objetivo da fase 5:
+- reduzir previsibilidade temporal no helper base de browser sem quebrar fluxos de recuperação/login.
