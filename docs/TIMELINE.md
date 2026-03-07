@@ -31,6 +31,20 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-07 — [CONV][OPS][DOCS] F0 anti-rajada no nurse/open (backoff progressivo + gate por perfil)
+
+- **O que**:
+  - removido comportamento de retry curto fixo (`3s`) em `nurse_open` sob `ram_low/supervisor_denied`;
+  - aplicado backoff progressivo por perfil com teto e jitter;
+  - adicionado gate de skip durante `activationHeldUntil` e telemetria nova de contenção (`nurse_open_backoff_skip`, `nurse_open_backoff_applied`);
+  - reset de estado de backoff/streak após abertura bem-sucedida.
+- **Por quê**: conter rajadas cíclicas de reabertura (~10s) que elevam pressão operacional e risco anti-abuso.
+- **Evidência**:
+  - código: `C:\conveniente\scripts\worker.js`
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260305-1815-01.md`
+- **Reinícios**: `conveniente` no host alvo (RM7) após `self_update` (`node index.js`).
+- **Rollback**: reverter este commit no `worker.js`, disparar `self_update` e reiniciar o runtime.
+
 #### 2026-03-05 — [DOCS][CONV][OPS] Auditoria pré-código da migração Chrome -> Chromium (com baseline de backup)
 
 - **O que**:

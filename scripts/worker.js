@@ -10692,10 +10692,31 @@ const NURSE_CFG = {
   PAGE_EVAL_TIMEOUT_MS: 5000
 };
 
+const NURSE_OPEN_BACKOFF_CFG = {
+  minMs: Math.max(60_000, Number(process.env.NURSE_OPEN_BACKOFF_MIN_MS || (2 * 60 * 1000)) || (2 * 60 * 1000)),
+  maxMs: Math.max(5 * 60 * 1000, Number(process.env.NURSE_OPEN_BACKOFF_MAX_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)),
+  growth: Math.max(1.2, Number(process.env.NURSE_OPEN_BACKOFF_GROWTH || 2) || 2),
+  jitterMs: Math.max(0, Number(process.env.NURSE_OPEN_BACKOFF_JITTER_MS || 20_000) || 20_000)
+};
+
 const MAX_OPEN_CONCURRENCY = 1;
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
 const ACTIVATE_ONCE_NURSE_TIMEOUT_MS = Math.max(45_000, Math.min(300_000, Number(process.env.ACTIVATE_ONCE_NURSE_TIMEOUT_MS || 120_000) || 120_000));
+
+function isRamDeniedOpenError(err = '') {
+  const e = String(err || '');
+  return /ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(e);
+}
+
+function calcNurseDeniedBackoffMs(prevMs = 0) {
+  const minMs = Math.max(60_000, Number(NURSE_OPEN_BACKOFF_CFG.minMs || 0) || (2 * 60 * 1000));
+  const maxMs = Math.max(minMs, Number(NURSE_OPEN_BACKOFF_CFG.maxMs || 0) || (45 * 60 * 1000));
+  const growth = Math.max(1.2, Number(NURSE_OPEN_BACKOFF_CFG.growth || 0) || 2);
+  const base = prevMs > 0 ? Math.round(prevMs * growth) : minMs;
+  const jitter = Math.floor(Math.random() * (Math.max(0, Number(NURSE_OPEN_BACKOFF_CFG.jitterMs || 0) || 0) + 1));
+  return Math.min(maxMs, base + jitter);
+}
 
 async function activateOnceNurseSafe(nome, source = '', operator = '') {
   const traceId = newFlowId('nurse_open');
@@ -12566,6 +12587,22 @@ async function nurseTick() {
         if (isFrozenNow(nome)) continue;
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
+          try {
+            robeMeta[nome] = robeMeta[nome] || {};
+            const now = Date.now();
+            const lastSkip = Number(robeMeta[nome].lastOpenBackoffSkipLogAt || 0) || 0;
+            if (!lastSkip || (now - lastSkip) > 60_000) {
+              robeMeta[nome].lastOpenBackoffSkipLogAt = now;
+              provisionAudit.append({
+                ts: now,
+                event: 'nurse_open_backoff_skip',
+                nome: String(nome || ''),
+                heldUntil: Number(robeMeta[nome].activationHeldUntil || 0) || 0,
+                remainingMs: Math.max(0, Number(robeMeta[nome].activationHeldUntil || 0) - now),
+                backoffMs: Number(robeMeta[nome].openBackoffMs || 0) || 0
+              });
+            }
+          } catch {}
           continue;
         }
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
@@ -12624,7 +12661,7 @@ async function nurseTick() {
                 robeMeta[nome].lastOpenDeniedAt = Date.now();
                 robeMeta[nome].lastOpenDeniedReason = String(err || '').slice(0, 220);
               } catch {}
-              if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
+              if (isRamDeniedOpenError(err)) {
                 appendForensicEvent({
                   eventType: 'nurse_open_ram_denied',
                   profileName: nome,
@@ -12641,13 +12678,42 @@ async function nurseTick() {
 
                 if (!swapped) {
                   robeMeta[nome] = robeMeta[nome] || {};
-                  // NOVO: Backoff fixo de 3s ao invés de escalonado (supervisor já controla velocidade)
-                  const curBackoff = 3000;
+                  const prevBackoff = Number(robeMeta[nome].openBackoffMs || 0) || 0;
+                  const curBackoff = calcNurseDeniedBackoffMs(prevBackoff);
                   robeMeta[nome].openBackoffMs = curBackoff;
                   robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
-                  await issues.append(nome, 'mil_action', `open_backoff set to ${Math.floor(curBackoff/1000)}s (fixed)`);
-                  logger.warn('[SWAP] open_backoff set', { nome, backoffMs: curBackoff, reason: err });
+                  robeMeta[nome].openDeniedStreak = (Number(robeMeta[nome].openDeniedStreak || 0) || 0) + 1;
+                  try {
+                    provisionAudit.append({
+                      ts: Date.now(),
+                      event: 'nurse_open_backoff_applied',
+                      nome: String(nome || ''),
+                      streak: Number(robeMeta[nome].openDeniedStreak || 0) || 0,
+                      backoffMs: curBackoff,
+                      prevBackoffMs: prevBackoff,
+                      reason: String(err || '').slice(0, 180),
+                      swapped: false
+                    });
+                  } catch {}
+                  await issues.append(nome, 'mil_action', `open_backoff escalado ${Math.floor(curBackoff/1000)}s (ram_denied)`);
+                  logger.warn('[SWAP] open_backoff escalated', { nome, backoffMs: curBackoff, prevBackoffMs: prevBackoff, reason: err });
                 } else {
+                  try {
+                    robeMeta[nome] = robeMeta[nome] || {};
+                    robeMeta[nome].openDeniedStreak = 0;
+                  } catch {}
+                  try {
+                    provisionAudit.append({
+                      ts: Date.now(),
+                      event: 'nurse_open_backoff_applied',
+                      nome: String(nome || ''),
+                      streak: 0,
+                      backoffMs: Number(robeMeta[nome]?.openBackoffMs || 0) || 0,
+                      prevBackoffMs: Number(robeMeta[nome]?.openBackoffMs || 0) || 0,
+                      reason: String(err || '').slice(0, 180),
+                      swapped: true
+                    });
+                  } catch {}
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
               }
@@ -12661,8 +12727,10 @@ async function nurseTick() {
                 decision: 'controller_active',
                 meta: { source: 'nurse_activate_once' }
               });
-              // NOVO: Backoff fixo de 3s ao invés de 15s
-              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 3000;
+              if (robeMeta[nome]) {
+                robeMeta[nome].openBackoffMs = 0;
+                robeMeta[nome].openDeniedStreak = 0;
+              }
               // Progresso do open-all: marca avanço para evitar "stall detector" falso.
               try {
                 const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
