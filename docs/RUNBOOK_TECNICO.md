@@ -1268,3 +1268,31 @@ Mudança técnica:
 
 Resultado esperado:
 - menor assinatura sistemática no helper base de navegador com manutenção de robustez.
+
+---
+
+## Forense de microações residuais (2026-03-07, RM7)
+
+Contexto:
+- auditoria estática detectou pontos ainda mecânicos:
+  - `virtus`: `sleep` sem guardrail e ranges curtos em type/click;
+  - `robe`/`robeVeiculos`: delays de click/type muito baixos;
+  - `browser`: `sleep` local em prune bypassava guardrail;
+  - `worker`: loops fixos curtos de stock-provision.
+
+Mudança técnica:
+- `scripts/virtus.js`
+  - `VIRTUS_HUMAN_PAUSE_MIN_MS=260`, `VIRTUS_HUMAN_PAUSE_JITTER_MS=220`;
+  - type `85..180ms`, enter pós-type `550..1300ms`;
+  - click de abertura de chat `110..220ms`;
+  - pós-click `1100..2200ms`; polling de confirmação `700ms`.
+- `scripts/robe.js` e `scripts/robeVeiculos.js`
+  - click `110..220ms`; type `45..95ms` com jitter.
+- `scripts/browser.js`
+  - prune usa `sleep` global humanizado (remove bypass local).
+- `scripts/worker.js`
+  - `STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS=5000` (default);
+  - `STOCK_PROVISION_RESUME_INTERVAL_MS=10000` (default).
+
+Resultado esperado:
+- menos microassinatura sistemática em interações de DOM/teclado/mouse e menor pressão de loops curtos de manutenção.

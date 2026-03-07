@@ -12870,8 +12870,10 @@ async function stockProvisionResumeTick() {
 setInterval(() => { nurseTick().catch(()=>{}); }, NURSE_CFG.INTERVAL_MS);
 setTimeout(() => { nurseTick().catch(()=>{}); }, 2000);
 // Watch do provision_lock e auto-resume pós stock_provision (P0 gaps)
-setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2000);
-setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, 5000);
+const STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS = Math.max(2000, Number(process.env.STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS || 5000) || 5000);
+const STOCK_PROVISION_RESUME_INTERVAL_MS = Math.max(5000, Number(process.env.STOCK_PROVISION_RESUME_INTERVAL_MS || 10000) || 10000);
+setInterval(() => { try { stockProvisionLockWatchTick(); } catch {} }, STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS);
+setInterval(() => { stockProvisionResumeTick().catch(()=>{}); }, STOCK_PROVISION_RESUME_INTERVAL_MS);
 setTimeout(() => { try { stockProvisionLockWatchTick(); } catch {} }, 2500);
 setTimeout(() => { stockProvisionResumeTick().catch(()=>{}); }, 5500);
 // Autopilot login_remediate: roda em paralelo ao nurseTick, mas com guardrails (1 por vez + skip se provision_lock ativo)

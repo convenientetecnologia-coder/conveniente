@@ -2464,3 +2464,14 @@ Adendo (ajuste operacional aprovado pelo owner):
   - diminuir previsibilidade temporal nos fluxos de login/recuperação sem regressão funcional.
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Forense fase 6: microações e loops residuais
+
+- **Achado de risco**:
+  - persistiam microações rápidas/fixas em `virtus`/`robe` e loops curtos de manutenção em `worker`.
+- **Mitigação aplicada**:
+  - guardrails adicionais de pausa e jitter em `virtus`, aumento de delays de click/type em `robe`/`robeVeiculos`, remoção de bypass de `sleep` local em `browser`, desaceleração configurável dos loops de stock-provision no `worker`.
+- **Objetivo**:
+  - reduzir assinatura sistemática residual sem regressão funcional dos fluxos principais.
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

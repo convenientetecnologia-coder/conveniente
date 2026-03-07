@@ -99,13 +99,17 @@ const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
 const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_CRITICAL_MAX || '350', 10);
-const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(10, parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || '55', 10) || 55);
-const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(VIRTUS_TYPE_DELAY_MIN_MS, parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || '120', 10) || 120);
-const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(80, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || '350', 10) || 350);
-const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || '900', 10) || 900);
-const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '700', 10) || 700);
-const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
-const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
+const VIRTUS_HUMAN_PAUSE_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_HUMAN_PAUSE_MIN_MS || '260', 10) || 260);
+const VIRTUS_HUMAN_PAUSE_JITTER_MS = Math.max(0, parseInt(process.env.VIRTUS_HUMAN_PAUSE_JITTER_MS || '220', 10) || 220);
+const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(40, parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || '85', 10) || 85);
+const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(VIRTUS_TYPE_DELAY_MIN_MS, parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || '180', 10) || 180);
+const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || '550', 10) || 550);
+const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || '1300', 10) || 1300);
+const VIRTUS_CHAT_OPEN_CLICK_DELAY_MIN_MS = Math.max(60, parseInt(process.env.VIRTUS_CHAT_OPEN_CLICK_DELAY_MIN_MS || '110', 10) || 110);
+const VIRTUS_CHAT_OPEN_CLICK_DELAY_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_CLICK_DELAY_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_CLICK_DELAY_MAX_MS || '220', 10) || 220);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(180, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '1100', 10) || 1100);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '2200', 10) || 2200);
+const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(180, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '700', 10) || 700);
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
 const __virtusDbgState = { lastByKey: Object.create(null) };
@@ -163,7 +167,12 @@ let issues = null;
 try { issues = require('./issues.js'); } catch { issues = null; }
 
 function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+  const raw = Math.max(0, Number(ms) || 0);
+  if (raw === 0) return new Promise(r => setTimeout(r, 0));
+  const normalized = raw >= VIRTUS_HUMAN_PAUSE_MIN_MS
+    ? raw
+    : VIRTUS_HUMAN_PAUSE_MIN_MS + Math.floor(Math.random() * (VIRTUS_HUMAN_PAUSE_JITTER_MS + 1));
+  return new Promise(r => setTimeout(r, normalized));
 }
 
 function randomBetween(min, max) {
@@ -1276,7 +1285,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           await found.evaluate((el) => {
             try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
           });
-          await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+          await found.click({ delay: randomBetween(VIRTUS_CHAT_OPEN_CLICK_DELAY_MIN_MS, VIRTUS_CHAT_OPEN_CLICK_DELAY_MAX_MS) }).catch(()=>{});
         } catch {
           await p.evaluate((sel) => {
             const el = document.querySelector(sel);

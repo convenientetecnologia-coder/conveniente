@@ -195,6 +195,10 @@ async function fastDetectPostingLimit(page, { timeoutMs = 1800 } = {}) {
 // Helpers básicos
 const ROBE_HUMAN_PAUSE_MIN_MS = Math.max(120, parseInt(process.env.ROBE_HUMAN_PAUSE_MIN_MS || '220', 10) || 220);
 const ROBE_HUMAN_PAUSE_JITTER_MS = Math.max(0, parseInt(process.env.ROBE_HUMAN_PAUSE_JITTER_MS || '180', 10) || 180);
+const ROBE_CLICK_DELAY_MIN_MS = Math.max(60, parseInt(process.env.ROBE_CLICK_DELAY_MIN_MS || '110', 10) || 110);
+const ROBE_CLICK_DELAY_MAX_MS = Math.max(ROBE_CLICK_DELAY_MIN_MS, parseInt(process.env.ROBE_CLICK_DELAY_MAX_MS || '220', 10) || 220);
+const ROBE_TYPE_DELAY_MIN_MS = Math.max(35, parseInt(process.env.ROBE_TYPE_DELAY_MIN_MS || '45', 10) || 45);
+const ROBE_TYPE_DELAY_MAX_MS = Math.max(ROBE_TYPE_DELAY_MIN_MS, parseInt(process.env.ROBE_TYPE_DELAY_MAX_MS || '95', 10) || 95);
 function toHumanPauseMs(ms) {
   const raw = Math.max(0, Number(ms) || 0);
   if (raw === 0) return 0;
@@ -515,7 +519,7 @@ async function clickExactCenter(page, handle) {
     await sleep(20);
     await page.mouse.up();
   } else {
-    await handle.click({ delay: 60 }).catch(()=>{});
+    await handle.click({ delay: jitter(ROBE_CLICK_DELAY_MIN_MS, ROBE_CLICK_DELAY_MAX_MS) }).catch(()=>{});
   }
 }
 
@@ -590,7 +594,7 @@ async function clickPublishAndWaitState(page, nome, {
 
     // 2. Clique!
     let clickOk = false;
-    try { await btn.focus(); await btn.click({delay: 70}); clickOk = true; } catch {}
+    try { await btn.focus(); await btn.click({ delay: jitter(ROBE_CLICK_DELAY_MIN_MS, ROBE_CLICK_DELAY_MAX_MS) }); clickOk = true; } catch {}
     clicked = true;
     await forensicScreenshot(page, nome, `after_click_publish_${tries}`);
 
@@ -835,11 +839,11 @@ async function selecionarCategoriaMoveis(page) {
   // Novo DOM: input/combobox de busca
   const input = await page.$('input[aria-label="Categoria"][role="combobox"][type="search"]');
   if (input) {
-    await input.click({ delay: 40 }).catch(()=>{});
+    await input.click({ delay: jitter(ROBE_CLICK_DELAY_MIN_MS, ROBE_CLICK_DELAY_MAX_MS) }).catch(()=>{});
     await sleep(120);
     // No NOVO DOM: deve ser "Diversos"
     const alvo = 'Diversos';
-    await input.type(alvo, { delay: 22 }).catch(()=>{});
+    await input.type(alvo, { delay: jitter(ROBE_TYPE_DELAY_MIN_MS, ROBE_TYPE_DELAY_MAX_MS) }).catch(()=>{});
     await sleep(700);
     await page.keyboard.press('Enter');
     await sleep(350);

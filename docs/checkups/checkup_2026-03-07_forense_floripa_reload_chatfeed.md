@@ -165,3 +165,64 @@ Mitigação aplicada:
 
 Objetivo da fase 5:
 - reduzir previsibilidade temporal no helper base de browser sem quebrar fluxos de recuperação/login.
+
+---
+
+### Validação pós-restart RM7 (fase 5)
+
+Evidência coletada:
+- `fetch_logs` requestId `rm7_postrestart_forense_full5_20260307_132424` (`cmdId=ddb4b477-9175-4591-bd53-bd75a8eb0e8a`).
+- `fetch_logs_query` requestId `rm7_postrestart_forense_query5_20260307_132424` (`cmdId=55e18e4a-319e-4ddf-8a36-a0c5ebd14b2e`).
+
+Recorte `provision_audit` (janela ~25.6 min):
+- `reload_rows=0`.
+- `nurse_open_attempt`: `67` eventos, `gap_p50 ~20.5s` (global multi-perfil).
+- `bootstrap_messenger_ok`: `65` eventos, `gap_p50 ~20.7s`.
+- `bootstrap_messenger_ready`: `63` eventos, `gap_p50 ~20.8s`.
+- `open_human_probe_clear`: `62` eventos, `gap_p50 ~20.8s`.
+
+Foco perfil observado (`florianopolis-1764625643701`):
+- sem `nurse_open_denied` no recorte.
+- ciclo principal presente e estável (`nurse_open_attempt` -> `bootstrap_messenger_ok` -> `bootstrap_messenger_ready` -> `open_human_probe_clear`).
+- gaps de `nurse_open_attempt` do perfil no recorte: `9.73 min`, `5.23 min`, `9.67 min`.
+
+Leitura técnica:
+- não houve evidência de rajada de `reload` no pós-restart observado.
+- permanece prioridade forense em reduzir retries curtos residuais por perfil quando houver janela abaixo de 10 min (ex.: gap `5.23 min`).
+
+---
+
+### Fase 6 — Forense de microações sistemáticas (virtus/robe/worker)
+
+Contexto:
+- varredura estática identificou microações ainda rápidas/fixas e loops de manutenção curtos:
+  - `virtus.js`: `sleep` sem guardrail humano e delays de type/click ainda agressivos.
+  - `robe.js`/`robeVeiculos.js`: delays de `click/type` na faixa `40..70ms` e `10..22ms`.
+  - `browser.js`: `sleep` locais em rotinas de prune bypassavam guardrail global.
+  - `worker.js`: watch/resume de stock-provision em `2s/5s` fixos.
+
+Mitigação aplicada:
+- `scripts/virtus.js`:
+  - guardrail de pausa humana no `sleep`:
+    - `VIRTUS_HUMAN_PAUSE_MIN_MS=260`
+    - `VIRTUS_HUMAN_PAUSE_JITTER_MS=220`
+  - aumento e randomização de microtempos:
+    - `VIRTUS_TYPE_DELAY_MIN_MS=85`, `VIRTUS_TYPE_DELAY_MAX_MS=180`
+    - `VIRTUS_ENTER_AFTER_TYPE_MIN_MS=550`, `VIRTUS_ENTER_AFTER_TYPE_MAX_MS=1300`
+    - `VIRTUS_CHAT_OPEN_CLICK_DELAY_MIN_MS=110`, `VIRTUS_CHAT_OPEN_CLICK_DELAY_MAX_MS=220`
+    - `VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS=1100`, `VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS=2200`
+    - `VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS=700`
+- `scripts/robe.js` e `scripts/robeVeiculos.js`:
+  - novos limites globais para microações:
+    - `ROBE_CLICK_DELAY_MIN_MS=110`, `ROBE_CLICK_DELAY_MAX_MS=220`
+    - `ROBE_TYPE_DELAY_MIN_MS=45`, `ROBE_TYPE_DELAY_MAX_MS=95`
+  - substituição de delays curtos fixos por jitter humano nas ações de click/type.
+- `scripts/browser.js`:
+  - remoção de `sleep` locais sem humanização em rotinas de prune (passa a usar guardrail global do arquivo).
+- `scripts/worker.js`:
+  - watch/resume de stock-provision agora configurável e mais desacelerado por padrão:
+    - `STOCK_PROVISION_LOCK_WATCH_INTERVAL_MS=5000`
+    - `STOCK_PROVISION_RESUME_INTERVAL_MS=10000`
+
+Objetivo da fase 6:
+- reduzir assinatura mecânica residual em microinterações e loops curtos sem alterar o fluxo funcional principal.

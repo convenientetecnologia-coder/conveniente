@@ -782,7 +782,6 @@ function ensureChromeProfilePreferences(userDataDir) {
  */
 async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, intervalMs = 250, robeMeta, nome, ctrl } = {}) {
   // 1) Sempre fecha about:blank extras (nunca aguarda flags)
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
   try {
     const pages = await browser.pages();
     for (const p of pages) {
@@ -836,7 +835,6 @@ async function pruneExtraWindows(browser, mainPage, { timeoutMs = 5000, interval
  */
 async function pruneHumanToOneTab(browser, { nome = '', ctrl = null, robeMeta = null } = {}) {
   if (!browser) return { ok: false, error: 'no_browser' };
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
   try {
     const pages = await browser.pages().catch(()=>[]);
     if (!Array.isArray(pages) || pages.length <= 1) {

@@ -625,3 +625,15 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - guardrail de pausa humana + jitter para click/type no `scripts/browser.js`.
 - Objetivo:
   - reduzir previsibilidade de microtempo no núcleo de automação sem degradar estabilidade.
+
+## 2026-03-07 — Fase 6 forense (microações residuais)
+
+- Achado:
+  - ainda havia microações rápidas/fixas em `virtus` e `robe`, além de loops curtos de manutenção em `worker`.
+- Correção:
+  - `virtus`: guardrail de pausa humana + aumento de ranges de type/click.
+  - `robe`/`robeVeiculos`: delays curtos substituídos por jitter humano mais lento.
+  - `browser`: prune passou a reutilizar `sleep` global humanizado (sem bypass local).
+  - `worker`: watch/resume de stock-provision desacelerados por padrão e configuráveis.
+- Objetivo:
+  - reduzir assinatura mecânica residual mantendo estabilidade do atendimento/publicação.
