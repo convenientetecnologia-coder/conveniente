@@ -260,3 +260,12 @@ Adendo técnico (correção complementar sem fallback de URL):
   - revalidação de URL após cada tentativa e re-busca da âncora (DOM virtualizado).
 - resultado esperado:
   - reduzir falso-negativo de abertura (`urlAtual=/marketplace`) sem mudar estratégia funcional.
+
+Adendo técnico 2 (telemetria + ordem primária):
+- para eliminar ambiguidade operacional no RM7, o fluxo passou a registrar no `provision_audit`:
+  - `virtus_chat_open_click_attempt` (modo/tentativa)
+  - `virtus_chat_open_click_result` (modo/tentativa/ok/url)
+- ordem de tentativa agora configurável por env:
+  - `VIRTUS_CHAT_OPEN_PRIMARY_MODE=mouse|dom` (default: `mouse`).
+- decisão atual:
+  - manter `mouse` como primário e `dom` como secundário, preservando fallback interno por click (sem `goto`).

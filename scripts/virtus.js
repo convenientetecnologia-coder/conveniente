@@ -106,6 +106,7 @@ const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, 
 const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '700', 10) || 700);
 const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
 const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
+const VIRTUS_CHAT_OPEN_PRIMARY_MODE = (String(process.env.VIRTUS_CHAT_OPEN_PRIMARY_MODE || 'mouse').trim().toLowerCase() === 'dom') ? 'dom' : 'mouse';
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
 const __virtusDbgState = { lastByKey: Object.create(null) };
@@ -1274,6 +1275,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let achou = false;
         let urlAtual = '';
+        const clickOrder = VIRTUS_CHAT_OPEN_PRIMARY_MODE === 'dom' ? ['dom', 'mouse'] : ['mouse', 'dom'];
         for (let clickTry = 0; clickTry < 2 && !achou; clickTry++) {
           try {
             await found.evaluate((el) => {
@@ -1281,33 +1283,57 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             });
           } catch {}
 
-          // Tentativa primária: click do próprio elemento.
-          try { await found.click({ delay: randomBetween(60, 140) }).catch(()=>{}); } catch {}
-          await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
-
-          // Se não navegou ainda, reforça com click por coordenada real no mesmo item.
-          if (!achou) {
+          for (const clickMode of clickOrder) {
+            if (achou) break;
             try {
-              const box = await found.boundingBox().catch(() => null);
-              if (box && box.width > 4 && box.height > 4) {
-                const x = box.x + (box.width / 2);
-                const y = box.y + (box.height / 2);
-                await p.mouse.move(x, y, { steps: randomBetween(4, 9) }).catch(()=>{});
-                await p.mouse.click(x, y, { delay: randomBetween(70, 160) }).catch(()=>{});
-                await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
+              if (clickMode === 'dom') {
+                await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+              } else {
+                const box = await found.boundingBox().catch(() => null);
+                if (box && box.width > 4 && box.height > 4) {
+                  const x = box.x + (box.width / 2);
+                  const y = box.y + (box.height / 2);
+                  await p.mouse.move(x, y, { steps: randomBetween(4, 9) }).catch(()=>{});
+                  await p.mouse.click(x, y, { delay: randomBetween(70, 160) }).catch(()=>{});
+                }
               }
             } catch {}
-          }
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'virtus_chat_open_click_attempt',
+                nome: String(nome || ''),
+                chatId: String(chatId || '').slice(0, 80),
+                clickTry: Number(clickTry + 1),
+                mode: String(clickMode || '')
+              });
+            } catch {}
 
-          let attempts = 0;
-          while (attempts < 6) {
-            urlAtual = await p.evaluate(() => location.pathname);
-            if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
-              achou = true;
-              break;
+            await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
+
+            let attempts = 0;
+            while (attempts < 6) {
+              urlAtual = await p.evaluate(() => location.pathname);
+              if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
+                achou = true;
+                break;
+              }
+              await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
+              attempts++;
             }
-            await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
-            attempts++;
+
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'virtus_chat_open_click_result',
+                nome: String(nome || ''),
+                chatId: String(chatId || '').slice(0, 80),
+                clickTry: Number(clickTry + 1),
+                mode: String(clickMode || ''),
+                ok: !!achou,
+                url: String(urlAtual || '').slice(0, 180)
+              });
+            } catch {}
           }
 
           // Rebusca a âncora antes da próxima tentativa (DOM pode reciclar após render virtualizada).
