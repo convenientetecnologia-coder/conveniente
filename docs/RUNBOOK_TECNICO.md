@@ -19,6 +19,112 @@ Regra adicional (obrigatória):
 
 ---
 
+### Reativação tokenized por praça + reset de baseline financeiro (CANÔNICO)
+
+Objetivo: reativar praças no tokenized sem carregar saldo/fatura legado da fase de testes.
+
+Escopo atual aprovado:
+- `Montes Claros (MG)`
+- `Foz do Iguaçu (PR)`
+- `Fortaleza (CE)`
+- `Petrolina (PE)`
+- + telefone explícito de operador/teste: `48991985634`
+
+Passos canônicos:
+1. Atualizar pilotos tokenized em `C:\notificador\tokenized_pilot_groups.json`.
+2. Garantir janela de sorteio no runtime (`C:\sitechatbot\lib\pedidosStore.js`) em `180000` ms (3 min).
+3. Rodar **dry-run** financeiro:
+   - `node tools/reset_wallets_tokenized_rollout.js`
+4. Aplicar reset financeiro:
+   - `node tools/reset_wallets_tokenized_rollout.js --apply`
+5. Validar saída:
+   - `drivers_targeted` esperado;
+   - cada item com `balance_cents_after=0` e `open_invoice_cents_after=0`.
+6. Reiniciar runtime:
+   - `sitechatbot` com `node index.js`.
+
+Guardrail obrigatório (legado T+15):
+- manter `CONTEST_LEGACY_T15_ENABLED=0` (default);
+- não reativar follow-up legado T+15/T+1h no piloto atual de contestação imediata.
+
+Garantias do script:
+- quita faturas abertas via rotina oficial (`settleDriverBalance`);
+- aplica ajuste residual (`addManualAdjustment`) só quando necessário para zerar saldo final;
+- mantém trilha auditável no ledger (sem edição manual de tabela).
+
+Rollback:
+- pilotos: restaurar arquivo anterior de `tokenized_pilot_groups.json`;
+- janela: restaurar constante anterior em `pedidosStore.js`;
+- financeiro: aplicar ajuste compensatório no ledger por script (nunca apagar histórico).
+
+---
+
+### Migração de crédito (mensalidade → tokenized) — **CANÔNICO**
+
+Objetivo: migrar crédito proporcional remanescente (e opcionalmente “em dobro”) para motoristas que entram no tokenized, sem risco de inverter sinal (crédito virar dívida).
+
+#### Contrato do ledger (não negociar)
+
+- **No ledger interno (`ct_driver_lead_ledger.amount_cents`)**:
+  - **positivo = dívida**
+  - **negativo = crédito**
+- O CT/UI mostra a “carteira” invertendo o sinal (exibição humana).
+- O botão do CT **Adicionar crédito** é seguro porque usa o endpoint que força `amountCents` negativo internamente:
+  - `POST /convenientetecnologia/api/lead_ledger/add_credit` (backend: `amountCents: -amount`).
+
+#### Formato de entrada (padrão)
+
+Lista no formato:
+
+```text
+telefone/mensalidade_brl/dia_vencimento
+```
+
+Exemplo:
+
+```text
+96981111306/80/24
+79999521849/125/05
+```
+
+#### Script base (CT / sitechatbot)
+
+- Script: `C:\sitechatbot\tools\apply_tokenized_credit_migration_lote1.js`
+- Como usar:
+  1) Atualize:
+     - `MIGRATION_KEY` (tem que ser único por lote e data)
+     - `INPUT[]` com `{ phone, monthly_brl, due_day }`
+  2) Dry-run (obrigatório):
+     - `cd C:\sitechatbot`
+     - `node tools\apply_tokenized_credit_migration_lote1.js`
+  3) Aplicar (exige dupla intenção):
+     - `node tools\apply_tokenized_credit_migration_lote1.js --apply --confirm`
+
+Guard rails do script:
+- sempre converte para crédito interno com `toLedgerCreditCents(...)` (resultado deve ser **negativo**);
+- se por qualquer motivo sair `>= 0`, o script aborta (`invalid_credit_direction_*`);
+- grava `metadata.credit_direction=negative_is_credit`.
+
+#### Auditoria (obrigatória após aplicar)
+
+- `node tools\audit_tokenized_migration_lote1.js`
+- Critério de sucesso:
+  - lançamentos do lote aparecem com `migration_sign != debt` **após** eventual correção;
+  - saldos finais fazem sentido na carteira humana (crédito positivo na UI).
+
+#### Correção de incidente (playbook)
+
+Se um lote foi aplicado com sinal invertido (crédito entrou como dívida):
+
+- Script idempotente de correção: `C:\sitechatbot\tools\fix_tokenized_credit_migration_lote1_sign.js`
+- Uso:
+  - dry-run: `node tools\fix_tokenized_credit_migration_lote1_sign.js`
+  - aplicar: `node tools\fix_tokenized_credit_migration_lote1_sign.js --apply --confirm`
+
+Regra: **nunca** apagar histórico do ledger; correção é sempre por lançamento compensatório (`manual_adjustment`) com `correction_key`.
+
+---
+
 ### Checklist de release / atualização (produção real) — **CANÔNICO**
 
 Objetivo: qualquer GPT/humano consegue atualizar e debugar com **prova**, sem “achismo” e sem travar produção.
@@ -554,6 +660,9 @@ Observação: isso NÃO significa “inventar chaves novas”. Significa “se e
   - observação: `logger.log` pode crescer sem limite; monitorar tamanho e rotacionar manualmente se necessário.
   - `ALLOW_SELF_UPDATE_RESTART=0` (**importante**: evita `self_update` derrubar o processo sozinho)
   - `CONVENIENTE_FATAL_EXIT=0` (default). Se colocar `1`, o processo sai em `uncaughtException/unhandledRejection` para evitar “seguir vivo” corrompido (humano reinicia `node index.js`).
+  - `BROWSER_ENGINE=chromium` (fase 1 canônica: engine padrão Chromium)
+  - `CHROMIUM_PATH` (opcional, recomendado quando o binário não estiver no path default)
+  - regra Fase 1: em `BROWSER_ENGINE=chromium`, o launcher é **estrito** (não faz fallback para Chrome).
 
 - `sitechatbot`:
   - `LOG_LEVEL=INFO`
@@ -665,13 +774,11 @@ Quando formos implementar, vira um checkup próprio com:
 Objetivo: preparar cobrança automática por lead (sem expor secrets).
 
 Escopo desta fase:
-- geração de cobrança em dias úteis às 08:00 (segunda a sexta);
-- regra de competência: sexta/sábado/domingo entram na cobrança de segunda;
+- geração de cobrança **fixa**: **segunda e quinta às 22:00** (fuso `America/Sao_Paulo`);
+- bloqueio por inadimplência: **quinta e segunda às 10:00**;
+- regra de competência: tudo que entrar desde a última emissão entra na próxima emissão (corte no instante real de emissão);
 - baixa automática por webhook de pagamento;
-- bloqueio às 15:00 do dia de cobrança para quem ficar em aberto;
-- desbloqueio de elegibilidade por baixa confirmada.
-
-Configuração (sem valor em docs/chat):
+- desbloqueio de elegibilidade por baixa confirmada.Configuração (sem valor em docs/chat):
 - `ASAAS_ACCESS_TOKEN` (token API);
 - `ASAAS_BASE_URL` (ex.: produção/sandbox);
 - `ASAAS_WEBHOOK_TOKEN` (validação de webhook, se aplicável);
@@ -683,3 +790,396 @@ Configuração (sem valor em docs/chat):
 - evento de baixa recebido no webhook;
 - transição de elegibilidade no CT (bloqueado -> liberado).Regra:
 - se token for compartilhado em texto livre por engano, abrir INC de rotação imediata e revogar chave anterior.
+
+---
+
+## Atualizacao operacional (2026-02-23) — transicao legado/tokenized
+
+### 1) Voltar grupos para legado (manter apenas Ipatinga tokenized)
+
+- Arquivo fonte unica:
+  - `C:\notificador\tokenized_pilot_groups.json`
+- Estado atual canônico:
+  - somente `120363329985026016@g.us` (Ipatinga) no piloto tokenized.
+- Observacao:
+  - o `notificador` usa cache curto da lista (segundos); restart nao e obrigatorio, mas pode ser feito para efeito imediato.
+
+### 2) Reset total de carteiras/leads (baseline zero)
+
+- Script canônico:
+  - `C:\sitechatbot\tools\reset_all_wallets_full_wipe.js`
+- Execucao:
+  - dry-run: `node tools/reset_all_wallets_full_wipe.js`
+  - aplicar: `node tools/reset_all_wallets_full_wipe.js --apply`
+- Efeito:
+  - zera `ct_driver_lead_ledger`, `ct_driver_lead_invoices`, `ct_driver_lead_controls` (financeiro de leads).
+- Validacao objetiva esperada:
+  - `ledger=0`, `invoices=0`, `open_invoices=0`, `active_lead_awards=0`.
+
+### 3) Limpeza seletiva de leads em aberto (quando nao for wipe total)
+
+- Script:
+  - `C:\sitechatbot\tools\cleanup_open_leads_tokenized_rollout.js`
+- Uso:
+  - dry-run: `node tools/cleanup_open_leads_tokenized_rollout.js`
+  - aplicar: `node tools/cleanup_open_leads_tokenized_rollout.js --apply`
+  - opcional: `--keep-token=<LEAD_TOKEN>` para preservar leads especificos.
+
+### 4) Regra de leitura no CT ("Leads em aberto")
+
+- Critério correto:
+  - nao exibir `lead_award` que ja tenha exclusao vinculada (`lead_contested_exclusion` via `contest_source_entry_id`).
+- Objetivo:
+  - evitar dupla leitura visual (lead aparecendo em "aberto" e "excluido" ao mesmo tempo).
+
+### 5) Safeguard obrigatorio em scripts destrutivos (2026-02-23)
+
+- Scripts com escrita destrutiva agora exigem **dupla intencao**:
+  - `node tools/reset_all_wallets_full_wipe.js --apply --confirm`
+  - `node tools/cleanup_open_leads_tokenized_rollout.js --apply --confirm`
+  - `node tools/reset_wallets_tokenized_rollout.js --apply --confirm`
+- Comportamento sem `--confirm`:
+  - retorno `ok=false`
+  - `error=missing_confirm`
+  - `hint` com comando correto.
+- Objetivo:
+  - reduzir risco operacional de execucao acidental em ambiente errado.
+
+### 6) Simulacao canônica pre-Go/No-Go (contestacao)
+
+- Matriz completa (10 motivos + bloqueio da segunda contestacao no mesmo case):
+  - `node tools/simulate_contestation_matrix_live.js --driver 48991985634 --customer 48991985634`
+- Concorrencia:
+  - `node tools/simulate_contestation_concurrency_live.js --driver 48991985634 --customer 48991985634 --count 36`
+- Gate de aprovacao:
+  - matriz `ok=true` e `pass=true`;
+  - concorrencia `ok=true`, `fail=0`.
+
+---
+
+## Diagnóstico enterprise — “pedido não chega no grupo” (fila não drena)
+
+### Sintomas típicos
+
+- Pedidos ficam em `status=pending` por muito tempo (sem virar `sending` e sem `sent_at`).
+- Ou um pedido fica preso em `status=sending` com `sent_at=NULL` por muito tempo.
+
+### Causas raiz mais prováveis (já observadas no campo)
+
+1) **`notificador` parado**
+- Evidência: lock stale em `C:\notificador\.notificador.lock` apontando para PID morto.
+- Ação: iniciar `C:\notificador` → `node index.js`.
+
+2) **Roteamento de cidade inválido**
+- Evidência: `pedidos.last_error` com `no_group_for_city:<cidade_uf>`.
+- Exemplo observado: `no_group_for_city:IPATINGA-MG`.
+- Ação imediata: usar a cidade canônica que existe no mapa do notificador (ex.: `Ipatinga (MG)`).
+
+### Evidência objetiva (como checar)
+
+- Ver status da fila:
+  - `C:\sitechatbot\dados\pedidos.sqlite` → tabela `pedidos`:
+    - `status`, `sent_at`, `locked_at`, `locked_by`, `last_error`
+
+- Checar se `notificador` está vivo:
+  - lock: `C:\notificador\.notificador.lock` (PID gravado)
+  - processo: `node index.js` em execução no diretório `C:\notificador`
+
+### Procedimento de recuperação (seguro)
+
+- Se `notificador` estiver parado: **subir primeiro**.
+- Se houver pedido preso em `sending` sem `sent_at`: pode requeuear para `pending` (caso único) para reprocessar.
+
+> Importante: a correção definitiva é manter o `notificador` como serviço/instância única saudável. Se o lock aponta PID morto, isso é sinal de encerramento inesperado e deve ser tratado como incidente operacional.
+
+---
+
+## Diagnóstico enterprise — CT “engessado” / API lenta (timeouts)
+
+### Sintomas típicos
+
+- UI do CT demora muito para carregar (ou desconecta).
+- Requisições internas (incluindo `/health`) ficam lentas, intermitentes ou estouram timeout.
+
+### Causa raiz provável (já observada)
+
+- O `sitechatbot` executa tarefas pesadas com I/O síncrono no mesmo processo do servidor HTTP.
+  - Exemplo: snapshots de auto-backup com `copyFileSync/statSync/rmSync` podem bloquear o event-loop por segundos.
+
+### Correção (hardening)
+
+- Rodar o auto-backup em **processo filho** (worker), evitando bloquear o event-loop:
+  - worker: `C:\sitechatbot\tools\ct_auto_backup_worker.js`
+  - `sitechatbot/index.js` dispara o worker via `spawn()` no boot e a cada intervalo.
+
+### Validação objetiva (pós-fix)
+
+- Medir latência do `/health` em loop (esperado: < 200ms em ambiente local estável).
+- Abrir o CT e repetir 10 navegações rápidas (sem travar).
+
+### Impacto operacional
+
+- Requer restart do `sitechatbot` para valer.---
+
+## Operação enterprise (recomendado) — 3 processos separados (CT / Notificador / Ngrok)
+
+### Objetivo
+
+- Isolar falhas e reduzir acoplamento operacional.
+- Evitar mistura “runtime unificado” (spawn de filhos) com instâncias manuais.
+
+### Como subir (padrão recomendado)
+
+> Importante: o runtime unificado agora é **opt-in** (desligado por padrão).  
+> Se você rodar `node index.js` em `C:\sitechatbot`, ele **não** deve tentar subir ngrok/notificador automaticamente.
+
+#### Terminal 1 — `sitechatbot` (CT + WhatsApp + API)
+
+- Pasta: `C:\sitechatbot`
+- Comando:
+  - `node index.js`
+
+#### Terminal 2 — `notificador`
+
+- Pasta: `C:\notificador`
+- Comando:
+  - `node index.js`
+
+#### Terminal 3 — `ngrok` (túnel)
+
+- Pasta: `C:\sitechatbot`
+- Comando simples:
+  - `node ngrok.js`
+
+### Customizações (sem mexer em código)
+
+- Para passar argumentos customizados ao ngrok (subdomain etc.):
+  - `CT_NGROK_ARGS="http --region sa --subdomain <...> 3000"`
+
+### Anti-padrão (não fazer)
+
+- Rodar `sitechatbot` com runtime unificado **e** iniciar `notificador` manualmente.
+  - Sintoma: `[LOCK] notificador já em execução` + logs confusos.
+
+---
+
+## Blindagem runtime (anti-travamento) — checklist de implantação segura
+
+### Escopo aplicado- Audit assíncrono com retry/fallback/rotação:
+  - `C:\sitechatbot\whatsapp\lib\audit.js`
+- Retry WhatsApp com classificação de timeout/conexão + jitter:
+  - `C:\sitechatbot\whatsapp\lib\whatsappApi.js`
+  - `C:\sitechatbot\whatsapp\lib\outboxSender.js`
+  - `C:\sitechatbot\whatsapp\lib\config.js`
+- Observabilidade leve:
+  - `C:\sitechatbot\whatsapp\lib\runtimeMetrics.js`
+  - `C:\sitechatbot\whatsapp\index.js`
+  - `C:\sitechatbot\index.js` (`/health` com `latency_ms`)
+
+### Ordem de restart (para ativar no runtime)
+
+1) Reiniciar `sitechatbot` (`C:\sitechatbot` -> `node index.js`)
+2) Manter `notificador` separado (`C:\notificador` -> `node index.js`)
+3) Manter `ngrok` separado (`C:\sitechatbot` -> `node ngrok.js` ou comando manual)### Gates de validação pós-restart
+
+- `GET /health`:
+  - `200` estável
+  - presença de `latency_ms.samples/p50/p95/max`
+- `GET /api/whatsapp/stats`:
+  - presença de `runtime.counters` e `runtime.latencies`
+- Fila de pedidos:
+  - sem `pending/sending/error` presos
+- Audit:
+  - ausência de spam `EBUSY` em janela de observação
+  - se lock ocorrer, fallback funcionando sem bloquear runtime
+
+### Rollback rápido
+
+- Reverter arquivos acima e reiniciar apenas `sitechatbot`.
+
+---
+
+## Monitoração do próximo turno (protocolo enxuto, produção controlada)
+
+### Duração
+
+- 2 janelas de 30 a 60 minutos com uso real.
+
+### Coleta mínima obrigatória
+
+- `/health`:
+  - HTTP 200
+  - `latency_ms.p95`
+- `/api/whatsapp/stats`:
+  - `runtime.counters` (`wa_api.timeout`, `audit.write_fail`, `outbox.retry_scheduled`, `outbox.failed_nonretryable`)
+  - `runtime.latencies.wa_api.send_ms.p95`
+- Fila `pedidos`:
+  - sem stuck em `pending/sending/error`
+
+### Critério de aceite rápido
+
+- sem stuck de fila;
+- sem crescimento anormal de `audit.write_fail`;
+- `wa_api.timeout` apenas intermitente e com recuperação por retry.
+
+### Registro canônico da rodada- consolidar evidências em:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260224-0005-01.md`
+
+---
+
+## Checkpoint oficial (12h) — produção controlada
+
+### Resultado da rodada
+
+- Runtime estável por ~12h na configuração de 3 processos separados.
+- Endpoints operacionais respondendo (`/health`, `/api/whatsapp/stats`, `/api/pedidos/stats`).
+- Fila de pedidos sem stuck (`pending/sending/error`).
+- Outbox do recorte sem erro novo e com volume entregue.
+
+### Estado de governança após checkpoint
+
+- `INC-20260222-2310-01`: fechado (`done`, `pass_for_core`).
+- `INC-20260224-0005-01`: permanece aberto (`need_evidence`, `in_progress`) para fechamento formal após próxima janela assistida.
+- Sorteio: manter produção em `3 minutos`.
+
+### Padrão operacional congelado
+
+- Manter 3 terminais/processos separados:
+  - `C:\sitechatbot` -> `node index.js`
+  - `C:\notificador` -> `node index.js`
+  - `C:\sitechatbot` -> `node ngrok.js` (ou comando manual ngrok)
+- Não reativar runtime unificado durante monitoracão assistida.
+
+---
+
+## Fechamento de cobrança (E2E real) + reset de base
+
+### Resultado validado
+
+- Fluxo CT↔Asaas de boleto validado em produção controlada nos 5 cenários críticos:
+  1) criar sem duplicar;
+  2) pagar e baixar automático;
+  3) cancelar e reabrir lead;
+  4) excluir e compensar lead;
+  5) editar e reemitir.
+
+### Controles obrigatórios ativos
+
+- criação idempotente por `externalReference`;
+- cancelamento com confirmação remota (`deleted=true`);
+- reconciliação periódica anti-zumbi/órfão;
+- baixa manual com governança (override explícito + motivo + trilha).
+
+### Reset operacional (quando solicitado pelo owner)
+
+- comando:
+  - `node C:\sitechatbot\tools\reset_all_wallets_full_wipe.js --apply --confirm`
+- pré-condição:
+  - preflight Asaas sem falhas (`failures=0`);
+- pós-condição esperada:
+  - `ct_driver_lead_ledger=0`
+  - `ct_driver_lead_invoices=0`
+  - `ct_driver_lead_controls=0`
+  - `open_invoices=0`.
+
+---
+
+## Estado vigente — pilotos tokenized (2026-02-26)
+
+Fonte única:
+- `C:\notificador\tokenized_pilot_groups.json`
+
+Grupos ativos:
+- `120363329985026016@g.us` (Ipatinga)
+- `120363404258521988@g.us` (Montes Claros)
+- `120363319453489081@g.us` (Foz do Iguaçu)
+- `120363418394810828@g.us` (Fortaleza)
+- `120363311442748035@g.us` (Petrolina)
+- `120363420004498085@g.us` (Balneário Camboriú)
+
+Checklist rápido de revalidação:
+1. arquivo JSON válido;
+2. IDs sem duplicidade;
+3. cada `groupId` existente em `C:\notificador\gruposids.json`;
+4. mapeamento 6/6 cidades-alvo confirmado.
+
+---
+
+## Sorteio `rank_mode=load` — contingência canônica (sem fallback silencioso)
+
+Diretriz enterprise desta frente:
+
+- sem fallback silencioso de regra de negócio (`load` -> `legacy`);
+- sem travamento global do sistema;
+- falha fica contida na janela/token afetado (fail-closed por janela), com evidência obrigatória e reprocesso explícito.
+
+Documento canônico:
+- `C:\conveniente\docs\checkups\checkup_2026-03-02_anexo_canonico_contingencia_sorteio_load.md`
+
+Regra operacional:
+- se uma janela entrar em erro de cálculo de carga, o GPT registra evidência e executa fluxo de reprocesso controlado; não “troca de critério em silêncio”.
+
+---
+
+## Canary RM1 — restore Chrome + anti-rajada mínimo (2026-03-07)
+
+Objetivo:
+- reduzir rajada interna de scan/open sem carregar as camadas amplas do experimento Chromium.
+
+Pré-condição obrigatória:
+- snapshot do estado atual antes de restore:
+  - `C:\sitechatbot\backups\conveniente_code_chromium_pre_restore_20260307_112310\_code_snapshot_manifest.json`
+
+Restore code-only (sem tocar dados):
+- arquivos restaurados:
+  - `scripts/worker.js`
+  - `scripts/browser.js`
+  - `scripts/api_status.js`
+  - `scripts/bootstrapService.js`
+  - `instalar_conveniente.ps1`
+
+Patch mínimo obrigatório pós-restore (`scripts/worker.js`):
+- `LR_SCAN_BASE_MS` default: `10min`
+- `LR_SCAN_JITTER_MS` default: `2min`
+- `AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS` default: `10min`
+- backoff progressivo `nurse/open` em `ram_denied`:
+  - `NURSE_OPEN_BACKOFF_MIN_MS` default `2min`
+  - `NURSE_OPEN_BACKOFF_MAX_MS` default `45min`
+  - `NURSE_OPEN_BACKOFF_GROWTH` default `2`
+  - `NURSE_OPEN_BACKOFF_JITTER_MS` default `20s`
+- `REOPEN_DELAY_SHORT_MS` default: `60s`
+
+Validação canônica (janela de horas):
+- confirmar redução de repetição curta de `nurse_open_denied` por perfil;
+- confirmar presença de `lr_scan_cadence_applied` e ausência de scan contínuo em segundos;
+- quando houver LR real, confirmar `auto_login_remediate_queued` -> `auto_login_remediate_begin`;
+- manter observabilidade por `provision_audit` e `login_required_events.jsonl`.
+
+---
+
+## Hardening Virtus anti-"feed reload visual" (2026-03-07, RM7)
+
+Contexto:
+- operação detectou efeito visual de "recarregando chats" no perfil `florianopolis-1764625643701` sem confirmação de `page.reload` puro em rajada recente.
+
+Evidência canônica:
+- CT `fetch_logs_query` cmdId `3f8dcb74-a366-46ea-8aef-074ce6b094f4`;
+- requestId `rm7_floripa_forense_20260307_123545`;
+- dossiê: `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`.
+
+Mudança técnica (`scripts/virtus.js`):
+- `POLL_INTERVAL_MS` default humanizado:
+  - normal `60s` (antes `30s`);
+  - slow `90s` (antes `45s`).
+- `SCROLL_TOP_INTERVAL_MS` default humanizado:
+  - normal `5min` (antes `30s`);
+  - slow `8min` (antes `60s`).
+- novos guardrails:
+  - `SCROLL_TOP_IDLE_MIN_GAP_MS=10min`;
+  - `KEEPALIVE_MIN_GAP_MS=5min`.
+- removido reforço `scroll +800ms` no loop.
+
+Pós-deploy (janela 60 min):
+- medir queda de eventos visuais de refresh em operação;
+- manter taxa de resposta Virtus estável;
+- verificar ausência de regressão de `login_required`/bloqueio temporário no perfil foco.

@@ -2392,3 +2392,21 @@ Adendo (ajuste operacional aprovado pelo owner):
   - reposicionado `finally` para o bloco correto da varredura LR; removido bloco indevido em fluxo de delete banido.
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_auditoria_rajadas_pos_restart_rm7.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Forense de "chat feed recarregando" (Florianopolis) + humanização Virtus
+
+- **Perfil foco**:
+  - `florianopolis-1764625643701` (operação observou "recarregando chats" visual).
+- **Evidência CT**:
+  - `fetch_logs_query` cmdId `3f8dcb74-a366-46ea-8aef-074ce6b094f4` (requestId `rm7_floripa_forense_20260307_123545`).
+- **Achado técnico**:
+  - sem burst de `page.reload` puro no recorte curto;
+  - padrão visual veio de scroll/keepalive agressivo no loop do Virtus (efeito de "refresh perceptível").
+- **Correção aplicada** (`scripts/virtus.js`):
+  - polling mais humano (`30s -> 60s`, slow `45s -> 90s`);
+  - scroll de topo desacelerado (`30s -> 5min`, slow `60s -> 8min`);
+  - remoção de reforço `scroll +800ms`;
+  - throttle de keepalive (`KEEPALIVE_MIN_GAP_MS=5min`);
+  - gate de scroll por fila/ociosidade (`SCROLL_TOP_IDLE_MIN_GAP_MS=10min`).
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

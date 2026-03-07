@@ -59,9 +59,12 @@ Motivo: isso evita engessar futuros GPTs e, ao mesmo tempo, evita “cada GPT in
   - Incidente P0 em monitoramento (aguardando evidência) — `docs/inbox/need_evidence/INC-20260203-1800-01.md`
   - Incidente P0 em monitoramento (aguardando evidência) — `docs/inbox/need_evidence/INC-20260216-1600-01.md`
   - Incidente P0 em monitoramento (aguardando evidência) — `docs/inbox/need_evidence/INC-20260216-1930-01.md`
+  - Reativação tokenized + reset baseline financeiro (runbook canônico) — `docs/RUNBOOK_TECNICO.md` (seção “Reativação tokenized por praça + reset de baseline financeiro”)
+  - **Migração de crédito (mensalidade → tokenized) + correção de sinal (ledger)** — `docs/RUNBOOK_TECNICO.md` (seção “Migração de crédito (mensalidade → tokenized) — CANÔNICO”)
   - **Inbox de relatos do humano (intake/triage)** — `docs/INBOX_RELATOS_DO_HUMANO.md`
   - **Host registry (apelidos ↔ hostId)** — `docs/HOST_REGISTRY.md`
   - Checkups (relatórios) — `docs/checkups/`
+- **Sorteio justo por carga (contestação não zera prioridade até pagamento)** — `docs/inbox/done/INC-20260302-1500-01.md` (inclui evidências/tokens e auditoria)
   - **P0 (CT) Fonte Única da Verdade — validação**: ver `docs/inbox/done/INC-20260202-2000-01.md` (inclui verificador offline `C:\sitechatbot\tools\verify_virtus_groups_truth.js`)
   - **Playbook (FS) perfis órfãos/recovery/purge (RM1 validado)**: `docs/RUNBOOK_TECNICO.md` (seção “Alinhamento no disco…”) + checkup `docs/checkups/checkup_2026-02-13_rm1_profiles_orphans_alignment.md`
 
@@ -357,7 +360,11 @@ Para detalhes (restart/checklists/diagnóstico), usar o runbook: `docs/RUNBOOK_T
 
 Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
 
----## 2026-02-20 — Fechamento P0 com simulação pesada (PASS)- Rodada final executada com foco em "fechar com chave de ouro", sempre em base forense isolada (sem tocar runtime de produção).
+---
+
+## 2026-02-20 — Fechamento P0 com simulação pesada (PASS)
+
+- Rodada final executada com foco em "fechar com chave de ouro", sempre em base forense isolada (sem tocar runtime de produção).
 - Incidentes P0 validados:
   - webhook Asaas com baixa automática idempotente
   - webhook atrasado recuperado por reconciliação `poll` (`reconcileOpenAsaasPayments`)
@@ -368,3 +375,210 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - sorteio atômico em alta carga (`1200` leads, `62674` participações persistidas, `0` falhas)
   - billing atômico em carga alta (`180` motoristas, `0` boletos abertos após webhook, `180` pagos)
 - Status operacional após rodada: sem pendência P0 aberta nos blocos testados nesta fase.
+
+---
+
+## 2026-02-23 — Consolidacao pre-nova-fase (transicao com menor atrito)
+
+- Contestacao/reabertura estabilizadas em runtime:
+  - reenvio ao grupo apos contestacao valida;
+  - bloqueio apenas do motorista contestante no mesmo `lead_token`;
+  - reabertura automatica quando janela fechou sem participantes (`no_participants`).
+- Governanca de grupos:
+  - todos os grupos voltaram ao legado, mantendo apenas Ipatinga tokenized (`C:\notificador\tokenized_pilot_groups.json`).
+- Financeiro zerado para recomeco limpo:
+  - limpeza seletiva de leads em aberto executada com trilha auditavel;
+  - em seguida, wipe total de carteira/ledger/faturas de lead (`reset_all_wallets_full_wipe.js --apply`);
+  - estado final confirmado: sem saldo/sem boletos/sem leads ativos no ledger.
+- INC de continuidade aberta para nova etapa:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260223-1200-01.md`
+  - foco: reduzir atrito entre metodo antigo e metodo novo antes de migracao ampla.
+
+---
+
+## 2026-02-23 — Hardening final pre-Go/No-Go (copy + seguranca + simulacao)
+
+- Canônico da contestacao alinhado ao runtime real:
+  - arquivo: `C:\conveniente\docs\inbox\done\INC-20260222-2310-01.md`
+  - consolidado: menu 10 opcoes (`r1..r10`), regra de reabertura por motivo e desativacao do legado `CONTEST_LEGACY_T15_ENABLED=0`.
+- Copy financeira unificada no WhatsApp:
+  - vencedor: `💰 Saldo da sua carteira (em aberto): R$ ...`
+  - contestacao aprovada: mesma assinatura de saldo.
+  - bloqueio financeiro: texto padronizado com "saldo em aberto" (removendo copy hibrida "boleto vencido" como frase primaria).
+- Scripts destrutivos com dupla confirmacao:
+  - `reset_all_wallets_full_wipe.js`, `cleanup_open_leads_tokenized_rollout.js`, `reset_wallets_tokenized_rollout.js`
+  - aplicar agora exige: `--apply --confirm`.
+- Script de reteste alinhado com producao:
+  - `release_lead_for_retest.js` voltou para janela de `180000ms` (3 minutos) no output.
+- Evidencia objetiva de validacao:
+  - `node tools/simulate_contestation_matrix_live.js --driver 48991985634 --customer 48991985634` => `ok=true`, `total_scenarios=11`, `pass=true`.
+  - `node tools/simulate_contestation_concurrency_live.js --driver 48991985634 --customer 48991985634 --count 36` => `ok=true`, `pass=36`, `fail=0`.
+  - higiene pos-simulacao: `node tools/cleanup_simulation_artifacts.js` e validacao `--dry-run` com `lead_tokens_found=0`.
+
+---
+
+## 2026-02-23 — Rodada pesada complementar (forense) concluida
+
+- Contestacao T+15 (slice legado) validada em base forense:
+  - `node tools/simulate_contestation_t15_slice.js` => `ok=true`.
+- Ledger financeiro validado sob carga em base forense:
+  - `node tools/simulate_lead_ledger.js` => `ok=true`, `220` motoristas, `90` operacoes por motorista, `mismatches=0`.
+- Status operacional:
+  - pronto para iniciar **teste controlado com equipe + usuarios monitorados**;
+  - manter gate de migracao ampla apenas apos Go/No-Go desse piloto.
+
+---
+
+## 2026-02-23 — Checklist final antes da bateria real com 3 usuários
+
+- Auditoria de ponta a ponta atualizada no INC de transição:
+  - `C:\conveniente\docs\inbox\need_evidence\INC-20260223-1200-01.md`
+- Confirmado no runtime:
+  - contestação `r1..r10` com regras de retorno/não-retorno;
+  - saldo único em mensagens + CT;
+  - crédito manual no CT;
+  - bloqueio operacional manual com botão dinâmico.
+- Plano de bateria real fechado:
+  - 8 cenários, 2 execuções por cenário, com critério PASS/FAIL objetivo.
+- Gate:
+  - Go para bateria controlada;
+  - No-Go para expansão ampla sem evidência da bateria real completa.
+
+---## 2026-02-23 — [BATERIA REAL][VALIDADO] Saldo único + crédito manual + contestação (runtime vivo)
+
+- **Saldo único no WhatsApp (pós-contestação)** validado com crédito manual:
+  - evidência canônica: `C:\conveniente\docs\inbox\done\INC-20260222-2310-01.md` (seção “Evidência (bateria real controlada) — 2026-02-23”).
+  - caso: `pedidoId=TSTBAL2_1771883706901`, `lead_token=LDTSTBAL21771883706901`, saldo exibido `+R$ 80,00`.
+- **Correção aplicada no runtime**:
+  - remover truncamento indevido do saldo pós-contestação (`Math.max(0, ...)`) no WhatsApp.
+  - arquivo: `C:\sitechatbot\whatsapp\lib\flow.js`
+  - requer restart do `sitechatbot` para valer.
+- **Operação: pedido não chega no grupo** (observado e resolvido):
+  - causa raiz 1: `notificador` parado com lock stale (`C:\notificador\.notificador.lock` com PID morto).
+  - causa raiz 2: cidade fora do mapa de roteamento tokenized (`no_group_for_city:IPATINGA-MG`).
+  - correção operacional: subir `C:\notificador` → `node index.js` e usar cidade canônica `Ipatinga (MG)`.
+
+---## 2026-02-24 — [ORGANIZACAO CANONICA] Fechamento da rodada e abertura de monitoracao dedicada
+
+- INC principal de contestacao/financeiro consolidado para operação:
+  - `C:\conveniente\docs\inbox\done\INC-20260222-2310-01.md`
+  - estado no índice atualizado para `done / deployed_monitoring / pass_for_core`.
+- INC dedicado de monitoracao runtime criado para o próximo turno:
+  - `C:\conveniente\docs\inbox\done\INC-20260224-0005-01.md`
+  - foco: observar em produção controlada latência, filas, outbox WhatsApp e auditabilidade.
+- Operação recomendada mantida:
+  - 3 processos separados (`sitechatbot`, `notificador`, `ngrok`) sem mistura com runtime unificado.
+
+---## 2026-02-24 — [PRODUCAO CONTROLADA][12H] Verificacao de estabilidade operacional
+
+- Janela de observacao: sistema em execucao continua por ~12h, sem erro terminal critico reportado na rodada.
+- Evidencias coletadas:
+  - `GET /health` retornando `200`;
+  - `GET /api/whatsapp/stats` retornando `200` com `runtime.counters` e `runtime.latencies`;
+  - `GET /api/pedidos/stats` retornando `200`;
+  - fila `pedidos` sem stuck em `pending/sending/error`.
+- Recorte objetivo de 12h (`wa_outbox`):
+  - `sent=1472`;
+  - sem novos registros com `error` no recorte.
+- Governanca de producao confirmada:
+  - sorteio consolidado novamente em `3 minutos` para operacao real.
+- Decisao:
+  - fluxo principal tokenized/contestacao segue aprovado para operacao;
+  - manter monitoracao assistida no `INC-20260224-0005-01` ate fechamento formal do turno seguinte.
+
+---## 2026-02-24 — [BILLING HARDENING][PASS] Bateria prática completa + reset financeiro total
+
+- Bateria de cobrança executada com validação forense (Asaas + CT + ledger), cobrindo:
+  - criação sem duplicação;
+  - pagamento e baixa automática;
+  - cancelamento com retorno para aberto;
+  - exclusão com compensação de leads;
+  - edição de leads com reemissão.
+- Correção crítica aplicada durante a bateria:
+  - baixa automática de Asaas no reconcile voltou a liquidar invoice (`paid`) sem bloquear fluxo legítimo de webhook/reconcile.
+- Hardening de confiabilidade confirmado:
+  - cliente Asaas com retry + idempotência por `externalReference`;
+  - confirmação forte pós-cancelamento (`deleted=true`);
+  - reconciliação anti-zumbi/órfão ativa.
+- Reset final solicitado pelo owner executado com proteção Asaas:
+  - `C:\sitechatbot\tools\reset_all_wallets_full_wipe.js --apply --confirm`
+  - resultado final: `ledger=0`, `invoices=0`, `open_invoices=0`, `controls=0`.---
+
+## 2026-02-24 — [ORGANIZACAO][INC] Limpeza de backlog + abertura da frente de dashboard de contestacao
+
+- Triagem dos INCs em `need_evidence` executada:
+  - confirmados como fechados: `INC-20260222-2310-01`, `INC-20260224-0005-01`;
+  - itens restantes mantidos em aberto por dependerem de evidência/definição funcional.
+- Correção canônica no índice:
+  - `INC-20260223-1200-01` alinhado para `in_progress / pilot_ready / passed_internal_simulation` (estava desatualizado no `INDEX`).
+- Nova frente aberta para execução imediata:
+  - `INC-20260224-1300-01` em `in_progress`;
+  - escopo: menu novo `Contestacao Tokenized` com métricas por grupo, taxas, ranking de motoristas e ranking de motivos.
+
+---## 2026-02-24 — [AUDITORIA][PRECIFICACAO] Base forense dos ultimos 200 pedidos (incompleto + porte)
+
+- INC de auditoria de preço por faixa concluído:
+  - `INC-20260224-1600-01` (`done`, `audited_data_ready`).
+- Fonte canônica auditada:
+  - `C:\sitechatbot\dados\pedidos.sqlite`, tabela `pedidos`, recorte dos últimos `200` por `created_at DESC`.
+- Resultado objetivo:
+  - incompletos (somente cidade): `37/200` (`18,5%`);
+  - não incompletos: `163/200` (`81,5%`);
+  - com porte preenchido: `123`;
+  - não incompletos sem porte explícito: `40`.
+- Distribuição de porte (contagem):
+  - `Apenas 1 item grande`: `29`;
+  - `Poucos itens (até 5 volumes)`: `22`;
+  - `Pequena mudança`: `33`;
+  - `Mudança de apartamento padrão`: `21`;
+  - `Mudança completa de casa`: `13`;
+  - `Carga comercial ou grande volume`: `5`.
+- Normalização robusta aplicada (aliases + remoção de acento):
+  - `unknown_port_values=0` no recorte.---
+
+## 2026-02-26 — Revalidação do rollout tokenized (6 grupos)
+
+- fonte única revisada: `C:\notificador\tokenized_pilot_groups.json`;
+- configuração confirmada:
+  - Ipatinga (MG) — `120363329985026016@g.us`
+  - Montes Claros (MG) — `120363404258521988@g.us`
+  - Foz do Iguaçu (PR) — `120363319453489081@g.us`
+  - Fortaleza (CE) — `120363418394810828@g.us`
+  - Petrolina (PE) — `120363311442748035@g.us`
+  - Balneário Camboriú (SC) — `120363420004498085@g.us`
+- checks de integridade executados:
+  - JSON válido;
+  - sem IDs repetidos;
+  - sem ID fora do mapa `gruposids.json`;
+  - 6/6 cidades-alvo com roteamento tokenized ativo por `groupId`.
+
+## 2026-03-07 — Restore controlado para canário RM1 (Chrome + anti-rajada)
+
+- Auditoria pré-código concluída e registrada em:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_dossie_pre_codigo_restore_chrome_antirajada_rm1.md`
+- Snapshot do estado Chromium atual criado antes da reversão:
+  - `C:\sitechatbot\backups\conveniente_code_chromium_pre_restore_20260307_112310`
+- Restore executado em modo code-only (sem tocar `dados/`) para baseline:
+  - `scripts/worker.js`, `scripts/browser.js`, `scripts/api_status.js`, `scripts/bootstrapService.js`, `instalar_conveniente.ps1`.
+- Patch mínimo anti-rajada aplicado no `worker.js`:
+  - LR scan único ~10min com jitter;
+  - auto-login-remediate mínimo ~10min por perfil;
+  - backoff progressivo no nurse/open para `ram_denied`;
+  - reabertura curta padrão elevada para `60s`.
+
+## 2026-03-07 — Forense RM7 (Florianopolis) sobre "chat feed recarregando"
+
+- Evidência CT focada no perfil `florianopolis-1764625643701` (RM7):
+  - cmdId `3f8dcb74-a366-46ea-8aef-074ce6b094f4`
+  - requestId `rm7_floripa_forense_20260307_123545`
+- Achado:
+  - sem evidência de rajada recente de `page.reload` puro para o perfil;
+  - o efeito visual de "recarregando chats" vinha do loop de humanização agressivo do Virtus (keepalive + scroll frequente + reforço em 800ms).
+- Correção aplicada em `scripts/virtus.js`:
+  - polling desacelerado para padrão humano (`60s` normal, `90s` slow);
+  - scroll periódico desacelerado (`5min` normal, `8min` slow);
+  - remoção do reforço de scroll em `+800ms`;
+  - throttle de keepalive (`5min`);
+  - gate de scroll por fila e ociosidade (janela de `10min`).
+- Dossiê técnico:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

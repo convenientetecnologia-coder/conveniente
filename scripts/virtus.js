@@ -590,10 +590,24 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
   const HIST_FILE = HIST_JSON_NAME(nome);
   const NO_REPEAT_WINDOW_SEC = 72 * 3600; // 72h de bloqueio hardcoded para blindagem absoluta antiflood
-  const POLL_INTERVAL_MS = slowMode ? 45_000 : 30_000; // menos carga no modo lento
+  const POLL_INTERVAL_MS = Math.max(
+    45_000,
+    Number(process.env.VIRTUS_POLL_INTERVAL_MS || (slowMode ? 90_000 : 60_000)) || (slowMode ? 90_000 : 60_000)
+  );
   const MIN_REPLY_DELAY_MS = slowMode ? 80_000 : 60_000;
   const MAX_REPLY_DELAY_MS = slowMode ? 150_000 : 120_000;
-  const SCROLL_TOP_INTERVAL_MS = slowMode ? 60_000 : 30_000;
+  const SCROLL_TOP_INTERVAL_MS = Math.max(
+    120_000,
+    Number(process.env.VIRTUS_SCROLL_TOP_INTERVAL_MS || (slowMode ? 8 * 60 * 1000 : 5 * 60 * 1000)) || (slowMode ? 8 * 60 * 1000 : 5 * 60 * 1000)
+  );
+  const SCROLL_TOP_IDLE_MIN_GAP_MS = Math.max(
+    120_000,
+    Number(process.env.VIRTUS_SCROLL_TOP_IDLE_MIN_GAP_MS || (10 * 60 * 1000)) || (10 * 60 * 1000)
+  );
+  const KEEPALIVE_MIN_GAP_MS = Math.max(
+    60_000,
+    Number(process.env.VIRTUS_KEEPALIVE_MIN_GAP_MS || (5 * 60 * 1000)) || (5 * 60 * 1000)
+  );
 
   // cache em memória e timers
   const RESP_CACHE_MAX = 5000;
@@ -613,6 +627,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
   let scrollInterval = null; // Militar: cleaning interval to prevent interval leak
 
   let lastScrollToTop = 0;
+  let lastKeepaliveAt = 0;
 
   // trackers
   let saveChain = Promise.resolve();
@@ -1513,6 +1528,9 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
       // Não dispare keepalive durante inserção de mensagem
       if (!isVirtusLocked(nome)) {
+        const nowKeepalive = Date.now();
+        if ((nowKeepalive - Number(lastKeepaliveAt || 0)) >= KEEPALIVE_MIN_GAP_MS) {
+          lastKeepaliveAt = nowKeepalive;
         try {
           await p.evaluate(() => {
             window.dispatchEvent(new Event('focus'));
@@ -1524,6 +1542,7 @@ async function startVirtus(browser, nome, robeMeta = {}) {
             }
           });
         } catch {}
+        }
       }
 
       if (limpaHistoricoVelho()) await salvaHistorico();
@@ -1535,6 +1554,8 @@ async function startVirtus(browser, nome, robeMeta = {}) {
       if (scrollInterval == null) {
         scrollInterval = setInterval(async () => {
           if (!running || !epochOk()) return;
+          const shouldScroll = (Array.isArray(fila) && fila.length > 0) || ((Date.now() - Number(lastScrollToTop || 0)) >= SCROLL_TOP_IDLE_MIN_GAP_MS);
+          if (!shouldScroll) return;
           try {
             const ok = await scrollChatsToTop(p, nome);
             if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', ok ? 'OK' : 'FAIL'); }
@@ -1542,32 +1563,17 @@ async function startVirtus(browser, nome, robeMeta = {}) {
               lastScrollToTop = Date.now();
             }
           } catch {}
-          // Reforço após 800ms para garantir Messenger reativo
-          setTimeout(() => {
-            if (!running || !epochOk()) return;
-            try {
-              const b = getBrowserFromPage(p);
-              if (b && b._sendLock && b._sendLock.active) return;
-            } catch {}
-            scrollChatsToTop(p, nome);
-          }, 800);
         }, SCROLL_TOP_INTERVAL_MS);
       }
       try {
-        const scrolled = await scrollChatsToTop(p, nome);
-        if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL'); }
-        if (scrolled) {
-          lastScrollToTop = Date.now();
+        const shouldScrollNow = (Array.isArray(fila) && fila.length > 0) || ((Date.now() - Number(lastScrollToTop || 0)) >= SCROLL_TOP_IDLE_MIN_GAP_MS);
+        if (shouldScrollNow) {
+          const scrolled = await scrollChatsToTop(p, nome);
+          if (VIRTUS_SCROLL_DEBUG) { log('[SCROLL TOP]', scrolled ? 'OK' : 'FAIL'); }
+          if (scrolled) {
+            lastScrollToTop = Date.now();
+          }
         }
-        // Reforço após 800ms para garantir Messenger reativo
-        setTimeout(() => {
-          if (!running || !epochOk()) return;
-          try {
-            const b = getBrowserFromPage(p);
-            if (b && b._sendLock && b._sendLock.active) return;
-          } catch {}
-          scrollChatsToTop(p, nome);
-        }, 800);
       } catch {}
 
       // #region agent log
