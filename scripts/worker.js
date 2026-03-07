@@ -10348,8 +10348,12 @@ async function appendIssueNurseDebounced(nome, type, message, key) {
 }
 
 const NURSE_CFG = {
-  INTERVAL_MS: 5000,
+  INTERVAL_MS: Math.max(5_000, Number(process.env.NURSE_INTERVAL_MS || 10_000) || 10_000),
   PAGE_EVAL_TIMEOUT_MS: 5000
+};
+
+const NURSE_OPEN_GUARD_CFG = {
+  minRetryMs: Math.max(15_000, Number(process.env.NURSE_OPEN_MIN_RETRY_MS || 60_000) || 60_000)
 };
 
 const LR_SCAN_CFG = {
@@ -11699,6 +11703,12 @@ async function nurseTick() {
       if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
 
+        robeMeta[nome] = robeMeta[nome] || {};
+        const lastOpenAttemptAt = Number(robeMeta[nome].lastNurseOpenAttemptAt || 0) || 0;
+        if (lastOpenAttemptAt && (Date.now() - lastOpenAttemptAt) < NURSE_OPEN_GUARD_CFG.minRetryMs) {
+          continue;
+        }
+
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
           continue;
         }
@@ -11711,6 +11721,8 @@ async function nurseTick() {
         }
         slotsInUse++;
         try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          robeMeta[nome].lastNurseOpenAttemptAt = Date.now();
           let _flags = null;
           try { _flags = await readAccountFlags(nome).catch(()=>null); } catch {}
           if (_flags && _flags.appealSubmitted === true) {
@@ -11748,6 +11760,9 @@ async function nurseTick() {
                 robeMeta[nome] = robeMeta[nome] || {};
                 robeMeta[nome].lastOpenDeniedAt = Date.now();
                 robeMeta[nome].lastOpenDeniedReason = String(err || '').slice(0, 220);
+                const minHoldUntil = Date.now() + NURSE_OPEN_GUARD_CFG.minRetryMs;
+                const curHoldUntil = Number(robeMeta[nome].activationHeldUntil || 0) || 0;
+                robeMeta[nome].activationHeldUntil = Math.max(curHoldUntil, minHoldUntil);
               } catch {}
               if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);

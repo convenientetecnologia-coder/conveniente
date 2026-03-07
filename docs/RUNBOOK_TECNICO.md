@@ -1183,3 +1183,23 @@ Pós-deploy (janela 60 min):
 - medir queda de eventos visuais de refresh em operação;
 - manter taxa de resposta Virtus estável;
 - verificar ausência de regressão de `login_required`/bloqueio temporário no perfil foco.
+
+---
+
+## Guardrail Nurse anti-retry curto (2026-03-07, RM7)
+
+Contexto:
+- investigação fase 2 encontrou risco de tentativas repetidas de `nurse_open_attempt` em intervalo curto quando perfis ficam sem controller (flapping).
+
+Evidência:
+- `fetch_logs` cmdId `0c12f7c4-dd42-4a75-8edc-392c767975b3`
+- `fetch_logs_query` cmdId `cdeb8c5b-d1ec-4be6-90ef-c202cf8b13d9`
+
+Mudança técnica:
+- `scripts/worker.js`
+  - `NURSE_INTERVAL_MS` configurável (default `10000`);
+  - `NURSE_OPEN_MIN_RETRY_MS` configurável (default `60000`);
+  - `nurse_open_denied` agora aplica `activationHeldUntil` mínimo, evitando retry imediato.
+
+Resultado esperado:
+- reduzir tentativa/open "nervoso" sem bloquear recuperação legítima do perfil.

@@ -2410,3 +2410,18 @@ Adendo (ajuste operacional aprovado pelo owner):
   - gate de scroll por fila/ociosidade (`SCROLL_TOP_IDLE_MIN_GAP_MS=10min`).
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Forense fase 2 pós-restart: guardrail anti-loop no Nurse
+
+- **Coleta CT fase 2**:
+  - `fetch_logs` cmdId `0c12f7c4-dd42-4a75-8edc-392c767975b3`
+  - `fetch_logs_query` cmdId `cdeb8c5b-d1ec-4be6-90ef-c202cf8b13d9`
+- **Achado técnico**:
+  - sem burst de reload no recorte pós-restart curto;
+  - identificado risco estrutural de retry curto de `nurse_open_attempt` em perfis sem controller (histórico).
+- **Mitigação aplicada** (`scripts/worker.js`):
+  - `NURSE_INTERVAL_MS` configurável (default `10s`);
+  - `NURSE_OPEN_MIN_RETRY_MS` default `60s` por perfil;
+  - `activationHeldUntil` mínimo em `nurse_open_denied` para evitar martelar reabertura.
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

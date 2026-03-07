@@ -62,3 +62,30 @@ Perfil foco: `florianopolis-1764625643701`
 - Redução visível de "feed recarregando";
 - Sem regressão de atendimento Virtus (fila e envio);
 - Sem aumento de `login_required`/`blocked` em janela de observação.
+
+---
+
+### Fase 2 — Forense pós-restart RM7 (amplo, worker+browser+virtus)
+
+Evidências CT:
+- `fetch_logs` cmdId `0c12f7c4-dd42-4a75-8edc-392c767975b3`
+- `fetch_logs_query` cmdId `cdeb8c5b-d1ec-4be6-90ef-c202cf8b13d9`
+- artefatos:
+  - `C:\sitechatbot\dados\logs\29546e77-083e-4c81-b90f-4402499d0fef\rm7_postrestart_forense_full_20260307_125355.json`
+  - `C:\sitechatbot\dados\logs\29546e77-083e-4c81-b90f-4402499d0fef\rm7_postrestart_forense_query_20260307_125355.json`
+
+Achado objetivo:
+- no recorte pós-restart curto (~22.5 min), **não houve rajada de reload**;
+- porém a trilha ampla mostrou padrão histórico de `nurse_open_attempt` com retry curto repetido em perfis sem controller (janela de ~10s por perfil em caso de flapping).
+
+Risco:
+- mesmo sem `page.reload` explícito, retry curto de abertura/navegação pode gerar "comportamento paranoico" para plataformas sensíveis.
+
+Mitigação aplicada (worker):
+- `scripts/worker.js`:
+  - `NURSE_INTERVAL_MS` passou a ser configurável (default `10s`, antes fixo `5s`);
+  - novo guardrail por perfil: `NURSE_OPEN_MIN_RETRY_MS` (default `60s`);
+  - ao falhar abertura (`nurse_open_denied`), impõe `activationHeldUntil` mínimo de retry para impedir re-tentativa imediata.
+
+Objetivo da mitigação:
+- cortar loops de reabertura em janela curta sem quebrar recuperação normal de perfil.

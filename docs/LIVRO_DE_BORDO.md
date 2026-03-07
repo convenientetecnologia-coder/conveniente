@@ -582,3 +582,16 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - gate de scroll por fila e ociosidade (janela de `10min`).
 - Dossiê técnico:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+## 2026-03-07 — Fase 2 forense pós-restart (worker/browser/virtus)
+
+- Coletas canônicas:
+  - `fetch_logs` cmdId `0c12f7c4-dd42-4a75-8edc-392c767975b3`
+  - `fetch_logs_query` cmdId `cdeb8c5b-d1ec-4be6-90ef-c202cf8b13d9`
+- Achado:
+  - sem evidência de burst de reload no recorte curto pós-restart;
+  - identificado padrão histórico de retry curto em `nurse_open_attempt` (perfil sem controller), potencialmente agressivo.
+- Correção:
+  - `scripts/worker.js` com guardrail de retry mínimo por perfil (`NURSE_OPEN_MIN_RETRY_MS=60s`) e tick mais humano (`NURSE_INTERVAL_MS=10s` por padrão).
+- Objetivo:
+  - impedir martelamento de abertura/navegação em janela curta sem comprometer recuperação normal e atendimento.
