@@ -607,3 +607,12 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - pós-click/poll de URL desacelerados.
 - Objetivo:
   - reduzir “cutucada” de micro-interações no Messenger mantendo estabilidade do atendimento.
+
+## 2026-03-07 — Fase 4 forense (humanização global no Robe)
+
+- Achado:
+  - fluxo `robe` e `robeVeiculos` ainda concentrava sleeps curtos repetidos (assinatura sistemática).
+- Correção:
+  - guardrail global em ambos os scripts para converter pauses curtas em faixa humana com jitter configurável.
+- Objetivo:
+  - reduzir padrão mecânico de interação durante criação/publicação sem alterar a lógica de negócio.

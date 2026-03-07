@@ -1228,3 +1228,23 @@ Mudança técnica:
 
 Resultado esperado:
 - menor assinatura de automação no Messenger sem perda de funcionalidade de atendimento.
+
+---
+
+## Humanização global de pausas no Robe (2026-03-07, RM7)
+
+Contexto:
+- fluxo de publicação (`robe`/`robeVeiculos`) apresentava muitos sleeps curtos repetidos.
+
+Mudança técnica:
+- `scripts/robe.js`, `scripts/robeVeiculos.js`:
+  - novo guardrail central:
+    - `ROBE_HUMAN_PAUSE_MIN_MS=220`
+    - `ROBE_HUMAN_PAUSE_JITTER_MS=180`
+  - comportamento:
+    - `sleep(0)` preservado;
+    - `sleep` abaixo do mínimo sobe para faixa humana;
+    - `sleep` acima do mínimo mantém valor.
+
+Resultado esperado:
+- menos assinatura de ritmo robótico no Robe sem impacto funcional relevante.

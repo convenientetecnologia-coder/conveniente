@@ -121,3 +121,23 @@ Mitigação aplicada:
 
 Objetivo da fase 3:
 - reduzir assinatura de automação em micro-interações sem comprometer taxa de resposta do Virtus.
+
+---
+
+### Fase 4 — Humanização global de pausas no Robe
+
+Contexto:
+- a varredura estática mostrou muitos `sleep` curtos no fluxo de publicação (`robe`/`robeVeiculos`) com cadência sistemática.
+
+Mitigação aplicada:
+- `scripts/robe.js` e `scripts/robeVeiculos.js`:
+  - guardrail central de pausa humana para sleeps curtos:
+    - `ROBE_HUMAN_PAUSE_MIN_MS` default `220`
+    - `ROBE_HUMAN_PAUSE_JITTER_MS` default `180`
+  - regra:
+    - `sleep(0)` permanece `0` (não altera micro-agendamentos internos);
+    - `sleep(ms<min)` sobe para faixa humana com jitter;
+    - `sleep(ms>=min)` preserva valor original.
+
+Objetivo da fase 4:
+- reduzir padrão robótico no fluxo Robe sem alterar a lógica funcional de publicação.

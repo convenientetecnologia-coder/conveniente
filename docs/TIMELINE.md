@@ -2440,3 +2440,16 @@ Adendo (ajuste operacional aprovado pelo owner):
   - reduzir sensibilidade anti-automação do Facebook sem quebrar fluxo de atendimento.
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Forense fase 4: humanização global de pausas no Robe
+
+- **Achado de risco**:
+  - `robe`/`robeVeiculos` com múltiplos `sleep` curtos e cadência sistemática no fluxo de publicação.
+- **Mitigação aplicada**:
+  - guardrail central nos dois scripts para elevar pauses curtas à faixa humana com jitter:
+    - `ROBE_HUMAN_PAUSE_MIN_MS=220`
+    - `ROBE_HUMAN_PAUSE_JITTER_MS=180`
+- **Objetivo**:
+  - diminuir assinatura robótica de microtempos no fluxo Robe mantendo comportamento funcional.
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

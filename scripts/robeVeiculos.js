@@ -176,7 +176,15 @@ async function fastDetectPostingLimit(page, { timeoutMs = 1800 } = {}) {
 }
 
 // Helpers básicos
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const ROBE_HUMAN_PAUSE_MIN_MS = Math.max(120, parseInt(process.env.ROBE_HUMAN_PAUSE_MIN_MS || '220', 10) || 220);
+const ROBE_HUMAN_PAUSE_JITTER_MS = Math.max(0, parseInt(process.env.ROBE_HUMAN_PAUSE_JITTER_MS || '180', 10) || 180);
+function toHumanPauseMs(ms) {
+  const raw = Math.max(0, Number(ms) || 0);
+  if (raw === 0) return 0;
+  if (raw >= ROBE_HUMAN_PAUSE_MIN_MS) return raw;
+  return ROBE_HUMAN_PAUSE_MIN_MS + Math.floor(Math.random() * (ROBE_HUMAN_PAUSE_JITTER_MS + 1));
+}
+const sleep = (ms) => new Promise(r => setTimeout(r, toHumanPauseMs(ms)));
 const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
 // PATCH MILITAR — Constantes de limit_posting
