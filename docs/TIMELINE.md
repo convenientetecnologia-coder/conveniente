@@ -2355,3 +2355,40 @@ Adendo (ajuste operacional aprovado pelo owner):
 - **Operação**:
   - sem `self_update` nesta rodada (owner fará `git pull` no host);
   - requer restart manual do `conveniente` para carregar o patch.
+
+#### 2026-03-07 — [CONVENIENTE][RM1] Restore code baseline Chrome + patch anti-rajada mínimo
+
+- **Escopo aprovado (sem achismo / sem tocar dados)**:
+  - restore **code-only** a partir de `C:\sitechatbot\backups\conveniente_full_20260305_140355`;
+  - sem overwrite de `C:\conveniente\dados\`.
+- **Backup de segurança do estado Chromium antes do restore**:
+  - `C:\sitechatbot\backups\conveniente_code_chromium_pre_restore_20260307_112310\_code_snapshot_manifest.json`;
+  - `robocopy_exit_code=1` (cópia bem-sucedida).
+- **Arquivos restaurados para baseline**:
+  - `C:\conveniente\scripts\worker.js`
+  - `C:\conveniente\scripts\browser.js`
+  - `C:\conveniente\scripts\api_status.js`
+  - `C:\conveniente\scripts\bootstrapService.js`
+  - `C:\conveniente\instalar_conveniente.ps1`
+- **Patch anti-rajada aplicado em `worker.js` (mínimo)**:
+  - cadência única de LR scan: `~10min + jitter` (`LR_SCAN_BASE_MS`/`LR_SCAN_JITTER_MS`);
+  - `AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS` default de `20min` -> `10min`;
+  - backoff progressivo para `nurse/open` em `ram_denied` (`2min` -> teto `45min`);
+  - `REOPEN_DELAY_SHORT_MS` default de `5s` -> `60s`.
+- **Dossiê pré-código canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_dossie_pre_codigo_restore_chrome_antirajada_rm1.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Auditoria de rajadas pós-restart + correção de cadência LR
+
+- **Coleta forense via CT (RM7)**:
+  - `logs_manifest` cmdId `15b72497-bfd4-4912-aa82-9db4421859d6`
+  - `fetch_logs` cmdId `5fca2ab4-2a7d-4ba3-b227-009a1cc6927b`
+  - `fetch_logs_query` cmdId `94da4e23-68b1-4a08-a935-d33ce544cd53`
+- **Achado**:
+  - persistência de rajada de marcação (`auto_login_remediate_queued` em faixa ~5s por perfil) e `lr_scan_tabs` acima do esperado.
+- **Causa raiz**:
+  - bloco `finally` de cadência LR fora do ponto correto no `worker.js`, impedindo consolidar `nextAt` de forma consistente no ciclo de scan.
+- **Correção**:
+  - reposicionado `finally` para o bloco correto da varredura LR; removido bloco indevido em fluxo de delete banido.
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_auditoria_rajadas_pos_restart_rm7.md`

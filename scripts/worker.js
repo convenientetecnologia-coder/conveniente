@@ -3466,22 +3466,7 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               { caller: 'auto_delete_banned_profile', nome }
             );
           } catch {}
-        } catch {} finally {
-          if (runLrScan) {
-            const nextAt = calcLrScanNextAt(Date.now());
-            lrMeta.lastAt = nowLrScan;
-            lrMeta.nextAt = nextAt;
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'lr_scan_cadence_applied',
-                nome: String(nome || ''),
-                nextAt,
-                waitMs: Math.max(0, nextAt - Date.now())
-              });
-            } catch {}
-          }
-        }
+        } catch {}
         try { await fileStore.removeDesired(nome); } catch {}
         try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
         try {
@@ -12153,7 +12138,22 @@ async function nurseTick() {
                 robeMeta[nome].lrAutoClearStreakTs = 0;
               } catch {}
             }
-          } catch {}
+          } catch {} finally {
+            if (runLrScan) {
+              const nextAt = calcLrScanNextAt(Date.now());
+              lrMeta.lastAt = nowLrScan;
+              lrMeta.nextAt = nextAt;
+              try {
+                provisionAudit.append({
+                  ts: Date.now(),
+                  event: 'lr_scan_cadence_applied',
+                  nome: String(nome || ''),
+                  nextAt,
+                  waitMs: Math.max(0, nextAt - Date.now())
+                });
+              } catch {}
+            }
+          }
         } catch {}
 
         if (lr && lr.loginRequired) {
