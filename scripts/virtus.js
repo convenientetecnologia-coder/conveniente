@@ -1272,33 +1272,49 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        try {
-          await found.evaluate((el) => {
-            try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
-          });
-          await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
-        } catch {
-          await p.evaluate((sel) => {
-            const el = document.querySelector(sel);
-            if (el && typeof el.click === 'function') {
-              try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
-              try { el.click(); } catch {}
-            }
-          }, anchorSel);
-        }
-        await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
-
-        let attempts = 0;
         let achou = false;
         let urlAtual = '';
-        while (attempts < 6) {
-          urlAtual = await p.evaluate(() => location.pathname);
-          if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
-            achou = true;
-            break;
+        for (let clickTry = 0; clickTry < 2 && !achou; clickTry++) {
+          try {
+            await found.evaluate((el) => {
+              try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
+            });
+          } catch {}
+
+          // Tentativa primária: click do próprio elemento.
+          try { await found.click({ delay: randomBetween(60, 140) }).catch(()=>{}); } catch {}
+          await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
+
+          // Se não navegou ainda, reforça com click por coordenada real no mesmo item.
+          if (!achou) {
+            try {
+              const box = await found.boundingBox().catch(() => null);
+              if (box && box.width > 4 && box.height > 4) {
+                const x = box.x + (box.width / 2);
+                const y = box.y + (box.height / 2);
+                await p.mouse.move(x, y, { steps: randomBetween(4, 9) }).catch(()=>{});
+                await p.mouse.click(x, y, { delay: randomBetween(70, 160) }).catch(()=>{});
+                await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
+              }
+            } catch {}
           }
-          await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
-          attempts++;
+
+          let attempts = 0;
+          while (attempts < 6) {
+            urlAtual = await p.evaluate(() => location.pathname);
+            if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
+              achou = true;
+              break;
+            }
+            await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
+            attempts++;
+          }
+
+          // Rebusca a âncora antes da próxima tentativa (DOM pode reciclar após render virtualizada).
+          if (!achou && clickTry < 1) {
+            found = await p.$(anchorSel).catch(() => null);
+            if (!found) break;
+          }
         }
         if (!achou) {
           logger.error(`Não entrou no chat correto após o click simulado. (urlAtual=${urlAtual}, esperado=${chatId})`, { nome, chatId });

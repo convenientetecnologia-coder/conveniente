@@ -252,3 +252,11 @@ Correção aplicada:
 
 Objetivo do hotfix:
 - recuperar estabilidade do atendimento (abrir chat por click) sem adicionar fluxo novo.
+
+Adendo técnico (correção complementar sem fallback de URL):
+- `scripts/virtus.js` recebeu robustez no **mesmo** fluxo de click:
+  - até 2 tentativas de abertura do chat por click;
+  - reforço por click real via coordenada (`mouse.click`) no mesmo item quando o click leve não navega;
+  - revalidação de URL após cada tentativa e re-busca da âncora (DOM virtualizado).
+- resultado esperado:
+  - reduzir falso-negativo de abertura (`urlAtual=/marketplace`) sem mudar estratégia funcional.
