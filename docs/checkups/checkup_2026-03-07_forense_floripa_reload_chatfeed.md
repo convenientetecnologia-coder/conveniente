@@ -226,3 +226,29 @@ Mitigação aplicada:
 
 Objetivo da fase 6:
 - reduzir assinatura mecânica residual em microinterações e loops curtos sem alterar o fluxo funcional principal.
+
+---
+
+### Hotfix regressão pós-fase 6 (virtus chat open)
+
+Evidência do incidente (RM7):
+- erro em produção logo após restart/update:
+  - `Não entrou no chat correto após o click simulado. (urlAtual=/marketplace, esperado=<chatId>)`
+  - perfil: `petrolina-1771560719856`
+
+Leitura técnica:
+- regressão concentrada no caminho de abertura de chat do `virtus` após endurecimento de timings da fase 6.
+- decisão operacional: **não** introduzir fallback por URL; restaurar caminho de click previamente estável.
+
+Correção aplicada:
+- `scripts/virtus.js` (somente no caminho de open chat):
+  - remoção do guardrail global de `sleep` introduzido na fase 6;
+  - restauração dos ranges anteriores:
+    - `VIRTUS_TYPE_DELAY_*`: `55..120`
+    - `VIRTUS_ENTER_AFTER_TYPE_*`: `350..900`
+    - `VIRTUS_CHAT_OPEN_POST_CLICK_*`: `700..1400`
+    - `VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS`: `450`
+  - restauração de `found.click({ delay: randomBetween(60, 140) })`.
+
+Objetivo do hotfix:
+- recuperar estabilidade do atendimento (abrir chat por click) sem adicionar fluxo novo.
