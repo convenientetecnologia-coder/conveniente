@@ -1008,19 +1008,10 @@ async function startVirtus(browser, nome, robeMeta = {}) {
         if (age < 8*60*1000) continue; // deixa “aquecendo” 8min antes de reconciliar
         try {
           if (!running || !epochOk()) return;
-          await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil:'domcontentloaded', timeout: 20000 }).catch(()=>{});
-          const looksSent = await wasRecentlySentByMe(p, 10*60*1000);
-          if (looksSent) {
-            // considera “committed”
-            const tsNow = agoraEpoch();
-            historico[chatId] = tsNow;
-            setResponded(chatId, tsNow);
-            await salvaHistorico();
-            await pendingDel(nome, chatId);
-          } else {
-            // rollback: libera para reenvio
-            await pendingDel(nome, chatId);
-          }
+          // Política anti-cutucada: não faz navegação direta por URL de chat em reconciliação.
+          // Se o pending envelheceu, libera para reprocessamento normal pela fila.
+          await pendingDel(nome, chatId);
+          try { await logIssue(nome, 'mil_action', `virtus_pending_reconcile_release_no_goto: chat ${chatId} ageMs=${age}`); } catch {}
         } catch { /* segue próximo */ }
       }
     } catch {}
@@ -1375,16 +1366,29 @@ async function startVirtus(browser, nome, robeMeta = {}) {
 
         let campo = await waitForComposer(p, 10000);
         if (!campo) {
-          logger.warn('Composer não encontrado. Fallback: goto direto e revalidar.', { nome, chatId });
+          logger.warn('Composer não encontrado. Retry por click no mesmo chat (sem goto).', { nome, chatId });
           try {
             if (!running || !epochOk()) { try { await pendingDel(nome, chatId); } catch {} fila = fila.filter(id => id !== chatId); chatAtivo = null; return; }
-            await p.goto(`https://www.messenger.com/marketplace/t/${chatId}/`, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            await sleep(800);
+            if (found) {
+              try { await found.evaluate((el) => { try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {} }); } catch {}
+              try {
+                const box2 = await found.boundingBox().catch(() => null);
+                if (box2 && box2.width > 4 && box2.height > 4) {
+                  const x2 = box2.x + (box2.width / 2);
+                  const y2 = box2.y + (box2.height / 2);
+                  await p.mouse.move(x2, y2, { steps: randomBetween(4, 9) }).catch(()=>{});
+                  await p.mouse.click(x2, y2, { delay: randomBetween(70, 160) }).catch(()=>{});
+                } else {
+                  await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+                }
+              } catch {}
+              await sleep(800);
+            }
           } catch {}
           if (await isChatBlocked(p)) {
-            logger.warn('Chat bloqueado no fallback, marcado respondido', { nome, chatId });
+            logger.warn('Chat bloqueado após retry de click, marcado respondido', { nome, chatId });
             try { await pendingDel(nome, chatId); } catch {}
-            try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (fallback)`); } catch {}
+            try { await logIssue(nome, 'virtus_blocked', `chat ${chatId} bloqueado (click_retry)`); } catch {}
             fila = fila.filter(id => id !== chatId);
             chatAtivo = null;
             resetFail(chatId);

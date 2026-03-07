@@ -637,3 +637,13 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - `worker`: watch/resume de stock-provision desacelerados por padrão e configuráveis.
 - Objetivo:
   - reduzir assinatura mecânica residual mantendo estabilidade do atendimento/publicação.
+
+## 2026-03-07 — Hotfix sem goto de chat + recovery com histerese
+
+- Achado:
+  - `virtus` ainda tinha navegação direta de chat por URL em caminhos de exceção; `worker` podia insistir em ciclos curtos de recuperação sob oscilação.
+- Correção:
+  - `virtus`: removido `goto` de chat e mantido retry por click.
+  - `worker`: guardrails adicionais de tempo mínimo entre ações de recovery e cooldown maior em phantom fix.
+- Objetivo:
+  - reduzir cutucada sistemática sem quebrar rota de recuperação automática.

@@ -2475,3 +2475,15 @@ Adendo (ajuste operacional aprovado pelo owner):
   - reduzir assinatura sistemática residual sem regressão funcional dos fluxos principais.
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Hotfix: sem `goto` de chat no Virtus + anti-insistência no recovery
+
+- **Achado de risco**:
+  - havia navegação direta para chat por URL no `virtus` e recuperação com potencial de repetição curta no `worker`.
+- **Mitigação aplicada**:
+  - remoção de `goto` de chat no `virtus` (composer missing e reconciliação);
+  - aumento de histerese/cooldown em recovery health/phantom no `worker`.
+- **Objetivo**:
+  - manter recuperação automática sem padrão de insistência e sem fallback de URL para chat.
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

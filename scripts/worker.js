@@ -4330,6 +4330,7 @@ const HEALTH_CFG = {
   DEAD_NO_EVENT_MS: 45000,
   DEAD_NO_DOM_MS: 45000,
   DEAD_NO_NET_MS: 60000,
+  MIN_ACTION_GAP_MS: Math.max(30_000, Number(process.env.HEALTH_RECOVERY_MIN_ACTION_GAP_MS || 120_000) || 120_000),
   RECOVERY_COOLDOWN_MS: {
     reload: 30000,
     navHome: 45000,
@@ -4347,7 +4348,7 @@ const PHANTOM_CFG = {
   INITIAL_GRACE_MS: 9000,
   PERSIST_MS: 20000,
   CHECK_INTERVAL_MS: 5000,
-  COOLDOWN_BETWEEN_TRIES_MS: 30000,
+  COOLDOWN_BETWEEN_TRIES_MS: Math.max(30_000, Number(process.env.PHANTOM_COOLDOWN_BETWEEN_TRIES_MS || 120_000) || 120_000),
   MAX_PHTM_RELOADS_10M: 2,
   MAX_PHTM_NAV_10M: 2,
   MAX_PHTM_NEWPAGE_30M: 2,
@@ -4485,6 +4486,7 @@ function getHealth(nome) {
     healthState.set(nome, {
       lastOkAt: 0, lastDomEventAt: 0, lastNetEventAt: 0, lastConsoleErrorAt: 0,
       lastUrl: '', lastTitle: '', stage: 'ok', nextTryAt: 0,
+      lastRecoveryActionAt: 0,
       counters: { softReloads10m: [], navHomes10m: [], newPages30m: [], cyclesWithoutLife: 0 },
       newPageInFlight: false,
       lastNewPageAt: 0
@@ -12937,11 +12939,13 @@ async function recoveryStep(nome, page, step) {
   const st = getHealth(nome);
   const now = Date.now();
   if (st.nextTryAt && st.nextTryAt > now) return false;
+  if (st.lastRecoveryActionAt && (now - st.lastRecoveryActionAt) < HEALTH_CFG.MIN_ACTION_GAP_MS) return false;
   if (step === 'reload') {
     st.counters.softReloads10m = _pruneWindow(st.counters.softReloads10m, 10*60*1000);
     if (st.counters.softReloads10m.length >= HEALTH_CFG.MAX_SOFT_RELOADS_10MIN) return false;
     try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{}); } catch {}
     st.counters.softReloads10m.push(Date.now());
+    st.lastRecoveryActionAt = Date.now();
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.reload;
     try { await issues.append(nome, 'mil_action', 'health_recover:reload'); } catch {}
     return true;
@@ -12951,6 +12955,7 @@ async function recoveryStep(nome, page, step) {
     if (st.counters.navHomes10m.length >= HEALTH_CFG.MAX_NAVHOME_10MIN) return false;
     try { await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); } catch {}
     st.counters.navHomes10m.push(Date.now());
+    st.lastRecoveryActionAt = Date.now();
     st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.navHome;
     try { await issues.append(nome, 'mil_action', 'health_recover:navHome'); } catch {}
     return true;
@@ -12974,6 +12979,7 @@ async function recoveryStep(nome, page, step) {
       ctrl.mainPage = np;
       await wirePageObservers(nome, np);
       st.counters.newPages30m.push(Date.now());
+      st.lastRecoveryActionAt = Date.now();
       st.nextTryAt = now + HEALTH_CFG.RECOVERY_COOLDOWN_MS.newPage;
       st.lastNewPageAt = now;
       try { await issues.append(nome, 'mil_action', 'health_recover:newPage'); } catch {}

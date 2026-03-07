@@ -269,3 +269,24 @@ Adendo técnico 2 (telemetria + ordem primária):
   - `VIRTUS_CHAT_OPEN_PRIMARY_MODE=mouse|dom` (default: `mouse`).
 - decisão atual:
   - manter `mouse` como primário e `dom` como secundário, preservando fallback interno por click (sem `goto`).
+
+---
+
+### Hotfix complementar (sem `goto` de chat + anti-insistência no worker)
+
+Decisão operacional:
+- remover navegação direta para chat por URL no `virtus` (inclusive reconciliação de pendências).
+- manter recuperação no `worker`, porém com histerese/cooldown maior para não virar padrão de insistência.
+
+Correções aplicadas:
+- `scripts/virtus.js`:
+  - removido `p.goto('https://www.messenger.com/marketplace/t/${chatId}/')` do fluxo de composer missing;
+  - removido `goto` de chat em `reconcilePendingsIfAny`;
+  - reconciliação de pending envelhecido agora só libera reprocessamento da fila (`pendingDel`) e registra evento `virtus_pending_reconcile_release_no_goto`.
+- `scripts/worker.js`:
+  - `HEALTH_CFG.MIN_ACTION_GAP_MS=120000` (env: `HEALTH_RECOVERY_MIN_ACTION_GAP_MS`);
+  - `PHANTOM_CFG.COOLDOWN_BETWEEN_TRIES_MS=120000` (env: `PHANTOM_COOLDOWN_BETWEEN_TRIES_MS`);
+  - trilha de health recovery passa a respeitar `lastRecoveryActionAt` entre `reload/navHome/newPage`.
+
+Objetivo:
+- reduzir “cutucada” por navegação forçada e evitar oscilação insistente em recuperação, sem remover o mecanismo de auto-cura.

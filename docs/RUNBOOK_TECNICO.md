@@ -1296,3 +1296,22 @@ Mudança técnica:
 
 Resultado esperado:
 - menos microassinatura sistemática em interações de DOM/teclado/mouse e menor pressão de loops curtos de manutenção.
+
+---
+
+## Hotfix: sem `goto` de chat + recovery com anti-insistência (2026-03-07, RM7)
+
+Contexto:
+- evitar fallback de URL de chat no Virtus e reduzir repetição agressiva em rotas de recuperação do Worker.
+
+Mudança técnica:
+- `scripts/virtus.js`
+  - removido `goto` para `.../marketplace/t/${chatId}/` em `composer_missing`;
+  - reconciliação de pendências sem `goto` (libera pending envelhecido para fila normal).
+- `scripts/worker.js`
+  - `HEALTH_RECOVERY_MIN_ACTION_GAP_MS` default `120000`;
+  - `PHANTOM_COOLDOWN_BETWEEN_TRIES_MS` default `120000`;
+  - `recoveryStep()` usa `lastRecoveryActionAt` para impedir ações repetidas em janela curta.
+
+Resultado esperado:
+- menor assinatura de insistência em recuperação e eliminação de navegação forçada para chat.
