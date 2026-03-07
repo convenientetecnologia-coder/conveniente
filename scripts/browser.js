@@ -36,21 +36,15 @@ async function injectCookies(page, cookies) {
   try {
     if (!Array.isArray(cookies) || !cookies.length) return;
     const allowed = ['name','value','domain','path','expires','httpOnly','secure','sameSite'];
-    const ESSENTIAL = new Set(['c_user', 'xs', 'fr', 'sb', 'datr']);
-    const normalizeDomain = (d) => {
-      let dd = String(d || '.facebook.com').replace(/\s/g, '').toLowerCase();
-      if (!dd) dd = '.facebook.com';
-      if (!dd.startsWith('.')) dd = '.' + dd;
-      if (dd.includes('messenger.com')) return '.messenger.com';
-      if (dd.includes('facebook.com')) return '.facebook.com';
-      return '.facebook.com';
-    };
     const fixDomain = (d) => {
-      return normalizeDomain(d);
+      let dd = String(d || '.facebook.com').replace(/\s/g, '').toLowerCase();
+      if (!dd.startsWith('.')) dd = '.' + dd;
+      if (!dd.includes('.facebook.com')) dd = '.facebook.com';
+      return dd;
     };
     const fixPath = (p) => (typeof p === 'string' ? p.trim() : '/');
     const ascii = (s) => String(s || '').normalize('NFD').replace(/[^\w\-]/g, '');
-    const filteredBase = cookies.map(c => {
+    const filtered = cookies.map(c => {
       const obj = {};
       for (const k of allowed) {
         if (c[k] !== undefined) {
@@ -78,22 +72,6 @@ async function injectCookies(page, cookies) {
       obj.path = fixPath(obj.path);
       return obj;
     }).filter(c => c.name && c.value && c.domain && c.path);
-    // Chromium (RM7) ficou mais estrito no isolamento de domínio:
-    // se vier só .facebook.com, espelhamos cookies essenciais para .messenger.com.
-    const expanded = [];
-    for (const c of filteredBase) {
-      expanded.push(c);
-      if (ESSENTIAL.has(String(c.name || '')) && String(c.domain || '').includes('facebook.com')) {
-        expanded.push({ ...c, domain: '.messenger.com' });
-      }
-    }
-    const seen = new Set();
-    const filtered = expanded.filter((c) => {
-      const key = `${String(c.name||'')}|${String(c.domain||'')}|${String(c.path||'/')}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[COOKIES] PARA INJETAR FINAL:', { cookies: filtered });
     }
@@ -170,46 +148,41 @@ async function patchPage(nome, page, coords) {
   try { await page.emulateTimezone(patchTz); } catch {}
 
   // --- viewport, deviceScale, threads ---
-  // Chromium pode fechar alvo muito cedo em hosts sob pressão; isso não pode matar a ativação inteira.
-  try {
-    await page.evaluateOnNewDocument((hwc) => {
-      try {
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => hwc, configurable: true });
-      } catch {}
-    }, hardwareConcurrency);
-  } catch {}
+  await page.evaluateOnNewDocument((hwc) => {
+    try {
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => hwc, configurable: true });
+    } catch {}
+  }, hardwareConcurrency);
 
   // --- LANGUAGE/PLATFORM PATCH anti-detect ---
-  try {
-    await page.evaluateOnNewDocument(() => {
-      const safeDefine = (obj, key, getter) => {
-        try {
-          Object.defineProperty(obj, key, { get: getter, configurable: true });
-        } catch {}
-      };
-      safeDefine(navigator, 'language', () => 'pt-BR');
-      safeDefine(navigator, 'languages', () => ['pt-BR', 'pt', 'en-US', 'en']);
-      safeDefine(navigator, 'platform', () => 'Win32');
-      safeDefine(navigator, 'webdriver', () => undefined);
-      window.chrome = window.chrome || { runtime: {} };
-      // Keep Notification API shape present to avoid marketplace runtime ReferenceError.
-      // We force denied semantics, so behavior stays non-intrusive.
-      if (typeof window.Notification === 'undefined') {
-        try {
-          const NotificationShim = function Notification() {
-            throw new TypeError('Illegal constructor');
-          };
-          NotificationShim.permission = 'denied';
-          NotificationShim.requestPermission = () => Promise.resolve('denied');
-          Object.defineProperty(window, 'Notification', {
-            value: NotificationShim,
-            configurable: true,
-            writable: true
-          });
-        } catch {}
-      }
-    });
-  } catch {}
+  await page.evaluateOnNewDocument(() => {
+    const safeDefine = (obj, key, getter) => {
+      try {
+        Object.defineProperty(obj, key, { get: getter, configurable: true });
+      } catch {}
+    };
+    safeDefine(navigator, 'language', () => 'pt-BR');
+    safeDefine(navigator, 'languages', () => ['pt-BR', 'pt', 'en-US', 'en']);
+    safeDefine(navigator, 'platform', () => 'Win32');
+    safeDefine(navigator, 'webdriver', () => undefined);
+    window.chrome = window.chrome || { runtime: {} };
+    // Keep Notification API shape present to avoid marketplace runtime ReferenceError.
+    // We force denied semantics, so behavior stays non-intrusive.
+    if (typeof window.Notification === 'undefined') {
+      try {
+        const NotificationShim = function Notification() {
+          throw new TypeError('Illegal constructor');
+        };
+        NotificationShim.permission = 'denied';
+        NotificationShim.requestPermission = () => Promise.resolve('denied');
+        Object.defineProperty(window, 'Notification', {
+          value: NotificationShim,
+          configurable: true,
+          writable: true
+        });
+      } catch {}
+    }
+  });
 
   // --- GEOLOCALIZAÇÃO ---
   if (coords && coords.latitude) {
@@ -217,25 +190,23 @@ async function patchPage(nome, page, coords) {
   }
 
   // --- OCULTAR BANNER AUTOMATION ---
-  try {
-    await page.evaluateOnNewDocument(() => {
-      const style = document.createElement('style');
-      style.innerHTML = `
-        body > div[role="alert"], .automation-message {
-          display: none !important;
-          visibility: hidden !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-        }
-      `;
-      document.addEventListener('DOMContentLoaded', () => {
-        document.head.appendChild(style);
-      });
-      try {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
-      } catch {}
+  await page.evaluateOnNewDocument(() => {
+    const style = document.createElement('style');
+    style.innerHTML = `
+      body > div[role="alert"], .automation-message {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+    `;
+    document.addEventListener('DOMContentLoaded', () => {
+      document.head.appendChild(style);
     });
-  } catch {}
+    try {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+    } catch {}
+  });
 
   // --- INJEÇÃO DO DISMISS AUTOMÁTICO DO OVERLAY "SUSPEITAMOS..." ---
   try {
@@ -244,19 +215,17 @@ async function patchPage(nome, page, coords) {
       dismissAutomationSuspect(page, nome).catch(()=>false)
     );
     // Injeta um scanner após DOMContentLoaded: tenta algumas vezes nas primeiras rodadas
-    try {
-      await page.evaluateOnNewDocument(() => {
-        let rodadas = 0;
-        function tryDismiss(){
-          if (++rodadas > 8) return;
-          if (window.__dismissAutomationSuspect) {
-            window.__dismissAutomationSuspect().catch(()=>{});
-          }
-          setTimeout(tryDismiss, 900 + Math.floor(Math.random()*400));
+    await page.evaluateOnNewDocument(() => {
+      let rodadas = 0;
+      function tryDismiss(){
+        if (++rodadas > 8) return;
+        if (window.__dismissAutomationSuspect) {
+          window.__dismissAutomationSuspect().catch(()=>{});
         }
-        window.addEventListener('DOMContentLoaded', tryDismiss);
-      });
-    } catch {}
+        setTimeout(tryDismiss, 900 + Math.floor(Math.random()*400));
+      }
+      window.addEventListener('DOMContentLoaded', tryDismiss);
+    });
   } catch {} // nunca deixa travar
 
   // GUARDA: Virtus Messenger asset interception (apenas Messenger, nunca Marketplace Create)
@@ -373,15 +342,6 @@ async function patchPage(nome, page, coords) {
     } catch {}
     return { loginRequired: true, reason: 'probe_failed' };
   }
-}
-
-function isTransientMainFrameError(err) {
-  const msg = String((err && err.message) || err || '').toLowerCase();
-  return (
-    msg.includes('requesting main frame too early') ||
-    msg.includes('main frame') ||
-    msg.includes('target closed')
-  );
 }
 
 // Minimização suave
@@ -785,25 +745,12 @@ function ensureChromeProfilePreferences(userDataDir) {
     prefs.session = prefs.session || {};
     prefs.session.restore_on_startup = 0; // 0: Nova guia
     prefs.session.startup_urls = [];
-    // Idioma/tradução (enterprise):
-    // - força idioma preferencial PT-BR;
-    // - desativa prompt de tradução para evitar "popup" e página em inglês no bootstrap.
-    prefs.intl = prefs.intl || {};
-    prefs.intl.accept_languages = 'pt-BR,pt';
-    prefs.translate = prefs.translate || {};
-    prefs.translate.enabled = false;
-    prefs.translate.translate_site_blacklist = Array.isArray(prefs.translate.translate_site_blacklist)
-      ? Array.from(new Set([...(prefs.translate.translate_site_blacklist || []), '*']))
-      : ['*'];
     writeJsonAtomic(prefsPath, prefs);
 
     // Local State
     const localStatePath = path.join(userDataDir, 'Local State');
     const ls = readJsonSafe(localStatePath, {}) || {};
     ls.exited_cleanly = true;
-    ls.intl = ls.intl || {};
-    ls.intl.app_locale = 'pt-BR';
-    ls.intl.accept_languages = 'pt-BR,pt';
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferências: ' + ((e && e.message) || e)); } } catch {}
@@ -1015,101 +962,49 @@ function installOneTabGuard(browser, nome, {
   } catch {}
 }
 
-function resolveBrowserEngine() {
-  const raw = String(process.env.BROWSER_ENGINE || 'chromium').trim().toLowerCase();
-  if (raw === 'chrome' || raw === 'chromium') return raw;
-  return 'chromium';
-}
-
-function getPuppeteerManagedBrowserPath() {
-  try {
-    if (puppeteer && typeof puppeteer.executablePath === 'function') {
-      const p = String(puppeteer.executablePath() || '').trim();
-      if (p && fs.existsSync(p)) return p;
-    }
-  } catch {}
-  try {
-    const pptr = require('puppeteer');
-    if (pptr && typeof pptr.executablePath === 'function') {
-      const p = String(pptr.executablePath() || '').trim();
-      if (p && fs.existsSync(p)) return p;
-    }
-  } catch {}
-  return null;
-}
-
-// ====== FIND BROWSER EXECUTABLE ======
-// Regra Fase 1:
-// - default: chromium
-// - BROWSER_ENGINE=chromium => NÃO faz fallback para Chrome
-// - BROWSER_ENGINE=chrome => usa apenas Chrome
+// ====== FIND CHROME STABLE ======
+// Tenta Chrome Stable por CHROME_PATH/CHROMIUM_PATH variáveis de ambiente, depois paths padrão de OS.
 function findChromeStable() {
-  const engine = resolveBrowserEngine();
-  const envChrome = String(process.env.CHROME_PATH || '').trim();
-  const envChromium = String(process.env.CHROMIUM_PATH || '').trim();
-
-  if (engine === 'chromium') {
-    if (envChromium && fs.existsSync(envChromium)) {
-      return { engine, executablePath: envChromium, source: 'env:CHROMIUM_PATH' };
-    }
-
-    const chromiumCandidates = [];
-    if (process.platform === 'win32') {
-      chromiumCandidates.push(
-        path.join(process.env.LOCALAPPDATA || '', 'Chromium', 'Application', 'chrome.exe'),
-        path.join(process.env.PROGRAMFILES || '', 'Chromium', 'Application', 'chrome.exe'),
-        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Chromium', 'Application', 'chrome.exe')
-      );
-    } else if (process.platform === 'darwin') {
-      chromiumCandidates.push(
-        '/Applications/Chromium.app/Contents/MacOS/Chromium',
-        path.join(os.homedir(), 'Applications', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
-      );
-    } else {
-      chromiumCandidates.push('/usr/bin/chromium-browser', '/usr/bin/chromium', '/snap/bin/chromium');
-    }
-
-    for (const file of chromiumCandidates) {
-      if (file && fs.existsSync(file)) return { engine, executablePath: file, source: 'default:chromium' };
-    }
-
-    // Fase 1 sem fallback para Chrome do sistema:
-    // aceita também o browser gerenciado pelo Puppeteer (Chrome for Testing) quando presente.
-    // Isso cobre hosts onde o runtime foi provisionado via npm install, mesmo sem Chromium global no PATH.
-    const pptrManaged = getPuppeteerManagedBrowserPath();
-    if (pptrManaged) {
-      return { engine, executablePath: pptrManaged, source: 'puppeteer-managed' };
-    }
-
-    if (process.platform === 'win32') {
-      throw new Error('Chromium não encontrado (modo estrito). Instale Chromium, configure CHROMIUM_PATH, ou garanta browser gerenciado do Puppeteer. Dica: winget install -e --id Chromium.Chromium -h');
-    }
-    throw new Error('Chromium não encontrado (modo estrito). Instale Chromium, configure CHROMIUM_PATH, ou garanta browser gerenciado do Puppeteer.');
-  }
-
+  const envChrome = process.env.CHROME_PATH;
   if (envChrome && fs.existsSync(envChrome)) {
-    return { engine, executablePath: envChrome, source: 'env:CHROME_PATH' };
+    return envChrome;
+  }
+  const envChromium = process.env.CHROMIUM_PATH;
+  if (envChromium && fs.existsSync(envChromium)) {
+    return envChromium;
   }
 
-  const chromeCandidates = [];
+  // Default installs, by OS
+  const candidates = [];
   if (process.platform === 'win32') {
-    chromeCandidates.push(
-      path.join(process.env.PROGRAMFILES || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    candidates.push(
+      path.join(process.env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe'),
       path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe')
+      path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe')
     );
   } else if (process.platform === 'darwin') {
-    chromeCandidates.push(
+    candidates.push(
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       path.join(os.homedir(), 'Applications', 'Google Chrome.app', 'Contents', 'MacOS', 'Google Chrome')
     );
   } else {
-    chromeCandidates.push('/opt/google/chrome/chrome', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome');
+    candidates.push(
+      '/opt/google/chrome/chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
+      '/snap/bin/chromium'
+    );
   }
-  for (const file of chromeCandidates) {
-    if (file && fs.existsSync(file)) return { engine, executablePath: file, source: 'default:chrome' };
+
+  // Adiciona ao final dos candidatos o path do Chromium por variável de ambiente, se definido
+  if (envChromium) {
+    candidates.push(envChromium);
   }
-  throw new Error('Chrome não encontrado (modo estrito). Instale Chrome ou defina CHROME_PATH.');
+
+  for (const file of candidates) {
+    if (file && fs.existsSync(file)) return file;
+  }
+  throw new Error('Chrome/Chromium não encontrado. Instale o Chrome Stable ou defina CHROME_PATH/CHROMIUM_PATH.');
 }
 
 //
@@ -1166,6 +1061,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       '--start-maximized' // Maximizada sempre
       // Removido: 'no-zygote', 'single-process', 'disable-gpu', GPU flags
     ];
+
     // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
     if (process.env.MEDIA_AUTO_UI === '1') {
       launchArgs.push('--use-fake-ui-for-media-stream');
@@ -1190,39 +1086,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // DEFAULT VIEWPORT: null SEMPRE
     const defaultViewport = null;
 
-    // Fase 1: engine explícita com resolução auditável.
-    const browserBin = findChromeStable();
-    const executablePath = browserBin.executablePath;
-    const isManagedChromium = browserBin && browserBin.engine === 'chromium' && browserBin.source === 'puppeteer-managed';
-    try {
-      logger.info('[BROWSER][ENGINE] executable resolved', {
-        engine: browserBin.engine,
-        source: browserBin.source,
-        executablePath
-      });
-    } catch {}
-
-    const safeLaunchArgs = (() => {
-      if (!isManagedChromium) return [...launchArgs];
-      const strip = new Set([
-        '--process-per-site'
-      ]);
-      const base = launchArgs.filter((a) => !strip.has(String(a || '')));
-      return [...base, '--disable-background-networking'];
-    })();
-    const ultraSafeLaunchArgs = (() => {
-      if (!isManagedChromium) return [...safeLaunchArgs];
-      return [
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--password-store=basic',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,CalculateNativeWinOcclusion',
-        '--window-size=1366,768',
-        '--start-maximized'
-      ];
-    })();
+    // GUARDA: Chrome Stable only
+    const executablePath = findChromeStable();
 
     async function tryLaunch(args, tag) {
       try {
@@ -1233,9 +1098,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
           headless: isHeadless ? true : false,
           executablePath,
           userDataDir,
-          args,
+          args: launchArgs,
           defaultViewport,
-          pipe: true,
           dumpio: !!process.env.BROWSER_DEBUG,
           protocolTimeout: 120000 // 120 segundos garante o Stealth/plugin
         });
@@ -1260,26 +1124,17 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     if (!browserTry) {
       try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
-      try { await sleep(350); } catch {}
-      browserTry = await tryLaunch(safeLaunchArgs, 'LAUNCH 2_SAFE');
+      browserTry = await tryLaunch(launchArgs, 'LAUNCH 2');
     }
 
     if (!browserTry) {
       try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
       try { cleanupUserDataLocks(userDataDir); } catch {}
-      try { await sleep(700); } catch {}
-      browserTry = await tryLaunch(safeLaunchArgs, 'LAUNCH 3_SAFE');
+      browserTry = await tryLaunch(launchArgs, 'LAUNCH 3');
     }
 
     if (!browserTry) {
-      try { killChromeProfileProcesses(userDataDir, openingMap); } catch {}
-      try { cleanupUserDataLocks(userDataDir); } catch {}
-      try { await sleep(1200); } catch {}
-      browserTry = await tryLaunch(ultraSafeLaunchArgs, 'LAUNCH 4_ULTRA_SAFE');
-    }
-
-    if (!browserTry) {
-      throw new Error('Browser não iniciou após 4 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
+      throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
 
@@ -1423,22 +1278,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
 
     // 5) patchPage na primeira aba — se falhar, fecha e relança
     try {
-      let patched = false;
-      let lastErr = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          const page = (await browser.pages())[0];
-          if (!page) throw new Error('patchPage: nenhuma aba disponível');
-          await patchPage(manifest.nome, page, coords);
-          patched = true;
-          break;
-        } catch (e) {
-          lastErr = e;
-          if (!isTransientMainFrameError(e) || attempt >= 3) break;
-          try { await sleep(300 * attempt); } catch {}
-        }
-      }
-      if (!patched) throw (lastErr || new Error('patchPage_failed'));
+      const page = (await browser.pages())[0];
+      await patchPage(manifest.nome, page, coords);
     } catch (e) {
       await safeCloseBrowser(browser);
       throw e;
@@ -2381,7 +2222,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   if (dbg) logger.debug('[CONFIG] configureProfile (3-tabs) begin', { nome });
 
   // Objetivo enterprise (conta nova / inject cookies): manter 3 abas fixas e previsíveis:
-  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com (home auth)
+  // 0) facebook.com  1) marketplace/create/(item|vehicle)  2) messenger.com/marketplace
   let pages = [];
   try { pages = await browser.pages().catch(()=>[]); } catch { pages = []; }
   if (!pages || !pages.length) {
@@ -2426,7 +2267,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
-  const msgUrl = 'https://www.messenger.com/';
+  const msgUrl = 'https://www.messenger.com/marketplace';
 
   // Aba 0 — Facebook base
   try {
@@ -4734,7 +4575,7 @@ async function collectFreshCookies(browser) {
     const p0 = pages && pages[0];
     if (!p0) return { ok: false, error: 'no_pages' };
     // garantir que os domínios relevantes foram tocados (para preencher jar)
-    await p0.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+    await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
     const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
     const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);

@@ -69,7 +69,6 @@ const CT_ARCHIVE_QUEUE_DONE_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'done');
 const CT_ARCHIVE_EVID_DIR = path.join(CT_ARCHIVE_QUEUE_DIR, 'evidence');
 const GOV_SNAP_JSONL = path.join(DATA_DIR, 'governor_snapshots.jsonl');
 const GOV_SNAP_LEADER_LOCK = path.join(DATA_DIR, '_governor_snapshot_leader.lock');
-const FALL_FORENSICS_JSONL = path.join(DATA_DIR, 'fall_forensics.jsonl');
 // P0 hardening (INC-20260207-1403-01):
 // Garantia "volta a trabalhar" pós stock_provision em ambiente com shards.
 // A causa observada foi "volta parcial" quando alguns workers/shards não retomam.
@@ -91,162 +90,6 @@ function appendJsonl(fp, obj) {
     ensureDirSync(path.dirname(fp));
     fs.appendFileSync(fp, JSON.stringify(obj) + '\n', 'utf8');
   } catch {}
-}
-
-function appendForensicEvent({
-  eventType = '',
-  profileName = '',
-  outcome = 'ok',
-  severity = 'info',
-  source = 'worker',
-  flowId = '',
-  traceId = '',
-  cause = '',
-  decision = '',
-  meta = null
-} = {}) {
-  try {
-    const ev = String(eventType || '').trim();
-    if (!ev) return;
-    const nome = String(profileName || '').trim();
-    const out = String(outcome || 'ok').trim();
-    const sev = String(severity || 'info').trim();
-    const hostId = (() => { try { return readHostIdSync() || null; } catch { return null; } })();
-    provisionAudit.append({
-      ts: Date.now(),
-      event: ev,
-      eventType: ev,
-      source: String(source || 'worker').trim() || 'worker',
-      hostId,
-      profileName: nome || null,
-      nome: nome || null,
-      flowId: flowId ? String(flowId).slice(0, 120) : null,
-      traceId: traceId ? String(traceId).slice(0, 120) : null,
-      outcome: out || 'ok',
-      severity: sev || 'info',
-      cause: cause ? String(cause).slice(0, 120) : null,
-      decision: decision ? String(decision).slice(0, 120) : null,
-      meta: (meta && typeof meta === 'object') ? meta : null
-    });
-  } catch {}
-}
-
-function classifyFallCause(cause = '') {
-  const c = String(cause || '').toLowerCase();
-  if (!c) return 'unknown';
-  if (c.includes('browser não iniciou') || c.includes('target closed') || c.includes('main frame too early') || c.includes('protocol error')) return 'launch_instability';
-  if (c.includes('timeout')) return 'timeout';
-  if (c.includes('ram') || c.includes('supervisor_denied') || c.includes('slots') || c.includes('headroom')) return 'resource_pressure';
-  if (c.includes('login') || c.includes('identity') || c.includes('appeal') || c.includes('captcha')) return 'checkpoint_or_login';
-  if (c.includes('banned') || c.includes('suspensa') || c.includes('disabled')) return 'ban_or_disabled';
-  return 'unknown';
-}
-
-function registerNurseOpenFailurePattern(nome, err = '', traceId = '', source = '') {
-  try {
-    const msg = String(err || '');
-    const mayFlap = /Browser não iniciou após 4 tentativas|Target\.setDiscoverTargets|Target closed|Requesting main frame too early|Protocol error|net::ERR_/i.test(msg);
-    if (!mayFlap) return { flapping: false, count: 0 };
-    const now = Date.now();
-    robeMeta[nome] = robeMeta[nome] || {};
-    const rec = robeMeta[nome];
-    rec.nurseOpenFailWindow = Array.isArray(rec.nurseOpenFailWindow) ? rec.nurseOpenFailWindow : [];
-    rec.nurseOpenFailWindow = rec.nurseOpenFailWindow.filter(x => x && (now - Number(x.ts || 0) < 10 * 60 * 1000));
-    rec.nurseOpenFailWindow.push({ ts: now, err: msg.slice(0, 220), traceId: String(traceId || '').slice(0, 120), source: String(source || '').slice(0, 80) });
-    const count = rec.nurseOpenFailWindow.length;
-    const canEmit = !rec.lastFlapSuspectedAt || (now - Number(rec.lastFlapSuspectedAt || 0) > 2 * 60 * 1000);
-    if (count >= 3 && canEmit) {
-      rec.lastFlapSuspectedAt = now;
-      return { flapping: true, count };
-    }
-    return { flapping: false, count };
-  } catch {
-    return { flapping: false, count: 0 };
-  }
-}
-
-async function captureFallForensicsSnapshot({
-  profileName = '',
-  eventType = '',
-  source = 'worker',
-  traceId = '',
-  flowId = '',
-  cause = '',
-  decision = '',
-  severity = 'warn',
-  meta = null
-} = {}) {
-  try {
-    const nome = String(profileName || '').trim();
-    if (!nome) return { ok: false, error: 'profile_required' };
-    const now = Date.now();
-    let flags = null;
-    let desiredPerfil = null;
-    let statusPerfil = null;
-    let pagesCount = null;
-    let browserConnected = false;
-    let ctrlInfo = null;
-    try { flags = await readAccountFlags(nome).catch(() => null); } catch {}
-    try {
-      const d = fileStore.readJsonSafe(desiredPath, null) || {};
-      desiredPerfil = d && d.perfis && d.perfis[nome] ? d.perfis[nome] : null;
-    } catch {}
-    try {
-      const st = fileStore.readJsonSafe(statusPath, null) || {};
-      const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
-      statusPerfil = arr.find((p) => p && p.nome === nome) || null;
-    } catch {}
-    try {
-      const ctrl = controllers.get(nome);
-      if (ctrl && ctrl.browser) {
-        browserConnected = !!ctrl.browser.isConnected?.();
-        const pages = await ctrl.browser.pages().catch(() => []);
-        pagesCount = Array.isArray(pages) ? pages.length : null;
-      }
-      ctrlInfo = {
-        exists: !!ctrl,
-        humanControl: !!(ctrl && ctrl.humanControl === true),
-        configurando: !!(ctrl && ctrl.configurando === true),
-        trabalhando: !!(ctrl && ctrl.trabalhando === true)
-      };
-    } catch {}
-
-    const causeClass = classifyFallCause(cause);
-    const rec = {
-      ts: now,
-      hostId: readHostIdSync() || null,
-      eventType: String(eventType || 'fall_snapshot'),
-      source: String(source || 'worker'),
-      profileName: nome,
-      traceId: traceId ? String(traceId).slice(0, 120) : null,
-      flowId: flowId ? String(flowId).slice(0, 120) : null,
-      severity: String(severity || 'warn'),
-      cause: String(cause || '').slice(0, 220) || null,
-      causeClass,
-      decision: String(decision || '').slice(0, 160) || null,
-      flags: flags || null,
-      desired: desiredPerfil || null,
-      status: statusPerfil || null,
-      ctrl: { ...(ctrlInfo || {}), browserConnected, pagesCount },
-      meta: (meta && typeof meta === 'object') ? meta : null
-    };
-    appendJsonl(FALL_FORENSICS_JSONL, rec);
-    appendForensicEvent({
-      eventType: 'fall_forensics_snapshot',
-      profileName: nome,
-      outcome: 'captured',
-      severity: String(severity || 'warn'),
-      source: String(source || 'worker'),
-      traceId,
-      flowId,
-      cause: String(cause || '').slice(0, 120) || null,
-      decision: String(decision || '').slice(0, 120) || null,
-      meta: { causeClass, eventType: rec.eventType, file: 'dados/fall_forensics.jsonl' }
-    });
-    return { ok: true, causeClass };
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || String(e) };
-  }
 }
 
 function _readJsonSafe(fp, fallback = null) {
@@ -906,19 +749,6 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
     } catch {}
 
     try { await snapshotStatusAndWrite(); } catch {}
-    if (!already) {
-      try {
-        await captureFallForensicsSnapshot({
-          profileName: nome,
-          eventType: 'login_required_detected',
-          source: 'flags',
-          cause: String(reason || 'login_required'),
-          decision: 'set_login_required_flag',
-          severity: 'warn',
-          meta: { source: String(source || '').slice(0, 80) }
-        });
-      } catch {}
-    }
   } catch {}
 }
 
@@ -1134,7 +964,6 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
       if (lastReason.includes('identity')) {
         try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_handoff_identity', nome: String(nome||''), flowId: id, attempt, reason: lastReason.slice(0,160) }); } catch {}
         try { await setIdentityRequiredFlag(nome, { source: 'captcha_flow', url: lr.url || '', title: lr.title || '' }).catch(()=>{}); } catch {}
-        let messengerLoginConfirmed = false;
         try {
           const c = controllers.get(nome) || ctrl;
           const p = (c && c.mainPage) ? c.mainPage : pg;
@@ -2046,7 +1875,7 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
 
     const targetUrl =
       (prefer === 'messenger')
-        ? 'https://www.messenger.com/'
+        ? 'https://www.messenger.com/marketplace'
         : 'https://www.facebook.com/';
     await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(900);
@@ -2745,13 +2574,10 @@ async function appealMonitorCheckNow(nome, ctrl) {
     if (rr.includes('login_form')) {
       const op = `appeal_monitor_login_form:${String(nome || '')}:${Date.now()}`;
       try { provisionAudit.append({ ts: Date.now(), event: 'appeal_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
-      try {
-        await enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
-          reason: rr || 'login_form',
-          source: 'appeal_monitor'
-        });
-      } catch {}
-      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_enqueued' };
+      setTimeout(() => {
+        try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
+      }, 0);
+      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_scheduled' };
     }
 
     return { ok: true, transitioned: true, reason: rr };
@@ -3417,13 +3243,10 @@ async function identityMonitorCheckNow(nome, ctrl) {
     if (rr.includes('login_form')) {
       const op = `identity_monitor_login_form:${String(nome || '')}:${Date.now()}`;
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
-      try {
-        await enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
-          reason: rr || 'login_form',
-          source: 'identity_monitor'
-        });
-      } catch {}
-      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_enqueued' };
+      setTimeout(() => {
+        try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
+      }, 0);
+      return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_scheduled' };
     }
 
     return { ok: true, transitioned: true, reason: rr };
@@ -3472,19 +3295,6 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
       try {
         const m0 = await manifestStore.read(nome).catch(()=>null);
         if (m0 && (m0.stockAccountId || m0.stock_account_id)) stockAccountId = Number(m0.stockAccountId || m0.stock_account_id) || null;
-      } catch {}
-
-      try {
-        await captureFallForensicsSnapshot({
-          profileName: nome,
-          eventType: 'banned_detected_predelete',
-          source: 'banflow',
-          flowId,
-          cause: String(reason || 'banned').slice(0, 220),
-          decision: 'archive_and_delete_profile',
-          severity: 'error',
-          meta: { snippet: String(snippet || '').slice(0, 220), stockAccountId: stockAccountId || null }
-        });
       } catch {}
 
       // 0) Captura evidence (antes de fechar)
@@ -3656,7 +3466,22 @@ async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
               { caller: 'auto_delete_banned_profile', nome }
             );
           } catch {}
-        } catch {}
+        } catch {} finally {
+          if (runLrScan) {
+            const nextAt = calcLrScanNextAt(Date.now());
+            lrMeta.lastAt = nowLrScan;
+            lrMeta.nextAt = nextAt;
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'lr_scan_cadence_applied',
+                nome: String(nome || ''),
+                nextAt,
+                waitMs: Math.max(0, nextAt - Date.now())
+              });
+            } catch {}
+          }
+        }
         try { await fileStore.removeDesired(nome); } catch {}
         try { fileStore.rimrafSync(path.join(fileStore.perfisDir, nome)); } catch {}
         try {
@@ -5226,10 +5051,8 @@ const robeMeta = {};
 
 const __AGENT_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __agentDebugState = { lastByKey: Object.create(null) };
-const LEGACY_RUNTIME_DEBUG_ENABLED = String(process.env.LEGACY_RUNTIME_DEBUG || '').trim() === '1';
 function __agentLog(hypothesisId, location, message, data, key = '', minIntervalMs = 0) {
   try {
-    if (!LEGACY_RUNTIME_DEBUG_ENABLED) return;
     const now = Date.now();
     const k = String(key || `${hypothesisId}:${location}:${message}`);
     const last = Number(__agentDebugState.lastByKey[k] || 0) || 0;
@@ -8486,7 +8309,7 @@ const handlers = {
           try {
             const u0 = safeUrl(page);
             if (label === 'msg' && !/messenger\.com/i.test(u0)) {
-              await page.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+              await page.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
               await new Promise(r => setTimeout(r, 2200));
             }
             if (label.startsWith('fb') && !/facebook\.com/i.test(u0)) {
@@ -8665,29 +8488,9 @@ const handlers = {
           const pages = await ctrl.browser.pages().catch(()=>[]);
           const p0 = pages && pages[0];
           if (!p0) throw new Error('no_page0');
-          const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
-          const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
-          const pickPage = (pred) => {
-            for (const pg of (pages || [])) {
-              try {
-                if (pred(safeUrl(pg), pg)) return pg;
-              } catch {}
-            }
-            return null;
-          };
 
-          // Fluxo stock_provision: manter as 3 abas abertas para não "trocar de contexto" desnecessariamente.
-          if (!isStockProvision) {
-            // UX HARDCORE padrão: antes de login+senha, fechar todas as abas extras (fica só na aba 0)
-            try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
-          }
-
-          const pFbLogin = isStockProvision
-            ? (pickPage((u) => /facebook\.com\/marketplace\/create\/(item|vehicle)/i.test(u)) || pickPage((u) => /facebook\.com/i.test(u)) || p0)
-            : p0;
-          const pMsgLogin = isStockProvision
-            ? (pickPage((u) => /messenger\.com/i.test(u)) || pFbLogin || p0)
-            : p0;
+          // UX HARDCORE: antes de login+senha, fechar todas as abas extras (fica só na aba 0)
+          try { if (ctrl.browser && typeof browserHelper.forceCloseExtrasHard === 'function') await browserHelper.forceCloseExtrasHard(ctrl.browser); } catch {}
 
           const man2 = await manifestStore.read(nome).catch(()=>null);
           const login2 = man2 && (man2.login || man2.email || man2.user || man2.username);
@@ -8698,151 +8501,98 @@ const handlers = {
             return { ok: false, error: 'missing_credentials', steps, closedForRam, pausedVirtus };
           }
 
-          const currentMsgReason = String((lrMessenger && lrMessenger.reason) || '').toLowerCase();
-          const currentFbReason = String((lrFacebook && lrFacebook.reason) || '').toLowerCase();
-          const needsMsgLoginNow = !!(lrMessenger && lrMessenger.loginRequired);
-          const needsFbLoginNow = !!(lrFacebook && lrFacebook.loginRequired);
-          const stockMsgFirst = isStockProvision && needsMsgLoginNow && currentMsgReason.includes('login_form');
+          // Facebook primeiro (tende a refletir no Messenger)
+          pushStep({ step: 'attempt2_login_fb_begin' });
+          // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
+          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 2600));
+          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: p0, note: 'fb before submit' });
+          if (await checkAndAbortIfBanned(p0, 'before_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
+          pushStep({ step: 'attempt2_login_fb_done', result: rfb });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: p0, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
+          if (await checkAndAbortIfBanned(p0, 'after_login_fb')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
-          const runFbLogin = async () => {
-            pushStep({ step: 'attempt2_login_fb_begin' });
-            // Regra enterprise: validar/login sempre na rota real do Robe (create/item), não no feed.
-            if (!/facebook\.com\/marketplace\/create\/item/i.test(safeUrl(pFbLogin))) {
-              await pFbLogin.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir para Messenger.
+          try {
+            const lrAfterFb = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+            if (lrAfterFb && lrAfterFb.loginRequired && hardBlockReason(lrAfterFb)) {
+              pushStep({ step: 'non_automatable_after_login_fb', lr: lrAfterFb });
+              await failFastToHuman(String(lrAfterFb.reason || 'login_requires_human'));
+              return { ok: false, error: String(lrAfterFb.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
             }
-            await new Promise(r => setTimeout(r, 2600));
-            await browserHelper.ensureFbUiUnblocked(pFbLogin, nome, { reasonBase: 'login_remediate_before_login_fb', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_fb', page: pFbLogin, note: 'fb before submit' });
-            if (await checkAndAbortIfBanned(pFbLogin, 'before_login_fb')) return { ok: false, error: 'banned' };
-            const rfb = await withTimeout('loginFb', browserHelper.tryLoginEmailPass(pFbLogin, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginFb);
-            pushStep({ step: 'attempt2_login_fb_done', result: rfb });
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_fb', page: pFbLogin, note: `fb result ok=${!!(rfb&&rfb.ok)} err=${rfb&&rfb.error||''}` });
-            if (await checkAndAbortIfBanned(pFbLogin, 'after_login_fb')) return { ok: false, error: 'banned' };
+          } catch {}
 
-            // Regra ultra enterprise: se FB cair em 2FA/captcha/checkpoint/identity, não adianta seguir.
-            try {
-              const lrAfterFb = await browserHelper.detectLoginRequired(pFbLogin).catch(()=>({ loginRequired:false }));
-              if (lrAfterFb && lrAfterFb.loginRequired && hardBlockReason(lrAfterFb)) {
-                pushStep({ step: 'non_automatable_after_login_fb', lr: lrAfterFb });
-                await failFastToHuman(String(lrAfterFb.reason || 'login_requires_human'));
-                return { ok: false, error: String(lrAfterFb.reason || 'login_requires_human') };
-              }
-            } catch {}
-            return { ok: true };
-          };
+          // Messenger depois (se necessário)
+          pushStep({ step: 'attempt2_login_msg_begin' });
+          await p0.goto('https://www.messenger.com/marketplace', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          await new Promise(r => setTimeout(r, 2600));
+          await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: p0, note: 'msg before submit' });
+          if (await checkAndAbortIfBanned(p0, 'before_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(p0, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
+          pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: p0, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
+          if (await checkAndAbortIfBanned(p0, 'after_login_msg')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
 
-          const runMsgLogin = async () => {
-            pushStep({ step: 'attempt2_login_msg_begin' });
-            if (!/messenger\.com/i.test(safeUrl(pMsgLogin))) {
-              await pMsgLogin.goto('https://www.messenger.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          // Se Messenger cair em estado não automatizável, também fail-fast.
+          try {
+            const lrAfterMsg = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+            if (lrAfterMsg && lrAfterMsg.loginRequired && hardBlockReason(lrAfterMsg)) {
+              pushStep({ step: 'non_automatable_after_login_msg', lr: lrAfterMsg });
+              await failFastToHuman(String(lrAfterMsg.reason || 'login_requires_human'));
+              return { ok: false, error: String(lrAfterMsg.reason || 'login_requires_human'), steps, closedForRam, pausedVirtus };
             }
-            await new Promise(r => setTimeout(r, 2600));
-            await browserHelper.ensureFbUiUnblocked(pMsgLogin, nome, { reasonBase: 'login_remediate_before_login_msg', allowGpt: true, maxRounds: 2 }).catch(()=>null);
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'before_login_msg', page: pMsgLogin, note: 'msg before submit' });
-            if (await checkAndAbortIfBanned(pMsgLogin, 'before_login_msg')) return { ok: false, error: 'banned' };
-            const rmsg = await withTimeout('loginMsg', browserHelper.tryLoginEmailPass(pMsgLogin, { nome, login: login2, password: password2, allowGpt: true }), stageTimeoutMs.loginMsg);
-            pushStep({ step: 'attempt2_login_msg_done', result: rmsg });
-            messengerLoginConfirmed = !!(rmsg && rmsg.ok === true);
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'after_login_msg', page: pMsgLogin, note: `msg result ok=${!!(rmsg&&rmsg.ok)} err=${rmsg&&rmsg.error||''}` });
-            if (await checkAndAbortIfBanned(pMsgLogin, 'after_login_msg')) return { ok: false, error: 'banned' };
-
-            // Se Messenger cair em estado não automatizável, também fail-fast.
-            try {
-              const lrAfterMsg = await browserHelper.detectLoginRequired(pMsgLogin).catch(()=>({ loginRequired:false }));
-              if (lrAfterMsg && lrAfterMsg.loginRequired && hardBlockReason(lrAfterMsg)) {
-                pushStep({ step: 'non_automatable_after_login_msg', lr: lrAfterMsg });
-                await failFastToHuman(String(lrAfterMsg.reason || 'login_requires_human'));
-                return { ok: false, error: String(lrAfterMsg.reason || 'login_requires_human') };
-              }
-            } catch {}
-            return { ok: true };
-          };
-
-          // Stock provision: se o problema detectado primeiro é Messenger/login_form, resolve ali primeiro.
-          // Evita desviar para FB/create desnecessariamente quando FB já está autenticado.
-          if (stockMsgFirst) {
-            const rMsgFirst = await runMsgLogin();
-            if (!rMsgFirst.ok) return { ok: false, error: rMsgFirst.error || 'login_msg_failed', steps, closedForRam, pausedVirtus };
-          }
-
-          // FB só precisa login quando o check inicial já mostrou loginRequired no lado FB.
-          if (needsFbLoginNow || (!stockMsgFirst && needsMsgLoginNow)) {
-            const rFb = await runFbLogin();
-            if (!rFb.ok) return { ok: false, error: rFb.error || 'login_fb_failed', steps, closedForRam, pausedVirtus };
-          }
-
-          // Se ainda houver loginRequired no Messenger (ou se não rodamos msg-first), tenta login no Messenger.
-          if (!stockMsgFirst || needsMsgLoginNow) {
-            const rMsg = await runMsgLogin();
-            if (!rMsg.ok) return { ok: false, error: rMsg.error || 'login_msg_failed', steps, closedForRam, pausedVirtus };
-          }
+          } catch {}
 
           // revalidar
           await new Promise(r => setTimeout(r, 1400));
-          lrMessenger = await browserHelper.detectLoginRequired(pMsgLogin).catch(()=>({ loginRequired:false }));
+          lrMessenger = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
 
-          const stockSkipCreateRevalidation =
-            isStockProvision &&
-            messengerLoginConfirmed === true &&
-            !(lrMessenger && lrMessenger.loginRequired) &&
-            !(lrFacebook && lrFacebook.loginRequired);
-
-          if (stockSkipCreateRevalidation) {
-            pushStep({ step: 'stock_provision_skip_create_revalidation', reason: 'tabs_already_validated' });
-            await appendLoginRemediateEvidence({
-              nome,
-              operator: op,
-              step: 'final_check',
-              page: pMsgLogin || p0,
-              note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} skippedCreateRevalidation=true`
-            });
-          } else {
-            // Facebook: validar create/item (Robe real) — sem navegar para o feed.
-            const uiRetryUnblock = async (page, label, rounds = 4) => {
-              // Espera extra para evitar "unknown" por race de navegação/contexto
-              await new Promise(r => setTimeout(r, 1600));
-              let ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
-              if (ui && ui.ok === false && ui.kind === 'unknown') {
-                // Retry com reload: muitos "unknown" são contexto destruído durante redirect
-                try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-                await new Promise(r => setTimeout(r, 1800));
-                ui = await browserHelper.ensureFbUiUnblocked(page, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
-              }
-              return ui;
-            };
-
-            // Create item (Robe real)
-            let uiCreate = null;
-            let lrCreate = null;
-            if (!/facebook\.com\/marketplace\/create\/item/i.test(safeUrl(pFbLogin))) {
-              await pFbLogin.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          // Facebook: validar create/item (Robe real) — sem navegar para o feed.
+          const uiRetryUnblock = async (label, rounds = 4) => {
+            // Espera extra para evitar "unknown" por race de navegação/contexto
+            await new Promise(r => setTimeout(r, 1600));
+            let ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
+            if (ui && ui.ok === false && ui.kind === 'unknown') {
+              // Retry com reload: muitos "unknown" são contexto destruído durante redirect
+              try { await p0.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
+              await new Promise(r => setTimeout(r, 1800));
+              ui = await browserHelper.ensureFbUiUnblocked(p0, nome, { reasonBase: `login_remediate_${label}_retry`, allowGpt: true, maxRounds: rounds }).catch(()=>null);
             }
-            uiCreate = await uiRetryUnblock(pFbLogin, 'post_login_create_item', 4);
-            if (await checkAndAbortIfBanned(pFbLogin, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-            lrCreate = await browserHelper.detectLoginRequired(pFbLogin).catch(()=>({ loginRequired:false }));
-            pushStep({ step: 'post_login_check_create_item', lrCreate, uiCreate });
-            await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
-            if (await checkAndAbortIfBanned(p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+            return ui;
+          };
 
-            // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
-            if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
-            if (lrCreate && lrCreate.loginRequired) lrFacebook = lrCreate;
-            // Caso comum (conta nova): "probe_failed" no fb_main não pode derrubar o provision
-            // se o create/item (Robe real) já validou ok.
-            try {
-              const fbReason = String((lrFacebook && lrFacebook.reason) || '');
-              if (
-                lrFacebook &&
-                lrFacebook.loginRequired === true &&
-                fbReason === 'probe_failed' &&
-                lrCreate &&
-                lrCreate.loginRequired === false
-              ) {
-                pushStep({ step: 'fb_probe_failed_overridden_by_create', fbReason, lrCreate });
-                lrFacebook = lrCreate;
-              }
-            } catch {}
-          }
+          // Create item (Robe real)
+          let uiCreate = null;
+          let lrCreate = null;
+          await p0.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
+          uiCreate = await uiRetryUnblock('post_login_create_item', 4);
+          if (await checkAndAbortIfBanned(p0, 'post_login_create_item')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+          lrCreate = await browserHelper.detectLoginRequired(p0).catch(()=>({ loginRequired:false }));
+          pushStep({ step: 'post_login_check_create_item', lrCreate, uiCreate });
+          await appendLoginRemediateEvidence({ nome, operator: op, step: 'final_check', page: p0, note: `final lrMsg=${!!(lrMessenger&&lrMessenger.loginRequired)} lrFb=${!!(lrFacebook&&lrFacebook.loginRequired)} lrCreate=${!!(lrCreate&&lrCreate.loginRequired)} uiFbOk=${!!(uiFacebook&&uiFacebook.ok)} uiCreateOk=${!!(uiCreate&&uiCreate.ok)}` });
+          if (await checkAndAbortIfBanned(p0, 'final_check')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
+
+          // Se create item está bloqueado, reflita em uiFacebook para decisão abaixo
+          if (uiCreate && uiCreate.ok === false) uiFacebook = uiCreate;
+          if (lrCreate && lrCreate.loginRequired) lrFacebook = lrCreate;
+          // Caso comum (conta nova): "probe_failed" no fb_main não pode derrubar o provision
+          // se o create/item (Robe real) já validou ok.
+          try {
+            const fbReason = String((lrFacebook && lrFacebook.reason) || '');
+            if (
+              lrFacebook &&
+              lrFacebook.loginRequired === true &&
+              fbReason === 'probe_failed' &&
+              lrCreate &&
+              lrCreate.loginRequired === false
+            ) {
+              pushStep({ step: 'fb_probe_failed_overridden_by_create', fbReason, lrCreate });
+              lrFacebook = lrCreate;
+            }
+          } catch {}
 
         } catch (e) {
           pushStep({ step: 'attempt2_login_fail', error: (e && e.message) || String(e) });
@@ -8857,7 +8607,6 @@ const handlers = {
         !(lrMessenger && lrMessenger.loginRequired) &&
         !(lrFacebook && lrFacebook.loginRequired) &&
         !!uiOk;
-      const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
 
       // Hard rule: se cair em captcha/checkpoint/identity, NÃO é sucesso e deve invocar humano.
       const nonAutomatableReason = (lr) => {
@@ -8886,6 +8635,7 @@ const handlers = {
       if (!uiOk) {
         // Stock provision: tente mais uma rodada determinística (reload + unblock) antes de declarar "UI bloqueada (Humano)".
         // Motivação: conta nova costuma cair em consent/dialog temporário; dá para resolver sem humano em muitos casos.
+        const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
         if (isStockProvision) {
           try {
             pushStep({ step: 'ui_blocked_retry_begin', uiMessenger, uiFacebook });
@@ -8930,38 +8680,10 @@ const handlers = {
         }
       }
 
-      // Stock provision (conta nova): se Messenger já autenticou e só o create/item ficou com diálogo,
-      // não derrubar o cadastro. Robe já fica em cooldown e o objetivo imediato é Virtus online estável.
-      if (isStockProvision) {
-        const messengerUiOk = (!uiMessenger || uiMessenger.ok === true);
-        const noLoginRequired = !(lrMessenger && lrMessenger.loginRequired) && !(lrFacebook && lrFacebook.loginRequired);
-        const fbUiBlockedOnly = !!(uiFacebook && uiFacebook.ok === false);
-        if (!uiOk && messengerUiOk && noLoginRequired && fbUiBlockedOnly) {
-          pushStep({ step: 'stock_provision_tolerate_fb_ui_blocked', uiMessenger, uiFacebook });
-          uiOk = true;
-          success = true;
-        }
-        if (!uiOk && noLoginRequired && messengerLoginConfirmed) {
-          pushStep({ step: 'stock_provision_tolerate_residual_ui_after_msg_login', uiMessenger, uiFacebook });
-          uiOk = true;
-          success = true;
-        }
-      }
-
       // Se não é loginRequired, mas a UI está bloqueada (consent/popup não resolvido), NÃO marque sucesso.
       if (!uiOk) {
         const kind = (uiFacebook && uiFacebook.kind) || (uiMessenger && uiMessenger.kind) || 'ui_blocked';
         pushStep({ step: 'ui_blocked_after_login', kind, uiMessenger, uiFacebook });
-        // Em falha, manter landing no Messenger/login para preservar contexto correto de remediação.
-        try {
-          const pages = await ctrl.browser.pages().catch(()=>[]);
-          const pFail = (pages && pages[0]) ? pages[0] : null;
-          if (pFail) {
-            await pFail.goto('https://www.messenger.com/login.php?next=https%3A%2F%2Fwww.messenger.com%2F', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
-            await sleep(900);
-            pushStep({ step: 'ui_blocked_parked_messenger_login' });
-          }
-        } catch {}
         try { await setLoginRequiredFlag(nome, { reason: `ui_blocked:${kind}`, source: 'login_remediate' }); } catch {}
         await failFastToHuman(`ui_blocked:${kind}`);
         return { ok: false, error: `ui_blocked:${kind}`, steps, closedForRam, pausedVirtus };
@@ -9592,9 +9314,15 @@ const handlers = {
             } catch {}
             setTimeout(() => {
               try {
-                enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
-                  reason: String(lr && lr.reason || 'login_form'),
-                  source: 'human_resume'
+                handlers.login_remediate({
+                  nome,
+                  operator: op2,
+                  options: { overrideHumanHold: true }
+                }).then((res) => {
+                  if (res && res.error === 'governor_busy') {
+                    const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume', immediate: true, force: true });
+                    try { provisionAudit.append({ ts: Date.now(), event: 'login_remediate_governor_retry_queued', nome: String(nome||''), operator: op2, queued: !!queued }); } catch {}
+                  }
                 }).catch(()=>null);
               } catch {}
             }, 0);
@@ -9640,14 +9368,18 @@ const handlers = {
                 try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_schedule_login_remediate', nome: String(nome||''), reason: String(lrPost && lrPost.reason || ''), source: String(lrPost && lrPost.domain || '') }); } catch {}
                 const opPost = `human_resume_post_nav:${String(nome || '').trim()}:${Date.now()}`;
                 try {
-                  enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
-                    reason: String(lrPost && lrPost.reason || 'login_form'),
-                    source: 'human_resume_post_nav'
-                  }).then((res) => {
-                    try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_result', nome: String(nome||''), operator: String(opPost||''), ok: !!(res && res.ok), error: String(res && res.error || '') }); } catch {}
-                  }).catch((err) => {
-                    try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_error', nome: String(nome||''), operator: String(opPost||''), error: String(err && err.message || err || '') }); } catch {}
-                  });
+                  handlers.login_remediate({ nome, operator: opPost, options: { overrideHumanHold: true } })
+                    .then((res) => {
+                      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_result', nome: String(nome||''), operator: String(opPost||''), ok: !!(res && res.ok), error: String(res && res.error || '') }); } catch {}
+                      const err = String(res && res.error || '');
+                      if (err === 'governor_busy' || err === 'busy') {
+                        const queued = queueAutoLoginRemediate(nome, { reason: 'governor_busy', source: 'human_resume_post_nav', immediate: true, force: true });
+                        try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_retry_queued', nome: String(nome||''), operator: String(opPost||''), queued: !!queued, error: err }); } catch {}
+                      }
+                    })
+                    .catch((err) => {
+                      try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_post_nav_error', nome: String(nome||''), operator: String(opPost||''), error: String(err && err.message || err || '') }); } catch {}
+                    });
                 } catch {}
                 await snapshotStatusAndWrite();
                 return { ok: true, scheduledLoginRemediate: true, preflight: { ok: true, state: 'login_required_post_nav', reason: String(lrPost.reason || '') } };
@@ -9784,9 +9516,10 @@ const handlers = {
                 // Agenda remediação automática para convergir o fluxo Robe sem depender de novo clique.
                 setTimeout(() => {
                   try {
-                    enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
-                      reason: rr || 'login_required',
-                      source: 'robe_play_login_required'
+                    handlers.login_remediate({
+                      nome,
+                      operator: `robe_play_login_required:${nome}:${Date.now()}`,
+                      options: { overrideHumanHold: true }
                     }).catch(() => {});
                   } catch {}
                 }, 0);
@@ -10409,7 +10142,6 @@ try {
   // Critério: captura quedas relevantes também em hosts menores, sem spammar.
   if (!global.__ANOMALY_WORKING_LAST_AT) global.__ANOMALY_WORKING_LAST_AT = 0;
   if (!global.__ANOMALY_PROFILE_LAST_AT) global.__ANOMALY_PROFILE_LAST_AT = new Map();
-  if (!global.__STUCK_CONFIG_SINCE_AT) global.__STUCK_CONFIG_SINCE_AT = new Map();
 
   const activeArr = perfis.filter(x => x && x.active === true);
   const workingArr = activeArr.filter(x => x.trabalhando === true);
@@ -10484,70 +10216,11 @@ try {
     if (!d || d.active !== true || String(d.virtus || '') !== 'on') continue;
     if (x.loginRequired === true || x.identityRequired === true || x.appealSubmitted === true) continue;
     if (x.humanControl === true || x.humanHold === true) continue;
-    const ctrl = controllers.get(x.nome);
-    const browserConnected = !!(ctrl && ctrl.browser && typeof ctrl.browser.isConnected === 'function' && ctrl.browser.isConnected());
-
-    // Auto-heal P0: perfil "travado em configurando" sem lock global ativo.
-    // Sintoma observado em produção: desired=virtus:on, browser ativo, mas ctrl.configurando=true por tempo indefinido.
-    // Regra de segurança:
-    // - só tenta recuperar sem provision lock ativo;
-    // - ignora se houver sendLock/robe em execução;
-    // - exige persistência mínima para evitar corrida com configuração legítima.
-    try {
-      const staleNoLock =
-        !!(ctrl && ctrl.configurando === true) &&
-        browserConnected &&
-        x.sendLockActive !== true &&
-        x.robeEmExecucao !== true &&
-        !provisionLock.isActive();
-      if (staleNoLock) {
-        const since = Number(global.__STUCK_CONFIG_SINCE_AT.get(x.nome) || 0) || now;
-        if (!global.__STUCK_CONFIG_SINCE_AT.get(x.nome)) global.__STUCK_CONFIG_SINCE_AT.set(x.nome, since);
-        const ageMs = now - since;
-        const minAgeMs = Math.max(30_000, Number(process.env.STUCK_CONFIG_RECOVER_MIN_AGE_MS || 120_000) || 120_000);
-        if (ageMs >= minAgeMs) {
-          let resumedVirtus = false;
-          let recoverError = null;
-          try {
-            ctrl.configurando = false;
-            if (!ctrl.virtus && automationAllowed(ctrl, { operator: 'stuck_config_recover' })) {
-              ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
-              ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, x.nome, {
-                restrictTab: 0,
-                epoch: ctrl.virtusEpoch,
-                slowMode: (autoMode && autoMode.mode !== 'full'),
-                governorMode: (autoMode && autoMode.mode) || 'full'
-              });
-              ctrl.trabalhando = true;
-              resumedVirtus = true;
-              try { unfreezeCooldownIfWorking(x.nome); } catch {}
-            }
-          } catch (e) {
-            recoverError = (e && e.message) ? String(e.message) : String(e);
-          }
-          try {
-            provisionAudit.append({
-              ts: now,
-              event: 'stuck_config_auto_recover',
-              nome: x.nome,
-              ageMs,
-              minAgeMs,
-              browserConnected,
-              resumedVirtus,
-              recoverError,
-              desired: { active: !!d.active, virtus: String(d.virtus || '') }
-            });
-          } catch {}
-          global.__STUCK_CONFIG_SINCE_AT.delete(x.nome);
-        }
-      } else {
-        global.__STUCK_CONFIG_SINCE_AT.delete(x.nome);
-      }
-    } catch {}
-
     const last = global.__ANOMALY_PROFILE_LAST_AT.get(x.nome) || 0;
     if ((now - Number(last || 0)) < (15 * 60 * 1000)) continue;
     global.__ANOMALY_PROFILE_LAST_AT.set(x.nome, now);
+    const ctrl = controllers.get(x.nome);
+    const browserConnected = !!(ctrl && ctrl.browser && typeof ctrl.browser.isConnected === 'function' && ctrl.browser.isConnected());
     try {
       provisionAudit.append({
         ts: now,
@@ -10695,10 +10368,8 @@ const NURSE_CFG = {
 };
 
 const LR_SCAN_CFG = {
-  healthyBaseMs: Math.max(60_000, Number(process.env.LR_SCAN_HEALTHY_BASE_MS || (5 * 60 * 1000)) || (5 * 60 * 1000)),
-  healthyJitterMs: Math.max(0, Number(process.env.LR_SCAN_HEALTHY_JITTER_MS || 30_000) || 30_000),
-  riskBaseMs: Math.max(60_000, Number(process.env.LR_SCAN_RISK_BASE_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)),
-  riskJitterMs: Math.max(0, Number(process.env.LR_SCAN_RISK_JITTER_MS || 60_000) || 60_000),
+  baseMs: Math.max(60_000, Number(process.env.LR_SCAN_BASE_MS || (10 * 60 * 1000)) || (10 * 60 * 1000)),
+  jitterMs: Math.max(0, Number(process.env.LR_SCAN_JITTER_MS || (2 * 60 * 1000)) || (2 * 60 * 1000))
 };
 
 const NURSE_OPEN_BACKOFF_CFG = {
@@ -10711,112 +10382,28 @@ const NURSE_OPEN_BACKOFF_CFG = {
 const MAX_OPEN_CONCURRENCY = 1;
 let slotsInUse = 0;
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
-const ACTIVATE_ONCE_NURSE_TIMEOUT_MS = Math.max(45_000, Math.min(300_000, Number(process.env.ACTIVATE_ONCE_NURSE_TIMEOUT_MS || 120_000) || 120_000));
-
-function isRamDeniedOpenError(err = '') {
-  const e = String(err || '');
-  return /ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(e);
-}
 
 function calcNurseDeniedBackoffMs(prevMs = 0) {
   const minMs = Math.max(60_000, Number(NURSE_OPEN_BACKOFF_CFG.minMs || 0) || (2 * 60 * 1000));
   const maxMs = Math.max(minMs, Number(NURSE_OPEN_BACKOFF_CFG.maxMs || 0) || (45 * 60 * 1000));
   const growth = Math.max(1.2, Number(NURSE_OPEN_BACKOFF_CFG.growth || 0) || 2);
   const base = prevMs > 0 ? Math.round(prevMs * growth) : minMs;
-  const jitter = Math.floor(Math.random() * (Math.max(0, Number(NURSE_OPEN_BACKOFF_CFG.jitterMs || 0) || 0) + 1));
+  const jitter = Math.floor(Math.random() * ((Number(NURSE_OPEN_BACKOFF_CFG.jitterMs || 0) || 0) + 1));
   return Math.min(maxMs, base + jitter);
 }
 
-function calcLrScanNextAt(now, isRiskTier) {
-  const base = isRiskTier ? LR_SCAN_CFG.riskBaseMs : LR_SCAN_CFG.healthyBaseMs;
-  const jitterCap = isRiskTier ? LR_SCAN_CFG.riskJitterMs : LR_SCAN_CFG.healthyJitterMs;
+function calcLrScanNextAt(now) {
+  const base = Number(LR_SCAN_CFG.baseMs || (10 * 60 * 1000)) || (10 * 60 * 1000);
+  const jitterCap = Number(LR_SCAN_CFG.jitterMs || 0) || 0;
   const jitter = jitterCap > 0 ? Math.floor(Math.random() * (jitterCap + 1)) : 0;
   return now + base + jitter;
-}
-
-async function activateOnceNurseSafe(nome, source = '', operator = '') {
-  const traceId = newFlowId('nurse_open');
-  const startedAt = Date.now();
-  appendForensicEvent({
-    eventType: 'nurse_open_begin',
-    profileName: nome,
-    outcome: 'begin',
-    severity: 'info',
-    source: 'nurse',
-    traceId,
-    decision: 'activate_once_race_start',
-    meta: {
-      source: String(source || '').slice(0, 80),
-      operator: String(operator || '').slice(0, 120),
-      timeoutMs: ACTIVATE_ONCE_NURSE_TIMEOUT_MS
-    }
-  });
-  let timer = null;
-  const timeoutPromise = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, error: `activate_once_timeout:${ACTIVATE_ONCE_NURSE_TIMEOUT_MS}` }), ACTIVATE_ONCE_NURSE_TIMEOUT_MS);
-  });
-  try {
-    const result = await Promise.race([
-      activateOnce(nome, source, operator),
-      timeoutPromise
-    ]);
-    const ok = !!(result && result.ok);
-    const err = !ok ? String((result && result.error) || 'unknown').slice(0, 180) : null;
-    appendForensicEvent({
-      eventType: 'nurse_open_end',
-      profileName: nome,
-      outcome: ok ? 'ok' : 'error',
-      severity: ok ? 'info' : 'warn',
-      source: 'nurse',
-      traceId,
-      cause: err || null,
-      decision: ok ? 'activate_once_ok' : 'activate_once_failed',
-      meta: {
-        durationMs: Date.now() - startedAt,
-        source: String(source || '').slice(0, 80),
-        operator: String(operator || '').slice(0, 120),
-        timeoutMs: ACTIVATE_ONCE_NURSE_TIMEOUT_MS,
-        already: !!(result && result.already),
-        error: err
-      }
-    });
-    if (!ok) {
-      const p = registerNurseOpenFailurePattern(nome, err || '', traceId, source);
-      if (p && p.flapping) {
-        appendForensicEvent({
-          eventType: 'nurse_open_flapping_suspected',
-          profileName: nome,
-          outcome: 'error',
-          severity: 'error',
-          source: 'nurse',
-          traceId,
-          cause: err || null,
-          decision: 'open_retry_pattern_detected',
-          meta: { failuresIn10m: Number(p.count || 0), source: String(source || '').slice(0, 80) }
-        });
-      }
-      await captureFallForensicsSnapshot({
-        profileName: nome,
-        eventType: (p && p.flapping) ? 'nurse_open_flapping_suspected' : 'nurse_open_failed',
-        source: 'nurse',
-        traceId,
-        cause: err || '',
-        decision: (p && p.flapping) ? 'open_retry_pattern_detected' : 'activate_once_failed',
-        severity: (p && p.flapping) ? 'error' : 'warn',
-        meta: { failuresIn10m: Number((p && p.count) || 0), operator: String(operator || '').slice(0, 120), source: String(source || '').slice(0, 80) }
-      });
-    }
-    return result;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 const ULTRA_RECOVERY = {
   MAX_RELOADS: 2,
   RELOAD_TIMEOUT_MS: 10000,
   RELOAD_POST_WAIT_MS: 250,
-  REOPEN_DELAY_SHORT_MS: 5000, // NOVO: Reduzido de 60s para 5s (reabertura quase imediata, supervisor controla velocidade)
+  REOPEN_DELAY_SHORT_MS: 60_000, // anti-rajada: evita reabertura curta em loop
   REOPEN_DELAY_RAMCPU_MS: 60000,
   FAIL_WINDOW_MS: 3*60*60*1000,
   FAIL_FREEZE_AFTER: 5,
@@ -11031,7 +10618,7 @@ const AUTO_LR_CFG = {
   enabled: !(String(process.env.AUTO_LOGIN_REMEDIATE || '').trim() === '0'),
   tickMs: Math.max(2000, Number(process.env.AUTO_LOGIN_REMEDIATE_TICK_MS || 5000) || 5000),
   immediateDelayMs: Math.max(0, Number(process.env.AUTO_LOGIN_REMEDIATE_IMMEDIATE_DELAY_MS || 1200) || 1200),
-  minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)), // 20min
+  minIntervalPerProfileMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_MIN_INTERVAL_MS || (10 * 60 * 1000)) || (10 * 60 * 1000)), // 10min
   maxAttemptsPerProfile24h: Math.max(1, Number(process.env.AUTO_LOGIN_REMEDIATE_MAX_ATTEMPTS_24H || 4) || 4),
   backoffFailMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_BACKOFF_FAIL_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)), // 45min
   totalTimeoutMs: Math.max(60_000, Number(process.env.AUTO_LOGIN_REMEDIATE_TOTAL_TIMEOUT_MS || (6 * 60 * 1000)) || (6 * 60 * 1000)),
@@ -11044,28 +10631,8 @@ const AUTO_LR_CFG = {
   }
 };
 
-const RECOVERY_QUEUE_CFG = {
-  enabled: String(process.env.RECOVERY_QUEUE_ENABLED || '1').trim() !== '0',
-  tickMs: Math.max(2000, Number(process.env.RECOVERY_QUEUE_TICK_MS || 5000) || 5000),
-  delayMinMs: Math.max(5 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MIN_MS || (15 * 60 * 1000)) || (15 * 60 * 1000)),
-  delayMaxMs: Math.max(10 * 60 * 1000, Number(process.env.RECOVERY_QUEUE_DELAY_MAX_MS || (30 * 60 * 1000)) || (30 * 60 * 1000)),
-  maxAttemptsPerItem: Math.max(1, Number(process.env.RECOVERY_QUEUE_MAX_ATTEMPTS || 6) || 6),
-};
-if (RECOVERY_QUEUE_CFG.delayMaxMs < RECOVERY_QUEUE_CFG.delayMinMs) {
-  RECOVERY_QUEUE_CFG.delayMaxMs = RECOVERY_QUEUE_CFG.delayMinMs;
-}
-
-const RECOVERY_ACTION = Object.freeze({
-  LOGIN_REQUIRED: 'login_required_recover',
-  CAPTCHA: 'captcha_recover',
-  IDENTITY: 'identity_recover',
-  APPEAL: 'appeal_followup_recover',
-});
-
 let _autoLoginRemediateRunning = false;
 let _autoLoginRemediateRunningNome = null;
-let _recoveryQueueTickRunning = false;
-let _recoveryQueueLastNoopLogAt = 0;
 
 function _pruneWindow(arr, winMs) {
   const now = Date.now();
@@ -11073,481 +10640,8 @@ function _pruneWindow(arr, winMs) {
   return a.filter(ts => ts && (now - ts) <= winMs);
 }
 
-function _recoveryRandomDelayMs() {
-  const min = Number(RECOVERY_QUEUE_CFG.delayMinMs || 60 * 60 * 1000) || (60 * 60 * 1000);
-  const max = Number(RECOVERY_QUEUE_CFG.delayMaxMs || 2 * 60 * 60 * 1000) || (2 * 60 * 60 * 1000);
-  if (max <= min) return min;
-  return Math.floor(min + Math.random() * (max - min + 1));
-}
-
-function _newRecoveryItemId(nome, tipo) {
-  return `rq_${Date.now()}_${safeFilePart(nome)}_${safeFilePart(tipo)}_${crypto.randomUUID().slice(0, 8)}`;
-}
-
-function _recoveryStateFromType(tipo = '', phase = 'pending') {
-  const t = String(tipo || '').trim();
-  const p = String(phase || 'pending').trim();
-  if (t === RECOVERY_ACTION.LOGIN_REQUIRED) return p === 'running' ? 'lr_running' : 'lr_pending';
-  if (t === RECOVERY_ACTION.CAPTCHA) return p === 'running' ? 'captcha_running' : 'captcha_pending';
-  if (t === RECOVERY_ACTION.IDENTITY) return p === 'running' ? 'identity_running' : 'identity_pending';
-  if (t === RECOVERY_ACTION.APPEAL) return p === 'running' ? 'appeal_running' : 'appeal_pending';
-  return p === 'running' ? 'recovery_running' : 'recovery_pending';
-}
-
-function _getRecoveryQueueFromDesired(desired) {
-  desired = desired || {};
-  desired._recoveryQueue = desired._recoveryQueue || {};
-  const q = desired._recoveryQueue;
-  q.enabled = RECOVERY_QUEUE_CFG.enabled;
-  q.items = Array.isArray(q.items) ? q.items : [];
-  q.history = Array.isArray(q.history) ? q.history : [];
-  q.running = q.running && typeof q.running === 'object' ? q.running : null;
-  q.cooldownUntil = Number(q.cooldownUntil || 0) || 0;
-  q.lastTickAt = Number(q.lastTickAt || 0) || 0;
-  return q;
-}
-
-function _queueAudit(event, payload = {}) {
-  try {
-    provisionAudit.append({
-      ts: Date.now(),
-      event: String(event || ''),
-      ...payload
-    });
-  } catch {}
-}
-
-async function enqueueRecoveryAction(nome, tipo, {
-  reason = '',
-  source = '',
-  immediate = false,
-  force = false,
-  meta = null
-} = {}) {
-  try {
-    if (!RECOVERY_QUEUE_CFG.enabled) {
-      nome = String(nome || '').trim();
-      tipo = String(tipo || '').trim();
-      if (!nome || !tipo) return { ok: false, skipped: 'disabled_invalid_input' };
-      try {
-        _queueAudit('recovery_queue_bypass_disabled', { nome, tipo, reason: String(reason || '').slice(0, 120), source: String(source || '').slice(0, 80) });
-      } catch {}
-      if (tipo === RECOVERY_ACTION.LOGIN_REQUIRED) {
-        const queued = queueAutoLoginRemediate(nome, { reason, source, immediate: true, force: true });
-        return { ok: !!queued, skipped: 'disabled_legacy_login' };
-      }
-      const ctrl = controllers.get(nome);
-      if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, skipped: 'disabled_no_ctrl' };
-      const pages = await ctrl.browser.pages().catch(() => []);
-      const pg = (pages && pages[0]) || ctrl.mainPage || null;
-      if (!pg) return { ok: false, skipped: 'disabled_no_page' };
-      if (tipo === RECOVERY_ACTION.CAPTCHA) {
-        setTimeout(() => { try { runCaptchaFlow(nome, ctrl, pg, { source: source || 'legacy_disabled', force: true }).catch(()=>{}); } catch {} }, 0);
-        return { ok: true, skipped: 'disabled_legacy_captcha' };
-      }
-      if (tipo === RECOVERY_ACTION.IDENTITY) {
-        setTimeout(() => { try { runIdentityFlow(nome, ctrl, pg, { source: source || 'legacy_disabled', force: true }).catch(()=>{}); } catch {} }, 0);
-        return { ok: true, skipped: 'disabled_legacy_identity' };
-      }
-      if (tipo === RECOVERY_ACTION.APPEAL) {
-        setTimeout(() => { try { appealMonitorCheckNow(nome, ctrl).catch(()=>{}); } catch {} }, 0);
-        return { ok: true, skipped: 'disabled_legacy_appeal' };
-      }
-      return { ok: false, skipped: 'disabled_unknown_type' };
-    }
-    nome = String(nome || '').trim();
-    tipo = String(tipo || '').trim();
-    if (!nome || !tipo) return { ok: false, skipped: 'invalid_input' };
-    const now = Date.now();
-    const reasonSafe = String(reason || '').slice(0, 180);
-    const sourceSafe = String(source || '').slice(0, 80);
-    let out = null;
-    await fileStore.withDesiredFileLockUpdate((desired) => {
-      desired = desired || {};
-      desired.perfis = desired.perfis || {};
-      const q = _getRecoveryQueueFromDesired(desired);
-      const items = q.items;
-      const idx = items.findIndex((it) =>
-        it &&
-        it.nome === nome &&
-        it.tipo === tipo &&
-        it.state !== 'done' &&
-        it.state !== 'cancelled'
-      );
-      if (idx >= 0) {
-        const item = items[idx];
-        item.lastSeenAt = now;
-        item.seenCount = Number(item.seenCount || 0) + 1;
-        if (item.state === 'running') item.seenWhileRunning = Number(item.seenWhileRunning || 0) + 1;
-        if (reasonSafe) item.lastReason = reasonSafe;
-        if (sourceSafe) item.lastSource = sourceSafe;
-        if (meta && typeof meta === 'object') item.lastMeta = meta;
-        items[idx] = item;
-        out = { ok: true, dedup: true, itemId: item.id, nextEligibleAt: Number(item.nextEligibleAt || 0) || 0 };
-        return desired;
-      }
-      const idxAny = items.findIndex((it) =>
-        it &&
-        it.nome === nome &&
-        it.state !== 'done' &&
-        it.state !== 'cancelled'
-      );
-      if (idxAny >= 0) {
-        const item = items[idxAny];
-        const prevTipo = String(item.tipo || '').trim();
-        item.lastSeenAt = now;
-        item.seenCount = Number(item.seenCount || 0) + 1;
-        if (reasonSafe) item.lastReason = reasonSafe;
-        if (sourceSafe) item.lastSource = sourceSafe;
-        if (meta && typeof meta === 'object') item.lastMeta = meta;
-        if (item.state === 'running') {
-          item.seenWhileRunning = Number(item.seenWhileRunning || 0) + 1;
-          if (prevTipo !== tipo) {
-            item.nextTipo = tipo;
-            item.nextReason = reasonSafe || null;
-            item.nextSource = sourceSafe || null;
-            item.nextMeta = (meta && typeof meta === 'object') ? meta : null;
-          }
-          out = {
-            ok: true,
-            dedup: true,
-            rerouted: prevTipo !== tipo,
-            itemId: item.id,
-            nextEligibleAt: Number(item.nextEligibleAt || 0) || 0
-          };
-          return desired;
-        }
-        if (prevTipo !== tipo) {
-          item.tipo = tipo;
-          if (reasonSafe) item.reason = reasonSafe;
-          if (sourceSafe) item.source = sourceSafe;
-          if (meta && typeof meta === 'object') item.meta = meta;
-        }
-        out = {
-          ok: true,
-          dedup: true,
-          rerouted: prevTipo !== tipo,
-          itemId: item.id,
-          nextEligibleAt: Number(item.nextEligibleAt || 0) || 0
-        };
-        return desired;
-      }
-      const delayMs = force ? 0 : (immediate ? _recoveryRandomDelayMs() : _recoveryRandomDelayMs());
-      const nextEligibleAt = now + delayMs;
-      const item = {
-        id: _newRecoveryItemId(nome, tipo),
-        nome,
-        tipo,
-        state: 'pending',
-        reason: reasonSafe || null,
-        source: sourceSafe || null,
-        firstSeenAt: now,
-        lastSeenAt: now,
-        nextEligibleAt,
-        attempts: 0,
-        seenCount: 1,
-        seenWhileRunning: 0,
-        lastOutcome: null,
-        lastError: null,
-        lastReason: reasonSafe || null,
-        lastSource: sourceSafe || null,
-        createdBy: sourceSafe || 'worker',
-        meta: (meta && typeof meta === 'object') ? meta : null,
-      };
-      items.push(item);
-      out = { ok: true, dedup: false, itemId: item.id, nextEligibleAt };
-      return desired;
-    });
-    if (out && out.ok) {
-      _queueAudit(out.dedup ? 'recovery_queue_dedup_hit' : 'recovery_queue_enqueued', {
-        nome,
-        tipo,
-        rerouted: !!out.rerouted,
-        reason: reasonSafe || null,
-        source: sourceSafe || null,
-        itemId: out.itemId,
-        nextEligibleAt: out.nextEligibleAt
-      });
-    }
-    return out || { ok: false, skipped: 'enqueue_failed' };
-  } catch (e) {
-    const msg = (e && e.message) ? String(e.message).slice(0, 180) : String(e).slice(0, 180);
-    _queueAudit('recovery_queue_enqueue_error', { nome: String(nome || ''), tipo: String(tipo || ''), error: msg });
-    return { ok: false, error: msg };
-  }
-}
-
-async function _finishRecoveryQueueRun({
-  runId = '',
-  lockOwner = '',
-  item = null,
-  success = false,
-  outcome = '',
-  error = '',
-  keepInQueue = false
-} = {}) {
-  const now = Date.now();
-  const delayMs = _recoveryRandomDelayMs();
-  const cooldownUntil = now + delayMs;
-  await fileStore.withDesiredFileLockUpdate((desired) => {
-    desired = desired || {};
-    const q = _getRecoveryQueueFromDesired(desired);
-    q.running = null;
-    q.cooldownUntil = cooldownUntil;
-    q.lastDoneAt = now;
-    q.lastOutcome = String(outcome || (success ? 'ok' : 'failed')).slice(0, 140);
-    q.lastError = error ? String(error).slice(0, 220) : null;
-    const items = q.items;
-    const idx = items.findIndex((it) => it && item && it.id === item.id);
-    let keepInQueueEffective = !!keepInQueue;
-    if (idx >= 0) {
-      const cur = items[idx];
-      const hasFollowup = !!(cur.nextTipo && String(cur.nextTipo || '') !== String(cur.tipo || ''));
-      if (hasFollowup) {
-        keepInQueueEffective = true;
-        cur.tipo = String(cur.nextTipo || cur.tipo);
-        if (cur.nextReason) cur.reason = String(cur.nextReason);
-        if (cur.nextSource) cur.source = String(cur.nextSource);
-        if (cur.nextMeta && typeof cur.nextMeta === 'object') cur.meta = cur.nextMeta;
-        cur.nextTipo = null;
-        cur.nextReason = null;
-        cur.nextSource = null;
-        cur.nextMeta = null;
-      }
-      if (keepInQueueEffective) {
-        cur.state = 'pending';
-        cur.nextEligibleAt = cooldownUntil;
-        cur.lastOutcome = q.lastOutcome;
-        cur.lastError = q.lastError;
-        cur.lastRunAt = now;
-        cur.attempts = Number(cur.attempts || 0) + 1;
-        items.splice(idx, 1);
-        items.push(cur);
-      } else {
-        cur.state = 'done';
-        cur.doneAt = now;
-        cur.lastOutcome = q.lastOutcome;
-        cur.lastError = q.lastError;
-        cur.lastRunAt = now;
-        cur.attempts = Number(cur.attempts || 0) + 1;
-        items.splice(idx, 1);
-      }
-      try {
-        desired.perfis = desired.perfis || {};
-        const curPerfil = desired.perfis[cur.nome] || {};
-        desired.perfis[cur.nome] = {
-          ...curPerfil,
-          recoveryState: keepInQueueEffective ? _recoveryStateFromType(cur.tipo, 'pending') : (success ? 'healthy' : 'recovery_error')
-        };
-      } catch {}
-    }
-    q.history = Array.isArray(q.history) ? q.history : [];
-    q.history.push({
-      ts: now,
-      runId: String(runId || ''),
-      itemId: item && item.id ? item.id : null,
-      nome: item && item.nome ? item.nome : null,
-      tipo: item && item.tipo ? item.tipo : null,
-      success: !!success,
-      outcome: q.lastOutcome,
-      error: q.lastError,
-      delayMs
-    });
-    if (q.history.length > 200) q.history = q.history.slice(-200);
-    return desired;
-  });
-  _queueAudit(keepInQueue ? 'recovery_queue_requeued' : 'recovery_queue_done', {
-    runId: String(runId || ''),
-    itemId: item && item.id ? item.id : null,
-    nome: item && item.nome ? item.nome : null,
-    tipo: item && item.tipo ? item.tipo : null,
-    success: !!success,
-    outcome: String(outcome || (success ? 'ok' : 'failed')).slice(0, 140),
-    error: error ? String(error).slice(0, 220) : null,
-    cooldownUntil
-  });
-  try {
-    if (lockOwner) provisionLock.release({ owner: String(lockOwner), force: false });
-  } catch {}
-}
-
-async function _executeRecoveryQueueItem(item) {
-  const nome = String(item && item.nome || '').trim();
-  const tipo = String(item && item.tipo || '').trim();
-  const attempts = Number(item && item.attempts || 0) || 0;
-  if (!nome || !tipo) return { ok: false, outcome: 'invalid_item', error: 'invalid_item' };
-  const ctrl = controllers.get(nome);
-  if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) {
-    return { ok: false, outcome: 'no_ctrl', error: 'no_connected_browser' };
-  }
-  const pages = await ctrl.browser.pages().catch(() => []);
-  const pg = (pages && pages[0]) || ctrl.mainPage || null;
-  if (!pg) return { ok: false, outcome: 'no_page', error: 'no_page' };
-  const operator = `recovery_queue:${tipo}:${nome}:${Date.now()}`;
-  if (tipo === RECOVERY_ACTION.LOGIN_REQUIRED) {
-    const resp = await handlers.login_remediate({
-      nome,
-      operator,
-      options: {
-        overrideHumanHold: false,
-        closeAfterSuccess: true,
-        startAfterSuccess: true,
-        reopenClosedForRam: true,
-        maxHardDeactivations: 2,
-        totalTimeoutMs: AUTO_LR_CFG.totalTimeoutMs,
-        stageTimeoutMs: AUTO_LR_CFG.stageTimeoutMs,
-        waitBusyMs: 120_000
-      }
-    });
-    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'login_recovered' : 'login_recover_failed', error: resp && resp.error ? String(resp.error) : null };
-  }
-  if (tipo === RECOVERY_ACTION.CAPTCHA) {
-    const resp = await runCaptchaFlow(nome, ctrl, pg, { source: 'recovery_queue', force: true }).catch((e) => ({ ok: false, error: (e && e.message) || String(e) }));
-    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'captcha_recovered' : 'captcha_recover_failed', error: resp && resp.error ? String(resp.error) : null };
-  }
-  if (tipo === RECOVERY_ACTION.IDENTITY) {
-    const resp = await runIdentityFlow(nome, ctrl, pg, { source: 'recovery_queue', force: true }).catch((e) => ({ ok: false, error: (e && e.message) || String(e) }));
-    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'identity_recovered' : 'identity_recover_failed', error: resp && resp.error ? String(resp.error) : null };
-  }
-  if (tipo === RECOVERY_ACTION.APPEAL) {
-    const resp = await appealMonitorCheckNow(nome, ctrl).catch((e) => ({ ok: false, error: (e && e.message) || String(e) }));
-    return { ok: !!(resp && resp.ok), outcome: (resp && resp.ok) ? 'appeal_checked' : 'appeal_check_failed', error: resp && resp.error ? String(resp.error) : null };
-  }
-  return { ok: false, outcome: 'unknown_type', error: `unknown_type:${tipo}:attempts=${attempts}` };
-}
-
-async function processRecoveryQueueTick() {
-  if (!RECOVERY_QUEUE_CFG.enabled) return;
-  if (_recoveryQueueTickRunning) return;
-  _recoveryQueueTickRunning = true;
-  const now = Date.now();
-  let runCtx = null;
-  try {
-    if (provisionLock.isActive()) {
-      const lock = (provisionLock.get && provisionLock.get().lock) || null;
-      const kind = String((lock && lock.meta && lock.meta.kind) || '');
-      if (kind !== 'recovery_queue_runner') {
-        const last = Number(_recoveryQueueLastNoopLogAt || 0) || 0;
-        if (!last || (now - last) > 60_000) {
-          _recoveryQueueLastNoopLogAt = now;
-          _queueAudit('recovery_queue_tick_blocked', { reason: 'provision_lock', lockKind: kind || null });
-        }
-        return;
-      }
-    }
-
-    const desired = readJsonFile(desiredPath, { perfis: {} }) || { perfis: {} };
-    const q = _getRecoveryQueueFromDesired(desired);
-    if (q.running && q.running.startedAt && (now - Number(q.running.startedAt || 0)) < (AUTO_LR_CFG.totalTimeoutMs + 120_000)) {
-      return;
-    }
-    if (Number(q.cooldownUntil || 0) > now) return;
-
-    const items = Array.isArray(q.items) ? q.items.slice() : [];
-    const next = items
-      .filter((it) => it && it.state === 'pending')
-      .sort((a, b) => Number(a.nextEligibleAt || 0) - Number(b.nextEligibleAt || 0))[0];
-    if (!next) return;
-    if (Number(next.nextEligibleAt || 0) > now) return;
-
-    const runId = `rqrun_${now}_${crypto.randomUUID().slice(0, 8)}`;
-    const lockOwner = `recovery_queue_runner:${runId}`;
-    try {
-      const got = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: Math.max(120_000, AUTO_LR_CFG.totalTimeoutMs + 120_000), meta: { kind: 'recovery_queue_runner', runId, itemId: next.id, nome: next.nome, tipo: next.tipo } });
-      if (!got || !got.ok) {
-        const lockOwnerBusy = got && got.lock && got.lock.owner ? String(got.lock.owner) : null;
-        const lockError = got && got.error ? String(got.error) : null;
-        _queueAudit('recovery_queue_tick_blocked', { reason: 'lock_acquire_failed', runId, itemId: next.id, nome: next.nome, tipo: next.tipo, lockOwner: lockOwnerBusy, error: lockError });
-        return;
-      }
-    } catch (e) {
-      _queueAudit('recovery_queue_tick_blocked', { reason: 'lock_acquire_error', runId, error: String((e && e.message) || e).slice(0, 180) });
-      return;
-    }
-    await fileStore.withDesiredFileLockUpdate((d) => {
-      d = d || {};
-      const qq = _getRecoveryQueueFromDesired(d);
-      const idx = qq.items.findIndex((it) => it && it.id === next.id && it.state === 'pending');
-      if (idx < 0) return d;
-      qq.items[idx].state = 'running';
-      qq.items[idx].runningAt = now;
-      qq.items[idx].runId = runId;
-      qq.items[idx].lastStartAt = now;
-      qq.running = {
-        runId,
-        itemId: qq.items[idx].id,
-        nome: qq.items[idx].nome,
-        tipo: qq.items[idx].tipo,
-        startedAt: now
-      };
-      qq.lastTickAt = now;
-      try {
-        d.perfis = d.perfis || {};
-        const curPerfil = d.perfis[qq.items[idx].nome] || {};
-        d.perfis[qq.items[idx].nome] = {
-          ...curPerfil,
-          recoveryState: _recoveryStateFromType(qq.items[idx].tipo, 'running')
-        };
-      } catch {}
-      return d;
-    });
-
-    runCtx = { runId, lockOwner, item: next };
-    _queueAudit('recovery_queue_started', {
-      runId,
-      itemId: next.id,
-      nome: next.nome,
-      tipo: next.tipo,
-      attempts: Number(next.attempts || 0) || 0,
-      firstSeenAt: Number(next.firstSeenAt || 0) || 0,
-      lastSeenAt: Number(next.lastSeenAt || 0) || 0,
-      nextEligibleAt: Number(next.nextEligibleAt || 0) || 0
-    });
-
-    const resp = await _executeRecoveryQueueItem(next);
-    const attemptsNext = (Number(next.attempts || 0) || 0) + 1;
-    const maxAttemptsReached = attemptsNext >= RECOVERY_QUEUE_CFG.maxAttemptsPerItem;
-    const keepInQueue = !resp.ok && !maxAttemptsReached;
-    await _finishRecoveryQueueRun({
-      runId,
-      lockOwner,
-      item: next,
-      success: !!resp.ok,
-      outcome: String(resp.outcome || (resp.ok ? 'ok' : 'failed')),
-      error: resp.error ? String(resp.error) : '',
-      keepInQueue
-    });
-  } catch (e) {
-    const msg = (e && e.message) ? String(e.message) : String(e);
-    if (runCtx && runCtx.item) {
-      await _finishRecoveryQueueRun({
-        runId: runCtx.runId,
-        lockOwner: runCtx.lockOwner,
-        item: runCtx.item,
-        success: false,
-        outcome: 'runner_exception',
-        error: msg,
-        keepInQueue: true
-      }).catch(()=>{});
-    } else {
-      _queueAudit('recovery_queue_tick_error', { error: msg.slice(0, 220) });
-    }
-  } finally {
-    _recoveryQueueTickRunning = false;
-  }
-}
-
 function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false, force = false } = {}) {
   try {
-    if (RECOVERY_QUEUE_CFG.enabled) {
-      enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
-        reason,
-        source: source || 'auto_login_remediate',
-        immediate,
-        force
-      }).catch(()=>{});
-      return true;
-    }
     if (!AUTO_LR_CFG.enabled) return false;
     if (!nome) return false;
     robeMeta[nome] = robeMeta[nome] || {};
@@ -11562,30 +10656,19 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
       return false;
     }
 
-    const reasonNorm = String(reason || '').toLowerCase();
-    // Prioridade P0: quando voltou para login_form, não pode ficar preso em backoff antigo.
-    // Ex.: tentativa passada falhou por UI bloqueada e deixou nextAt distante; agora precisamos tentar novamente.
-    const immediateLoginForm = !!immediate && reasonNorm.includes('login_form');
-    const bypassSchedule = !!(force || immediateLoginForm);
     const last = Number(st.lastStartAt || 0) || 0;
-    const earliest = bypassSchedule ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
+    const earliest = force ? 0 : (last ? (last + AUTO_LR_CFG.minIntervalPerProfileMs) : 0);
     const when = Math.max(
       now + (immediate ? AUTO_LR_CFG.immediateDelayMs : 2500),
       earliest,
-      bypassSchedule ? 0 : (Number(st.nextAt || 0) || 0)
+      force ? 0 : (Number(st.nextAt || 0) || 0)
     );
-    // Evita spam de eventos quando já está enfileirado para o mesmo instante.
-    const prevQueued = !!st.queued;
-    const prevNextAt = Number(st.nextAt || 0) || 0;
     st.queued = true;
     st.nextAt = when;
     st.reason = String(reason || '').slice(0, 80);
     st.source = String(source || '').slice(0, 80);
-    st.force = !!bypassSchedule;
+    st.force = !!force;
     st.enqueuedAt = now;
-    if (prevQueued && prevNextAt === when) {
-      return true;
-    }
     try {
       provisionAudit.append({
         ts: now,
@@ -11595,7 +10678,7 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
         source: String(source || '').slice(0, 80),
         nextAt: when,
         immediate: !!immediate,
-        force: !!bypassSchedule
+        force: !!force
       });
     } catch {}
     return true;
@@ -11605,9 +10688,6 @@ function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = f
 }
 
 async function autoLoginRemediateTick() {
-  if (RECOVERY_QUEUE_CFG.enabled) {
-    return processRecoveryQueueTick();
-  }
   if (!AUTO_LR_CFG.enabled) return;
   if (_autoLoginRemediateRunning) return;
   // Não competir com provisionamento/manual configure em andamento: evita alternância de lock
@@ -11853,14 +10933,10 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     };
     let lr = null;
     let lrPage = pg;
-    let sawMessengerPage = false;
-    let sawFacebookPage = false;
     try {
       for (const p of (pages || []).slice(0, HUMAN_RECONCILE_CFG.maxPagesScan)) {
         const u = safeUrl(p);
         if (!/(facebook|messenger)\.com/i.test(u)) continue;
-        if (/messenger\.com/i.test(u)) sawMessengerPage = true;
-        if (/facebook\.com/i.test(u)) sawFacebookPage = true;
         const det = await browserHelper.detectLoginRequired(p).catch(()=>null);
         if (det && det.loginRequired) {
           if (!lr || reasonPriority(det.reason) > reasonPriority(lr.reason)) {
@@ -11872,25 +10948,6 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     } catch {}
     if (!lr) lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
-      // Guardrail: se o último bloqueio veio de Messenger, mas não há aba Messenger para validar,
-      // o estado é inconclusivo e NÃO pode limpar flags.
-      try {
-        const flagsPeek = await readAccountFlags(nome).catch(()=>({}));
-        const lastLoginSource = String((flagsPeek && flagsPeek.loginSource) || '').toLowerCase();
-        if (lastLoginSource === 'messenger' && !sawMessengerPage) {
-          try {
-            provisionAudit.append({
-              ts: now,
-              event: 'human_reconcile_inconclusive_no_messenger_page',
-              nome: String(nome||''),
-              source: String(source||''),
-              sawMessengerPage: false,
-              sawFacebookPage: !!sawFacebookPage
-            });
-          } catch {}
-          return { ok: true, state: 'inconclusive_no_messenger_page' };
-        }
-      } catch {}
       // Estado real mudou: browser está ok, mas flags antigas podem ter ficado presas (ex.: loginRemediateFailed).
       // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
       let cleared = [];
@@ -11971,12 +11028,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
         const op = `human_reconcile_login_form:${String(nome||'')}:${now}`;
         try { provisionAudit.append({ ts: now, event: 'human_reconcile_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
         setTimeout(() => {
-          try {
-            enqueueRecoveryAction(nome, RECOVERY_ACTION.LOGIN_REQUIRED, {
-              reason: lr.reason || 'login_form',
-              source: 'human_reconcile'
-            }).catch(()=>{});
-          } catch {}
+          try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
         }, 0);
       } else {
         try { provisionAudit.append({ ts: now, event: 'human_reconcile_schedule_suppressed', nome: String(nome||''), reason: 'min_interval' }); } catch {}
@@ -12363,7 +11415,7 @@ async function nurseTick() {
         slotsInUse++;
         try {
           await reportAction(appealReadyPick, 'nurse_restart', 'appeal_ready_priority_open');
-          await activateOnceNurseSafe(appealReadyPick, 'nurse_appeal_ready').catch(()=>null);
+          await activateOnce(appealReadyPick, 'nurse_appeal_ready').catch(()=>null);
         } catch {} finally {
           slotsInUse--;
         }
@@ -12518,12 +11570,7 @@ async function nurseTick() {
                 const pages = ctrl.browser ? await ctrl.browser.pages().catch(()=>[]) : [];
                 const pg = pages && pages[0];
                 if (pg) {
-                  try {
-                    await enqueueRecoveryAction(nome, RECOVERY_ACTION.IDENTITY, {
-                      reason: 'identity_required',
-                      source: 'nurse_identity_required'
-                    });
-                  } catch {}
+                  await runIdentityFlow(nome, ctrl, pg, { source: 'nurse_identity_required' }).catch(()=>null);
                 }
               }
               await snapshotStatusAndWrite().catch(()=>{});
@@ -12558,12 +11605,7 @@ async function nurseTick() {
                 const pg = (pages && pages[0]) || ctrl.mainPage || null;
                 if (pg) {
                   try { provisionAudit.append({ ts: now, event: 'nurse_captcha_flow_schedule', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
-                  try {
-                    await enqueueRecoveryAction(nome, RECOVERY_ACTION.CAPTCHA, {
-                      reason: rr || 'captcha',
-                      source: 'nurse_captcha_login_required'
-                    });
-                  } catch {}
+                  runCaptchaFlow(nome, ctrl, pg, { source: 'nurse_captcha_login_required', force: true }).catch(()=>{});
                 } else {
                   try { provisionAudit.append({ ts: now, event: 'nurse_captcha_flow_no_page', nome: String(nome||''), reason: rr.slice(0,160) }); } catch {}
                 }
@@ -12669,42 +11711,10 @@ async function nurseTick() {
         continue;
       }
 
-      // Guardrail: se sobrou controller "zumbi" (sem browser conectado),
-      // trate como ausente para permitir reopen automático.
-      const ctrlDisconnected = !!(ctrl && (!ctrl.browser || !ctrl.browser.isConnected?.()));
-      if (want.active === true && ctrlDisconnected) {
-        try {
-          provisionAudit.append({
-            ts: Date.now(),
-            event: 'nurse_cleanup_stale_controller',
-            nome: String(nome || ''),
-            hadBrowser: !!(ctrl && ctrl.browser),
-            wasConnected: !!(ctrl && ctrl.browser && ctrl.browser.isConnected?.())
-          });
-        } catch {}
-        try { controllers.delete(nome); } catch {}
-      }
-
-      if (want.active === true && (!ctrl || ctrlDisconnected)) {
+      if (want.active === true && !ctrl) {
         if (isFrozenNow(nome)) continue;
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {
-          try {
-            robeMeta[nome] = robeMeta[nome] || {};
-            const now = Date.now();
-            const lastSkip = Number(robeMeta[nome].lastOpenBackoffSkipLogAt || 0) || 0;
-            if (!lastSkip || (now - lastSkip) > 60_000) {
-              robeMeta[nome].lastOpenBackoffSkipLogAt = now;
-              provisionAudit.append({
-                ts: now,
-                event: 'nurse_open_backoff_skip',
-                nome: String(nome || ''),
-                heldUntil: Number(robeMeta[nome].activationHeldUntil || 0) || 0,
-                remainingMs: Math.max(0, Number(robeMeta[nome].activationHeldUntil || 0) - now),
-                backoffMs: Number(robeMeta[nome].openBackoffMs || 0) || 0
-              });
-            }
-          } catch {}
           continue;
         }
         if (robeMeta[nome]?.reopenAt && robeMeta[nome].reopenAt > Date.now()) {
@@ -12737,23 +11747,14 @@ async function nurseTick() {
               const lkKind = (provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.meta && provisionLockSnap.lock.meta.kind)
                 ? String(provisionLockSnap.lock.meta.kind)
                 : '';
-              const useOpenAll =
-                oaActive &&
-                oaOwner &&
-                lkActive &&
-                lkOwner === oaOwner &&
-                (
-                  lkKind === 'open_all_map' ||
-                  lkKind === 'open_all_keepalive' ||
-                  (!lkKind && /^open_all_map:/i.test(lkOwner))
-                );
+              const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: useOpenAll ? 'open_all_24h' : 'nurse_auto', oaActive: !!oaActive, lkActive: !!lkActive, lkKind: lkKind || null }); } catch {}
               r = useOpenAll
-                ? await activateOnceNurseSafe(nome, 'open_all_24h', oaOwner)
-                : await activateOnceNurseSafe(nome, 'nurse_auto');
+                ? await activateOnce(nome, 'open_all_24h', oaOwner)
+                : await activateOnce(nome, 'nurse_auto');
             } catch {
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: 'nurse_auto', oaActive: false, lkActive: false, lkKind: null }); } catch {}
-              r = await activateOnceNurseSafe(nome, 'nurse_auto');
+              r = await activateOnce(nome, 'nurse_auto');
             }
             if (!r || !r.ok) {
               const err = (r && r.error) || '';
@@ -12763,17 +11764,7 @@ async function nurseTick() {
                 robeMeta[nome].lastOpenDeniedAt = Date.now();
                 robeMeta[nome].lastOpenDeniedReason = String(err || '').slice(0, 220);
               } catch {}
-              if (isRamDeniedOpenError(err)) {
-                appendForensicEvent({
-                  eventType: 'nurse_open_ram_denied',
-                  profileName: nome,
-                  outcome: 'error',
-                  severity: 'warn',
-                  source: 'nurse',
-                  cause: 'ram_or_supervisor_denied',
-                  decision: 'try_swap_open',
-                  meta: { error: String(err || '').slice(0, 180) }
-                });
+              if (/ram_insuficiente_para_ativar|supervisor_denied:ram_low|supervisor_denied:slots|headroom_below_min_after_open/.test(err)) {
                 await issues.append(nome, 'mil_action', 'open_denied_ram_swap_attempt err='+err);
 
                 const swapped = await trySwapOpen(nome);
@@ -12784,55 +11775,15 @@ async function nurseTick() {
                   const curBackoff = calcNurseDeniedBackoffMs(prevBackoff);
                   robeMeta[nome].openBackoffMs = curBackoff;
                   robeMeta[nome].activationHeldUntil = Date.now() + curBackoff;
-                  robeMeta[nome].openDeniedStreak = (Number(robeMeta[nome].openDeniedStreak || 0) || 0) + 1;
-                  try {
-                    provisionAudit.append({
-                      ts: Date.now(),
-                      event: 'nurse_open_backoff_applied',
-                      nome: String(nome || ''),
-                      streak: Number(robeMeta[nome].openDeniedStreak || 0) || 0,
-                      backoffMs: curBackoff,
-                      prevBackoffMs: prevBackoff,
-                      reason: String(err || '').slice(0, 180),
-                      swapped: false
-                    });
-                  } catch {}
                   await issues.append(nome, 'mil_action', `open_backoff escalado ${Math.floor(curBackoff/1000)}s (ram_denied)`);
                   logger.warn('[SWAP] open_backoff escalated', { nome, backoffMs: curBackoff, prevBackoffMs: prevBackoff, reason: err });
                 } else {
-                  try {
-                    robeMeta[nome] = robeMeta[nome] || {};
-                    robeMeta[nome].openDeniedStreak = 0;
-                  } catch {}
-                  try {
-                    provisionAudit.append({
-                      ts: Date.now(),
-                      event: 'nurse_open_backoff_applied',
-                      nome: String(nome || ''),
-                      streak: 0,
-                      backoffMs: Number(robeMeta[nome]?.openBackoffMs || 0) || 0,
-                      prevBackoffMs: Number(robeMeta[nome]?.openBackoffMs || 0) || 0,
-                      reason: String(err || '').slice(0, 180),
-                      swapped: true
-                    });
-                  } catch {}
+                  try { robeMeta[nome].openBackoffMs = 0; } catch {}
                   logger.info('[SWAP] swap_open_success (nurse)', { target: nome });
                 }
               }
             } else {
-              appendForensicEvent({
-                eventType: 'nurse_open_success',
-                profileName: nome,
-                outcome: 'ok',
-                severity: 'info',
-                source: 'nurse',
-                decision: 'controller_active',
-                meta: { source: 'nurse_activate_once' }
-              });
-              if (robeMeta[nome]) {
-                robeMeta[nome].openBackoffMs = 0;
-                robeMeta[nome].openDeniedStreak = 0;
-              }
+              if (robeMeta[nome]) robeMeta[nome].openBackoffMs = 0;
               // Progresso do open-all: marca avanço para evitar "stall detector" falso.
               try {
                 const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
@@ -12843,16 +11794,7 @@ async function nurseTick() {
                 const lkKind = (provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.meta && provisionLockSnap.lock.meta.kind)
                   ? String(provisionLockSnap.lock.meta.kind)
                   : '';
-                const useOpenAll =
-                  oaActive &&
-                  oaOwner &&
-                  lkActive &&
-                  lkOwner === oaOwner &&
-                  (
-                    lkKind === 'open_all_map' ||
-                    lkKind === 'open_all_keepalive' ||
-                    (!lkKind && /^open_all_map:/i.test(lkOwner))
-                  );
+                const useOpenAll = oaActive && oaOwner && lkActive && lkOwner === oaOwner && (lkKind === 'open_all_map' || (!lkKind && /^open_all_map:/i.test(lkOwner)));
                 if (useOpenAll) {
                   await fileStore.withDesiredFileLockUpdate((d) => {
                     d = d || {}; d._openAll = d._openAll || {};
@@ -12951,12 +11893,11 @@ async function nurseTick() {
 
       const p0 = pages[0];
       try {
-        let flagsSnapshot = null;
         // Se a flag LR já está setada (persistida), capture evidência do estado atual
         // para provar se é falso positivo (ex.: já está logado mas flag ficou presa).
         try {
-          flagsSnapshot = await readAccountFlags(nome).catch(()=>({}));
-          if (flagsSnapshot && flagsSnapshot.loginRequired === true) {
+          const flags = await readAccountFlags(nome).catch(()=>({}));
+          if (flags && flags.loginRequired === true) {
             const captured = await captureLoginRequiredEvidence(nome, p0, { reason: 'flag_snapshot' });
             if (captured) {
               let urlNow = null, titleNow = null;
@@ -12967,67 +11908,11 @@ async function nurseTick() {
                 host: os.hostname(),
                 perfil: nome,
                 event: 'lr_flag_snapshot',
-                storedReason: flagsSnapshot.loginReason || null,
-                storedSource: flagsSnapshot.loginSource || null,
+                storedReason: flags.loginReason || null,
+                storedSource: flags.loginSource || null,
                 url: urlNow,
                 title: titleNow
               });
-            }
-          }
-        } catch {}
-
-        // Guardrail P2: nunca manter conta saudável "viva e parada" por política de recovery.
-        // Se não há bloqueio real, não há item pendente/running de recovery e desired.virtus está off,
-        // reativa virtus automaticamente (com debounce) sem depender do LR scan completo.
-        try {
-          const nowGuard = Date.now();
-          const wantNow = (desired && desired.perfis && desired.perfis[nome]) ? desired.perfis[nome] : {};
-          const desiredVirtusOff = String((wantNow && wantNow.virtus) || '').toLowerCase() === 'off';
-          const hardBlock = !!(flagsSnapshot && (
-            flagsSnapshot.loginRequired === true ||
-            flagsSnapshot.loginRemediateFailed === true ||
-            flagsSnapshot.messengerPin === true ||
-            flagsSnapshot.banned === true ||
-            flagsSnapshot.twoFactor === true ||
-            flagsSnapshot.identityRequired === true ||
-            flagsSnapshot.identitySubmitted === true ||
-            flagsSnapshot.appealSubmitted === true
-          ));
-          const qItems = (desired && desired._recoveryQueue && Array.isArray(desired._recoveryQueue.items))
-            ? desired._recoveryQueue.items
-            : [];
-          const hasPendingRecovery = qItems.some((it) =>
-            it && it.nome === nome && (it.state === 'pending' || it.state === 'running')
-          );
-          const shouldGuardHeal =
-            desiredVirtusOff &&
-            !hardBlock &&
-            !hasPendingRecovery &&
-            !!(wantNow && wantNow.active === true) &&
-            !!ctrl &&
-            ctrl.humanControl !== true &&
-            ctrl.configurando !== true &&
-            ctrl.trabalhando !== true;
-          if (shouldGuardHeal) {
-            robeMeta[nome] = robeMeta[nome] || {};
-            const lastHeal = Number(robeMeta[nome].lastVirtusGuardHealAt || 0) || 0;
-            if (!lastHeal || (nowGuard - lastHeal) > (5 * 60 * 1000)) {
-              robeMeta[nome].lastVirtusGuardHealAt = nowGuard;
-              await fileStore.withDesiredFileLockUpdate((d) => {
-                d = d || {};
-                d.perfis = d.perfis || {};
-                d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'on', humanHold: false };
-                return d;
-              }).catch(()=>{});
-              try {
-                provisionAudit.append({
-                  ts: nowGuard,
-                  event: 'virtus_off_auto_heal_guardrail',
-                  nome: String(nome || ''),
-                  policy: 'healthy_profile_never_stalled'
-                });
-              } catch {}
-              setTimeout(() => { try { handlers.start_work({ nome, operator: 'virtus_off_auto_heal_guardrail' }).catch(()=>{}); } catch {} }, 0);
             }
           }
         } catch {}
@@ -13048,36 +11933,25 @@ async function nurseTick() {
         robeMeta[nome] = robeMeta[nome] || {};
         robeMeta[nome].lrScanMeta = robeMeta[nome].lrScanMeta || {};
         const lrMeta = robeMeta[nome].lrScanMeta;
-        const riskByFlags = !!(flagsSnapshot && (
-          flagsSnapshot.loginRequired === true ||
-          flagsSnapshot.loginRemediateFailed === true ||
-          flagsSnapshot.messengerPin === true ||
-          flagsSnapshot.twoFactor === true ||
-          flagsSnapshot.identityRequired === true ||
-          flagsSnapshot.identitySubmitted === true ||
-          flagsSnapshot.appealSubmitted === true
-        ));
-        let lrScanRiskNow = riskByFlags;
-        let lrScanRan = false;
+        let runLrScan = true;
         const nextDueAt = Number(lrMeta.nextAt || 0) || 0;
         if (nextDueAt && nowLrScan < nextDueAt) {
+          runLrScan = false;
           const lastSkipLogAt = Number(lrMeta.lastSkipLogAt || 0) || 0;
-          if (!lastSkipLogAt || (nowLrScan - lastSkipLogAt) > 5 * 60 * 1000) {
+          if (!lastSkipLogAt || (nowLrScan - lastSkipLogAt) > (5 * 60 * 1000)) {
             lrMeta.lastSkipLogAt = nowLrScan;
             try {
               provisionAudit.append({
                 ts: nowLrScan,
                 event: 'lr_scan_deferred',
                 nome: String(nome || ''),
-                tier: riskByFlags ? 'risk' : 'healthy',
                 nextAt: nextDueAt,
                 remainingMs: Math.max(0, nextDueAt - nowLrScan)
               });
             } catch {}
           }
-        } else try {
-          lrScanRan = true;
-        try {
+        }
+        if (runLrScan) try {
           const scan = [];
           let hasMessengerTab = false;
           let hasMessengerOk = false;
@@ -13101,7 +11975,6 @@ async function nurseTick() {
               if (isMessengerTab && !det.loginRequired) hasMessengerOk = true;
 
               if (det.loginRequired) {
-                lrScanRiskNow = true;
                 // Regra de domínio: Virtus é decidido por Messenger.
                 // "probe_failed" em create/item é sinal fraco quando Messenger está saudável.
                 if (isCreateItemTab && reasonNow === 'probe_failed') {
@@ -13282,24 +12155,6 @@ async function nurseTick() {
             }
           } catch {}
         } catch {}
-        } finally {
-          if (lrScanRan) {
-            const nextAt = calcLrScanNextAt(Date.now(), lrScanRiskNow);
-            lrMeta.lastAt = nowLrScan;
-            lrMeta.nextAt = nextAt;
-            lrMeta.lastTier = lrScanRiskNow ? 'risk' : 'healthy';
-            try {
-              provisionAudit.append({
-                ts: Date.now(),
-                event: 'lr_scan_cadence_applied',
-                nome: String(nome || ''),
-                tier: lrMeta.lastTier,
-                nextAt,
-                waitMs: Math.max(0, nextAt - Date.now())
-              });
-            } catch {}
-          }
-        }
 
         if (lr && lr.loginRequired) {
           try {
@@ -13367,10 +12222,7 @@ async function nurseTick() {
                 try {
                   const pg = (lrPage || p0);
                   if (pg && ctrl && ctrl.browser && ctrl.browser.isConnected?.()) {
-                    await enqueueRecoveryAction(nome, RECOVERY_ACTION.IDENTITY, {
-                      reason: rr || 'identity_required',
-                      source: 'lr_scan'
-                    }).catch(()=>null);
+                    await runIdentityFlow(nome, ctrl, pg, { source: 'lr_scan' }).catch(()=>null);
                   }
                 } catch {}
               } else if (rr.includes('captcha') || rr.includes('checkpoint')) {
