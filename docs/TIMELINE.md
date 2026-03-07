@@ -31,6 +31,20 @@ Formato canônico (copiar/colar):
 
 ---
 
+#### 2026-03-07 — [CONV][OPS][DOCS] P1 anti-pânico: LR scan desacelerado (5min saudável / 20min risco)
+
+- **O que**:
+  - aplicado gate de cadência por perfil no `lr_scan_tabs` do nurse;
+  - perfil saudável passou para janela de ~5min (com jitter);
+  - perfil em risco (LR/captcha/identity/appeal/twoFactor/messengerPin) passou para janela de ~20min (com jitter);
+  - adicionada telemetria de pacing (`lr_scan_deferred`, `lr_scan_cadence_applied`).
+- **Por quê**: reduzir comportamento robótico de varredura em segundos, mantendo detecção com ritmo humano.
+- **Evidência**:
+  - código: `C:\conveniente\scripts\worker.js`
+  - INC: `C:\conveniente\docs\inbox\need_evidence\INC-20260305-1815-01.md`
+- **Reinícios**: `conveniente` no host alvo (RM7) após `self_update` (`node index.js`).
+- **Rollback**: reverter este commit no `worker.js`, disparar `self_update` e reiniciar o runtime.
+
 #### 2026-03-07 — [CONV][OPS][DOCS] F0 anti-rajada no nurse/open (backoff progressivo + gate por perfil)
 
 - **O que**:

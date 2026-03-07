@@ -10692,6 +10692,13 @@ const NURSE_CFG = {
   PAGE_EVAL_TIMEOUT_MS: 5000
 };
 
+const LR_SCAN_CFG = {
+  healthyBaseMs: Math.max(60_000, Number(process.env.LR_SCAN_HEALTHY_BASE_MS || (5 * 60 * 1000)) || (5 * 60 * 1000)),
+  healthyJitterMs: Math.max(0, Number(process.env.LR_SCAN_HEALTHY_JITTER_MS || 30_000) || 30_000),
+  riskBaseMs: Math.max(60_000, Number(process.env.LR_SCAN_RISK_BASE_MS || (20 * 60 * 1000)) || (20 * 60 * 1000)),
+  riskJitterMs: Math.max(0, Number(process.env.LR_SCAN_RISK_JITTER_MS || 60_000) || 60_000),
+};
+
 const NURSE_OPEN_BACKOFF_CFG = {
   minMs: Math.max(60_000, Number(process.env.NURSE_OPEN_BACKOFF_MIN_MS || (2 * 60 * 1000)) || (2 * 60 * 1000)),
   maxMs: Math.max(5 * 60 * 1000, Number(process.env.NURSE_OPEN_BACKOFF_MAX_MS || (45 * 60 * 1000)) || (45 * 60 * 1000)),
@@ -10716,6 +10723,13 @@ function calcNurseDeniedBackoffMs(prevMs = 0) {
   const base = prevMs > 0 ? Math.round(prevMs * growth) : minMs;
   const jitter = Math.floor(Math.random() * (Math.max(0, Number(NURSE_OPEN_BACKOFF_CFG.jitterMs || 0) || 0) + 1));
   return Math.min(maxMs, base + jitter);
+}
+
+function calcLrScanNextAt(now, isRiskTier) {
+  const base = isRiskTier ? LR_SCAN_CFG.riskBaseMs : LR_SCAN_CFG.healthyBaseMs;
+  const jitterCap = isRiskTier ? LR_SCAN_CFG.riskJitterMs : LR_SCAN_CFG.healthyJitterMs;
+  const jitter = jitterCap > 0 ? Math.floor(Math.random() * (jitterCap + 1)) : 0;
+  return now + base + jitter;
 }
 
 async function activateOnceNurseSafe(nome, source = '', operator = '') {
@@ -12849,11 +12863,12 @@ async function nurseTick() {
 
       const p0 = pages[0];
       try {
+        let flagsSnapshot = null;
         // Se a flag LR já está setada (persistida), capture evidência do estado atual
         // para provar se é falso positivo (ex.: já está logado mas flag ficou presa).
         try {
-          const flags = await readAccountFlags(nome).catch(()=>({}));
-          if (flags && flags.loginRequired === true) {
+          flagsSnapshot = await readAccountFlags(nome).catch(()=>({}));
+          if (flagsSnapshot && flagsSnapshot.loginRequired === true) {
             const captured = await captureLoginRequiredEvidence(nome, p0, { reason: 'flag_snapshot' });
             if (captured) {
               let urlNow = null, titleNow = null;
@@ -12864,8 +12879,8 @@ async function nurseTick() {
                 host: os.hostname(),
                 perfil: nome,
                 event: 'lr_flag_snapshot',
-                storedReason: flags.loginReason || null,
-                storedSource: flags.loginSource || null,
+                storedReason: flagsSnapshot.loginReason || null,
+                storedSource: flagsSnapshot.loginSource || null,
                 url: urlNow,
                 title: titleNow
               });
@@ -12885,6 +12900,39 @@ async function nurseTick() {
         };
         let lr = null;
         let lrPage = p0;
+        const nowLrScan = Date.now();
+        robeMeta[nome] = robeMeta[nome] || {};
+        robeMeta[nome].lrScanMeta = robeMeta[nome].lrScanMeta || {};
+        const lrMeta = robeMeta[nome].lrScanMeta;
+        const riskByFlags = !!(flagsSnapshot && (
+          flagsSnapshot.loginRequired === true ||
+          flagsSnapshot.loginRemediateFailed === true ||
+          flagsSnapshot.messengerPin === true ||
+          flagsSnapshot.twoFactor === true ||
+          flagsSnapshot.identityRequired === true ||
+          flagsSnapshot.identitySubmitted === true ||
+          flagsSnapshot.appealSubmitted === true
+        ));
+        let lrScanRiskNow = riskByFlags;
+        let lrScanRan = false;
+        const nextDueAt = Number(lrMeta.nextAt || 0) || 0;
+        if (nextDueAt && nowLrScan < nextDueAt) {
+          const lastSkipLogAt = Number(lrMeta.lastSkipLogAt || 0) || 0;
+          if (!lastSkipLogAt || (nowLrScan - lastSkipLogAt) > 5 * 60 * 1000) {
+            lrMeta.lastSkipLogAt = nowLrScan;
+            try {
+              provisionAudit.append({
+                ts: nowLrScan,
+                event: 'lr_scan_deferred',
+                nome: String(nome || ''),
+                tier: riskByFlags ? 'risk' : 'healthy',
+                nextAt: nextDueAt,
+                remainingMs: Math.max(0, nextDueAt - nowLrScan)
+              });
+            } catch {}
+          }
+        } else try {
+          lrScanRan = true;
         try {
           const scan = [];
           let hasMessengerTab = false;
@@ -12909,6 +12957,7 @@ async function nurseTick() {
               if (isMessengerTab && !det.loginRequired) hasMessengerOk = true;
 
               if (det.loginRequired) {
+                lrScanRiskNow = true;
                 // Regra de domínio: Virtus é decidido por Messenger.
                 // "probe_failed" em create/item é sinal fraco quando Messenger está saudável.
                 if (isCreateItemTab && reasonNow === 'probe_failed') {
@@ -13089,6 +13138,24 @@ async function nurseTick() {
             }
           } catch {}
         } catch {}
+        } finally {
+          if (lrScanRan) {
+            const nextAt = calcLrScanNextAt(Date.now(), lrScanRiskNow);
+            lrMeta.lastAt = nowLrScan;
+            lrMeta.nextAt = nextAt;
+            lrMeta.lastTier = lrScanRiskNow ? 'risk' : 'healthy';
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'lr_scan_cadence_applied',
+                nome: String(nome || ''),
+                tier: lrMeta.lastTier,
+                nextAt,
+                waitMs: Math.max(0, nextAt - Date.now())
+              });
+            } catch {}
+          }
+        }
 
         if (lr && lr.loginRequired) {
           try {
