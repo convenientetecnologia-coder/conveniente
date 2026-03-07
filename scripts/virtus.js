@@ -99,6 +99,13 @@ const VIRTUS_RESP_CACHE_LOW_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_LOW_MAX
 const VIRTUS_RESP_CACHE_CRITICAL_MAX = parseInt(process.env.VIRTUS_RESP_CACHE_CRITICAL_MAX || '1800', 10);
 const VIRTUS_FAIL_COUNTS_LOW_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_LOW_MAX || '700', 10);
 const VIRTUS_FAIL_COUNTS_CRITICAL_MAX = parseInt(process.env.VIRTUS_FAIL_COUNTS_CRITICAL_MAX || '350', 10);
+const VIRTUS_TYPE_DELAY_MIN_MS = Math.max(10, parseInt(process.env.VIRTUS_TYPE_DELAY_MIN_MS || '55', 10) || 55);
+const VIRTUS_TYPE_DELAY_MAX_MS = Math.max(VIRTUS_TYPE_DELAY_MIN_MS, parseInt(process.env.VIRTUS_TYPE_DELAY_MAX_MS || '120', 10) || 120);
+const VIRTUS_ENTER_AFTER_TYPE_MIN_MS = Math.max(80, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MIN_MS || '350', 10) || 350);
+const VIRTUS_ENTER_AFTER_TYPE_MAX_MS = Math.max(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, parseInt(process.env.VIRTUS_ENTER_AFTER_TYPE_MAX_MS || '900', 10) || 900);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS || '700', 10) || 700);
+const VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS = Math.max(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, parseInt(process.env.VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS || '1400', 10) || 1400);
+const VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS = Math.max(120, parseInt(process.env.VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS || '450', 10) || 450);
 const __VIRTUS_DEBUG_ENDPOINT = 'http://127.0.0.1:7242/ingest/611be70a-568b-4b8e-87dd-5895ef7bcc36';
 const __virtusGlobalRecycle = { owner: '', acquiredAt: 0, lastReleaseAt: 0 };
 const __virtusDbgState = { lastByKey: Object.create(null) };
@@ -501,8 +508,9 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       campo
     ).catch(()=>{});
 
-    // Digita uma única vez (sem execCommand/insertText)
-    await p.keyboard.type(String(msg || ''), { delay: 0 });
+    // Digita com atraso humano por caractere para reduzir assinatura robótica
+    const typingDelayMs = randomBetween(VIRTUS_TYPE_DELAY_MIN_MS, VIRTUS_TYPE_DELAY_MAX_MS);
+    await p.keyboard.type(String(msg || ''), { delay: typingDelayMs });
 
     // Revalidar contexto antes do Enter
     if (!(await assertOnChat(p, chatId, { timeoutMs: 0 }))) {
@@ -510,6 +518,9 @@ async function sendMessageSafe(p, campo, msg, nome, chatId) {
       await logIssue(nome, 'mil_action', `virtus_context_abort: before_enter (chat ${chatId})`);
       return;
     }
+
+    // Pausa curta antes do Enter para humanização do envio
+    await sleep(randomBetween(VIRTUS_ENTER_AFTER_TYPE_MIN_MS, VIRTUS_ENTER_AFTER_TYPE_MAX_MS));
 
     // Envia (um único Enter)
     await p.keyboard.press('Enter');
@@ -1261,27 +1272,32 @@ async function startVirtus(browser, nome, robeMeta = {}) {
           return;
         }
 
-        await p.evaluate((sel) => {
-          const el = document.querySelector(sel);
-          if (el) {
-            el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-            el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-          }
-        }, anchorSel);
+        try {
+          await found.evaluate((el) => {
+            try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
+          });
+          await found.click({ delay: randomBetween(60, 140) }).catch(()=>{});
+        } catch {
+          await p.evaluate((sel) => {
+            const el = document.querySelector(sel);
+            if (el && typeof el.click === 'function') {
+              try { el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch {}
+              try { el.click(); } catch {}
+            }
+          }, anchorSel);
+        }
+        await sleep(randomBetween(VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS, VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS));
 
         let attempts = 0;
         let achou = false;
         let urlAtual = '';
-        while (attempts < 8) {
+        while (attempts < 6) {
           urlAtual = await p.evaluate(() => location.pathname);
           if (urlAtual.includes(`/marketplace/t/${chatId}`)) {
             achou = true;
             break;
           }
-          await sleep(250);
+          await sleep(VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS);
           attempts++;
         }
         if (!achou) {

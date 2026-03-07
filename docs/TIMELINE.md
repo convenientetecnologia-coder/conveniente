@@ -2425,3 +2425,18 @@ Adendo (ajuste operacional aprovado pelo owner):
   - `activationHeldUntil` mínimo em `nurse_open_denied` para evitar martelar reabertura.
 - **Dossiê canônico**:
   - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`
+
+#### 2026-03-07 — [CONVENIENTE][RM7] Forense fase 3: humanização de micro-ações Virtus
+
+- **Achado de risco**:
+  - `virtus` ainda tinha assinatura robótica em micro-ações (`typing delay 0`, click sintético por `dispatchEvent`, polling curto de URL).
+- **Mitigação aplicada** (`scripts/virtus.js`):
+  - typing por caractere com delay humano configurável;
+  - pausa humana antes de Enter;
+  - troca de click sintético por click nativo com delay;
+  - pós-click com janela humana;
+  - polling de confirmação de chat desacelerado.
+- **Objetivo**:
+  - reduzir sensibilidade anti-automação do Facebook sem quebrar fluxo de atendimento.
+- **Dossiê canônico**:
+  - `C:\conveniente\docs\checkups\checkup_2026-03-07_forense_floripa_reload_chatfeed.md`

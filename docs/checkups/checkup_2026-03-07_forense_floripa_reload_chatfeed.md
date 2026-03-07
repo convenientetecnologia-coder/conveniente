@@ -89,3 +89,35 @@ Mitigação aplicada (worker):
 
 Objetivo da mitigação:
 - cortar loops de reabertura em janela curta sem quebrar recuperação normal de perfil.
+
+---
+
+### Fase 3 — Humanização de micro-ações Virtus (click/typing)
+
+Achado de código (forense estática):
+- em `scripts/virtus.js` havia pontos com assinatura robótica:
+  - `keyboard.type(..., { delay: 0 })`;
+  - sequência sintética de `dispatchEvent(MouseEvent...)` para abrir chat;
+  - verificação de entrada em chat em polling curto (`250ms`).
+
+Risco:
+- mesmo sem `page.reload`, ações rápidas e repetitivas de click/typing podem aumentar sensibilidade anti-automação da plataforma.
+
+Mitigação aplicada:
+- `scripts/virtus.js`:
+  - typing humanizado por caractere:
+    - `VIRTUS_TYPE_DELAY_MIN_MS` default `55`
+    - `VIRTUS_TYPE_DELAY_MAX_MS` default `120`
+  - pausa humana antes de Enter:
+    - `VIRTUS_ENTER_AFTER_TYPE_MIN_MS` default `350`
+    - `VIRTUS_ENTER_AFTER_TYPE_MAX_MS` default `900`
+  - abertura de chat com click nativo (delay humano) no lugar de cadeia agressiva de `MouseEvent` sintético;
+  - pós-click com espera humana:
+    - `VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS` default `700`
+    - `VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS` default `1400`
+  - polling de confirmação de URL desacelerado:
+    - `VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS` default `450`
+    - tentativas reduzidas de `8` para `6` (menos martelo).
+
+Objetivo da fase 3:
+- reduzir assinatura de automação em micro-interações sem comprometer taxa de resposta do Virtus.

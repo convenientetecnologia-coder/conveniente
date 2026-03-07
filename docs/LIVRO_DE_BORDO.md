@@ -595,3 +595,15 @@ Para histórico de mudanças, usar a timeline: `docs/TIMELINE.md`.
   - `scripts/worker.js` com guardrail de retry mínimo por perfil (`NURSE_OPEN_MIN_RETRY_MS=60s`) e tick mais humano (`NURSE_INTERVAL_MS=10s` por padrão).
 - Objetivo:
   - impedir martelamento de abertura/navegação em janela curta sem comprometer recuperação normal e atendimento.
+
+## 2026-03-07 — Fase 3 forense (humanização de micro-ações Virtus)
+
+- Achado:
+  - ainda existiam ações com assinatura sistemática rápida no `virtus` (digitação instantânea e click sintético em chat).
+- Correção aplicada:
+  - digitação por caractere com delay humano configurável;
+  - pausa humana antes do Enter;
+  - click nativo com delay no link do chat (remoção de cadeia agressiva de `MouseEvent` sintético);
+  - pós-click/poll de URL desacelerados.
+- Objetivo:
+  - reduzir “cutucada” de micro-interações no Messenger mantendo estabilidade do atendimento.

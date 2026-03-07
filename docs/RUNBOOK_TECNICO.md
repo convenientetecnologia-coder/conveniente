@@ -1203,3 +1203,28 @@ Mudança técnica:
 
 Resultado esperado:
 - reduzir tentativa/open "nervoso" sem bloquear recuperação legítima do perfil.
+
+---
+
+## Humanização de micro-ações Virtus (2026-03-07, RM7)
+
+Contexto:
+- após estabilizar loops de abertura, persistia risco de assinatura robótica em click/typing no `virtus`.
+
+Mudança técnica:
+- `scripts/virtus.js`
+  - typing:
+    - `VIRTUS_TYPE_DELAY_MIN_MS=55`
+    - `VIRTUS_TYPE_DELAY_MAX_MS=120`
+  - pré-envio:
+    - `VIRTUS_ENTER_AFTER_TYPE_MIN_MS=350`
+    - `VIRTUS_ENTER_AFTER_TYPE_MAX_MS=900`
+  - abertura de chat:
+    - click nativo com delay no elemento alvo (fallback simples);
+    - `VIRTUS_CHAT_OPEN_POST_CLICK_MIN_MS=700`
+    - `VIRTUS_CHAT_OPEN_POST_CLICK_MAX_MS=1400`
+    - `VIRTUS_CHAT_OPEN_CHECK_INTERVAL_MS=450`
+    - tentativas de confirmação `8 -> 6`.
+
+Resultado esperado:
+- menor assinatura de automação no Messenger sem perda de funcionalidade de atendimento.
