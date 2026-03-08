@@ -7903,6 +7903,50 @@ const handlers = {
           } catch {}
         }
 
+        // Blindagem cadastro (stock_provision):
+        // garante Robe pausado por 24h já no fim do configure.
+        // Assim, mesmo que falhe em etapas posteriores (recycle/start_work),
+        // conta nova não posta antes da janela mínima.
+        if (isStockProvision) {
+          try {
+            const plus24 = 24 * 60 * 60 * 1000;
+            const now = Date.now();
+            const desiredUntil = now + plus24;
+            await manifestStore.update(nome, (m) => {
+              m = m || {};
+              const curUntil = Number(m.robeCooldownUntil || 0) || 0;
+              m.robeCooldownUntil = Math.max(curUntil, desiredUntil);
+              m.robeCooldownRemainingMs = 0;
+              const r = String(m.robePauseReason || '');
+              if (String(r).toLowerCase() !== 'limit_posting') {
+                m.robePauseReason = 'new_account';
+              }
+              return m;
+            });
+            try { robeUpdateMeta(nome, { pauseReason: 'new_account' }); } catch {}
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_new_account_robe_pause_applied',
+                nome: String(nome || ''),
+                operator: op || null,
+                untilMs: desiredUntil,
+                reason: 'new_account'
+              });
+            } catch {}
+          } catch (e) {
+            try {
+              provisionAudit.append({
+                ts: Date.now(),
+                event: 'configure_new_account_robe_pause_apply_fail',
+                nome: String(nome || ''),
+                operator: op || null,
+                error: (e && e.message) ? String(e.message) : String(e)
+              });
+            } catch {}
+          }
+        }
+
         // Sucesso: limpa flags e segue.
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length }); } catch {}
