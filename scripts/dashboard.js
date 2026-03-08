@@ -2239,9 +2239,9 @@ async function execStockProvision(cmd) {
                   if (statusProbe) {
                     tabs = Number(statusProbe.abas || statusProbe.tabs || statusProbe.openPages || 0) || 0;
                     const activeFlag = (statusProbe.active === true) || String(statusProbe.active || '').toLowerCase() === 'true';
-                    // Guardrail: aceitarmos 3+ abas nesse ponto evita falso negativo observado em produção
-                    // quando o perfil fica ativo/aberto, mas o worker retorna ui_blocked no fechamento.
-                    activeNow = !!activeFlag || tabs >= 3;
+                    // Critério de segurança: só aceitar soft-pass quando o status confirma ACTIVE.
+                    // Abas abertas sozinhas não bastam para considerar cadastro saudável.
+                    activeNow = !!activeFlag;
                     if (activeNow) break;
                   }
                   await sleep(600);
