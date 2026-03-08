@@ -2219,22 +2219,44 @@ async function execStockProvision(cmd) {
             if (isSoftStockProvisionLoginRemediateError(lrErr)) {
               let statusProbe = null;
               let activeNow = false;
+              let tabs = 0;
               try {
-                const st = await getStatusSnapshot();
-                const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
-                statusProbe = arr.find(p => p && String(p.nome || '') === String(nome)) || null;
-                activeNow = !!(statusProbe && statusProbe.active === true);
+                const target = String(nome || '').trim().toLowerCase();
+                // Em produção observamos corrida no /api/status logo após login_remediate.
+                // Fazemos algumas leituras curtas e match tolerante para não gerar falso fail.
+                for (let i = 0; i < 6; i += 1) {
+                  const st = await getStatusSnapshot();
+                  const arr = Array.isArray(st && st.perfis) ? st.perfis : [];
+                  statusProbe = arr.find((p) => {
+                    if (!p) return false;
+                    const keys = [
+                      String(p.nome || '').trim().toLowerCase(),
+                      String(p.id || '').trim().toLowerCase(),
+                      String(p.profileName || '').trim().toLowerCase()
+                    ];
+                    return keys.includes(target);
+                  }) || null;
+                  if (statusProbe) {
+                    tabs = Number(statusProbe.abas || statusProbe.tabs || statusProbe.openPages || 0) || 0;
+                    const activeFlag = (statusProbe.active === true) || String(statusProbe.active || '').toLowerCase() === 'true';
+                    // Guardrail: aceitarmos 3+ abas nesse ponto evita falso negativo observado em produção
+                    // quando o perfil fica ativo/aberto, mas o worker retorna ui_blocked no fechamento.
+                    activeNow = !!activeFlag || tabs >= 3;
+                    if (activeNow) break;
+                  }
+                  await sleep(600);
+                }
               } catch {}
               if (activeNow) {
                 try {
-                  const tabs = Number(statusProbe && (statusProbe.abas || statusProbe.tabs || statusProbe.openPages || 0)) || 0;
+                  const tabsNow = Number(statusProbe && (statusProbe.abas || statusProbe.tabs || statusProbe.openPages || tabs || 0)) || 0;
                   out.steps.push({
                     step: 'login_remediate_softpass',
                     at: Date.now(),
                     reason: lrErr,
                     active: true,
                     virtusOnline: !!(statusProbe && statusProbe.virtusOnline === true),
-                    tabs
+                    tabs: tabsNow
                   });
                 } catch {}
                 try {
