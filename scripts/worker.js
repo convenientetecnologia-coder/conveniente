@@ -856,6 +856,10 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
 const CAPTCHA_FLOW_CFG = {
   maxTries: Math.max(1, Number(process.env.CAPTCHA_MAX_TRIES || 5) || 5)
 };
+// Kill-switch enterprise:
+// 1 = pausa automações de captcha/identidade/recurso_em_analise.
+// login_required continua habilitado (autoLoginRemediate).
+const PAUSE_NON_LR_AUTOMATION = String(process.env.PAUSE_NON_LR_AUTOMATION || '1').trim() === '1';
 const CAPTCHA_PACING_CFG = {
   minStableMs: Math.max(200, Number(process.env.CAPTCHA_MIN_STABLE_MS || 1500) || 1500)
 };
@@ -863,6 +867,37 @@ const CAPTCHA_PACING_CFG = {
 // Mutex in-process: 1 captcha flow por host (fallback quando supervisor permits não estão habilitados).
 let _captchaFlowRunning = false;
 let _captchaFlowRunningNome = null;
+
+function isNonLrAutomationPaused() {
+  return PAUSE_NON_LR_AUTOMATION === true;
+}
+
+async function enforcePausedNonLrState(nome, { kind = '', source = '' } = {}) {
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d.perfis = d.perfis || {};
+      d.perfis[nome] = { ...(d.perfis[nome] || {}), active: true, virtus: 'off', humanHold: false };
+      return d;
+    });
+  } catch {}
+  try {
+    const c = controllers.get(nome);
+    if (c) {
+      c.trabalhando = false;
+      try { await stopVirtus(nome); } catch {}
+    }
+  } catch {}
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'non_lr_automation_paused_state_enforced',
+      nome: String(nome || ''),
+      kind: String(kind || '').slice(0, 80),
+      source: String(source || '').slice(0, 80)
+    });
+  } catch {}
+}
 
 async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '', force = false } = {}) {
   const startedAt = Date.now();
@@ -876,6 +911,12 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
     if (ctrl && ctrl.humanControl === true) {
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
       return { ok: false, skipped: true, reason: 'human_control' };
+    }
+    if (isNonLrAutomationPaused()) {
+      try { await setCaptchaCheckpointFlag(nome, { reason: 'non_lr_automation_paused', source: String(source || '').slice(0, 80) }); } catch {}
+      await enforcePausedNonLrState(nome, { kind: 'captcha_checkpoint', source });
+      try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_paused_by_policy', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
+      return { ok: false, pausedByPolicy: true, error: 'non_lr_automation_paused' };
     }
 
     // Fallback enterprise: mutex interno (1 captcha por host).
@@ -2349,6 +2390,18 @@ async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' 
 }
 
 async function armAppealMonitor(nome, { delayMs = APPEAL_CFG.firstDelayMs } = {}) {
+  if (isNonLrAutomationPaused()) {
+    await enforcePausedNonLrState(nome, { kind: 'appeal_submitted', source: 'appeal_monitor' });
+    try {
+      provisionAudit.append({
+        ts: Date.now(),
+        event: 'appeal_monitor_paused_by_policy',
+        nome: String(nome || ''),
+        delayMs: Math.max(60_000, Number(delayMs || 0) || 0)
+      });
+    } catch {}
+    return { ok: true, pausedByPolicy: true };
+  }
   try {
     const now = Date.now();
     const next = now + Math.max(60_000, Number(delayMs || 0) || 0);
@@ -2573,6 +2626,10 @@ async function appealMonitorCheckNow(nome, ctrl) {
     // Política definida: se virar login_form, disparar pipeline de login_remediate automaticamente.
     if (rr.includes('login_form')) {
       const op = `appeal_monitor_login_form:${String(nome || '')}:${Date.now()}`;
+      if (isNonLrAutomationPaused()) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'appeal_monitor_login_remediate_suppressed_by_policy', nome: String(nome||''), operator: op }); } catch {}
+        return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_suppressed_by_policy' };
+      }
       try { provisionAudit.append({ ts: Date.now(), event: 'appeal_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
       setTimeout(() => {
         try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
@@ -2759,6 +2816,12 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
     if (ctrl && ctrl.humanControl === true) {
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80) }); } catch {}
       return { ok: false, skipped: true, reason: 'human_control' };
+    }
+    if (isNonLrAutomationPaused()) {
+      try { await setIdentityRequiredFlag(nome, { source: String(source || '').slice(0, 80) }); } catch {}
+      await enforcePausedNonLrState(nome, { kind: 'identity_required', source });
+      try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_paused_by_policy', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80) }); } catch {}
+      return { ok: false, pausedByPolicy: true, error: 'non_lr_automation_paused' };
     }
 
     // Roteamento: se já estamos em captcha, não consumir governança de identidade.
@@ -3242,6 +3305,10 @@ async function identityMonitorCheckNow(nome, ctrl) {
     // Se virar login_form, disparar pipeline de login_remediate automaticamente.
     if (rr.includes('login_form')) {
       const op = `identity_monitor_login_form:${String(nome || '')}:${Date.now()}`;
+      if (isNonLrAutomationPaused()) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_login_remediate_suppressed_by_policy', nome: String(nome||''), operator: op }); } catch {}
+        return { ok: true, transitioned: true, reason: rr, action: 'login_remediate_suppressed_by_policy' };
+      }
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_monitor_schedule_login_remediate', nome: String(nome||''), operator: op }); } catch {}
       setTimeout(() => {
         try { handlers.login_remediate({ nome, operator: op, options: { overrideHumanHold: true } }).catch(()=>{}); } catch {}
