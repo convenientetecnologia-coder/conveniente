@@ -7243,12 +7243,6 @@ async function start_work({ nome, operator }) {
       } catch {}
 
       ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, { restrictTab: 0, epoch: ctrl.virtusEpoch, slowMode: (autoMode && autoMode.mode !== 'full'), governorMode: (autoMode && autoMode.mode) || 'full' });
-    // Para o fluxo stock_provision:<batchId>, liberar automação apenas se ele for o dono do lock.
-    if (!automationAllowed(ctrl, { operator })) {
-      await issues.append(nome, 'mil_action', 'start_work_denied (automation_not_allowed)');
-      logger.warn('[HANDLER] start_work denied (automation_not_allowed)', { nome, operator: String(operator || '').trim() });
-      return { ok: false, error: 'automation_not_allowed' };
-    }
 
     ctrl.trabalhando = true;
       try {
