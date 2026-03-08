@@ -7109,6 +7109,25 @@ async function start_work({ nome, operator }) {
       logger.info('[HANDLER] start_work ok (já trabalhando)', { nome });
       return { ok: true };
     }
+    // Idempotência enterprise: em corridas pós-reopen pode surgir trabalhando=true
+    // com virtus ainda não anexado no ctrl. Nesse caso, tenta anexar e não falha o fluxo.
+    if (ctrl.trabalhando && !ctrl.virtus && !ctrl._virtusStarting) {
+      try {
+        ctrl.virtusEpoch = (ctrl.virtusEpoch || 0);
+        ctrl.virtus = virtusHelper.startVirtus(ctrl.browser, nome, {
+          restrictTab: 0,
+          epoch: ctrl.virtusEpoch,
+          slowMode: (autoMode && autoMode.mode !== 'full'),
+          governorMode: (autoMode && autoMode.mode) || 'full'
+        });
+        try { await snapshotStatusAndWrite(); } catch {}
+        logger.info('[HANDLER] start_work ok (reconciled trabalhando without virtus)', { nome });
+        return { ok: true, reconciled: 'trabalhando_without_virtus' };
+      } catch {
+        // Se não conseguiu anexar, volta para o fluxo normal abaixo.
+        try { ctrl.trabalhando = false; } catch {}
+      }
+    }
     if (ctrl._virtusStarting) {
       logger.info('[HANDLER] start_work ok (_virtusStarting)', { nome });
       return { ok: true };
