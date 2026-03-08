@@ -2180,17 +2180,43 @@ async function execStockProvision(cmd) {
           if (!r5 || r5.ok === false) throw new Error((r5 && r5.error) ? String(r5.error) : 'configure_failed');
           return r5;
         });
-        await runStep('start_work', async () => {
+        // Ciclo legado pós-cadastro:
+        // fecha/reabre o perfil alvo para garantir entrada limpa em modo trabalho.
+        await runStep('recycle_after_configure_deactivate', async () => {
           const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
-          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, {
+          const r6 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/deactivate`, {
+            method: 'POST',
+            headers: { 'x-operator': lockOwner },
+            timeoutMs: longTimeoutMs,
+            retries: 0,
+            body: { reason: 'stock_provision_post_configure_recycle', policy: 'preserveDesired' }
+          });
+          if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'recycle_deactivate_failed');
+          return r6;
+        });
+        await runStep('recycle_after_configure_activate', async () => {
+          const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
+          const r7 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
             method: 'POST',
             headers: { 'x-operator': lockOwner },
             timeoutMs: longTimeoutMs,
             retries: 0,
             body: {}
           });
-          if (!r6 || r6.ok === false) throw new Error((r6 && r6.error) ? String(r6.error) : 'start_work_failed');
-          return r6;
+          if (!r7 || r7.ok === false) throw new Error((r7 && r7.error) ? String(r7.error) : 'recycle_activate_failed');
+          return r7;
+        });
+        await runStep('start_work', async () => {
+          const longTimeoutMs = Math.max(45_000, Math.min(4 * 60 * 1000, budgetLeftMs() + 20_000));
+          const r8 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/start-work`, {
+            method: 'POST',
+            headers: { 'x-operator': lockOwner },
+            timeoutMs: longTimeoutMs,
+            retries: 0,
+            body: {}
+          });
+          if (!r8 || r8.ok === false) throw new Error((r8 && r8.error) ? String(r8.error) : 'start_work_failed');
+          return r8;
         });
 
         out.ok = true;
